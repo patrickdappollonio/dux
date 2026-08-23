@@ -24,12 +24,9 @@ export const MAX_NAMED_FILES = 5
 /// `"Files"` entry and must never light a drop target up.
 ///
 /// This answers ONE question and nothing else, which is why it takes the type
-/// list rather than an event. Both drop surfaces used to carry a local function
-/// under this name asking DIFFERENT questions: the tree's was this, and the
-/// terminal pane's folded its own three enabling gates in, so the same call
-/// spelled the same way meant two things. The pane's gates now live in
-/// `paneAcceptsFileDrag`, whose name says that it is answering the wider
-/// question.
+/// list rather than an event; the pane's wider enabling gates live in
+/// `paneAcceptsFileDrag` (components/terminal/uploadPipeline.ts), whose name
+/// says it answers the wider question.
 export function dragCarriesFiles(
   types: readonly string[] | undefined,
 ): boolean {
@@ -670,10 +667,9 @@ function reasonList(items: { requestedName: string; reason: string }[]): string 
 
 /// The renamed-file note, applied to EVERY saved file at EVERY rung.
 ///
-/// It used to be dropped whenever the toast landed on a worse rung, which lost
-/// the original-to-saved pair exactly when the user needed it most: a file that
-/// was renamed AND whose path never went out is one they have to find by hand
-/// under a name they were never told.
+/// Applied at EVERY rung on purpose: a file that was renamed AND whose path
+/// never went out is one the user must find by hand under a name they were
+/// never told.
 function renameNote(saved: SavedFile[], ctx: DropContext): string {
   const renamed = saved.filter((s) => s.requestedName !== s.savedName)
   if (renamed.length === 0) return ""
@@ -739,7 +735,7 @@ export function dropToastFor(
 /// which is the surprising half. What the file is called and where it went are
 /// the ladder's job, and it already does that better than a lead-in could.
 ///
-/// TWO things it must get right, and it used to get both wrong.
+/// TWO things it must get right.
 ///
 /// TENSE. It is prepended to whichever rung the ladder chose, INCLUDING rung 1,
 /// where nothing was saved at all. "dux saved it as a file" in front of "Could

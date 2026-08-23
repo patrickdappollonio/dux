@@ -368,9 +368,9 @@ describe("TerminalPane OSC 8 hyperlinks", () => {
     expect(openSpy.mock.calls).toEqual([[LINK_URL, "_blank", "noopener,noreferrer"]])
   })
 
-  // The regression. Double-clicking is how you select a word in a terminal, and
-  // xterm's Linkifier activates the link on EVERY mouseup, so the second click
-  // of that gesture opened a second tab.
+  // Double-clicking is how you select a word in a terminal, and xterm's
+  // Linkifier activates the link on EVERY mouseup, so the second click of that
+  // gesture would open a second tab.
   it("opens only one tab for a double-click, which selects a word", async () => {
     const el = await mountWithLink()
     await clickLink(el, { detail: 1 })

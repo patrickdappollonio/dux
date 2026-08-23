@@ -1,10 +1,8 @@
 // What the code editor is rooted at.
 //
-// It used to be a session id, spelled out as one at every layer: the API URL,
-// the tab-list key, the draft-cache key, the React key and the address. A
-// terminal now gets an editor too, rooted at the directory it was SPAWNED in,
-// so the root becomes a tagged value and those layers ask this module instead
-// of reading an id.
+// The root is a tagged value (agents and terminals draw ids from different
+// counters), and the API URL, tab-list key, draft-cache key, React key and
+// address all ask this module rather than reading a raw id.
 //
 // The root is pinned at spawn and is never the shell's live working directory.
 // A file dropped on a terminal PANE follows the shell, because that is where

@@ -313,9 +313,9 @@ describe("FirstLoadDialog", () => {
       expect(within(footer()).queryByRole("link")).toBeNull()
     })
 
-    // REGRESSION. The body rendered `notes.paragraphs` and `notes.sections` and
-    // nothing else, so a release whose body parsed to a headline alone produced a
-    // dialog with a title, two buttons, and an entirely blank middle. That shape
+    // A body that renders `notes.paragraphs` and `notes.sections` and nothing
+    // else turns a headline-only release into a dialog with a title, two
+    // buttons, and an entirely blank middle. That shape
     // is reachable without anyone doing anything unusual: GitHub prepends
     // `## What's Changed` and the release workflow appends `## Installation`, so a
     // one-line human headline is all the server-side parser is left with.
@@ -344,8 +344,8 @@ describe("FirstLoadDialog", () => {
     })
 
     it("explains itself when the only feature title collapsed to nothing", () => {
-      // A `### **__**` heading strips to "", which used to render the "In this
-      // release" label above one blank bullet.
+      // A `### **__**` heading strips to "", which must not render the "In
+      // this release" label above one blank bullet.
       seed({
         screen: "whats_new",
         notes: { ...NOTES, paragraphs: [], sections: [""] },

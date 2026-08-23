@@ -228,9 +228,9 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
   // user who tapped Ctrl intending Ctrl-c should not lose the latch to an
   // unrelated Send.
   //
-  // All three refusals KEEP the fixed `compose-send` id, which is the opposite
-  // of what the terminal copy and paste notifications now do (see
-  // `lib/termClipboard.ts` for why theirs went away). Send is one deliberate
+  // All three refusals KEEP the fixed `compose-send` id, unlike the terminal
+  // copy and paste notifications, which carry no id (see
+  // `lib/termClipboard.ts`). Send is one deliberate
   // press producing one of three fixed sentences, and a user who presses it
   // three times against a dead socket wants one "not connected", not three
   // identical copies of it stacked up. The id is doing real work here: it also

@@ -714,8 +714,8 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   // THE SURVIVING EFFECTS, inventoried in one place because "one lifecycle
   // owner, and nothing smuggled past it" is only checkable once the exceptions
-  // are a list. The sixteen settings mirrors are GONE; every effect below is a
-  // registration or a genuine reaction whose lifetime is narrower than the
+  // are a list. Every effect below is a registration or a genuine reaction
+  // whose lifetime is narrower than the
   // terminal's, which is why it is not folded into the lifecycle hook. Each
   // module-scope registration retires only its OWN registration, because on a
   // focus switch React's old-cleanup / new-effect order is not guaranteed.

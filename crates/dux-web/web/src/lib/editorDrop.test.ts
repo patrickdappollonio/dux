@@ -303,10 +303,9 @@ describe("performTreeDrop", () => {
   })
 
   it("says so when a drop delivered nothing at all", async () => {
-    // The other browser shape for a dropped folder: no files and no items. It
-    // used to fall through the `files.length === 0` early return and report
-    // NOTHING, so letting go of a folder looked exactly like letting go of
-    // nothing.
+    // The other browser shape for a dropped folder: no files and no items.
+    // Without a report here, letting go of a folder looks exactly like letting
+    // go of nothing.
     const { deps, calls, finals } = harness((file) => ok(file.name))
     await performTreeDrop("", justFiles(), deps)
 

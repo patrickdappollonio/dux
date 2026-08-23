@@ -29,15 +29,13 @@ beforeEach(() => {
 })
 
 describe("copying the terminal selection", () => {
-  // THE BUG THIS PINS. These two used to raise on the fixed ids "term-copy" and
-  // "term-paste". An id is a REPLACEMENT instruction, and sonner resets a
-  // toast's remaining time only when its DURATION changes while re-running its
-  // close timer on every re-raise, so re-raising the same message on one id
-  // restarts the countdown without ever letting it finish. Copy-on-select fires
-  // on every drag, so anyone selecting text more often than the window is long
-  // pinned "Copied to clipboard" on screen: measured at 90 seconds across 30
-  // re-raises, and it would have gone on as long as the copying did. Each copy
-  // is its own event, so each one retires on its own clock.
+  // A fixed toast id is a REPLACEMENT instruction: sonner resets a toast's
+  // remaining time only when its DURATION changes while re-running the close
+  // timer on every re-raise, so re-raising the same message on one id restarts
+  // the countdown without ever letting it finish. Copy-on-select fires on every
+  // drag, so a shared id pins "Copied to clipboard" open for as long as the
+  // copying goes on. Each copy is its own event, so each one retires on its own
+  // clock.
   it("raises every copy as its own notification, sharing no id and so no clock", async () => {
     const term = fakeTerm("hello")
     for (let i = 0; i < 3; i++) await copyTermSelection(term, () => {})

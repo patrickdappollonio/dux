@@ -6,8 +6,8 @@
 // Markdown parser. A body shaped differently degrades: `## ` becomes the headline
 // (which this dialog renders as its TITLE) and `### ` becomes a feature title, and
 // anything else lands in the intro prose. So a release whose body is only a
-// headline parses to a headline and nothing else, and the dialog used to render a
-// title above a blank body with no explanation at all.
+// headline parses to a headline and nothing else, so without this check the
+// dialog renders a title above a blank body with no explanation.
 //
 // That shape is not exotic. GitHub APPENDS its generated `## What's Changed`
 // section (it lands after every human-written section, not before them), the

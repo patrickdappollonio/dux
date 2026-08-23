@@ -18,23 +18,16 @@
  * | `?1015`| urxvt                             | encoding |
  * | `?1016`| SGR pixels                        | encoding |
  *
- * dux used to hand-encode a left click as SGR (`ESC [ < 0 ; col ; row M/m`)
- * unconditionally, gated only on `term.modes.mouseTrackingMode !== "none"` —
- * which reports the PROTOCOL and says nothing at all about the ENCODING. An app
- * that enabled `?1000` or `?1002` WITHOUT `?1006` therefore received SGR text it
- * does not parse, and an app on `?9` received a release report it must never be
- * sent. The cell was computed with a second, parallel arithmetic
- * (`container.clientWidth / term.cols`) that does not match xterm's own
- * (`getMouseReportCoords`, which measures against the `.xterm-screen`
- * element, subtracts its CSS padding and divides by the MEASURED cell size), so
- * it landed on a different cell than a desktop click at the same point. That is
- * not theoretical: MEASURED on a 390px phone viewport in `tools/preview-env`,
- * clicking and then tapping the same 21 points, 15 of them reported a DIFFERENT
- * cell, drifting up to two columns by the far side. The container is 374px wide
- * where xterm's screen is 361px (the scrollbar gutter), so dividing the
- * container by the column count inflates every cell and the error accumulates
- * across the row. After this change the same sweep disagrees nowhere inside the
- * screen element.
+ * A browser-side encoder cannot be correct: `term.modes.mouseTrackingMode`
+ * reports the PROTOCOL and says nothing about the ENCODING, so hardcoding SGR
+ * sends unparseable text to an app on `?1000`/`?1002` without `?1006`, and a
+ * release report to an app on `?9`, which must never receive one. Cell math
+ * must be xterm's own (`getMouseReportCoords` measures against the
+ * `.xterm-screen` element, subtracts its CSS padding and divides by the
+ * MEASURED cell size); dividing the container width by the column count
+ * inflates every cell (the container includes the scrollbar gutter; measured
+ * on a 390px viewport, 15 of 21 points resolve to a different cell, drifting
+ * up to two columns).
  *
  * MEASURED against the installed `@xterm/xterm` 6.0.0 bundle
  * (`node_modules/@xterm/xterm/lib/xterm.mjs`):
@@ -52,7 +45,7 @@
  *    `Terminal.onBinary`, NOT `onData` (`triggerMouseEvent` branches on
  *    `activeEncoding === "DEFAULT"`). A pane that subscribes only to `onData`
  *    silently drops every X10-encoded mouse report, including a real DESKTOP
- *    click. `TerminalPane` now subscribes to both.
+ *    click. `TerminalPane` subscribes to both.
  *
  * So this module does not encode anything. It REPLAYS the DOM mouse events the
  * browser's own synthetic ones would have been, straight at the element xterm

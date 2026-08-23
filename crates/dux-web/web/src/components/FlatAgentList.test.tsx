@@ -590,7 +590,7 @@ describe("FlatAgentList search-match highlight", () => {
     expect(marks.some((m) => m.parentElement?.textContent === "Repo")).toBe(true)
   })
 
-  it("highlights nothing for a branch-only hit, because the row no longer shows the branch", () => {
+  it("highlights nothing for a branch-only hit, because the row does not show the branch", () => {
     // The branch stays SEARCHABLE (agentSearch matches on branch_name) but the
     // row never prints it, so a query that hits only the branch filters the row
     // in and highlights nothing. Accepted: the branch's home is the top bar.

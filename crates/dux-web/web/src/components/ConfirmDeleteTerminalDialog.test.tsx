@@ -90,9 +90,9 @@ describe("ConfirmDeleteTerminalDialog", () => {
   })
 
   it("opens and STAYS open for a project-owned terminal", () => {
-    // The trap this guards (T2): a session-only owner scan resolved a project
-    // terminal to `undefined`, so the vanished-target guard closed the dialog
-    // the instant it opened and the user never even reached the delete.
+    // A session-only owner scan resolves a project terminal to `undefined`,
+    // and the vanished-target guard would close the dialog the instant it
+    // opened.
     seedProjectTerminal(term({ id: "pt-1", label: "Terminal 3" }))
     render(<ConfirmDeleteTerminalDialog />)
     expect(screen.getByText("Close Terminal 3?")).toBeTruthy()

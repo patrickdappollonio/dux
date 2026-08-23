@@ -3,7 +3,7 @@
 // call). Kept as plain data in a leaf module so the values are unit-testable
 // without mounting dnd-kit.
 //
-// Two sensors instead of the previous single PointerSensor, because
+// Two sensors, one per pointer kind, because
 // @dnd-kit/core 6.3.1's `PointerActivationConstraint` applies one constraint
 // to every pointer type (its `DelayConstraint | DistanceConstraint` union has
 // no per-pointer-type branch, read from the installed package's
@@ -11,9 +11,9 @@
 //
 // - MOUSE keeps the small distance gate: a plain click stays a select, and a
 //   6px pull starts the drag immediately, exactly the previous desktop feel.
-// - TOUCH arms on a HOLD (delay + tolerance): with the old instant
-//   activation, a touch drag armed on contact and fought the list's own
-//   scroll gesture, so on phones reordering "briefly glitched" and aborted.
+// - TOUCH arms on a HOLD (delay + tolerance): instant activation arms a touch
+//   drag on contact and fights the list's own scroll gesture, so reordering
+//   glitches and aborts on phones.
 //   The delay makes a swipe scroll (moving past the tolerance during the
 //   hold cancels activation) and a deliberate hold grab the row. The
 //   activator buttons carry `touch-manipulation`, the touch-action dnd-kit

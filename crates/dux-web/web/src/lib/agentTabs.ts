@@ -28,8 +28,8 @@ export function isExtraTabDormant(
   )
 }
 
-// Whether an extra tab that used to exist for a session is no longer present in
-// the spine's tab list (e.g. another client closed it while this client's PTY
+// Whether an extra tab has vanished from the spine's tab list (e.g. another
+// client closed it while this client's PTY
 // socket was retrying). A gone tab's socket must stop reconnecting instead of
 // retrying forever against a route that will keep 404ing. Only meaningful for an
 // extra tab (a session-slot tab has no row of its own; its owning session's

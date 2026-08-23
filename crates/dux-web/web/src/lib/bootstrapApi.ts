@@ -4,8 +4,8 @@
 // resource fetch. The matching `config.changed` event over `/ws/events` tells
 // the client WHEN to re-GET.
 //
-// These fields used to ride the broadcast `ViewModel`; they are static
-// per server config, so a volatile-data channel was the wrong home for them.
+// These fields are static per server config, so they live on a document GET
+// rather than a volatile broadcast channel.
 // The server is authoritative: it projects the config + runtime capabilities
 // into this single document. A non-2xx is thrown as a `BootstrapFetchError`
 // carrying the HTTP status so the caller can branch.

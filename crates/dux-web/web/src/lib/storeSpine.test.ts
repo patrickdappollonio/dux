@@ -208,10 +208,9 @@ describe("spine slice", () => {
     // WHY IT LIVES ON THE SPINE. The profile says how a file dropped onto a tab
     // has its path quoted, and which CLI's length limit applies. It changes when
     // a process LAUNCHES or TERMINATES, and `sessions.changed` is the event that
-    // fires for both. It used to be published on the BOOTSTRAP document, which
-    // the browser refetches only on `config.changed`, so a client's copy went
-    // stale for the whole life of a process and nothing corrected it short of a
-    // reconnect or a restart.
+    // fires for both. The bootstrap document is the wrong home: the browser
+    // refetches it only on `config.changed`, so a copy there goes stale for the
+    // whole life of a process.
     //
     // Both tests below start from a copy that IS stale and drive the correction
     // through the real event path, rather than injecting an already-correct one.
@@ -338,9 +337,9 @@ describe("spine slice", () => {
   })
 
   it("keeps a focused project terminal selected across a spine apply", async () => {
-    // The trap this guards (T10): the prune resolved the terminal through a
-    // (nonexistent) owning session, so a focused project terminal was ejected
-    // to home on EVERY spine refresh.
+    // The prune must resolve a project terminal through its project, not an
+    // owning session it does not have, or focus is ejected to home on every
+    // spine refresh.
     const mod = await loadStore()
     await pushSpine(
       mod,

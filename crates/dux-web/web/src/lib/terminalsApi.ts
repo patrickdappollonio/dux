@@ -1,8 +1,6 @@
-// HTTP client for companion-terminal lifecycle (create/delete), Phase 5 of the
-// REST-first migration. These used to ride the fire-and-forget `/ws`
-// `create_terminal`/`delete_terminal` commands; live terminal byte I/O now rides
-// the dedicated PTY socket (`lib/ptySocket.ts`) and the lifecycle rides these
-// scoped REST verbs.
+// HTTP client for companion-terminal lifecycle (create/delete). Live terminal
+// byte I/O rides the dedicated PTY socket (`lib/ptySocket.ts`); lifecycle rides
+// these scoped REST verbs.
 //
 // Mirrors `sessionsApi.ts`: `credentials: "same-origin"`, JSON body, and the
 // per-connection id stamped as `X-Connection-Id` so the server can scope any

@@ -2,8 +2,8 @@
 //
 // jsdom doesn't compute layout/resolved CSS, so this is a class-contract test:
 // it asserts the popup and arrow carry the popover surface tokens (matching
-// DropdownMenuContent) and never the old inverted bg-foreground/text-background
-// pair that made a white tooltip in this dark-only app.
+// DropdownMenuContent) and never an inverted bg-foreground/text-background
+// pair, which makes a white tooltip in this dark-only app.
 import { afterEach, describe, expect, it } from "vitest"
 import { cleanup, render, screen } from "@testing-library/react"
 

@@ -72,8 +72,8 @@ afterEach(() => {
 describe("AgentTabsStrip", () => {
   it("exposes exactly one close affordance per pill (the ⋯ menu, no standalone ✕)", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    // The old always-visible ✕ button (aria-label "Close tab") is gone; closing
-    // lives only inside the ⋯ menu's "Close tab…" item (not rendered until open).
+    // There is no standalone ✕ button (aria-label "Close tab"); closing lives
+    // only inside the ⋯ menu's "Close tab…" item (not rendered until open).
     expect(screen.queryByLabelText("Close tab")).toBeNull()
     expect(screen.getAllByLabelText("Tab actions")).toHaveLength(2)
   })

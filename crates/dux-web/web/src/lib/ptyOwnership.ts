@@ -35,12 +35,11 @@ export type HandshakeOwner = string | null | undefined
 // `connected` frame lands. This is the correction that makes "a plain resize
 // claims only an unowned pty" safe to ship.
 //
-// The foreground guess alone used to be enough because a foregrounded attach
-// really did take the pty (the server granted any resize as a claim). Now it
-// does not, and a refused claim is SILENT by design, so a phone opening an agent
-// its owner's desktop is driving would guess "foregrounded, therefore mine",
-// render its typing surfaces, and have every keystroke dropped server-side with
-// no card ever explaining why. The handshake closes that hole: the foreground
+// The foreground guess alone is not enough: the server does not grant a resize
+// against an owned pty, and a refused claim is SILENT by design, so a phone
+// opening an agent its owner's desktop is driving would guess "foregrounded,
+// therefore mine", render its typing surfaces, and have every keystroke dropped
+// with no card explaining why. The handshake closes that hole: the foreground
 // check survives only as the decision to claim an UNOWNED pty.
 //
 // The order of the rules is the whole content:
@@ -157,11 +156,11 @@ export function handshakeSuperseded(
 // or the event carried no owner) is treated as "not us" — the safe default of
 // observing rather than wrongly assuming control.
 //
-// This replaces the old timing/echo-counting heuristic, which guessed whether an
-// event was our own claim echoing back. That guess inverted when two devices
-// claimed in the same instant and broadcast order flipped, leaving BOTH devices on
-// the placeholder while the server held a real owner. Comparing stable ids removes
-// the guess and the race: every client converges on the same final `pty.owner`.
+// Ids, never timing: guessing whether an event is our own claim echoing back
+// inverts when two devices claim in the same instant and broadcast order flips,
+// leaving BOTH on the placeholder while the server holds a real owner.
+// Comparing stable ids makes every client converge on the same final
+// `pty.owner`.
 export function isOwnerAfterHandover(
   eventOwnerId: string | undefined,
   myConnId: string | null,

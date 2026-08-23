@@ -263,9 +263,8 @@ describe("TaskManagerDialog", () => {
   })
 
   it("project_terminal_row_renders_and_its_stop_opens_the_delete_confirm", async () => {
-    // The traps this guards (T3 + T5): a project terminal must appear as a row
-    // at all (it lives on a project, not a session), and its Stop button must
-    // not be dead (its sessionId is null; the old guard early-returned on that).
+    // A project terminal must appear as a row at all (it lives on a project,
+    // not a session), and its Stop button must work with a null sessionId.
     seed({
       spine: {
         sessions: [],
@@ -285,8 +284,8 @@ describe("TaskManagerDialog", () => {
   })
 
   it("does_not_say_nothing_is_running_while_a_project_terminal_lives", async () => {
-    // The trap this guards (T6): with only a project terminal running the
-    // dialog claimed "Nothing is running." and auto-closed.
+    // With only a project terminal running, the dialog must not claim
+    // "Nothing is running." and auto-close.
     seed({
       spine: {
         sessions: [],
@@ -303,9 +302,8 @@ describe("TaskManagerDialog", () => {
   })
 
   it("stop_all_confirmation_counts_project_terminals", async () => {
-    // The trap this guards (T4's undercount): the confirmation copy summed
-    // only sessions' terminals, so a project terminal was stopped without
-    // ever being counted.
+    // The confirmation copy must count project terminals too, not only
+    // sessions' terminals.
     seed({
       stopAllOpen: true,
       spine: {
@@ -391,7 +389,7 @@ describe("TaskManagerDialog", () => {
     const row = await screen.findByTestId("task-row-tab:t2")
     expect(row.textContent).toContain("—")
     // The extra tab's Stop label carries the owning agent and its position,
-    // not just the bare provider (finding 4): "Stop codex" alone would
+    // not just the bare provider: "Stop codex" alone would
     // collide with any other codex extra tab on any other agent.
     expect(screen.getByLabelText("Stop codex tab 1 in feat")).toBeTruthy()
   })
@@ -589,7 +587,7 @@ describe("TaskManagerDialog", () => {
   it("shows_a_stale_indicator_after_repeated_poll_failures_and_stops_after_a_recovery", async () => {
     // The poll's catch is empty by design: a single dropped sample renders the
     // last good numbers, unremarked. But a run of failures must not render
-    // those numbers as fresh forever (finding 7).
+    // those numbers as fresh forever.
     vi.useFakeTimers({ shouldAdvanceTime: true })
     seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
     render(<TaskManagerDialog />)
@@ -676,8 +674,8 @@ describe("TaskManagerDialog", () => {
   })
 
   it("child_row_renders_its_pid_under_pid_and_an_empty_procs_cell", async () => {
-    // Regression: a child process has no process count of its own. Putting
-    // its pid under Procs read as "over 2 million subprocesses" in the wild.
+    // A child process has no process count of its own; its pid under Procs
+    // reads as "over 2 million subprocesses".
     getResources.mockResolvedValue({
       rows: [
         duxStat,

@@ -6,7 +6,7 @@ import type { Bootstrap } from "./bootstrapApi"
 // Stub the minimum so the store settles.
 //
 // `show_changes_pane` moved off the broadcast ViewModel onto the
-// `GET /api/v1/bootstrap` document (Phase 2). The optimistic Changes-pane
+// `GET /api/v1/bootstrap` document. The optimistic Changes-pane
 // override is reconciled when a `config.changed` event refetches bootstrap, not
 // on a ViewModel push. Tests drive the bootstrap body via `bootstrapBody`.
 
@@ -40,8 +40,8 @@ const fetchMock = vi.fn(async (url: string) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  // The Changes-pane toggle now persists via a REST PUT (Phase 6, was a `/ws`
-  // command). Acknowledge it so the optimistic override is not rolled back.
+  // The Changes-pane toggle persists via a REST PUT. Acknowledge it so the
+  // optimistic override is not rolled back.
   if (u.includes("/api/v1/ui/changes-pane")) {
     return {
       ok: true,

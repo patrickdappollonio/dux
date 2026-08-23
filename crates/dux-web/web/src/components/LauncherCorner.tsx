@@ -29,9 +29,8 @@ import { cn } from "@/lib/utils"
 // Terminals / Projects), so its rows never move under the cursor.
 //
 // Variant: verb and ⋯ are one action cluster and share ONE variant, the filled
-// default, per CLAUDE.md. The pair that used to break that rule (a filled New
-// beside an outline Add project) is gone with the split buttons; what separates
-// the two controls now is width and glyph, not weight.
+// default, per CLAUDE.md. What separates the two controls is width and glyph,
+// not weight.
 export function LauncherCorner({ className }: { className?: string }) {
   const { spine } = useDux()
   // null while the spine has not arrived: see launcherVerb for why that is not

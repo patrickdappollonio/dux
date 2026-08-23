@@ -1,17 +1,14 @@
 // HTTP client for mutating agent-session operations (create/fork/from-worktree/
 // from-pr, delete, rename, change-provider, toggle auto-reopen, reconnect,
-// reorder). These used to ride the
-// fire-and-forget `/ws` `sendCommand` channel; they are now scoped, programmable
-// REST verbs so the server can authorize each one and route its operation toasts
-// back to the initiating client.
+// reorder). Scoped REST verbs so the server can authorize each one and route
+// its operation toasts back to the initiating client.
 //
 // Like `git.ts`, every request is `credentials: "same-origin"` with a JSON body
 // and stamps the per-connection id as `X-Connection-Id` (every endpoint reads
 // it) so the server can scope the busy/success/error toasts — which still arrive
 // over `/ws` — back to this client. A non-2xx is thrown as a typed
 // `SessionsApiError` carrying the HTTP status + the parsed server message; the
-// caller surfaces it as a sonner toast (the legacy `/ws` CommandResult that used
-// to report these failures no longer fires for them).
+// caller surfaces it as a sonner toast.
 
 import { getConnectionId } from "./connection"
 import type {

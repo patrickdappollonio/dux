@@ -238,8 +238,9 @@ describe("deep-link restore on load", () => {
   })
 
   it("restores a project terminal from #/project/<pid>/terminal/<tid> on boot", async () => {
-    // The trap this guards (T11): the old grammar embedded a session id, so a
-    // project-terminal bookmark was silently dropped on an ordinary page load.
+    // A project-terminal address carries no session id, so the restore must
+    // resolve it through the project, or the bookmark is silently dropped on
+    // load.
     const mod = await loadStore(
       "#/project/p1/terminal/pt1",
       [],

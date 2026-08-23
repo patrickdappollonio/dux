@@ -295,9 +295,9 @@ export function ChangedFiles() {
   // Checked before the slice below, because the answer is already known: the
   // server never runs git in such a folder and stores an empty-but-successful
   // result for it, so waiting on the fetch phase would only trade this sentence
-  // for a spinner and then for a bare "No changes". The old path did run git in
-  // it and reported "the repository is busy" once per poll, which is a lie
-  // about a folder that simply has no repository.
+  // for a spinner and then for a bare "No changes". Running git there would
+  // report "the repository is busy" once per poll, a lie about a folder that
+  // simply has no repository.
   const selectedSession = spine?.sessions.find(
     (s) => s.id === selectedSessionId,
   )

@@ -8,7 +8,7 @@ import {
 import type { TerminalView } from "@/lib/types"
 
 // Every terminal owned by `owner`, in the order the flat collection carries them
-// (the global `sort_order` base). This is what nesting used to give for free.
+// (the global `sort_order` base).
 export function terminalsForOwner(
   terminals: readonly TerminalView[],
   owner: TerminalOwnerRef,
@@ -47,8 +47,8 @@ export function groupTerminalsByOwnerKey(
 
 // Terminals bucketed into the two owners a PROJECT can reach: its own project
 // terminals, and the terminals of the sessions it owns. Each bucket keeps the
-// input order, which is the global `sort_order` base, so a bucket is the same
-// sequence the nested collections used to carry.
+// input order, which is the global `sort_order` base, so a bucket preserves the
+// global sequence.
 //
 // LOSSY ON PURPOSE, and its one caller is `projectLiveCounts`, where the entire
 // question is how many terminals a given project reaches, directly or through
@@ -100,8 +100,7 @@ export function groupTerminalsByOwner(
 }
 
 // The terminals sharing `t`'s owner, INCLUDING `t`. `terminalTitle` uses this to
-// disambiguate two same-owner terminals running the same app; it used to be
-// simply the array `t` was nested in.
+// disambiguate two same-owner terminals running the same app.
 export function terminalSiblings(
   terminals: readonly TerminalView[],
   t: TerminalView,

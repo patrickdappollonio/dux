@@ -124,9 +124,8 @@ export function FileTree({
   const [viewportHeight, setViewportHeight] = useState(400)
   // The dirs already requested (loading OR resolved OR errored), so effects
   // never auto-refetch a dir they've already tried. A ref: fetch bookkeeping,
-  // not render state. Deliberately NOT cleared on failure (see F9 note in
-  // fetchDir's .catch below) — only the explicit Retry button refetches an
-  // errored dir.
+  // not render state. Deliberately NOT cleared on failure (see the .catch in
+  // fetchDir below): only the explicit Retry button refetches an errored dir.
   const requestedRef = useRef<Set<string>>(new Set())
   // Unmount guard plus a per-dir request counter, so a stale response (the
   // same dir refetched again before the first call resolves, or the
@@ -176,10 +175,10 @@ export function FileTree({
           if (unmountedRef.current || requestTokenRef.current.get(dir) !== token)
             return
           // Deliberately do NOT delete `dir` from requestedRef here: doing so
-          // used to make the automatic dirsToLoadFor("missing ancestors")
-          // effect below treat an errored dir as still-needing-a-fetch on
-          // every subsequent `dirs` change, retrying it forever with no
-          // backoff. Leaving it in requestedRef means only an explicit Retry
+          // makes the automatic dirsToLoadFor("missing ancestors") effect
+          // below treat an errored dir as still-needing-a-fetch on every
+          // subsequent `dirs` change, retrying forever with no backoff.
+          // Leaving it in requestedRef means only an explicit Retry
           // click (which calls fetchDir directly, bypassing requestedRef)
           // refetches an errored dir.
           setDirs((prev) => {
@@ -220,7 +219,7 @@ export function FileTree({
   // re-runs as `dirs` changes (guards against a refetch loop when the file
   // genuinely isn't on disk, e.g. opened from a stale changed-files row). The
   // "missing ancestors" fetch above it is separately guarded: fetchDir never
-  // clears a dir from requestedRef on failure (see F9 note in fetchDir), so
+  // clears a dir from requestedRef on failure (see its .catch), so
   // dirsToLoadFor stops treating an errored ancestor as "missing" after its
   // first attempt.
   const revealCheckedRef = useRef<string | null>(null)
@@ -401,12 +400,6 @@ export function FileTree({
   // The highlight on the row the drop would land in. Returned as CLASSES so a
   // caller can merge them into whatever the element already carries, and
   // through tokens rather than literal colours.
-  //
-  // There used to be a `data-drop-target` attribute beside this that no CSS
-  // ever read: the highlight tests asserted the attribute, so deleting every
-  // `dropClass` call and leaving the tree visually inert kept them green. The
-  // attribute is gone and the tests assert the classes, which is the thing the
-  // user can actually see.
   const dropClass = (key: string) =>
     dropKey === key && "bg-primary/10 ring-1 ring-primary"
 

@@ -281,9 +281,9 @@ describe("glyphAt", () => {
   })
 
   it("resolves a CONTINUATION cell to the glyph that owns it", () => {
-    // The finding this exists for: a backwards drag ending on the right half
-    // of a wide glyph used to start the span mid-glyph, dropping the glyph and
-    // leaving a stray blank at the front of the copied text.
+    // A backwards drag ending on the right half of a wide glyph must resolve
+    // to the owning column, or the span starts mid-glyph, drops the glyph, and
+    // copies a stray leading blank.
     expect(glyphAt(cells, 2)).toEqual({ col: 1, width: 2 })
   })
 

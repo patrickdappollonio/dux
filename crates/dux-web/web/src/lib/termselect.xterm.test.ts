@@ -193,9 +193,9 @@ describe("the pure helpers against a real xterm buffer", () => {
   })
 
   it("starts a BACKWARDS drag at the wide glyph, not inside it", async () => {
-    // Measured regression: with the anchor on "x" and the finger ending on the
-    // CONTINUATION half of 日, the span used to start mid-glyph and the copied
-    // text came back as " 本語 x", one glyph short and with a leading blank.
+    // With the anchor on "x" and the finger ending on the CONTINUATION half of
+    // 日, the span must start at the glyph's own column, or the copy comes back
+    // one glyph short with a leading blank.
     const { term, cells } = await openTerminal("ok 日本語 x\r\n")
     const row = cells(0)
     const anchor = anchorOn(wordRangeAt(row, 10), 0)

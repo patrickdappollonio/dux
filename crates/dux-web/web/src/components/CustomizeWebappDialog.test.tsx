@@ -445,8 +445,8 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    // Regression guard: the swatch control's wrapper (`SettingRow`'s
-    // `shrink-0` div) is an auto-width flex child, so a swatch that derives
+    // The swatch control's wrapper (`SettingRow`'s `shrink-0` div) is an
+    // auto-width flex child, so a swatch that derives
     // its size from `aspect-square` inside a `grid-cols-6` column blows up
     // to that column's shrink-to-fit width instead of a fixed size. Every
     // swatch button must carry an explicit fixed square size (`size-10`) and

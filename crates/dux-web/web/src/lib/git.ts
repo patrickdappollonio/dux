@@ -39,7 +39,7 @@ async function postGit(
   }
 }
 
-// The session id is the `:id` path segment (encoded) — no longer a body field.
+// The session id is the `:id` path segment (encoded), never a body field.
 const gitUrl = (sessionId: string, action: string) =>
   `/api/v1/sessions/${encodeURIComponent(sessionId)}/git/${action}`
 

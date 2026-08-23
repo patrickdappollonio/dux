@@ -318,9 +318,8 @@ function SettingControl({
 // until this permission is granted, so the setting and its precondition belong
 // together.
 //
-// This affordance used to be the command palette's one client-side entry, and it
-// is still the ONLY way to grant permission: dux deliberately never auto-prompts,
-// so the visitor must opt in explicitly. The row appears only while there is
+// This affordance is the ONLY way to grant permission: dux deliberately never
+// auto-prompts, so the visitor must opt in explicitly. The row appears only while there is
 // something to ask for (notifications enabled in config, the API exists, and
 // permission is still "default"); once granted or denied, the browser owns the
 // decision and dux cannot re-ask.

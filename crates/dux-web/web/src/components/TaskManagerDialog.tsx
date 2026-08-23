@@ -50,8 +50,8 @@ import {
 import { cn } from "@/lib/utils"
 
 // The Task Manager (the app menu's "Task Manager…"): what is running, what it
-// costs, and how to stop it. It merges two things that used to be separate: the
-// web's kill-running modal and the resource monitor the web never had.
+// costs, and how to stop it. It is both the kill-running surface and the
+// resource monitor.
 //
 // Rows are PER TAB, not per agent: stats are sampled per provider process, and
 // the engine keys those by tab id. A three-tab agent is three rows, grouped

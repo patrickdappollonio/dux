@@ -43,8 +43,8 @@
 //
 //   1. the INITIAL guess: foreground, held only until the handshake answers.
 //   2. a `pty.owner` HANDOVER: a definitive id comparison, never a timing or
-//      echo heuristic. The old guess inverted when two devices claimed in the
-//      same instant and the broadcast order flipped, leaving BOTH on the
+//      echo heuristic, which inverts when two devices claim in the same
+//      instant and the broadcast order flips, leaving BOTH on the
 //      placeholder. A missing id on either side reads as "not us".
 //   3. TAKE-OVER: arm the intent, flip the verdict optimistically, bounce the
 //      socket. Idempotent while the bounce is in flight.

@@ -148,7 +148,8 @@ export function DesktopShell() {
   // the joined panel ids, and prefers that cache over `defaultSize` when the
   // panels re-register (`mutableState.layouts[ids] ?? defaultLayout ??
   // computed`, react-resizable-panels 4.11.2). So a pane that left at zero
-  // width comes BACK at zero, and nothing but a page reload used to clear it.
+  // width comes BACK at zero, and nothing clears that cache short of a page
+  // reload.
   // There is no API to drop the cache, so the pane is measured on the way back
   // in and resized if it returned as nothing.
   //
@@ -160,9 +161,9 @@ export function DesktopShell() {
   // itself in a layout effect and schedules the Group's re-registration through
   // a state update, and the Group is what publishes the layout; the parent's
   // passive effect lands in between. One animation frame later the call
-  // succeeds. Calling it here unwound React out of an effect with no boundary
-  // over it, and the whole screen went black on the first click of "Show
-  // Changes pane", which is the bug this comment exists for.
+  // succeeds. Calling it synchronously from this effect lets the throw unwind
+  // React with no boundary over it, blacking the whole screen on the first
+  // click of "Show Changes pane".
   //
   // So the heal runs off animation frames and retries a bounded few times.
   // Deliberately NOT driven off the panel's own first `onResize` instead: a
@@ -239,17 +240,17 @@ export function DesktopShell() {
   //
   // Its `pointerup` handler runs on the DOCUMENT in the capture phase; this
   // shell's runs on the WINDOW in the capture phase, which is strictly earlier
-  // in the same dispatch. So "the pointer is already up" did not mean the
-  // library was out of its drag. It still ends the drag afterwards, and ending
+  // in the same dispatch. So "the pointer is already up" does not mean the
+  // library is out of its drag. It still ends the drag afterwards, and ending
   // it re-adds the group object it captured at pointerdown to the registry
   // (`hitRegions.forEach(({group}) => setGroupData(group, getGroupDataById(group.id)))`,
   // 4.11.2). That object was deleted when the panel unmounted, so re-adding it
   // resurrects a two-panel registration holding the one-panel layout, and
   // every registry read scans by group id and takes the FIRST match, so the
-  // corpse shadows the live group from then on. Measured: after a drag-shut,
-  // reopening left the pane an eleven-pixel sliver, the panel's layout never
-  // appeared again, and the library threw `Invalid 2 panel layout: 100%` out of
-  // its own ResizeObserver.
+  // corpse shadows the live group from then on. Measured: after a write inside
+  // the dispatch, the reopened pane is an eleven-pixel sliver, its layout never
+  // reappears, and the library throws `Invalid 2 panel layout: 100%` out of its
+  // own ResizeObserver.
   //
   // A macrotask, not a microtask: microtask checkpoints run BETWEEN listeners
   // of the same dispatch, so a microtask would still land before the library's
@@ -343,9 +344,10 @@ export function DesktopShell() {
                 (defaultSize only applies on mount).
 
                 UNITS: never a bare number. react-resizable-panels v4 reads a
-                bare number as PIXELS, so `minSize={14}` was a fourteen-PIXEL
-                floor rather than 14%, and the pane could be dragged down to a
-                sliver and, being collapsible, snapped from there to nothing.
+                bare number as PIXELS, so a bare `minSize={14}` is a
+                fourteen-pixel floor rather than 14%, and the pane can be
+                dragged down to a sliver and, being collapsible, snapped from
+                there to nothing.
                 Every size here is an explicit string with its unit spelled
                 out; see the units note at the top of lib/editorLayout.ts. */}
             <ResizablePanel
@@ -366,13 +368,12 @@ export function DesktopShell() {
                   defaultSize={`${CHANGES_PANE_DEFAULT_PERCENT}%`}
                   minSize="14%"
                   // Still collapsible: dragging the divider off the edge is a
-                  // legitimate way to put the pane away. What changed is that
-                  // it now WRITES that intent. The preference and the split are
-                  // separate variables, so a silent collapse left the pane at
-                  // zero width while the preference still said "visible": the
-                  // header's reopen button stayed away, the pane's own hide
-                  // item was inside the zero-width pane, and the pane was
-                  // stuck until a reload. Mapping the collapse onto the
+                  // legitimate way to put the pane away, and it WRITES that
+                  // intent. The preference and the split are separate
+                  // variables, so a silent collapse leaves the pane at zero
+                  // width while the preference still says "visible": no reopen
+                  // button, the pane's own hide item inside the zero-width
+                  // pane, stuck until a reload. Mapping the collapse onto the
                   // preference makes hidden-by-drag and hidden-by-menu one
                   // state with one way back. Same precedent as the sidebar,
                   // where dragging the edge past its threshold sets exactly the

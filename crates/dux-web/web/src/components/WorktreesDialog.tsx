@@ -429,10 +429,9 @@ function WorktreesBody({ projectId }: { projectId: string }) {
 
 // The per-project worktree manager: it lists every worktree dux manages for a
 // project, adopts an unused one as an agent (the "Create agent" button), and
-// removes one that is no longer wanted. Its store surface keeps the older
-// "attach worktree" naming from when adoption was its only job, so grep
-// `attachWorktree` / `openAttachWorktree` / `attachWorktreeTarget`
-// (lib/store.ts) to find the wiring behind these labels.
+// removes one that is no longer wanted. Its store surface uses "attach
+// worktree" naming: grep `attachWorktree` / `openAttachWorktree` /
+// `attachWorktreeTarget` (lib/store.ts) to find the wiring behind these labels.
 export function WorktreesDialog() {
   const { attachWorktreeTarget, spine } = useDux()
   const project = spine?.projects.find((p) => p.id === attachWorktreeTarget)

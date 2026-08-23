@@ -187,9 +187,9 @@ export function workspaceLocation(
  * tracks otherwise, and for a standalone agent its folder's own name.
  *
  * The twin of `AgentSession::display_label` in dux-core, and it exists for the
- * same reason: every label site used to fall back through the branch name, and
- * a standalone agent has none, so those sites would have rendered a nameless
- * row. Creation guarantees a standalone agent has a title, so the folder
+ * same reason: label sites fall back through the branch name, a standalone
+ * agent has none, and without this rule they would render a nameless row.
+ * Creation guarantees a standalone agent has a title, so the folder
  * fallback here is belt and braces rather than a path users reach.
  *
  * The folder half is pinned by shared vectors with `display_label`'s own test,

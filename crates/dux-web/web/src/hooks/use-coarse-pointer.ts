@@ -5,9 +5,9 @@ import * as React from "react"
 // This is deliberately NOT `useIsMobile` (which is a viewport WIDTH query, and
 // stays the right signal for layout, menus and touch-target sizing). It exists
 // because the compose bar is a decision about the INPUT METHOD, not about how
-// much room there is: rotating a tablet crosses the width breakpoint and the
-// typing surface changed underneath the user mid-session, which is the bug this
-// replaced. `pointer: coarse` does not change with orientation.
+// much room there is: rotating a tablet crosses the width breakpoint and would
+// swap the typing surface underneath the user mid-session; `pointer: coarse`
+// does not change with orientation.
 //
 // MEASURED, and recorded here because each of these kills an alternative that
 // looks more precise and will otherwise be tried again:

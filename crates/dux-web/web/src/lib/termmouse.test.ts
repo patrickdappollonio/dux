@@ -228,10 +228,10 @@ describe("a replayed tap through xterm's pipeline", () => {
     ])
   })
 
-  // The old parallel arithmetic divided the CONTAINER's width by the column
-  // count and knew nothing about the screen element's CSS padding, so a padded
-  // terminal landed the click a cell early. xterm subtracts the padding first.
-  it("subtracts the screen element's padding, which the old cell math ignored", () => {
+  // xterm subtracts the screen element's CSS padding before dividing by the
+  // measured cell size; container-width arithmetic lands a padded click a cell
+  // early.
+  it("subtracts the screen element's padding before resolving the cell", () => {
     const { element, data } = setup("VT200", "SGR", {
       paddingLeft: 8,
       paddingTop: 8,

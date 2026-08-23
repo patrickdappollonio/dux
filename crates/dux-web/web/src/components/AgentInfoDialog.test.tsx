@@ -127,8 +127,7 @@ describe("AgentInfoDialog", () => {
     // Drift note.
     expect(screen.getByText(/changed since creation/i)).toBeTruthy()
     // The project and the worktree, which a managed agent always has. Asserted
-    // because they were the fields the whole-object workspace override used to
-    // blank: nothing else in this file noticed the Project row disappearing.
+    // because nothing else in this file notices the Project row disappearing.
     expect(screen.getByText("Repo")).toBeTruthy()
     expect(screen.getByText("/tmp/s1")).toBeTruthy()
   })

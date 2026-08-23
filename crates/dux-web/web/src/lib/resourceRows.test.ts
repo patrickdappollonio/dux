@@ -91,9 +91,8 @@ function project(over: Partial<ProjectView> & { id: string }): ProjectView {
 
 describe("taskManagerRows", () => {
   it("emits_project_terminal_rows_with_stats_joined_and_project_detail", () => {
-    // The trap this guards (T5): project terminals never appeared in the Task
-    // Manager at all, even though the server samples them (the resource
-    // monitor iterates the whole terminal map).
+    // Project terminals must appear in the Task Manager; the server samples
+    // them (the resource monitor iterates the whole terminal map).
     const projects = [project({ id: "p1", name: "Repo" })]
     const terminals = [
       projectTerminal({ id: "pt-1", projectId: "p1", label: "Terminal 2" }),
@@ -179,8 +178,8 @@ describe("taskManagerRows", () => {
   })
 
   it("a_lone_project_terminal_means_something_is_running", () => {
-    // The trap this guards (T6): with only a project terminal live the dialog
-    // said "Nothing is running." and auto-closed.
+    // A lone project terminal must count as something running, or the dialog
+    // says "Nothing is running." and auto-closes.
     const projects = [project({ id: "p1" })]
     const terminals = [projectTerminal({ id: "pt-1", projectId: "p1" })]
     const rows = taskManagerRows([], [duxStat, totalStat], projects, terminals)
@@ -366,8 +365,8 @@ describe("taskManagerRows", () => {
   })
 
   it("keeps_row_order_stable_regardless_of_stat_values", () => {
-    // R7: rows must never sort by a stat, or they would reorder under the
-    // cursor on every poll.
+    // Rows must never sort by a stat, or they would reorder under the cursor
+    // on every poll.
     const sessions = [
       session({ id: "s1", tabs: [tab({ id: "s1" }), tab({ id: "t2", order: 1 })] }),
     ]

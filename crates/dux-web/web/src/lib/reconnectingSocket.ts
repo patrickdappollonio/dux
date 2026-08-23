@@ -19,9 +19,9 @@ export const RECONNECT_MAX_MS = 5000
 // `failed`. Kept deliberately small (a handful of tries) so a genuinely-down
 // server surfaces a Reconnect affordance quickly rather than retrying silently
 // and indefinitely. Shared by BOTH sockets so the app-wide offline modal (driven
-// by the events socket) and a focused terminal give up on the same schedule —
-// the old asymmetry (uncapped PTY silently reattaching behind a stuck overlay)
-// is impossible by construction now.
+// by the events socket) and a focused terminal give up on the same schedule:
+// sharing one cap makes an uncapped PTY silently reattaching behind a stuck
+// overlay impossible by construction.
 export const MAX_RECONNECT_ATTEMPTS = 3
 
 // The shared reconnecting WebSocket base. Subclasses supply the socket-specific

@@ -220,7 +220,7 @@ describe("the automatic first-load offer", () => {
   it("dismisses on close, and a refetch racing the in-flight dismissal cannot pop it back up", async () => {
     // A slow dismissal, so the refetch below genuinely lands BEFORE the POST
     // answers. With an instant mock the POST's `.then` always wins and the race
-    // window never opens, which is exactly how this test used to pass vacuously.
+    // window never opens, which would let this test pass vacuously.
     dismissDelayMs = 50
     bootstrapBody = makeBootstrap({ pending_first_load: welcomePending })
     const mod = await loadStore()

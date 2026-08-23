@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils"
 // leading slot when the message box is up, the accessory bar's row-one trailing
 // slot when only the keys are up, and its own minimal row when neither is.
 // Exactly one instance ever renders; the anchors are mutually exclusive by
-// construction and a test pins the state that used to produce two.
+// construction and a test pins the state that could produce two.
 //
 // It NEVER renders empty: an `⋯` that opens nothing is worse than no `⋯`, and
 // the empty state is reachable, so every anchor asks `inputMenuHasItems` first

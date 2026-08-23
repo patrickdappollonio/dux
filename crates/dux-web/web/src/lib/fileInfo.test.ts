@@ -88,7 +88,7 @@ describe("gitStatusRows", () => {
 
   // The status vocabulary is `fileStatusMeta`'s, once, for the whole app: an
   // unrecognised code reads as the shared neutral word and never leaks the raw
-  // letter the way the panel's own copy of the table used to.
+  // letter.
   it("uses the shared vocabulary for an unrecognised code instead of printing it", () => {
     const rows = gitStatusRows({ state: "changed", staged: null, unstaged: "X" })
     expect(rows).toEqual([{ label: "Changed, not staged", status: "X" }])

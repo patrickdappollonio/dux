@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Bootstrap } from "./bootstrapApi"
 
-// Exercises the store's Phase 5 companion-terminal lifecycle wiring: createTerminal
+// Exercises the store's companion-terminal lifecycle wiring: createTerminal
 // POSTs the nested REST endpoint and focuses the returned terminal; deleteTerminal
 // resolves the owning session from the spine and DELETEs the nested endpoint. The
 // REST client's own wire behaviour is in terminalsApi.test.ts; here we assert the
@@ -223,8 +223,8 @@ describe("store companion-terminal lifecycle", () => {
   })
 
   it("deleteTerminal routes a PROJECT-owned terminal to the project endpoint", async () => {
-    // The trap this guards (T1): a session-only owner scan resolved nothing for
-    // a project terminal and silently returned: Close did nothing, no toast.
+    // An owner scan that only walks sessions resolves nothing for a project
+    // terminal, so Close would silently do nothing.
     spineBody = {
       projects: [{ id: "p1", name: "Repo" }],
       sessions: [],
@@ -288,8 +288,8 @@ describe("store companion-terminal lifecycle", () => {
   })
 
   it("stopAllRunning deletes project terminals too", async () => {
-    // The trap this guards (T4): the panic button iterated only sessions'
-    // terminals, so a hung project terminal survived "Stop all".
+    // "Stop all" must cover project terminals too, not only sessions'
+    // terminals.
     spineBody = {
       projects: [{ id: "p1", name: "Repo" }],
       sessions: [{ id: "s1", project_id: "p1" }],

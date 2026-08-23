@@ -70,7 +70,7 @@ describe("DeleteEntryDialog", () => {
     expect(onConfirm).toHaveBeenCalled()
   })
 
-  // Finding 3: an in-flight save must block deleting the same path, the same
+  // An in-flight save must block deleting the same path, the same
   // way RenameEntryDialog's `isDirty` gate blocks a dirty rename.
   describe("blockedBySave", () => {
     it("disables Delete and does not fire onConfirm when clicked", () => {

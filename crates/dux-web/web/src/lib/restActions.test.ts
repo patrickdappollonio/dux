@@ -4,7 +4,7 @@ import { setConnectionId } from "./connection"
 import { ProjectsApiError, projectsApi } from "./projectsApi"
 import { SessionsApiError, existingBranchConflict, sessionsApi } from "./sessionsApi"
 
-// Wire-level coverage for the Phase 4 REST action clients: each verb hits the
+// Wire-level coverage for the REST action clients: each verb hits the
 // exact endpoint with the right method/body, stamps the per-connection id as
 // `X-Connection-Id` (every endpoint reads it to scope its `/ws` toasts back to
 // this client), and surfaces a non-2xx as a typed error carrying the HTTP status

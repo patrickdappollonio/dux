@@ -267,10 +267,9 @@ export function InsetHeader() {
         ))}
       </div>
 
-      {/* The macro quick-picker. It used to float over the terminal as an
-          absolutely-positioned overlay inside TerminalPane; it lives here now,
-          on the pane's own right edge, where it sits in the header's control
-          family instead of on top of the PTY text. Labelled on desktop because
+      {/* The macro quick-picker. It lives on the pane's own right edge, in the
+          header's control family, never floating over the PTY text.
+          Labelled on desktop because
           there is room and macros are a feature people forget exists; the phone
           keeps the icon variant (MobileShell), where there is not. */}
       {selectedTarget ? <MacroPopover target={selectedTarget} /> : null}
@@ -312,10 +311,10 @@ export function InsetHeader() {
             only by construction: InsetHeader mounts only in DesktopShell.
 
             It shows for a ZERO-WIDTH pane as well, not just a hidden one. A
-            divider dragged off the edge used to leave the pane at 0% with the
-            preference still reading "visible", which took this button away and
-            put the pane's own hide item inside the zero: nothing on screen
-            could bring it back. `showChangesPane` is the healing form, which
+            divider dragged off the edge leaves the pane at 0% with the
+            preference still reading "visible"; if this button hid then,
+            nothing on screen could bring the pane back (its own hide item is
+            inside the zero). `showChangesPane` is the healing form, which
             restores a width as well as the preference. */}
         {changesPaneEffectivelyHidden(dux) && (
           <SimpleTooltip content="Show Changes pane">

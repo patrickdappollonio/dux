@@ -6,10 +6,8 @@
 export const MIN_SIDEBAR_PX = 14 * 16
 export const MAX_SIDEBAR_PX = 28 * 16
 // Below this released width the sidebar auto-collapses to the icon rail instead
-// of staying uselessly narrow. It used to be pinned just below the width where
-// the footer's two split buttons started stacking; the footer is one launcher
-// corner now and stacks nothing, so this is simply the width below which the
-// list rows stop being readable, and the collapse reads as an intentional "you
+// of staying uselessly narrow. This is simply the width below which the list
+// rows stop being readable, and the collapse reads as an intentional "you
 // dragged it too narrow" snap.
 export const AUTO_COLLAPSE_SIDEBAR_PX = 15 * 16
 

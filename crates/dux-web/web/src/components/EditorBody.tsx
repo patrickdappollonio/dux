@@ -283,7 +283,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // LIVE tab list at RESOLVE time, not the `tabs` closed over when `save()`
   // was called: a delete confirmed while the write was in flight closes the
   // tab, and the save must notice that at resolve time to avoid a false
-  // "Saved" toast (see `saveResolutionOutcome` / finding 3).
+  // "Saved" toast (see `saveResolutionOutcome`).
   const tabsRef = useRef<typeof tabs>(tabs)
   useEffect(() => {
     tabsRef.current = tabs
@@ -1625,8 +1625,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       // `sticky` is forwarded rather than dropped, so the decision stays in the
       // one place that makes it (`editorDropToast`, where every rung says
       // false, and says why). Hardcoding it here would put a second opinion
-      // next to the first; omitting it, as this line used to, silently made a
-      // tree drop unpinnable whatever the report asked for.
+      // next to the first; omitting it silently makes a tree drop unpinnable
+      // whatever the report asked for.
       reportFinal: (t) => notify(t.tone, t.message, { id: toastId, sticky: t.sticky }),
     })
   }

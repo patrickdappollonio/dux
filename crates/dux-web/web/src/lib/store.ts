@@ -253,8 +253,7 @@ export interface ChangesSlice {
 
 export interface DuxState {
   // The workspace "spine" from `GET /api/v1/workspace`: projects, sessions, and
-  // the core-computed sidebar grouping. These three fields used to ride the
-  // broadcast `ViewModel`; they now live here, fetched once after auth resolves
+  // the core-computed sidebar grouping, fetched once after auth resolves
   // (alongside the bootstrap document) and thereafter PUSHED by the server as a
   // `workspace` event on every change. A server that does not push, or a frame
   // this client cannot read, falls back to re-fetching on the coarse
@@ -270,7 +269,7 @@ export interface DuxState {
   // default) so nothing crashes in that pre-load window.
   bootstrap: Bootstrap | null
   // Set to true synchronously when boot runs (at module load). Tests wait on
-  // this as a settled signal instead of the old auth.phase guard.
+  // this as a settled signal.
   booted: boolean
   conn: ConnState
   // Sticky "the app-wide events socket is not connected" flag that drives the
@@ -968,20 +967,19 @@ const wsScheme = hasBrowser && location.protocol === "https:" ? "wss:" : "ws:"
 const wsHost = hasBrowser ? location.host : "localhost"
 
 // The single JSON socket for the whole app (`/ws/events`), separate from the
-// per-PTY byte sockets (`lib/ptySocket.ts`). Since the Phase 6 cutover it carries
-// EVERYTHING the retired `/ws`/`DuxSocket` used to: resource-change events
-// (changed files, spine, config) AND the control frames
-// (`connected` id, `status`/`status_cleared` toasts). It also owns the
-// connection-state UX (the status-bar indicator). Exported so tests can drive
+// per-PTY byte sockets (`lib/ptySocket.ts`). It carries resource-change events
+// (changed files, spine, config) and the control frames (`connected` id,
+// `status`/`status_cleared` toasts), and owns the connection-state UX (the
+// status-bar indicator). Exported so tests can drive
 // its callbacks / inspect its interest set; connected on boot.
 export const eventsSocket = new EventsSocket(
   `${wsScheme}//${wsHost}/ws/events`,
 )
 
-// App-wide coarse topics, subscribed once at module load. They are added to the
-// interest set immediately (sent on the first open, re-sent on every reconnect).
-// Phase 1 has no GET tied to these — they exist so later phases can refresh
-// projects/sessions/config off the same channel without a new subscribe site.
+// App-wide coarse topics, subscribed once at module load: added to the interest
+// set immediately (sent on the first open, re-sent on every reconnect), so the
+// bootstrap and spine refetches ride one channel with no per-feature subscribe
+// site.
 eventsSocket.subscribe(["sessions", "projects", "config"])
 
 // A `session.changes` event invalidates one session's changed files. Refetch
@@ -997,13 +995,13 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
     if (typeof ev.id === "string") setConnectionId(ev.id)
     return
   }
-  // Engine status toasts, migrated off the retired `/ws`. The server already
+  // Engine status toasts. The server already
   // scope-filtered per connection; the client reads `scope` for one further,
   // surface-level decision: the standalone editor tab renders only statuses
   // addressed to its own connection and drops the workspace broadcasts
   // (`statusToastAllowed`). That gate is on the RENDERING only. An error-toned
   // async status also voids any in-flight create-focus (the create likely failed)
-  // and unwinds any optimistic reorder overlay — mirroring the old `onStatus`.
+  // and unwinds any optimistic reorder overlay.
   if (ev.event === "status") {
     if (ev.tone === "error") setState({ ...clearPendingClientIntent() })
     // A `tab-launch-<tabId>` keyed status carries BOTH outcomes of an extra-tab
@@ -1120,10 +1118,10 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
 // `eventsSocket.connect()`, so the first `onOpen` that follows must NOT re-fetch
 // them or it would duplicate that initial load. The driver sets this flag right
 // before connecting; the first `onOpen` consumes it. Every
-// later (RE-connect) open leaves it false and so always retries — crucially, even
-// when the FIRST load FAILED: keying the retry off `state.bootstrap !== null`
-// (the old guard) stranded a failed first fetch as null forever, so every
-// reconnect skipped it and the app stayed empty with no recovery path.
+// later (RE-connect) open leaves it false and so always retries, crucially even
+// when the FIRST load FAILED: the retry must not key off `state.bootstrap !==
+// null`, because a failed first fetch leaves that null forever, so every
+// reconnect would skip it and the app would stay empty with no recovery path.
 let skipNextEventsOnOpenLoad = false
 
 // Which run of which build of dux this tab loaded against, read once at boot
@@ -1364,8 +1362,8 @@ function loadBootstrap(): void {
 }
 
 // Apply a freshly fetched bootstrap. Also reconciles the optimistic Changes-pane
-// override the same way the broadcast ViewModel used to: the toggle persists to
-// config, the server emits `config.changed`, the refetched bootstrap carries the
+// override: the toggle persists to config, the server emits `config.changed`,
+// the refetched bootstrap carries the
 // confirmed `show_changes_pane`, and the override is dropped once it matches so
 // config becomes the single source of truth across every client.
 function applyBootstrap(b: Bootstrap): void {
@@ -1510,14 +1508,13 @@ function loadWorkspace(): void {
 }
 
 // Apply a freshly fetched spine. This is the single place the projects/sessions/
-// sidebar data lands, and it drives the same client-view reconciliation the
-// broadcast ViewModel used to:
+// sidebar data lands, and it drives the client-view reconciliation:
 //   - retire the optimistic reorder overlays once the server's order matches;
 //   - auto-focus an agent THIS client just created, the instant it appears;
 //   - prune the selection when its target session/terminal has vanished.
-// Order mirrors the legacy `onViewModel`: set the slice (with reconciled overlays)
-// first, then focus (which only ever selects a session present in the spine, so
-// the prune below leaves it alone), then prune.
+// Order matters: set the slice (with reconciled overlays) first, then focus
+// (which only ever selects a session present in the spine, so the prune below
+// leaves it alone), then prune.
 //
 // `seq` is the `loadWorkspaceSeq` value the originating `loadWorkspace` captured; discard
 // this (now-stale) result if a newer load has since started, so a slow older
@@ -1615,7 +1612,7 @@ function pruneEditorStateIfGone(spine: Spine): void {
     // vanished session. Its navigation already serializes without the
     // editor suffix, because `currentRoute` drops an editor arm whose
     // session no longer matches the focused target. A second writer here
-    // (the old `closeEditor()` call) would push or double-write.
+    // (calling `closeEditor()` here) would push or double-write.
     clearEditorStateSilently()
   }
 }
@@ -1649,20 +1646,6 @@ function pruneDeadEditorTabs(live: Set<string>, heldKey: string | null): void {
     if (!live.has(key)) clearEditorTabsForKey(key)
   }
 }
-
-// The per-connection id now arrives as the `connected` event on `/ws/events`
-// (see `eventsSocket.onEvent` above), which calls `setConnectionId`. The REST
-// clients stamp it as `X-Connection-Id` so the server scopes their toasts back
-// to this client.
-
-// The broadcast ViewModel now carries ONLY `changed_files` (a residual frame);
-// projects/sessions/sidebar moved to `GET /api/v1/workspace` and the changed-files
-// data is owned by the `changes` slice over REST. Nothing reads the residual
-// frame anymore, so we deliberately do NOT install an `onViewModel` handler:
-// storing it on every frame only triggered spurious re-renders. The
-// focus/prune/reorder reconciliation runs on the spine apply path (`applyWorkspace`),
-// and changed files flow through the `changes` slice. The frame is removed at
-// cutover (Phase 6); until then it is simply ignored (the socket default no-op).
 
 // Drop the pending session-order overlay once the incoming spine's session
 // order for that project already equals the overlay; otherwise keep it.
@@ -1906,15 +1889,14 @@ eventsSocket.onConn = (conn) => {
   // falls back to scope `All` (broadcast) — visible to this client once it
   // reconnects, the safe default. The next `connected` frame re-issues a fresh id.
   if (conn === "closed" || conn === "failed") setConnectionId(null)
-  // Changed files no longer ride this socket: the `/ws/events` channel owns the
-  // per-session subscription and re-establishes it on its own reconnect (see
-  // `eventsSocket.onOpen`, which also refetches). There is nothing to re-arm here.
+  // The per-session changed-files subscription re-establishes on reconnect in
+  // `eventsSocket.onOpen` (which also refetches); nothing to re-arm here.
 }
 
-// Since Phase 6 there is no `command_result`/`error` frame: every action is a
-// REST verb whose failure rejects its promise (the caller toasts it and rolls
-// back optimistic state), and every keyed busy/success/clear arrives as a
-// `status`/`status_cleared` event over `/ws/events` (see `eventsSocket.onEvent`).
+// Every action is a REST verb whose failure rejects its promise (the caller
+// toasts it and rolls back optimistic state); keyed busy/success/clear arrives
+// as `status`/`status_cleared` events over `/ws/events` (see
+// `eventsSocket.onEvent`).
 
 // Reset both optimistic order overlays. Returned as a patch so callers can fold
 // it into a single `setState`. Used on every error path so a rejected reorder
@@ -2183,7 +2165,7 @@ const EDITOR_SUFFIX = "/editor"
 // NOT a single greedy regex, deliberately: a file literally named "editor"
 // makes the string contain "/editor" twice (`#/agent/s1/editor/file/editor`),
 // and a greedy match splits at the LAST one, leaving a prefix that is not a
-// target, so the whole route used to fall through to home. Instead every
+// target, so the whole route would fall through to home. Instead every
 // "/editor" occurrence is tried as the split point, rightmost first, and the
 // first candidate whose tail has the suffix shape AND whose prefix parses as
 // a target wins.
@@ -2475,21 +2457,17 @@ function applyUrlRoute(): void {
   const spine = state.spine
   if (!spine) {
     // A popstate before the first spine landed: a slow spine fetch, or a
-    // session/bfcache restore that comes back with a back stack already. This
-    // used to return and drop the route on the floor, on the claim that the
-    // boot deep-link restore would resolve the hash later. It does not: that
-    // restore resolves the BOOT hash, and the browser has since moved to a
-    // different one. Both outcomes were measured. Booting on home and stepping
-    // to an agent left the address bar naming an agent the app never selected,
-    // permanently, since nothing retries. Booting on an agent and stepping back
-    // to home had the boot restore silently undo the Back and overwrite the
-    // entry the user had landed on.
+    // session/bfcache restore that comes back with a back stack already. The
+    // route cannot be dropped here on the theory that the boot deep-link
+    // restore will resolve it: that restore resolves the BOOT hash, and the
+    // browser has since moved to a different one (measured in both directions:
+    // the address bar names an agent the app never selects, or the boot restore
+    // silently undoes the Back and overwrites the entry the user landed on).
     //
     // So the pending boot link is REPLACED by where the browser actually is,
     // and `restoreDeepLink` resolves that against the first spine. A route
-    // naming home replaces it with null, which is exactly the cancellation the
-    // second case needs. Nothing else can be done here: resolving a target
-    // needs a session list, and there is none yet.
+    // naming home replaces it with null, which cancels the boot link. Nothing
+    // else can be done here: resolving a target needs a session list.
     pendingDeepLink = route.target
     pendingDeepLinkChanges = route.changes
     pendingDeepLinkEditor = route.editor
@@ -2805,11 +2783,10 @@ function applyDeepLinkSelection(
   if (target.kind === "terminal") {
     // A handler per owner variant, not `if (owner.kind !== "session") return`.
     //
-    // That early return was silent in both directions: it said nothing about
-    // WHICH other owner it was declining, and it would have gone on declining a
-    // third kind that has no other restore path at all, dropping the user's
-    // position with no trace. Written as a match, a new variant cannot be added
-    // without answering for it here.
+    // An early return is silent about which owner it declines and keeps
+    // declining a third kind that has no other restore path, dropping the
+    // user's position with no trace. Written as a match, a new variant cannot
+    // be added without answering for it here.
     const terminal = target
     matchOwner(target.owner, {
       session: (owner) => {
@@ -2868,7 +2845,7 @@ function restoreDeepLink(spine: Spine): void {
 // Restore a project-terminal route against a spine: select the terminal when its
 // project still carries it, and land home when either the project or the terminal
 // is gone. Landing home is a real navigation, URL included: returning silently
-// used to leave the address bar naming a terminal the app was not showing, which
+// would leave the address bar naming a terminal the app is not showing, which
 // is the exact URL-versus-state disagreement this router exists to remove. There
 // is no not-found screen for a terminal, deliberately, since terminal ids are
 // ephemeral and a closed terminal is ordinary rather than a broken link.
@@ -2921,10 +2898,10 @@ function applyStandaloneTerminalDeepLink(
 // has completed). Restoring earlier, while still `detached`, would ping-pong
 // with the center pane's eject.
 // The `changes` half of the route rides along with the target: the intent is a
-// whole POSITION, not just a focus. Arming from a target alone used to strand a
-// user reading changed files twice over, first because the anchored
-// `parseSelectionHash` read `#/agent/<sid>/changes` as no link at all, and then
-// because the restore would have dropped them onto the terminal screen.
+// whole POSITION, not just a focus. Arming from a target alone strands a user
+// reading changed files twice over: the anchored `parseSelectionHash` reads
+// `#/agent/<sid>/changes` as no link at all, and the restore would drop them
+// onto the terminal screen.
 interface ReconnectDeepLink {
   target: SelectedTarget
   changes: boolean
@@ -3002,14 +2979,11 @@ function restoreReconnectDeepLink(spine: Spine): void {
   }
   // A handler per owner variant, not a predicate plus a nullable id.
   //
-  // This used to test `owner.kind === "project"` and send everything else
-  // through `ownerSessionId`, so a third kind of owner would have answered null
-  // and had its restoration intent silently dropped: the user's position would
-  // quietly fail to come back after a reconnect, with nothing anywhere saying
-  // why. That is precisely the class of silence the owner tag exists to remove,
-  // and a predicate cannot remove it, because a predicate keeps compiling. The
-  // matcher's object literal is missing a key the moment a variant is added,
-  // which is a compile error HERE, where the decision is.
+  // Reducing the owner to a nullable session id answers null for any unhandled
+  // kind and silently drops its restoration intent, with nothing anywhere
+  // saying why. A predicate keeps compiling; the matcher's object literal is
+  // missing a key the moment a variant is added, which is a compile error
+  // HERE, where the decision is.
   const terminal = armedTarget
   matchOwner(terminal.owner, {
     session: (owner) =>
@@ -3164,9 +3138,9 @@ function screenPatch(changes?: boolean): { mobileScreen: MobileScreen } | object
 
 // The editor half of a selection commit. A selection that moves to a session
 // DIFFERENT from the open editor's CLOSES the editor in the same state patch:
-// the hash must always name the VISIBLE position, and the old behavior of
-// merely dropping the editor suffix from the URL (see `currentRoute`'s
-// session guard) while the editor state lingered left the two disagreeing.
+// the hash must always name the VISIBLE position; merely dropping the editor
+// suffix from the URL (see `currentRoute`'s session guard) while the editor
+// state lingers leaves the two disagreeing.
 // Closing also drops the standalone surface flag, per the rule that every
 // editor clear outside popstate does (`clearEditorStateSilently`). Selecting
 // the editor's OWN session (or the same session's tab/terminal) keeps it
@@ -3271,7 +3245,7 @@ export function ejectSelectionForReconnect(): void {
 // session-slot tab (equivalent to `selectSession`). The changed files belong to the
 // SESSION, so the subscription/fetch key off `sessionId` regardless of tab.
 //
-// Persists the choice as the agent's remembered tab-focus (J3: fire-and-forget,
+// Persists the choice as the agent's remembered tab-focus (fire-and-forget,
 // no status/toast) so a later `selectSession` restores it, on this client or
 // any other sharing the same server. `tabsApi.setFocusedTab` itself normalizes
 // `tabId === sessionId` to "clear the memory" server-side. Pass `persist:
@@ -3388,7 +3362,7 @@ export function selectTerminal(
   if (sessionId !== null && prev !== sessionId) loadChanges(sessionId)
 }
 
-// Spawn a new companion terminal for a session via REST (Phase 5). The 201 reply
+// Spawn a new companion terminal for a session via REST. The 201 reply
 // carries the new terminal id, so we focus it immediately — opening its PTY
 // socket (`TerminalPane`) — rather than waiting for a `terminal_created` frame.
 // The terminal also lands in the spine via the `sessions.changed` refetch, which
@@ -3442,7 +3416,7 @@ export function createStandaloneTerminal(): void {
 
 // Open the close-terminal confirmation dialog for a companion terminal. The TUI
 // always confirms before killing a terminal's running process, so the web does
-// too (the ✕ no longer deletes on a single click).
+// too.
 export function openDeleteTerminal(terminalId: string): void {
   setState({ deleteTerminalTarget: terminalId })
 }
@@ -3451,10 +3425,9 @@ export function closeDeleteTerminal(): void {
   setState({ deleteTerminalTarget: null })
 }
 
-// Resolve a terminal's owner from the spine. The terminal CARRIES its owner now,
-// so this is a lookup by id and a conversion rather than a scan of two nested
-// collections in which "which list did I find it in" was the answer. Undefined
-// when the terminal has already vanished.
+// Resolve a terminal's owner from the spine: the terminal carries its owner, so
+// this is a lookup by id and a conversion. Undefined when the terminal has
+// already vanished.
 export function findTerminalOwner(
   terminalId: string,
 ): TerminalOwnerRef | undefined {
@@ -3462,10 +3435,10 @@ export function findTerminalOwner(
   return terminal ? ownerRefFromWire(terminal.owner) : undefined
 }
 
-// Close (delete) a companion terminal via REST (Phase 5). The endpoint is nested
+// Close (delete) a companion terminal via REST. The endpoint is nested
 // under the owner, so resolve it from the spine across BOTH owner kinds,
-// sessions and projects (a session-only scan silently made project terminals
-// undeletable); a terminal that already vanished (no owner) is a no-op. The
+// sessions and projects (a session-only scan would silently make project
+// terminals undeletable); a terminal that already vanished (no owner) is a no-op. The
 // terminal is removed from the workspace spine, and if it was the focused target
 // the selection clears via the spine prune in `applyWorkspace` (driven by the
 // `sessions.changed` refetch). A failure surfaces as a toast.
@@ -3540,9 +3513,9 @@ export function closeCloseTab(): void {
 // that tab and detaches the agent only if it was the last live tab (server 200,
 // session survives); an extra tab is destroyed (also 200, same `{ detached }`
 // shape). All focus/latch mutations wait for the DELETE to actually resolve —
-// closing is NOT optimistic: mutating them beforehand (as this used to) left the
-// UI navigated away from a tab that was still alive server-side whenever the
-// request failed, with only a toast and no rollback. On success, if the closed
+// closing is NOT optimistic: mutating them beforehand would leave the UI
+// navigated away from a tab that is still alive server-side whenever the
+// request fails, with only a toast and no rollback. On success, if the closed
 // tab was the focused target, move focus off it so the pane never sits on the
 // just-closed tab and re-subscribes it (subscribing force-relaunches the
 // provider): an extra tab falls back to the session-slot tab; the session-slot
@@ -3931,8 +3904,9 @@ export function deleteSession(sessionId: string, deleteWorktree: boolean): void 
     .remove(sessionId, deleteWorktree)
     .catch((e) => {
       // A 409 is a refusal (a tab is still launching, or a delete is already in
-      // flight). The server already surfaces that message over the /ws status
-      // stream, so don't toast it a second time. Mirrors `toastCreateError`.
+      // flight). The server already surfaces that message over the `/ws/events`
+      // status stream, so don't toast it a second time. Mirrors
+      // `toastCreateError`.
       if (e instanceof SessionsApiError && e.status === 409) return
       notifyError(
         e instanceof Error ? e.message : "Could not delete the session.",
@@ -4323,9 +4297,8 @@ export function closeForceReconnect(): void {
   setState({ forceReconnectTarget: null })
 }
 
-// Browse a directory for the add-project picker over REST (replaces the retired
-// `/ws` `browse_dir` → `dir_entries` round-trip). A null path resolves the
-// server's configured default start directory. The reply is ignored once the
+// Browse a directory for the add-project picker over REST. A null path resolves
+// the server's configured default start directory. The reply is ignored once the
 // dialog has closed so a late response can't repopulate a closed picker.
 /** Whether SOME folder picker is still open. The browse reply is dropped
  * otherwise, so a late response cannot repopulate a closed picker. Both
@@ -4436,7 +4409,7 @@ export function browseDir(path: string | null): void {
 
 // Fire the branch pre-flight for a selected git repo, mirroring the TUI's
 // `add_project`, which inspects the current branch before adding. The reply
-// fills `projectPathInspection` via `onProjectPathInspection`; the dialog shows
+// fills `projectPathInspection` when it lands; the dialog shows
 // a warning step when it carries one. Runs in the click handler that selects the
 // repo — never an effect — like `openAttachWorktree` kicks off its listing.
 export function inspectProjectPath(path: string): void {
@@ -4453,8 +4426,7 @@ export function inspectProjectPath(path: string): void {
       loading: true,
     },
   })
-  // Resolve over REST (replaces the retired `/ws` `inspect_project_path` reply).
-  // Ignore a stale reply whose path no longer matches the pending inspection (the
+  // Resolve over REST. Ignore a stale reply whose path no longer matches the pending inspection (the
   // user picked a different repo, or the dialog closed) so a late frame can never
   // repopulate a closed/changed selection.
   projectsApi
@@ -4651,7 +4623,7 @@ export function checkoutDefaultBranch(projectId: string): void {
 
 // Open the attach-worktree dialog for a project and immediately request its
 // managed-worktree listing (the server classifies in spawn_blocking). The
-// listing reply fills `attachWorktreeEntries` via `onProjectWorktrees`. Runs in
+// listing reply fills `attachWorktreeEntries` when it lands. Runs in
 // the click handler that opens the dialog — never an effect — mirroring how
 // `openAddProject` kicks off its browse.
 export function openAttachWorktree(
@@ -4667,8 +4639,7 @@ export function openAttachWorktree(
   loadProjectWorktrees(projectId)
 }
 
-// Fetch the managed-worktree listing over REST (replaces the retired `/ws`
-// `list_project_worktrees` → `project_worktrees` reply). Ignore a stale reply if
+// Fetch the managed-worktree listing over REST. Ignore a stale reply if
 // the dialog closed (or switched projects) before it arrived. Shared by the
 // opener and by the post-delete refresh so the list can never drift from what
 // the server would answer.
@@ -4805,9 +4776,8 @@ export function openCreateAgentFromPr(projectId: string | null): void {
 // lookup, so PR mode opens blank and the server's head-branch fallback applies.
 // Runs in the click handler that opens the dialog — never an effect — so there
 // is no set-state-in-effect.
-// Request a fresh pet name for the new-agent dialog over REST (replaces the
-// retired `/ws` `generate_agent_name` → `agent_name` reply). The TUI fills the
-// input with the generated name (that fill IS the preview) and remembers it so a
+// Request a fresh pet name for the new-agent dialog over REST. The TUI fills
+// the input with the generated name (that fill IS the preview) and remembers it so a
 // later uncheck can tell "still the generated name" from "user-edited". We mirror
 // that: fill the draft and stash the name. Ignored if the dialog closed or the
 // user unchecked the box before the reply landed (a stale reply must not refill).
@@ -4930,7 +4900,7 @@ export function toggleCreateAgentCopyChanges(): void {
 }
 
 // Toggle the "Use randomized pet name" checkbox with the TUI's exact semantics:
-//   ON  -> request a fresh name (the reply fills the input via `onAgentName`).
+//   ON  -> request a fresh name (the reply fills the input).
 //   OFF -> clear the input ONLY if it still equals the generated name; otherwise
 //          keep the user's edits. Either way, forget the generated name.
 export function toggleCreateAgentRandomize(): void {
@@ -4947,8 +4917,8 @@ export function toggleCreateAgentRandomize(): void {
       createAgentRandomize: false,
       createAgentDraft: keepText ? state.createAgentDraft : "",
       createAgentGeneratedName: null,
-      // Unchecking abandons any in-flight request; its reply is ignored by
-      // `onAgentName` (randomize is false by then), so stop the spinner now.
+      // Unchecking abandons any in-flight request; its reply is dropped
+      // (randomize is false by then), so stop the spinner now.
       createAgentNamePending: false,
       ...retireInFlightPrResolve(),
     })
@@ -4957,10 +4927,11 @@ export function toggleCreateAgentRandomize(): void {
 
 // Surface a create-action REST error as a toast, EXCEPT a 409 Conflict. A 409
 // means the engine's in-flight create guard refused: it returns an `Ok`
-// error-toned status that the engine ALSO broadcasts over `/ws` (scoped to this
-// connection) and that the REST handler maps to 409. Toasting the 409 here would
-// double up — the user would see two identical toasts for one refusal. The `/ws`
-// status stream is the single surface for that case; every other status still
+// error-toned status that the engine ALSO broadcasts over `/ws/events` status
+// events (scoped to this connection) and that the REST handler maps to 409.
+// Toasting the 409 here would double up: the user would see two identical
+// toasts for one refusal. The `/ws/events` status stream is the single surface
+// for that case; every other status still
 // toasts. Network failures (`status === 0`) and all other codes are surfaced.
 function toastCreateError(e: unknown, fallback: string): void {
   if (e instanceof SessionsApiError && e.status === 409) return
@@ -5351,9 +5322,9 @@ export function reorderProjects(orderedIds: string[]): void {
 // draft, while the PTY path keeps today's focus behavior.
 export type MacroDestination = "compose" | "pty" | "none"
 
-// Run a macro by name on the focused target. Since Phase 5 the web no longer
-// sends a server-side `run_macro` command: it resolves the macro's text from the
-// bootstrap document and delivers it client-side, to one of two destinations.
+// Run a macro by name on the focused target. There is no server-side macro
+// command: the macro's text is resolved from the bootstrap document and
+// delivered client-side, to one of two destinations.
 //
 // While the mobile compose bar is the rendered typing surface, `TerminalPane`
 // has a compose-insert sink registered (see `composeInsert.ts`) and the macro's
@@ -5474,10 +5445,10 @@ export function openChangesScreen(): void {
 //
 // Up from a REAL screen PUSHES, because it is ordinary navigation to a different
 // position and the browser is supposed to accumulate those: Back then alternates
-// meaningfully between where you were and where you went. It used to replace,
-// and that quietly grew the stack by one entry per trip, since going in pushed
-// and coming out overwrote the top: ten trips in and out left ten identical home
-// entries, so Back did nothing visible ten times before it did anything at all.
+// meaningfully between where you were and where you went. A replace here quietly
+// grows the stack by one entry per trip (going in pushes, coming out overwrites
+// the top), so Back does nothing visible for many presses before it does
+// anything at all.
 //
 // Leaving the NOT-FOUND screen is the one exception, and it replaces. That is
 // not navigation between two positions, it is a CORRECTION of a bad URL, and a
@@ -5510,7 +5481,7 @@ export function navigateUp(): void {
 }
 
 export function reconnect(): void {
-  // Both sockets now give up after the shared MAX_RECONNECT_ATTEMPTS and signal
+  // Both sockets give up after the shared MAX_RECONNECT_ATTEMPTS and signal
   // "failed"; a manual Retry must restore EVERYTHING. connect() resets the events
   // socket's closedByUser/attempts/delay (safe on an exhausted socket), and the
   // `terminalEpoch` bump remounts the focused TerminalPane so its (now-capped)
@@ -5562,9 +5533,9 @@ export function changesSpacerPercent(s: DuxState): number {
 export const CHANGES_PANE_COLLAPSE_EPSILON = 1
 
 // Did this layout report take the Changes panel from a measured, open width to
-// nothing? That is a user dragging the divider off the edge, and it is the one
-// thing that used to strand the pane: zero-width but still "visible", so no
-// reopen control anywhere on screen (its own ⋯ menu was inside the zero).
+// nothing? That is a user dragging the divider off the edge, the one state that
+// strands the pane: zero-width but still "visible", so no reopen control
+// anywhere on screen (its own ⋯ menu is inside the zero).
 //
 // `prevPercent` is undefined on a panel's very FIRST report, before anything has
 // been measured. That is not a collapse; treating it as one would hide the pane
@@ -5819,11 +5790,10 @@ export function sessionActiveElsewhere(
   })
 }
 
-// There is deliberately NO restore-both action here any more. The one-tap
-// "show hidden bars" button it served is gone: the input ⋯ menu below the
-// terminal is always on screen, and it carries a named Show item PER BAR, so a
-// user restores the one they are missing rather than being handed both. Each
-// item is an ordinary `setMobileBarVisibility` write.
+// Deliberately no restore-both action: the input ⋯ menu below the terminal is
+// always on screen and carries a named Show item PER BAR, so a user restores
+// the one they are missing rather than being handed both. Each item is an
+// ordinary `setMobileBarVisibility` write.
 
 // The Task Manager (the app menu's "Task Manager…"). Open/close just flip the
 // gate; the dialog derives its rows from the spine and polls the stats itself
@@ -5857,8 +5827,7 @@ export function stopAllRunning(): void {
     if (s.status === "active") killSessionPty(s.id)
   }
   // One flat collection, so every terminal of every owner is reached by one
-  // loop: the panic button cannot miss a whole owner kind the way it once could
-  // have missed project terminals.
+  // loop and no owner kind can be missed.
   for (const t of state.spine?.terminals ?? []) deleteTerminal(t.id)
 }
 

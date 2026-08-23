@@ -7,12 +7,12 @@ import type { EventsClientMessage, EventsServerMessage } from "./types"
 // watching many sessions never loses its tail of subscriptions on reconnect.
 const MAX_EVENT_TOPICS_PER_FRAME = 64
 
-// EventsSocket wraps the `/ws/events` channel — since Phase 6 the ONLY JSON
-// socket (the legacy `/ws`/`DuxSocket` is gone; PTY bytes ride their own per-PTY
-// sockets in `lib/ptySocket.ts`). It (a) maintains the full set of topics this
-// client is interested in, (b) forwards every server frame (resource-change
-// events plus the `connected`/`status`/`status_cleared` control frames the old
-// `/ws` used to carry) to a consumer callback, and (c) re-emits its connection
+// EventsSocket wraps the `/ws/events` channel, the ONLY JSON socket (PTY bytes
+// ride their own per-PTY sockets in `lib/ptySocket.ts`). It (a) maintains the
+// full set of topics this client is interested in, (b) forwards every server
+// frame (resource-change events plus the
+// `connected`/`status`/`status_cleared` control frames) to a consumer
+// callback, and (c) re-emits its connection
 // state so the store can drive the indicator + auth recovery.
 //
 // The client sends `{ "subscribe": [...] }` / `{ "unsubscribe": [...] }`; the

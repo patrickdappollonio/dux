@@ -19,7 +19,7 @@ interface DeleteEntryDialogProps {
   // and a blocking note replaces the usual warning copy, mirroring
   // RenameEntryDialog's `isDirty` gate: deleting a path whose write hasn't
   // resolved yet would let that in-flight write silently recreate the file
-  // right after the delete lands (finding 3).
+  // right after the delete lands.
   blockedBySave?: boolean
   onClose: () => void
   onConfirm: () => void

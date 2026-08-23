@@ -52,8 +52,8 @@ interface FileInfoDialogProps {
 // panel dismisses itself. A 400 is the opposite answer, a path that was
 // REFUSED, and that must stay on screen with its reason.
 //
-// Be precise about WHEN it learns that, because the panel used to claim more
-// than it did: there is no poll and no subscription, so the facts are exactly
+// Be precise about WHEN it learns that, because the panel must never claim
+// more than it knows: there is no poll and no subscription, so the facts are exactly
 // as fresh as the last fetch. Two things trigger one, the panel opening and
 // the WINDOW REGAINING FOCUS, and the second is the whole reason a file can
 // vanish "while the panel is open" at all. It covers the real journey (delete

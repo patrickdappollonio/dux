@@ -79,7 +79,7 @@ describe("fetchBootstrap", () => {
 describe("DEFAULT_AGENT_TABS_MAX", () => {
   // This constant is a plain duplicated literal mirroring
   // `dux_core::config::DEFAULT_AGENT_TABS_MAX` (crates/dux-core/src/config.rs) —
-  // nothing enforces the two staying equal (see G13). Pinning the value here
+  // nothing enforces the two staying equal. Pinning the value here
   // means a change to either side without updating the other fails THIS test
   // (a TS-side change) as a heads-up to also update config.rs, rather than the
   // drift going unnoticed until an older-server fallback silently diverges from

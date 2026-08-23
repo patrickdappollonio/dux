@@ -534,10 +534,10 @@ describe("a deleted agent never throws the user out of dux", () => {
   })
 })
 
-// A popstate can arrive before the first spine lands. The handler used to
-// return early in that window, on the claim that the boot deep-link restore
-// would resolve the hash later. It does not: the boot restore resolves the BOOT
-// hash, not the address the browser has since moved to.
+// A popstate can arrive before the first spine lands. Returning early in that
+// window on the theory that the boot deep-link restore will resolve the hash is
+// wrong: the boot restore resolves the BOOT hash, not the address the browser
+// has since moved to.
 describe("a popstate that beats the first spine is not dropped", () => {
   it("adopts the agent the browser moved to while the spine was still loading", async () => {
     const mod = await loadStoreWithHeldSpine("", [{ id: "s1", project_id: "p1" }])

@@ -139,7 +139,7 @@ describe("FileTree", () => {
     expect(srcCalls).toBe(2)
   })
 
-  it("renders a real file named __error__ as a normal, openable entry row (F1)", async () => {
+  it("renders a real file named __error__ as a normal, openable entry row", async () => {
     treeMock.mockImplementation((_sid, d) =>
       Promise.resolve({ dir: d, entries: d === "" ? [file("__error__")] : [] }),
     )
@@ -272,7 +272,7 @@ describe("FileTree", () => {
     ])
   })
 
-  it("evicts a collapsed directory's cache so re-expanding refetches (F3)", async () => {
+  it("evicts a collapsed directory's cache so re-expanding refetches", async () => {
     let srcCalls = 0
     treeMock.mockImplementation((_sid, d) => {
       if (d === "") return Promise.resolve({ dir: "", entries: [dir("src")] })
@@ -304,7 +304,7 @@ describe("FileTree", () => {
     expect(srcCalls).toBe(2)
   })
 
-  it("fetches a failing ancestor exactly once automatically, and once more per explicit Retry click (F9)", async () => {
+  it("fetches a failing ancestor exactly once automatically, and once more per explicit Retry click", async () => {
     let badCalls = 0
     treeMock.mockImplementation((_sid, d) => {
       if (d === "") return Promise.resolve({ dir: "", entries: [dir("bad")] })
@@ -339,7 +339,7 @@ describe("FileTree", () => {
     expect(badCalls).toBe(2)
   })
 
-  it("keeps a manually collapsed ancestor collapsed when an unrelated dir loads (F11)", async () => {
+  it("keeps a manually collapsed ancestor collapsed when an unrelated dir loads", async () => {
     const listings: Record<string, DirEntry[]> = {
       "": [dir("parent"), dir("other")],
       parent: [file("parent/target.ts")],
@@ -375,11 +375,10 @@ describe("FileTree", () => {
   })
 
   // The tree must own its scroll surface: virtualization has to window against
-  // the SAME element the user scrolls. Regression: the tree used to render an
-  // unbounded inner div inside the sidebar's outer ScrollArea, so scrolling
-  // happened on an ancestor its scroll handler never saw and everything past
-  // the first screenful rendered as blank spacer (huge dirs like
-  // target/debug/deps showed a handful of rows, then nothing).
+  // the SAME element the user scrolls. An unbounded inner div inside the
+  // sidebar's outer ScrollArea would scroll on an ancestor the scroll handler
+  // never sees, rendering everything past the first screenful as blank spacer
+  // (huge dirs like target/debug/deps show a handful of rows, then nothing).
   it("windows rows against its own scroll viewport and reveals rows on scroll", async () => {
     const ROW_HEIGHT = 28
     const many = Array.from({ length: 300 }, (_, i) =>

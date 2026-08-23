@@ -64,10 +64,9 @@ describe("Dux Mono / Dux Mono Symbols / Dux Mono Fill font wiring", () => {
 
   it("each unicode-range sits inside its own family's @font-face block", () => {
     const css = read("../index.css")
-    // Block-scoped on purpose. The two ranges used to be asserted against the
-    // whole file, so swapping the symbols and fill range strings between the
-    // two blocks passed both assertions while every restricted glyph resolved
-    // to the wrong face.
+    // Block-scoped on purpose: asserted against the whole file, swapping the
+    // symbols and fill range strings between the two blocks passes both
+    // assertions while every restricted glyph resolves to the wrong face.
     const symbols = fontFaceBlockFor(css, DUX_MONO_SYMBOLS_FAMILY)
     expect(symbols).toContain(`unicode-range: ${UNICODE_RANGES};`)
     const fill = fontFaceBlockFor(css, DUX_MONO_FILL_FAMILY)

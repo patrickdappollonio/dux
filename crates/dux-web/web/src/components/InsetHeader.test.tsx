@@ -178,7 +178,7 @@ describe("InsetHeader agent chips", () => {
     render(<InsetHeader />)
     expect(chipValue("agent")).toBe("main")
     expect(chip("branch")).toBeNull()
-    // The words it used to print instead are gone with the caption.
+    // No "same branch" caption text renders.
     expect(screen.queryByText(/same branch/)).toBeNull()
   })
 
@@ -416,8 +416,8 @@ describe("InsetHeader macros and the pane-edge spacer", () => {
 
 describe("InsetHeader project terminal chips", () => {
   it("renders project and terminal chips for a focused project terminal", () => {
-    // The trap this guards (T8): every field was gated on a resolved SESSION,
-    // so a focused project terminal rendered a completely blank bar.
+    // If every field were gated on a resolved SESSION, a focused project
+    // terminal would render a completely blank bar.
     mockState = {
       selectedSessionId: null,
       changesPanePercent: 26,
@@ -524,8 +524,8 @@ describe("InsetHeader standalone terminal chips", () => {
 })
 
 describe("InsetHeader show-Changes button", () => {
-  // The pane's only in-app reopen control used to live inside the pane's own
-  // header menu, which unmounts with the pane; this button is the always-there
+  // A reopen control inside the pane's own header menu unmounts with the
+  // pane; this button is the always-there
   // way back (the sidebar rail-button pattern applied to the right panel).
   it("renders only while the Changes pane is hidden, and clicking it shows the pane", async () => {
     const store = await import("@/lib/store")

@@ -87,8 +87,8 @@ describe("ConfirmCloseTabDialog", () => {
   })
 
   // The closed tab itself is DORMANT (has_live_process: false, liveTabs counts 0
-  // among OTHER tabs) — the `liveTabs === 0` branch of `willDetach`, previously
-  // untested. Closing an already-dormant tab is still meaningful: it deletes the
+  // among OTHER tabs): the `liveTabs === 0` branch of `willDetach`. Closing an
+  // already-dormant tab is still meaningful: it deletes the
   // dormant tab's row (or, for the session-slot tab, its slot) outright.
   it("shows no detach warning when closing an already-dormant tab that has a live sibling", () => {
     seed("b2", [

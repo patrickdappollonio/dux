@@ -83,7 +83,7 @@ export function formatModified(iso: string | null): string {
 // The porcelain code, spelled out. The NOUN is `fileStatusMeta`'s, not a
 // second copy of the vocabulary: one marker and one word per status across the
 // whole app, including its deliberate refusal to print an unrecognised code
-// (it answers "Changed"; the panel used to leak the raw letter as `Status X`).
+// (it answers "Changed" rather than leaking the raw letter).
 // All this adds is which SIDE the change is on, which is the thing a one-word
 // "Modified" leaves ambiguous and which the panel has room to say.
 function codeLabel(code: string, staged: boolean): string {

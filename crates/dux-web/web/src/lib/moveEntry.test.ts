@@ -76,8 +76,6 @@ describe("performMove", () => {
     ])
   })
 
-  // A move that succeeded used to say nothing at all. It now confirms once,
-  // naming the entry and where it went.
   it("confirms the move exactly once, naming the entry and the destination", async () => {
     const { d } = deps()
     await performMove("src/a/notes.md", "docs", d)

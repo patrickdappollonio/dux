@@ -162,11 +162,9 @@ export function nextActiveSessionId(
   return candidates[0]
 }
 
-// NOTE: agent order is now a single GLOBAL flat order (agents are independent of
-// project grouping). A drag is a plain `moveItem` over the complete session id
-// list, sent via `reorderAgents` — see FlatAgentList's handleDragEnd. The old
-// project-aware `flatDragPlan` (same-project reorder vs cross-project block move)
-// was removed with that change.
+// Agent order is a single GLOBAL flat order (agents are independent of project
+// grouping). A drag is a plain `moveItem` over the complete session id list,
+// sent via `reorderAgents` (see FlatAgentList's handleDragEnd).
 
 // The drag baseline for a drop: the COMPLETE session id list in the order the
 // user is actually looking at. Drag-reorder works from every sort mode; on a

@@ -3,12 +3,9 @@
 // The pane's lifecycle effect owns a terminal and a socket and must re-run only
 // when the streamed target changes, so every closure it creates outlives the
 // render that created it. Everything those closures need to read has to reach
-// them some other way, and there used to be sixteen individual ref mirrors and
-// sixteen effects doing exactly that, one per preference, each with the same
-// three-line shape and its own chance to be forgotten.
-//
-// This replaces all of them with ONE container and ONE synchronising effect,
-// and it draws the line the mirrors never did:
+// them some other way. Rather than one ref mirror and one effect per
+// preference (each a chance to be forgotten), this is ONE container and ONE
+// synchronising effect, and it draws the line the mirrors never did:
 //
 //   READ-ONLY SETTINGS (this file) travel one way. The render computes them,
 //   the container publishes them, and the long-lived closures read them AT CALL
@@ -25,11 +22,11 @@
 // The container's own freshness contract: the snapshot is published in a
 // LAYOUT effect with no dependency list, so it lands in EVERY commit's layout
 // phase, before the pane's relayout (declared after this hook, so ordered
-// after it) and before every passive effect. The old passive publish was one
-// phase too late for exactly one reader: the relayout is itself a layout
-// effect, and a live preference flip it acted on (the watcher-view mode) read
-// the PREVIOUS commit's snapshot through the coordinator, shrinking the font
-// for a view whose grid it then refused to adopt. Every other reader is an
+// after it) and before every passive effect. A passive publish is one phase
+// too late for exactly one reader: the relayout is itself a layout effect, and
+// a live preference flip it acts on (the watcher-view mode) would read the
+// PREVIOUS commit's snapshot through the coordinator, shrinking the font for a
+// view whose grid it then refuses to adopt. Every other reader is an
 // event-time closure (socket callbacks, gestures, timers), all of which run
 // after layout anyway, so publishing earlier only narrows their stale window.
 // The initial value is the mount render's snapshot, so no effect ever reads an

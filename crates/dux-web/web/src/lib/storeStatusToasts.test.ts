@@ -108,8 +108,8 @@ async function loadStoreWithBootstrap() {
 }
 
 // Drive a `status` / `status_cleared` frame through the events socket exactly as
-// the server pushes it on `/ws/events` (Phase 6: status moved off the retired
-// `/ws`). `key` is omitted from the frame when null/undefined (the anonymous
+// the server pushes it on `/ws/events`. `key` is omitted from the frame when
+// null/undefined (the anonymous
 // slot), mirroring the server's `skip_serializing_if = None`.
 type StoreModule = typeof import("./store")
 function status(
@@ -224,7 +224,8 @@ describe("engine status → sonner toast routing", () => {
     const mod = await loadStore()
 
     status(mod, "sl-key", "info", "Status bar message.")
-    // The statusLine field was removed in T14; the store no longer carries it.
+    // The store carries no statusLine field; toasts are the sole web status
+    // surface.
     expect(mod.getSnapshot()).not.toHaveProperty("statusLine")
   })
 

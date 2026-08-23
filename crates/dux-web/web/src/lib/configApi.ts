@@ -1,10 +1,8 @@
 // HTTP client for the config-mutating operations the palette / dialogs trigger:
 // persist the global env map, replace the macro list wholesale, toggle the
-// Changes-pane visibility flag, and reload config from disk. These used to ride
-// the retired `/ws` `command` channel (`persist_global_env`, `update_macros`,
-// `set_changes_pane_visible`, `reload_config`); since the Phase 6 cutover they
-// are scoped REST verbs, stamping the per-connection id so the server can route
-// each operation's status toast back to the initiating client.
+// Changes-pane visibility flag, and reload config from disk. Scoped REST
+// verbs, stamping the per-connection id so the server can route each
+// operation's status toast back to the initiating client.
 //
 // The server validates each request (e.g. macro names/text/surface) and persists
 // to `config.toml`, emitting `config.changed` over `/ws/events` so every client

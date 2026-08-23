@@ -23,7 +23,7 @@ import type { PtySocket } from "./ptySocket"
 // minimum so the import succeeds.
 //
 // Macros moved off the broadcast ViewModel onto the `GET /api/v1/bootstrap`
-// document (Phase 2), so the dialog seeds from `state.bootstrap.macros`. The
+// document, so the dialog seeds from `state.bootstrap.macros`. The
 // boot path fetches it at module load; tests control its body via the
 // `bootstrapMacros` variable the fetch double reads at call time.
 
@@ -71,7 +71,7 @@ const fetchMock = vi.fn(async (url: string) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  // The macro editor now persists via a REST PUT (Phase 6, was a `/ws` command).
+  // The macro editor persists via a REST PUT.
   if (u.includes("/api/v1/macros")) {
     if (failMacrosPut) {
       return {
@@ -191,8 +191,8 @@ describe("store macros dialog", () => {
 })
 
 describe("store macros commands", () => {
-  // A minimal PtySocket double that records the stdin written to it. Phase 5
-  // routes a macro straight to the focused PTY socket as stdin (no server-side
+  // A minimal PtySocket double that records the stdin written to it. A macro
+  // goes straight to the focused PTY socket as stdin (no server-side
   // `run_macro` command), so the store resolves the macro text from bootstrap,
   // applies the newline transform, and calls `sendInput` on the active socket.
   // `setActivePtySocket` is pulled from the SAME module graph the dynamically

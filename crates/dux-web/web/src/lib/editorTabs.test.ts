@@ -118,7 +118,7 @@ describe("openFile", () => {
     expect(state.tabs[0].mode).toBe("diff")
   })
 
-  // Correction: EditorBody's Monaco buffers are keyed by tab id, and a
+  // EditorBody's Monaco buffers are keyed by tab id, and a
   // preview-replace reuses the tab's id while swapping its path. If the
   // replaced tab kept a stale `dirty: true` from the file it used to hold,
   // the strip's dirty dot and the close-confirm gating would misfire against
@@ -555,15 +555,11 @@ describe("hasDirtyUnderPath", () => {
   })
 })
 
-// `saveResolutionOutcome` backs the finding-3 fix: `EditorOverlay`'s `save()`
-// used to unconditionally toast "Saved" and mark the tab clean once
-// `fileApi.write` resolved, even if a delete for that same path landed WHILE
-// the write was in flight (the write itself already reached the server and
-// succeeded, silently recreating the just-deleted file on disk). The caller
-// re-checks whether the tab this save was for still exists in the LIVE tabs
-// list at resolve time (not at call time, since a delete can race the
-// in-flight write) and feeds that into this pure decision: an honest warning
-// instead of a false "Saved" success when the tab is gone.
+// A delete can land while a write for the same path is in flight; the write
+// still succeeds server-side, recreating the just-deleted file. The caller
+// re-checks the LIVE tabs list at resolve time (not call time) and feeds that
+// into this pure decision: a warning, never a false "Saved", when the tab is
+// gone.
 describe("saveResolutionOutcome", () => {
   it("reports success when the tab is still open", () => {
     expect(saveResolutionOutcome("a.ts", true)).toEqual({

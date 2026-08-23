@@ -107,9 +107,9 @@ export function createLinkPress(deps: LinkPressDeps): LinkPress {
 
   // ONE CLICK ON A HYPERLINK OPENS ONE TAB, ON THE CLICKER'S SIDE.
   //
-  // With the app in the PTY tracking the mouse, a click on an OSC 8 link used
-  // to open the page TWICE: dux's `window.open` in this browser, and the same
-  // click forwarded as a mouse report, which an agent CLI answers by shelling
+  // With the app in the PTY tracking the mouse, a click on an OSC 8 link would
+  // open the page TWICE: dux's `window.open` in this browser, plus the click
+  // forwarded as a mouse report, which an agent CLI answers by shelling
   // out to `open <url>` ON THE SERVER'S MACHINE. Only the first one reaches
   // the person who clicked, so dux is the sole opener and the click that
   // dispatched a link is withheld from the app entirely.

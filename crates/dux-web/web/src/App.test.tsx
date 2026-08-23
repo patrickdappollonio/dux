@@ -10,16 +10,17 @@ import type { DuxState } from "@/lib/store"
 // the library hands back. The panes themselves are stubbed: TerminalArea drags
 // in xterm and a live socket, and none of that is what these tests are about.
 //
-// The two bugs pinned here:
+// The two invariants pinned here:
 //
 //   1. UNITS. v4 reads a BARE NUMBER as PIXELS (see the units note in
-//      lib/editorLayout.ts). `minSize={14}` was a 14-PIXEL minimum, not 14%, so
-//      the Changes panel could be dragged down to a sliver and, being
-//      `collapsible`, snapped from there to zero.
-//   2. A drag to zero wrote NOTHING. Visibility (the preference) and the split
-//      (runtime) are unrelated variables, so the pane went to zero width while
-//      the preference still said "visible": the header's reopen button never
-//      appeared and the pane's own hide item was inside the zero-width pane.
+//      lib/editorLayout.ts): a bare `minSize={14}` is a 14-pixel minimum, not
+//      14%, letting the Changes panel be dragged to a sliver and, being
+//      `collapsible`, snapped to zero.
+//   2. A drag to zero must WRITE the preference. Visibility (the preference)
+//      and the split (runtime) are unrelated variables, so an unwritten
+//      collapse leaves the pane at zero width while the preference still says
+//      "visible": no reopen button, and the pane's own hide item inside the
+//      zero-width pane.
 
 const recordedPanelProps: Array<PanelProps> = []
 let lastGroupProps: Record<string, unknown> = {}
@@ -207,8 +208,8 @@ describe("DesktopShell panel units", () => {
 
     const terminal = panel("terminal-pane")!
     const changes = panel("changes-pane")!
-    // A bare number here means PIXELS: `minSize={14}` was a 14-pixel floor, so
-    // the pane could be dragged to a sliver and then snapped to zero.
+    // A bare number here means PIXELS: a bare `minSize={14}` is a 14-pixel
+    // floor, so the pane can be dragged to a sliver and then snapped to zero.
     expect(terminal.minSize).toBe("30%")
     expect(terminal.defaultSize).toBe(`${100 - CHANGES_PANE_DEFAULT_PERCENT}%`)
     expect(changes.minSize).toBe("14%")
@@ -249,8 +250,8 @@ describe("DesktopShell drag-collapse", () => {
     // have run. One task later is soon enough and is the whole guarantee.
     expect(collapseFromDrag).not.toHaveBeenCalled()
     flushScheduled()
-    // Hidden-by-drag and hidden-by-menu are now ONE state, so the header's
-    // reopen button appears. Without this the pane was unreachable.
+    // Hidden-by-drag and hidden-by-menu are ONE state, so the header's
+    // reopen button appears. Without this the pane is unreachable.
     expect(collapseFromDrag).toHaveBeenCalledTimes(1)
   })
 
@@ -276,12 +277,12 @@ describe("DesktopShell drag-collapse", () => {
     // And not synchronously on the release either. This shell listens on the
     // WINDOW in the capture phase; the library listens on the DOCUMENT in the
     // capture phase, which is strictly later in the same dispatch, so writing
-    // here still unmounted the panel while the library was mid-drag. Ending the
+    // here still unmounts the panel while the library is mid-drag. Ending the
     // drag then re-adds the group object it captured at pointerdown to the
     // registry, resurrecting the registration that just died, and every lookup
-    // scans by id and takes the first match. Measured after that happened: the
-    // reopened pane was an eleven-pixel sliver, its layout never reappeared,
-    // and the library threw `Invalid 2 panel layout: 100%` from its own
+    // scans by id and takes the first match. Measured: the reopened pane is an
+    // eleven-pixel sliver, its layout never reappears, and the library throws
+    // `Invalid 2 panel layout: 100%` from its own
     // ResizeObserver. A macrotask lands after the whole dispatch; a microtask
     // would not, because microtask checkpoints run between listeners.
     act(() => pointer("pointerup"))
@@ -309,7 +310,7 @@ describe("DesktopShell drag-collapse", () => {
     act(() => pointer("pointerup"))
     flushScheduled()
     // Dragging past the snap and back out before letting go is the escape from
-    // an accidental collapse; committing at the snap took it away.
+    // an accidental collapse; committing at the snap takes it away.
     expect(collapseFromDrag).not.toHaveBeenCalled()
   })
 
@@ -348,7 +349,7 @@ describe("DesktopShell re-show", () => {
   // cache over `defaultSize` when the panels re-register (measured in
   // react-resizable-panels 4.11.2: `mutableState.layouts[ids] ?? defaultLayout
   // ?? computed`). So re-showing a pane that was collapsed to zero brings back
-  // the ZERO, not the default, and only a reload used to clear it.
+  // the ZERO, not the default, and only a reload clears that cache.
   it("resets a re-shown pane that comes back at nothing", () => {
     // Hidden, then shown again with the panel reporting the cached zero.
     mockState = stateWith(false)
@@ -393,11 +394,10 @@ describe("DesktopShell re-show", () => {
     expect(handle.resized).toEqual([])
   })
 
-  // THE BLACK SCREEN. The handle's methods throw rather than no-op while the
-  // re-mounting panel has no registry entry, and the shell used to call
-  // `getSize()` straight from its own effect, one beat too early. The throw
-  // unwound React with no boundary over it and the whole screen went black on
-  // the first click of "Show Changes pane".
+  // The handle's methods throw rather than no-op while the re-mounting panel
+  // has no registry entry, so a `getSize()` straight from the shell's own
+  // effect is one beat too early: the throw unwinds React with no boundary over
+  // it and blacks the whole screen on the first click of "Show Changes pane".
   it("survives a panel that has no layout yet, and heals once it does", () => {
     mockState = stateWith(false)
     const { rerender } = render(<DesktopShell />)

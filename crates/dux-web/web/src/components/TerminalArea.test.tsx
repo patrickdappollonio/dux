@@ -14,8 +14,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
   return { ...actual, useDux: () => mockState, startDormantTab: startDormantTabMock }
 })
 
-// Replace the lazy terminal pane with a prop-recording stub: the T15 test
-// below must prove WHAT the area hands the pane (the owner ref), and mounting
+// Replace the lazy terminal pane with a prop-recording stub: the owner-ref
+// test below must prove WHAT the area hands the pane, and mounting
 // the real TerminalPane would pull in xterm's canvas renderer, which jsdom
 // cannot back. The dormant-gating tests never resolve the lazy chunk, so they
 // are unaffected.
@@ -27,8 +27,8 @@ vi.mock("@/components/LazyTerminalPane", () => ({
   },
 }))
 
-// A tracking WebSocket double: G-T4 exists to prove that a DORMANT tab never
-// opens a PTY socket (which would force-launch the provider) merely by being
+// A tracking WebSocket double: it proves a DORMANT tab never opens a PTY
+// socket (which would force-launch the provider) merely by being
 // focused/rendered — only the explicit "Start session" action may. Every
 // PtySocket construction goes through `new WebSocket(...)`, so counting
 // constructions here is a proxy for "was a PTY socket opened."
@@ -216,12 +216,12 @@ describe("TerminalArea dormant-tab gating (G-T4)", () => {
   })
 })
 
-describe("TerminalArea project terminals (T15)", () => {
+describe("TerminalArea project terminals", () => {
   it("mounts the pane with the PROJECT owner and never the dormant agent card", async () => {
-    // The trap this guards (T15): with a required string `sessionId` on the
-    // terminal target, this area compiled unchanged and handed a bogus session
-    // id down, so the pane built the session-nested PTY URL and 404'd forever,
-    // silently. The pane must receive the owner ref itself.
+    // With a required string `sessionId` on the terminal target, this area
+    // compiles unchanged while handing a bogus session id down, so the pane
+    // builds the session-nested PTY URL and 404s forever, silently. The pane
+    // must receive the owner ref itself.
     mockState = makeState({
       spine: {
         projects: [

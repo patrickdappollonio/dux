@@ -1,7 +1,6 @@
 // A dedicated WebSocket to ONE PTY (an agent's main provider or a companion
-// terminal), introduced in Phase 5. It replaces the legacy `DuxSocket`
-// Subscribe/SubscribeTerminal/Resize/binary-frame multiplexing: each focused
-// terminal opens its own socket whose connection IS the subscription, so the
+// terminal). Each focused terminal opens its own socket whose connection IS
+// the subscription, so the
 // server routes that PTY's bytes here with no per-message addressing.
 //
 // Protocol (matches `handle_pty_socket` in `crates/dux-web/src/server.rs`):
@@ -472,7 +471,8 @@ export class PtySocket extends ReconnectingSocket {
 
 // The PTY socket the focused center pane is currently driving, or null when no
 // terminal is focused. The macro quick-picker writes a macro's payload straight
-// to this socket as stdin (Phase 5 dropped the server-side `run_macro` command),
+// to this socket as stdin (there is no server-side `run_macro` command;
+// delivery is client-side),
 // so the store needs a handle to "the active PTY" without reaching into React.
 // `TerminalPane` registers its socket on mount and clears it on unmount.
 let activePtySocket: PtySocket | null = null

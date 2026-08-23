@@ -108,9 +108,9 @@ describe("statusToastDuration", () => {
 
 describe("the configured window is read at RAISE time, not captured by the caller", () => {
   // The trap this removes is documented in CLAUDE.md's clipboard-paste tenet: a
-  // raise registered in a mount effect used to capture `status_clear_seconds`
-  // out of the render closure, pinning every later toast from that component to
-  // the pre-bootstrap default for the life of the pane. With the window living
+  // raise registered in a mount effect that captures `status_clear_seconds`
+  // out of the render closure pins every later toast from that component to
+  // the pre-bootstrap default. With the window living
   // here and read on the way past, a caller has nothing to capture and nothing
   // to get wrong.
   it("uses the default until the bootstrap document lands", () => {

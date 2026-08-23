@@ -37,10 +37,9 @@ describe("useIsCoarsePointer", () => {
     expect(read()).toBe("fine")
   })
 
-  // THE REGRESSION THIS HOOK EXISTS FOR. The compose bar used to be gated on
-  // `useIsMobile()`, so rotating a tablet crossed the 768px width breakpoint
-  // and swapped the user's typing surface mid-session. A width change must be
-  // invisible here.
+  // Gating the compose bar on `useIsMobile()` swaps the user's typing surface
+  // mid-session when a tablet rotates across the 768px width breakpoint. A
+  // width change must be invisible here.
   it("does not change when only the viewport width changes", () => {
     stub = stubMatchMedia({ [COARSE_POINTER_QUERY]: true })
     const original = window.innerWidth

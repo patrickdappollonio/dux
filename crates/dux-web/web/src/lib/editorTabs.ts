@@ -250,9 +250,9 @@ export function closeTabsUnderPath(
   return working
 }
 
-// True when `path` (a file) or any tab under `path/` (a folder) is DIRTY --
-// used to gate the Rename dialog so an unsaved buffer is never silently
-// reloaded away by the post-rename staleness refetch.
+// True when `path` (a file) or any tab under `path/` (a folder) is DIRTY.
+// Gates the Rename dialog so an unsaved buffer is never silently reloaded away
+// by the post-rename staleness refetch.
 export function hasDirtyUnderPath(
   state: EditorTabsState,
   path: string,

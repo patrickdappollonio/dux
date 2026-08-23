@@ -64,8 +64,8 @@ describe("projectLiveCounts", () => {
   })
 
   it("includes the project's own project terminals", () => {
-    // The trap this guards (T7): the info dialog summed only the sessions'
-    // terminals, so a project terminal never counted.
+    // The count must include the project's own terminals, not only its
+    // sessions' terminals.
     const sessions = [session({ id: "a", project_id: "p1" })]
     const terminals = [
       sessionTerm("t1", "a"),

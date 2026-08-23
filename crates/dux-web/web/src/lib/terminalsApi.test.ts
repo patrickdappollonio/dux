@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { setConnectionId } from "./connection"
 import { TerminalsApiError, terminalsApi } from "./terminalsApi"
 
-// Wire-level coverage for the Phase 5 companion-terminal REST client: create and
+// Wire-level coverage for the companion-terminal REST client: create and
 // delete hit the exact nested endpoint with the right method, stamp the
 // per-connection id as `X-Connection-Id`, and surface a non-2xx as a typed error.
 // Mirrors `restActions.test.ts`'s style.

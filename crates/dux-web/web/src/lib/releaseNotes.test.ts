@@ -126,9 +126,10 @@ describe("the invisible-character set", () => {
 describe("the shared cross-language fixture", () => {
   // The other half of the pin in `release_notes.rs`. The Rust test compares the
   // invisible SET; this compares the ANSWERS, because the two surfaces can hold
-  // the same set and still disagree: each `<br>` matcher used to ask its own
-  // language what whitespace is, and this file used to strip comments, breaks and
-  // invisibles in three sequential passes where Rust scans once, left to right.
+  // the same set and still disagree: a `<br>` matcher that asks its own
+  // language what whitespace is, or a stripper that runs in sequential passes
+  // where Rust scans once left to right, holds the same set and still answers
+  // differently.
   // Both sides read this same file, so a case passes only when both agree.
   const cases = JSON.parse(
     readFileSync(

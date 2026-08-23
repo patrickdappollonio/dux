@@ -770,10 +770,9 @@ function AgentFlatRow({
                 >
                   {word.label}
                 </span>
-                {/* No branch here, by decision. The row used to print the branch
-                    whenever it differed from the agent's name, which on a drifted
-                    agent meant a long mono branch inline on every row: noise, and
-                    worst on a tablet. The branch's one home is the top bar's
+                {/* No branch here, by decision: a drifted agent would put a
+                    long mono branch inline on every row, noise, and worst on a
+                    tablet. The branch's one home is the top bar's
                     branch chip (InsetHeader), which shows the CURRENT branch and
                     carries the drift note on hover. The branch stays searchable
                     (lib/agentSearch.ts still matches on it); a branch-only query
@@ -1270,9 +1269,7 @@ const SORT_KEYS: FlatSortKey[] = ["active", "updated", "created", "name", "manua
 // finger is the pointer (the hub renders this header too).
 const HEADER_CONTROL_SIZING = "h-7 max-md:min-h-10"
 
-// One counter pill for every section of the list. "Agents" used to render its
-// count as bare muted text while Terminals and Inactive used this pill, and the
-// two dividers pushed theirs to the right edge; the count now sits immediately
+// One counter pill for every section of the list: the count sits immediately
 // after the section word everywhere, and right edges carry controls only.
 const SECTION_COUNT_PILL =
   "rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground"

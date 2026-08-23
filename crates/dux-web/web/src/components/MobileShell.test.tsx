@@ -80,7 +80,7 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
 
 // A minimal one-project/one-session spine, with the session's tab count
 // configurable so the "Add tab" reachability + cap-disable can be exercised at
-// any tab count (including the common 1-tab case, per G7).
+// any tab count (including the common 1-tab case).
 function makeSessionSpine(tabCount: number): DuxState["spine"] {
   const tabs = Array.from({ length: tabCount }, (_, i) => ({
     id: i === 0 ? "s1" : `extra-${i}`,
@@ -143,9 +143,9 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe("MobileShell home row agent ⋯ menu — Add tab (G7)", () => {
-  // Mirrors the desktop sidebar's fix: before it, the web had no way to reach a
-  // session's first extra tab (the in-strip "+" only renders at 2+ tabs).
+describe("MobileShell home row agent ⋯ menu: Add tab", () => {
+  // Mirrors the desktop sidebar: the in-strip "+" only renders at 2+ tabs, so
+  // this menu item is the way to a session's first extra tab.
   it("is present and enabled for a session with only one tab, and calls addTab", () => {
     mockState = makeState({
       spine: makeSessionSpine(1),
@@ -233,8 +233,8 @@ describe("MobileShell project terminals", () => {
   }
 
   it("renders the project terminal row under the project block on the hub", () => {
-    // T14's mobile half: before this, a project terminal rendered nowhere in
-    // the hub, invisible and unreachable on a phone.
+    // Without this row a project terminal renders nowhere in the hub,
+    // invisible and unreachable on a phone.
     mockState = makeState({
       spine: projectTerminalSpine(),
       bootstrap: { title: "dux", dux_version: "v1" },
@@ -708,8 +708,8 @@ describe("MobileShell terminal-screen macro trigger", () => {
   })
 
   it("puts the macro trigger in the agentless terminal screen's header too", () => {
-    // The floating trigger used to render over project/standalone terminals
-    // as well, so their header gets the same treatment as the agent screen.
+    // Project/standalone terminal headers get the same treatment as the agent
+    // screen.
     mockState = terminalState({
       spine: {
         projects: [
@@ -895,9 +895,8 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
 })
 
 describe("MobileShell agentless terminal screen ⋯ menu", () => {
-  // The project and standalone terminal screens used to carry NO menu at all,
-  // so hiding the bars from them meant a trip through Preferences. That
-  // decision changed: every mobile terminal screen carries the quick toggles.
+  // Every mobile terminal screen carries the quick toggles; without them,
+  // hiding the bars means a trip through Preferences.
   // The toggles read `useIsMobile`, so the viewport shrinks below the 768px
   // breakpoint exactly like the agent-screen quick-toggle suite above.
   const desktopWidth = window.innerWidth
@@ -1053,10 +1052,9 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
 })
 
 describe("MobileShell agent header identity", () => {
-  // The phone header used to show the BRANCH alone, in mono, so it never said
-  // which project or which assistant you were talking to. It now carries the
-  // same two facts the desktop header does, as a two-line stack inside the SAME
-  // h-11 the one line used.
+  // The phone header must say which project and which assistant, the same two
+  // facts as the desktop header, as a two-line stack inside the SAME h-11 a
+  // single line occupies.
   function agentHeaderState(): DuxState {
     return makeState({
       spine: makeSessionSpine(1),
@@ -1104,17 +1102,15 @@ describe("MobileShell agent header identity", () => {
     expect(name.className).toContain("truncate")
   })
 
-  it("drops the mono branch line the old header showed", () => {
+  it("renders the branch without a mono line in the header", () => {
     mockState = agentHeaderState()
     render(<MobileShell />)
     expect(screen.getByText("main").className).not.toContain("font-mono")
   })
 })
 
-// THE PHONE HEADER'S CONTROLS ARE ONE FAMILY. They used to be three unrelated
-// treatments sitting side by side: a ghost size-10 macro trigger, an outline
-// size="sm" ±N (whose `sm` token also swapped the corner RADIUS), and a ghost
-// size-10 ⋯.
+// THE PHONE HEADER'S CONTROLS ARE ONE FAMILY: one size, one variant, one
+// corner radius.
 //
 // jsdom has no layout engine, so `getBoundingClientRect` is all zeros here and
 // these assert the height TOKEN rather than the rendered pixel. The rendered
@@ -1312,7 +1308,7 @@ describe("MobileShell hub bottom bar", () => {
     expect(
       controls.map((c) => c.textContent?.trim()).filter(Boolean),
     ).toEqual(["New agent"])
-    // The old second split button is gone, not moved.
+    // There is no second split button.
     expect(screen.queryByLabelText("More ways to add a project")).toBeNull()
   })
 })

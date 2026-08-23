@@ -1,17 +1,13 @@
 // Terminal ownership, defined ONCE and switched on exhaustively.
 //
 // A terminal is owned by exactly one owner and ownership never changes after
-// spawn. Terminals used to reach the client only by being nested inside the
-// session or the project that owns them, with no owner on the terminal at all,
-// so every consumer inferred ownership from which collection it had walked, or
-// from a two-way `owner.kind === "session" ? ... : ...` conditional. Both are
-// silent: add a third kind of owner and the conditional keeps compiling and
-// treats it as a project.
-//
-// So the owner is now a tagged value the server sends (`TerminalOwnerWire`, the
+// spawn. The owner is a tagged value the server sends (`TerminalOwnerWire`, the
 // mirror of Rust's `dux_core::viewmodel::TerminalOwnerView`), and every decision
-// it drives goes through a `switch` whose last statement is `assertNever`. A new
-// variant is then a COMPILE error at every site that has to answer for it.
+// it drives goes through a `switch` whose last statement is `assertNever`, so a
+// new variant is a COMPILE error at every site that has to answer for it.
+//
+// A two-way `owner.kind === "session" ? ... : ...` conditional is the failure
+// this prevents: it keeps compiling for a third kind and treats it as a project.
 
 import { assertNever } from "@/lib/assertNever"
 
@@ -174,8 +170,7 @@ export function sameOwner(
 
 // Whether two wire owners name the same owner. Backs the sibling grouping in
 // `assembleFlatTerminals` (a terminal's siblings are the terminals sharing its
-// owner), which used to be free because siblings were literally the array a
-// terminal was nested in.
+// owner).
 export function sameWireOwner(
   a: TerminalOwnerWire,
   b: TerminalOwnerWire,

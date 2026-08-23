@@ -12,7 +12,7 @@
 //     label like "Agent (claude): fix-auth" breaks on a title containing "): "
 //     and silently conflates two agents that share a title.
 //
-// Order is deterministic and never depends on a stat value (R7): dux, then each
+// Order is deterministic and never depends on a stat value: dux, then each
 // agent's session-slot tab with its extra tabs nested by `order`, then that
 // agent's terminals, then TOTAL. Sorting by CPU would reorder rows under the
 // user's cursor on every poll.
@@ -181,7 +181,7 @@ export function taskManagerRows(
       })
 
       // 1-based position among this session's EXTRA tabs, in the same stable
-      // order, so two same-provider tabs never share a Stop label (finding 4).
+      // order, so two same-provider tabs never share a Stop label.
       let nestedIndex = 0
 
       for (const tab of tabs) {

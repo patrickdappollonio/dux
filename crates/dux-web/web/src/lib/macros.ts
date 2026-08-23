@@ -1,7 +1,7 @@
 // Pure, unit-tested helpers for the web macro surfaces (the terminal-pane
 // popover quick-picker and the macro-editor dialog). The surface gate mirrors
-// `dux_core`'s rules for fast client-side feedback. Since Phase 5 the web sends a
-// macro by writing its payload straight to the focused PTY socket (no server-side
+// `dux_core`'s rules for fast client-side feedback. The web sends a macro by
+// writing its payload straight to the focused PTY socket (no server-side
 // `run_macro` command), so the byte transform `macroPayloadBytes` is mirrored
 // here from `dux_core::macros::macro_payload_bytes` — see its doc comment.
 

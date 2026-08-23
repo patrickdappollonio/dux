@@ -1,12 +1,10 @@
 // What the editor SAYS when a file mutation lands.
 //
-// Creating, renaming, moving and deleting a file used to succeed in silence:
-// the dialog closed, the tree refetched, and nothing confirmed that anything
-// had happened. That reads as "did the click register?" for the harmless
-// operations and as something worse for delete, which closes its dialog
-// BEFORE the request settles (deliberately; see EditorBody's handler) and so
-// had no on-screen trace of the outcome at all. Save, open-in-editor and the
-// drop path already report; these four now match them.
+// Every mutation confirms out loud: a silent success reads as "did the click
+// register?" for the harmless operations and worse for delete, which closes its
+// dialog BEFORE the request settles (deliberately; see EditorBody's handler)
+// and so has no other on-screen trace of the outcome. These four match save,
+// open-in-editor and the drop path.
 //
 // Kept pure and here rather than inline at the call sites so the wording is
 // one place, testable without mounting the editor, and hard to drift between

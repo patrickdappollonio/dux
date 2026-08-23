@@ -172,7 +172,7 @@ export function primeLinkHover(
 
 /** What the rest of a tap should do once the link question is settled. */
 export interface TerminalTapOutcome {
-  /** Forward the tap to a mouse-tracking app as a synthetic SGR click. */
+  /** Forward the tap to a mouse-tracking app as a replayed click. */
   forwardClick: boolean
   /** Move focus to the compose textarea (which raises the soft keyboard). */
   focusCompose: boolean

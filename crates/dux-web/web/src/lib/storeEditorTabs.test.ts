@@ -310,8 +310,7 @@ describe("editor tabs store slice", () => {
     expect(mod.getSnapshot().editorCloseTabTarget).toBeNull()
   })
 
-  // Finding 8: `editorRenameTabPaths`/`editorCloseTabsUnderPath` had no direct
-  // store-level coverage; the pure reducers (`renameTabPaths`/
+  // The pure reducers (`renameTabPaths`/
   // `closeTabsUnderPath`) are covered by editorTabs.test.ts, but the store's
   // thin wrapping (keying by session id, and the ref-equal no-op short-
   // circuit `setEditorTabsFor` relies on to skip a store-wide re-render) was

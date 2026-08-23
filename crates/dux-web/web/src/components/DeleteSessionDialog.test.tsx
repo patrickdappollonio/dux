@@ -86,10 +86,10 @@ describe("DeleteSessionDialog", () => {
   })
 
   it("says the branch goes too, because this path deletes it", () => {
-    // The checkbox used to promise only the worktree while the same code path
-    // also ran `git branch -D`, on the current branch AND the one the agent was
-    // born on. The TUI's checkbox has always said "worktree and branch"; the web
-    // has to say it as well or the user is agreeing to less than happens.
+    // The checkbox must promise the branch too: the same code path runs
+    // `git branch -D`, on the current branch AND the one the agent was born
+    // on. The TUI's checkbox says "worktree and branch"; the web must say it
+    // as well or the user is agreeing to less than happens.
     seed("s1", [session1])
     render(<DeleteSessionDialog />)
     expect(
@@ -147,7 +147,7 @@ describe("DeleteSessionDialog", () => {
   })
 
   // The checkbox state outlives one open: the dialog stays mounted. A box ticked
-  // for a managed agent and then reopened on a standalone one used to send
+  // for a managed agent and then reopened on a standalone one would send
   // `delete_worktree: true` for an agent that has no worktree, which the server
   // refuses out loud, with no control on screen to clear it.
   it("does not carry a ticked worktree box over to a standalone agent", () => {

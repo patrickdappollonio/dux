@@ -1,8 +1,5 @@
 // HTTP client for the two stateless "utility" reads the add-project / new-agent
-// dialogs need. These used to ride the retired `/ws` request/reply pairs
-// (`browse_dir` → `dir_entries`, `generate_agent_name` → `agent_name`); since the
-// Phase 6 cutover they are plain GETs, matching the REST resource map in the
-// rest-first architecture design.
+// dialogs need. Plain GETs, matching the REST resource map.
 //
 // `credentials: "same-origin"` like the other read clients. A non-2xx throws so
 // the caller can surface a toast and clear its loading state.

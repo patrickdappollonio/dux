@@ -373,18 +373,14 @@ export function AppSidebar() {
         />
       </SidebarContent>
 
-      {/* No @container here any more. The footer used to be a container-query
-          context so two side-by-side split buttons could stack when the user
-          dragged the sidebar narrow; the corner is now ONE verb whose label
-          truncates plus a 28px ⋯, so there is nothing left to stack and nothing
-          that can overflow into the center pane at any width the resize handle
+      {/* No @container context: the corner is ONE verb whose label truncates
+          plus a fixed-width ⋯ trigger, so nothing stacks and nothing can
+          overflow into the center pane at any width the resize handle
           allows. If the corner ever grows a third control, the scaffolding
           (`@container` here, `@[18rem]:` on the row) is what to bring back. */}
       <SidebarFooter>
         <div className="flex flex-col items-stretch gap-2 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:justify-center">
-          {/* The launcher corner: the shared component, never a copy. This
-              footer used to hand-roll its own group and drifted from the shared
-              one on size and variant. */}
+          {/* The launcher corner: the shared component, never a copy. */}
           <LauncherCorner className="group-data-[collapsible=icon]:hidden" />
           {/* Collapsed rail: the same two controls as bare icons, stacked. The
               verb does NOT flip here (a rail is too narrow to say what it would

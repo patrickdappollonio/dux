@@ -1238,11 +1238,9 @@ describe("a file drop that misses the tree", () => {
   })
 })
 
-// Every file mutation the editor performs now CONFIRMS itself. They used to
-// land in silence: the dialog closed, the tree refetched, and nothing said
-// what had happened. Delete is the sharp one, because its dialog closes the
-// moment it is confirmed rather than when the request settles, so a
-// successful delete left no trace on screen at all.
+// Every file mutation the editor performs CONFIRMS itself. Delete is the
+// sharp one: its dialog closes the moment it is confirmed rather than when the
+// request settles, so a silent success would leave no trace on screen at all.
 describe("file mutations confirm themselves", () => {
   const ENTRY = {
     name: "notes.md",

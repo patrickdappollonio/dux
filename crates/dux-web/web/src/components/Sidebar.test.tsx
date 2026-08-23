@@ -95,7 +95,7 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
 
 // A minimal one-project/one-session spine, with the session's tab count
 // configurable so the "Add tab" reachability + cap-disable can be exercised at
-// any tab count (including the common 1-tab case, per G7).
+// any tab count (including the common 1-tab case).
 function makeSessionSpine(tabCount: number): DuxState["spine"] {
   const tabs = Array.from({ length: tabCount }, (_, i) => ({
     id: i === 0 ? "s1" : `extra-${i}`,
@@ -195,11 +195,9 @@ describe("AppSidebar brand block", () => {
   })
 })
 
-describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
-  // Before this fix the web had NO way to create a session's first extra tab:
-  // `addTab`'s only call site was the in-strip "+", which only renders once a
-  // session already has two or more tabs — so a fresh 1-tab session could never
-  // reach 2. This menu item is the affordance that closes that gap.
+describe("AppSidebar agent ⋯ menu: Add tab", () => {
+  // This menu item is the only way to create a session's first extra tab: the
+  // in-strip "+" renders only once a session already has two or more tabs.
   it("is present and enabled for a session with only one tab, and calls addTab", () => {
     mockState = makeState({
       spine: makeSessionSpine(1),
@@ -357,8 +355,8 @@ describe("AppSidebar flat Terminals section", () => {
 
 describe("AppSidebar project terminals", () => {
   // A spine whose project owns a live project terminal (and has no sessions):
-  // the row must render under the project header (T14; before this, a project
-  // terminal rendered NOWHERE in the sidebar).
+  // the row must render under the project header, or a project terminal
+  // renders nowhere in the sidebar.
   function projectTerminalSpine(): DuxState["spine"] {
     return {
       projects: [
@@ -597,10 +595,10 @@ describe("AppSidebar flat agent row", () => {
 })
 
 describe("AppSidebar resize affordances", () => {
-  // The agents panel resizes by dragging only — matching the changes panel. The
-  // old shadcn `SidebarRail` doubled as a click-near-the-edge collapse target; it
-  // was removed so a stray click by the splitter can no longer collapse the panel.
-  // Collapse now happens only through the footer button or the Ctrl/Cmd-b shortcut
+  // The agents panel resizes by dragging only, matching the changes panel.
+  // There is no click-near-the-edge collapse target, so a stray click by the
+  // splitter cannot collapse the panel.
+  // Collapse happens only through the footer button or the Ctrl/Cmd-b shortcut
   // (the latter lives in SidebarProvider), and the edge offers drag-to-resize when
   // expanded and click-to-expand when collapsed.
   it("exposes the drag handle but not the click-to-collapse rail", () => {
@@ -820,8 +818,8 @@ describe("AppSidebar resize affordances", () => {
       window.dispatchEvent(new MouseEvent("pointermove", { clientX: 336 }))
       window.dispatchEvent(new Event("pointercancel"))
     })
-    // Nothing is persisted by a cancel, and a later stray move must no longer
-    // move the sidebar: the listeners are gone.
+    // Nothing is persisted by a cancel, and a later stray move must not move
+    // the sidebar: the listeners are gone.
     expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
     act(() => {
       window.dispatchEvent(new MouseEvent("pointermove", { clientX: 400 }))
@@ -1307,7 +1305,7 @@ describe("AppSidebar collapsed icon rail", () => {
     const tooltips = rail.querySelectorAll('[data-testid="tooltip-content"]')
     // makeSessionSpine's session s1 carries branch_name "main"; the "Branch"
     // key/value label proves the rail uses the full AgentVitalsTooltip content
-    // component and not the old 2-line tooltip (which had no labelled rows).
+    // component (a bare 2-line tooltip would have no labelled rows).
     expect(tooltips[0].textContent).toContain("Branch")
     expect(tooltips[0].textContent).toContain("main")
   })

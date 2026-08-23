@@ -119,8 +119,8 @@ describe("appMenuModel", () => {
     }
   })
 
-  // The standalone terminal used to ALSO sit at the top level. It has one home
-  // now, so the cog cannot offer the same click twice.
+  // The standalone terminal has ONE home in this menu, so the cog cannot offer
+  // the same click twice.
   it("offers the standalone terminal only inside the New submenu", () => {
     const model = appMenuModel(ctx)
     expect(model.map((e) => e.id)).not.toContain("new-standalone-terminal")
@@ -281,9 +281,9 @@ describe("appMenuModel", () => {
     expect(sortAgents).toHaveBeenCalledWith("name")
   })
 
-  // The six preference-shaped toggles the web command palette used to carry are
-  // settings, not actions: they live in the Preferences dialog now. This pins
-  // that consolidation so one cannot quietly creep back into the menu.
+  // Preference-shaped toggles are settings, not actions: they live in the
+  // Preferences dialog. This pins that so one cannot quietly creep into the
+  // menu.
   it("does not reference the removed palette toggles", () => {
     for (const entry of walk(appMenuModel(ctx))) {
       const text = `${entry.id} ${entry.kind === "separator" ? "" : entry.title}`

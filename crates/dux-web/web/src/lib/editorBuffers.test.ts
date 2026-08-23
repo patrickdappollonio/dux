@@ -88,16 +88,10 @@ describe("pruneSetByIds", () => {
   })
 })
 
-// `unionRevalidateBatch` backs the finding-4 fix: `EditorBody`'s
-// `revalidateDirs` used to do a plain `setTreeRevalidate({ dirs, nonce })`,
-// which silently dropped a same-tick prior batch's dirs when two mutations
-// (e.g. a rename touching two parent dirs, or a rapid create + rename) each
-// called `revalidateDirs` before React flushed a render in between: React
-// batches the two `setState` calls, so only the LAST plain assignment survives
-// and the first batch's dirs are lost, meaning `FileTree` never re-fetches
-// them. A functional update whose updater unions the new dirs into whatever
-// batch is already pending fixes this because updaters run in call order even
-// within one batch.
+// `unionRevalidateBatch` must be a functional update that unions new dirs into
+// the pending batch. React batches same-tick `setState` calls, so a plain
+// assignment keeps only the last batch and `FileTree` never re-fetches the
+// dropped dirs; updaters run in call order even within one batch.
 describe("unionRevalidateBatch", () => {
   it("unions a new batch's dirs into a same-tick prior batch, deduped", () => {
     const prev = { dirs: ["a", "b"], nonce: 1 }

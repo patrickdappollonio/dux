@@ -75,7 +75,7 @@ export function MacroPopover({
   const macros = macrosForTarget(allMacros, target)
 
   function handleRun(name: string) {
-    // Phase 5: the macro's payload is written to the focused PTY socket (the
+    // The macro's payload is written to the focused PTY socket (the
     // `target` this picker is filtered for), resolved by name in the store —
     // unless the mobile compose bar is the typing surface, in which case the
     // store splices the text into the compose draft instead (the returned

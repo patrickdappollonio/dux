@@ -1,8 +1,8 @@
 // TypeScript types mirroring the dux web server contract.
 //
 // These shapes must stay in sync with the Rust view/event definitions on the
-// server side. Since Phase 6 the legacy `/ws` control socket is gone: every
-// data read/mutation is a REST `/api/v1/*` call and every server push (resource
+// server side. Every data read/mutation is a REST `/api/v1/*` call and every
+// server push (resource
 // changes plus status/connection control frames) rides `/ws/events`. PTY byte
 // I/O rides the dedicated per-PTY sockets (`/ws/sessions/:id/pty` and
 // `/ws/sessions/:id/terminals/:tid/pty`) — see `lib/ptySocket.ts`.
@@ -21,8 +21,8 @@ export type MacroSurface = "agent" | "terminal" | "both"
 // A single text macro projected from the server's `[macros]` config, mirroring
 // the Rust `MacroView`. Order matches the config order. `text` is exposed (the
 // web session is authenticated) so the editor dialog can show/edit it and the
-// terminal-pane popover can write it straight to the focused PTY socket (Phase 5
-// applies the newline transform client-side; see `runMacro`/`macroPayloadBytes`).
+// terminal-pane popover can write it straight to the focused PTY socket (the
+// newline transform is applied client-side; see `runMacro`/`macroPayloadBytes`).
 export interface MacroView {
   name: string
   text: string
@@ -338,9 +338,8 @@ export type ConnState = "connecting" | "open" | "closed" | "failed"
 
 // --- /ws/events channel ----------------------------------------------------
 //
-// Since Phase 6 the ONLY JSON socket (the legacy `/ws` is gone). The client
-// manages a per-connection interest set; the server pushes resource-change
-// notifications plus the control frames the old `/ws` used to carry. Every frame
+// The only JSON socket. The client manages a per-connection interest set; the
+// server pushes resource-change notifications plus control frames. Every frame
 // is a flat object discriminated by `event`.
 
 // Server -> client resource-change frame. `event` is the resource discriminator
@@ -366,7 +365,7 @@ export interface ResourceEvent {
 //     instead of each tab answering `projects.changed`/`sessions.changed` with
 //     its own full GET. Those two keep firing for a page too old to read the
 //     push;
-//   - control frames migrated off the retired `/ws`: `connected` (id = the
+//   - control frames: `connected` (id = the
 //     per-connection id echoed via `X-Connection-Id`), `status`
 //     (key?/tone/message, plus a `scope` the standalone editor tab reads to
 //     stay quiet for workspace broadcasts), and
