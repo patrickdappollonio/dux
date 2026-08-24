@@ -1022,6 +1022,17 @@ async fn apply_mode_request(
     }
 
     let steps = plan_mode_change(ts.mode, mode, ts.bound_addr(), ts.forced_no);
+    // Before the first step, not part way through one: without a primary there
+    // is no port to hang a leg on, so a mode that wants one must not open the
+    // Host guard's tailnet-literal rule or move the recorded mode either. A
+    // refusal the run cannot lift outranks it.
+    if !matches!(steps.first(), Some(ModeStep::Refuse))
+        && mode.wants_tailscale()
+        && ts.primary.is_none()
+    {
+        let _ = reply.send(TailscaleModeOutcome::NoPrimary);
+        return;
+    }
     let mut detached = false;
     for step in steps {
         match step {
@@ -1046,6 +1057,9 @@ async fn apply_mode_request(
             }
             ModeStep::StartWatcher { probe_now } => {
                 ts.mode = mode;
+                // The primary is there, so the only failure left is a thread
+                // that would not start, which the log names; either way the
+                // answer the caller needs is that nothing is watching.
                 if !ts.start_watcher(probe_now) {
                     let _ = reply.send(TailscaleModeOutcome::NoPrimary);
                     return;
@@ -1053,10 +1067,6 @@ async fn apply_mode_request(
             }
             ModeStep::DetectAndBind => {
                 ts.mode = mode;
-                if ts.primary.is_none() {
-                    let _ = reply.send(TailscaleModeOutcome::NoPrimary);
-                    return;
-                }
                 // A generation of its own, so a watcher this change replaced
                 // cannot land a command against the answer of this probe.
                 ts.generation += 1;
@@ -2792,6 +2802,35 @@ mod live_tailscale_mode_tests {
         );
         drop(release);
         h.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_mode_that_wants_a_leg_changes_nothing_when_there_is_no_primary() {
+        // No primary means no port to hang a leg on, so there is nothing for a
+        // watcher to do. Opening the Host guard's tailnet-literal rule anyway
+        // would admit tailnet Host headers with nothing watching behind them.
+        for mode in [TailscaleMode::Auto, TailscaleMode::Yes] {
+            let h = Harness::start(
+                TailscaleMode::No,
+                false,
+                None,
+                None,
+                Arc::new(|| Ok("127.0.0.2".parse().unwrap())),
+            );
+            assert_eq!(
+                h.control.set_mode(mode).await,
+                TailscaleModeOutcome::NoPrimary
+            );
+            assert!(
+                !h.control.host_literals().load(Ordering::SeqCst),
+                "{mode:?} must leave the Host guard where it found it"
+            );
+            assert!(
+                !h.control.watched().load(Ordering::SeqCst),
+                "{mode:?} must leave nothing claiming to watch"
+            );
+            h.finish().await;
+        }
     }
 
     /// The probe the loop calls, boxed so a test can script it.
