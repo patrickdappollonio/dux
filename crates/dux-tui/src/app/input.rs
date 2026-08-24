@@ -24327,6 +24327,121 @@ cyan = "#00ffff"
         );
     }
 
+    /// The default: Tab from the typeable pane moves panes and types nothing.
+    /// The option is opt-in, so this is the behavior every existing user keeps,
+    /// and it is pinned here rather than left implied by the tests above.
+    #[test]
+    fn tab_from_the_typeable_pane_moves_focus_while_the_option_is_off() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+        assert!(
+            !app.engine.config.ui.tab_reaches_agent,
+            "test setup: the option is off by default"
+        );
+
+        tap_center(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+
+        assert_ne!(app.focus, FocusPane::Center, "Tab must move panes");
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "and must not reach the agent"
+        );
+    }
+
+    /// An open prompt makes the pane non-typeable, so the bypass never runs and
+    /// a dialog resolves Tab in its own scope whatever the option says: the
+    /// delete confirmation's ToggleSelection still moves between Cancel and
+    /// Delete over what was a typeable pane a keystroke ago.
+    #[test]
+    fn a_dialogs_tab_still_toggles_selection_when_the_option_is_on() {
+        let mut app = app_with_minimized_typeable_agent();
+        app.engine.config.ui.tab_reaches_agent = true;
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.config.macros.entries.insert(
+            "greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        app.open_edit_macros();
+        tap_center(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(pending_delete_state(&app), Some(("greet", false)));
+        app.engine.pty_input.remove(&session_id);
+
+        tap_center(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+
+        assert_eq!(
+            pending_delete_state(&app),
+            Some(("greet", true)),
+            "Tab must move the dialog's focus to the confirm button"
+        );
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "a dialog's Tab must not also reach the agent"
+        );
+    }
+
+    /// The macro bar is handled before the bypass and makes the pane
+    /// non-typeable besides, so its Tab completion survives the option too.
+    #[test]
+    fn the_macro_bars_tab_completion_still_works_when_the_option_is_on() {
+        let mut app = app_with_minimized_typeable_agent();
+        app.engine.config.ui.tab_reaches_agent = true;
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.config.macros.entries.insert(
+            "greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        app.open_macro_bar();
+        assert!(app.macro_bar.is_some(), "test setup: the bar must be open");
+        app.engine.pty_input.remove(&session_id);
+
+        tap_center(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+
+        assert_eq!(
+            app.macro_bar.as_ref().map(|bar| bar.input.text.as_str()),
+            Some("greet"),
+            "Tab must complete the macro name"
+        );
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "the completing Tab must not also reach the agent"
+        );
+    }
+
+    /// Fullscreen is a verbatim passthrough that intercepts only the
+    /// Interactive-scoped bindings, and the two pane chords are deliberately not
+    /// in that scope: `cat -v` echoing `^O` and `^Y` is the proof they reached
+    /// the child rather than moving panes behind the overlay.
+    #[test]
+    fn fullscreen_passes_the_pane_chords_through_to_the_agent() {
+        let mut app = app_with_minimized_typeable_caret_child("");
+        app.engine.config.ui.tab_reaches_agent = true;
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        assert!(
+            app.interactive_patterns.match_sequence(&[0x0f]).is_none()
+                && app.interactive_patterns.match_sequence(&[0x19]).is_none(),
+            "test setup: neither chord may be an Interactive-scope intercept"
+        );
+
+        app.process_raw_input_bytes(&[0x0f]).expect("Ctrl-o");
+        wait_for_grid_row(&mut app, "READY^O");
+
+        app.process_raw_input_bytes(&[0x19]).expect("Ctrl-y");
+        wait_for_grid_row(&mut app, "READY^O^Y");
+
+        assert_eq!(
+            app.focus,
+            FocusPane::Center,
+            "a chord the child consumed must not also move panes"
+        );
+    }
+
     /// The pane chords move focus from the typeable pane whatever the option
     /// says: they are the way out once Tab is the agent's.
     #[test]
