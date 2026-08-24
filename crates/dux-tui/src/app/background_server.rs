@@ -137,6 +137,7 @@ impl App {
     /// nothing on this surface has any reason to rebuild: the change did not come
     /// through this surface's own event stream.
     fn refresh_after_companion_mutation(&mut self) {
+        self.sync_view_state_from_config();
         self.rebuild_left_items();
         if self.selected_left >= self.left_items_cache.len() {
             self.selected_left = self.left_items_cache.len().saturating_sub(1);
@@ -569,6 +570,9 @@ pub(crate) mod tests {
         /// A session to remove from the engine the next time `service` runs, so a
         /// test can stand in for a browser deleting an agent.
         remove_session: Option<String>,
+        /// Turn `ui.show_changes_pane` off in the engine's config the next time
+        /// `service` runs, standing in for a browser saving that preference.
+        hide_changes_pane: bool,
         /// What the next `service` call reports as a self-retirement, standing in
         /// for a required listener dying.
         retirement_next: Option<String>,
@@ -656,6 +660,9 @@ pub(crate) mod tests {
             recorded.serviced += 1;
             if let Some(id) = recorded.remove_session.take() {
                 engine.sessions.retain(|s| s.id != id);
+            }
+            if std::mem::take(&mut recorded.hide_changes_pane) {
+                engine.config.ui.show_changes_pane = false;
             }
             ServiceOutcome {
                 mutated: recorded.mutated_next,
@@ -924,6 +931,36 @@ pub(crate) mod tests {
             recorded.lock().expect("not poisoned").serviced,
             1,
             "the seam is serviced once per iteration"
+        );
+    }
+
+    /// Under one engine, a browser's Preferences save writes `engine.config`
+    /// directly. Anything this surface caches off that config would stay stale
+    /// until a manual reload, so the seam re-seeds the fields the web can write.
+    #[test]
+    fn a_web_written_preference_re_seeds_this_surfaces_cached_view_state() {
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.engine.config.ui.show_changes_pane = true;
+        app.right_hidden = false;
+        app.focus = FocusPane::Files;
+        {
+            let mut recorded = recorded.lock().expect("not poisoned");
+            recorded.mutated_next = true;
+            recorded.hide_changes_pane = true;
+        }
+
+        app.service_companion();
+
+        assert!(
+            app.right_hidden,
+            "the changes pane follows the preference the browser saved"
+        );
+        assert_ne!(
+            app.focus,
+            FocusPane::Files,
+            "focus must leave a pane that is no longer on screen"
         );
     }
 

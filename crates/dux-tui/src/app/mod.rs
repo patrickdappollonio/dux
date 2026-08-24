@@ -4550,6 +4550,28 @@ impl App {
         };
     }
 
+    /// Re-seed the view state this surface caches off `engine.config`.
+    ///
+    /// Exactly the fields a browser can write through Preferences, because under
+    /// one engine a web save mutates `engine.config` in place and this surface
+    /// would otherwise render its own stale copy until a manual reload. Theme,
+    /// bindings, pane percentages and diff line numbers are deliberately absent:
+    /// the settings patch cannot carry them, so only a reload changes them and
+    /// only a reload has to re-seed them.
+    pub(crate) fn sync_view_state_from_config(&mut self) {
+        let ui = &self.engine.config.ui;
+        self.pr_banner_at_bottom = ui.pr_banner_position == "bottom";
+        let clear_after = Duration::from_secs(ui.status_clear_seconds.into());
+        let hide_right = !ui.show_changes_pane;
+        self.status.set_clear_after(clear_after);
+        // If the changes pane just became hidden while the Files pane was
+        // focused, move focus to the center, matching the toggle.
+        self.right_hidden = hide_right;
+        if self.right_hidden && self.focus == FocusPane::Files {
+            self.focus = FocusPane::Center;
+        }
+    }
+
     fn apply_reloaded_config(&mut self, mut config: Config) -> Result<()> {
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         self.interactive_patterns = bindings.interactive_byte_patterns();
@@ -4571,16 +4593,6 @@ impl App {
             // palette toggle, and needs the same fresh answer from `gh`.
             self.engine.spawn_gh_status_check();
         }
-        self.pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
-        self.status
-            .set_clear_after(Duration::from_secs(config.ui.status_clear_seconds.into()));
-        // Re-seed the changes (right) pane's hidden state from the reloaded
-        // config, mirroring startup; if it just became hidden while the Files
-        // pane was focused, move focus to the center (matching the toggle).
-        self.right_hidden = !config.ui.show_changes_pane;
-        if self.right_hidden && self.focus == FocusPane::Files {
-            self.focus = FocusPane::Center;
-        }
         self.engine.projects = load_projects(
             &self.engine.session_store.load_projects()?,
             &self.engine.session_store.load_project_created_ats()?,
@@ -4595,6 +4607,7 @@ impl App {
         )?;
         self.engine.config = config;
         self.engine.retune_after_config_swap();
+        self.sync_view_state_from_config();
 
         self.engine.refresh_project_defaults();
         // No project-count clamp here: the flat list indexes agent rows, not
