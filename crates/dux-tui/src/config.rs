@@ -94,6 +94,13 @@ fn validate_project_envs(config: &Config) -> Result<()> {
 const RETIRED_KEY_ACTIONS: &[&str] = &[
     // Removed together with the AI-generated commit-message feature.
     "generate_commit_message",
+    // The three per-mode sort actions v0.6.0 shipped. They are retired rather
+    // than folded into the `sort_agents` cycling action that replaced them:
+    // three names collapsing onto one would bind the same action three times,
+    // which is a conflict rather than a migration.
+    "sort_agents_by_updated",
+    "sort_agents_by_created",
+    "sort_agents_by_name",
 ];
 
 /// Remove `[keys]` entries for retired actions so an old config that still binds
@@ -3024,6 +3031,42 @@ oneshot_output = "stdout"
             doc["keys"].get("quit").is_some(),
             "a live binding must be preserved"
         );
+    }
+
+    #[test]
+    fn prune_retired_key_actions_drops_the_per_mode_sort_actions() {
+        for action in [
+            "sort_agents_by_updated",
+            "sort_agents_by_created",
+            "sort_agents_by_name",
+        ] {
+            // A binding for the retired action would abort startup at validate_keys...
+            let mut keys = KeysConfig::default();
+            keys.bindings
+                .insert(action.to_string(), vec!["ctrl-y".to_string()]);
+            assert!(
+                validate_keys(&keys).is_err(),
+                "precondition: {action} fails validate_keys"
+            );
+
+            // ...so the load-time migration prunes it from an existing config.
+            let mut doc: DocumentMut =
+                format!("[keys]\n{action} = [\"ctrl-y\"]\nquit = [\"ctrl-q\"]\n")
+                    .parse()
+                    .expect("parse doc");
+
+            let changed = prune_retired_key_actions(&mut doc);
+
+            assert!(changed, "{action} should be pruned");
+            assert!(
+                doc["keys"].get(action).is_none(),
+                "{action} must be removed from [keys]"
+            );
+            assert!(
+                doc["keys"].get("quit").is_some(),
+                "a live binding must be preserved alongside {action}"
+            );
+        }
     }
 
     #[test]
