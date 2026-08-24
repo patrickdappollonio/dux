@@ -236,6 +236,17 @@ pub enum WireCommand {
     /// refetch carries the new value so the web shows (or stops showing) the
     /// agent tab strip at a single tab. Low-stakes preference, lazy write.
     ToggleAlwaysShowTabStrip {},
+    /// Save `[server] tailscale` as one of the three modes, mirroring the TUI's
+    /// `set-tailscale-mode` palette command and the web Preferences row.
+    ///
+    /// The CONFIG write only. Moving the running listener is the serve layer's
+    /// job and happens after this, because only the serve loop owns the leg; the
+    /// engine has no idea whether anything is serving. An unrecognized value is
+    /// refused rather than degraded, because this arrives from a picker and a
+    /// value outside the tri-state is a bug, not a typo in a file.
+    SetTailscaleMode {
+        mode: String,
+    },
     /// Set explicit values for the "Settings" modal's `[ui]`/`[capabilities]`
     /// knobs in one request, mirroring `SetInstanceIdentity`'s all-optional
     /// present-field pattern but for the generic settings surface (the
@@ -909,6 +920,7 @@ impl WireCommand {
                 | WireCommand::ToggleCopyOnSelect {}
                 | WireCommand::ToggleGithubIntegration {}
                 | WireCommand::ToggleAlwaysShowTabStrip {}
+                | WireCommand::SetTailscaleMode { .. }
         )
     }
 }
@@ -1401,6 +1413,18 @@ impl Engine {
                     created_op_id: None,
                 });
             }
+            WireCommand::SetTailscaleMode { mode } => {
+                self.set_tailscale_mode(&mode)?;
+                // No status: the sentence a user sees names what happened to the
+                // LISTENER, which the caller learns from the serve layer after
+                // this write. Saying "saved" here and "detached" a moment later
+                // would be two toasts for one gesture.
+                return Ok(WireCommandOutcome {
+                    status: None,
+                    detached: None,
+                    created_op_id: None,
+                });
+            }
             WireCommand::ToggleGithubIntegration {} => {
                 let status = self.toggle_github_integration();
                 return Ok(WireCommandOutcome {
@@ -1887,6 +1911,26 @@ impl Engine {
         self.config.ui.agent_sort = sort.to_string();
         self.config_writer.save_lazy(self.config.clone());
         WireStatus::new("info", format!("Agent list now sorted by \"{sort}\"."))
+    }
+
+    /// Save `[server] tailscale` as `mode`, refusing anything outside the
+    /// tri-state. The write only: the running listener is moved by the serve
+    /// layer, which is the only thing that owns the Tailscale leg.
+    ///
+    /// Lazy rather than eager, matching the sibling preferences: the serve has
+    /// already acted by the time the file lands, and the saved value only decides
+    /// what the NEXT run does.
+    pub fn set_tailscale_mode(&mut self, mode: &str) -> anyhow::Result<crate::config::TailscaleMode> {
+        let parsed = crate::config::TailscaleMode::parse(mode).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown Tailscale mode \"{mode}\". Expected one of: auto, yes, no."
+            )
+        })?;
+        if self.config.server.tailscale_mode() != parsed {
+            self.config.server.tailscale = parsed.as_str().to_string();
+            self.config_writer.save_lazy(self.config.clone());
+        }
+        Ok(parsed)
     }
 
     /// Flip `ui.copy_on_select` and persist it, mirroring the web
@@ -4189,6 +4233,7 @@ impl Engine {
             | WireCommand::ToggleCopyOnSelect {}
             | WireCommand::ToggleGithubIntegration {}
             | WireCommand::ToggleAlwaysShowTabStrip {}
+            | WireCommand::SetTailscaleMode { .. }
             | WireCommand::KillSessionPty { .. }
             | WireCommand::DetachAgent { .. }
             | WireCommand::CloseAgentTab { .. }
@@ -10206,6 +10251,64 @@ mod tests {
     }
 
     #[test]
+    fn wire_set_tailscale_mode_deserializes() {
+        let json = r#"{"command":"set_tailscale_mode","args":{"mode":"auto"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::SetTailscaleMode {
+                mode: "auto".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn setting_the_tailscale_mode_saves_the_tri_state_and_refuses_anything_else() {
+        let (mut engine, _tmp) = test_engine();
+        assert_eq!(
+            engine.config.server.tailscale_mode(),
+            crate::config::TailscaleMode::Auto
+        );
+
+        for (raw, expected) in [
+            ("no", crate::config::TailscaleMode::No),
+            ("YES", crate::config::TailscaleMode::Yes),
+            ("  auto ", crate::config::TailscaleMode::Auto),
+        ] {
+            let parsed = engine
+                .apply_wire(WireCommand::SetTailscaleMode {
+                    mode: raw.to_string(),
+                })
+                .expect("a tri-state value is accepted");
+            assert!(
+                parsed.status.is_none(),
+                "the sentence a user sees names what happened to the listener, which \
+                 only the serve layer knows"
+            );
+            assert_eq!(engine.config.server.tailscale_mode(), expected);
+        }
+
+        // A value outside the tri-state is REFUSED, not degraded: this arrives
+        // from a picker, so it is a bug rather than a typo in a file.
+        let refused = engine
+            .apply_wire(WireCommand::SetTailscaleMode {
+                mode: "maybe".to_string(),
+            })
+            .expect_err("an unknown mode must be refused");
+        let message = format!("{refused}");
+        assert!(message.contains("maybe"), "{message}");
+        assert!(
+            message.contains("auto") && message.contains("yes") && message.contains("no"),
+            "the refusal must list the valid values: {message}"
+        );
+        assert_eq!(
+            engine.config.server.tailscale_mode(),
+            crate::config::TailscaleMode::Auto,
+            "and must leave the saved value alone"
+        );
+    }
+
+    #[test]
     fn mutates_config_static_flags_only_bootstrap_config_writes() {
         // The eager-save config mutations that have no disk-reload to drive a
         // `config.changed` signal — the web actor fires it for these.
@@ -10217,6 +10320,14 @@ mod tests {
             .mutates_config_static()
         );
         assert!(WireCommand::SetChangesPaneVisible { visible: true }.mutates_config_static());
+        // Without this the raw editor's disk-ahead reconcile never runs after a
+        // mode change and no client refetches the bootstrap that carries it.
+        assert!(
+            WireCommand::SetTailscaleMode {
+                mode: "no".to_string()
+            }
+            .mutates_config_static()
+        );
         // A SetInstanceIdentity carrying at least one field may mutate config.
         assert!(
             WireCommand::SetInstanceIdentity {

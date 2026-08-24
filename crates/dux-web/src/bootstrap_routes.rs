@@ -45,6 +45,10 @@ async fn get_bootstrap(State(state): State<AppState>) -> Response {
             // browser connecting at any point in the server's life still receive
             // the screen.
             view.pending_first_load = state.first_load.pending();
+            // `--no-tailscale` belongs to the process that parsed the command
+            // line, not to the engine's config, so it is injected here for the
+            // same reason the first-load screen is.
+            view.tailscale_forced_no = state.tailscale_forced_no;
             Json(view).into_response()
         }
         None => (

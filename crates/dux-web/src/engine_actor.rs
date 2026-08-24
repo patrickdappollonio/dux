@@ -430,6 +430,11 @@ pub(crate) struct ActorLoopEnds {
     /// projected spine, so an ownership flip moves the sessions fingerprint and
     /// fires `sessions.changed` like any other spine mutation.
     pty_input_owners: Arc<PtySizeOwners>,
+    /// The serve's live Tailscale-mode handle, filled by the serve path once its
+    /// loop exists. The reload arm uses it to apply a changed
+    /// `[server] tailscale` to the running listener; empty means nothing is
+    /// serving and the reload only saved the value.
+    tailscale_mode_control: Arc<std::sync::OnceLock<crate::serve_legs::TailscaleModeControl>>,
 }
 
 /// Extract the reloaded `Config` from a reload follow-up reaction, consuming it.
@@ -594,6 +599,12 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     // Built here for the same reason as `pty_input_owners`: the loop starts
     // before the router exists, so both sides have to be handed the same Arc.
     let live_limits = Arc::new(LiveServerLimits::default());
+    // Filled by the serve path once its loop exists, which is after the actor is
+    // already running on `dux server`. A `OnceLock` rather than a constructor
+    // argument for exactly that reason; empty means nothing is serving, which is
+    // what a reload on a TUI-only run sees.
+    let tailscale_mode_control: Arc<std::sync::OnceLock<crate::serve_legs::TailscaleModeControl>> =
+        Arc::new(std::sync::OnceLock::new());
     (
         EngineHandle {
             req_tx,
@@ -607,6 +618,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             has_active_processes: Arc::clone(&engine.has_active_processes),
             pty_input_owners: Arc::clone(&pty_input_owners),
             live_limits: Arc::clone(&live_limits),
+            tailscale_mode_control: Arc::clone(&tailscale_mode_control),
             #[cfg(test)]
             refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
@@ -621,6 +633,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             shutdown_flag,
             pty_input_owners,
             live_limits,
+            tailscale_mode_control: Arc::clone(&tailscale_mode_control),
         },
     )
 }
@@ -701,6 +714,10 @@ pub struct EngineHandle {
     /// channel, so a route test has no other way to prove the request was made,
     /// and "asked the engine to refresh" is exactly half of what a refresh-now
     /// route must get right.
+    /// The same slot as [`ActorLoopEnds::tailscale_mode_control`], so the serve
+    /// path can hand the actor its live Tailscale-mode handle after the actor is
+    /// already running (which it always is on `dux server`).
+    tailscale_mode_control: Arc<std::sync::OnceLock<crate::serve_legs::TailscaleModeControl>>,
     #[cfg(test)]
     refresh_requests: Arc<std::sync::Mutex<Vec<String>>>,
 }
@@ -714,6 +731,15 @@ const _: fn() = || {
 };
 
 impl EngineHandle {
+    /// Hand the actor this serve's live Tailscale-mode handle. Called once per
+    /// serve, before the first reload can happen; a second call is ignored.
+    pub(crate) fn set_tailscale_mode_control(
+        &self,
+        control: crate::serve_legs::TailscaleModeControl,
+    ) {
+        let _ = self.tailscale_mode_control.set(control);
+    }
+
     /// The teardown flag PTY forwarders poll. Cloned into each forwarder so a
     /// blocking `recv_timeout` loop can break within one timeout window once the
     /// server starts winding down, even though the underlying `PtyClient`'s
@@ -1902,6 +1928,9 @@ pub(crate) struct EngineService {
     /// mutation performs). Drives the clobber-safe reconcile in `handle_request`.
     config_disk_ahead: bool,
     shutdown_echo: ShutdownEcho,
+    /// The serve's live Tailscale-mode handle. Empty when nothing is serving, and
+    /// when the terminal UI's background mode owns the reload instead.
+    tailscale_mode_control: Arc<std::sync::OnceLock<crate::serve_legs::TailscaleModeControl>>,
 }
 
 impl EngineService {
@@ -1917,6 +1946,7 @@ impl EngineService {
             shutdown_flag,
             pty_input_owners,
             live_limits,
+            tailscale_mode_control,
         } = ends;
         let spine_check = SpineCheck::new(engine, &pty_input_owners, &workspace_tx);
         Self {
@@ -1928,6 +1958,7 @@ impl EngineService {
             shutdown_flag,
             pty_input_owners,
             live_limits,
+            tailscale_mode_control,
             pending: Vec::new(),
             last_pr_foregrounded: None,
             spine_check,
@@ -2483,6 +2514,11 @@ pub(crate) fn run_engine_loop(
                 // incoming one — keeps the detection next to the config-reload handler.
                 let restart_warning =
                     server_restart_warning_copy(&engine.config.server, &config.server, false);
+                // The parsed MODE, never the raw string: the value is trimmed
+                // and case-insensitive, so a user who retyped "Auto" must not
+                // have their listener stopped and started for nothing.
+                let previous_tailscale = engine.config.server.tailscale_mode();
+                let next_tailscale = config.server.tailscale_mode();
                 match engine.apply_reloaded_config(*config) {
                     Ok(()) => {
                         // Memory now matches disk: any pending raw "Save" has been
@@ -2507,6 +2543,21 @@ pub(crate) fn run_engine_loop(
                         // effect.
                         if let Some(warning) = restart_warning {
                             let _ = svc.status.send(WireStatus::new("warning", warning));
+                        }
+
+                        // `[server] tailscale` IS live, so a reload that changed
+                        // it acts rather than warning. This is the reload owner
+                        // for `dux server` and for the flip; the background mode
+                        // is owned by the terminal UI's own reload, which is why
+                        // this slot is empty there.
+                        if previous_tailscale != next_tailscale
+                            && let Some(control) = svc.tailscale_mode_control.get()
+                        {
+                            let status = svc.status.tx.clone();
+                            control.set_mode_detached(next_tailscale, move |report| {
+                                let tone = if report.warning { "warning" } else { "info" };
+                                let _ = status.send(WireStatus::new(tone, report.message));
+                            });
                         }
                     }
                     Err(e) => {
@@ -4645,17 +4696,17 @@ mod tests {
     }
 
     #[test]
-    fn restart_drift_detects_a_tailscale_mode_change() {
-        // The mode is read once at serve start (it decides whether a watcher runs
-        // at all), so changing it is still restart-bound even though `auto` binds
-        // and unbinds the leg by itself while serving.
+    fn restart_drift_never_names_the_tailscale_mode() {
+        // The mode is a LIVE switch: the reload arm hands a changed value to the
+        // serve's mode control, which moves the watcher, the leg and the Host
+        // guard. Telling that user to restart would be false.
         let prev = dux_core::config::ServerConfig::default();
-        for mode in ["yes", "no"] {
+        for mode in ["yes", "no", " AUTO ", "Auto"] {
             let mut next = prev.clone();
             next.tailscale = mode.to_string();
             assert!(
-                server_restart_settings_changed(&prev, &next),
-                "changing tailscale from {} to {mode} must warn",
+                !server_restart_settings_changed(&prev, &next),
+                "changing tailscale from {} to {mode} is live and must not warn",
                 prev.tailscale
             );
         }

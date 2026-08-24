@@ -487,6 +487,10 @@ pub(crate) struct ModeRequest {
 #[derive(Clone)]
 pub struct TailscaleModeControl {
     tx: tokio::sync::mpsc::Sender<ModeRequest>,
+    /// The serve's runtime, so a caller on a thread with no runtime of its own
+    /// (the engine actor's reload arm, the terminal UI's run loop) can still ask
+    /// for a mode change and hear the answer.
+    runtime: tokio::runtime::Handle,
     /// Whether an interface watcher is running for this serve right now. Shared
     /// with [`ServeShutdown`] so a dying best-effort leg's warning stays truthful
     /// after a live switch between `auto` and the static modes.
@@ -498,11 +502,16 @@ pub struct TailscaleModeControl {
 
 impl TailscaleModeControl {
     /// Build the control and the receiving end the serve loop owns.
-    pub(crate) fn new(watched: Arc<AtomicBool>, host_literals: Arc<AtomicBool>) -> (Self, tokio::sync::mpsc::Receiver<ModeRequest>) {
+    pub(crate) fn new(
+        runtime: tokio::runtime::Handle,
+        watched: Arc<AtomicBool>,
+        host_literals: Arc<AtomicBool>,
+    ) -> (Self, tokio::sync::mpsc::Receiver<ModeRequest>) {
         let (tx, rx) = tokio::sync::mpsc::channel(MODE_REQUEST_QUEUE);
         (
             Self {
                 tx,
+                runtime,
                 watched,
                 host_literals,
             },
@@ -519,6 +528,23 @@ impl TailscaleModeControl {
     /// Tailscale leg again.
     pub(crate) fn watched(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.watched)
+    }
+
+    /// Ask for a mode change from a thread with no runtime and report what
+    /// happened when the loop answers.
+    ///
+    /// The synchronous surfaces need this: the engine actor's reload arm and the
+    /// terminal UI's run loop both sit on plain std threads, and neither may
+    /// block on a detection that is allowed to take five seconds.
+    pub fn set_mode_detached(
+        &self,
+        mode: TailscaleMode,
+        report: impl FnOnce(dux_core::config::TailscaleModeReport) + Send + 'static,
+    ) {
+        let control = self.clone();
+        self.runtime.spawn(async move {
+            report(control.set_mode(mode).await.report(mode));
+        });
     }
 
     /// Ask the serve loop to change the mode and wait for what it did.

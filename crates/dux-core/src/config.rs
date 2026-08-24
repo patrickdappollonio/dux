@@ -819,21 +819,18 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
 /// reload that only touched, say, `[ui]` theme settings leaves every compared
 /// field equal and triggers no warning.
 ///
-/// Compared fields: the bind `host` and `port`, the `tailscale` mode, the
-/// `allowed_hosts` host-guard list, all five WebSocket caps, both `file_drop_*`
-/// caps, and the two directory-work concurrency limits.
+/// Compared fields: the bind `host` and `port`, the `allowed_hosts` host-guard
+/// list, all five WebSocket caps, both `file_drop_*` caps, and the two
+/// directory-work concurrency limits.
 ///
 /// `access_log` and `search_index_max_files` are deliberately ABSENT: the routes
 /// read those two off shared cells a reload writes, so warning about them would
 /// name a restart for a change that has already taken effect.
 ///
-/// The `tailscale` MODE stays on this list even though `auto` now re-binds that
-/// leg by itself. What the watcher makes live is the interface coming and going,
-/// not the setting: the mode is read once when serving starts, and it decides
-/// whether a watcher was started at all. So switching `no` to `auto` starts no
-/// watcher and switching `auto` to `no` drops no listener, and the operator has
-/// to hear that from the restart warning rather than discover it by finding dux
-/// still answering on their tailnet.
+/// The `tailscale` MODE is deliberately ABSENT: it is a live switch. A reload
+/// that changes it hands the new mode to the running serve, which stops or
+/// starts the watcher, binds or drops the leg, and moves the Host guard's
+/// Tailscale-literal rule with it. Warning about a restart there would be false.
 ///
 /// All five WebSocket caps are also startup-bound: the three per-class
 /// connection-cap semaphores (`max_websocket_events_connections`,
@@ -845,10 +842,6 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
 pub fn server_bind_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
     prev.host != next.host
         || prev.port != next.port
-        // The parsed MODE, never the raw string: the value is trimmed and
-        // case-insensitive, so comparing the text would tell a user who retyped
-        // "Auto" to restart a server whose behavior did not change at all.
-        || prev.tailscale_mode() != next.tailscale_mode()
         || prev.allowed_hosts != next.allowed_hosts
         || prev.max_websocket_events_connections != next.max_websocket_events_connections
         || prev.max_websocket_agent_connections != next.max_websocket_agent_connections

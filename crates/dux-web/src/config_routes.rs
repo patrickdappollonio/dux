@@ -29,6 +29,10 @@
 //!   strip always renders, even with a single tab.
 //! - `POST /api/v1/config/instance-identity`: set the browser tab title and
 //!   favicon color.
+//! - `POST /api/v1/server/tailscale-mode`: save `[server] tailscale` and, when
+//!   something is serving, move the Tailscale listener to match. Bespoke rather
+//!   than part of the generic settings PATCH because the listener half is a live
+//!   act only the serve loop can perform, and the reply is what it did.
 //! - `PATCH /api/v1/config/settings`: set explicit values for the grouped
 //!   Settings modal's other `[ui]`/`[capabilities]` fields in one request (see
 //!   `crates/dux-web/web/src/lib/settingsDescriptors.ts`).
@@ -86,6 +90,7 @@ pub fn routes() -> Router<AppState> {
             post(set_instance_identity),
         )
         .route("/api/v1/config/settings", patch(set_settings))
+        .route("/api/v1/server/tailscale-mode", post(set_tailscale_mode))
         .route(
             "/api/v1/config/raw",
             // A config.toml is a few KB; 256 KB is generous. The cap stops a
@@ -496,6 +501,75 @@ async fn write_raw_config(
     }
 }
 
+// ── The live Tailscale mode ─────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TailscaleModeBody {
+    /// One of `auto` | `yes` | `no`. Validated by the engine, which refuses
+    /// anything else rather than degrading it.
+    mode: String,
+}
+
+/// What the mode change did, for the browser to raise as a toast.
+///
+/// The SENTENCE travels rather than being rebuilt client-side, because the
+/// terminal UI shows the same one and a second copy in TypeScript is how the two
+/// drift apart.
+#[derive(Serialize)]
+struct TailscaleModeReply {
+    /// The mode that was saved, canonicalized.
+    mode: String,
+    /// Whether the sentence is a warning rather than plain information.
+    warning: bool,
+    message: String,
+}
+
+/// `POST /api/v1/server/tailscale-mode`. Save `[server] tailscale` and apply it
+/// to the running listener.
+///
+/// Two halves, deliberately in this order: the WRITE first (so the choice
+/// survives whatever happens to the listener), then the live change. When
+/// nothing is serving there is no second half and the reply says exactly that.
+///
+/// A browser connected over the Tailscale leg that chooses `no` cuts its own
+/// connection. That is allowed under the single-tenant trusted-access model, and
+/// the reply is written before the unbind lands so this response still arrives.
+async fn set_tailscale_mode(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TailscaleModeBody>,
+) -> Response {
+    let saved = match state
+        .engine
+        .apply_wire_scoped(
+            WireCommand::SetTailscaleMode {
+                mode: body.mode.clone(),
+            },
+            scope_from_headers(&headers, &state.connections),
+        )
+        .await
+    {
+        Ok(_) => (),
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let _ = saved;
+    // Parsing again rather than threading the engine's answer back: the engine
+    // has already refused anything outside the tri-state, so this cannot fail,
+    // and it keeps the reply's `mode` canonical.
+    let mode = dux_core::config::TailscaleMode::parse(&body.mode).unwrap_or_default();
+    let outcome = match state.tailscale_mode.as_ref() {
+        Some(control) => control.set_mode(mode).await,
+        None => dux_core::config::TailscaleModeOutcome::NotServing,
+    };
+    let report = outcome.report(mode);
+    Json(TailscaleModeReply {
+        mode: mode.as_str().to_string(),
+        warning: report.warning,
+        message: report.message,
+    })
+    .into_response()
+}
+
 // ── Shared dispatch ─────────────────────────────────────────────────────────────
 
 /// Dispatch a config-mutating wire command, scoping its status toasts to the
@@ -527,6 +601,80 @@ mod tests {
             .header("content-type", "application/json")
             .body(axum::body::Body::from(body.to_string()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn setting_the_tailscale_mode_saves_it_and_says_it_applies_when_a_listener_starts() {
+        // Nothing is serving behind a test router, which is the honest half of
+        // the answer: the choice is saved, and the listener half happens later.
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/server/tailscale-mode",
+                r#"{"mode":"no"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(reply["mode"], "no");
+        assert_eq!(reply["warning"], false);
+        assert!(
+            reply["message"]
+                .as_str()
+                .expect("a sentence")
+                .contains("applies when a listener starts"),
+            "{reply}"
+        );
+
+        // And the write really happened: the next bootstrap carries it.
+        let boot = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/bootstrap")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let boot = axum::body::to_bytes(boot.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let boot: serde_json::Value = serde_json::from_slice(&boot).unwrap();
+        assert_eq!(boot["tailscale_mode"], "no");
+        assert_eq!(
+            boot["tailscale_forced_no"], false,
+            "a test router is not a --no-tailscale run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tailscale_mode_outside_the_tri_state_is_refused() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/server/tailscale-mode",
+                r#"{"mode":"maybe"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let message = String::from_utf8(body.to_vec()).unwrap();
+        assert!(message.contains("maybe"), "{message}");
+        assert!(
+            message.contains("auto") && message.contains("yes") && message.contains("no"),
+            "the refusal must list the valid values: {message}"
+        );
     }
 
     #[tokio::test]

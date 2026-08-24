@@ -489,9 +489,11 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
         // The live-mode collaborators, created BEFORE the router so the Host
         // guard can read the mode from the same cell the serve loop writes.
         let (mode_control, mode_requests) = TailscaleModeControl::new(
+            tokio::runtime::Handle::current(),
             Arc::new(AtomicBool::new(tailscale.watches_interface())),
             Arc::new(AtomicBool::new(tailscale.wants_tailscale())),
         );
+        handle.set_tailscale_mode_control(mode_control.clone());
         let shutdown = ServeShutdown::new(mode_control.watched());
         // Collect the IPs the server actually bound to (for the host allowlist).
         // Uses the bound addresses captured above, BEFORE the listeners move into
@@ -1461,9 +1463,11 @@ impl ServeCore {
         // in-app mode is ever a forced-no run: `--no-tailscale` is a `dux server`
         // flag, so both can change the mode live.
         let (mode_control, mode_requests) = TailscaleModeControl::new(
+            runtime.handle().clone(),
             Arc::new(AtomicBool::new(tailscale.watches_interface())),
             Arc::new(AtomicBool::new(tailscale.wants_tailscale())),
         );
+        handle.set_tailscale_mode_control(mode_control.clone());
 
         // The shared shutdown primitive — the SAME [`ServeShutdown`] the CLI serve
         // path uses. Its watch is the graceful-shutdown lane every serve task and
@@ -2002,6 +2006,7 @@ mod tests {
         }
 
         let (control, mode_rx) = crate::serve_legs::TailscaleModeControl::new(
+            tokio::runtime::Handle::current(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         );
@@ -2442,6 +2447,7 @@ mod live_tailscale_mode_tests {
             detect: Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>,
         ) -> Self {
             let (control, mode_rx) = TailscaleModeControl::new(
+                tokio::runtime::Handle::current(),
                 Arc::new(AtomicBool::new(mode.watches_interface())),
                 Arc::new(AtomicBool::new(mode.wants_tailscale())),
             );
@@ -2813,6 +2819,7 @@ mod live_tailscale_mode_tests {
     #[tokio::test]
     async fn a_control_whose_loop_is_gone_reports_that_nothing_is_serving() {
         let (control, mode_rx) = TailscaleModeControl::new(
+            tokio::runtime::Handle::current(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );

@@ -314,6 +314,20 @@ pub struct BootstrapView {
     /// the feature exists. Defaulting that window to on would advertise a drop
     /// target for a feature that may be switched off.
     pub file_drop_max_bytes: usize,
+    /// Mirrors `config.server.tailscale` as its canonical tri-state name
+    /// ("auto" | "yes" | "no"), so the Preferences row shows the saved mode. An
+    /// unrecognized config value projects as "auto", which is what the serve
+    /// path degrades it to.
+    pub tailscale_mode: String,
+    /// Whether the RUN was started with `--no-tailscale`, which outranks the
+    /// saved mode for as long as it lasts.
+    ///
+    /// NOT engine state, and [`Engine::bootstrap`] always leaves it `false`: the
+    /// flag belongs to the process that parsed the command line, so the web
+    /// server injects it per request the way it injects `pending_first_load`.
+    /// Without it the Preferences row would offer a mode the run will refuse and
+    /// say nothing about why.
+    pub tailscale_forced_no: bool,
 }
 
 /// One numbered getting-started step, projected from
@@ -1349,6 +1363,10 @@ impl Engine {
             .as_str()
             .to_string(),
             pr_banner_position: self.config.ui.pr_banner_position.clone(),
+            tailscale_mode: self.config.server.tailscale_mode().as_str().to_string(),
+            // Always `false` here: `--no-tailscale` is the serving process's own
+            // fact, and the bootstrap ROUTE injects it. See the field's doc.
+            tailscale_forced_no: false,
             agent_sort: self.config.ui.agent_sort.clone(),
             agent_scrollback_lines: self.config.ui.agent_scrollback_lines,
             show_changes_pane: self.config.ui.show_changes_pane,
@@ -2368,6 +2386,32 @@ mod tests {
     }
 
     #[test]
+    fn the_tailscale_mode_is_projected_as_its_canonical_name() {
+        let (mut engine, _tmp) = test_engine();
+        assert_eq!(engine.bootstrap().tailscale_mode, "auto");
+
+        engine.config.server.tailscale = "  YES ".to_string();
+        assert_eq!(
+            engine.bootstrap().tailscale_mode,
+            "yes",
+            "the canonical name, not the raw text: a retyped value must not look \
+             like a different mode to the row that renders it"
+        );
+
+        engine.config.server.tailscale = "maybe".to_string();
+        assert_eq!(
+            engine.bootstrap().tailscale_mode,
+            "auto",
+            "a value dux does not know projects as what the serve path degrades it to"
+        );
+
+        assert!(
+            !engine.bootstrap().tailscale_forced_no,
+            "the engine never knows about --no-tailscale; the serving process injects it"
+        );
+    }
+
+    #[test]
     fn always_show_tab_strip_is_projected_from_config() {
         let (mut engine, _tmp) = test_engine();
 
@@ -2867,6 +2911,8 @@ mod tests {
             "disable_automated_welcome_screen",
             "disable_release_notes",
             "file_drop_max_bytes",
+            "tailscale_mode",
+            "tailscale_forced_no",
         ] {
             assert!(
                 json.contains(&format!("\"{field}\"")),
