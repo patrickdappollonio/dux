@@ -433,6 +433,126 @@ impl TailscaleMode {
     }
 }
 
+/// What a live `[server] tailscale` mode change did to the running listener.
+///
+/// Lives beside [`TailscaleMode`] rather than in the web layer because both
+/// surfaces resolve one of these into a status line, and a copy per surface is
+/// how the two sentences drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailscaleModeOutcome {
+    /// The mode is live. `bound` is the Tailscale leg's address, or `None` when
+    /// the mode wants no leg right now (`no`, or `auto` still waiting for the
+    /// interface).
+    Applied {
+        bound: Option<std::net::SocketAddr>,
+    },
+    /// The Tailscale listener that was serving has been stopped.
+    Detached,
+    /// `yes` looked for a Tailscale address and found none. The mode still
+    /// saved; nothing is going to look again until a restart or a mode change.
+    NothingDetected,
+    /// There is no primary listener to derive the leg's port from, so there is
+    /// nothing to hang a Tailscale leg on.
+    NoPrimary,
+    /// This run was started with `--no-tailscale`, which outranks the config for
+    /// as long as it runs.
+    RefusedForcedNo,
+    /// Nothing is serving, so the choice is saved and nothing else happened.
+    NotServing,
+    /// A later mode request replaced this one before it resolved.
+    Superseded,
+    /// The serve loop did not answer inside the detection window.
+    TimedOut,
+}
+
+/// One outcome rendered for a status line: the sentence, and whether it is a
+/// warning rather than plain information.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailscaleModeReport {
+    pub warning: bool,
+    pub message: String,
+}
+
+impl TailscaleModeOutcome {
+    /// The sentence both surfaces show for this outcome, given the mode that was
+    /// requested. Every sentence says what happened to the listener AND that the
+    /// choice is saved, because those are two different questions a user has.
+    pub fn report(self, mode: TailscaleMode) -> TailscaleModeReport {
+        let saved = format!("[server] tailscale is saved as \"{}\".", mode.as_str());
+        match self {
+            Self::Applied { bound: Some(addr) } => TailscaleModeReport {
+                warning: false,
+                message: format!(
+                    "{saved} dux is serving your Tailscale address on http://{addr} as well as \
+                     its other address(es)."
+                ),
+            },
+            Self::Applied { bound: None } => TailscaleModeReport {
+                warning: false,
+                message: match mode {
+                    TailscaleMode::Auto => format!(
+                        "{saved} dux is watching the Tailscale interface and binds your \
+                         Tailscale address by itself when it appears."
+                    ),
+                    TailscaleMode::Yes | TailscaleMode::No => format!(
+                        "{saved} There is no separate Tailscale listener to add or remove; \
+                         the address dux already serves covers it."
+                    ),
+                },
+            },
+            Self::Detached => TailscaleModeReport {
+                warning: false,
+                message: format!(
+                    "{saved} dux stopped serving on your Tailscale address and is still \
+                     serving on its other address(es); anything connected over the tailnet \
+                     loses its connection."
+                ),
+            },
+            Self::NothingDetected => TailscaleModeReport {
+                warning: true,
+                message: format!(
+                    "{saved} No Tailscale address was found, and \"yes\" does not look again: \
+                     dux serves without it until you restart or choose \"auto\", which binds \
+                     it whenever the interface appears."
+                ),
+            },
+            Self::NoPrimary => TailscaleModeReport {
+                warning: true,
+                message: format!(
+                    "{saved} dux could not read the address of its main listener, so there is \
+                     no port to serve a Tailscale leg on; restart dux to pick the mode up."
+                ),
+            },
+            Self::RefusedForcedNo => TailscaleModeReport {
+                warning: true,
+                message: format!(
+                    "{saved} This run was started with --no-tailscale, which wins for as long \
+                     as it runs, so nothing changed on the listeners; restart dux without that \
+                     flag to use the saved mode."
+                ),
+            },
+            Self::NotServing => TailscaleModeReport {
+                warning: false,
+                message: format!("{saved} Nothing is serving, so it applies when a listener starts."),
+            },
+            Self::Superseded => TailscaleModeReport {
+                warning: true,
+                message: format!(
+                    "{saved} Another Tailscale mode change arrived first, so this one was \
+                     dropped; the saved value is what a restart uses."
+                ),
+            },
+            Self::TimedOut => TailscaleModeReport {
+                warning: true,
+                message: format!(
+                    "{saved} The server did not report back in time, so dux cannot say what \
+                     the Tailscale listener is doing; check dux.log."
+                ),
+            },
+        }
+    }
+}
+
 /// The mode a single run actually serves under: `--no-tailscale` forces
 /// [`TailscaleMode::No`], otherwise the configured mode stands. One place so the
 /// CLI flag cannot be honored on one code path and forgotten on another.
@@ -2757,6 +2877,11 @@ pub struct ServerPlan {
     /// serve path reads it to decide whether to watch the interface at all, so
     /// the flag cannot be honored at plan time and forgotten at serve time.
     pub tailscale: TailscaleMode,
+    /// Whether `--no-tailscale` is what produced [`Self::tailscale`], rather than
+    /// the configured value. A live mode change is REFUSED for this run when it
+    /// is set, so the two have to stay distinguishable: a configured `"no"` is a
+    /// preference the user may change while dux runs, a flagged one is not.
+    pub forced_no: bool,
 }
 
 /// CLI overrides for the server plan. Every field is `None`/`false` when the
@@ -2836,6 +2961,7 @@ pub fn resolve_server_plan(
         addrs: plan_addrs(bind, ts),
         primary: bind,
         tailscale,
+        forced_no: cli.no_tailscale,
     })
 }
 
@@ -2954,6 +3080,29 @@ mod resolve_plan_tests {
             1
         );
     }
+    #[test]
+    fn no_tailscale_carries_a_forced_no_flag_the_serve_can_read() {
+        // The flag has to survive plan resolution as its own fact: the mode
+        // alone reads as "the user configured no", and a live mode change has to
+        // tell that apart from "this run was told no on the command line".
+        let c = ServerCliOverrides {
+            no_tailscale: true,
+            ..cli()
+        };
+        let forced = resolve_server_plan(&ServerConfig::default(), &c, Some(ts())).unwrap();
+        assert!(forced.forced_no, "--no-tailscale must be carried");
+        assert_eq!(forced.tailscale, TailscaleMode::No);
+
+        let mut configured_no = ServerConfig::default();
+        configured_no.tailscale = TailscaleMode::No.as_str().to_string();
+        let plain = resolve_server_plan(&configured_no, &cli(), Some(ts())).unwrap();
+        assert!(
+            !plain.forced_no,
+            "a configured \"no\" is not a forced one: the user can still change it live"
+        );
+        assert_eq!(plain.tailscale, TailscaleMode::No);
+    }
+
     #[test]
     fn bind_wildcard_overrides_and_subsumes_tailscale() {
         let c = ServerCliOverrides {
@@ -4009,6 +4158,86 @@ github_integration = false
         assert!(TailscaleMode::Auto.watches_interface());
         assert!(!TailscaleMode::Yes.watches_interface());
         assert!(!TailscaleMode::No.watches_interface());
+    }
+
+    #[test]
+    fn every_live_mode_outcome_names_the_saved_value_and_grades_itself() {
+        use std::net::SocketAddr;
+        let leg: SocketAddr = "100.64.0.5:8080".parse().unwrap();
+        let cases = [
+            (
+                TailscaleModeOutcome::Applied { bound: Some(leg) },
+                TailscaleMode::Yes,
+                false,
+            ),
+            (
+                TailscaleModeOutcome::Applied { bound: None },
+                TailscaleMode::Auto,
+                false,
+            ),
+            (TailscaleModeOutcome::Detached, TailscaleMode::No, false),
+            (
+                TailscaleModeOutcome::NothingDetected,
+                TailscaleMode::Yes,
+                true,
+            ),
+            (TailscaleModeOutcome::NoPrimary, TailscaleMode::Auto, true),
+            (
+                TailscaleModeOutcome::RefusedForcedNo,
+                TailscaleMode::Auto,
+                true,
+            ),
+            (TailscaleModeOutcome::NotServing, TailscaleMode::Yes, false),
+            (TailscaleModeOutcome::Superseded, TailscaleMode::No, true),
+            (TailscaleModeOutcome::TimedOut, TailscaleMode::Auto, true),
+        ];
+        for (outcome, mode, warning) in cases {
+            let report = outcome.report(mode);
+            assert_eq!(
+                report.warning, warning,
+                "{outcome:?} must grade itself as warning={warning}"
+            );
+            assert!(
+                report.message.contains(mode.as_str()),
+                "{outcome:?} must name the saved mode: {}",
+                report.message
+            );
+            assert!(
+                report.message.len() > 40,
+                "status copy is verbose and actionable: {}",
+                report.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_bound_leg_is_named_and_a_saved_only_change_says_it_applies_later() {
+        use std::net::SocketAddr;
+        let leg: SocketAddr = "100.64.0.5:8080".parse().unwrap();
+        let applied = TailscaleModeOutcome::Applied { bound: Some(leg) }.report(TailscaleMode::Yes);
+        assert!(
+            applied.message.contains("100.64.0.5:8080"),
+            "{}",
+            applied.message
+        );
+        let saved = TailscaleModeOutcome::NotServing.report(TailscaleMode::Auto);
+        assert!(
+            saved.message.contains("applies when a listener starts"),
+            "{}",
+            saved.message
+        );
+        let refused = TailscaleModeOutcome::RefusedForcedNo.report(TailscaleMode::Auto);
+        assert!(
+            refused.message.contains("--no-tailscale"),
+            "the refusal must name the flag that caused it: {}",
+            refused.message
+        );
+        let undetected = TailscaleModeOutcome::NothingDetected.report(TailscaleMode::Yes);
+        assert!(
+            undetected.message.contains("auto"),
+            "the undetected warning must point at the mode that would look again: {}",
+            undetected.message
+        );
     }
 
     #[test]

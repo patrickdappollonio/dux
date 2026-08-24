@@ -406,6 +406,7 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
         addrs,
         primary,
         tailscale,
+        forced_no,
     } = plan;
     warn_if_ui_not_built();
     let engine = bootstrap::bootstrap_engine(&paths)?;
@@ -491,6 +492,7 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
         // failure flips its watch and every serve task awaits it. It carries the
         // mode's watched-ness so a dying Tailscale leg can say truthfully whether
         // anything is going to bind it again.
+        let _ = forced_no;
         let shutdown = ServeShutdown::new(tailscale.watches_interface());
         // Collect the IPs the server actually bound to (for the host allowlist).
         // Uses the bound addresses captured above, BEFORE the listeners move into
