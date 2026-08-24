@@ -37,10 +37,10 @@ resume_wait_timeout_ms = 0
 # Hint shown to the user when the command isn't found on PATH.
 install_hint = "curl -fsSL https://claude.ai/install.sh | bash"
 # Where the mouse wheel and PgUp/PgDn go, in the windowed agent pane and in
-# fullscreen alike. Leave this key absent for auto: dux forwards them to the
-# child only when it owns the screen and wants the wheel (an alt-screen,
-# mouse-aware app like an agent's renderer) and otherwise scrolls its own host
-# scrollback. Set true to always forward to the child, or false to never
+# fullscreen alike. Leave this key absent for auto: dux forwards the wheel to
+# the child when it asked for the mouse (a mouse-aware app like an agent's
+# renderer) and the page keys when it owns the alt screen, and otherwise
+# scrolls its own host scrollback. Set true to always forward, or false to never
 # forward (always use dux scrollback).
 # forward_scroll = true
 # What a dragged, dropped or pasted file's path looks like when the web UI
@@ -72,9 +72,9 @@ command = "myagent"
 args = []
 resume_args = ["--continue"]
 install_hint = "see https://example.com/install"
-# forward_scroll left absent: auto-detect (forward only to an alt-screen,
-# mouse-aware child, otherwise dux host scrollback; windowed and fullscreen
-# behave the same).
+# forward_scroll left absent: auto-detect (the wheel goes to a mouse-aware
+# child, page keys to an alt-screen child, otherwise dux host scrollback;
+# windowed and fullscreen behave the same).
 # web_dragdrop_paste left absent: "bare", the do-nothing form. If dropping a
 # file on this agent in the browser leaves the path as plain text instead of
 # attaching it, the CLI probably wants the path quoted; try "single_quoted". If

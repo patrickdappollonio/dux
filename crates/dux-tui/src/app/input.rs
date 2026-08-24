@@ -469,12 +469,15 @@ impl ForwardedInput {
 /// Decide whether a mouse-wheel event should be forwarded to the embedded
 /// child process instead of scrolling dux's own host scrollback.
 ///
-/// `None` = auto (forward only when the child owns the alt screen and asked for
-/// mouse); `Some(true)` = always forward; `Some(false)` = never forward.
-fn should_forward_wheel(forward_scroll: Option<bool>, alt_screen: bool, mouse_mode: bool) -> bool {
+/// `None` = auto (forward when the child asked for mouse reporting: an app
+/// that takes the mouse owns the wheel, alt screen or not); `Some(true)` =
+/// always forward; `Some(false)` = never forward. Page keys have their own
+/// rule below, keyed on the alt screen, because a normal-buffer app has host
+/// scrollback for them to page through.
+fn should_forward_wheel(forward_scroll: Option<bool>, _alt_screen: bool, mouse_mode: bool) -> bool {
     match forward_scroll {
         Some(v) => v,
-        None => alt_screen && mouse_mode,
+        None => mouse_mode,
     }
 }
 
@@ -9988,10 +9991,11 @@ mod tests {
     #[test]
     fn should_forward_wheel_matrix() {
         use super::should_forward_wheel;
-        // None = auto: forward only on alt screen AND mouse mode.
+        // None = auto: mouse reporting alone decides. An app that asks for
+        // the mouse owns the wheel whether or not it took the alt screen.
         assert!(should_forward_wheel(None, true, true));
         assert!(!should_forward_wheel(None, true, false));
-        assert!(!should_forward_wheel(None, false, true));
+        assert!(should_forward_wheel(None, false, true));
         assert!(!should_forward_wheel(None, false, false));
         // Some(true) = always forward, regardless of live signals.
         assert!(should_forward_wheel(Some(true), false, false));

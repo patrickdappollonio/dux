@@ -1678,9 +1678,10 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
         "# Controls whether the mouse wheel and PgUp/PgDn scroll dux's own host\n\
          # scrollback or get forwarded to the provider. Applies in the windowed\n\
          # agent pane and in fullscreen alike. Tri-state:\n\
-         #   (unset) = auto: forward to the child only when it owns the screen and\n\
-         #             wants the wheel (an alt-screen, mouse-aware app like an\n\
-         #             agent's renderer); otherwise scroll dux host scrollback.\n\
+         #   (unset) = auto: forward the wheel to the child when it asked for\n\
+         #             the mouse (a mouse-aware app like an agent's renderer), and\n\
+         #             the page keys when it owns the alt screen; otherwise scroll\n\
+         #             dux host scrollback.\n\
          #   true    = always forward scroll + page keys to the child.\n\
          #   false   = never forward; always use dux host scrollback.\n\
          # Leave this key absent for auto. Uncomment to pin a value.\n",
