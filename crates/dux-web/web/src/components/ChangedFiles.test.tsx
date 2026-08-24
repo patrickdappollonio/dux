@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -19,6 +20,7 @@ import type { ChangesSlice, DuxState } from "@/lib/store"
 
 const forceRefreshChanges = vi.fn(() => Promise.resolve())
 const refreshChanges = vi.fn()
+const openEditor = vi.fn()
 
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
@@ -28,6 +30,45 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     forceRefreshChanges: () => forceRefreshChanges(),
     refreshChanges: () => refreshChanges(),
+    openEditor: (...args: unknown[]) => openEditor(...args),
+  }
+})
+
+const stageMany = vi.fn(async (_id: string, paths: string[]) => ({
+  done: paths,
+  refused: [] as string[],
+}))
+const unstageMany = vi.fn(async (_id: string, paths: string[]) => ({
+  done: paths,
+  refused: [] as string[],
+}))
+const discardMany = vi.fn(async (_id: string, paths: string[]) => ({
+  done: paths,
+  failed: [] as { path: string; message: string }[],
+}))
+vi.mock("@/lib/git", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/git")>()
+  return {
+    ...actual,
+    git: {
+      ...actual.git,
+      stageMany: (...args: [string, string[]]) => stageMany(...args),
+      unstageMany: (...args: [string, string[]]) => unstageMany(...args),
+      discardMany: (...args: [string, string[]]) => discardMany(...args),
+    },
+  }
+})
+
+const notifySuccess = vi.fn()
+const notifyWarning = vi.fn()
+const notifyError = vi.fn()
+vi.mock("@/lib/notify", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/notify")>()
+  return {
+    ...actual,
+    notifySuccess: (...args: unknown[]) => notifySuccess(...args),
+    notifyWarning: (...args: unknown[]) => notifyWarning(...args),
+    notifyError: (...args: unknown[]) => notifyError(...args),
   }
 })
 
@@ -97,6 +138,13 @@ beforeEach(() => {
   installBootStubs()
   forceRefreshChanges.mockClear()
   refreshChanges.mockClear()
+  openEditor.mockClear()
+  stageMany.mockClear()
+  unstageMany.mockClear()
+  discardMany.mockClear()
+  notifySuccess.mockClear()
+  notifyWarning.mockClear()
+  notifyError.mockClear()
   mockState = {
     selectedSessionId: "s1",
     changes: loadedChanges(),
@@ -213,5 +261,250 @@ describe("ChangedFiles for a standalone agent", () => {
     expect(menu.getByText("Commit…")).toBeTruthy()
     expect(menu.queryByText("Push")).toBeNull()
     expect(menu.queryByText("Pull")).toBeNull()
+  })
+})
+
+function withFiles(
+  staged: Array<[string, string]>,
+  unstaged: Array<[string, string]>,
+): DuxState {
+  const view = ([path, status]: [string, string]) => ({
+    path,
+    status,
+    additions: 1,
+    deletions: 0,
+    binary: false,
+  })
+  return {
+    selectedSessionId: "s1",
+    changes: {
+      ...loadedChanges(),
+      staged: staged.map(view),
+      unstaged: unstaged.map(view),
+    },
+  } as unknown as DuxState
+}
+
+function check(path: string) {
+  fireEvent.click(screen.getByLabelText(`Select ${path}`))
+}
+
+function bar() {
+  return within(screen.getByRole("toolbar", { name: "Actions for the selected files" }))
+}
+
+describe("the changes pane's multi-select", () => {
+  beforeEach(() => {
+    mockState = withFiles(
+      [["staged.ts", "M"]],
+      [["a.ts", "M"], ["b.ts", "??"]],
+    )
+  })
+
+  it("shows the bulk bar with the verb and the count once files are checked", () => {
+    render(<ChangedFiles />)
+    expect(
+      screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
+    ).toBeNull()
+
+    check("a.ts")
+    check("b.ts")
+
+    expect(bar().getByRole("button", { name: "Stage 2" })).toBeTruthy()
+    expect(bar().getByRole("button", { name: "Discard 2…" })).toBeTruthy()
+  })
+
+  // One request per verb: the batch route stages the lot in one git call and
+  // broadcasts once. A per-file loop would churn the pane.
+  it("stages every checked path in one request and says so once", async () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("b.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Stage 2" }))
+    await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
+
+    expect(stageMany).toHaveBeenCalledTimes(1)
+    expect(stageMany).toHaveBeenCalledWith("s1", ["a.ts", "b.ts"])
+    expect(notifySuccess).toHaveBeenCalledTimes(1)
+    expect(notifyError).not.toHaveBeenCalled()
+  })
+
+  // The acted paths leave the set the moment the server says yes, so the bar
+  // cannot be clicked a second time on files that have already moved.
+  it("sends nothing on a second click after a success", async () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Stage 1" }))
+    await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
+
+    expect(
+      screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
+    ).toBeNull()
+    expect(stageMany).toHaveBeenCalledTimes(1)
+  })
+
+  it("unstages from the staged section with its own verb", async () => {
+    render(<ChangedFiles />)
+    check("staged.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Unstage 1" }))
+    await act(() => unstageMany.mock.results[0]!.value as Promise<unknown>)
+
+    expect(unstageMany).toHaveBeenCalledWith("s1", ["staged.ts"])
+  })
+
+  it("warns once, not per file, when the server could not act on everything", async () => {
+    stageMany.mockResolvedValueOnce({ done: ["a.ts"], refused: ["b.ts"] })
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("b.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Stage 2" }))
+    await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
+
+    expect(notifyWarning).toHaveBeenCalledTimes(1)
+    expect(notifySuccess).not.toHaveBeenCalled()
+  })
+
+  it("empties both sections when Clear is pressed", () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("staged.ts")
+    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+    expect(bar().getByRole("button", { name: "Unstage 1" })).toBeTruthy()
+
+    fireEvent.click(bar().getByRole("button", { name: "Clear" }))
+
+    expect(
+      screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
+    ).toBeNull()
+  })
+
+  // The checkbox and the row mean different things, and base-ui re-dispatches a
+  // click on the root's hidden input, so both clicks have to stop at the
+  // wrapper or every tick would open a diff.
+  it("never opens the diff when the checkbox itself is clicked", () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    expect(openEditor).not.toHaveBeenCalled()
+  })
+
+  it("still opens the diff when the row is clicked", () => {
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByText("a.ts"))
+    expect(openEditor).toHaveBeenCalledTimes(1)
+  })
+
+  // The status marker moved out of the leading slot to make room for the
+  // checkbox, and must still be on the row, after the path.
+  it("keeps the status marker on the row, trailing the path", () => {
+    render(<ChangedFiles />)
+    const path = screen.getByText("a.ts")
+    const row = path.closest('[role="row"]')!
+    const marker = within(row as HTMLElement).getByRole("img", { name: "Modified" })
+    expect(
+      path.compareDocumentPosition(marker) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it("keeps the header ellipsis the only surface-scoped one while the bar shows", () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    expect(screen.getAllByLabelText("Changes actions")).toHaveLength(1)
+    expect(bar().queryByLabelText(/actions/i)).toBeNull()
+  })
+
+  it("drops a checked path once a refresh moves it to the other section", () => {
+    const view = render(<ChangedFiles />)
+    check("a.ts")
+    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+
+    mockState = withFiles([["staged.ts", "M"], ["a.ts", "M"]], [["b.ts", "??"]])
+    view.rerender(<ChangedFiles />)
+
+    expect(
+      screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
+    ).toBeNull()
+  })
+})
+
+describe("the section select-all", () => {
+  beforeEach(() => {
+    mockState = withFiles([], [["a.ts", "M"], ["b.ts", "??"]])
+  })
+
+  it("reads mixed while only some rows are checked", () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    expect(
+      screen.getByLabelText("Select all unstaged files").getAttribute("aria-checked"),
+    ).toBe("mixed")
+  })
+
+  it("checks every row in its own section", () => {
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Select all unstaged files"))
+    expect(bar().getByRole("button", { name: "Stage 2" })).toBeTruthy()
+  })
+
+  // The header counts the rows on screen; the bar counts and acts on the whole
+  // selection, so a filter never silently shrinks what a verb will do.
+  it("counts the filtered rows while the bar keeps the whole selection", () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("b.ts")
+    fireEvent.change(screen.getByLabelText("Filter changed files"), {
+      target: { value: "a.ts" },
+    })
+
+    expect(
+      screen.getByLabelText("Select all unstaged files").getAttribute("aria-checked"),
+    ).toBe("true")
+    expect(bar().getByRole("button", { name: "Stage 2" })).toBeTruthy()
+  })
+
+  it("checks only the filtered rows", () => {
+    render(<ChangedFiles />)
+    fireEvent.change(screen.getByLabelText("Filter changed files"), {
+      target: { value: "a.ts" },
+    })
+    fireEvent.click(screen.getByLabelText("Select all unstaged files"))
+
+    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+  })
+})
+
+describe("the multi-file discard confirm", () => {
+  beforeEach(() => {
+    mockState = withFiles([], [["a.ts", "M"], ["gone.ts", "??"]])
+  })
+
+  it("names the count and both outcomes, and defaults to Cancel", () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("gone.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+
+    const dialog = within(screen.getByRole("dialog"))
+    expect(dialog.getByText(/2 files/)).toBeTruthy()
+    // One untracked (deleted from disk) and one tracked (restored).
+    expect(dialog.getByText(/1 untracked/)).toBeTruthy()
+    expect(dialog.getByText(/1 .*restored/)).toBeTruthy()
+    const cancel = dialog.getByRole("button", { name: "Cancel" })
+    expect(document.activeElement).toBe(cancel)
+  })
+
+  it("discards the live intersection and reports it once", async () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("gone.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Discard",
+      }),
+    )
+    await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
+
+    expect(discardMany).toHaveBeenCalledWith("s1", ["a.ts", "gone.ts"])
+    expect(notifySuccess).toHaveBeenCalledTimes(1)
   })
 })

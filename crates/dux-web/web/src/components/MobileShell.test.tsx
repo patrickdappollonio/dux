@@ -1312,3 +1312,32 @@ describe("MobileShell hub bottom bar", () => {
     expect(screen.queryByLabelText("More ways to add a project")).toBeNull()
   })
 })
+
+// The changes screen is the same component the desktop pane renders, so the
+// multi-select behaviour is tested there. What matters here is that the bulk
+// bar's verbs stay TEXT on a phone: each carries a count, and a count is data
+// no icon can say.
+describe("MobileShell changes screen", () => {
+  it("keeps the bulk bar's verbs as text with their counts", () => {
+    mockState = makeState({
+      spine: makeSessionSpine(1),
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      selectedSessionId: "s1",
+      mobileScreen: "changes",
+      changes: {
+        sessionId: "s1",
+        phase: "loaded",
+        staged: [],
+        unstaged: [
+          { path: "a.ts", status: "M", additions: 1, deletions: 0, binary: false },
+        ],
+      },
+    } as unknown as Partial<DuxState>)
+    render(<MobileShell />)
+
+    fireEvent.click(screen.getByLabelText("Select a.ts"))
+
+    const stage = screen.getByRole("button", { name: "Stage 1" })
+    expect(stage.textContent).toContain("Stage 1")
+  })
+})

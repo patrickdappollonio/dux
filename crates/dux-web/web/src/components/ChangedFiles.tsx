@@ -18,9 +18,11 @@ import {
   TriangleAlert,
   Undo2,
 } from "lucide-react"
-import { notifyError } from "@/lib/notify"
+import { notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
 import { git } from "@/lib/git"
+import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -58,7 +60,12 @@ import {
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
-import { fileStatusMeta, filterChangedFiles } from "@/lib/changedFiles"
+import {
+  fileStatusMeta,
+  filterChangedFiles,
+  reconcileSelection,
+  type ChangedFileSelection,
+} from "@/lib/changedFiles"
 import {
   forceRefreshChanges,
   openCommit,
@@ -72,14 +79,35 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import type { ChangedFileView } from "@/lib/types"
 import { agentRoot } from "@/lib/editorRoot"
 
+const fileCount = (n: number) => `${n} file${n === 1 ? "" : "s"}`
+
+// One height for every control in the bulk bar; they differ in width only.
+const BULK_CONTROL = "h-9 max-md:h-11"
+
+// The leading checkbox slot, on the row and on a section header so the two
+// columns line up. The shared checkbox carries a click halo reaching 12px
+// sideways and 8px vertically past its 16px box, and the slot is sized to
+// contain it: a near-miss must not land on the row's open-diff click instead.
+const CHECKBOX_SLOT =
+  "flex shrink-0 items-center justify-center max-md:size-11 md:h-8 md:w-10"
+
 interface FileRowProps {
   file: ChangedFileView
   action: "stage" | "unstage"
   sessionId: string
+  selected: boolean
+  onToggleSelected: (path: string) => void
   onOpenDiff: (path: string) => void
 }
 
-function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
+function FileRow({
+  file,
+  action,
+  sessionId,
+  selected,
+  onToggleSelected,
+  onOpenDiff,
+}: FileRowProps) {
   const { kind } = fileStatusMeta(file.status)
   const [busy, setBusy] = useState(false)
 
@@ -117,9 +145,16 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
       className="group flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-muted max-md:min-h-11"
       onClick={() => onOpenDiff(file.path)}
     >
-      {/* Status marker — a neutral file-status icon (shared FileStatusIcon),
-          with a tooltip naming the status (Modified/Added/Deleted/…). */}
-      <FileStatusIcon status={file.status} />
+      {/* Selection checkbox. The click stops here: base-ui re-dispatches the
+          root's click onto its hidden input and both bubble, so without this
+          every tick would also open the diff. */}
+      <div className={CHECKBOX_SLOT} onClick={(e) => e.stopPropagation()}>
+        <Checkbox
+          checked={selected}
+          onCheckedChange={() => onToggleSelected(file.path)}
+          aria-label={`Select ${file.path}`}
+        />
+      </div>
 
       {/* File path — monospace (it's a path/code identifier). Long paths
           ellipsize at the START (direction:rtl) so the filename at the end stays
@@ -131,6 +166,11 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
       <span className="min-w-0 flex-1 truncate text-left font-mono text-sm text-foreground [direction:rtl]">
         <bdi dir="ltr">{file.path}</bdi>
       </span>
+
+      {/* Status marker — a neutral file-status icon (shared FileStatusIcon),
+          with a tooltip naming the status (Modified/Added/Deleted/…). It rides
+          the trailing cluster because the leading slot carries the checkbox. */}
+      <FileStatusIcon status={file.status} />
 
       {/* Additions / deletions (text-only, skip for binary). Added lines green,
           removed lines red, matching the diff viewer's gutter coloring. */}
@@ -219,10 +259,26 @@ interface FileGroupProps {
   filtering: boolean
   action: "stage" | "unstage"
   sessionId: string
+  selected: Set<string>
+  onToggleSelected: (path: string) => void
+  // Called with the rows currently on screen: the header acts on what the
+  // filter shows, never on the files it hides.
+  onToggleAll: (paths: string[], checked: boolean) => void
   onOpenDiff: (path: string) => void
 }
 
-function FileGroup({ heading, files, total, filtering, action, sessionId, onOpenDiff }: FileGroupProps) {
+function FileGroup({
+  heading,
+  files,
+  total,
+  filtering,
+  action,
+  sessionId,
+  selected,
+  onToggleSelected,
+  onToggleAll,
+  onOpenDiff,
+}: FileGroupProps) {
   const [open, setOpen] = useState(true)
 
   // Hide a group that's empty in the source. While filtering, a group that has
@@ -230,14 +286,37 @@ function FileGroup({ heading, files, total, filtering, action, sessionId, onOpen
   // covers the "no matches anywhere" case).
   if (files.length === 0) return null
 
+  // Tri-state over the rows ON SCREEN, so it agrees with the "N of M" badge
+  // beside it while a filter is active.
+  const checkedHere = files.filter((f) => selected.has(f.path)).length
+  const allChecked = checkedHere === files.length
+  const someChecked = checkedHere > 0 && !allChecked
+
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium hover:bg-muted max-md:min-h-11">
-        <span className="flex-1 text-left">{heading}</span>
-        <Badge variant="secondary">
-          {filtering ? `${files.length} of ${total}` : files.length}
-        </Badge>
-      </CollapsibleTrigger>
+      <div className="flex items-center">
+        {/* A sibling of the collapse trigger, not nested inside it: it is its
+            own control, and it sits in the same leading column as the rows'. */}
+        <div className={CHECKBOX_SLOT}>
+          <Checkbox
+            checked={allChecked}
+            indeterminate={someChecked}
+            onCheckedChange={() =>
+              onToggleAll(
+                files.map((f) => f.path),
+                !allChecked,
+              )
+            }
+            aria-label={`Select all ${heading.toLowerCase()} files`}
+          />
+        </div>
+        <CollapsibleTrigger className="flex flex-1 items-center gap-2 rounded px-1 py-1 text-sm font-medium hover:bg-muted max-md:min-h-11">
+          <span className="flex-1 text-left">{heading}</span>
+          <Badge variant="secondary">
+            {filtering ? `${files.length} of ${total}` : files.length}
+          </Badge>
+        </CollapsibleTrigger>
+      </div>
       <CollapsibleContent>
         <div className="mt-1 flex flex-col gap-0.5">
           {files.map((f) => (
@@ -246,6 +325,8 @@ function FileGroup({ heading, files, total, filtering, action, sessionId, onOpen
               file={f}
               action={action}
               sessionId={sessionId}
+              selected={selected.has(f.path)}
+              onToggleSelected={onToggleSelected}
               onOpenDiff={onOpenDiff}
             />
           ))}
@@ -271,6 +352,18 @@ export function ChangedFiles() {
   const query = search.sessionId === selectedSessionId ? search.query : ""
   const setQuery = (next: string) =>
     setSearch({ sessionId: selectedSessionId ?? "", query: next })
+
+  // Checked paths, per section, stored against the session they belong to so a
+  // session switch reads as an empty selection without an effect. The state is
+  // local: leaving the mobile Changes screen, or hiding the pane, unmounts this
+  // component and drops the selection. Accepted.
+  const [selection, setSelection] = useState<
+    { sessionId: string } & ChangedFileSelection
+  >({ sessionId: "", staged: new Set(), unstaged: new Set() })
+  // Which verb is in flight, so its button can say so and no second request can
+  // start behind it.
+  const [busy, setBusy] = useState<"stage" | "unstage" | "discard" | null>(null)
+  const [discarding, setDiscarding] = useState(false)
 
   // No session selected — muted empty state.
   if (!selectedSessionId) {
@@ -392,6 +485,118 @@ export function ChangedFiles() {
   const filteredUnstaged = filterChangedFiles(changed.unstaged, query)
   const hasMatches = filteredStaged.length > 0 || filteredUnstaged.length > 0
   const showSeparator = filteredStaged.length > 0 && filteredUnstaged.length > 0
+
+  // The honest selection: a path that left its section is no longer checked.
+  // Derived at render, so a refresh keeps it truthful with no effect.
+  const selected = reconcileSelection(
+    selection.sessionId === selectedSessionId
+      ? selection
+      : { staged: new Set<string>(), unstaged: new Set<string>() },
+    changed,
+  )
+  const anySelected = selected.staged.size > 0 || selected.unstaged.size > 0
+  // Narrowed once here so the async handlers below see a plain string.
+  const sessionId: string = selectedSessionId
+
+  const writeSelection = (next: ChangedFileSelection) =>
+    setSelection({ sessionId: selectedSessionId, ...next })
+
+  function toggleOne(section: "staged" | "unstaged", path: string) {
+    const next = {
+      staged: new Set(selected.staged),
+      unstaged: new Set(selected.unstaged),
+    }
+    if (next[section].has(path)) next[section].delete(path)
+    else next[section].add(path)
+    writeSelection(next)
+  }
+
+  function toggleMany(
+    section: "staged" | "unstaged",
+    paths: string[],
+    checked: boolean,
+  ) {
+    const next = {
+      staged: new Set(selected.staged),
+      unstaged: new Set(selected.unstaged),
+    }
+    for (const path of paths) {
+      if (checked) next[section].add(path)
+      else next[section].delete(path)
+    }
+    writeSelection(next)
+  }
+
+  function dropActed(section: "staged" | "unstaged", paths: string[]) {
+    const next = {
+      staged: new Set(selected.staged),
+      unstaged: new Set(selected.unstaged),
+    }
+    for (const path of paths) next[section].delete(path)
+    writeSelection(next)
+  }
+
+  // One request, one toast. The acted paths leave the selection as soon as the
+  // server has answered, so the bar cannot fire twice at files that have
+  // already moved, whatever the broadcast does next.
+  async function runBulk(verb: "stage" | "unstage") {
+    const section = verb === "stage" ? "unstaged" : "staged"
+    const paths = [...selected[section]]
+    if (busy !== null || paths.length === 0) return
+    setBusy(verb)
+    try {
+      const result =
+        verb === "stage"
+          ? await git.stageMany(sessionId, paths)
+          : await git.unstageMany(sessionId, paths)
+      dropActed(section, paths)
+      const past = verb === "stage" ? "staged" : "unstaged"
+      if (result.refused.length === 0) {
+        notifySuccess(`${fileCount(result.done.length)} ${past}.`)
+      } else {
+        notifyWarning(
+          `${fileCount(result.done.length)} ${past}. ${fileCount(
+            result.refused.length,
+          )} had already left the list, starting with ${result.refused[0]}.`,
+        )
+      }
+    } catch (err) {
+      notifyError(
+        err instanceof Error ? err.message : `could not ${verb} the files`,
+      )
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // Discard runs file by file, so a refusal on one ("unstage it first") cannot
+  // block the rest; the outcomes are aggregated into a single toast.
+  async function runDiscardMany(paths: string[]) {
+    setDiscarding(false)
+    if (busy !== null || paths.length === 0) return
+    setBusy("discard")
+    try {
+      const result = await git.discardMany(sessionId, paths)
+      dropActed("unstaged", paths)
+      if (result.failed.length === 0) {
+        notifySuccess(`Discarded the changes to ${fileCount(result.done.length)}.`)
+      } else if (result.done.length === 0) {
+        notifyError(
+          `Nothing was discarded. ${result.failed[0]!.path}: ${result.failed[0]!.message}`,
+        )
+      } else {
+        notifyWarning(
+          `Discarded the changes to ${fileCount(result.done.length)}. ${fileCount(
+            result.failed.length,
+          )} could not be discarded, starting with ${result.failed[0]!.path}: ${
+            result.failed[0]!.message
+          }`,
+        )
+      }
+    } finally {
+      setBusy(null)
+    }
+  }
 
   return (
     <>
@@ -516,6 +721,76 @@ export function ChangedFiles() {
             </div>
           )}
 
+          {/* Bulk bar: present only while something is checked, one height
+              token, one variant. The verbs carry their count because the count
+              is data. It holds no ellipsis of its own: the header's is the
+              pane's one surface-scoped menu. */}
+          {anySelected && (
+            <div
+              role="toolbar"
+              aria-label="Actions for the selected files"
+              className="flex flex-wrap items-center gap-2 border-b p-2"
+            >
+              {selected.unstaged.size > 0 && (
+                <Button
+                  variant="outline"
+                  className={BULK_CONTROL}
+                  disabled={busy !== null}
+                  aria-busy={busy === "stage"}
+                  onClick={() => void runBulk("stage")}
+                >
+                  {busy === "stage" ? (
+                    <Loader2 className="motion-safe:animate-spin" />
+                  ) : (
+                    <Plus />
+                  )}
+                  Stage {selected.unstaged.size}
+                </Button>
+              )}
+              {selected.staged.size > 0 && (
+                <Button
+                  variant="outline"
+                  className={BULK_CONTROL}
+                  disabled={busy !== null}
+                  aria-busy={busy === "unstage"}
+                  onClick={() => void runBulk("unstage")}
+                >
+                  {busy === "unstage" ? (
+                    <Loader2 className="motion-safe:animate-spin" />
+                  ) : (
+                    <Minus />
+                  )}
+                  Unstage {selected.staged.size}
+                </Button>
+              )}
+              {selected.unstaged.size > 0 && (
+                <Button
+                  variant="outline"
+                  className={BULK_CONTROL}
+                  disabled={busy !== null}
+                  aria-busy={busy === "discard"}
+                  onClick={() => setDiscarding(true)}
+                >
+                  {busy === "discard" ? (
+                    <Loader2 className="motion-safe:animate-spin" />
+                  ) : (
+                    <Undo2 />
+                  )}
+                  Discard {selected.unstaged.size}…
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                className={BULK_CONTROL}
+                onClick={() =>
+                  writeSelection({ staged: new Set(), unstaged: new Set() })
+                }
+              >
+                Clear
+              </Button>
+            </div>
+          )}
+
           <ScrollArea className="min-h-0 flex-1">
             <div className="flex flex-col gap-1 p-3">
               {!hasChanges && (
@@ -555,6 +830,11 @@ export function ChangedFiles() {
                 filtering={filtering}
                 action="unstage"
                 sessionId={selectedSessionId}
+                selected={selected.staged}
+                onToggleSelected={(path) => toggleOne("staged", path)}
+                onToggleAll={(paths, checked) =>
+                  toggleMany("staged", paths, checked)
+                }
                 onOpenDiff={(path) => openEditor(agentRoot(selectedSessionId), path, "diff")}
               />
 
@@ -567,12 +847,27 @@ export function ChangedFiles() {
                 filtering={filtering}
                 action="stage"
                 sessionId={selectedSessionId}
+                selected={selected.unstaged}
+                onToggleSelected={(path) => toggleOne("unstaged", path)}
+                onToggleAll={(paths, checked) =>
+                  toggleMany("unstaged", paths, checked)
+                }
                 onOpenDiff={(path) => openEditor(agentRoot(selectedSessionId), path, "diff")}
               />
             </div>
           </ScrollArea>
         </CardContent>
       </Card>
+
+      {/* The selection is local state, so this confirm takes its target as a
+          prop rather than through the store, unlike the single-file one. */}
+      <ConfirmDiscardFilesDialog
+        open={discarding}
+        paths={[...selected.unstaged]}
+        unstaged={changed.unstaged}
+        onCancel={() => setDiscarding(false)}
+        onConfirm={(paths) => void runDiscardMany(paths)}
+      />
     </>
   )
 }
