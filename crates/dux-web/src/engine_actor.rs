@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use dux_core::config::server_restart_settings_changed;
+use dux_core::config::{server_bind_settings_changed, server_console_settings_changed};
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
@@ -450,6 +450,41 @@ fn take_apply_reloaded_config(reaction: EventReaction) -> Option<Box<dux_core::c
     }
 }
 
+/// The warning a reload owes the user about `[server]` settings it could not
+/// make live, or `None` when nothing startup-bound moved.
+///
+/// Two independent sentences because the two sets are read at different moments.
+/// `background` picks the bind sentence's remedy: with the background server the
+/// restart is stopping and starting it. The console sentence never takes that
+/// remedy, because only `dux server` builds a console at all.
+fn server_restart_warning_copy(
+    prev: &dux_core::config::ServerConfig,
+    next: &dux_core::config::ServerConfig,
+    background: bool,
+) -> Option<String> {
+    let mut sentences: Vec<&str> = Vec::new();
+    if server_bind_settings_changed(prev, next) {
+        sentences.push(
+            "Server settings changed in config that are read only when a listener binds; \
+             restart the server to apply them.",
+        );
+        if background {
+            sentences
+                .push("With the background server, stopping and starting it again is the restart.");
+        }
+    }
+    if server_console_settings_changed(prev, next) {
+        sentences.push(
+            "The [server] color setting changed; the console that reads it is built by \
+             `dux server`, so it applies the next time you start `dux server`.",
+        );
+    }
+    match sentences.is_empty() {
+        true => None,
+        false => Some(sentences.join(" ")),
+    }
+}
+
 /// Bound on the engine request channel. A burst buffer, not a steady-state
 /// queue: the engine drains the WHOLE channel every `TICK` (50ms), so under
 /// normal use it holds only a handful of in-flight requests. The cap exists so a
@@ -481,10 +516,10 @@ const REQ_CHANNEL_CAPACITY: usize = 1024;
 /// The two `[server]` limits a running listener can adopt from a config reload.
 ///
 /// Everything else under `[server]` is frozen when the listener binds (a
-/// semaphore, a body-limit layer, the console) and is reported by
-/// [`server_restart_settings_changed`] instead. These two are plain scalars the
-/// routes read per request, so the actor stores the reloaded values here and the
-/// next request honors them.
+/// semaphore, a body-limit layer) or when `dux server` builds its console, and
+/// is reported by [`server_restart_warning_copy`] instead. These two are plain
+/// scalars the routes read per request, so the actor stores the reloaded values
+/// here and the next request honors them.
 ///
 /// Seeded from the router's own bind-time values in `build_app`, because a test
 /// or a serve path may pass something other than the engine's config.
@@ -2053,8 +2088,8 @@ impl EngineService {
         let Some(config) = peek_apply_reloaded_config(reaction) else {
             return;
         };
-        let server_settings_changed =
-            server_restart_settings_changed(&engine.config.server, &config.server);
+        let restart_warning =
+            server_restart_warning_copy(&engine.config.server, &config.server, true);
         // The drainer applies the config after this seam, so store the two live
         // limits from the INCOMING section: the routes must not answer one more
         // request on the old caps.
@@ -2069,13 +2104,8 @@ impl EngineService {
             "info",
             "Configuration reloaded; connected browsers are refreshing.",
         ));
-        if server_settings_changed {
-            let _ = self.status.send(WireStatus::new(
-                "warning",
-                "Server settings changed in config that are read only when a listener \
-                 binds; restart the server to apply them. With the background server, \
-                 stopping and starting it again is the restart.",
-            ));
+        if let Some(warning) = restart_warning {
+            let _ = self.status.send(WireStatus::new("warning", warning));
         }
     }
 
@@ -2446,8 +2476,8 @@ pub(crate) fn run_engine_loop(
                 // bound once; reload-config never rebinds). Comparing here — the
                 // arm already holds both the running config (pre-swap) and the
                 // incoming one — keeps the detection next to the config-reload handler.
-                let server_settings_changed =
-                    server_restart_settings_changed(&engine.config.server, &config.server);
+                let restart_warning =
+                    server_restart_warning_copy(&engine.config.server, &config.server, false);
                 match engine.apply_reloaded_config(*config) {
                     Ok(()) => {
                         // Memory now matches disk: any pending raw "Save" has been
@@ -2470,11 +2500,8 @@ pub(crate) fn run_engine_loop(
                         // reload cannot rebind listeners. Warn so the user knows a
                         // restart is needed for those specific changes to take
                         // effect.
-                        if server_settings_changed {
-                            let drift = "Server settings changed in config that are read \
-                                 only when a listener binds; restart the server to apply \
-                                 them.";
-                            let _ = svc.status.send(WireStatus::new("warning", drift));
+                        if let Some(warning) = restart_warning {
+                            let _ = svc.status.send(WireStatus::new("warning", warning));
                         }
                     }
                     Err(e) => {
@@ -3659,7 +3686,7 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
 mod tests {
     use super::*;
     use crate::bootstrap::bootstrap_engine;
-    use dux_core::config::DuxPaths;
+    use dux_core::config::{DuxPaths, server_restart_settings_changed};
     use dux_core::statusline::FINAL_REPLAY_WINDOW;
 
     fn temp_paths() -> (tempfile::TempDir, DuxPaths) {
@@ -4683,6 +4710,60 @@ mod tests {
         let mut next = prev.clone();
         next.color = "never".to_string();
         assert!(server_restart_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn the_restart_warning_names_dux_server_for_a_console_only_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.color = "never".to_string();
+
+        let copy = server_restart_warning_copy(&prev, &next, false).expect("a warning");
+        assert!(
+            copy.contains("dux server"),
+            "the console is built by that process alone: {copy}"
+        );
+        assert!(
+            !copy.contains("listener binds"),
+            "nothing bound moved, so the bind sentence must stay away: {copy}"
+        );
+    }
+
+    #[test]
+    fn the_restart_warning_carries_both_sentences_when_both_sets_moved() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.color = "never".to_string();
+        next.port += 1;
+
+        let copy = server_restart_warning_copy(&prev, &next, false).expect("a warning");
+        assert!(copy.contains("listener binds"), "{copy}");
+        assert!(copy.contains("dux server"), "{copy}");
+    }
+
+    #[test]
+    fn the_restart_warning_adds_the_background_remedy_only_for_a_bind_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut bind = prev.clone();
+        bind.port += 1;
+        let mut console = prev.clone();
+        console.color = "never".to_string();
+
+        let bind_copy = server_restart_warning_copy(&prev, &bind, true).expect("a warning");
+        assert!(bind_copy.contains("stopping and starting"), "{bind_copy}");
+        let console_copy = server_restart_warning_copy(&prev, &console, true).expect("a warning");
+        assert!(
+            !console_copy.contains("stopping and starting"),
+            "the background server has no console to rebuild: {console_copy}"
+        );
+    }
+
+    #[test]
+    fn the_restart_warning_is_absent_when_nothing_startup_bound_moved() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.access_log = !prev.access_log;
+        assert!(server_restart_warning_copy(&prev, &next, true).is_none());
     }
 
     #[test]

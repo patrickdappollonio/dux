@@ -873,8 +873,10 @@ impl App {
                 // Compared before the swap, while `engine.config` still holds the
                 // running values. A listener binds once, so a `[server]` change
                 // needs a restart on this surface exactly as it does on the web,
-                // and the terminal UI is often the only one watching.
-                let server_settings_changed = dux_core::config::server_restart_settings_changed(
+                // and the terminal UI is often the only one watching. The BIND
+                // set only: the console settings reach the `dux server` process
+                // alone, and neither way of serving from here builds a console.
+                let bind_settings_changed = dux_core::config::server_bind_settings_changed(
                     &self.engine.config.server,
                     &boxed.server,
                 );
@@ -905,7 +907,7 @@ impl App {
                 // Last, so it is the line left on screen: the reload succeeded and
                 // this is the part of it that has not happened yet. A failed apply
                 // has a more urgent thing to say and keeps the line.
-                if applied && server_settings_changed {
+                if applied && bind_settings_changed {
                     let serving = self.background_server_is_serving();
                     self.set_warning(server_restart_warning(serving));
                 }
@@ -2504,6 +2506,66 @@ mod tests {
 
         let (tone, _) = app.status.most_recent_tui().expect("a status");
         assert_eq!(tone, StatusTone::Info, "nothing bound has drifted");
+    }
+
+    /// `color` reaches only the `dux server` console, which neither the flip nor
+    /// the background server builds, so telling a terminal UI user to restart
+    /// anything would name a restart that changes nothing they can see.
+    #[test]
+    fn a_reload_that_changes_only_the_console_color_warns_about_nothing() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let mut config = app.engine.config.clone();
+        config.server.color = "never".to_string();
+
+        app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
+
+        let (tone, _) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(
+            tone,
+            StatusTone::Info,
+            "nothing the terminal UI binds moved"
+        );
+    }
+
+    /// The copy is chosen by whether a listener is up on this process, so the
+    /// choice must read the live companion rather than a remembered flag.
+    #[test]
+    fn a_serving_terminal_ui_gets_the_stop_and_start_wording_on_a_bind_change() {
+        let (companion, _recorded) = crate::app::background_server::tests::FakeCompanion::serving();
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.engine.config.server.serve_while_tui = true;
+        app.companion = Some(companion);
+        let mut config = app.engine.config.clone();
+        // Kept on, or the reload's own live switch stops the serve before the
+        // warning is chosen and the copy would be right for the wrong reason.
+        config.server.serve_while_tui = true;
+        config.server.port += 1;
+
+        app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
+
+        let (tone, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(tone, StatusTone::Warning);
+        assert_eq!(
+            message,
+            server_restart_warning(true),
+            "a serving companion picks the stop-and-start copy"
+        );
+    }
+
+    #[test]
+    fn an_idle_terminal_ui_gets_the_next_start_wording_on_a_bind_change() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        assert!(!app.background_server_is_serving());
+        let mut config = app.engine.config.clone();
+        config.server.port += 1;
+
+        app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
+
+        let (_, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(message, server_restart_warning(false));
     }
 
     #[test]

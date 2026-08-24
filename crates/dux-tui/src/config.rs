@@ -901,7 +901,8 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # An unrecognized value falls back to \"auto\" with a warning. The in-app\n\
                  # \"start web server\" flip keeps its themed status screen — this only\n\
                  # affects the `dux server` CLI.\n\
-                 # The console is built once, so changing this needs a restart.",
+                 # The console is built once, so changing this applies the next time\n\
+                 # you start `dux server`.",
             )),
             value_fn: |c| FieldValue::Str(c.server.color.clone()),
         },

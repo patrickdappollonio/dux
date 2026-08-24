@@ -258,9 +258,14 @@ The rest tune presentation and limits:
 > [!IMPORTANT]
 > Most of these are read once, when serving starts, so changing them needs a **server
 > restart**, not just a config reload: `host`, `port`, `allowed_hosts`, `tailscale`,
-> both `file_drop_*` keys, every connection cap, `color`, and the two
-> `*_max_concurrency` limits. A config reload says so for all of them, on either
-> surface: the browser and the terminal app each warn you.
+> both `file_drop_*` keys, every connection cap, and the two `*_max_concurrency`
+> limits. A config reload says so for all of them, on either surface: the browser
+> and the terminal app each warn you.
+>
+> `color` is read once too, but only by `dux server`, which is the only way of
+> serving that prints a console. A reload that changes it says so in the browser
+> and tells you it applies the next time you start `dux server`; the terminal app
+> stays quiet, because nothing it can start reads the setting.
 >
 > The two exceptions are `access_log` and `search_index_max_files`, which a reload
 > applies to a running server.

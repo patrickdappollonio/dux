@@ -674,14 +674,23 @@ impl ServerConfig {
 }
 
 /// True when a config reload changed any `[server]` setting that only takes
-/// effect at startup. Both surfaces call this on every reload (before the config
-/// swap) so each can warn that a restart is needed for these specific changes; a
+/// effect at startup, whether it is read when a listener binds or when the
+/// `dux server` console is built. The web surface warns on this whole set; the
+/// terminal UI warns on [`server_bind_settings_changed`] alone, because neither
+/// way of serving from inside the terminal UI builds a console.
+pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
+    server_bind_settings_changed(prev, next) || server_console_settings_changed(prev, next)
+}
+
+/// True when a config reload changed a `[server]` setting that is read once, as
+/// a listener binds and its router is built. Both surfaces call this on every
+/// reload (before the config swap) so each can warn that a restart is needed; a
 /// reload that only touched, say, `[ui]` theme settings leaves every compared
 /// field equal and triggers no warning.
 ///
 /// Compared fields: the bind `host` and `port`, the `tailscale` mode, the
 /// `allowed_hosts` host-guard list, all five WebSocket caps, both `file_drop_*`
-/// caps, the two directory-work concurrency limits, and the console `color`.
+/// caps, and the two directory-work concurrency limits.
 ///
 /// `access_log` and `search_index_max_files` are deliberately ABSENT: the routes
 /// read those two off shared cells a reload writes, so warning about them would
@@ -702,7 +711,7 @@ impl ServerConfig {
 /// (`max_websocket_tab_connections`, `max_websocket_tabs_per_agent`) are frozen
 /// into `RouterParams`. The deprecated `bind` field is migrated into `host`/`port` on load,
 /// so a change to it surfaces through those fields.
-pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
+pub fn server_bind_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
     prev.host != next.host
         || prev.port != next.port
         // The parsed MODE, never the raw string: the value is trimmed and
@@ -721,11 +730,20 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
         // browser believing a cap the server no longer enforces.
         || prev.file_drop_max_bytes != next.file_drop_max_bytes
         || prev.file_drop_max_concurrency != next.file_drop_max_concurrency
-        // Both are semaphores sized once in `build_app`, and the console is
-        // built before the engine moves into the actor thread.
+        // Both are semaphores sized once in `build_app`.
         || prev.tree_list_max_concurrency != next.tree_list_max_concurrency
         || prev.release_notes_max_concurrency != next.release_notes_max_concurrency
-        || prev.color != next.color
+}
+
+/// True when a config reload changed a `[server]` setting that is read once, as
+/// the `dux server` console is built.
+///
+/// Separate from the bind set because only the standalone `dux server` process
+/// has a console: the terminal UI's flip and its background server both serve
+/// through a no-op console, so a `color` change means nothing to either and a
+/// restart warning on that surface would name a restart that changes nothing.
+pub fn server_console_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
+    prev.color != next.color
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -4546,5 +4564,49 @@ mod agent_tabs_cap_tests {
         ] {
             assert_eq!(WebDragDropPaste::parse(mode.as_str()), Some(mode));
         }
+    }
+}
+
+#[cfg(test)]
+mod server_restart_split_tests {
+    use super::*;
+
+    fn server() -> ServerConfig {
+        Config::default().server
+    }
+
+    /// `color` only reaches the `dux server` console, which the flip and the
+    /// background server never build, so the bind set must leave it out.
+    #[test]
+    fn the_bind_set_ignores_the_console_color_setting() {
+        let prev = server();
+        let mut next = prev.clone();
+        next.color = "never".to_string();
+
+        assert!(!server_bind_settings_changed(&prev, &next));
+        assert!(server_console_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn the_console_set_ignores_every_bind_setting() {
+        let prev = server();
+        let mut next = prev.clone();
+        next.port += 1;
+        next.allowed_hosts.push("example.test".to_string());
+        next.max_websocket_tabs_per_agent += 1;
+        next.tree_list_max_concurrency += 1;
+
+        assert!(server_bind_settings_changed(&prev, &next));
+        assert!(!server_console_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn an_untouched_server_section_changes_neither_set() {
+        let prev = server();
+        assert!(!server_bind_settings_changed(&prev, &prev.clone()));
+        assert!(!server_console_settings_changed(&prev, &prev.clone()));
+        assert!(!server_restart_settings_changed(&prev, &prev.clone()));
     }
 }
