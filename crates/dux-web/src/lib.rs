@@ -712,9 +712,10 @@ pub(crate) struct TailscaleLoop {
     leg_tx: tokio::sync::mpsc::Sender<(u64, LegCommand)>,
     /// Taken once by the serve path and handed to the loop.
     leg_rx: Option<tokio::sync::mpsc::Receiver<(u64, LegCommand)>>,
-    /// The current generation. Bumped by every watcher start AND every one-shot
-    /// detection, so a command from a watcher the mode already replaced is
-    /// dropped rather than re-binding a leg that was just let go.
+    /// The current generation. Bumped by every watcher STOP (a start stops the
+    /// watcher it replaces) and every one-shot detection, so a command from a
+    /// watcher the mode already left is dropped rather than re-binding a leg
+    /// that was just let go.
     generation: u64,
     /// The current watcher's stop flag, per watcher rather than per serve: a mode
     /// change stops exactly the watcher it is replacing.
@@ -778,15 +779,20 @@ impl TailscaleLoop {
     }
 
     /// End the running watcher, if any, and say so in the shared flag.
+    ///
+    /// The generation moves on unconditionally, because the stop flag alone does
+    /// not stop a watcher already past its post-probe check: its command is still
+    /// coming, and only a stale generation makes it harmless.
     fn stop_watcher(&mut self) {
         if let Some(stop) = self.watcher_stop.take() {
             stop.store(true, Ordering::SeqCst);
         }
+        self.generation += 1;
         self.watched.store(false, Ordering::SeqCst);
     }
 
     /// Spawn a watcher over the EXISTING bound cell and command sender, stamped
-    /// with a fresh generation. A dedicated std thread, never a runtime worker:
+    /// with the generation the stop above it minted. A dedicated std thread, never a runtime worker:
     /// the probe is a bounded but blocking call, and a wedged `tailscaled` (a
     /// suspend and resume, which is the exact scenario the watcher serves) must
     /// not be able to occupy a tokio worker.
@@ -800,7 +806,6 @@ impl TailscaleLoop {
             );
             return false;
         };
-        self.generation += 1;
         let generation = self.generation;
         let stop = Arc::new(AtomicBool::new(false));
         let watcher_stop = Arc::clone(&stop);
@@ -2730,6 +2735,60 @@ mod live_tailscale_mode_tests {
         assert!(
             !h.shutdown.has_leg(stale),
             "a stale generation's bind must never have been served"
+        );
+        drop(release);
+        h.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_watcher_command_from_before_the_switch_to_no_is_dropped() {
+        // A watcher whose probe returned in the window between the switch to
+        // `no` storing its stop flag and the loop reading the next command is
+        // still allowed to emit. Its bind must not put the leg back.
+        let (_primary, primary_addr) = primary_listener();
+        let leg = SocketAddr::new(leg_ip(), primary_addr.port());
+        let stale = SocketAddr::new("127.0.0.3".parse::<IpAddr>().unwrap(), primary_addr.port());
+        // A detection that never answers, so the only commands the loop sees are
+        // this test's.
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let parked = std::sync::Mutex::new(parked);
+        let h = Harness::start(
+            TailscaleMode::Auto,
+            false,
+            Some(primary_addr),
+            Some(leg),
+            Arc::new(move || {
+                let _ = parked.lock().expect("not poisoned").recv();
+                Err(TailscaleUnavailable::NoAddress)
+            }),
+        );
+
+        assert_eq!(
+            h.control.set_mode(TailscaleMode::No).await,
+            TailscaleModeOutcome::Detached
+        );
+
+        // Generation 1 is the startup watcher's, which `no` stopped.
+        h.legs.send((1, LegCommand::Bind(stale))).await.unwrap();
+        // One lane, so once this has been acted on the stale one has already
+        // been decided.
+        h.legs.send((2, LegCommand::Bind(leg))).await.unwrap();
+        let landed = tokio::time::timeout(WAIT, async {
+            loop {
+                if h.bound() == Some(leg) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            landed.is_ok(),
+            "stopping a watcher must move the generation on, so the next one is current"
+        );
+        assert!(
+            !h.shutdown.has_leg(stale),
+            "a watcher stopped by the switch to no must not re-bind the leg"
         );
         drop(release);
         h.finish().await;

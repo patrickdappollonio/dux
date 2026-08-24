@@ -358,7 +358,10 @@ pub(crate) fn plan_mode_change(
         return vec![ModeStep::Refuse];
     }
     let mut steps = Vec::new();
-    if prev.watches_interface() {
+    // `StartWatcher` replaces the watcher it finds, so a plan that ends in one
+    // needs no stop of its own; two stops would mint two generations and leave
+    // the new watcher's commands looking stale.
+    if prev.watches_interface() && !matches!(next, TailscaleMode::Auto) {
         steps.push(ModeStep::StopWatcher);
     }
     match next {
@@ -909,11 +912,12 @@ mod tests {
             ],
             "the bound leg is left alone; the watcher reconciles it"
         );
-        // auto → auto replaces the watcher rather than adding a second one.
+        // auto → auto replaces the watcher rather than adding a second one, and
+        // the start is what replaces it: an explicit stop as well would be a
+        // second one.
         assert_eq!(
             plan_mode_change(Auto, Auto, Some(ts), false),
             vec![
-                ModeStep::StopWatcher,
                 ModeStep::SetHostLiterals(true),
                 ModeStep::StartWatcher { probe_now: true },
             ]
