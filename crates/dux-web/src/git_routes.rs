@@ -54,6 +54,33 @@ struct FileOp {
     path: String,
 }
 
+/// A batch of worktree-relative paths for the stage-files / unstage-files
+/// routes.
+#[derive(Deserialize)]
+struct FilesOp {
+    paths: Vec<String>,
+}
+
+/// What a batch route answers with: the paths it acted on, and the paths that
+/// were no longer in the section it validates against. A path that moved
+/// between the click and the request must not take the rest of the batch down
+/// with it.
+#[derive(serde::Serialize)]
+struct BatchResult {
+    done: Vec<String>,
+    refused: Vec<String>,
+}
+
+/// Maximum number of paths one batch may name. `changed_files` runs
+/// `--untracked-files=all`, so a select-all in a repository with a large
+/// untracked tree can reach tens of thousands of paths; the cap keeps one
+/// request bounded and is answered with a sentence rather than a bare status.
+const MAX_BATCH_PATHS: usize = 2_000;
+
+/// Body cap for the batch routes. Comfortably holds `MAX_BATCH_PATHS` long
+/// paths and stops a client streaming a multi-megabyte body at them.
+const MAX_BATCH_BODY_BYTES: usize = 1024 * 1024;
+
 #[derive(Deserialize)]
 struct CommitOp {
     message: String,
@@ -77,6 +104,14 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(&format!("{prefix}/stage"), post(stage))
         .route(&format!("{prefix}/unstage"), post(unstage))
+        .route(
+            &format!("{prefix}/stage-files"),
+            post(stage_files).layer(axum::extract::DefaultBodyLimit::max(MAX_BATCH_BODY_BYTES)),
+        )
+        .route(
+            &format!("{prefix}/unstage-files"),
+            post(unstage_files).layer(axum::extract::DefaultBodyLimit::max(MAX_BATCH_BODY_BYTES)),
+        )
         .route(&format!("{prefix}/discard"), post(discard))
         .route(&format!("{prefix}/commit"), post(commit))
         .route(&format!("{prefix}/push"), post(push))
@@ -359,6 +394,164 @@ async fn discard(
     StatusCode::OK.into_response()
 }
 
+async fn stage_files(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<FilesOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    files_op(state, id, op.paths, Section::Unstaged).await
+}
+
+async fn unstage_files(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<FilesOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    files_op(state, id, op.paths, Section::Staged).await
+}
+
+/// Which changes-pane section a batch is validated against, which decides both
+/// the git verb and what "no longer there" means.
+#[derive(Clone, Copy)]
+enum Section {
+    Staged,
+    Unstaged,
+}
+
+impl Section {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Staged => "staged",
+            Self::Unstaged => "unstaged",
+        }
+    }
+
+    fn action(self) -> &'static str {
+        match self {
+            Self::Staged => "unstage the files",
+            Self::Unstaged => "stage the files",
+        }
+    }
+}
+
+/// Stage or unstage a whole batch: one validating `git status` read, one git
+/// call, one changed-files refresh.
+///
+/// The batch is PARTITIONED rather than refused whole. Validation is
+/// section-scoped, because the two verbs mean opposite things: staging is
+/// offered for a file in the unstaged list and unstaging for one in the staged
+/// list, and a path that left its section between the click and the request is
+/// reported in `refused` while the rest proceed. Only an empty present set is a
+/// 400.
+async fn files_op(
+    state: AppState,
+    session_id: String,
+    paths: Vec<String>,
+    section: Section,
+) -> Response {
+    if paths.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "no files were named, so there is nothing to do".to_string(),
+        )
+            .into_response();
+    }
+    if paths.len() > MAX_BATCH_PATHS {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} files were named, which is more than the {MAX_BATCH_PATHS} one request may \
+                 carry. Select fewer files, or filter the list and act on it in batches.",
+                paths.len()
+            ),
+        )
+            .into_response();
+    }
+    let worktree = match resolve_mutation_worktree(&state, session_id.clone()).await {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+
+    let wt = worktree.clone();
+    let requested = paths.clone();
+    let partition = tokio::task::spawn_blocking(move || {
+        dux_core::git::changed_files(&wt).map(|(staged, unstaged)| {
+            let live: std::collections::HashSet<&str> = match section {
+                Section::Staged => staged.iter().map(|f| f.path.as_str()).collect(),
+                Section::Unstaged => unstaged.iter().map(|f| f.path.as_str()).collect(),
+            };
+            let mut seen = std::collections::HashSet::new();
+            let mut done = Vec::new();
+            let mut refused = Vec::new();
+            for path in requested {
+                if !seen.insert(path.clone()) {
+                    continue;
+                }
+                if live.contains(path.as_str()) {
+                    done.push(path);
+                } else {
+                    refused.push(path);
+                }
+            }
+            (done, refused)
+        })
+    })
+    .await;
+    let (done, refused) = match partition {
+        Ok(Ok(split)) => split,
+        Ok(Err(e)) => {
+            dux_core::logger::warn(&format!("[web] could not read changed files: {e:#}"));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "Could not read this worktree's changed files. {}",
+                    dux_core::git::redact_worktree_path(&format!("{e:#}"), &worktree)
+                ),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("git task failed: {e}"),
+            )
+                .into_response();
+        }
+    };
+    if done.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "none of the {} selected files are in this worktree's {} changes any more \
+                 (starting with \"{}\"). Refresh the changes and try again.",
+                refused.len(),
+                section.word(),
+                refused.first().map(String::as_str).unwrap_or_default(),
+            ),
+        )
+            .into_response();
+    }
+
+    let wt = worktree.clone();
+    let batch = done.clone();
+    if let Err(r) = run_git(section.action(), &worktree, move || match section {
+        Section::Staged => dux_core::git::unstage_files(&wt, &batch),
+        Section::Unstaged => dux_core::git::stage_files(&wt, &batch),
+    })
+    .await
+    {
+        return r.into_response();
+    }
+    refresh_changed_files_now(&state, session_id, &worktree);
+    (StatusCode::OK, Json(BatchResult { done, refused })).into_response()
+}
+
 async fn file_op<F>(
     state: AppState,
     session_id: String,
@@ -585,6 +778,13 @@ mod tests {
             store
                 .upsert_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
                 .unwrap();
+            // A standalone agent in a plain directory: no repository, so every
+            // mutating route must be refused by the workspace chokepoint.
+            let plain = root.join("plain");
+            std::fs::create_dir_all(&plain).unwrap();
+            store
+                .upsert_session(&standalone_session("sa1", plain.to_string_lossy().as_ref()))
+                .unwrap();
         }
         let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
@@ -654,6 +854,15 @@ mod tests {
                 },
             ),
         }
+    }
+
+    fn standalone_session(id: &str, folder: &str) -> dux_core::model::AgentSession {
+        let mut session = sample_session(id, folder);
+        session.workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: folder.to_string(),
+            });
+        session
     }
 
     /// The refresh route has to do BOTH halves of what every mutating handler
@@ -892,5 +1101,183 @@ mod tests {
             body.contains("./out.log"),
             "the path should be relative to the worktree, not dropped: {body}"
         );
+    }
+
+    async fn body_text(resp: Response) -> String {
+        String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    /// Dirty three working-tree files in the fixture worktree, one of them named
+    /// so git would read it as an option.
+    fn dirty_three(worktree: &Path) {
+        std::fs::write(worktree.join("f.txt"), "line1\nline2\n").unwrap();
+        std::fs::write(worktree.join("second.txt"), "new\n").unwrap();
+        std::fs::write(worktree.join("-lead.txt"), "new\n").unwrap();
+    }
+
+    /// The batch route does in ONE call what N single-path calls did: one git
+    /// invocation, one changed-files refresh, one broadcast. A per-path loop
+    /// would refresh N times and the pane would churn.
+    #[tokio::test]
+    async fn stage_files_stages_every_named_path_and_refreshes_once() {
+        let (tmp, app, state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        dirty_three(&worktree);
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/stage-files",
+                r#"{"paths":["f.txt","second.txt","-lead.txt"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_text(resp).await;
+        assert!(
+            body.contains("f.txt"),
+            "the response lists what it did: {body}"
+        );
+        assert!(
+            body.contains("-lead.txt"),
+            "an option-looking path is a path, not a flag: {body}"
+        );
+
+        let staged = tokio::task::spawn_blocking(move || {
+            let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+            let mut paths: Vec<String> = staged.into_iter().map(|f| f.path).collect();
+            paths.sort();
+            paths
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            staged,
+            vec![
+                "-lead.txt".to_string(),
+                "f.txt".to_string(),
+                "second.txt".to_string()
+            ],
+        );
+        assert_eq!(
+            state.engine.refresh_requests().len(),
+            1,
+            "a batch must refresh the changed files exactly once",
+        );
+    }
+
+    /// A path that left the section between the click and the request must not
+    /// take the rest of the batch down with it: the route acts on what it can
+    /// and says what it could not.
+    #[tokio::test]
+    async fn stage_files_partitions_and_names_what_it_refused() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        dirty_three(&worktree);
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/stage-files",
+                r#"{"paths":["f.txt","ghost.txt"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_text(resp).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["done"], serde_json::json!(["f.txt"]));
+        assert_eq!(parsed["refused"], serde_json::json!(["ghost.txt"]));
+    }
+
+    /// Section-scoped: unstage validates against the STAGED list, so a file that
+    /// is merely modified is refused rather than quietly reset.
+    #[tokio::test]
+    async fn unstage_files_validates_against_the_staged_section() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        dirty_three(&worktree);
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/unstage-files",
+                r#"{"paths":["f.txt"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_text(resp).await;
+        assert!(
+            body.contains("f.txt"),
+            "the refusal must name the path it could not act on: {body}"
+        );
+    }
+
+    /// An empty list is a client bug, and git reads "no pathspec" as the whole
+    /// index, so it never reaches git.
+    #[tokio::test]
+    async fn stage_files_refuses_an_empty_list() {
+        let (_tmp, app, _state) = router_with_session_and_state().await;
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/stage-files",
+                r#"{"paths":[]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn stage_files_refuses_a_batch_over_the_count_cap_with_a_sentence() {
+        let (_tmp, app, _state) = router_with_session_and_state().await;
+        let paths: Vec<String> = (0..MAX_BATCH_PATHS + 1)
+            .map(|i| format!("f{i}.txt"))
+            .collect();
+        let body = serde_json::json!({ "paths": paths }).to_string();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/stage-files",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let text = body_text(resp).await;
+        assert!(
+            text.contains(&MAX_BATCH_PATHS.to_string()),
+            "the refusal must say what the limit is: {text}"
+        );
+    }
+
+    /// The workspace chokepoint answers before any git runs: a standalone agent
+    /// whose folder has no repository cannot stage anything.
+    #[tokio::test]
+    async fn stage_files_in_a_folder_with_no_repository_is_refused() {
+        let (_tmp, app, _state) = router_with_session_and_state().await;
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/sa1/git/stage-files",
+                r#"{"paths":["f.txt"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 }
