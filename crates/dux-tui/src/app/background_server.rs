@@ -1267,6 +1267,47 @@ pub(crate) mod tests {
         assert_eq!(33u64.min(app.max_poll_ms()), SERVING_POLL_CAP_MS);
     }
 
+    /// Asking to start a server that is already serving is a transient refusal:
+    /// the user reads it, and the line clears itself rather than holding the
+    /// message until whatever they do next writes over it.
+    #[test]
+    fn the_already_serving_refusal_leaves_the_status_line_on_its_own() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        let window = std::time::Duration::from_secs(6);
+        app.status.set_clear_after(window);
+
+        app.start_background_server();
+        let message = app
+            .status
+            .most_recent_tui()
+            .map(|(_, message)| message)
+            .unwrap_or_default();
+        assert!(
+            message.contains("already serving in the background"),
+            "the refusal must be on the line first: {message}"
+        );
+
+        let now = std::time::Instant::now();
+        let _ = app
+            .status
+            .tick(now + window * 2, dux_core::statusline::BUSY_TIMEOUT);
+        assert!(
+            app.status.most_recent_tui().is_some(),
+            "a warning outlasts the plain info window"
+        );
+
+        let _ = app
+            .status
+            .tick(now + window * 3, dux_core::statusline::BUSY_TIMEOUT);
+        assert!(
+            app.status.most_recent_tui().is_none(),
+            "three windows on, the refusal must be gone: {:?}",
+            app.status.most_recent_tui()
+        );
+    }
+
     /// The flip and the background server bind the same addresses, so flipping
     /// while serving would fail on dux's own port. Refuse with the reason and both
     /// ways out instead.

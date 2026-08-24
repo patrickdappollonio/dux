@@ -798,7 +798,9 @@ impl App {
                     self.set_error(format!("{e:#}"));
                 }
                 // Surface a non-fatal seed failure AFTER the success status so
-                // the persistent warning is what remains on screen.
+                // the warning is what the user reads, not the success it
+                // qualifies. The project was still added, so it leaves on the
+                // ordinary warning window.
                 if let Some(warning) = seed_warning {
                     self.set_warning(warning);
                 }
@@ -915,10 +917,11 @@ impl App {
                 }
                 // Last, so it is the line left on screen: the reload succeeded and
                 // this is the part of it that has not happened yet. A failed apply
-                // has a more urgent thing to say and keeps the line.
+                // has a more urgent thing to say and keeps the line. Pinned,
+                // because the restart is still owed until the user performs it.
                 if applied && bind_settings_changed {
                     let serving = self.background_server_is_serving();
-                    self.set_warning(server_restart_warning(serving));
+                    self.set_pinned_warning(server_restart_warning(serving));
                 }
             }
             EventReaction::OpenConfigReloadFailedModal(message) => {
@@ -2574,6 +2577,30 @@ mod tests {
         app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
 
         let (_, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(message, server_restart_warning(false));
+    }
+
+    /// The restart is owed until the user performs it, so unlike an ordinary
+    /// warning this one is not on a timer.
+    #[test]
+    fn the_server_restart_warning_holds_the_line_until_the_user_acts() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let window = std::time::Duration::from_secs(6);
+        app.status.set_clear_after(window);
+        let mut config = app.engine.config.clone();
+        config.server.port += 1;
+
+        app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
+
+        let now = std::time::Instant::now();
+        let _ = app
+            .status
+            .tick(now + window * 4, dux_core::statusline::BUSY_TIMEOUT);
+        let (_, message) = app
+            .status
+            .most_recent_tui()
+            .expect("the restart warning must survive the warning window");
         assert_eq!(message, server_restart_warning(false));
     }
 

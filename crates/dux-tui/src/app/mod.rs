@@ -3162,6 +3162,9 @@ impl App {
         status.pin();
         if let Some(message) = theme_warning {
             status.set(Instant::now(), None, StatusTone::Warning, message);
+            // A theme that will not load is still true tomorrow, so it waits
+            // for the user rather than for the warning window.
+            status.pin();
         }
         let gh_integration_val = config.ui.github_integration;
         let config_writer =
@@ -3449,6 +3452,8 @@ impl App {
         status.pin();
         if let Some(message) = theme_warning {
             status.set(Instant::now(), None, StatusTone::Warning, message);
+            // Still true after the warning window, so it waits for the user.
+            status.pin();
         }
         Self::assemble(
             engine,
@@ -4066,6 +4071,14 @@ impl App {
             .set(Instant::now(), None, StatusTone::Warning, message);
     }
 
+    /// Set a warning that outlives the ordinary warning window because the
+    /// condition it reports is still true: it stays until the user's next
+    /// action writes over the anonymous slot, not until a timer.
+    pub(crate) fn set_pinned_warning(&mut self, message: impl Into<String>) {
+        self.set_warning(message);
+        self.status.pin();
+    }
+
     pub(crate) fn set_error(&mut self, message: impl Into<String>) {
         self.status
             .set(Instant::now(), None, StatusTone::Error, message);
@@ -4092,7 +4105,7 @@ impl App {
                 _ => None,
             });
         if let Some(path) = missing_path {
-            self.set_warning(format!("Project path not found: {path}"));
+            self.set_pinned_warning(format!("Project path not found: {path}"));
             return;
         }
         // Only clear if the current (most-recent) tone is Warning — don't clobber
@@ -4701,7 +4714,7 @@ impl App {
             self.ask_companion_for_tailscale_mode(mode);
         }
         if let Some(message) = theme_warning {
-            self.set_warning(message);
+            self.set_pinned_warning(message);
         }
         Ok(())
     }
@@ -8077,5 +8090,91 @@ leading_branch = "main"
              must not perform that reset"
         );
         signal_hook::low_level::unregister(dormant_id);
+    }
+}
+
+#[cfg(test)]
+mod pinned_warning_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const WINDOW: Duration = Duration::from_secs(6);
+
+    /// A warning that stays true for as long as the user leaves a row selected
+    /// is not a transient: the row is still there, so the reason is too.
+    #[test]
+    fn the_missing_project_warning_holds_the_line_while_its_row_is_selected() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        app.status.set_clear_after(WINDOW);
+        app.engine.projects[0].path_missing = true;
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("the seeded agent needs a row");
+
+        app.update_missing_project_warning();
+        let message = app
+            .status
+            .most_recent_tui()
+            .map(|(_, message)| message)
+            .unwrap_or_default();
+        assert!(
+            message.contains("Project path not found"),
+            "the warning must be on the line: {message}"
+        );
+
+        let now = Instant::now();
+        let _ = app
+            .status
+            .tick(now + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
+        assert!(
+            app.status
+                .most_recent_tui()
+                .is_some_and(|(_, message)| message.contains("Project path not found")),
+            "it must survive the warning window while the row stays selected"
+        );
+
+        // Moving off the row is what retires it.
+        app.engine.projects[0].path_missing = false;
+        app.update_missing_project_warning();
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, message)| message),
+            Some(String::new()),
+            "leaving the row must clear the warning"
+        );
+    }
+
+    /// A theme that will not load is a standing fact about the user's config,
+    /// so it waits for them rather than for a timer.
+    #[test]
+    fn the_unloadable_theme_warning_holds_the_line() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        app.status.set_clear_after(WINDOW);
+        let mut config = app.engine.config.clone();
+        config.ui.theme = "no-such-theme-exists".to_string();
+        app.apply_reloaded_config(config).expect("reload applies");
+
+        let message = app
+            .status
+            .most_recent_tui()
+            .map(|(_, message)| message)
+            .unwrap_or_default();
+        assert!(
+            message.contains("could not be loaded"),
+            "the theme warning must be on the line: {message}"
+        );
+
+        let now = Instant::now();
+        let _ = app
+            .status
+            .tick(now + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
+        assert!(
+            app.status
+                .most_recent_tui()
+                .is_some_and(|(_, message)| message.contains("could not be loaded")),
+            "it must survive the warning window"
+        );
     }
 }
