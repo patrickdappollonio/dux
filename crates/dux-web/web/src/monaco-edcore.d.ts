@@ -11,7 +11,3 @@ declare module "monaco-editor/esm/vs/editor/edcore.main" {
 // monacoLanguages.ts) are side-effect-only and don't resolve their bundled .d.ts
 // under bundler module resolution. This wildcard makes them importable.
 declare module "monaco-editor/esm/vs/basic-languages/*"
-
-// Same for the JSON language-service contribution (the one language service we
-// keep, for real JSON tokenization + validation).
-declare module "monaco-editor/esm/vs/language/json/monaco.contribution"
