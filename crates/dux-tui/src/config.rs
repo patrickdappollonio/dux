@@ -390,14 +390,17 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "level",
             comment: Some(CommentSource::Static(
-                "# Log level can be error, info, or debug.",
+                "# Log level can be error, warn, info, or debug.\n\
+                 # A config reload applies a new level right away; the path below\n\
+                 # is read only at startup.",
             )),
             value_fn: |c| FieldValue::Str(c.logging.level.clone()),
         },
         ConfigEntry::Field {
             key: "path",
             comment: Some(CommentSource::Static(
-                "# Relative paths are resolved from the dux config directory.",
+                "# Relative paths are resolved from the dux config directory.\n\
+                 # The log file is opened once, so changing this needs a restart.",
             )),
             value_fn: |c| FieldValue::Str(c.logging.path.clone()),
         },

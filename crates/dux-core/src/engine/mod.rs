@@ -1865,12 +1865,14 @@ impl Engine {
         Ok(())
     }
 
-    /// Re-point the live poll loops at `self.config` after a reload swapped it
-    /// in. Both loops re-read their shared interval on every wait, and the
-    /// branch-sync spawn is idempotent, so this also covers a reload that turns
-    /// branch sync on from `0`. Each surface applies a reload its own way, so
-    /// both call this rather than relying on the other's path.
+    /// Re-point the live machinery at `self.config` after a reload swapped it
+    /// in: the log level, and both poll loops. The loops re-read their shared
+    /// interval on every wait and the branch-sync spawn is idempotent, so this
+    /// also covers a reload that turns branch sync on from `0`. Each surface
+    /// applies a reload its own way, so both call this rather than relying on
+    /// the other's path.
     pub fn retune_after_config_swap(&mut self) {
+        crate::logger::set_level(&self.config.logging.level);
         self.pr_poll_interval_secs.store(
             u64::from(crate::config::normalized_pr_poll_interval(
                 self.config.ui.pr_poll_interval_seconds,
@@ -7124,6 +7126,24 @@ mod tests {
             engine.branch_sync_worker_started.load(Ordering::Relaxed),
             "second call stays guarded, no second poller"
         );
+    }
+
+    #[test]
+    fn a_config_reload_adopts_a_new_logging_level() {
+        let _guard = crate::logger::LEVEL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::logger::set_level("info");
+        let (mut engine, _tmp) = test_engine();
+
+        let mut config = engine.config.clone();
+        config.logging.level = "debug".to_string();
+        engine
+            .apply_reloaded_config(config)
+            .expect("reload applies");
+
+        assert_eq!(crate::logger::current_level(), "debug");
+        crate::logger::set_level("info");
     }
 
     #[test]

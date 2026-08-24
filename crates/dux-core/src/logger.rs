@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use chrono::Utc;
@@ -9,12 +10,17 @@ use crate::config::{DuxPaths, LoggingConfig};
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 
+/// The threshold [`log`] gates on, kept outside [`LOGGER`] because the file is
+/// opened once for the process while the level moves with the config: a reload
+/// retunes it through [`set_level`].
+static LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info as u8);
+
 struct Logger {
-    level: LogLevel,
     file: Mutex<std::fs::File>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 enum LogLevel {
     Error,
     Warn,
@@ -28,6 +34,18 @@ impl LogLevel {
             "debug" => Self::Debug,
             "error" => Self::Error,
             "warn" => Self::Warn,
+            _ => Self::Info,
+        }
+    }
+
+    /// The inverse of the `as u8` cast used to store the level. Exhaustive on
+    /// the stored discriminants; anything else means a corrupted store, which
+    /// degrades to the same default `from_str` uses.
+    fn from_u8(value: u8) -> Self {
+        match value {
+            v if v == Self::Error as u8 => Self::Error,
+            v if v == Self::Warn as u8 => Self::Warn,
+            v if v == Self::Debug as u8 => Self::Debug,
             _ => Self::Info,
         }
     }
@@ -47,9 +65,9 @@ pub fn init(config: &LoggingConfig, paths: &DuxPaths) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    set_level(&config.level);
     if let Ok(file) = open_log_file(&path) {
         let logger = Logger {
-            level: LogLevel::from_str(&config.level),
             file: Mutex::new(file),
         };
         let _ = LOGGER.set(logger);
@@ -108,13 +126,30 @@ pub fn error(message: &str) {
     log(LogLevel::Error, message);
 }
 
+/// Adopt a new `logging.level`. Takes effect on the next line written; the log
+/// FILE is opened once for the process, so `logging.path` is startup-only and a
+/// reload cannot move it.
+pub fn set_level(level: &str) {
+    LEVEL.store(LogLevel::from_str(level) as u8, Ordering::Relaxed);
+}
+
+/// The name of the level `log` currently gates on.
+pub fn current_level() -> &'static str {
+    match LogLevel::from_u8(LEVEL.load(Ordering::Relaxed)) {
+        LogLevel::Error => "error",
+        LogLevel::Warn => "warn",
+        LogLevel::Info => "info",
+        LogLevel::Debug => "debug",
+    }
+}
+
 fn log(level: LogLevel, message: &str) {
+    if level > LogLevel::from_u8(LEVEL.load(Ordering::Relaxed)) {
+        return;
+    }
     let Some(logger) = LOGGER.get() else {
         return;
     };
-    if level > logger.level {
-        return;
-    }
     let line = format!(
         "{} {:<5} {}\n",
         Utc::now().to_rfc3339(),
@@ -168,10 +203,32 @@ pub fn resolve_log_path(config: &LoggingConfig, paths: &DuxPaths) -> PathBuf {
     }
 }
 
+/// Serializes the tests that move the process-wide [`LEVEL`], so a parallel run
+/// cannot read another test's threshold.
+#[cfg(test)]
+pub(crate) static LEVEL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn set_level_retunes_the_threshold_log_gates_on() {
+        let _guard = LEVEL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_level("info");
+        assert!(LogLevel::Debug > LogLevel::from_u8(LEVEL.load(Ordering::Relaxed)));
+
+        set_level("debug");
+        assert_eq!(current_level(), "debug");
+        assert!(LogLevel::Debug <= LogLevel::from_u8(LEVEL.load(Ordering::Relaxed)));
+
+        set_level("warn");
+        assert!(LogLevel::Info > LogLevel::from_u8(LEVEL.load(Ordering::Relaxed)));
+        assert!(LogLevel::Error <= LogLevel::from_u8(LEVEL.load(Ordering::Relaxed)));
+
+        set_level("info");
+    }
 
     /// `dux.log` records paths, project names, and error text from the user's
     /// own work, so it gets the same owner-only treatment as the rest of the

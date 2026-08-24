@@ -83,6 +83,19 @@ It is careful with your data:
 - If the file cannot be parsed, the command refuses and changes nothing rather than
   falling back to defaults, which would throw your settings away.
 
+## Logs (`[logging]`)
+
+```toml
+[logging]
+level = "info"   # error, warn, info or debug
+path  = ""       # empty means dux.log in the config directory
+```
+
+| Key | When it takes effect |
+|---|---|
+| `level` | On a config reload. Turn `debug` on while something is misbehaving and back off again without restarting. |
+| `path` | At startup only. The log file is opened once, so a new path needs a restart. |
+
 ## Environment variables and portable paths
 
 Project paths understand `$HOME`, `${HOME}`, and `~`, and environment values expand
