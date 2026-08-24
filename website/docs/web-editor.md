@@ -1,405 +1,328 @@
 ---
 title: The code editor
-description: A real Monaco editor in the browser for any file in a worktree or in the directory a terminal opened in, with syntax highlighting, JSON and TOML help, Markdown and SVG previews, image viewing, path search, diffs against HEAD, file management including moving and inspecting files, dragging files in from your desktop, and open-in-local-editor.
+description: A real Monaco editor in the browser for any file in a worktree or a terminal's directory, with previews, path search, diffs against HEAD, file management, drag-in uploads, and open-in-local-editor.
 group: Web UI
 order: 62
 ---
 
-Sometimes you do not want to ask the agent to fix a typo, you just want to fix it.
-Server mode ships a real code editor, built on **Monaco** (the engine behind VS
-Code), right in the page. No round trip to a separate app, no leaving the
-workspace. Open a file, edit it, save it, and the agent working in that worktree
-sees your change on disk immediately.
+Sometimes you do not want to ask the agent to fix a typo, you just want to fix it. Server
+mode ships a real code editor, built on **Monaco** (the engine behind VS Code), right in
+the page. Open a file, edit it, save it, and the agent working in that worktree sees your
+change on disk immediately.
 
 ## Opening it
 
 The editor opens as a full-screen overlay from a few places:
 
 - An agent's `⋯` menu has **Open editor here**.
-- A terminal's `⋯` menu has the same pair, and roots the editor at the
-  directory that terminal opened in (see below).
-- A changed file's `⋯` menu has **Edit**, and clicking a changed file opens its
-  diff (more on that below).
+- A terminal's `⋯` menu has the same pair, rooted at the directory that terminal opened
+  in (see below).
+- A changed file's `⋯` menu has **Edit**, and clicking a changed file opens its diff.
 
-It loads only when you open it, so it costs nothing until you use it.
+For a separate browser tab, the agent's `⋯` menu also has **Open editor in new tab**, and
+the editor's header carries a matching icon that opens the current file there
+(middle-click works, it is a real link). That tab is nothing but the editor,
+full-viewport, named at the top by whatever it is rooted at. There is no in-app link back
+to the workspace: your browser's Back button or closing the tab is the way out.
 
-Prefer the editor in its own browser tab? The agent's `⋯` menu also has **Open
-editor in new tab**, and the editor's own header carries a matching icon that
-opens the current file in that standalone tab (middle-click works, it is a real
-link). The standalone tab is nothing but the editor, full-viewport, named at the top
-by whatever it is rooted at: the agent, or the terminal and the directory it
-opened in. There is no in-app link back to the workspace: the
-tab is yours, so your browser's Back button or closing the tab is the way out.
+The standalone tab is deliberately quiet: workspace messages and the "needs you" count in
+the tab title belong to the workspace tab. What the editor itself does still tells you
+there, so saves, renames, deletes and uploads confirm in the tab you did them in.
 
-The standalone tab is also deliberately quiet. Workspace messages and the
-"needs you" count in the tab title belong to the workspace tab, so the editor
-tab shows neither, even for the agent whose worktree you are editing. What the
-editor itself does still tells you there: saves, renames, deletes and uploads
-confirm in the tab you did them in.
+> [!IMPORTANT]
+> The editor overlay is **desktop-only**. Monaco is a poor experience on a touch screen,
+> so on a phone the overlay does not open. The standalone tab is the deliberate exception.
 
-The editor overlay is **desktop-only**: Monaco is a poor experience on a touch
-screen, so on a phone the overlay does not open. The standalone tab is the
-deliberate exception. It works on phones, best-effort, with the file explorer
-starting collapsed so the file itself gets the width (the header's toggle
-reopens it at a phone-sized width), and it keeps the editor above the soft
-keyboard. The phone header stays lean, too: only the explorer toggle and
-**Save** sit inline, and everything else — the File/Diff switch, the preview
-toggle, **Open local editor** — folds into one `⋯` menu at the end of the row.
-Fixing a typo from the couch is exactly what it is for; long editing sessions
-still want a real keyboard.
+The standalone tab works on phones, best-effort. The file explorer starts collapsed so the
+file gets the width (the header's toggle reopens it at a phone-sized width), and the
+editor stays above the soft keyboard. Only the explorer toggle and **Save** sit inline;
+the File/Diff switch, the preview toggle and **Open local editor** fold into one `⋯` menu
+at the end of the row.
 
 ## Editing next to a terminal
 
-A terminal's `⋯` menu carries the same two entries an agent's does, and they do
-what they say: the editor opens rooted at the directory that terminal started
-in. A project terminal gets the repo root, a standalone terminal gets wherever
-it opened, home included. It is the whole tree from there, files you can create
-and rename and save, not a read-only peek.
+A terminal's two entries open the editor rooted at the directory that terminal started in.
+A project terminal gets the repo root, a standalone terminal gets wherever it opened, home
+included. It is the whole tree from there, files you can create and rename and save.
 
-The root is pinned to where the terminal STARTED, and it stays there when you
-`cd`. That is on purpose. The root is behind your file tree, your open buffers,
-your unsaved drafts and the address in your bar, and if it moved every time you
-changed directory, all four would quietly stop meaning what they said.
+The root is pinned to where the terminal **started** and stays there when you `cd`, so
+your file tree, open buffers, unsaved drafts and bookmarkable address keep meaning the
+same thing.
 
-A terminal spawned by an agent is the exception, and it is not really an
-exception: it lives in that agent's worktree, so its two entries open the
-agent's editor, with the full git surface that comes with it.
+A terminal spawned by an agent lives in that agent's worktree, so its entries open the
+agent's editor, with the full git surface.
 
-Two things a terminal's editor does not have, because there is nothing behind
-them: the **Diff** view (a plain directory has no last-committed version to
-compare against) and the live changed-files chatter an agent's editor listens
-to. Everything else is the same editor. Freshness still works there, it just
-leans on the other two signals: come back to the tab, or click into it, and dux
-re-checks what is open.
+A terminal-rooted editor has no **Diff** view (a plain directory has no last-committed
+version to compare against) and no live changed-files updates. Everything else is the same
+editor, and freshness still works off the other two signals: come back to the tab, or
+click into it, and dux re-checks what is open.
 
-And an editor never outlives what it is rooted at. Close the terminal and its
-editor goes with it, saying so rather than blanking. If you had unsaved text in
-it, dux stops and asks first, and keeps the words on screen so you can copy them
-out. There is nowhere left to save them to: the root that could have taken them
-is exactly what just closed.
+> [!WARNING]
+> An editor never outlives what it is rooted at. Close the terminal and its editor goes
+> with it, saying so rather than blanking. If you had unsaved text in it, dux stops and
+> asks first, and keeps the words on screen so you can copy them out. There is nowhere left
+> to save them to.
 
 ## The URL knows where you are
 
-The address bar names the editor and the file you are looking at, so the
-position survives anything a URL survives: a hard refresh reopens the editor on
-the same file (and view), a bookmark or a shared link lands there directly, and
-the standalone tab is just another address. Opening the editor is exactly one
-step in your browser history, wherever you opened it from, and switching files
-inside it updates the address in place rather than piling up entries — so one
-press of Back closes the editor and returns you to whatever you were looking
-at before it opened. Closing it that way loses nothing — see below.
+The address bar names the editor and the file you are looking at, so a hard refresh
+reopens the editor on the same file and view, and a bookmark or shared link lands there
+directly. Opening the editor is exactly one step in your browser history, and switching
+files inside it updates the address in place, so one press of Back closes the editor and
+returns you to whatever was behind it. Closing it that way loses nothing (see below).
 
 ## The layout
 
-The overlay is two panes. On the left, a search box, a header shortcut to create a
-file at the worktree root, and a file tree. On the right, the file itself: the
-editor, a diff view, or a rendered preview, depending on the toggles in the header.
-The header also carries the file path, a dirty dot when you have unsaved edits, a
-read-only badge where it applies, and **Save** and **Close**.
+The overlay is two panes. On the left, a search box, a header shortcut to create a file at
+the worktree root, and a file tree. On the right, the file itself: the editor, a diff
+view, or a rendered preview, depending on the header toggles. The header also carries the
+file path, a dirty dot for unsaved edits, a read-only badge where it applies, and **Save**
+and **Close**.
 
-The explorer pane is yours to shape: drag the divider to resize it, or collapse it
-entirely with the toggle at the left end of the header when you want the whole
-width for the file. Your width and collapsed/expanded choice are remembered in the
-browser, so the editor reopens the way you left it. The width is remembered in
-pixels, on purpose: whether the editor is the overlay or its own browser tab, the
-tree renders at the same width instead of growing with the window.
+Drag the divider to resize the explorer pane, or collapse it with the toggle at the left
+end of the header. Your width (in pixels) and collapsed state are remembered in the
+browser, so the editor reopens the way you left it in the overlay and in its own tab
+alike.
 
-Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write, and
-the same goes for the file operations: creating, renaming, moving, and deleting a
-file or folder each confirm with a toast naming what happened, or tell you plainly
-when something went wrong.
+Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write, and creating,
+renaming, moving and deleting each confirm with a toast naming what happened, or say
+plainly when something went wrong.
 
-The header also shows the file's syntax language, and it is a dropdown: dux lets
-Monaco guess the language from the file name, and when the guess is wrong (a
-`Cargo.lock` that is really TOML, a config file with no extension) you can pick
-the right one from the full list. The choice applies to the open file, including
-its diff view, and follows it if you rename or move it. It lasts until you close
-the file: reopen it later and dux guesses again. **Auto** at the top of the list
-hands the decision back to Monaco.
+The header also shows the file's syntax language as a dropdown. dux lets Monaco guess from
+the file name, and when the guess is wrong (a `Cargo.lock` that is really TOML, a config
+file with no extension) you can pick the right one from the full list. The choice applies
+to the open file including its diff view, follows a rename or move, and lasts until you
+close the file. **Auto** at the top of the list hands the decision back to Monaco.
 
 ## Tabs
 
-Open more than one file and the editor grows a tab strip, the way any real
-editor does, so you can flip between several open files without losing your
-place in each one.
+Open more than one file and the editor grows a tab strip.
 
-Single-clicking a file in the tree opens it in a **preview tab**, shown in
-italic. A preview tab is reusable: click another file and it replaces the same
-tab instead of piling up a new one, so browsing around the tree to find the
-right file does not leave a trail of tabs behind you. The moment you actually
-edit the file, or double-click it in the tree (or double-click its tab), it is
-promoted to a permanent tab, and a new preview tab is free to take over for the
-next file you are just looking at.
+Single-clicking a file in the tree opens it in a **preview tab**, shown in italic. A
+preview tab is reusable: click another file and it replaces the same tab, so browsing the
+tree does not leave a trail behind you. Editing the file, double-clicking it in the tree,
+or double-clicking its tab promotes it to a permanent tab, and a new preview tab is free to
+take over.
 
-You can have as many permanent tabs open as you like, each with its own edit
-history, scroll position, and cursor location, so switching back to a tab
-returns you to exactly where you left it. Close a tab with its `×` control or a
-middle-click; if it has unsaved changes, dux asks before discarding them.
+You can have as many permanent tabs as you like, each with its own edit history, scroll
+position and cursor location. Close a tab with its `×` control or a middle-click; if it has
+unsaved changes, dux asks before discarding them.
 
 ## Finding a file
 
-The file tree is a lazy filesystem browser: it loads one directory at a time, as
-you expand it, rather than walking the whole worktree up front. That means it
-stays fast and effectively uncapped no matter how large the repo is, and a huge
-sibling folder you never open costs nothing. Directories list before files,
-alphabetically within each level, and the whole tree renders as a virtualized
-list so scrolling stays smooth even with a folder expanded wide. The ancestors of
-whatever file you have open expand automatically. Changed files carry the same
-status icon you see in the [Changes pane](/docs/web-git), so you can spot your
-edits at a glance.
+The file tree is a lazy filesystem browser: it loads one directory at a time as you expand
+it, so it is effectively uncapped no matter how large the repo is. Directories list before
+files, alphabetically within each level, and the tree is virtualized so scrolling stays
+smooth. The ancestors of the file you have open expand automatically. Changed files carry
+the same status icon as the [Changes pane](/docs/web-git).
 
-The tree is a plain filesystem listing, not a git-aware one: gitignored files are
-included, and so is `.git/` itself, browsable like any other folder. Anything
-inside `.git/` opens read-only, so you can look but not edit it.
+> [!NOTE]
+> The tree is a plain filesystem listing, not a git-aware one. Gitignored files are
+> included, and so is `.git/` itself, browsable like any other folder. Anything inside
+> `.git/` opens read-only.
 
-Each row also carries a file-type icon on the left, monochrome so it never
-competes with the git-status marker on the right: folders look different open,
-closed, or empty, and files get an icon for their kind (code, image, config,
-Markdown, lockfile, binary, and a generic fallback for everything else). It is a
-glance-level cue, not a replacement for opening the file.
+Each row carries a monochrome file-type icon on the left, so it never competes with the
+git-status marker on the right: folders differ open, closed and empty, and files get an
+icon for their kind (code, image, config, Markdown, lockfile, binary, and a generic
+fallback).
 
-The **Search files…** box does a fast, case-insensitive match on file paths across
-the worktree, so you do not have to click through folders to reach a deeply nested
-file. It matches paths, not file contents. Unlike the tree, search works off a
-flat index built by walking the worktree once, and that index is capped (50,000
-files by default, configurable via `[server] search_index_max_files`, `0`
-disables the cap) so a very large repository still gets a bounded, fast search
-rather than an unbounded walk. The tree itself has no such cap: it only ever asks
-for one directory at a time.
+The **Search files…** box does a fast, case-insensitive match on file **paths**, not
+contents. It is capped at 50,000 files by default, configurable via
+`[server] search_index_max_files`, with `0` disabling the cap. The tree itself has no such
+cap.
 
 ## Editing and saving
 
-Any file inside the worktree is editable. Open it, type, and the dirty dot
-appears; save writes it to disk.
+Any file inside the worktree is editable. Open it, type, and the dirty dot appears; save
+writes it to disk.
 
-The server keeps you inside the worktree and refuses to hand back things you
-should not be editing: files outside the worktree, inside `.git`, or binary blobs
-come back read-only or not at all, with a badge explaining why.
+dux keeps you inside the worktree: files outside it, inside `.git`, or binary blobs come
+back read-only or not at all, with a badge explaining why.
 
-Unsaved edits survive the editor closing. Close it — the button, Escape, the
-browser's Back — and your drafts stay put: reopen the editor and every tab is
-back, dirty dot and typed text included. The one real discard is closing a
-dirty **tab**, which still asks first. Because drafts live in the page, a hard
-refresh or closing the browser tab really would lose them, so the browser asks
-before leaving while any draft is unsaved — even if the editor itself is
-closed at the time. Deal with the draft (save it, or discard its tab) and the
-prompt stops. The one silent exception: when dux itself restarts, the page
-reloads without asking, and in-page drafts do not survive that.
+Unsaved edits survive the editor closing. Close it with the button, Escape, or the
+browser's Back, and reopening brings every tab back, dirty dot and typed text included. The
+one real discard is closing a dirty **tab**, which still asks first.
 
-There are two size limits, and they are generous enough that you are unlikely to
-meet either. A file over **5 MiB** does not open in the editor at all; you get the
-read-only badge saying so. A save is refused past roughly **10 MiB**, measured on
-the request rather than the file, so reaching it means having more than doubled
-the file's size in one sitting. If that happens, the refusal says what the limit
-is and **your text is kept**: the tab stays dirty with everything you typed still
-in it, so you can trim it down and save again, or copy it out. Nothing is
-discarded.
+> [!WARNING]
+> Drafts live in the page, so a hard refresh or closing the browser tab loses them. The
+> browser asks before leaving while any draft is unsaved, even if the editor is closed at
+> the time. Save it or discard its tab and the prompt stops. The one silent exception: when
+> dux itself restarts the page reloads without asking, and in-page drafts do not survive.
+
+Two size limits, both generous:
+
+- A file over **5 MiB** does not open in the editor at all; you get the read-only badge
+  saying so.
+- A save is refused past roughly **10 MiB**. The refusal names the limit and **your text
+  is kept**: the tab stays dirty with everything you typed, so you can trim it down and
+  save again, or copy it out.
 
 ## When the agent edits a file you have open
 
-You and your agent work in the same worktree, so sooner or later it rewrites a
-file you have open. The editor notices, and what it does next depends on whether
-you have typed anything.
+**If you have not touched the file**, it refreshes in place, with no banner and nothing to
+click, and your scroll position and undo history come along.
 
-**If you have not touched the file**, it just refreshes. The new content appears
-in place, with no banner and nothing to click, and your scroll position and undo
-history come along. That is what you wanted from a file you were only reading.
+**If you have unsaved edits**, a notice appears across the top of the pane saying the file
+changed on disk, offering **Reload from disk** (which confirms first, because it discards
+everything you typed) and **Keep mine**. If the file was deleted rather than changed, the
+notice says so and offers to close the tab or keep your copy open.
 
-**If you have unsaved edits**, nothing is taken from you. A notice appears across
-the top of the pane saying the file changed on disk, offering **Reload from
-disk**, which confirms first because it discards everything you typed, and **Keep
-mine**, which dismisses the notice and leaves your text alone. If the file was
-deleted rather than changed, the notice says that instead and offers to close the
-tab or keep your copy open.
+**Your save cannot clobber the agent's work.** dux refuses a save that would overwrite a
+file changed since you opened it, and gives you three choices: overwrite anyway, reload the
+disk version, or cancel. Cancelling keeps your text exactly as typed.
 
-**And your save cannot clobber the agent's work.** A save tells the server what
-the file looked like when you opened it, and the server refuses the write if the
-file has moved on since. You get a dialog with the three honest choices:
-overwrite anyway, reload the disk version, or cancel. Cancelling costs nothing,
-your text stays exactly as typed.
-
-dux does not watch the filesystem for any of this. It checks when git reports the
-file as changed, when you come back to the browser window, and when you switch to
-the tab. The one gap left is a file that changes while you sit on its tab with
-the window already focused and git silent, and looking away and back resolves it.
+> [!NOTE]
+> dux does not watch the filesystem. It checks when git reports the file as changed, when
+> you come back to the browser window, and when you switch to the tab. The one gap is a
+> file that changes while you sit on its tab with the window already focused and git
+> silent, and looking away and back resolves it.
 
 ## Creating, renaming, moving, and deleting files
 
-Right-click anywhere in the file tree to manage files and folders without leaving
-the editor:
+Right-click anywhere in the file tree:
 
-- **New File…** and **New Folder…** are always on the menu. Right-click a file row
-  and the new entry lands in that file's own folder; right-click a folder row and
-  it lands inside that folder; right-click the empty area below the tree and it
-  lands at the worktree root. A brand-new file opens immediately, ready to type
-  into.
-- **Upload here…** takes a file off the computer you are sitting at and puts it
-  in the folder you right-clicked, resolved exactly as a New File would resolve
-  it. It is the same thing as dragging the file onto that row, for when dragging
-  is awkward or impossible, and it pastes nothing into any terminal (see
-  [Dropping and pasting files](/docs/dropping-files)). It is absent when the
+- **New File…** and **New Folder…** are always on the menu. Right-click a file row and the
+  new entry lands in that file's folder; right-click a folder row and it lands inside it;
+  right-click the empty area below the tree and it lands at the worktree root. A brand-new
+  file opens immediately.
+- **Upload here…** takes a file off the computer you are sitting at and puts it in the
+  folder you right-clicked, resolved exactly as New File would. It pastes nothing into any
+  terminal (see [Dropping and pasting files](/docs/dropping-files)) and is absent when the
   server has uploads switched off.
-- **Rename…** works on files and folders alike. If the file has unsaved changes,
-  dux blocks the rename until you save or discard them first, rather than
-  silently reloading your edits away.
-- **Move…** puts the entry in a different folder, name unchanged. There is no
-  cut and paste to remember: you get a little folder browser instead, opening on
-  the folder the entry is already in, one click to step into a subfolder and one
-  to climb back out. The line above the browser always spells out exactly where
-  the thing will land, so nothing hinges on you reading a breadcrumb correctly.
-  Same unsaved-changes rule as Rename, and the same tab bookkeeping. A move that
-  would land on a name that is already taken is **refused outright**, not offered
-  as an "are you sure?": there is no trash on the server, so an overwrite here
-  would destroy the file that was already there with nothing to undo it. Rename
-  one of the two first, then move.
-- **Delete…** is permanent. There is no trash on the server: confirming deletes
-  the file, or the folder and everything inside it, straight from disk. If the
-  file you deleted was open, its tab closes along with it.
-- **File info…** (**Folder info…** on a folder) is the read-only one: full path,
-  whether it is a file, a folder or a symlink (and for a symlink, what it points
-  at), size in both human units and exact bytes, when it was last modified in
-  your own timezone, the permission bits both as `rw-r--r--` and as `644`, and
-  what git currently makes of it. Git gets its own answer rather than a guess:
-  unmodified, the exact change and which side it is on, ignored, inside a
-  different repository (a nested clone or a submodule), or no repository at all.
-  Ignored and nested get named explicitly because `git status` says nothing
-  whatsoever about either, so anything less would report your `node_modules` as
-  a tracked, unmodified file.
+- **Rename…** works on files and folders alike. If the file has unsaved changes, dux blocks
+  the rename until you save or discard them.
+- **Move…** puts the entry in a different folder, name unchanged. You get a folder browser
+  opening on the folder the entry is already in, and the line above it always spells out
+  exactly where the thing will land. Same unsaved-changes rule as Rename, and the same tab
+  bookkeeping.
+- **Delete…** is permanent.
+- **File info…** (**Folder info…** on a folder) is read-only: full path; whether it is a
+  file, a folder or a symlink (and for a symlink, what it points at); size in human units
+  and exact bytes; last modified in your own timezone; the permission bits both as
+  `rw-r--r--` and as `644`; and what git makes of it. Git gets its own answer rather than a
+  guess: unmodified, the exact change and which side it is on, ignored, inside a different
+  repository (a nested clone or a submodule), or no repository at all. Ignored and nested
+  are named explicitly because `git status` says nothing about either.
 
-  The panel reads the file once when it opens and again whenever you come back
-  to the browser tab, and that is all: there is no polling. So if you delete the
-  file somewhere else and switch back, the panel notices it is gone and closes
-  itself instead of describing something that is not there. If it vanishes while
-  you are sitting on this tab watching it, the panel will not know until the tab
-  regains focus.
+  The panel reads the file when it opens and again whenever you come back to the browser
+  tab, and that is all: there is no polling. Delete the file elsewhere and switch back and
+  the panel closes itself rather than describing something that is not there. If it
+  vanishes while you sit on the focused tab, the panel will not know until the tab regains
+  focus.
 
-Renaming, moving, or deleting a file that has other open editor tabs pointed at it
-(or, for a folder, tabs pointed anywhere underneath it) keeps everything in sync: a
-rename or a move retargets those tabs to the new path, and a delete closes them.
+> [!CAUTION]
+> **There is no trash on the server.** Confirming a delete removes the file, or the folder
+> and everything inside it, straight from disk, and an open tab on it closes.
+>
+> For the same reason, a **Move…** onto a name that is already taken is **refused
+> outright**, not offered as an "are you sure?". Rename one of the two first, then move.
+
+Renaming, moving, or deleting a file that has other open editor tabs pointed at it (or, for
+a folder, tabs pointed anywhere underneath it) keeps everything in sync: a rename or move
+retargets those tabs, and a delete closes them.
 
 ## Dragging files in from your desktop
 
-Drag files from your own machine onto the file tree and let go, and they are
-saved into the worktree on the server. This is how you get a logo, a fixture, a
-CSV or a screenshot **into the project** from a laptop that is not the machine
-dux is running on.
+Drag files from your own machine onto the file tree and let go, and they are saved into the
+worktree on the server. This is how you get a logo, a fixture, a CSV or a screenshot **into
+the project** from a laptop that is not the machine dux runs on.
 
 Where they land is where you point:
 
 - **A folder row** takes the files into that folder.
-- **A file row** takes them into the folder that file is in, because a file is
-  not a place to put a file. It is the same rule New File… follows.
+- **A file row** takes them into the folder that file is in, the same rule New File…
+  follows.
 - **The empty space** below the tree takes them to the worktree root.
 
-The row that would receive the drop is highlighted while you are still holding
-the files, so you can see the destination before you commit to it, and a toast
-afterwards names the folder they went to.
+The receiving row is highlighted while you are still holding the files, and a toast
+afterwards names the folder.
 
-These are **ordinary files**. They show up in `git status`, they show up in the
-agent's Changes pane straight away, and you can commit them. Nothing is hidden
-and no ignore file is written. That is deliberate, and it is the difference
-between this and dropping a file onto an agent's pane: a file handed to an agent
-is scratch that dies with the agent, and a file dropped here is one you are
-adding to the repository. dux calls those two different intents and gives them
-different destinations. See
-[Dropping and pasting files](/docs/dropping-files) for the whole picture.
+These are **ordinary files**: `git status` shows them, they appear in the agent's Changes
+pane straight away, and you can commit them. That is the difference between this and
+dropping a file onto an agent's pane, which is scratch that dies with the agent. See
+[Dropping and pasting files](/docs/dropping-files).
 
-A drop here pastes nothing into any terminal, and it does not need you to hold
-input on anything: it saves files and stops.
+A drop here pastes nothing into any terminal and needs no input ownership: it saves files
+and stops.
 
-Nothing already on disk is overwritten. If a name is taken the file is saved
-under a new one, with a timestamp and a counter, and the toast tells you what it
-is called now. (Note the deliberate difference from **Move…** above, which
-refuses an occupied destination outright. A move names one exact destination, so
-putting the file somewhere else would be a different operation from the one you
-asked for; a drop names only a folder, so the next free name is the honest
-answer. Neither overwrites.) Your filenames are kept exactly as you had them,
-accents and all, and a name dux cannot use is refused with the reason rather
-than rewritten.
+Nothing on disk is overwritten. If a name is taken the file is saved under a new one, with
+a timestamp and a counter, and the toast tells you what it is called now. (**Move…** above
+instead refuses an occupied destination outright, because a move names one exact
+destination while a drop names only a folder. Neither overwrites.) Your filenames are kept
+exactly as you had them, accents and all, and a name dux cannot use is refused with the
+reason rather than rewritten.
 
-Dropping outside the worktree or into `.git` is refused, exactly as creating,
-renaming or moving into either is. A drop is **stricter than those three in one
-way**, and it is worth knowing about rather than being surprised by: **New
-File…**, **Rename…** and **Move…** will follow a symlinked directory that stays
-inside the worktree, so `New File…` inside a `libs -> packages/libs` link works,
-while a drop refuses any folder reached through a link and says so. That is the
-safe direction to be wrong in (a link is the one way a perfectly ordinary
-relative path still lands outside the tree), so it stays; if you want to drop
-into a linked folder, navigate to the real one and drop there. Both the tree and
-the file search index refresh as soon as the files land.
+Dropping outside the worktree or into `.git` is refused, exactly as creating, renaming or
+moving into either is.
 
-dux takes **files**, not folders. Dropping a folder is refused by name, with the
-files dropped alongside it still saved, and one toast says which was which. And
-a drop that misses the tree entirely, landing on the editor or the tab strip, is
-swallowed rather than handled by the browser, which would otherwise navigate the
-tab to the file you dropped and throw away everything you had not saved.
+> [!IMPORTANT]
+> A drop is **stricter than New File…, Rename… and Move… in one way**: those three follow a
+> symlinked directory that stays inside the worktree, so `New File…` inside a
+> `libs -> packages/libs` link works, while a drop refuses any folder reached through a link
+> and says so. To drop into a linked folder, navigate to the real one.
 
-The whole feature is switched off when `[server] file_drop_max_bytes` is `0`,
-and the same size limit applies here as anywhere else; the tree simply does not
-respond to a drag when it is off.
+The tree and the file search pick them up as soon as they land.
+
+dux takes **files**, not folders. Dropping a folder is refused by name, with the files
+dropped alongside it still saved, and one toast says which was which. A drop that misses the
+tree entirely, landing on the editor or the tab strip, does nothing at all, rather than the
+browser navigating the tab away and taking everything unsaved with it.
+
+The whole feature is off when `[server] file_drop_max_bytes` is `0` (the tree simply does not
+react to a drag), and the same size limit applies here as anywhere else.
 
 ## Syntax highlighting and language niceties
 
-Around eighty languages get proper syntax highlighting out of the box: Rust, Go,
-Python, JavaScript and TypeScript, C and C++, Java, shell, SQL, YAML, HCL,
-Dockerfile, Markdown, and many more, including bare-filename matches like
-`Makefile` and `Dockerfile`. Two file types get extra help beyond coloring:
+Around eighty languages get proper syntax highlighting out of the box: Rust, Go, Python,
+JavaScript and TypeScript, C and C++, Java, shell, SQL, YAML, HCL, Dockerfile, Markdown and
+many more, including bare-filename matches like `Makefile` and `Dockerfile`. Two file types
+get extra help:
 
-- **JSON** gets full validation, so a misplaced comma is flagged as you type. This
-  is the same editor behind the app menu's **Edit config file…** entry.
-- **TOML** gets a dedicated tokenizer, which is exactly what you want when you are
-  editing a `config.toml`.
+- **JSON** gets full validation, so a misplaced comma is flagged as you type. This is the
+  same editor behind the app menu's **Edit config file…** entry.
+- **TOML** gets a dedicated tokenizer, which is what you want when editing a `config.toml`.
 
 This is a deliberately trimmed Monaco: highlighting and JSON validation, but no
-heavyweight IntelliSense or cross-file diagnostics. It is a fast, honest text
-editor with great highlighting, not a full IDE.
+IntelliSense or cross-file diagnostics.
 
 ## Markdown and SVG preview
 
-For Markdown files (`.md`, `.markdown`, and friends) a **Preview / Edit** toggle
-renders the current buffer, unsaved edits included, so you can check how a README
-reads without saving first. It handles GitHub-flavored Markdown, hides a YAML
-frontmatter block, and rewrites relative image paths so they load from the
-worktree.
+For Markdown files (`.md`, `.markdown`, and friends) a **Preview / Edit** toggle renders the
+current buffer, unsaved edits included. It handles GitHub-flavored Markdown, hides a YAML
+frontmatter block, and rewrites relative image paths so they load from the worktree.
 
-SVG files get the same treatment: they open in the editor as text, and the same
-toggle renders the drawing from whatever is in the buffer right now, saved or not,
-so you can tweak a path and see the shape move before committing to it.
+SVG files get the same treatment: they open as text and the toggle renders the drawing from
+whatever is in the buffer right now.
 
-The toggle is there in the **Diff** view too, so a changed README clicked in the
-Changes pane can be read as a rendered page without flipping the tab to File
-first. It always shows the file's end state: your unsaved draft when you have
-one, otherwise the file as it is on disk. Toggling it off puts you right back on
-the diff.
+The toggle is there in the **Diff** view too, so a changed README can be read as a rendered
+page without flipping to File first. It always shows the file's end state: your unsaved
+draft when you have one, otherwise the file on disk. Toggling it off puts you back on the
+diff.
 
 ## Images
 
-Image files (PNG, JPEG, GIF, WebP, and the rest) are not text, so they skip the
-editor entirely and open as the picture itself, centered on the right, with the
-path and pixel dimensions underneath. There is nothing to save, no preview
-toggle to press, and no diff view either: clicking a changed image in the
-Changes pane shows you the picture as it is on disk right now, which is what
-you wanted to see anyway. It is simply the fastest way to check what an agent
-just drew into the worktree.
+Image files (PNG, JPEG, GIF, WebP, and the rest) skip the editor and open as the picture
+itself, centered on the right, with the path and pixel dimensions underneath. There is
+nothing to save, no preview toggle and no diff view: clicking a changed image in the Changes
+pane shows the picture as it is on disk right now.
 
 ## Diffs against HEAD
 
-This one is for agent worktrees; a terminal-rooted editor simply has no Diff
-button, for the reason above.
+This one is for agent worktrees; a terminal-rooted editor has no Diff button.
 
-Flip to the **Diff** view (or click a changed file in the Changes pane) to see a
-read-only, syntax-highlighted comparison of the file's working copy against its
-last committed version, shown inline. Added files render as all-insert, deleted
-files as all-delete. If the file changes on disk while you are looking, dux does
-not yank the diff out from under you: an amber **Reload** button appears so you
-refresh on your own terms.
+Flip to the **Diff** view (or click a changed file in the Changes pane) to see a read-only,
+syntax-highlighted comparison of the file's working copy against its last committed version,
+shown inline. Added files render as all-insert, deleted files as all-delete. If the file
+changes on disk while you are looking, an amber **Reload** button appears so you refresh on
+your own terms.
 
 ## Open in your local editor
 
-Prefer your own editor? The **Open local editor ▾** dropdown launches **Cursor, VS
-Code, Zed, VSCodium, or Sublime Text** on the file. Because it spawns that editor
-**on the server** (the machine dux is running on), it only makes sense when you
-are sitting at that machine. dux enables it only for local-access URLs (loopback,
-`0.0.0.0`, or a private LAN address) and disables it with a tooltip when you have
-reached dux over a remote URL, where launching a GUI editor on the server would do
-you no good at all.
+The **Open local editor ▾** dropdown launches **Cursor, VS Code, Zed, VSCodium, or Sublime
+Text** on the file.
+
+> [!IMPORTANT]
+> It spawns that editor **on the server** (the machine dux runs on), so it only makes sense
+> when you are sitting at that machine. dux enables it only for local-access URLs (loopback,
+> `0.0.0.0`, or a private LAN address) and disables it with a tooltip when you reached dux
+> over a remote URL.

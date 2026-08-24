@@ -1,143 +1,116 @@
 ---
 title: Git without leaving the browser
-description: The Changes pane in server mode, staged and unstaged groups, stage, unstage, discard with confirmation, commit, push, pull, forcing a refresh, the PR banner, and the shared file-status icons.
+description: The Changes pane in server mode, with staged and unstaged groups, stage, unstage, discard, commit, push, pull, the PR banner, and how the pane stays in sync.
 group: Web UI
 order: 63
 ---
 
-An agent changes files, and you want to see what it did before it goes anywhere.
-The Changes pane in server mode is that review surface, and it does the everyday
-git chores too, so you rarely need to drop to a shell for them.
+The Changes pane is where you review what an agent did, and it does the everyday git
+chores too, so you rarely need to drop to a shell.
 
 ## The Changes pane
 
-The right-hand Changes pane tracks the focused agent's working tree. Files split
-into two collapsible groups, **Staged** and **Unstaged**, each with a count badge,
-and a filter box narrows a long list by path. Every row shows a status icon, the
-file path, and the green and red line counts for the change. When the worktree is
-clean it says so plainly.
+The right-hand Changes pane tracks the focused agent's working tree. Files split into two
+collapsible groups, **Staged** and **Unstaged**, each with a count badge, and a filter box
+narrows a long list by path. Every row shows a status icon, the file path, and the green
+and red line counts. When the worktree is clean it says so plainly.
 
-Click any row to open its diff in the [code editor](/docs/web-editor), read-only
-and syntax-highlighted, HEAD against the working copy.
+Click any row to open its diff in the [code editor](/docs/web-editor), read-only and
+syntax-highlighted, HEAD against the working copy.
 
-## One icon for every status
-
-Each file's git status is shown through a single shared status icon, the same one
-the editor's file tree uses, so a modified file looks the same everywhere:
-
-- **M** modified, **A** added, **D** deleted, **R** renamed, **C** copied,
-  **U** conflict, **T** type changed, and **?** untracked.
-
-Each carries a tooltip spelling the status out, so you are never guessing what a
-glyph means.
+Status icons are the same ones the editor's file tree uses, each with a tooltip spelling it
+out: **M** modified, **A** added, **D** deleted, **R** renamed, **C** copied, **U**
+conflict, **T** type changed, and **?** untracked.
 
 ## Stage, unstage, discard
 
 Hover a file row for its `⋯` menu:
 
-- **Stage** and **Unstage** move a file between the two groups. The row jumps to
-  its new group as soon as the engine confirms the change.
-- **Edit** opens the file in the editor (desktop only, and hidden for deleted
-  files).
-- **Discard…** throws away a file's uncommitted changes. It only shows up on
-  **unstaged** rows, both in the menu and on the server: unstage a file first if
-  you want to discard it. This one is destructive, so it always confirms first,
-  and the dialog is honest about what it will do: an untracked file is
-  **permanently deleted from disk**, a tracked file is **restored to its last
-  committed state**. The server re-derives which case applies from live git
-  status at the moment you confirm.
+- **Stage** and **Unstage** move a file between the two groups. The row jumps to its new
+  group as soon as the engine confirms.
+- **Edit** opens the file in the editor (desktop only, and hidden for deleted files).
+- **Discard…** throws away a file's uncommitted changes. It only shows up on **unstaged**
+  rows, both in the menu and on the server: unstage a file first if you want to discard it.
+
+> [!CAUTION]
+> **Discard is destructive**, so it always confirms first, and the dialog says which case
+> applies. An untracked file is **permanently deleted from disk**. A tracked file is
+> **restored to its last committed state**. The server re-derives which from live git
+> status at the moment you confirm.
 
 ## Commit, push, pull
 
 The pane header's `⋯` **Actions** menu carries the rest:
 
-- **Commit…** opens a dialog for a multi-line message and commits **only the
-  staged files**. It is disabled until something is staged, and `Cmd/Ctrl+Enter`
-  submits.
-- **Push** and **Pull** are one click each, with a progress toast that reports
-  back to the browser tab you triggered them from.
-- **Refresh changes** asks git again on the spot and reports what it found. dux
-  has no file watcher, so a change dux did not make itself is only picked up by
-  the next poll. This is the "I just did that, look again" button.
-- **Hide Changes pane** tucks the whole pane away when you want the terminal full
-  width. Dragging the split all the way closed does the same thing, and means the
-  same thing, though it only counts when you let go: drag past the snap and back
-  out again before releasing and the pane stays. Either way a button appears in
-  the header, on the right, to bring
-  the pane back at a sensible width; the **Show the Changes pane** row in
-  **Preferences** is the other way in, since hiding the pane takes this menu
-  with it.
+- **Commit…** opens a dialog for a multi-line message and commits **only the staged
+  files**. It is disabled until something is staged, and `Cmd/Ctrl+Enter` submits.
+- **Push** and **Pull** are one click each, with a progress toast that reports back to the
+  browser tab you triggered them from.
+- **Refresh changes** asks git again on the spot and reports what it found.
+- **Hide Changes pane** tucks the whole pane away. Dragging the split all the way closed
+  does the same, though only when you let go: drag past the snap and back out before
+  releasing and the pane stays. Either way a button appears on the right of the header to
+  bring it back at a sensible width, and the **Show the Changes pane** row in
+  **Preferences** is the other way in, since hiding the pane takes this menu with it.
 
 ## The PR banner
 
-When a session is tied to a GitHub pull request, a one-line strip shows the PR
-number, its state, and its title, color-coded (open is green, merged is purple,
-closed is red), and clicking it opens the PR in a new tab. You can move the banner
-above or below the terminal in **Preferences** (the cog menu).
+When a session is tied to a GitHub pull request, a one-line strip shows the PR number, its
+state, and its title, color-coded (open is green, merged is purple, closed is red).
+Clicking it opens the PR in a new tab. You can move the banner above or below the terminal
+in **Preferences** (the cog menu).
 
-There is no "create a PR" button in the web UI. The banner surfaces an **existing**
-PR; agents open PRs themselves as part of their work. Pulling a PR's branch into a
-fresh agent, on the other hand, is something the web UI does do, covered in
-[Agents from the browser](/docs/web-agents).
+> [!NOTE]
+> There is no "create a PR" button in the web UI. The banner surfaces an **existing** PR;
+> agents open PRs themselves as part of their work. Pulling a PR's branch into a fresh
+> agent is covered in [Agents from the browser](/docs/web-agents).
 
 ### Attaching a PR by hand
 
-dux normally finds the PR itself, by matching the agent's branch name against
-the repository on GitHub. When that heuristic misses (the PR lives on a fork,
-or under a head branch that no longer matches), you can attach one manually:
-in the web UI it is **Attach pull request…** in the agent's ⋯ menu, and in the
-terminal UI it is the `attach-pull-request` command in the command palette. The
-field takes the same spellings as the from-PR agent flow: a full PR URL,
-`owner/repo#123`, or a bare number resolved against the project's remote.
+dux normally finds the PR itself by matching the agent's branch name against the repository
+on GitHub. When that misses (the PR lives on a fork, or under a head branch that no longer
+matches), attach one by hand: **Attach pull request…** in the agent's ⋯ menu, or the
+`attach-pull-request` command in the terminal UI's command palette. The field takes a full
+PR URL, `owner/repo#123`, or a bare number resolved against the project's remote.
 
-A manually attached PR is pinned: dux keeps tracking that exact pull request
-(its state still refreshes) and stops second-guessing it with autodetection,
-and the Agent Info dialog says "manually attached" so you can tell a pin from a
-find.
+A manually attached PR is pinned: its state still refreshes, autodetection stops
+second-guessing it, and the Agent Info dialog says "manually attached".
 
 ### Detaching, and getting detection back
 
-**Detach pull request** (in the same menu, or `detach-pull-request` in the
-palette) means what it says: this agent has no pull request. The badge goes
-immediately, a pin is dropped if there was one, and dux stops looking for a PR
-on the agent's branch, so nothing puts the badge back a minute later. It works
-on an autodetected PR too, not only on a pin, which is the point: a wrong guess
-is exactly what you want to be able to switch off. The detach is remembered
-across restarts.
+**Detach pull request** (same menu, or `detach-pull-request` in the palette) means this
+agent has no pull request. The badge goes immediately, a pin is dropped if there was one,
+and dux stops looking for a PR on the agent's branch. It works on an autodetected PR too,
+not only on a pin, and the detach is remembered across restarts.
 
-Two things bring detection back. Attaching a PR by hand is one, since you have
-just told dux what the pull request is. The other is **Resume PR
-autodetection**, which appears in the agent's ⋯ menu (and as
-`resume-pull-request-autodetection` in the palette) only while the agent is
-detached; it switches detection on again and checks GitHub straight away.
-Neither detaching nor resuming is destructive, so neither asks for
-confirmation.
+Two things bring detection back: attaching a PR by hand, or **Resume PR autodetection**,
+which appears in the agent's ⋯ menu (and as `resume-pull-request-autodetection` in the
+palette) only while the agent is detached and checks GitHub straight away. Neither
+detaching nor resuming is destructive, so neither asks for confirmation.
 
-Attaching needs GitHub integration and a signed-in `gh` (it resolves the
-reference through `gh`); detaching and resuming do not, so an association never
-outlives your ability to remove it. With GitHub integration switched off
-entirely, the pin is hidden (and not removable) until the integration is
-re-armed, at which point the badge reseeds from what dux remembered.
+Attaching needs GitHub integration and a signed-in `gh`; detaching and resuming do not, so
+an association never outlives your ability to remove it. With GitHub integration off
+entirely, the pin is hidden and not removable until you switch it back on, at which point
+the badge comes back.
 
 ## Staying in sync
 
-There is no file watcher behind the Changes pane, and knowing that explains
-everything it does. The pane updates the moment dux itself changes a file: a
-stage, an unstage, a discard, a commit, a file saved in the editor, and a file
-you drop onto a pane once it lands somewhere git is watching. Everything else is
-found by a background poll, an agent writing files in its worktree just as much
-as a file you delete from a companion terminal. The poll
-runs every couple of seconds while any agent or terminal in the workspace is
-running, and every ten seconds while none is, so a change dux did not make is
-never invisible, it is just up to ten seconds late.
+There is no file watcher behind the Changes pane.
 
-**Refresh changes** in the header menu skips that wait and says what it found.
-The terminal UI has the same action as its `refresh-changes` command.
+The pane updates the moment dux itself changes a file: a stage, an unstage, a discard, a
+commit, a file saved in the editor, and a file you drop onto a pane once it lands somewhere
+git is watching.
 
-If a git operation collides with a lock, the background poller keeps retrying on
-its own, so a single blip usually clears itself before you notice. If it does
-not, dux shows a "Couldn't load changes" card with a Refresh button, and a
-warning toast fires once the failures persist across several attempts, so you
-are never left guessing why the pane went quiet. All of this rides the same
-engine and the same worktrees the terminal UI uses, so a commit you make in the
-browser is simply a commit, visible everywhere.
+Everything else is noticed within a couple of seconds while any agent or terminal is
+running, and within ten seconds when none is: an agent writing files in its worktree just
+as much as a file you delete from a companion terminal.
+
+> [!IMPORTANT]
+> A change dux did not make is never invisible, it is just up to ten seconds late.
+> **Refresh changes** in the header menu skips that wait and says what it found. The
+> terminal UI has the same action as its `refresh-changes` command.
+
+If a git operation collides with a lock, dux keeps retrying, so a single blip usually
+clears itself. If it does not, you get a "Couldn't load changes" card with a Refresh button,
+and a warning toast once the failures persist. A commit you make in the browser is an
+ordinary commit, visible everywhere.

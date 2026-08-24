@@ -1,34 +1,32 @@
 ---
 title: Hosting dux behind a login
-description: A reverse proxy plus oauth2-proxy plus dux, in one Docker Compose file, with GitHub as the identity provider restricted to an org, a team, or named accounts, plus what each piece is doing and what breaks when one is missing.
+description: A reverse proxy plus oauth2-proxy plus dux in one Docker Compose file, with GitHub sign-in restricted to an org, a team, or named accounts, and what breaks when a piece is missing.
 group: Web UI
 order: 66
 ---
 
-dux has no login. That is stated plainly in
-[the trust model](/docs/server-mode#the-trust-model-stated-plainly) and it is worth
-repeating at the top of this page, because everything below exists to compensate for
-it: **there is no authentication layer in dux at all.** No password, no token, no
-accounts, and nothing that can be turned on in config. Anyone who can open the URL
-gets the whole workspace: every agent, every terminal, a shell on the machine
-through those terminals, git, and the server's filesystem through the project
-picker.
+> [!CAUTION]
+> **There is no authentication layer in dux at all.** No password, no token, no
+> accounts, and nothing that can be turned on in config. Anyone who can open the URL
+> gets the whole workspace: every agent, every terminal, a shell on the machine through
+> those terminals, git, and the server's filesystem through the project picker. This is
+> [the trust model](/docs/server-mode#the-trust-model-stated-plainly), and everything
+> below exists to compensate for it.
 
-So if you want dux somewhere reachable, the login has to live in front of it. This
-page is one way to build that: a TLS terminator, `oauth2-proxy` doing GitHub sign-in
-restricted to your org or to a list of accounts you name, and dux on a private
-network where nothing but the proxy can see it.
+So the login has to live in front of dux. This page is one way to build that: a TLS
+terminator, `oauth2-proxy` doing GitHub sign-in restricted to your org or to accounts you
+name, and dux on a private network where nothing but the proxy can see it.
 
-If you do not actually need the public internet, you do not need any of this.
-[Tailscale](/docs/tailscale) puts the same workspace on a private network with
-nothing to publish and nothing to configure, and it is what the maintainer uses.
+> [!TIP]
+> If you do not actually need the public internet, you do not need any of this.
+> [Tailscale](/docs/tailscale) puts the same workspace on a private network with
+> nothing to publish and nothing to configure, and it is what the maintainer uses.
 
 > [!IMPORTANT]
 > Nothing about the Host allowlist or the same-origin check is access control. They
-> stop a hostile web page tricking *your* browser into driving your server, which is
-> a real attack and worth defending, and they do nothing at all about a person who
-> simply visits the URL. If you read "dux has two automatic defenses" and relaxed,
-> unrelax.
+> stop a hostile web page tricking *your* browser into driving your server, which is a
+> real attack and worth defending, and they do nothing at all about a person who simply
+> visits the URL. If you read "dux has two automatic defenses" and relaxed, unrelax.
 
 ## The shape of it
 
@@ -66,36 +64,34 @@ digraph topology {
 }
 ```
 
-The order matters. TLS is outermost because the login cookie must not cross the
-internet in the clear. `oauth2-proxy` sits between the proxy and dux rather than
-beside it, so there is no code path that reaches dux without passing the gate: dux's
-port is never published, so the only thing on the machine that can talk to it is the
-proxy container.
+The order matters. TLS is outermost so the login cookie never crosses the internet in the
+clear, and `oauth2-proxy` sits between Caddy and dux rather than beside it, so nothing
+reaches dux without passing the gate.
 
 ## Before you start
 
 You need three things.
 
 **A hostname with DNS pointing at the box.** Caddy gets a certificate for it
-automatically, and the name has to resolve for that to work. Everything below uses
-`dux.example.com`; replace it everywhere, including in the dux config.
+automatically, and the name has to resolve first. Everything below uses `dux.example.com`;
+replace it everywhere, including in the dux config.
 
 **A GitHub OAuth app.** Create one under your account or your org
-(`Settings → Developer settings → OAuth Apps`). The **Authorization callback URL**
-must be exactly:
+(`Settings → Developer settings → OAuth Apps`). The **Authorization callback URL** must
+be exactly:
 
 ```text
 https://dux.example.com/oauth2/callback
 ```
 
-Keep the client ID and secret. If you are going to restrict by organization, create
-the app under a personal account: the org check is a read against the GitHub API on
-the signed-in user's behalf, not an app installation.
+Keep the client ID and secret. To restrict by organization, create the app under a
+personal account: the org check reads the GitHub API on the signed-in user's behalf, not as
+an app installation.
 
 **A cookie secret.** `oauth2-proxy` derives an AES key from it, and it validates at
-startup that the value decodes to exactly 16, 24, or 32 bytes. Anything else aborts
-the process with `cookie_secret must be 16, 24, or 32 bytes to create an AES cipher,
-but is N bytes`:
+startup that the value decodes to exactly 16, 24, or 32 bytes. Anything else aborts the
+process with `cookie_secret must be 16, 24, or 32 bytes to create an AES cipher, but is
+N bytes`:
 
 ```bash
 openssl rand -base64 32 | tr -- '+/' '-_'
@@ -188,19 +184,17 @@ volumes:
   dux_config:
 ```
 
-Two things that are deliberately **not** in that `command:` list.
+Two flags are deliberately **not** in that list:
 
-There is no `--scope`. The GitHub provider's default scope is already
-`user:email read:org`, and `read:org` is what makes the org and team lookups
-possible. Setting `--scope` replaces that default wholesale, so the usual way to
-break an org check is to write the flag out and drop a scope from it.
+- **No `--scope`.** The GitHub provider's default is already `user:email read:org`, and
+  `read:org` is what makes the org and team lookups work. Setting `--scope` replaces that
+  default wholesale, which is the usual way an org check breaks.
+- **No `--cookie-secure=false`.** It defaults to `true`, which is correct here.
 
-There is no `--cookie-secure=false`. It defaults to `true`, which is correct here,
-because the browser reaches Caddy over HTTPS.
-
-One shell note: `--email-domain=*` is safe in the YAML list above because Compose
-runs the entrypoint without a shell. Typing the same flag into a `docker run` at a
-prompt lets the shell glob the `*` against your working directory first; quote it.
+> [!NOTE]
+> `--email-domain=*` is safe in the YAML list above because Compose runs the entrypoint
+> without a shell. Typing the same flag into a `docker run` at a prompt lets the shell
+> glob the `*` against your working directory first; quote it.
 
 The `Caddyfile` is three lines:
 
@@ -210,18 +204,14 @@ dux.example.com {
 }
 ```
 
-That is the whole configuration because Caddy already does the two things dux needs.
-It passes incoming headers, `Host` included, through to the backend unmodified apart
-from adding `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host`. And it
-performs the HTTP upgrade for a WebSocket and then tunnels the connection, with no
-directive to enable it.
+That is the whole configuration because Caddy already does the two things dux needs with
+no directives: it passes incoming headers through unchanged, `Host` included, adding only
+`X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host`, and it tunnels WebSockets.
 
-One exception to know about before you copy this into a different topology: since
-Caddy v2.11.0, an upstream written as `https://` gets its `Host` overwritten to
-`{upstream_hostport}`, so the TLS handshake sends the right SNI. The upstream here is
-plain `http://` inside a private network, so it does not apply, but a variant that
-re-encrypts the hop has to put the original back with `header_up Host {host}`, or
-dux sees a `Host` the browser never sent.
+One exception if you copy this into a different topology: since Caddy v2.11.0 an upstream
+written as `https://` gets its `Host` overwritten to `{upstream_hostport}`. The upstream
+here is plain `http://`, so it does not apply, but a variant that re-encrypts the hop has
+to put the original back with `header_up Host {host}`.
 
 And `.env`:
 
@@ -233,29 +223,28 @@ COOKIE_SECRET=...   # the openssl output from above
 
 ### The one line of dux config
 
-dux's Host allowlist accepts `localhost`, loopback addresses, and IP literals it
-actually bound. `dux.example.com` is a hostname, so it is none of those, and every
-request would get a `403` until you say the name out loud once:
+dux's Host allowlist accepts `localhost`, loopback addresses, and IP literals it actually
+bound. `dux.example.com` is none of those, so every request gets a `403` until you say the
+name out loud once:
 
 ```toml
 [server]
 allowed_hosts = ["dux.example.com"]
 ```
 
-Hostnames only, no scheme and no port; the port is ignored when matching, matching
-is case-insensitive, and a trailing dot is stripped. There is no wildcard, so `"*"`
-is a literal hostname that matches nothing.
+Hostnames only, no scheme and no port; the port is ignored when matching, matching is
+case-insensitive, and a trailing dot is stripped. There is no wildcard, so `"*"` is a
+literal hostname that matches nothing.
 
-Note that binding `0.0.0.0` does **not** get you out of this. An unspecified bind
-relaxes the allowlist for anything that parses as an IP address, and a hostname
-still is not one.
+> [!IMPORTANT]
+> Binding `0.0.0.0` does **not** get you out of this. An unspecified bind relaxes the
+> allowlist for anything that parses as an IP address, and a hostname still is not one.
 
 ### Building the dux image
 
-dux ships no image, so this part of the recipe is yours. The awkward truth is that
-the container is not really "dux", it is your whole development environment:
-the agent CLIs, their credentials, `git`, your git identity, and whatever your
-projects need to build. A sketch:
+dux ships no image, so this part is yours. The container is not really "dux": it is your
+whole development environment, the agent CLIs and their credentials, `git`, your git
+identity, and whatever your projects need to build. A sketch:
 
 ```dockerfile
 FROM debian:bookworm-slim
@@ -283,103 +272,84 @@ WORKDIR /root/code
 ```
 
 Then `docker compose exec dux gh auth login` and the equivalent for each agent CLI,
-once. Those credentials do **not** land on the `dux_config` volume: `gh` writes
-`/root/.config/gh` and each agent CLI writes its own directory, none of which is
-mounted above. Add volumes for them (or mount all of `/root`) if you want them to
-survive a restart. This is the part that takes an afternoon, and it has nothing to
-do with dux.
+once.
 
-If containerising your dev environment is not appealing, run `dux server` on the
-host instead and delete the `dux` service. One gotcha if you do: the proxy container
-cannot reach a host-loopback bind, so dux has to bind an address the container can
-route to, and the whole "no published port" protection goes with it. Firewall the
-port at that point, and remember the firewall is now the only thing standing between
-the internet and a workspace with no login.
+> [!WARNING]
+> Those credentials do **not** land on the `dux_config` volume. `gh` writes
+> `/root/.config/gh` and each agent CLI writes its own directory, none of which is
+> mounted above. Add volumes for them (or mount all of `/root`) if you want them to
+> survive a restart. This is the part that takes an afternoon, and it has nothing to do
+> with dux.
 
-## What each piece is doing, and what happens without it
+If containerising your dev environment is not appealing, run `dux server` on the host and
+delete the `dux` service. One gotcha: the proxy container cannot reach a host-loopback
+bind, so dux has to bind an address the container can route to, and the "no published port"
+protection goes with it. Firewall that port, and remember the firewall is then the only
+thing between the internet and a workspace with no login.
 
-**Caddy** terminates TLS and does nothing else. Without it you are on plain HTTP,
-and two things follow. `--cookie-secure` defaults to `true`, so `oauth2-proxy` sets
-the session cookie `Secure`, the browser refuses to store it over HTTP, and you get
-an infinite redirect loop at sign-in rather than an error. And the browser refuses
-dux a few APIs off a secure context: right-click paste, `OSC 52` clipboard writes
-from an agent, desktop notifications, and PWA install.
+## What each piece is doing
+
+**Caddy** terminates TLS. Without it you get the sign-in redirect loop below, and the
+browser refuses dux a few APIs off a secure context: right-click paste, `OSC 52` clipboard
+writes from an agent, desktop notifications, and PWA install.
 [The Tailscale page lists the exact set](/docs/tailscale#plain-http-costs-you-a-few-browser-features),
 and it is the same set here.
 
-**`oauth2-proxy`** is the login. Without it, or reachable around it, you have
-published a shell to the internet. That is not hyperbole and it is not a
-misconfiguration risk you can mitigate with care: a dux terminal is a terminal.
+**`oauth2-proxy`** is the login. Without it, or reachable around it, you have published a
+shell to the internet.
 
-**The GitHub restriction flags** are what make the login mean something.
-`--provider=github` on its own authenticates *any* GitHub account, which is
-approximately everyone. There are three:
+**The GitHub restriction flags** are what make the login mean something, since
+`--provider=github` on its own authenticates *any* GitHub account. Set at least one:
 
 - `--github-org=your-org` requires membership of that organization.
-- `--github-team=your-org:the-team` requires that team. Combined with
-  `--github-org`, both must match.
-- `--github-user=alice,bob` is checked first and short-circuits: a listed username
-  is admitted whether or not the org or team check would have passed.
+- `--github-team=your-org:the-team` requires that team. Combined with `--github-org`, both
+  must match.
+- `--github-user=alice,bob` is checked first and short-circuits: a listed username is
+  admitted whether or not the org or team check would have passed. Set on its own, it is a
+  complete allowlist, and an unlisted account is rejected outright.
 
-Set at least one. If you set `--github-user` and nothing else, an unlisted account
-is rejected outright, which makes it a complete allowlist on its own.
-
-**`--email-domain=*`** is the counterintuitive one. `oauth2-proxy` runs an email
-allowlist in front of everything, built from `--email-domain` and
-`--authenticated-emails-file`. With both unset the allowlist is empty and it matches
-nobody, so a perfectly successful GitHub sign-in is still refused. `*` short-circuits
-that check and leaves the GitHub gate as the gate.
-
-**The absent `ports:` entry on the `dux` service** is doing more work than any flag
-here. It is what makes "you cannot get to dux without passing the proxy" a property
-of the network rather than a promise. If you add a published port for a quick test,
-you have removed the login for as long as it is there.
+> [!CAUTION]
+> **The absent `ports:` entry on the `dux` service** is doing more work than any flag here.
+> It makes "you cannot get to dux without passing the proxy" a property of the network
+> rather than a promise. Add a published port for a quick test and you have removed the
+> login for as long as it is there.
 
 ## What this does not give you
 
-`oauth2-proxy` is a door, not a permission system. Once someone is through it they
-are inside the same single workspace as everyone else who is through it, because
-dux has no concept of a user to scope anything to. They can attach to any agent,
-type into a session someone else is mid-sentence in, run git, and browse the
-server's filesystem through the project picker. There is no per-user ownership and
-no path sandbox, by design.
+> [!CAUTION]
+> Everyone through the door shares one workspace, because dux has no concept of a user to
+> scope anything to. They can attach to any agent, type into a session someone else is
+> mid-sentence in, run git, and browse the server's filesystem. There is no per-user
+> ownership and no path sandbox, by design.
+>
+> So restrict the gate to people you would hand a terminal on that machine. An org-wide
+> `--github-org` on a company with a thousand engineers is a thousand people with a shell.
 
-So restrict the gate to people you would hand a terminal on that machine, not to
-everyone in a large org. An org-wide `--github-org` on a company with a thousand
-engineers is a thousand people with a shell.
-
-One more thing that surprises people: **dux reads no `X-Forwarded-*` headers at
-all.** Nothing in dux inspects `X-Forwarded-For`, `X-Forwarded-Proto` or
-`X-Forwarded-Host`, even though Caddy sets all three and `oauth2-proxy` adds
-`X-Forwarded-User` and `X-Forwarded-Email` on top (`--pass-user-headers` and
-`--pass-basic-auth` both default to `true`). Practically
-that means dux's access log carries no client identity at all: it records only the
-timestamp, method, path, status and latency, so the identity `oauth2-proxy`
-established is invisible to dux. Your audit trail lives in the proxy's logs, not in
-dux's.
+**dux reads no `X-Forwarded-*` headers at all**, even though Caddy sets three and
+`oauth2-proxy` adds `X-Forwarded-User` and `X-Forwarded-Email` on top. So dux's access log
+carries no client identity: it records only the timestamp, method, path, status and
+latency. Your audit trail lives in the proxy's logs, not in dux's.
 
 > [!CAUTION]
-> Do not use Tailscale Funnel, `ngrok`, `cloudflared` in its no-authentication mode,
-> or anything else that publishes the port to the anonymous internet, as a shortcut
-> around this page. The point of every paragraph above is that something has to ask
-> who you are before dux answers. A tunnel that skips that step has not made this
-> easier, it has made it public.
+> Do not use Tailscale Funnel, `ngrok`, `cloudflared` in its no-authentication mode, or
+> anything else that publishes the port to the anonymous internet, as a shortcut around
+> this page. The point of every paragraph above is that something has to ask who you are
+> before dux answers. A tunnel that skips that step has not made this easier, it has
+> made it public.
 
 ## When it does not work
 
-Each of these fails in a distinctive way, which is the good news.
+Each of these fails in a distinctive way.
 
 ### The page loads, looks perfect, and nothing is ever live
 
-Suspect the WebSocket upgrade. Terminals are WebSocket-only, and so is the change
-feed that tells the page when anything moved, so a proxy that does not pass upgrades
-through gives you a UI that renders its first load correctly and then sits there:
-no terminal output, no status changes, and eventually the in-app *Reconnecting…*
-overlay. Nothing returns a visible error, which is why this one costs the most time.
+Suspect the WebSocket upgrade. A proxy that does not pass upgrades through gives you a UI
+that renders its first load correctly and then sits there: no terminal output, no status
+changes, and eventually the in-app *Reconnecting…* overlay. Nothing returns a visible
+error, which is why this one costs the most time.
 
-Caddy needs no configuration for this, and `oauth2-proxy` proxies WebSockets by
-default (`--proxy-websockets` is `true`). nginx does **not**, and needs it spelled
-out:
+Caddy needs no configuration for this, and `oauth2-proxy` proxies WebSockets by default
+(`--proxy-websockets` is `true`). nginx does **not**, and needs it spelled out:
 
 ```nginx
 proxy_http_version 1.1;
@@ -390,19 +360,17 @@ proxy_read_timeout 1h;      # or an idle agent's socket is closed under you
 
 ### `403 this dux server does not serve the requested host`
 
-The Host allowlist. The proxy is forwarding a `Host` that dux does not accept,
-almost always your public hostname before you added it to `allowed_hosts`. Add it,
-reload dux's config, done. The body of the `403` is that exact sentence, so you do
-not have to guess which check fired.
+The Host allowlist. The proxy is forwarding a `Host` that dux does not accept, almost
+always your public hostname before you added it to `allowed_hosts`. Add it and reload dux's
+config.
 
 ### `403 cross-origin WebSocket upgrade rejected`, or `cross-origin request rejected` on a write
 
-The same-origin check, and this is the trap worth reading twice. dux compares the
-browser's `Origin` against the request's `Host` on every socket upgrade and every
-`POST`, `PATCH`, `PUT` and `DELETE`. A proxy that **rewrites** `Host` to its backend
-target satisfies the allowlist, because loopback is always allowed, and then fails
-this check on everything that matters, because the browser is still sending
-`dux.example.com` as `Origin`.
+The same-origin check. dux compares the browser's `Origin` against the request's `Host` on
+every socket upgrade and every `POST`, `PATCH`, `PUT` and `DELETE`. A proxy that
+**rewrites** `Host` to its backend target satisfies the allowlist, because loopback is
+always allowed, and then fails this check on everything that matters, because the browser
+still sends `dux.example.com` as `Origin`.
 
 ```dot Every hop forwards the same Host, and dux checks it against the browser's Origin. Rewrite Host anywhere in that chain and only the writes break.
 digraph headers {
@@ -424,48 +392,41 @@ digraph headers {
 }
 ```
 
-The symptom is worse than a straight failure: the page loads, reads fine, and every
-single action fails. The fix is to forward the original `Host`, never to add the
-rewritten one to `allowed_hosts`, which silences the first check and leaves the
-second exactly as broken.
-
-Both hops above forward `Host` unchanged out of the box: Caddy passes incoming
-headers through, and `oauth2-proxy`'s `--pass-host-header` defaults to `true`. Two
-known ways to lose it anyway: nginx's `proxy_pass` rewrites `Host` to the upstream
-name unless you add `proxy_set_header Host $host;`, and Caddy overwrites it when the
-upstream is written as `https://` (since v2.11.0, so the SNI matches the upstream).
+The symptom is worse than a straight failure: the page loads, reads fine, and every single
+action fails. The fix is to forward the original `Host`; adding the rewritten one to
+`allowed_hosts` only silences the first check. Both hops above forward it unchanged out of
+the box (`oauth2-proxy`'s `--pass-host-header` defaults to `true`); the two known ways to
+lose it are nginx's `proxy_pass`, which rewrites `Host` to the upstream name unless you add
+`proxy_set_header Host $host;`, and Caddy with an `https://` upstream.
 
 The comparison is authority-only, so `http` versus `https` on the same host is not a
-mismatch. A request with **no** `Origin` header at all passes deliberately, which is
-what keeps `curl` and scripts working; a request with `Origin: null` is treated as a
-mismatch and rejected.
+mismatch. A request with **no** `Origin` header passes deliberately, which keeps `curl` and
+scripts working; `Origin: null` is treated as a mismatch and rejected.
 
 ### An endless redirect loop at sign-in
 
-The session cookie. Either you are on plain HTTP with `--cookie-secure` at its
-`true` default, or the `--redirect-url` does not exactly match the callback URL
-registered on the GitHub OAuth app, down to the scheme and the `/oauth2/callback`
-path.
+The session cookie. Either you are on plain HTTP with `--cookie-secure` at its `true`
+default, so `oauth2-proxy` marks the cookie `Secure` and the browser refuses to store it,
+or the `--redirect-url` does not exactly match the callback URL registered on the GitHub
+OAuth app, down to the scheme and the `/oauth2/callback` path.
 
 ### GitHub sign-in succeeds and then you are denied
 
-Two candidates and they are both easy. `--email-domain` is unset, so the domain
-allowlist is empty and rejects everybody. Or `--scope` was set by hand without
-`read:org`, so the org membership lookup comes back empty and `--github-org` matches
-nobody. Both look identical from the browser, so check the `oauth2-proxy` logs, which
-name the org it wanted and the orgs it saw.
+Two candidates. `--email-domain` is unset, so the domain allowlist is empty and rejects
+everybody. Or `--scope` was set by hand without `read:org`, so the org membership lookup
+comes back empty and `--github-org` matches nobody. Both look identical from the browser,
+so check the `oauth2-proxy` logs, which name the org it wanted and the orgs it saw.
 
 ### The console shows one client IP for everybody
 
-dux's per-request access log records no IP at all: only the timestamp, method, path,
-status and latency. The console's connect and disconnect lines do print a peer
-address, and since dux reads no forwarded headers that address is the proxy's for
-every client. Use the proxy's logs when you want to know who did something.
+dux's per-request access log records no IP at all. Its connect and disconnect lines do
+print a peer address, and since dux reads no forwarded headers that address is the proxy's
+for every client. Use the proxy's logs to know who did something.
 
 ## Where to go next
 
-- [Server mode overview](/docs/server-mode): the trust model in full, every
-  `[server]` key with its default, the startup banner, and graceful shutdown.
+- [Server mode overview](/docs/server-mode): the trust model in full, every `[server]`
+  key with its default, the startup banner, and graceful shutdown.
 - [Reaching dux over Tailscale](/docs/tailscale): the private-network answer, which
   needs none of this page and is what the maintainer actually uses.
 - [The workspace in the browser](/docs/web-workspace): what you get once you are in,

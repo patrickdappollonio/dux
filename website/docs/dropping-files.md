@@ -1,291 +1,189 @@
 ---
 title: Dropping and pasting files onto an agent
-description: Drag a screenshot from your desktop onto an agent, a terminal or the editor's file tree in the browser, press paste, or pick it from a menu, and dux puts it where you meant it. Where files land, why an agent's uploads stay out of git, why an editor drop is an ordinary committable file, why nothing is ever overwritten, and why this is web-only.
+description: Drag, paste, or pick a file in the browser and dux saves it on the server and pastes its path. Where files land, why agent uploads stay out of git, why an editor drop is an ordinary committable file, and why nothing is ever overwritten.
 group: Web UI
 order: 67
 ---
 
-You have a screenshot. Your agent is running on a machine somewhere else, and
-you are looking at it through a browser tab. Getting that image in front of the
-agent would mean copying it to the server by hand and typing out the path.
+You have a screenshot. Your agent is running on a machine somewhere else, and you are
+looking at it through a browser tab. Drag the image onto the terminal and let go: dux saves
+it on the server and pastes its path into the prompt, ready for you to finish the sentence.
 
-Instead, you drag it onto the terminal and let go. dux saves the file on the
-server and pastes its path into the prompt, ready for you to finish the
-sentence.
+## Three gestures, one journey
 
-## Or pick it from a menu
+Drag, paste, or pick from a menu. All three save the file on the server and paste its path,
+with one toast at the end.
 
-No drag, no clipboard, no pointer at all. **Attach a file…** opens your
-browser's ordinary file picker and sends whatever you choose down exactly the
-same road: saved on the server, path pasted into the prompt, one toast at the
-end. It is in three places, and each one keeps the meaning of the surface you
-opened it from:
+**Paste** is the shortest: take the screenshot, press `Ctrl+v` (`Cmd+v` on a Mac), and the
+image on your clipboard takes the same route.
+
+**Attach a file…** opens your browser's ordinary file picker, and lives in three places:
 
 - The **input `⋯` menu** below the terminal (see
-  [The workspace in the browser](/docs/web-workspace)), the entry closest to
-  your thumb on a phone, since there is no drag gesture on a touch screen at
-  all.
-- The **agent and terminal row menus** in the sidebar, so a keyboard-only
-  desktop has one too. The entry appears while that session's terminal is open
-  in front of you and you are the one driving it, because the file still travels
-  through that terminal's own connection; close the terminal and the entry goes
-  with it.
-- The file tree's right-click menu in the editor, as **Upload here…**, which
-  puts the file in the folder you right-clicked exactly as dropping on it would,
-  and pastes nothing anywhere.
+  [The workspace in the browser](/docs/web-workspace)), which is the phone entry point,
+  since there is no drag gesture on a touch screen.
+- The **agent and terminal row menus** in the sidebar, so a keyboard-only desktop has one
+  too. The entry appears while that session's terminal is open in front of you and you are
+  the one driving it; close the terminal and the entry goes.
+- The file tree's right-click menu in the editor, as **Upload here…**, which puts the file
+  in the folder you right-clicked and pastes nothing anywhere.
 
-You can pick several at once. A picker cannot hand over a folder, so the
-folder refusal below never comes up for this gesture.
+You can pick several files at once, and a picker cannot hand over a folder, so the folder
+refusal below never comes up for that gesture.
 
-## Or just paste it
+A few things specific to pasting:
 
-You do not have to find the file first. Take the screenshot, press
-`Ctrl+v` (`Cmd+v` on a Mac), and the image on your clipboard takes exactly the
-same route: saved on the server, path pasted into the prompt. It is the shorter
-gesture and it is the one most people reach for, because a screenshot is already
-on the clipboard the moment you take it.
+- **Images, and text that is very long, are taken over.** A clipboard carrying an image is
+  taken over, and so is text past a length you set
+  ([below](#a-very-long-paste-becomes-a-file-too)). Anything shorter pastes exactly as it
+  always has. When the clipboard carries an image *and* text, the image wins and the text is
+  not pasted.
+- **`Ctrl+Shift+v` forces the text.** Image-wins is right for a screenshot and wrong for
+  rich content: copy a range of spreadsheet cells and the clipboard carries a picture of the
+  cells alongside the numbers. `Ctrl+Shift+v` (`Cmd+Shift+v`) skips image handling entirely,
+  and is also how you paste very long text as text. It applies to that one keystroke.
+- **On a phone, the path joins your draft** rather than sending anything. The toast says so.
+- **A screenshot usually has no name of its own.** Browsers hand one over as `image.png`, so
+  several pastes collide, and dux saves the next one under a new name and tells you what it
+  is. With no name at all, dux invents one from the clock, like
+  `pasted-2026-08-09-141530.png`.
 
-Everything below applies to a paste as much as to a drop: the same folders, the
-same ignore file, the same collision-safe naming, the same per-provider path
-shape, the same one toast at the end.
-
-A few specifics worth knowing:
-
-- **Images, and text that is very long.** A clipboard carrying an image is taken
-  over. So is a piece of text past a length you set
-  ([below](#a-very-long-paste-becomes-a-file-too)). Anything shorter is left
-  completely alone and pastes exactly as it always has. When the clipboard
-  carries an image *and* text (copying a screenshot out of an application
-  routinely does), the image wins and the text is not pasted, because pasting
-  both would drop the markup into your prompt beside the path.
-- **`Ctrl+Shift+v` forces the text.** Image-wins is the right default for a
-  screenshot and the wrong one for rich content: copy a range of spreadsheet
-  cells and the clipboard carries a picture of the cells alongside the numbers,
-  and you almost certainly wanted the numbers. `Ctrl+Shift+v` (`Cmd+Shift+v` on
-  a Mac) skips image handling entirely and pastes the text, exactly as that
-  chord does elsewhere. It is also how you paste a very long piece of text as
-  text, because it is one hatch rather than two competing ones. It applies to
-  that one keystroke; the next `Ctrl+v` behaves normally again.
-- **On a phone, the path joins your draft.** With the compose bar up, a pasted
-  image puts its path into the message you are composing rather than sending
-  anything. You finish the sentence and press Send, as usual. The toast says so
-  too, rather than claiming the agent already has it.
-- **A screenshot usually has no name of its own.** Browsers hand one over as
-  `image.png`, so several pastes collide, and dux does what it does for any
-  collision: saves the next one under a new name and tells you what that name
-  is. When the clipboard supplies no name at all, dux invents one from the
-  clock, like `pasted-2026-08-09-141530.png`.
-
-### Why paste and not "read my clipboard"
-
-Browsers have an API for reading the clipboard on demand, and dux deliberately
-does not use it. It is blocked outside a **secure context**, and dux is routinely
-served over plain HTTP on a Tailscale address, which is exactly the deployment
-this feature is for. The `paste` event has no such requirement, because your
-keystroke *is* the permission: the browser hands the bytes to the page precisely
-because you asked it to. That is the same reasoning behind `Ctrl+v` being the
-reliable paste chord in the web terminal (see
-[The workspace in the browser](/docs/web-workspace)).
+> [!NOTE]
+> dux reads your clipboard only from a real paste keystroke, never on demand. The on-demand
+> browser API is blocked outside a secure context, and dux is routinely served over plain
+> HTTP on a Tailscale address.
 
 ## A very long paste becomes a file too
 
-Paste a 40 KB error log into an agent and every one of those characters goes
-into its context window, whether or not it needed all of them. The agent can
-only read what you gave it, and you gave it everything.
+Paste a 40 KB error log into an agent and every one of those characters goes into its
+context window. So past a length you set, dux saves the text as a `.txt` file in the agent's
+upload folder and pastes **that file's path** instead. The agent can then open it, scan it,
+or grep it.
 
-So past a length you set, dux takes the same route it takes for an image: it
-saves the text as a `.txt` file in the agent's upload folder and pastes **that
-file's path**. The agent can then open it, scan it, grep it, or ignore most of
-it. A path costs a handful of tokens; the log costs the window.
-
-The threshold is [`ui.upload_pasted_text_chars`](/docs/configuration), and the
-default is **1000 characters**, deliberately on the low side. The CLIs whose
-source could be read start reclassifying a paste themselves somewhere in that
-region (Codex files anything past 1000 characters away as generic large content;
-Claude Code treats a single key event over 800 as a paste), and since any
-command can be a provider in dux, one nobody has measured may cut off sooner.
-Raise it if you would rather more of your text arrived as text. Paste a stack
-trace, a diff or a config file and you hand over a document. Paste a paragraph
-of instructions and it arrives as text, as it always did.
+The threshold is [`ui.upload_pasted_text_chars`](/docs/configuration), and the default is
+**1000 characters**, deliberately low: Codex files anything past 1000 characters away as
+generic large content, and Claude Code treats a single key event over 800 as a paste. Since
+any command can be a provider in dux, one nobody has measured may cut off sooner. Raise it
+if you would rather more of your text arrived as text.
 
 The details:
 
-- **Counted in characters.** A paste in Japanese, or one full of emoji, is
-  measured exactly the way an English one is. Counting bytes would file a
-  Japanese paragraph away at a third of the length an English one is allowed.
-- **The file is the pasted text, exactly.** UTF-8, no BOM added, nothing
-  appended, no newlines rewritten: carriage returns, trailing spaces, escape
-  codes, combining marks and NUL bytes all survive. The one exception is an
-  unpaired surrogate, half of a character whose other half never arrived, which
-  UTF-8 cannot represent and which is written as the replacement character
-  (`U+FFFD`) instead. It is named from the clock, like
-  `pasted-2026-08-09-141530.txt`, and
-  it lands in the same folder, under the same ignore file and the same
-  collision-safe naming, as everything else on this page.
-- **The toast says so, and says the way out.** Turning a paste into a file
-  silently would be a surprise, so the report leads with what happened and with
-  the size that triggered it, then names the file, then tells you your text is
-  still on the clipboard and which chord pastes it literally: *"That paste was
-  41320 characters, so dux saved it as a file rather than typing it into the
-  agent."* If the save itself fails it says it **tried** to save, and the
-  clipboard note is how you get your text back. That one waits for you instead
-  of clearing itself: dux cancelled the paste to make room for a file that never
-  arrived, so your text is neither typed nor saved and the message is the thing
-  telling you how to get it back.
-- **`Ctrl+Shift+v` pastes it as text anyway.** The same hatch as image-wins,
-  for the same reason, and for that one keystroke only.
-- **Set it to `0` to switch it off** and long pastes go to the prompt verbatim,
-  as before.
-- **Never in a terminal.** A long paste into a shell is a command, or a heredoc,
-  or a script you meant to run. Turning that into a file would destroy what you
-  meant, so a terminal pastes text verbatim at any length and always will.
-- **In the phone message box too.** A paste that large is a document wherever
-  you paste it, so the same thing happens: the file is saved and its **path
-  joins your draft**, which you can then write around before pressing Send. The
-  alternative would be a message box holding 40 KB of log.
+- **Counted in characters**, so a paste in Japanese or one full of emoji is measured exactly
+  the way an English one is.
+- **The file is the pasted text, exactly.** UTF-8, no BOM added, nothing appended, no
+  newlines rewritten: carriage returns, trailing spaces, escape codes, combining marks and
+  NUL bytes all survive. The one exception is an unpaired surrogate, which UTF-8 cannot
+  represent and which is written as the replacement character (`U+FFFD`). It is named from
+  the clock, like `pasted-2026-08-09-141530.txt`, and lands in the same folder under the
+  same ignore file and collision-safe naming as everything else here.
+- **The toast says so, and says the way out.** It leads with what happened and the size that
+  triggered it, names the file, then tells you your text is still on the clipboard and which
+  chord pastes it literally: *"That paste was 41320 characters, so dux saved it as a file
+  rather than typing it into the agent."* If the save itself fails it says it **tried** to
+  save, and that message waits for you instead of clearing itself, because your text is
+  neither typed nor saved and the message is how you get it back.
+- **`Ctrl+Shift+v` pastes it as text anyway**, for that one keystroke.
+- **Set it to `0` to switch it off** and long pastes go to the prompt verbatim.
+- **Never in a terminal.** A long paste into a shell is a command, or a heredoc, or a script
+  you meant to run, so a terminal pastes text verbatim at any length.
+- **In the phone message box too**, where the saved file's **path joins your draft** and you
+  write around it before pressing Send.
 
 ## Why a path and not the file itself
 
-The obvious idea is to shove the file's bytes into the terminal. That cannot
-work, and it is worth knowing why, because it explains the whole design.
+No agent CLI reads a file out of its input stream. They take a **path**, or they read the
+clipboard of the machine they are running on, which when you are driving from a browser is
+the wrong computer. Claude Code shells out to `xclip` or `wl-paste`; Codex takes
+`--image <FILE>` and also accepts a pasted path; OpenCode's own docs say dragging works in
+"a terminal that exposes the dropped file path to the TUI".
 
-No agent CLI reads a file out of its input stream. They take a **path**, or they
-read the **clipboard of the machine they are running on**, which when you are
-driving from a browser is entirely the wrong computer. Claude Code shells out to
-`xclip` or `wl-paste`; Codex takes `--image <FILE>` and also accepts a pasted
-path; OpenCode's own docs say dragging works in "a terminal that exposes the
-dropped file path to the TUI".
-
-That is also what every terminal emulator does. Alacritty, kitty, WezTerm,
-Ghostty, GNOME Terminal, Konsole and iTerm2 all answer a drop by typing the
-path in for you. None of them sends contents. dux does the same thing, with the
-one extra step a browser needs: it puts the file on the server first, since that
-is where the agent can actually see it.
-
-## Two drops, two intents
-
-Dropping a file means one of two things, and dux stopped pretending it was one.
-
-Handing an image to an agent is **"look at this for me"**. It is scratch: you
-want the agent to read it, and then you want it gone. Dropping a file into a
-terminal, or onto the editor's file tree, is **"put this here"**. It is a file
-you are placing in a folder you chose, and you meant it.
-
-Those want opposite things from git, so they get different destinations. Two
-intents, three places you can drop: the agent's pane, a terminal, and the
-editor's file tree.
+That is what every terminal emulator does too. Alacritty, kitty, WezTerm, Ghostty, GNOME
+Terminal, Konsole and iTerm2 all answer a drop by typing the path in. dux does the same,
+with the one extra step a browser needs: it puts the file on the server first.
 
 ## Where the file lands
 
-**On an agent's pane**, in that agent's upload folder: `.dux/uploads` inside the
-agent's worktree, created the first time you drop something. It is **invisible
-to git**, and it is **deleted with the agent**, because it lives inside the
-worktree that gets removed along with it. Nothing to clean up, nothing sitting
-in your changed files asking to be discarded. Every tab of one agent shares one
-worktree, so it does not matter which tab you drop on.
+Dropping a file means one of two things, and dux gives them different destinations.
+Handing an image to an agent is "look at this for me": scratch. Dropping a file into a
+terminal or onto the editor's file tree is "put this here": a file you are placing in a
+folder you chose.
 
-It is inside the worktree rather than tucked away somewhere neutral for a
-practical reason: some agent CLIs will not read a file outside the workspace
-they were started in, so a folder next door would be a path the agent cannot
-open.
+**On an agent's pane**, in that agent's upload folder: `.dux/uploads` inside the agent's
+worktree, created the first time you drop something. It is **invisible to git** and
+**deleted with the agent**, so there is nothing to clean up and nothing sitting in your
+changed files. Every tab of one agent shares one worktree, so it does not matter which tab
+you drop on. It lives inside the worktree because some agent CLIs will not read a file
+outside the workspace they were started in.
 
-**On a terminal**, in the folder that terminal is *actually* in right now. Not
-the folder it was opened in. If you opened a terminal at your repo root and then
-typed `cd docs/images`, a file dropped on it lands in `docs/images`, because
-that is where you are. dux asks the live process each time rather than
-remembering where it started, and it prefers whatever program is in the
-foreground over the shell behind it, on the reasoning that a file handed to a
-terminal belongs to whatever is reading it. If that foreground program has
-already exited but its job is still running, dux asks a surviving part of that
-job before it falls back to the shell, because a pipeline whose first stage
-finished is an ordinary thing and the shell is not where you are.
+**On a terminal**, in the folder that terminal is *actually* in right now, not the one it
+opened in. Open a terminal at your repo root, type `cd docs/images`, and a dropped file lands
+in `docs/images`. dux prefers whatever program is in the foreground over the shell behind it.
 
-That last step, asking the rest of a job whose first program has already gone, is
-**Linux only**. On macOS dux cannot enumerate the job, and it will not pretend a
-job it cannot see has finished, so in that one situation it refuses the drop and
-asks you to try again rather than quietly saving into the shell's folder instead.
-The window is narrow and it closes on its own: drop the file again and the
-program now in the foreground answers for itself. Everything else on this page
-behaves identically on both platforms.
+> [!IMPORTANT]
+> If a foreground program has exited but its job is still running, dux looks at the rest of
+> the job before falling back to the shell, and that step is **Linux only**. On macOS dux
+> refuses the drop in that one situation and asks you to try again rather than quietly
+> saving into the shell's folder. Drop the file again and the program now in the foreground
+> answers for itself. Everything else on this page behaves the same on both platforms.
 
-If dux cannot read the process at all, it refuses the drop and tells you, rather
-than writing somewhere else and naming that instead. Being unable to see where a
-terminal is has never been a good reason to guess.
+If dux cannot read the process at all, it refuses the drop and tells you rather than writing
+somewhere else and naming that instead. A file that lands inside an agent's worktree shows
+up in that agent's Changes pane straight away; one that lands anywhere else changes nothing
+git is watching, and nothing claims otherwise.
 
-**On the editor's file tree**, in the folder you dropped on. This is the
-durable answer, and it is the one place where you pick the destination by
-pointing at it rather than by having navigated there. Drop on a **folder** row
-and the files go into that folder. Drop on a **file** row and they go into the
-folder that file is in, because a file is not a place to put a file. Drop on the
-**empty space** below the tree and they go to the worktree root. Whichever row
-would receive the drop lights up while you are still holding the files, so you
-can see where they are going before you let go, and the toast afterwards names
-the folder.
+**On the editor's file tree**, in the folder you dropped on:
 
-Nothing here goes near the upload folder and nothing writes an ignore file.
-These are **ordinary, visible files**: `git status` shows them, you can commit
-them, and they are still there after the agent is gone. That is the whole point
-of dropping them here instead of on the pane. The agent's Changes pane refreshes
-immediately, so the new files appear there without waiting for the next poll,
-and the file tree and the file search index both pick them up at once.
+- Drop on a **folder** row and the files go into that folder.
+- Drop on a **file** row and they go into the folder that file is in.
+- Drop on the **empty space** below the tree and they go to the worktree root.
 
-A tree drop pastes nothing into any terminal. It saves the file and stops, which
-is what "add this to my project" means.
+The receiving row lights up while you are still holding the files, and the toast afterwards
+names the folder.
 
-You cannot drop outside the worktree or into `.git`, exactly as you cannot
-create, rename or move anything into either. dux refuses and says so, and
-nothing is written.
+Nothing here goes near the upload folder and nothing writes an ignore file. These are
+**ordinary, visible files**: `git status` shows them, you can commit them, and they are still
+there after the agent is gone. The agent's Changes pane, the file tree and the file search
+all pick them up at once. A tree drop pastes nothing into any terminal.
 
-A drop is **stricter than create, rename and move in one way**: those three
-follow a symlinked directory as long as it stays inside the worktree, so
-creating a file inside a `libs -> packages/libs` link works, while a drop
-refuses any folder reached through a link. That is the safe direction to be
-wrong in, since a link is the one way an ordinary-looking relative path still
-lands outside the tree. Drop into the real folder instead.
+You cannot drop outside the worktree or into `.git`, exactly as you cannot create, rename or
+move anything into either. dux refuses and says so, and nothing is written.
 
-dux takes **files**, not folders. Drop a folder and it is refused by name, with
-any files you dropped alongside it still saved; one toast tells you which was
-which. And if the folder you dropped on has been deleted since the tree last
-listed it, the drop is refused with that folder named, rather than being
-recreated behind your back.
+> [!IMPORTANT]
+> A drop is **stricter than create, rename and move in one way**: those three follow a
+> symlinked directory as long as it stays inside the worktree, so creating a file inside a
+> `libs -> packages/libs` link works, while a drop refuses any folder reached through a link.
+> Drop into the real folder instead.
 
-The toast that appears afterwards names the folder for each file, so you never
-have to guess. Drop several onto a terminal, type `cd` in the middle, and they
-genuinely do land in different folders; the toast says which went where.
+dux takes **files**, not folders. Drop a folder and it is refused by name, with any files you
+dropped alongside it still saved, and one toast says which was which. If the folder you
+dropped on has been deleted since the tree last listed it, the drop is refused with that
+folder named rather than the folder being recreated.
 
-If the file landed inside an agent's worktree, that agent's Changes pane is
-refreshed straight away rather than on its next poll. With the ignore file in
-place an upload changes nothing git can see, so the pane stays exactly as it
-was, which is the point; turn the ignore off and your screenshot is sitting
-there as an untracked file before you have finished typing the sentence about
-it. A file that landed somewhere else, a terminal you had `cd`'d out of the
-worktree, or a project or standalone terminal with no agent behind it, changes
-nothing git is watching, so nothing claims otherwise.
+The toast names the folder for each file. Drop several onto a terminal, type `cd` in the
+middle, and they genuinely do land in different folders; the toast says which went where.
+
+With the ignore file in place an agent upload changes nothing git can see, so the Changes
+pane stays as it was. Turn the ignore off and your screenshot shows up there as an untracked
+file straight away.
 
 ## Keeping the uploads out of git
 
-The upload folder hides itself. dux keeps a `.gitignore` in it containing a
-single `*`, which ignores everything in the folder **including the ignore file
-itself**. Run `git status` after dropping a
-screenshot and it prints nothing at all: not the image, not the ignore file, not
+The upload folder hides itself. dux keeps a `.gitignore` in it containing a single `*`, which
+ignores everything in the folder **including the ignore file itself**. Run `git status` after
+dropping a screenshot and it prints nothing at all: not the image, not the ignore file, not
 even the folder.
 
-dux tries to write that file on **every** upload, not only on the drop that
-first creates the folder. It costs one exclusive-create syscall that does
-nothing when the file is already there, and it means the folder repairs itself:
-delete the ignore file, or create the folder while the setting is off and turn
-it on later, and the next dropped file puts it back.
+dux rewrites that file on **every** upload, not only the first, so the folder repairs itself:
+delete the ignore file, or create the folder while the setting is off and turn it on later,
+and the next dropped file puts it back.
 
-Two things dux deliberately will not do:
+Two things dux will not do:
 
-- **It never edits a `.gitignore` that is already there.** If you have written
-  your own rules in that folder, they win, and turning the setting on later will
-  not overwrite them.
-- **It never touches `.git/info/exclude`.** That looks like the tidier place for
-  a local ignore, and in a worktree it is a trap: inside a linked worktree that
-  path resolves to the **main checkout's** copy, so writing it would edit your
-  main repository and change what git ignores in every other worktree at once.
-  Polluting your repo is the thing this feature exists to stop doing.
+- **It never edits a `.gitignore` that is already there.** Your own rules in that folder win,
+  and turning the setting on later will not overwrite them.
+- **It never touches `.git/info/exclude`.** Inside a linked worktree that path resolves to
+  the **main checkout's** copy, so writing it would edit your main repository and change what
+  git ignores in every other worktree at once.
 
 These are settings, on `[ui]` in `config.toml`:
 
@@ -295,102 +193,80 @@ These are settings, on `[ui]` in `config.toml`:
 | `upload_write_gitignore` | `true` | Whether to keep the self-ignoring `.gitignore` in that folder, attempted on every upload. Set it to `false` if you intend to commit what you drop or paste, and your uploads show up as ordinary untracked files again. This one is also a row in the web UI's **Preferences** dialog, as *Hide dropped and pasted files from git*. |
 | `upload_pasted_text_chars` | `1000` | How long a piece of text you paste into an **agent** may be before dux saves it as a `.txt` file in the folder above and pastes that file's path instead. Counted in characters. `0` switches it off. Values between 1 and 199, or above 100000, are clamped with one warning in `dux.log`. Also a row in the web UI's **Preferences** dialog, as *Save long pastes as a file*. Never applies to a terminal. |
 
-`upload_directory` deliberately has **no** Preferences row. It is a path, and a
-free-text box is a poor way to pick one; doing it properly needs a directory
-picker the dialog does not have. Edit it in `config.toml`.
+`upload_directory` deliberately has **no** Preferences row: picking a path properly needs a
+directory picker the dialog does not have. Edit it in `config.toml`.
 
-Set `upload_directory = ""`, or point it at anything outside the worktree, and
-dux will not follow you: uploads have to be somewhere the agent can read and
-somewhere that dies with the agent, so an unusable value degrades to the default
-rather than being obeyed. The same goes for a value the filesystem itself could
-not store, one holding a control character or a null byte (a TOML `"\n"` escape
-will get you one), or one longer than a path is allowed to be. Every one of them
-is caught when the config loads, warned about once in `dux.log`, and replaced.
+Set `upload_directory = ""`, or point it at anything outside the worktree, and dux will not
+follow you: uploads have to be somewhere the agent can read and somewhere that dies with the
+agent. The same goes for a value the filesystem could not store, one holding a control
+character or a null byte (a TOML `"\n"` escape will get you one), or one longer than a path
+is allowed to be. Each is caught when the config loads, warned about once in `dux.log`, and
+replaced.
 
-**A rejected value does not survive in your config file.** The replacement
-happens in memory as the config loads, so the next time dux saves `config.toml`
-for any reason the corrected value is what gets written and the one you typed is
-gone. That is the same treatment `terminal_font_size` gets for an out-of-range
-number. If you want to keep the value you wrote while you work out why it was
-refused, keep a copy of it somewhere other than `config.toml`.
+> [!WARNING]
+> **A rejected value does not survive in your config file.** The correction happens as the
+> config loads, so the next time dux saves `config.toml` for any reason the corrected value
+> is what gets written and the one you typed is gone. That is the same treatment
+> `terminal_font_size` gets for an out-of-range number. Keep a copy elsewhere while you work
+> out why it was refused.
 
 ## Dropped files do not follow a fork
 
-Forking an agent copies its uncommitted work into the new worktree, and it does
-that by asking git what has changed. Uploads are invisible to git by design, so
-git does not mention them and the fork does not get them: the new agent starts
-with an empty upload folder. Turn `upload_write_gitignore` off and they are
-ordinary untracked files again, which a fork does carry across. If you want a
-particular screenshot in both, drop it onto both.
+Forking an agent copies its uncommitted work into the new worktree by asking git what has
+changed. Uploads are invisible to git, so the fork does not get them and the new agent starts
+with an empty upload folder. Turn `upload_write_gitignore` off and they become ordinary
+untracked files, which a fork does carry across. To have a particular screenshot in both,
+drop it onto both.
 
-If you want uploads visible to git, set `upload_write_gitignore = false`: the
-folder stays but the files become ordinary untracked files, so they appear in
-Changes and can be committed. There is
-deliberately no way to point uploads at the worktree root itself: the folder is
-what makes them easy to ignore, easy to find, and easy to throw away.
+There is deliberately no way to point uploads at the worktree root itself: the folder is what
+makes them easy to ignore, easy to find, and easy to throw away.
 
 ## Nothing is ever overwritten
 
-Drop `screenshot.png` twice and you get two files. The second one is saved under
-a new name, with a timestamp and a counter, and **the toast tells you the new
-name**. That last part matters: a message saying "1 file was renamed" would tell
-you something changed without telling you what to type, which is useless when
-the whole point is to reference the file.
+Drop `screenshot.png` twice and you get two files. The second is saved under a new name, with
+a timestamp and a counter, and **the toast tells you the new name**, because the whole point
+is to reference the file.
 
-The file is created exclusively, so two uploads racing each other cannot land on
-the same name, and dux refuses to write through a symlink. If something
-unexpected is sitting at that name, the drop fails and says so rather than
-quietly writing next to it.
+dux refuses to write through a symlink, and if something unexpected is sitting at that name
+the drop fails and says so rather than quietly writing next to it.
 
-The same holds for a drop on the editor's file tree, and it is worth being
-precise about how that differs from **moving** a file in the editor. A move is
-*refused* when something is already at the destination, because you named that
-exact destination and quietly putting the file somewhere else would be a
-different operation from the one you asked for. A drop names only a folder, so
-the next free name is the honest answer and the toast tells you which one it
-used. Neither one ever overwrites what is already there.
+A drop on the editor's file tree behaves the same way, and differs from **moving** a file in
+the editor: a move is *refused* when something is already at the destination, because you
+named that exact destination, while a drop names only a folder, so the next free name is the
+honest answer. Neither overwrites.
 
 ## Your filenames are kept as you had them
 
-dux **validates** a dropped name; it does not rewrite it. Accented names,
-Japanese names, Cyrillic names, names with spaces, parentheses and apostrophes
-all arrive exactly as they were. Rewriting names to "safe" characters destroys
-information, and it can quietly turn two different files into one.
+dux **validates** a dropped name; it does not rewrite it. Accented, Japanese and Cyrillic
+names, names with spaces, parentheses and apostrophes all arrive exactly as they were.
 
-A handful of names are refused outright, with the reason named:
+A handful are refused outright, with the reason named:
 
 - an empty name, or `.` and `..`, which name a folder and not a file
 - anything containing a `/`, which makes it a path rather than a name
 - control characters and null bytes, which no terminal can print back to you
 - anything longer than the filesystem will accept
 
-When a name is right at the length limit and a collision forces a suffix, dux
-trims the front of the name to make room and keeps the extension, so the file is
-still recognizable as an image.
+When a name is right at the length limit and a collision forces a suffix, dux trims the front
+of the name to make room and keeps the extension.
 
-## The folder has to be nameable too
-
-The name is only the last part of the path, and the path is what ends up in your
-prompt, so the folders above it are held to the same standard. dux refuses a drop
-into a folder whose own path could not survive the trip to your terminal: one
-holding a line feed (which arrives as a submit rather than as text), one holding
-an escape character (which the program reading your terminal simply obeys), or
-one whose name is not valid text at all. Those are the only refusals, and none
-of them is something a different way of writing the path could rescue.
-
-Everything else works. Spaces, dollars, backticks, quotes and semicolons in a
-folder name are all fine, which matters because a worktree path is built from
+The folders above it are held to the same standard, since the whole path ends up in your
+prompt. dux refuses a drop into a folder whose path holds a line feed (which arrives as a
+submit), an escape character (which the program reading your terminal simply obeys), or text
+that is not valid at all. Those are the only refusals. Spaces, dollars, backticks, quotes and
+semicolons in a folder name are all fine, which matters because a worktree path is built from
 your project's name.
 
 ## What the path looks like when it lands
 
-Whether a dropped file is picked up automatically depends on the exact shape of
-the path in the prompt, and the agent CLIs do not agree with each other about
-what that shape should be. So it is **a per-provider setting**, `web_dragdrop_paste`,
-in the provider's own block in `config.toml` next to `command` and `resume_args`.
+Whether a dropped file is picked up automatically depends on the exact shape of the path in
+the prompt, and the agent CLIs disagree about what that shape should be. So it is **a
+per-provider setting**, `web_dragdrop_paste`, in the provider's own block in `config.toml`
+next to `command` and `resume_args`.
 
-You almost certainly do not need to touch it. dux ships the value it measured for
-each CLI it knows about.
+> [!TIP]
+> You almost certainly do not need to touch it. dux ships the value it measured for each CLI
+> it knows about.
 
 ```toml
 [providers.codex]
@@ -409,21 +285,18 @@ A file at `/home/you/My Project/it's here.png` goes out as:
 | `double_quoted` | `"/home/you/My Project/it's here.png"` |
 | `backslash_escaped` | `/home/you/My\ Project/it\'s\ here.png` |
 
-`bare` sends the path exactly as it is on disk. `single_quoted` and
-`double_quoted` wrap it so that a shell lexer reads the whole thing as one word,
-escaping whatever would otherwise end the quoting. `backslash_escaped` skips the
-quotes and protects the significant characters one at a time, which is what
-several real terminal emulators do when you drop a file on them.
+`bare` sends the path exactly as it is on disk. `single_quoted` and `double_quoted` wrap it
+so a shell lexer reads the whole thing as one word. `backslash_escaped` protects the
+significant characters one at a time, which is what several real terminal emulators do.
 
-**Which one do you want?** If a dropped file arrives as plain text instead of
-attaching, the CLI probably wants the path quoted, so try `single_quoted`. If the
-path arrives visibly mangled, with stray quote or backslash characters in it, the
-CLI probably wants it `bare`.
+**Which one do you want?** If a dropped file arrives as plain text instead of attaching, the
+CLI probably wants the path quoted, so try `single_quoted`. If the path arrives visibly
+mangled, with stray quote or backslash characters, the CLI probably wants it `bare`.
 
 ### Which CLI needs which, and why
 
-Every row here was produced by running that CLI's own path handling over the exact
-bytes dux sends, not by reading the code and summarising it.
+Every row was produced by running that CLI's own path handling over the exact bytes dux
+sends.
 
 | CLI | What it does with a pasted path | Value |
 |---|---|---|
@@ -432,139 +305,113 @@ bytes dux sends, not by reading the code and summarising it.
 | Codex | Strips one matching quote pair, resolves a `file://` URL, and otherwise lexes the text with POSIX shell rules, accepting it only if it comes out as exactly one token. | `single_quoted` |
 | Copilot CLI | Closed source, so this one is **not verified**. It is defaulted to `bare`, the do-nothing option and what two of the three CLIs above want. | `bare` (a guess) |
 
-Anything else, including a provider you add yourself, gets `bare` unless you say
-otherwise. An absent key means `bare`, and so does a value dux does not recognise
-(it says so once in `dux.log` and carries on rather than refusing to load your
-config).
+Anything else, including a provider you add yourself, gets `bare`. An absent key means
+`bare`, and so does a value dux does not recognise (it says so once in `dux.log` and carries
+on rather than refusing to load your config).
 
-The `web_` prefix is there to be obvious about scope: this affects the browser and
-nothing else. In the terminal UI, dropping a file onto the window is your terminal
-emulator's job and dux is not involved at all.
+The `web_` prefix marks the scope: this affects the browser and nothing else. In the terminal
+UI, dropping a file onto the window is your terminal emulator's job.
 
 ### What is known to fail
 
-This is the more useful half of the table, and none of it is something dux can fix
-from its side. dux sends the correct bytes; the receiving tool rewrites them.
+None of this is something dux can fix from its side. dux sends the correct bytes; the
+receiving tool rewrites them.
 
-- **Single-quoting a path that contains an apostrophe breaks Claude Code.** POSIX
-  quoting writes an embedded apostrophe by closing the quote, escaping it and
-  reopening, and Claude Code's own unescaping step then collapses that into three
-  apostrophes in a row. A file in a folder called `Bob's app` comes out naming
-  nothing. This is why Claude's value is `bare`.
-- **Any form carrying a backslash is mangled by Claude Code's unescaping step.**
-  That covers `backslash_escaped` outright, and it also covers a path that simply
-  has a backslash in its name, whatever form you send it in. Backslashes in file
-  and folder names are rare on macOS and Linux, but when they happen there is no
-  form that survives.
-- **OpenCode eats a trailing quote character, and unescapes backslashes.** It
-  strips quote characters from *both ends* rather than one matching pair, so a
-  file whose own name ends in a quote loses that character. And like Claude Code
-  it undoes backslash escapes, so a path holding a backslash is mangled there too.
-- **Codex ignores a paste that is too long before it ever looks for a path.**
-  Anything over 1000 characters is filed away as generic pasted content, and the
-  quoting dux adds counts toward that. dux measures the finished paste rather than
-  the file's own path, and when it would go over the limit it does not send it at
-  all: the report tells you the file was saved, gives you its full path, and says
-  the agent will not pick it up automatically. That report waits for you rather
-  than clearing itself, since the path in it is the only one you have got. The
-  limit belongs to Codex itself,
-  not to a quoting style and not to what you called the provider block: it applies
-  whichever `web_dragdrop_paste` value you give Codex, it follows Codex under any
-  block name you like (`[providers.myagent] command = "codex"` still gets it), and
-  a block you happened to name `codex` that runs something else does not. dux
-  decides by the `command` you configured, comparing on its file name, so a full
-  path such as `/usr/local/bin/codex` counts the same as the bare name. No other
-  CLI has been measured to have a limit, and a terminal has none at all.
+- **Single-quoting a path that contains an apostrophe breaks Claude Code.** POSIX quoting
+  writes an embedded apostrophe by closing the quote, escaping it and reopening, and Claude
+  Code's own unescaping collapses that into three apostrophes in a row. A file in a folder
+  called `Bob's app` comes out naming nothing. This is why Claude's value is `bare`.
+- **Any form carrying a backslash is mangled by Claude Code's unescaping step.** That covers
+  `backslash_escaped` outright, and a path that simply has a backslash in its name whatever
+  form you send it in. Rare on macOS and Linux, but when it happens no form survives.
+- **OpenCode eats a trailing quote character, and unescapes backslashes.** It strips quote
+  characters from *both ends* rather than one matching pair, so a file whose name ends in a
+  quote loses that character.
+- **Codex ignores a paste that is too long before it ever looks for a path.** Anything over
+  1000 characters is filed away as generic pasted content, and the quoting dux adds counts
+  toward that. dux measures the finished paste, and when it would go over the limit it does
+  not send it at all: the report tells you the file was saved, gives its full path, and says
+  the agent will not pick it up automatically. That report waits for you rather than clearing
+  itself. The limit belongs to Codex itself, so it applies whichever `web_dragdrop_paste`
+  value you give it and follows Codex under any block name
+  (`[providers.myagent] command = "codex"` still gets it), while a block you happened to name
+  `codex` that runs something else does not: dux decides by the `command` you configured,
+  comparing on its file name, so `/usr/local/bin/codex` counts the same as the bare name. No
+  other CLI has been measured to have a limit, and a terminal has none at all.
 
-A `file://` URL is deliberately **not** one of the four values. Codex and OpenCode
-both resolve one, but whether Claude Code does on its paste path has not been
-measured. It is not a rejected idea, it is a candidate: measure it against a CLI,
-and it can be added as a fifth value for that provider.
+A `file://` URL is deliberately **not** one of the four values. Codex and OpenCode both
+resolve one, but whether Claude Code does on its paste path has not been measured. Measure it
+against a CLI and it can be added as a fifth value.
 
-### Getting it wrong is not usually a breakage
-
-If the value is wrong for your CLI, the normal symptom is that the file is not
-attached automatically and its path is left sitting in the prompt as ordinary
-text. You can still work with that, and you can still refer to the file by the
-path you are looking at. Nothing is lost and nothing is overwritten.
+If the value is wrong for your CLI, the usual symptom is that the file is not attached
+automatically and its path sits in the prompt as ordinary text. You can still refer to the
+file by that path. Nothing is lost and nothing is overwritten.
 
 ## Dropping onto a terminal
 
-A terminal is not an agent, and it does not read `web_dragdrop_paste` at all. Its
-dropped paths are **always quoted**, because a terminal runs a shell, and a shell
-is precisely the thing that would split a path on its spaces, expand a `$` in it
-and run a command substitution the moment you press Enter on the line the path
-landed in. dux permits all of those characters in a destination path, so the
-quoting is what makes them inert. The path is pasted at your cursor as one
-literal word and nothing is submitted for you. There is no length limit either:
-that limit is a property of Codex's composer, and a shell does not have one, so a
-very long path is sent to a terminal rather than held back.
+A terminal does not read `web_dragdrop_paste` at all. Its dropped paths are **always
+quoted**, because a shell would otherwise split the path on its spaces, expand a `$` and run
+a command substitution the moment you press Enter. dux permits all of those characters in a
+destination path, so the quoting is what makes them inert. The path is pasted at your cursor
+as one literal word and nothing is submitted for you. There is no length limit either: that
+limit belongs to Codex's composer, and a shell does not have one.
 
 ## Several files at once
 
-Drop a handful and they are saved one after another, and their paths are pasted
-**in the order you dropped them**, not in whatever order the uploads happened to
-finish. Each path is pasted on its own, followed by a single space and no
-newline, because a newline would submit your half-written prompt, and because
-these tools only treat a pasted path as an attachment when the whole paste is
-that one path.
+Drop a handful and their paths are pasted **in the order you dropped them**, not the order
+the uploads finished. Each path is pasted on its own followed by a single space and no
+newline, because a newline would submit your half-written prompt, and because these tools
+only treat a pasted path as an attachment when the whole paste is that one path.
 
-While the uploads are running you get a spinner naming the file being sent and
-counting through the drop, so a large file or a busy server never looks like
-nothing happened. It is replaced, in place, by **one** toast reporting the whole
-drop rather than one per file.
+While the uploads run you get a spinner naming the file being sent and counting through the
+drop. It is replaced, in place, by **one** toast reporting the whole drop rather than one per
+file.
 
 ## Who can drop, and who can paste
 
-This section is about the two **pane** drops, and about a file attached from the
-input or row menus, which is the same journey. A drop on the editor's file tree
-pastes nothing, so nothing below applies to it: it needs no input ownership and
-a watcher can do it, **Upload here…** included.
+This section is about the two **pane** drops and about a file attached from the input or row
+menus. A drop on the editor's file tree pastes nothing, so none of it applies there: it needs
+no input ownership and a watcher can do it, **Upload here…** included.
 
-Only the device that currently holds input. Terminals in dux are one-writer,
-many-watchers (see [The workspace in the browser](/docs/web-workspace)), and the
-drop target only appears for the writer, because a watcher could not paste the
-path afterwards anyway.
+Only the device that currently holds input can drop or paste. Terminals in dux are
+one-writer, many-watchers (see [The workspace in the browser](/docs/web-workspace)), and the
+drop target only appears for the writer.
 
-A watcher who pastes an image is told rather than ignored: nothing is uploaded,
-and a toast says the image was not saved and that taking over is the way to
-paste it here. Nothing is left on the server to clean up.
+A watcher who pastes an image is told rather than ignored: nothing is uploaded, and a toast
+says the image was not saved and that taking over is the way to paste it here.
 
-If you lose input to another device in the moment between the file being saved
-and its path being pasted, dux tells you plainly: the file **was** saved, here
-is its full path, and the path was not sent. You can then take over input and
-paste it yourself. That particular message is one of the few that **waits for
-you** instead of clearing itself, because it is holding the only copy of that
-path anywhere on screen, and a report that timed out would take the path with it.
-Dismiss it once you have what you need. The same honesty applies on a phone: if
-the compose box goes away mid-upload (you rotated to a wide layout, or switched
-the box off), dux reports the file as saved-but-not-added with its full path
-rather than claiming it joined a message you can no longer see.
+> [!IMPORTANT]
+> If you lose input to another device between the file being saved and its path being pasted,
+> dux tells you plainly: the file **was** saved, here is its full path, and the path was not
+> sent. Take over input and paste it yourself. That message waits for you instead of clearing
+> itself, because it holds the only copy of that path on screen.
+
+The same applies on a phone: if the compose box goes away mid-upload (you rotated to a wide
+layout, or switched the box off), dux reports the file as saved-but-not-added with its full
+path rather than claiming it joined a message you can no longer see.
 
 ## Limits, and switching it off
 
-Two `[server]` settings, both read at startup, so changing either needs a server
-restart. See [Server mode overview](/docs/server-mode) for the rest of them.
+Two `[server]` settings. See [Server mode overview](/docs/server-mode) for the rest.
 
 | Key | Default | What it does |
 |---|---|---|
 | `file_drop_max_bytes` | `104857600` (100 MiB) | Largest single dropped file. A file over it is refused with a message saying so, and nothing is written. Set to `0` to switch file drop off entirely: the pane stops offering a drop target, and the server refuses any upload that reaches it anyway. |
 | `file_drop_max_concurrency` | `2` | How many uploads are accepted at once. This bounds how much upload dux holds in memory, not just how much work it does at a time. An upload beyond the limit waits up to 30 seconds for a slot; if none comes free it is refused with a `503` saying the server is busy, and the browser tells you to try the drop again in a moment. `0` clamps to `1`. |
 
-The size default is generous on purpose. Screenshots from a high-resolution
-display are routinely several megabytes, and a stingier limit would reject the
-most ordinary thing anyone drops.
+> [!IMPORTANT]
+> Both are read at startup, so changing either needs a **server restart**.
+
+The size default is generous on purpose: screenshots from a high-resolution display are
+routinely several megabytes.
 
 ## Why this is web-only
 
-The terminal UI needs nothing here, and deliberately gets nothing. Dropping a
-file onto a terminal window is your terminal emulator's job, and it already does
-it: Alacritty, kitty, Ghostty and the rest all type the path in for you, and the
-file is already on the machine the agent is running on. There is nothing for dux
-to add. This feature exists to close the gap that only a browser has.
+Dropping a file onto a terminal window is your terminal emulator's job, and Alacritty, kitty,
+Ghostty and the rest already type the path in for you, with the file already on the machine
+the agent runs on. This feature closes the gap that only a browser has.
 
-There is no drag gesture on a phone, so dropping is a desktop gesture. Pasting
-is not: on a phone the compose bar is your typing surface (see
-[The workspace in the browser](/docs/web-workspace)), and pasting an image into
-it puts the saved file's path into your draft. Neither is **Attach a file…**,
-which is the gesture that works everywhere, phone included.
+There is no drag gesture on a phone, so dropping is a desktop gesture. Pasting is not: on a
+phone the compose bar is your typing surface (see
+[The workspace in the browser](/docs/web-workspace)), and pasting an image into it puts the
+saved file's path into your draft. Neither is **Attach a file…**, which works everywhere.

@@ -1,242 +1,207 @@
 ---
 title: Reaching dux over Tailscale
-description: How dux finds and binds your Tailscale address, how it follows the interface as you close your laptop and reopen it somewhere else, what happens when Tailscale isn't there, why a MagicDNS name needs allowed_hosts, what plain HTTP costs you in the browser, how to put Tailscale's HTTPS proxy in front, and the caveats worth knowing before you open your agents to a tailnet.
+description: How dux finds and binds your Tailscale address, why a MagicDNS name needs allowed_hosts, what plain HTTP costs you in the browser, how to put Tailscale's HTTPS proxy in front, and the caveats before you open your agents to a tailnet.
 group: Web UI
 order: 65
 ---
 
-This is the feature that makes dux on a phone actually pleasant. Tailscale gives your
-machine a stable private address that follows it between networks, dux binds that
-address by default, and your phone opens a URL. No port forwarding, no dynamic DNS,
-no VPN client to babysit.
+Tailscale gives your machine a stable private address that follows it between networks,
+dux binds that address by default, and your phone opens a URL. No port forwarding, no
+dynamic DNS, no VPN client to babysit.
 
-It is also the point where dux stops being reachable only by you, so read
-[the trust model](/docs/server-mode#the-trust-model-stated-plainly) before you rely
-on it. There is no login.
+> [!WARNING]
+> This is the point where dux stops being reachable only by you. **There is no login.**
+> Read [the trust model](/docs/server-mode#the-trust-model-stated-plainly) first.
 
 ## What dux actually does
 
-Tailscale binding is **on by default**, and the setting has three answers rather than
-two:
+Tailscale binding is **on by default**, and the setting has three answers:
 
 ```toml
 [server]
 tailscale = "auto"   # or "yes", or "no"
 ```
 
-- **`"auto"`** (the default) binds your Tailscale address whenever it exists, and
-  keeps looking. This is the one you want on a laptop; see
-  [it follows the interface](#it-follows-the-interface) below.
-- **`"yes"`** looks exactly once, at startup, and never again. If Tailscale is not up
-  at that moment, that run serves your configured host only.
+- **`"auto"`** (the default) binds your Tailscale address whenever it exists, and keeps
+  looking. This is the one you want on a laptop; see
+  [it follows the interface](#it-follows-the-interface).
+- **`"yes"`** looks exactly once, at startup. If Tailscale is not up at that moment, that
+  run serves your configured host only.
 - **`"no"`** never binds it and never runs the detection at all.
 
-`dux server --no-tailscale` forces `"no"` for a single run. If you are upgrading, the
-old boolean `tailscale_enabled` keeps working and is rewritten for you: `true` becomes
-`"yes"` and `false` becomes `"no"`, because a boolean never said "keep watching". The
-next time dux saves your config the old line is gone.
+`dux server --no-tailscale` forces `"no"` for a single run.
 
-When the mode is not `"no"`, dux runs the `tailscale ip` command and reads the address
-back. It takes the first IPv4 in Tailscale's
-`100.64.0.0/10` range, falling back to the first IPv6 in Tailscale's own
-`fd7a:115c:a1e0::/48` block. A plain LAN address or a link-local one is ignored, so
-dux cannot accidentally bind something that merely looks similar.
+> [!NOTE]
+> The old boolean `tailscale_enabled` still works and is rewritten for you: `true` becomes
+> `"yes"` and `false` becomes `"no"`. The next time dux saves your config the old line is
+> gone.
 
-That address then joins the **listen plan** as an extra leg, at the *same port* as
-your primary address. It never replaces your `host`. So the default is two listeners,
-loopback and tailnet, one URL each, both printed in the startup banner with the
-tailnet row labelled `Tailscale` and a note that says other devices on your tailnet
-can reach it with no login. dux skips the extra leg when it would be redundant,
-meaning when your primary is already `0.0.0.0` or already that same address.
+When the mode is not `"no"`, dux runs `tailscale ip` and takes the first IPv4 in
+Tailscale's `100.64.0.0/10` range, falling back to the first IPv6 in Tailscale's own
+`fd7a:115c:a1e0::/48` block. A plain LAN or link-local address is ignored.
 
-The two legs are not equal in one respect, and it is deliberate: your configured
-address is **required** and a failure to bind it is fatal, while the Tailscale leg is
-**best effort**. If something else is already on that port on the tailnet address,
-dux warns and keeps serving the addresses that did bind rather than refusing to
-start.
+That address joins the listen plan as an extra leg at the *same port* as your primary
+address, and never replaces your `host`. So the default is two listeners, loopback and
+tailnet, one URL each, both printed in the startup banner with the tailnet row labelled
+`Tailscale` and a note that other tailnet devices can reach it with no login. dux skips the
+extra leg when your primary is already `0.0.0.0` or already that same address.
+
+> [!IMPORTANT]
+> The two legs are not equal. Your configured address is **required**, and failing to bind
+> it is fatal. The Tailscale leg is **best effort**: if something else already holds that
+> port, dux warns and keeps serving the addresses that did bind.
 
 ### It follows the interface
 
-A tailnet address is not a property of your config, it is a property of the moment. It
-appears when Tailscale connects and vanishes when it does not, which on a laptop that
-suspends and roams is several times a day. On `"auto"`, dux tracks that:
+A tailnet address appears when Tailscale connects and vanishes when it does not, which on
+a roaming laptop is several times a day. On `"auto"`:
 
-- **The interface appears** and dux binds it, mid-run, with no restart. A new URL
-  starts answering and everything else is untouched.
-- **The interface goes away** and dux drops that one listener. Your configured address
-  keeps serving the whole time. Pages that were open over the tailnet lose their
-  connection, show the in-app *Reconnecting…* overlay, and pick up again by themselves
-  when the address comes back, in place, with their terminals still scrolled where you
-  left them.
+- **The interface appears** and dux binds it mid-run, with no restart. A new URL starts
+  answering and everything else is untouched.
+- **The interface goes away** and dux drops that one listener. Your configured address keeps
+  serving throughout. Pages open over the tailnet show the in-app *Reconnecting…* overlay
+  and pick up again by themselves when the address comes back, with their terminals still
+  scrolled where you left them.
 - **Your Tailscale address changes** and dux moves the listener to the new one.
 
-dux checks roughly every ten seconds, which is not configurable: it is an
-implementation cadence, not a preference. That interval is also the only debounce
-there is, so an interface that flaps faster than dux looks costs at most one bind or
-one unbind. Every bind and unbind is written to `dux.log`, printed by `dux server`,
-and listed in the flip's activity panel, so nothing about this happens quietly.
+dux checks roughly every ten seconds, which is not configurable. That interval is also the
+only debounce, so an interface that flaps faster than dux looks costs at most one bind or
+unbind. Every bind and unbind is written to `dux.log`, printed by `dux server`, and listed
+in the flip's activity panel.
 
-One thing `"auto"` deliberately does not do is notice that you changed the *setting*.
-The mode is read when serving starts, so switching between `"auto"`, `"yes"` and
-`"no"` needs a restart of the server, and dux says so when you reload your config.
+> [!IMPORTANT]
+> `"auto"` does not notice that you changed the *setting*. The mode is read when serving
+> starts, so switching between `"auto"`, `"yes"` and `"no"` needs a server restart, and dux
+> says so when you reload your config.
 
 ### When Tailscale isn't there
 
-Nothing breaks. Detection failing is a warning, never a fatal error, and dux serves
-your configured host regardless. There are three distinct cases and the warning names
-which one you hit:
+Nothing breaks. Detection failing is a warning, never fatal, and dux serves your configured
+host regardless. Three distinct cases, and the warning names which one you hit:
 
 - the `tailscale` CLI is not installed or not on `PATH`
-- the CLI ran and failed, which is what a stopped daemon or a logged-out node looks
-  like
+- the CLI ran and failed, which is what a stopped daemon or a logged-out node looks like
 - the CLI ran fine and returned nothing dux could use
 
-A fourth, rarer one folds into the second: if the daemon stops answering entirely,
-dux's call is capped at a few seconds, killed, and reported as a failure rather than
-hanging around waiting for it.
+A fourth folds into the second: if the daemon stops answering entirely, dux's call is capped
+at a few seconds, killed, and reported as a failure rather than hanging.
 
-In every case you get one warning and a working server. The warning says what happens
-next, because that differs by mode: on `"auto"` it is a "not yet" and dux keeps
-looking, while on `"yes"` it is settled for the rest of the run. If you do not use
-Tailscale and would rather not read about it every start, set `tailscale = "no"` (or
-pass `--no-tailscale` for a single run) and the warning goes with it.
+The warning also says what happens next, which differs by mode: on `"auto"` it is a "not
+yet" and dux keeps looking, while on `"yes"` it is settled for the rest of the run. If you
+do not use Tailscale, set `tailscale = "no"` (or pass `--no-tailscale`) and the warning goes
+with it.
 
 ### Serving from the terminal UI is loopback plus Tailscale, always
 
-Worth filing away, because it surprises people: `dux server` honors your configured
-`[server] host` and `--bind`, but the two ways of serving from inside a running
-terminal UI always serve loopback plus your Tailscale address, and never reach for a
-custom host. That is both flipping the terminal over with `start-web-server` and
-keeping it with `serve_while_tui` (see
-[Serve in the background](/docs/server-mode#serve-in-the-background-and-keep-the-tui)).
-If you need a specific interface, start with `dux server`.
+`dux server` honors your configured `[server] host` and `--bind`. The two ways of serving
+from inside a running terminal UI always serve loopback plus your Tailscale address and
+never reach for a custom host: that is both flipping with `start-web-server` and keeping the
+TUI with `serve_while_tui` (see
+[Serve in the background](/docs/server-mode#serve-in-the-background-and-keep-the-tui)). If
+you need a specific interface, start with `dux server`.
 
-The `tailscale` mode applies to all three the same way, watcher included, so on
-`"auto"` a flipped server picks up your tailnet address while its status screen is
-sitting there and says so in the activity panel, and a background server does it
-while you carry on working in the TUI.
+The `tailscale` mode applies to all three the same way, watcher included. On `"auto"` a
+flipped server picks up your tailnet address while its status screen sits there and says so
+in the activity panel, and a background server does it while you work in the TUI.
 
 ## The MagicDNS gotcha
 
-Both ways in work: the raw `100.x` address and the MagicDNS name. This is the single
-most common Tailscale support question because they do not need the same amount of
-setup, so here it is up front.
+> [!IMPORTANT]
+> The raw `100.x` address works with no configuration. A **MagicDNS hostname works too, but
+> returns `403` until you allow it.**
 
-**The `100.x` address works with no configuration. A MagicDNS hostname works too,
-but returns `403` until you allow it.**
+dux runs a Host-header allowlist in front of everything, which is what stops a malicious web
+page from DNS-rebinding your browser into your server. It accepts `localhost` and any
+loopback address, a Host that is an IP literal it actually bound, and, unless the mode is
+`"no"`, any IP literal inside Tailscale's own ranges. So `http://100.101.102.103:8080` just
+works, and it keeps working even while the Tailscale leg is down.
 
-dux runs a Host-header allowlist in front of everything, which is what stops a
-malicious web page from DNS-rebinding your browser into your server. It accepts
-`localhost` and any loopback address, it accepts a Host that is an IP literal it
-actually bound, and, unless the mode is `"no"`, it accepts any IP literal inside
-Tailscale's own ranges. Your tailnet `100.x` address is exactly that, so
-`http://100.101.102.103:8080` just works.
-
-That last rule is not conditional on the leg being up at that instant, and it cannot
-be: the allowlist is built once, when serving starts, while the Tailscale listener
-comes and goes for the rest of the run. Accepting a *literal* is safe in a way that
-accepting a *name* is not, which is why the next paragraph still applies to MagicDNS:
-rebinding an address needs a name the attacker controls, and no browser can be made to
-send an IP literal for one.
-
-A MagicDNS name like `box.tailnet.ts.net` is a hostname, not an IP literal, and a
-hostname is never something dux bound, so it fails the check and you get a plain
-`403` reading *"this dux server does not serve the requested host"*. Nothing is
-broken and nothing about the name is second class; you simply have to say it out
-loud once:
+A MagicDNS name like `box.tailnet.ts.net` is a hostname, never something dux bound, so it
+fails the check and you get a plain `403` reading *"this dux server does not serve the
+requested host"*. Say the name out loud once:
 
 ```toml
 [server]
 allowed_hosts = ["box.tailnet.ts.net"]
 ```
 
-Hostnames only, no scheme and no port. Entries are matched case-insensitively and
-the port is ignored, so one entry covers every port you might serve on. A trailing
-dot is stripped too, so `box.tailnet.ts.net.` matches the same entry. There is no
-wildcard: `"*"` is treated as a literal hostname and will not match anything.
+Hostnames only, no scheme and no port. Entries are matched case-insensitively and the port
+is ignored, so one entry covers every port. A trailing dot is stripped, so
+`box.tailnet.ts.net.` matches the same entry. There is no wildcard: `"*"` is a literal
+hostname and matches nothing.
 
-dux's other browser defense, a same-origin check on socket upgrades and write
-requests, needs nothing from you here. It compares the request's `Origin` against its
-`Host`, and a browser sitting at your tailnet URL sends a matching pair.
+dux's other browser defense, a same-origin check on socket upgrades and write requests,
+needs nothing from you here: a browser sitting at your tailnet URL sends a matching `Origin`
+and `Host`.
 
 ## Plain HTTP costs you a few browser features
 
-dux serves plain HTTP only. There is no built-in TLS, by design: certificates are
-delegated to a proxy in front of it if you want them. A tailnet address over plain
-HTTP is not a "secure context" as browsers define it, and browsers switch off a
-handful of APIs there. What that actually costs you:
+dux serves plain HTTP only, with no built-in TLS: certificates are delegated to a proxy in
+front of it. A tailnet address over plain HTTP is not a "secure context" as browsers define
+it, and browsers switch off a handful of APIs there:
 
-- **Right-click paste stops working.** Reading your clipboard needs a secure context.
-  dux notices and toasts a hint pointing you at `Ctrl+v` instead, rather than failing
-  silently.
-- **`Ctrl+v` still works**, which is why that is the hint. dux intercepts the chord
-  and lets the browser's native paste event feed the terminal, and that path needs no
-  secure context at all.
-- **Copying still works.** Select-to-copy, the press-and-hold selection you use on
-  a phone, the copy chords, and "copy local path" all fall back to the legacy copy
-  path inside your click or your touch, so they are unaffected.
+- **Right-click paste stops working.** Reading your clipboard needs a secure context. dux
+  toasts a hint pointing you at `Ctrl+v` instead, rather than failing silently.
+- **`Ctrl+v` still works.** dux intercepts the chord and lets the browser's native paste
+  event feed the terminal, which needs no secure context.
+- **Copying still works.** Select-to-copy, press-and-hold selection on a phone, the copy
+  chords, and "copy local path" all fall back to the legacy copy path inside your click or
+  touch.
 - **An agent writing your clipboard (`OSC 52`) silently does nothing.** The
-  `clipboard_passthrough` setting still reads as enabled and no error appears, so if
-  you are wondering why an agent's clipboard write never landed, this is why.
-- **Desktop notifications are unavailable.** Browsers only allow the notification
-  permission prompt on a secure origin. dux degrades quietly: the **Enable browser
-  notifications** row hides itself when the browser exposes no notification API, and
-  nothing fires. The **Desktop notifications** preference stays visible and
-  toggleable regardless, so it can look armed while being inert.
-- **Installing dux as an app is unavailable.** The PWA manifest ships, but browsers
-  require a secure origin to offer installation, and dux's service worker
-  deliberately stays dormant off a secure context. The only thing that worker ever
-  did was serve a branded "dux is unreachable" page for a navigation made while the
-  server is down; the in-app "Reconnecting…" overlay is plain React and works fine.
-- **Everything that matters still works.** The terminal, the live WebSocket streams,
-  the file editor, git, macros, the mobile compose bar. The socket URL is derived from
-  the page, so plain HTTP simply yields `ws://`.
+  `clipboard_passthrough` setting still reads as enabled and no error appears.
+- **Desktop notifications are unavailable.** The **Enable browser notifications** row hides
+  itself when the browser exposes no notification API, and nothing fires. The **Desktop
+  notifications** preference stays visible and toggleable regardless, so it can look armed
+  while being inert.
+- **Installing dux as an app is unavailable.** The PWA manifest ships, but browsers require a
+  secure origin to offer installation, and dux's service worker stays dormant off one. All
+  that worker ever does is serve a branded "dux is unreachable" page for a navigation made
+  while the server is down; the in-app "Reconnecting…" overlay is plain React and works fine.
+- **Everything that matters still works.** The terminal, the live WebSocket streams, the file
+  editor, git, macros, the mobile compose bar. The socket URL is derived from the page, so
+  plain HTTP yields `ws://`.
 
-One more that is *not* a TLS problem but bites the same person: the editor's **Open
-editor** button, which hands a path to the editor on the machine you are sitting at,
-is disabled on any tailnet address. That is a deliberate host check, because a remote
-URL means "your editor is not on that machine," and no certificate would change it.
+One more that is *not* a TLS problem: the editor's **Open local editor** button, which hands a path
+to the editor on the machine you are sitting at, is disabled on any tailnet address. That is
+a host check, not a certificate one.
 
-If those tradeoffs bother you, terminate TLS in a reverse proxy in front of dux and
-add its hostname to `allowed_hosts`. Tailscale ships one, and
-[the recipe is below](#putting-the-tailscale-https-proxy-in-front).
+> [!TIP]
+> If those tradeoffs bother you, terminate TLS in a reverse proxy in front of dux and add its
+> hostname to `allowed_hosts`. Tailscale ships one, and
+> [the recipe is below](#putting-the-tailscale-https-proxy-in-front).
 
 ## Caveats worth knowing
 
-**On `"auto"`, "reachable on my tailnet" is a standing fact, not a snapshot.** dux
-being loopback-only right now does not mean it will stay that way: the listener comes
-back with the interface, without asking. That is the point of the mode, and it is also
-the thing to keep in mind before leaving a server running on a machine you are about
-to reconnect somewhere else. If you want a run that can never grow that address, use
-`--no-tailscale`.
+> [!CAUTION]
+> **There is no login, so routing is your only access control.** Anyone who can reach the
+> port has your whole workspace: every agent, every terminal, every worktree, and the
+> server's filesystem through the project picker. The terminal is read-write for whoever
+> holds input, so that includes typing into a session you are in the middle of using. Treat
+> "on my tailnet" as "holding a terminal on this machine".
 
-**There is no login, so routing is your only access control.** Anyone who can reach
-the port has your whole workspace: every agent, every terminal, every worktree, and
-the server's filesystem through the project picker. Because the terminal is
-read-write for whoever holds input, that includes typing into a session you are in
-the middle of using. Treat "on my tailnet" as "holding a terminal on this machine".
+**"My tailnet" is probably wider than you think.** Tailscale's default policy is allow-all:
+every device of every member can reach every other device, on every port, until someone
+edits the ACL. If your tailnet has other people in it, restrict dux's port in your policy
+file first.
 
-**"My tailnet" is probably wider than you think.** Tailscale's default policy is
-allow-all: every device of every member can reach every other device, on every port,
-until someone edits the ACL. If your tailnet has other people in it, or a device you
-would not hand a shell to, restrict dux's port in your policy file before you rely on
-this.
+**On `"auto"`, "reachable on my tailnet" is a standing fact, not a snapshot.** dux being
+loopback-only right now does not mean it will stay that way: the listener comes back with the
+interface, without asking. For a run that can never grow that address, use `--no-tailscale`.
 
-**Node keys expire.** Tailscale expires device keys on a schedule by default, and an
-expired node quietly drops off the tailnet, which looks exactly like dux being
-broken when it is not. If this machine is something you expect to reach at 2am from a
-phone, disable key expiry for it in the Tailscale admin console.
+**Node keys expire.** Tailscale expires device keys on a schedule by default, and an expired
+node quietly drops off the tailnet, which looks exactly like dux being broken. If you expect
+to reach this machine at 2am from a phone, disable key expiry for it in the Tailscale admin
+console.
 
-**Do not use Tailscale Funnel for this.** Funnel publishes a service to the anonymous
-public internet. dux has no login. Those two facts do not belong in the same sentence,
-and dux offers no support for it.
+> [!CAUTION]
+> **Do not use Tailscale Funnel for this.** Funnel publishes a service to the anonymous
+> public internet, and dux has no login. dux offers no support for it.
 
 ## Putting the Tailscale HTTPS proxy in front
 
 Tailscale can terminate HTTPS for a local service, which buys back the clipboard and
-notification features listed above, because `https://box.tailnet.ts.net` is a secure
-context and a plain tailnet IP is not. dux needs no TLS setup of its own for this. It
-keeps serving plain HTTP on loopback and Tailscale owns the certificate.
+notification features above, because `https://box.tailnet.ts.net` is a secure context and a
+plain tailnet IP is not. dux needs no TLS setup of its own.
 
 Serve dux on loopback, then point the proxy at that port:
 
@@ -245,54 +210,50 @@ dux server --bind 127.0.0.1:8080
 tailscale serve --bg 8080
 ```
 
-Then allow the node's MagicDNS name, which is the same single line the plain MagicDNS
-path needs:
+Then allow the node's MagicDNS name:
 
 ```toml
 [server]
 allowed_hosts = ["box.tailnet.ts.net"]
 ```
 
-Open `https://box.tailnet.ts.net` and you are done. The socket URLs are derived from
-the page, so they become `wss://` on their own with nothing to configure.
+Open `https://box.tailnet.ts.net` and you are done. The socket URLs are derived from the
+page, so they become `wss://` on their own.
 
-Note that the Tailscale leg is still added on top of your `--bind` address, so dux is
-also answering plain HTTP directly on `100.x:8080` alongside the proxied URL. If you
-want the HTTPS path to be the only way in, add `--no-tailscale` to the `dux server`
-line and let the proxy own the tailnet side.
+The Tailscale leg is still added on top of your `--bind` address, so dux is also answering
+plain HTTP directly on `100.x:8080` alongside the proxied URL. To make the HTTPS path the
+only way in, add `--no-tailscale` to the `dux server` line and let the proxy own the tailnet
+side.
 
-One honest clause: the plain address is the path the maintainer uses daily, and this
-proxy path is documented from dux's behaviour rather than from a tested recipe. If it
-does not work, two things are worth checking first, and they fail in very different
-ways.
+> [!NOTE]
+> The plain address is the path the maintainer uses daily. This proxy path is documented from
+> dux's behaviour rather than from a tested recipe.
 
-**Check that the proxy passes WebSockets through.** dux is not merely degraded
-without them, it is unusable: every terminal rides a WebSocket, and so does the
-change feed that tells the page when anything moved. This is the confusing failure, because nothing returns an error
-you can see. The page loads, looks right, and then nothing is live: no output, no
-status changes, and the in-app *Reconnecting…* overlay sitting there. If the UI
-arrives but never comes alive, suspect the upgrade rather than dux.
+If it does not work, check two things.
 
-**Check the `Host` and `Origin` the proxy sends.** dux runs two separate checks. The
-host allowlist tests `Host` on every request, and a same-origin check compares the
-`Origin`'s host and port against `Host` on every WebSocket upgrade and every write
-request. A proxy that forwards the original `Host` satisfies both, once that hostname
-is in `allowed_hosts`. A proxy that rewrites `Host` to its backend target
-(`127.0.0.1:8080`) passes the allowlist, since loopback is always allowed, and then
-fails the origin check, because the browser still sends the external name as
-`Origin`. So preserving the original `Host` is the fix; adding a rewritten one to
-`allowed_hosts` only silences the first check and leaves the second.
+**Does the proxy pass WebSockets through?** Every terminal rides a WebSocket, and so does the
+change feed that tells the page when anything moved, so without them dux is unusable rather
+than degraded. Nothing returns an error you can see: the page loads, looks right, and then
+nothing is live, with the in-app *Reconnecting…* overlay sitting there.
 
-The `403` is the friendly failure of the two, and the response body says which check
-fired: *"this dux server does not serve the requested host"* is the allowlist, and
-*"cross-origin WebSocket upgrade rejected"* (or *"cross-origin request rejected"* on
-a write) is the same-origin check. Either way you know exactly what to change.
+**What `Host` and `Origin` does the proxy send?** The host allowlist tests `Host` on every
+request, and a same-origin check compares the `Origin`'s host and port against `Host` on
+every WebSocket upgrade and every write request. A proxy that forwards the original `Host`
+satisfies both, once that hostname is in `allowed_hosts`. A proxy that rewrites `Host` to its
+backend target (`127.0.0.1:8080`) passes the allowlist, since loopback is always allowed, and
+then fails the origin check, because the browser still sends the external name as `Origin`.
+Preserving the original `Host` is the fix; adding a rewritten one to `allowed_hosts` only
+silences the first check.
+
+The response body of a `403` says which check fired: *"this dux server does not serve the
+requested host"* is the allowlist, and *"cross-origin WebSocket upgrade rejected"* (or
+*"cross-origin request rejected"* on a write) is the same-origin check.
 
 ## Where to go next
 
-- [Server mode overview](/docs/server-mode): the `[server]` keys in full, the startup
-  banner, graceful shutdown, and the trust model.
-- [The workspace in the browser](/docs/web-workspace): what you actually get once you
-  are in, including the phone layout.
-- [Hosting dux behind a login](/docs/public-hosting): the other answer, for when the
-  machine is not on a private network and something has to ask who you are first.
+- [Server mode overview](/docs/server-mode): the `[server]` keys in full, the startup banner,
+  graceful shutdown, and the trust model.
+- [The workspace in the browser](/docs/web-workspace): what you get once you are in,
+  including the phone layout.
+- [Hosting dux behind a login](/docs/public-hosting): the other answer, for when the machine
+  is not on a private network.
