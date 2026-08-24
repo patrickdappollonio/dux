@@ -7254,6 +7254,95 @@ mod tests {
         assert!(matches!(event, WorkerEvent::BranchSyncReady(_)));
     }
 
+    /// A reload to `0` stops the sweeps without stopping the thread: the loop
+    /// naps instead, so a later retune back to N is picked up by this same loop
+    /// and `branch_sync_worker_started` keeps meaning "a thread is live".
+    #[test]
+    fn a_reload_to_zero_stops_the_running_branch_sync_loop_from_polling() {
+        // Held because the reload stores this config's `logging.level` into the
+        // process-wide threshold another test may be asserting on.
+        let _guard = crate::logger::level_test_guard();
+        let (mut engine, tmp) = test_engine();
+        let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+        engine.worker_tx = worker_tx;
+        engine.branch_sync_wait.slice_ms.store(5, Ordering::Relaxed);
+
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        crate::git::init_repo(&worktree).expect("init repo");
+        let actual = crate::git::current_branch(&worktree).expect("a branch");
+        // A real session, because the reload rebuilds the enrolment list from
+        // `engine.sessions`: an entry pushed by hand would be swept away and the
+        // quiet below would prove nothing.
+        let mut session = sample_session("session-1", "project-1", &format!("{actual}-stale"));
+        if let crate::model::AgentWorkspace::Managed(managed) = &mut session.workspace {
+            managed.worktree_path = worktree.to_string_lossy().to_string();
+        }
+        engine.sessions.push(session);
+        engine.update_branch_sync_sessions();
+
+        // One second, so the loop sweeps often enough for the quiet window below
+        // to be evidence rather than coincidence.
+        engine.config.ui.branch_sync_interval = 1;
+        engine.spawn_branch_sync_worker();
+        let first = worker_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("an enabled loop sweeps");
+        assert!(matches!(first, WorkerEvent::BranchSyncReady(_)));
+
+        let waits_before = engine
+            .branch_sync_wait
+            .waits_started
+            .load(Ordering::Relaxed);
+        let mut config = engine.config.clone();
+        config.ui.branch_sync_interval = 0;
+        engine
+            .apply_reloaded_config(config)
+            .expect("reload applies");
+        assert_eq!(
+            engine
+                .branch_sync_sessions
+                .lock()
+                .expect("branch sync sessions")
+                .len(),
+            1,
+            "the agent is still enrolled, so silence is the interval and not an empty list"
+        );
+
+        // Wait for the loop to START a new wait, which is where it re-reads the
+        // interval: until then the quiet below would only mean the old wait had
+        // not elapsed yet.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while engine
+            .branch_sync_wait
+            .waits_started
+            .load(Ordering::Relaxed)
+            <= waits_before
+        {
+            assert!(Instant::now() < deadline, "the loop never restarted a wait");
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            engine.branch_sync_worker_started.load(Ordering::Relaxed),
+            "the thread naps rather than ending, so a later retune can wake it"
+        );
+        // One sweep may have been queued before the retune landed.
+        while worker_rx.try_recv().is_ok() {}
+
+        // Three seconds of a one-second cadence: three sweeps, had it kept going.
+        // Only branch syncs are counted; the engine's other pollers share this
+        // channel and are not what this test is about.
+        let quiet_until = Instant::now() + Duration::from_secs(3);
+        while let Some(remaining) = quiet_until.checked_duration_since(Instant::now())
+            && let Ok(event) = worker_rx.recv_timeout(remaining)
+        {
+            assert!(
+                !matches!(event, WorkerEvent::BranchSyncReady(_)),
+                "a napping loop sweeps nothing"
+            );
+        }
+    }
+
     #[test]
     fn branch_sync_worker_disabled_leaves_guard_unset() {
         let (mut engine, _tmp) = test_engine();
