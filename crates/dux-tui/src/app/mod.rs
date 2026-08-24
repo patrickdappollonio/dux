@@ -4570,6 +4570,8 @@ impl App {
             self.engine.spawn_gh_status_check();
         }
         self.pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
+        self.status
+            .set_clear_after(Duration::from_secs(config.ui.status_clear_seconds.into()));
         // Re-seed the changes (right) pane's hidden state from the reloaded
         // config, mirroring startup; if it just became hidden while the Files
         // pane was focused, move focus to the center (matching the toggle).
@@ -7802,6 +7804,28 @@ leading_branch = "main"
         app.apply_reloaded_config(config)
             .expect("apply reloaded config again");
         assert_eq!(app.engine.gh_probe.generation, 1);
+    }
+
+    /// `ui.status_clear_seconds` is one of the settings the web Preferences
+    /// dialog writes, so the TUI's controller must adopt the reloaded value
+    /// rather than keeping the lifetime it was constructed with.
+    #[test]
+    fn a_tui_config_reload_retunes_the_status_clear_lifetime() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let t0 = Instant::now();
+        app.status
+            .set(t0, None, StatusTone::Info, "something happened");
+
+        let mut config = app.engine.config.clone();
+        config.ui.status_clear_seconds = 1;
+        app.apply_reloaded_config(config)
+            .expect("apply reloaded config");
+
+        app.status.tick(t0 + Duration::from_secs(2), BUSY_TIMEOUT);
+        assert!(
+            app.status.most_recent_tui().is_none(),
+            "a two-second-old info status is gone once the lifetime is one second",
+        );
     }
 
     /// A reentrant config reload (one already in flight) returns an Info status
