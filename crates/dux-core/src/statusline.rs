@@ -299,6 +299,19 @@ impl KeyedStatusController {
         self.anon_pinned = true;
     }
 
+    /// The generation of the message currently on the anonymous slot, or
+    /// `None` when the slot is empty.
+    ///
+    /// The anonymous slot is most-recent-wins and shared by every unkeyed
+    /// producer, so "is my message still the one on the line" cannot be
+    /// answered by tone (several producers write warnings) or by text
+    /// (comparing strings would match a second producer's identical message).
+    /// A producer that wants to retire its own message keeps the generation its
+    /// `set` returned and clears only while this still equals it.
+    pub fn anon_generation(&self) -> Option<Generation> {
+        self.anon.as_ref().map(|a| a.generation)
+    }
+
     pub fn set_clear_after(&mut self, clear_after: Duration) {
         self.clear_after = clear_after;
     }
@@ -905,10 +918,34 @@ mod tests {
             })
             .expect("notify.ts must declare WARNING_DURATION_FACTOR");
         assert_eq!(
-            declared.trim(),
+            // The declaration may or may not end in a semicolon depending on how
+            // the file was last formatted; the number is what must match.
+            declared.trim().trim_end_matches(';').trim(),
             super::WARNING_CLEAR_FACTOR.to_string(),
             "notify.ts WARNING_DURATION_FACTOR must match WARNING_CLEAR_FACTOR"
         );
+    }
+
+    #[test]
+    fn the_anonymous_slot_reports_the_generation_of_the_message_on_it() {
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
+        assert_eq!(c.anon_generation(), None, "an empty slot names nothing");
+
+        let mine = c.set(t0, None, StatusTone::Warning, "Project path not found.");
+        assert_eq!(c.anon_generation(), Some(mine));
+
+        // Somebody else writes the slot. The first producer still holds `mine`,
+        // and this is how it learns its own message is no longer there: without
+        // it, a producer that clears "if the line holds a warning" wipes a
+        // warning that belongs to someone else.
+        let theirs = c.set(t0, None, StatusTone::Warning, "Restart to apply.");
+        assert_ne!(mine, theirs);
+        assert_eq!(c.anon_generation(), Some(theirs));
+
+        // A keyed status is a different slot and leaves the answer alone.
+        c.set(t0, Some("push".into()), StatusTone::Error, "Push failed.");
+        assert_eq!(c.anon_generation(), Some(theirs));
     }
 
     #[test]
