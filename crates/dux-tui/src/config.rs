@@ -900,7 +900,8 @@ fn config_schema() -> Vec<ConfigEntry> {
                  #   \"never\"  — plain text always.\n\
                  # An unrecognized value falls back to \"auto\" with a warning. The in-app\n\
                  # \"start web server\" flip keeps its themed status screen — this only\n\
-                 # affects the `dux server` CLI.",
+                 # affects the `dux server` CLI.\n\
+                 # The console is built once, so changing this needs a restart.",
             )),
             value_fn: |c| FieldValue::Str(c.server.color.clone()),
         },
@@ -911,7 +912,8 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # the `dux server` console. The /healthz probe is always skipped so a\n\
                  # health checker does not flood the log. This output is console-ONLY and\n\
                  # never written to dux.log, so piping `dux server`'s stdout captures the\n\
-                 # access log. Set false to silence it.",
+                 # access log. Set false to silence it.\n\
+                 # A config reload applies this to a running server right away.",
             )),
             value_fn: |c| FieldValue::Bool(c.server.access_log),
         },
@@ -1056,7 +1058,8 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # per-directory browser and is never capped; this bounds only the search\n\
                  # index, where an incomplete result on a very large repo (for example a\n\
                  # built target/ directory) is an acceptable tradeoff for a bounded\n\
-                 # response. Set to 0 to disable the cap entirely.",
+                 # response. Set to 0 to disable the cap entirely.\n\
+                 # A config reload applies this to a running server right away.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.search_index_max_files),
         },
@@ -1069,7 +1072,8 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # pool from a burst of tree requests (for example several tabs expanding\n\
                  # directories at once) starving other blocking work such as git operations\n\
                  # and file reads/writes. A request beyond the limit waits for a free slot\n\
-                 # rather than being refused. Set to 0 to disable the bound entirely.",
+                 # rather than being refused. Set to 0 to disable the bound entirely.\n\
+                 # The limit is sized at startup, so changing it needs a restart.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.tree_list_max_concurrency as usize),
         },
@@ -1085,7 +1089,8 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # waits for a free slot rather than being refused, and because the notes\n\
                  # are cached for six hours the waiter usually answers straight from cache.\n\
                  # Small on purpose: every caller gets the same answer. Set to 0 to disable\n\
-                 # the bound entirely.",
+                 # the bound entirely.\n\
+                 # The limit is sized at startup, so changing it needs a restart.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.release_notes_max_concurrency as usize),
         },

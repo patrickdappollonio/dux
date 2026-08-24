@@ -42,10 +42,12 @@ pub struct AppState {
     /// terminal) and every test that does not assert console output. WS handlers
     /// emit life events through it; the access middleware reads it too.
     pub console: Console,
-    /// Whether the per-request access log is enabled (`[server] access_log`).
-    /// The access middleware checks this AND `console.is_active()` before
-    /// emitting, so the flip and disabled-console paths never log.
-    pub access_log: bool,
+    /// The `[server]` settings a config reload can move on a listener that is
+    /// already bound: `access_log` and `search_index_max_files`. Seeded from
+    /// [`RouterParams`] here and rewritten by the engine actor on every reload,
+    /// so the routes read the current value per request rather than one frozen
+    /// at bind time.
+    pub live_limits: Arc<crate::engine_actor::LiveServerLimits>,
     /// Caps concurrent EVENTS WebSocket connections
     /// (`[server] max_websocket_events_connections`). This is the `/ws/events`
     /// status/changed-files stream (`ws_events_upgrade`). Each upgrade takes a
@@ -78,11 +80,6 @@ pub struct AppState {
     /// The per-agent live-tab-socket ceiling (`[server] max_websocket_tabs_per_agent`).
     /// `0` permanently blocks all tab sockets (matching the WS-connection-cap family).
     pub max_ws_tabs_per_agent: u32,
-    /// Cap on the editor's file-search index flat walk
-    /// (`[server] search_index_max_files`). Bounds only `/files/list` (the
-    /// search index); the lazy `/files/tree` browser is never capped. `0`
-    /// disables the cap.
-    pub search_index_max_files: usize,
     /// Bounds concurrent `/files/tree` directory listings across all sessions
     /// (`[server] tree_list_max_concurrency`). Protects the server's
     /// blocking-thread pool (`spawn_blocking`) from a burst of tree requests
@@ -615,10 +612,16 @@ pub fn build_app(
             Arc::clone(&pty_grid_bus),
         ));
     }
+    // The router's bind-time values seed the shared cells; a later reload
+    // overwrites them through the actor. Seeded from the params rather than the
+    // engine's config because a serve path or a test may pass either.
+    let live_limits = engine.live_limits();
+    live_limits.set_access_log(params.access_log);
+    live_limits.set_search_index_max_files(params.search_index_max_files);
     let state = AppState {
         engine,
         console: params.console,
-        access_log: params.access_log,
+        live_limits,
         ws_events_semaphore: Arc::new(tokio::sync::Semaphore::new(
             params.max_websocket_events_connections as usize,
         )),
@@ -633,7 +636,6 @@ pub fn build_app(
         )),
         tab_ws_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         max_ws_tabs_per_agent: params.max_websocket_tabs_per_agent,
-        search_index_max_files: params.search_index_max_files,
         // `0` means unlimited: skip the semaphore entirely rather than build a
         // zero-permit one, which would block every request forever (the
         // opposite of the ws_*_semaphore "0 = block all" convention).
@@ -756,7 +758,13 @@ pub fn build_app(
 /// response. Reads the console + toggle off [`AppState`] and delegates to the
 /// shared [`log_request`] core.
 async fn access_log(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    log_request(&state.console, state.access_log, request, next).await
+    log_request(
+        &state.console,
+        state.live_limits.access_log(),
+        request,
+        next,
+    )
+    .await
 }
 
 /// The shared access-log core. CONSOLE-ONLY (never `dux.log` — piping
@@ -4186,6 +4194,47 @@ mod tests {
             sink.contents().is_empty(),
             "access_log = false must emit no access lines: {}",
             sink.contents()
+        );
+    }
+
+    /// `access_log` is one of the two `[server]` settings a reload applies to a
+    /// listener that is already bound: the middleware reads the shared cell the
+    /// reload writes, not the value frozen into the router at bind time.
+    #[tokio::test]
+    async fn a_reloaded_access_log_toggle_takes_effect_on_the_next_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let limits = handle.live_limits();
+        let (console, sink) = Console::test_capture(false);
+        let params = RouterParams::plain_http().with_console(console, false);
+        let app = build_app(handle, Router::new(), params);
+
+        let _ = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/me")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(sink.contents().is_empty(), "bound with the log off");
+
+        limits.set_access_log(true);
+        let _ = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/me")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let out = sink.contents();
+        assert!(
+            out.contains("/api/me 200"),
+            "turning it on must not need a restart: {out}"
         );
     }
 

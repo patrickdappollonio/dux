@@ -239,8 +239,8 @@ The rest tune presentation and limits:
 
 | Key | Default | What it does |
 |---|---|---|
-| `color` | `"auto"` | Colored, vite-style console output for `dux server` (`auto`, `always`, `never`). |
-| `access_log` | `true` | Print a per-request access log line to the `dux server` console (never to `dux.log`, so pipe stdout to capture it). `/healthz` is always skipped. |
+| `color` | `"auto"` | Colored, vite-style console output for `dux server` (`auto`, `always`, `never`). Read at startup. |
+| `access_log` | `true` | Print a per-request access log line to the `dux server` console (never to `dux.log`, so pipe stdout to capture it). `/healthz` is always skipped. A config reload applies it. |
 | `title` | `"dux"` | Web-only instance name: the browser tab title and the wordmark in the projects pane. Set `"dux (prod)"` to tell tabs apart. |
 | `favicon` | `""` | Web-only favicon tint so several dux tabs are distinguishable. Empty keeps the yellow duck; otherwise a curated color (violet, blue, sky, cyan, teal, green, amber, orange, red, pink, rose). |
 | `shutdown_timeout_seconds` | `30` | Seconds the server waits for agents and terminals to save state after SIGTERM before force-killing. A second Ctrl-c during the wait exits immediately. |
@@ -251,12 +251,19 @@ The rest tune presentation and limits:
 | `max_websocket_tabs_per_agent` | `8` | Per-agent fairness sub-quota on that tab pool. |
 | `file_drop_max_bytes` | `104857600` | Largest single file you can drag, or image you can paste, onto a terminal or agent pane in the browser (100 MiB). A bigger file is refused and nothing is written. `0` switches file drop and image paste off. |
 | `file_drop_max_concurrency` | `2` | How many dropped-file uploads are accepted at once. Bounds buffered upload memory, not just queued work. An upload beyond the limit waits up to 30 seconds for a slot, then is refused with a `503` rather than queueing indefinitely. `0` clamps to `1`. |
+| `search_index_max_files` | `50000` | Cap on the web editor's "Search files…" flat walk. `0` disables the cap. A config reload applies it. |
+| `tree_list_max_concurrency` | `8` | How many editor directory listings run at once. `0` disables the bound. Read at startup. |
+| `release_notes_max_concurrency` | `2` | How many release-notes fetches run at once. `0` disables the bound. Read at startup. |
 
 > [!IMPORTANT]
 > Most of these are read once, when serving starts, so changing them needs a **server
 > restart**, not just a config reload: `host`, `port`, `allowed_hosts`, `tailscale`,
-> both `file_drop_*` keys, and every connection cap. A config reload says so for all
-> of them, on either surface: the browser and the terminal app each warn you.
+> both `file_drop_*` keys, every connection cap, `color`, and the two
+> `*_max_concurrency` limits. A config reload says so for all of them, on either
+> surface: the browser and the terminal app each warn you.
+>
+> The two exceptions are `access_log` and `search_index_max_files`, which a reload
+> applies to a running server.
 
 `serve_while_tui` is the one binding key that is a live switch: a config reload that
 flips it acts on it there and then, in both directions.

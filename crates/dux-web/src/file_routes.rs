@@ -434,7 +434,7 @@ async fn list_files<R: EditorRoot>(State(state): State<AppState>, root: R) -> Re
         Err(resp) => return resp.into_response(),
     };
     let worktree = root.path().to_path_buf();
-    let max_files = state.search_index_max_files;
+    let max_files = state.live_limits.search_index_max_files();
     match tokio::task::spawn_blocking(move || R::search_walk(&worktree, max_files)).await {
         Ok(Ok(listing)) => Json(FileList {
             files: listing.files,

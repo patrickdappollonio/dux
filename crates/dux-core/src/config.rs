@@ -674,14 +674,18 @@ impl ServerConfig {
 }
 
 /// True when a config reload changed any `[server]` setting that only takes
-/// effect at startup -- listeners are bound once, and reload-config never
-/// rebinds them. Both surfaces call this on every reload (before the config
+/// effect at startup. Both surfaces call this on every reload (before the config
 /// swap) so each can warn that a restart is needed for these specific changes; a
 /// reload that only touched, say, `[ui]` theme settings leaves every compared
 /// field equal and triggers no warning.
 ///
-/// Compared fields: the bind `host` and `port`, the `tailscale` mode, and the
-/// `allowed_hosts` host-guard list.
+/// Compared fields: the bind `host` and `port`, the `tailscale` mode, the
+/// `allowed_hosts` host-guard list, all five WebSocket caps, both `file_drop_*`
+/// caps, the two directory-work concurrency limits, and the console `color`.
+///
+/// `access_log` and `search_index_max_files` are deliberately ABSENT: the routes
+/// read those two off shared cells a reload writes, so warning about them would
+/// name a restart for a change that has already taken effect.
 ///
 /// The `tailscale` MODE stays on this list even though `auto` now re-binds that
 /// leg by itself. What the watcher makes live is the interface coming and going,
@@ -698,7 +702,7 @@ impl ServerConfig {
 /// (`max_websocket_tab_connections`, `max_websocket_tabs_per_agent`) are frozen
 /// into `RouterParams`. The deprecated `bind` field is migrated into `host`/`port` on load,
 /// so a change to it surfaces through those fields.
-pub fn server_rebind_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
+pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
     prev.host != next.host
         || prev.port != next.port
         // The parsed MODE, never the raw string: the value is trimmed and
@@ -717,6 +721,11 @@ pub fn server_rebind_settings_changed(prev: &ServerConfig, next: &ServerConfig) 
         // browser believing a cap the server no longer enforces.
         || prev.file_drop_max_bytes != next.file_drop_max_bytes
         || prev.file_drop_max_concurrency != next.file_drop_max_concurrency
+        // Both are semaphores sized once in `build_app`, and the console is
+        // built before the engine moves into the actor thread.
+        || prev.tree_list_max_concurrency != next.tree_list_max_concurrency
+        || prev.release_notes_max_concurrency != next.release_notes_max_concurrency
+        || prev.color != next.color
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -6,11 +6,11 @@
 //! coarse spine-change/status/commit signals); replies over tokio oneshots.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use dux_core::config::server_rebind_settings_changed;
+use dux_core::config::server_restart_settings_changed;
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
@@ -422,6 +422,9 @@ pub(crate) struct ActorLoopEnds {
     /// The inline `Shutdown` request trips this so forwarders exit promptly even
     /// before the engine drop disconnects their channels.
     shutdown_flag: Arc<AtomicBool>,
+    /// The same limits as [`EngineHandle::live_limits`]: each successful reload
+    /// stores its `[server]` values here so the routes read them next request.
+    live_limits: Arc<LiveServerLimits>,
     /// The same registry as [`EngineHandle::pty_input_owners`]: the loop reads
     /// it every spine check to overlay the current input owners onto the
     /// projected spine, so an ownership flip moves the sessions fingerprint and
@@ -475,6 +478,49 @@ const REQ_CHANNEL_CAPACITY: usize = 1024;
 /// [`EngineHandle`] and the loop-side [`ActorLoopEnds`]. Both server entry
 /// points (the dedicated engine thread and the in-process flip) call this so
 /// the channel topology is defined in exactly one place.
+/// The two `[server]` limits a running listener can adopt from a config reload.
+///
+/// Everything else under `[server]` is frozen when the listener binds (a
+/// semaphore, a body-limit layer, the console) and is reported by
+/// [`server_restart_settings_changed`] instead. These two are plain scalars the
+/// routes read per request, so the actor stores the reloaded values here and the
+/// next request honors them.
+///
+/// Seeded from the router's own bind-time values in `build_app`, because a test
+/// or a serve path may pass something other than the engine's config.
+#[derive(Debug, Default)]
+pub struct LiveServerLimits {
+    search_index_max_files: AtomicUsize,
+    access_log: AtomicBool,
+}
+
+impl LiveServerLimits {
+    /// Cap on the editor's file-search flat walk. `0` disables the cap.
+    pub fn search_index_max_files(&self) -> usize {
+        self.search_index_max_files.load(Ordering::Relaxed)
+    }
+
+    pub fn set_search_index_max_files(&self, value: usize) {
+        self.search_index_max_files.store(value, Ordering::Relaxed);
+    }
+
+    /// Whether the per-request access log is on. The middleware still requires an
+    /// active console, so the flip and the noop-console paths emit nothing.
+    pub fn access_log(&self) -> bool {
+        self.access_log.load(Ordering::Relaxed)
+    }
+
+    pub fn set_access_log(&self, value: bool) {
+        self.access_log.store(value, Ordering::Relaxed);
+    }
+
+    /// Adopt both values from a reloaded `[server]` section.
+    pub fn store_from(&self, server: &dux_core::config::ServerConfig) {
+        self.set_search_index_max_files(server.search_index_max_files);
+        self.set_access_log(server.access_log);
+    }
+}
+
 pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopEnds) {
     let (req_tx, req_rx) = mpsc::channel::<EngineRequest>(REQ_CHANNEL_CAPACITY);
     // Status uses THREE channels driven from one place (the StatusEmitter):
@@ -510,6 +556,9 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     // handlers write claims into it and the loop's spine check reads them back
     // out to publish the owner per agent tab.
     let pty_input_owners = Arc::new(PtySizeOwners::default());
+    // Built here for the same reason as `pty_input_owners`: the loop starts
+    // before the router exists, so both sides have to be handed the same Arc.
+    let live_limits = Arc::new(LiveServerLimits::default());
     (
         EngineHandle {
             req_tx,
@@ -522,6 +571,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             shutdown_flag: Arc::clone(&shutdown_flag),
             has_active_processes: Arc::clone(&engine.has_active_processes),
             pty_input_owners: Arc::clone(&pty_input_owners),
+            live_limits: Arc::clone(&live_limits),
             #[cfg(test)]
             refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
@@ -535,6 +585,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             workspace_tx,
             shutdown_flag,
             pty_input_owners,
+            live_limits,
         },
     )
 }
@@ -607,6 +658,9 @@ pub struct EngineHandle {
     /// client. Built here (in [`build_actor_channels`]) because the loop starts
     /// before the router exists, so the router cannot be the one to create it.
     pty_input_owners: Arc<PtySizeOwners>,
+    /// The `[server]` limits a reload can move on a bound listener, shared with
+    /// the router the same way and for the same reason as `pty_input_owners`.
+    live_limits: Arc<LiveServerLimits>,
     /// Test-only tally of the worktrees [`Self::refresh_changed_files`] was asked
     /// to recompute, newest last. That call is fire-and-forget into the actor
     /// channel, so a route test has no other way to prove the request was made,
@@ -1216,6 +1270,12 @@ impl EngineHandle {
         Arc::clone(&self.pty_input_owners)
     }
 
+    /// The `[server]` limits a config reload can move without a restart. The
+    /// router clones this into `AppState`; the actor stores each reload into it.
+    pub fn live_limits(&self) -> Arc<LiveServerLimits> {
+        Arc::clone(&self.live_limits)
+    }
+
     /// The configured preferred editor name for the "open in editor" action
     /// (`config.editor.default`). Empty if the engine is gone — the handler then
     /// falls back to the first detected editor.
@@ -1762,6 +1822,9 @@ pub(crate) struct EngineService {
     workspace_tx: watch::Sender<Option<Arc<WorkspaceDoc>>>,
     shutdown_flag: Arc<AtomicBool>,
     pty_input_owners: Arc<PtySizeOwners>,
+    /// The limits every route reads per request; each successful reload stores
+    /// its `[server]` values here.
+    live_limits: Arc<LiveServerLimits>,
     /// Subscribes waiting for their provider to come up via the worker-event
     /// drain.
     pending: Vec<PendingSubscribe>,
@@ -1818,6 +1881,7 @@ impl EngineService {
             workspace_tx,
             shutdown_flag,
             pty_input_owners,
+            live_limits,
         } = ends;
         let spine_check = SpineCheck::new(engine, &pty_input_owners, &workspace_tx);
         Self {
@@ -1828,6 +1892,7 @@ impl EngineService {
             workspace_tx,
             shutdown_flag,
             pty_input_owners,
+            live_limits,
             pending: Vec::new(),
             last_pr_foregrounded: None,
             spine_check,
@@ -1989,7 +2054,11 @@ impl EngineService {
             return;
         };
         let server_settings_changed =
-            server_rebind_settings_changed(&engine.config.server, &config.server);
+            server_restart_settings_changed(&engine.config.server, &config.server);
+        // The drainer applies the config after this seam, so store the two live
+        // limits from the INCOMING section: the routes must not answer one more
+        // request on the old caps.
+        self.live_limits.store_from(&config.server);
         let _ = self.config_reload_tx.send(());
         // Says what has actually happened at this point, and no more. The
         // drainer has not adopted the config yet (the seam is pre-consume), so
@@ -2003,8 +2072,9 @@ impl EngineService {
         if server_settings_changed {
             let _ = self.status.send(WireStatus::new(
                 "warning",
-                "Server bind settings changed in config; restart the server to apply them. \
-                 With the background server, stopping and starting it again is the restart.",
+                "Server settings changed in config that are read only when a listener \
+                 binds; restart the server to apply them. With the background server, \
+                 stopping and starting it again is the restart.",
             ));
         }
     }
@@ -2377,12 +2447,13 @@ pub(crate) fn run_engine_loop(
                 // arm already holds both the running config (pre-swap) and the
                 // incoming one — keeps the detection next to the config-reload handler.
                 let server_settings_changed =
-                    server_rebind_settings_changed(&engine.config.server, &config.server);
+                    server_restart_settings_changed(&engine.config.server, &config.server);
                 match engine.apply_reloaded_config(*config) {
                     Ok(()) => {
                         // Memory now matches disk: any pending raw "Save" has been
                         // adopted, so disk is no longer ahead.
                         svc.config_disk_ahead = false;
+                        svc.live_limits.store_from(&engine.config.server);
                         // Signal the web layer that config-static state changed so
                         // it emits a `config.changed` event and clients refetch
                         // `/api/v1/bootstrap`. Fire-and-forget: an `Err` only means
@@ -2400,8 +2471,9 @@ pub(crate) fn run_engine_loop(
                         // restart is needed for those specific changes to take
                         // effect.
                         if server_settings_changed {
-                            let drift = "Server bind settings changed in config; restart \
-                                 the server to apply them.";
+                            let drift = "Server settings changed in config that are read \
+                                 only when a listener binds; restart the server to apply \
+                                 them.";
                             let _ = svc.status.send(WireStatus::new("warning", drift));
                         }
                     }
@@ -4470,32 +4542,32 @@ mod tests {
     }
 
     #[test]
-    fn rebind_drift_is_false_for_identical_server_config() {
+    fn restart_drift_is_false_for_identical_server_config() {
         let cfg = dux_core::config::ServerConfig::default();
-        assert!(!server_rebind_settings_changed(&cfg, &cfg.clone()));
+        assert!(!server_restart_settings_changed(&cfg, &cfg.clone()));
     }
 
     #[test]
-    fn rebind_drift_detects_a_file_drop_cap_change() {
+    fn restart_drift_detects_a_file_drop_cap_change() {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.file_drop_max_bytes = prev.file_drop_max_bytes + 1;
-        assert!(server_rebind_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
         let mut next2 = prev.clone();
         next2.file_drop_max_concurrency = prev.file_drop_max_concurrency + 1;
-        assert!(server_rebind_settings_changed(&prev, &next2));
+        assert!(server_restart_settings_changed(&prev, &next2));
     }
 
     #[test]
-    fn rebind_drift_detects_port_change() {
+    fn restart_drift_detects_port_change() {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.port += 1;
-        assert!(server_rebind_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
     }
 
     #[test]
-    fn rebind_drift_detects_a_tailscale_mode_change() {
+    fn restart_drift_detects_a_tailscale_mode_change() {
         // The mode is read once at serve start (it decides whether a watcher runs
         // at all), so changing it is still restart-bound even though `auto` binds
         // and unbinds the leg by itself while serving.
@@ -4504,7 +4576,7 @@ mod tests {
             let mut next = prev.clone();
             next.tailscale = mode.to_string();
             assert!(
-                server_rebind_settings_changed(&prev, &next),
+                server_restart_settings_changed(&prev, &next),
                 "changing tailscale from {} to {mode} must warn",
                 prev.tailscale
             );
@@ -4512,7 +4584,7 @@ mod tests {
     }
 
     #[test]
-    fn rebind_drift_ignores_a_tailscale_value_that_means_the_same_mode() {
+    fn restart_drift_ignores_a_tailscale_value_that_means_the_same_mode() {
         // The value is trimmed and matched case-insensitively, so " AUTO " is the
         // mode the server is already running under. Telling that user to restart
         // would be a warning about nothing.
@@ -4521,7 +4593,7 @@ mod tests {
             let mut next = prev.clone();
             next.tailscale = same.to_string();
             assert!(
-                !server_rebind_settings_changed(&prev, &next),
+                !server_restart_settings_changed(&prev, &next),
                 "{same:?} is the same mode as {:?} and must not warn",
                 prev.tailscale
             );
@@ -4529,72 +4601,100 @@ mod tests {
     }
 
     #[test]
-    fn rebind_drift_detects_host_change() {
+    fn restart_drift_detects_host_change() {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.host = "0.0.0.0".to_string();
-        assert!(server_rebind_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
     }
 
     #[test]
-    fn rebind_drift_detects_allowed_hosts_change() {
+    fn restart_drift_detects_allowed_hosts_change() {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.allowed_hosts.push("box.tailnet.ts.net".to_string());
-        assert!(server_rebind_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
     }
 
     #[test]
-    fn rebind_drift_detects_max_websocket_events_connections_change() {
+    fn restart_drift_detects_max_websocket_events_connections_change() {
         // Each per-class connection-cap semaphore is built once at startup, so
         // changing a cap must surface as a restart-needed warning like the other
         // startup-bound settings, not be silently swallowed by a live reload.
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.max_websocket_events_connections += 1;
-        assert!(server_rebind_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
     }
 
     #[test]
-    fn rebind_drift_detects_max_websocket_agent_connections_change() {
+    fn restart_drift_detects_max_websocket_agent_connections_change() {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.max_websocket_agent_connections += 1;
-        assert!(server_rebind_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
     }
 
     #[test]
-    fn rebind_drift_detects_max_websocket_terminal_connections_change() {
+    fn restart_drift_detects_max_websocket_terminal_connections_change() {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.max_websocket_terminal_connections += 1;
-        assert!(server_rebind_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
     }
 
     #[test]
-    fn rebind_drift_detects_max_websocket_tab_connections_change() {
+    fn restart_drift_detects_max_websocket_tab_connections_change() {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.max_websocket_tab_connections += 1;
-        assert!(server_rebind_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
     }
 
     #[test]
-    fn rebind_drift_detects_max_websocket_tabs_per_agent_change() {
+    fn restart_drift_detects_max_websocket_tabs_per_agent_change() {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.max_websocket_tabs_per_agent += 1;
-        assert!(server_rebind_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
     }
 
     #[test]
-    fn rebind_drift_ignores_color_setting() {
-        // [server] color is a console-only preference, not a bound value; a
-        // running listener cannot drift because of it, so it must not warn.
+    fn restart_drift_detects_tree_list_max_concurrency_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.tree_list_max_concurrency += 1;
+        assert!(server_restart_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn restart_drift_detects_release_notes_max_concurrency_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.release_notes_max_concurrency += 1;
+        assert!(server_restart_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn restart_drift_detects_color_change() {
+        // The console is built once, before the engine moves into the actor
+        // thread, so a reloaded `color` reaches nothing until a restart.
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.color = "never".to_string();
-        assert!(!server_rebind_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn restart_drift_ignores_the_two_settings_a_reload_applies() {
+        // `access_log` and `search_index_max_files` are read live off the shared
+        // limits, so warning about them would tell the user to restart for a
+        // change that has already taken effect.
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.access_log = !prev.access_log;
+        next.search_index_max_files = prev.search_index_max_files + 1;
+        assert!(!server_restart_settings_changed(&prev, &next));
     }
 
     // -----------------------------------------------------------------------

@@ -874,7 +874,7 @@ impl App {
                 // running values. A listener binds once, so a `[server]` change
                 // needs a restart on this surface exactly as it does on the web,
                 // and the terminal UI is often the only one watching.
-                let server_settings_changed = dux_core::config::server_rebind_settings_changed(
+                let server_settings_changed = dux_core::config::server_restart_settings_changed(
                     &self.engine.config.server,
                     &boxed.server,
                 );
