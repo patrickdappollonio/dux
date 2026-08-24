@@ -325,6 +325,35 @@ describe("settingsDescriptors", () => {
     expect(description).toContain("reopen dux")
   })
 
+  // `--no-tailscale` outranks the config for as long as the run lasts, so the
+  // row would save a value the listener refuses. It locks instead and says why.
+  it("locks the Tailscale row on a run started with --no-tailscale", () => {
+    const d = allSettingDescriptors().find((x) => x.key === "server.tailscale")!
+    expect(d.lockedBy).toBeTypeOf("function")
+    expect(d.lockedBy!({ ...sampleBootstrap, tailscale_forced_no: false })).toBeNull()
+    const locked = d.lockedBy!({ ...sampleBootstrap, tailscale_forced_no: true })
+    expect(locked).toBeTruthy()
+    expect(locked!).toContain("--no-tailscale")
+    expect(locked!.toLowerCase()).toContain("next")
+  })
+
+  // An older server omits the field entirely; an absent flag is not a lock.
+  it("does not lock the Tailscale row when the server never mentions the flag", () => {
+    const d = allSettingDescriptors().find((x) => x.key === "server.tailscale")!
+    const older = { ...sampleBootstrap }
+    delete older.tailscale_forced_no
+    expect(d.lockedBy!(older)).toBeNull()
+  })
+
+  // Every other row is always editable; the lock is not a field anyone else has
+  // to reason about.
+  it("locks no other row", () => {
+    for (const d of allSettingDescriptors()) {
+      if (d.key === "server.tailscale") continue
+      expect(d.lockedBy).toBeUndefined()
+    }
+  })
+
   it("routes github_integration to the dedicated toggle endpoint", () => {
     const d = allSettingDescriptors().find((d) => d.key === "ui.github_integration")
     expect(d?.writeTarget).toBe("github")

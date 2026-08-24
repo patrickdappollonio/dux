@@ -28,6 +28,16 @@ vi.mock("@/lib/configApi", () => ({
   configApi: { toggleGithubIntegration: vi.fn(), setTailscaleMode: vi.fn() },
 }))
 
+// The Tailscale row's reply is a sentence, and its tone decides which raiser
+// it goes to. `lib/notify` is the one place a toast is raised, so it is the one
+// place to spy on.
+vi.mock("@/lib/notify", () => ({
+  notifyError: vi.fn(),
+  notifyInfo: vi.fn(),
+  notifySuccess: vi.fn(),
+  notifyWarning: vi.fn(),
+}))
+
 // The real tooltip only mounts its popup on hover and needs a ResizeObserver
 // that jsdom lacks; render its trigger children directly so the swatch
 // buttons exist.
@@ -78,6 +88,9 @@ const setChangesPaneVisibility = vi.mocked(store.setChangesPaneVisibility)
 const { configApi } = await import("@/lib/configApi")
 const toggleGithubIntegration = vi.mocked(configApi.toggleGithubIntegration)
 const setTailscaleMode = vi.mocked(configApi.setTailscaleMode)
+const notify = await import("@/lib/notify")
+const notifyInfo = vi.mocked(notify.notifyInfo)
+const notifyWarning = vi.mocked(notify.notifyWarning)
 
 const fullBootstrap: Bootstrap = {
   available_providers: [],
@@ -131,6 +144,8 @@ beforeEach(() => {
     warning: false,
     message: "saved",
   })
+  notifyInfo.mockClear()
+  notifyWarning.mockClear()
 })
 
 afterEach(() => {
@@ -637,6 +652,15 @@ describe("CustomizeWebappDialog", () => {
 
   // ── The Tailscale mode row ────────────────────────────────────────────────
 
+  async function pickTailscaleMode(label: string) {
+    const trigger = screen.getByLabelText("Bind your Tailscale address")
+    fireEvent.click(trigger)
+    await waitFor(() => expect(trigger.getAttribute("aria-expanded")).toBe("true"))
+    const option = await screen.findByRole("option", { name: label })
+    fireEvent.pointerDown(option, { pointerType: "mouse" })
+    fireEvent.click(option)
+  }
+
   it("saves the Tailscale mode through its own endpoint, not the settings PATCH", async () => {
     // Saving the value is only half of the row: the other half moves a live
     // listener, which the generic PATCH cannot do.
@@ -668,6 +692,86 @@ describe("CustomizeWebappDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(setTailscaleMode).not.toHaveBeenCalled()
+  })
+
+  // The reply's tone is the server's, not the client's guess: "your Tailscale
+  // listener would not bind" is not the same news as "saved".
+  it("raises the Tailscale reply as a warning when the server grades it one", async () => {
+    setTailscaleMode.mockResolvedValue({
+      mode: "yes",
+      warning: true,
+      message: "No Tailscale address was found",
+    })
+    seed({ tailscale_mode: "auto" })
+    render(<CustomizeWebappDialog />)
+
+    await pickTailscaleMode("Yes")
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(notifyWarning).toHaveBeenCalledWith("No Tailscale address was found")
+    expect(notifyInfo).not.toHaveBeenCalled()
+  })
+
+  it("raises a plain reply as information", async () => {
+    setTailscaleMode.mockResolvedValue({
+      mode: "no",
+      warning: false,
+      message: "dux stopped serving on your Tailscale address",
+    })
+    seed({ tailscale_mode: "auto" })
+    render(<CustomizeWebappDialog />)
+
+    await pickTailscaleMode("No")
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(notifyInfo).toHaveBeenCalledWith(
+      "dux stopped serving on your Tailscale address",
+    )
+    expect(notifyWarning).not.toHaveBeenCalled()
+  })
+
+  // ── The run-scoped lock ───────────────────────────────────────────────────
+
+  it("locks the Tailscale row on a run started with --no-tailscale", () => {
+    seed({ tailscale_mode: "no", tailscale_forced_no: true })
+    render(<CustomizeWebappDialog />)
+
+    const trigger = screen.getByLabelText("Bind your Tailscale address")
+    expect(trigger.hasAttribute("disabled")).toBe(true)
+    const row = trigger.closest(".flex-col.gap-2")
+    expect(row!.textContent).toContain("--no-tailscale")
+    expect(row!.textContent).toContain("next time")
+  })
+
+  it("leaves the row editable on an ordinary run", () => {
+    seed({ tailscale_mode: "no", tailscale_forced_no: false })
+    render(<CustomizeWebappDialog />)
+
+    const trigger = screen.getByLabelText("Bind your Tailscale address")
+    expect(trigger.hasAttribute("disabled")).toBe(false)
+    expect(trigger.closest(".flex-col.gap-2")!.textContent).not.toContain(
+      "--no-tailscale",
+    )
+  })
+
+  // Reset-to-defaults writes every row in the section at once, which would
+  // otherwise post a value past a control the user cannot reach.
+  it("skips the locked Tailscale row when the section is reset", async () => {
+    // `hyperlinks` is in the same section and differs from its default, so the
+    // reset has real work to do and its completion is observable.
+    seed({ tailscale_mode: "no", tailscale_forced_no: true, hyperlinks: false })
+    render(<CustomizeWebappDialog />)
+
+    const resets = screen.getAllByRole("button", {
+      name: /Reset section to defaults/i,
+    })
+    fireEvent.click(resets[resets.length - 1])
+
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled())
+    expect(saveSettings.mock.calls[0][0].capabilities).toEqual({ hyperlinks: true })
     expect(setTailscaleMode).not.toHaveBeenCalled()
   })
 

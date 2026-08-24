@@ -380,12 +380,15 @@ function SettingRow({
   value,
   onChange,
   disabled,
+  lock,
   availableProviders,
 }: {
   d: SettingDescriptor
   value: SettingValue
   onChange: (v: SettingValue) => void
   disabled: boolean
+  /** The sentence saying why this run cannot change the row, or null. */
+  lock: string | null
   availableProviders: string[]
 }) {
   const id = rowId(d)
@@ -403,7 +406,9 @@ function SettingRow({
     <div className="flex flex-col gap-2 py-3 first:pt-0 md:flex-row md:items-start md:justify-between md:gap-6">
       <div className="flex flex-col gap-1">
         {labelEl}
-        <p className="text-xs text-muted-foreground">{renderInlineCode(d.description)}</p>
+        <p className="text-xs text-muted-foreground">
+          {renderInlineCode(lock ?? d.description)}
+        </p>
         <p className="text-xs text-muted-foreground">
           {defaultLabel(d)}
           {d.control.kind === "number" && d.control.zeroMeaning
@@ -416,7 +421,7 @@ function SettingRow({
           d={d}
           value={value}
           onChange={onChange}
-          disabled={disabled}
+          disabled={disabled || lock !== null}
           availableProviders={availableProviders}
         />
       </div>
@@ -610,6 +615,10 @@ function CustomizeWebappForm({
   const setOverride = (key: string, value: SettingValue) =>
     setOverrides((o) => ({ ...o, [key]: value }))
 
+  // What this RUN of the server refuses to let the row change, if anything.
+  const lockOn = (d: SettingDescriptor): string | null =>
+    bootstrap ? (d.lockedBy?.(bootstrap) ?? null) : null
+
   // Refuse to write before the config is loaded. The form seeds its fields
   // from `bootstrap`, so saving with a null bootstrap would persist fallback
   // defaults over whatever the operator actually configured.
@@ -647,10 +656,12 @@ function CustomizeWebappForm({
       // the pre-existing "Reset to default" behavior for those two fields.
       const resetValue = (d: SettingDescriptor): SettingValue =>
         d.writeTarget === "identity" ? "" : d.default
-      const entries: [SettingDescriptor, SettingValue][] = settings.map((d) => [
-        d,
-        resetValue(d),
-      ])
+      // A locked row's control is unreachable, and a reset must not write past
+      // it: the run would refuse the value and the toast would contradict the
+      // dialog.
+      const entries: [SettingDescriptor, SettingValue][] = settings
+        .filter((d) => lockOn(d) === null)
+        .map((d) => [d, resetValue(d)])
       // Only reflect the reset defaults in the dialog's local state AFTER the
       // write actually lands. Applying the optimistic override first (the
       // previous behavior) showed reset defaults in the controls even when
@@ -662,7 +673,7 @@ function CustomizeWebappForm({
       if (await persist(entries, originalOf)) {
         setOverrides((o) => {
           const next = { ...o }
-          for (const d of settings) next[d.key] = resetValue(d)
+          for (const [d, value] of entries) next[d.key] = value
           return next
         })
       }
@@ -710,6 +721,7 @@ function CustomizeWebappForm({
                       value={effective(d)}
                       onChange={(v) => setOverride(d.key, v)}
                       disabled={saving}
+                      lock={lockOn(d)}
                       availableProviders={bootstrap?.available_providers ?? []}
                     />
                     {/* Directly beneath the setting it is a precondition for. */}
