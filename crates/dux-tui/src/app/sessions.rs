@@ -2266,7 +2266,11 @@ impl App {
 
         let reconnect_key = self.bindings.label_for(Action::ReconnectAgent);
         if outcome.running {
-            self.set_warning(format!(
+            // Pinned: the swap has happened but the relaunch has not, and it
+            // stays owed until the user exits the running agent. A standing
+            // owed action is not a transient outcome, so it waits for them
+            // rather than for the warning window.
+            self.set_pinned_warning(format!(
                 "Worktree \"{}\" is set to {}, but the {} agent is still running. Exit it and press {} to relaunch with {}.",
                 prompt.session_label,
                 selected.provider.as_str(),

@@ -19517,8 +19517,11 @@ cyan = "#00ffff"
         assert!(app.status.text().contains("will use opencode next launch"));
     }
 
+    /// The warning says the user must exit the running agent and relaunch it.
+    /// That stays owed until they do it, so it waits for them rather than for
+    /// the warning window.
     #[test]
-    fn change_agent_provider_swaps_but_warns_when_agent_is_running() {
+    fn change_agent_provider_warns_and_holds_the_line_when_agent_is_running() {
         let mut app = test_app(default_bindings());
         app.engine.sessions[0].provider = ProviderKind::from_str("codex");
         app.engine.sessions[0].status = SessionStatus::Active;
@@ -19587,6 +19590,18 @@ cyan = "#00ffff"
             "status should explain the agent still runs the old provider, got: {message}"
         );
         assert!(matches!(app.prompt, PromptState::None));
+
+        let window = std::time::Duration::from_secs(6);
+        app.status.set_clear_after(window);
+        let _ = app.status.tick(
+            std::time::Instant::now() + window * 4,
+            dux_core::statusline::BUSY_TIMEOUT,
+        );
+        assert!(
+            app.status.message().contains("still running"),
+            "the relaunch is still owed, so the warning waits for the user: {}",
+            app.status.message()
+        );
 
         // Clean up so the PTY doesn't outlive the test.
         app.engine.providers.remove(&session_id);
