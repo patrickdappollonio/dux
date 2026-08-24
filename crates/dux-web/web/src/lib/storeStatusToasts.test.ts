@@ -180,7 +180,7 @@ describe("engine status → sonner toast routing", () => {
     status(mod, "warn-key", "warning", "Careful!")
     expect(toast.warning).toHaveBeenCalledWith("Careful!", {
       id: "warn-key",
-      duration: 12000,
+      duration: 18000,
     })
   })
 
@@ -294,7 +294,7 @@ describe("engine status → sonner toast routing", () => {
     status(mod, "w", "warning", "Careful.")
     expect(toast.warning).toHaveBeenCalledWith("Careful.", {
       id: "w",
-      duration: 20000,
+      duration: 30000,
     })
     status(mod, "e", "error", "Broken.")
     expect(toast.error).toHaveBeenCalledWith("Broken.", {
@@ -509,7 +509,7 @@ describe("the standalone editor tab", () => {
     scopedStatus(mod, "pull", "warning", "Agent exited.", "all")
     expect(toast.warning).toHaveBeenCalledWith("Agent exited.", {
       id: "pull",
-      duration: 12000,
+      duration: 18000,
     })
   })
 })
@@ -533,7 +533,7 @@ describe("an engine status that says it waits for the user", () => {
     status(mod, "ordinary", "warning", "Careful.", false)
     expect(toast.warning).toHaveBeenCalledWith("Careful.", {
       id: "ordinary",
-      duration: 12000,
+      duration: 18000,
     })
   })
 

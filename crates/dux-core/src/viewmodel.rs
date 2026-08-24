@@ -221,8 +221,9 @@ pub struct BootstrapView {
     pub global_env: std::collections::BTreeMap<String, String>,
     /// Mirrors `config.ui.status_clear_seconds`. The web honors it for toast
     /// auto-dismiss, and every tone dismisses: an info/success toast clears
-    /// this many seconds after it arrives, a warning at twice that and an error
-    /// at four times, so this one value grades them all. 0 disables auto-clear
+    /// this many seconds after it arrives, a warning at
+    /// [`WARNING_CLEAR_FACTOR`](crate::statusline::WARNING_CLEAR_FACTOR) times
+    /// that and an error at four times, so this one value grades them all. 0 disables auto-clear
     /// for those final states. (A busy toast is not a final state: the web
     /// retires it on its own fixed leak guard, comfortably longer than
     /// `statusline::BUSY_TIMEOUT`.)

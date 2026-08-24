@@ -330,17 +330,16 @@ export const SETTING_GROUPS: SettingGroup[] = [
         key: "ui.status_clear_seconds",
         label: "Status message auto-clear",
         description:
-          "Seconds before a success/info status toast auto-clears. Warnings stay up twice as long and errors four times as long, so this one number moves all of them. Set it to 0 to keep status toasts on screen until you dismiss them.",
+          "Seconds before a success/info status toast auto-clears. Warnings stay up three times as long and errors four times as long, so this one number moves all of them. Set it to 0 to keep status toasts on screen until you dismiss them.",
         surface: "both",
         control: {
           kind: "number",
           min: 0,
           max: MAX_STATUS_CLEAR_SECONDS,
-          // Not "like a warning" any more: a warning now retires at twice this
-          // window rather than persisting, so the old analogy taught the
-          // opposite of the truth. "Sticky" is also a specific thing now (the
-          // handful of messages that wait for the user whatever this is set to),
-          // so it cannot double as a loose description of this setting.
+          // Neither "like a warning" nor "sticky" can name this: a warning
+          // retires at three times this window rather than persisting, and
+          // sticky is the handful of messages that wait for the user whatever
+          // this is set to.
           zeroMeaning: "Never auto-clear (stays until you dismiss it)",
           unit: "seconds",
         },

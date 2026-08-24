@@ -254,7 +254,7 @@ ends when you close it, or when dux shuts down.
 Progress and results arrive as small messages at the bottom of the screen, and **they
 clear themselves.** How long a finished one stays depends on how much it matters: a
 success or a note uses your `ui.status_clear_seconds` window (six seconds by default), a
-warning stays twice that, and an error four times. Setting `ui.status_clear_seconds = 0`
+warning stays three times that, and an error four times. Setting `ui.status_clear_seconds = 0`
 turns auto-clearing off. Dismiss one early by swiping it away or with its close button.
 
 A message about work still in flight is a spinner: no close button and no swipe, replaced

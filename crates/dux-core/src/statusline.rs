@@ -820,7 +820,12 @@ mod tests {
         let window = Duration::from_secs(6);
         let mut c = KeyedStatusController::with_clear_after(window);
         c.set(t0, None, StatusTone::Warning, "Already serving.");
-        c.set(t0, Some("push".into()), StatusTone::Warning, "Push is stale.");
+        c.set(
+            t0,
+            Some("push".into()),
+            StatusTone::Warning,
+            "Push is stale.",
+        );
         c.set(t0, Some("pull".into()), StatusTone::Error, "Pull failed.");
 
         // One window in, a warning is still there: it outlives an info.
@@ -1008,7 +1013,11 @@ mod tests {
         let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
         c.set(t0, Some("push".into()), StatusTone::Error, "Push failed.");
         let _ = c.tick(t0 + Duration::from_secs(3600), Duration::from_secs(20));
-        assert_eq!(c.snapshot().len(), 1, "Retain must keep the error available");
+        assert_eq!(
+            c.snapshot().len(),
+            1,
+            "Retain must keep the error available"
+        );
         assert_eq!(c.most_recent().unwrap().tone, "error");
     }
 
