@@ -2764,26 +2764,6 @@ impl App {
         )
     }
 
-    /// The hint line shown while ANOTHER DEVICE is driving the terminal in the
-    /// center pane, replacing the usual hints the way the scroll-mode cue does and
-    /// for the same reason: while it is up, this keyboard is not reaching the
-    /// child, so a line listing keys that go nowhere would be a lie.
-    ///
-    /// It carries its own way out (the palette, and the command to run there),
-    /// because that is the only gesture that takes the terminal back, and the
-    /// minimize key, because this line is the whole hint bar and in fullscreen it
-    /// would otherwise be the only thing on screen with no way back.
-    ///
-    /// Reads the registry live, on every frame, which is what makes it disappear
-    /// by itself the moment the other device lets go.
-    ///
-    /// `width` is the room the line actually has, which is the inner width of the
-    /// center pane and NOT the window's. The line is built to fit it: the fixed
-    /// half (the way out) is measured first and the DEVICE NAME is what gives way,
-    /// because a cue that names a problem with no way out of it is worse than one
-    /// that names the device approximately. The clause about the keys is the
-    /// second thing dropped, in the narrow panes where even a cut name would not
-    /// leave room for it.
     /// The hint line under a WINDOWED, typeable center pane: keystrokes reach the
     /// focused surface's PTY while dux keeps its chords, so the line names only
     /// the chords that stay dux's (all resolved through the bindings, never
@@ -2872,6 +2852,26 @@ impl App {
         )
     }
 
+    /// The hint line shown while ANOTHER DEVICE is driving the terminal in the
+    /// center pane, replacing the usual hints the way the scroll-mode cue does and
+    /// for the same reason: while it is up, this keyboard is not reaching the
+    /// child, so a line listing keys that go nowhere would be a lie.
+    ///
+    /// It carries its own way out (the palette, and the command to run there),
+    /// because that is the only gesture that takes the terminal back, and the
+    /// minimize key, because this line is the whole hint bar and in fullscreen it
+    /// would otherwise be the only thing on screen with no way back.
+    ///
+    /// Reads the registry live, on every frame, which is what makes it disappear
+    /// by itself the moment the other device lets go.
+    ///
+    /// `width` is the room the line actually has, which is the inner width of the
+    /// center pane and NOT the window's. The line is built to fit it: the fixed
+    /// half (the way out) is measured first and the DEVICE NAME is what gives way,
+    /// because a cue that names a problem with no way out of it is worse than one
+    /// that names the device approximately. The clause about the keys is the
+    /// second thing dropped, in the narrow panes where even a cut name would not
+    /// leave room for it.
     pub(crate) fn remote_driver_cue_line(&self, device: &str, width: u16) -> Line<'static> {
         let cue_style = Style::default().fg(self.theme.remote_driver_fg);
         let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
