@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicBool;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use dux_core::config::server_rebind_settings_changed;
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
@@ -426,55 +427,6 @@ pub(crate) struct ActorLoopEnds {
     /// projected spine, so an ownership flip moves the sessions fingerprint and
     /// fires `sessions.changed` like any other spine mutation.
     pty_input_owners: Arc<PtySizeOwners>,
-}
-
-/// True when a config reload changed any `[server]` setting that only takes
-/// effect at startup -- listeners are bound once, and reload-config never
-/// rebinds them. The engine actor calls this on every reload (before the config
-/// swap) so it can warn the user that a restart is needed for these specific
-/// changes; a reload that only touched, say, `[ui]` theme settings leaves every
-/// compared field equal and triggers no warning.
-///
-/// Compared fields: the bind `host` and `port`, the `tailscale` mode, and the
-/// `allowed_hosts` host-guard list.
-///
-/// The `tailscale` MODE stays on this list even though `auto` now re-binds that
-/// leg by itself. What the watcher makes live is the interface coming and going,
-/// not the setting: the mode is read once when serving starts, and it decides
-/// whether a watcher was started at all. So switching `no` to `auto` starts no
-/// watcher and switching `auto` to `no` drops no listener, and the operator has
-/// to hear that from the restart warning rather than discover it by finding dux
-/// still answering on their tailnet.
-///
-/// All five WebSocket caps are also startup-bound: the three per-class
-/// connection-cap semaphores (`max_websocket_events_connections`,
-/// `max_websocket_agent_connections`, `max_websocket_terminal_connections`) are
-/// built ONCE in `build_app` and never resized on reload, and the two tab caps
-/// (`max_websocket_tab_connections`, `max_websocket_tabs_per_agent`) are frozen
-/// into `RouterParams`. The deprecated `bind` field is migrated into `host`/`port` on load,
-/// so a change to it surfaces through those fields.
-fn server_rebind_settings_changed(
-    prev: &dux_core::config::ServerConfig,
-    next: &dux_core::config::ServerConfig,
-) -> bool {
-    prev.host != next.host
-        || prev.port != next.port
-        // The parsed MODE, never the raw string: the value is trimmed and
-        // case-insensitive, so comparing the text would tell a user who retyped
-        // "Auto" to restart a server whose behavior did not change at all.
-        || prev.tailscale_mode() != next.tailscale_mode()
-        || prev.allowed_hosts != next.allowed_hosts
-        || prev.max_websocket_events_connections != next.max_websocket_events_connections
-        || prev.max_websocket_agent_connections != next.max_websocket_agent_connections
-        || prev.max_websocket_terminal_connections != next.max_websocket_terminal_connections
-        || prev.max_websocket_tab_connections != next.max_websocket_tab_connections
-        || prev.max_websocket_tabs_per_agent != next.max_websocket_tabs_per_agent
-        // The file-drop caps are frozen into RouterParams at bind time and the
-        // routes enforce that frozen copy, while the viewmodel projects the
-        // reloaded value live. Without this row a reload silently leaves the
-        // browser believing a cap the server no longer enforces.
-        || prev.file_drop_max_bytes != next.file_drop_max_bytes
-        || prev.file_drop_max_concurrency != next.file_drop_max_concurrency
 }
 
 /// Extract the reloaded `Config` from a reload follow-up reaction, consuming it.

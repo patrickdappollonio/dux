@@ -870,6 +870,14 @@ impl App {
             }
 
             EventReaction::ApplyReloadedConfig(boxed) => {
+                // Compared before the swap, while `engine.config` still holds the
+                // running values. A listener binds once, so a `[server]` change
+                // needs a restart on this surface exactly as it does on the web,
+                // and the terminal UI is often the only one watching.
+                let server_settings_changed = dux_core::config::server_rebind_settings_changed(
+                    &self.engine.config.server,
+                    &boxed.server,
+                );
                 // Resolve the TUI's keyed reload busy op (if one rode along) into
                 // its keyed final, REPLACING the legacy `set_info`/`set_error` with
                 // byte-identical messages. The shared engine reload logic is
@@ -878,6 +886,7 @@ impl App {
                     Err(err) => TuiConfigReloadOutcome::ApplyFailed(format!("{err:#}")),
                     Ok(()) => TuiConfigReloadOutcome::Applied,
                 };
+                let applied = matches!(outcome, TuiConfigReloadOutcome::Applied);
                 if let Some(op) = self.pending_config_reload_op.take() {
                     self.apply_reaction(op.resolve(&outcome).into_reaction());
                 } else {
@@ -892,6 +901,13 @@ impl App {
                         }
                         TuiConfigReloadOutcome::ValidationFailed => {}
                     }
+                }
+                // Last, so it is the line left on screen: the reload succeeded and
+                // this is the part of it that has not happened yet. A failed apply
+                // has a more urgent thing to say and keeps the line.
+                if applied && server_settings_changed {
+                    let serving = self.background_server_is_serving();
+                    self.set_warning(server_restart_warning(serving));
                 }
             }
             EventReaction::OpenConfigReloadFailedModal(message) => {
@@ -1689,6 +1705,23 @@ fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput
     }
 }
 
+/// What a reloaded startup-bound `[server]` change means for this terminal UI.
+/// A background listener is restarted from inside dux, so the serving copy names
+/// that pair of commands; with nothing serving there is nothing to restart and
+/// the change simply waits for the next listener.
+fn server_restart_warning(serving_in_background: bool) -> &'static str {
+    match serving_in_background {
+        true => {
+            "Server settings changed in config, but a listener that is already bound cannot adopt \
+             them. Stop the background server and start it again to apply them."
+        }
+        false => {
+            "Server settings changed in config. Nothing is serving right now, so they apply the \
+             next time a server starts."
+        }
+    }
+}
+
 pub(crate) fn run_create_agent_branch_inspection_job(
     project: Project,
     worker_tx: Sender<WorkerEvent>,
@@ -2438,6 +2471,54 @@ mod tests {
             _ => panic!("expected missing-name failure"),
         }
         assert!(worker_rx.try_recv().is_err());
+    }
+
+    /// A `[server]` setting only takes effect when a listener binds, so the
+    /// terminal UI must say so on its own reload rather than leaving the news to
+    /// a browser that may not be connected.
+    #[test]
+    fn a_reload_that_changes_a_server_setting_warns_on_the_terminal_ui() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let mut config = app.engine.config.clone();
+        config.server.port += 1;
+
+        app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
+
+        let (tone, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(tone, StatusTone::Warning, "the last word is the warning");
+        assert!(
+            message.contains("server"),
+            "the warning names what needs restarting: {message}"
+        );
+    }
+
+    #[test]
+    fn a_reload_that_leaves_the_server_section_alone_warns_about_nothing() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let mut config = app.engine.config.clone();
+        config.ui.diff_tab_width += 1;
+
+        app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
+
+        let (tone, _) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(tone, StatusTone::Info, "nothing bound has drifted");
+    }
+
+    #[test]
+    fn the_server_restart_warning_names_the_background_server_only_while_it_serves() {
+        let serving = server_restart_warning(true);
+        let idle = server_restart_warning(false);
+        assert_ne!(serving, idle);
+        assert!(
+            serving.contains("background server"),
+            "a serving terminal UI is told what to stop and start: {serving}"
+        );
+        assert!(
+            !idle.contains("background server"),
+            "an idle one is told when the change applies instead: {idle}"
+        );
     }
 
     /// The pull is best-effort: a broken checkout does not abort creation at the

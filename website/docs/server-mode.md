@@ -256,7 +256,7 @@ The rest tune presentation and limits:
 > Most of these are read once, when serving starts, so changing them needs a **server
 > restart**, not just a config reload: `host`, `port`, `allowed_hosts`, `tailscale`,
 > both `file_drop_*` keys, and every connection cap. A config reload says so for all
-> of them.
+> of them, on either surface: the browser and the terminal app each warn you.
 
 `serve_while_tui` is the one binding key that is a live switch: a config reload that
 flips it acts on it there and then, in both directions.
