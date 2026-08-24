@@ -2784,6 +2784,89 @@ impl App {
     /// that names the device approximately. The clause about the keys is the
     /// second thing dropped, in the narrow panes where even a cut name would not
     /// leave room for it.
+    /// The hint line under a WINDOWED, typeable center pane: keystrokes reach the
+    /// focused surface's PTY while dux keeps its chords, so the line names only
+    /// the chords that stay dux's (all resolved through the bindings, never
+    /// hardcoded). Typing shows itself, so the line does not say where it goes.
+    ///
+    /// With `[ui] tab_reaches_agent` on, Tab is the agent's and the pane chords
+    /// are the only way out, so both are named and a flush-right cue says where
+    /// the tabs went. `width` is the pane's inner width: the cue is what gives
+    /// way when there is not room for both, because the chords are the way out
+    /// and the cue only explains something the pane already demonstrates.
+    pub(crate) fn typeable_hint_line(
+        &self,
+        active_surface: SessionSurface,
+        width: u16,
+    ) -> Line<'static> {
+        let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        let tab_reaches_agent = self.engine.config.ui.tab_reaches_agent;
+        let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
+        let macro_key = self.bindings.label_for(Action::OpenMacroBar);
+        let next_tab = self.bindings.label_for(Action::NextTab);
+        // A key this pane types is a key the hint must not advertise, so the
+        // labels come from the same ownership predicate the routing uses.
+        let pane_key = |action: Action| {
+            self.bindings
+                .label_for_typeable_center(action, tab_reaches_agent)
+                .unwrap_or_default()
+        };
+        let next_pane = pane_key(Action::FocusNext);
+        let prev_pane = pane_key(Action::FocusPrev);
+
+        let mut spans: Vec<Span> = Vec::new();
+        spans.extend(self.theme.dim_key_badge_default(&exit_key));
+        spans.push(Span::styled(" fullscreen  ", desc_style));
+        if !next_pane.is_empty() {
+            spans.extend(self.theme.dim_key_badge_default(&next_pane));
+            spans.push(Span::styled(" next pane", desc_style));
+        }
+        if tab_reaches_agent && !prev_pane.is_empty() {
+            spans.push(Span::styled("  ", desc_style));
+            spans.extend(self.theme.dim_key_badge_default(&prev_pane));
+            spans.push(Span::styled(" previous pane", desc_style));
+        }
+        // The surviving tab-switch chords are loud in HINTS, not only docs: with
+        // plain arrows typing into the agent, the chords are the only tab keys
+        // left, so an agent with something to switch to names the next-tab chord
+        // here. A tab hint on a single-tab agent is noise, so it needs 2+.
+        let tab_count = self
+            .selected_session()
+            .map(|s| self.session_tab_ids(&s.id).len())
+            .unwrap_or(0);
+        if matches!(active_surface, SessionSurface::Agent) && tab_count >= 2 && !next_tab.is_empty()
+        {
+            spans.push(Span::styled("  ", desc_style));
+            spans.extend(self.theme.dim_key_badge_default(&next_tab));
+            spans.push(Span::styled(" next tab", desc_style));
+        }
+        if !self.filtered_macros("").is_empty() && !macro_key.is_empty() {
+            spans.push(Span::styled("  ", desc_style));
+            spans.extend(self.theme.dim_key_badge_default(&macro_key));
+            spans.push(Span::styled(" macros", desc_style));
+        }
+        spans.push(Span::styled(".", desc_style));
+
+        if tab_reaches_agent {
+            const CUE: &str = "tabs are sent to the agent";
+            const GAP: usize = 2;
+            let chords: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+            if let Some(pad) = (width as usize).checked_sub(chords + GAP + CUE.chars().count()) {
+                spans.push(Span::styled(" ".repeat(pad + GAP), desc_style));
+                spans.push(Span::styled(CUE, desc_style));
+            }
+        }
+
+        // The key badges borrow locals, so hand back owned spans (the same
+        // pattern `remote_driver_cue_line` uses).
+        Line::from(
+            spans
+                .into_iter()
+                .map(|span| Span::styled(span.content.into_owned(), span.style))
+                .collect::<Vec<Span<'static>>>(),
+        )
+    }
+
     pub(crate) fn remote_driver_cue_line(&self, device: &str, width: u16) -> Line<'static> {
         let cue_style = Style::default().fg(self.theme.remote_driver_fg);
         let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
@@ -3268,8 +3351,6 @@ impl App {
             let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
 
             let macro_key = self.bindings.label_for(Action::OpenMacroBar);
-            let next_pane = self.bindings.label_for(Action::FocusNext);
-            let next_tab = self.bindings.label_for(Action::NextTab);
             let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
             // Resolved before the ladder so the branch below stays a plain
             // condition, and asked of the live registry rather than a cached flag.
@@ -3339,41 +3420,7 @@ impl App {
                 spans.push(Span::styled(" live edge.", desc_style));
                 Line::from(spans)
             } else if self.center_typeable() {
-                // Windowed typing: keystrokes reach the focused surface's PTY
-                // while dux keeps its chords. The line names only the chords
-                // that stay dux's (all resolved through the bindings, never
-                // hardcoded); typing shows itself, so the line does not say
-                // where it goes.
-                let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-                let mut spans: Vec<Span> = Vec::new();
-                spans.extend(self.theme.dim_key_badge_default(&exit_key));
-                spans.push(Span::styled(" fullscreen  ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&next_pane));
-                spans.push(Span::styled(" next pane", desc_style));
-                // The surviving tab-switch chords are loud in
-                // HINTS, not only docs: with plain arrows now typing into the
-                // agent, the chords are the only tab keys left, so an agent
-                // with something to switch to names the next-tab chord here.
-                // A tab hint on a single-tab agent is noise, so it needs 2+.
-                let tab_count = self
-                    .selected_session()
-                    .map(|s| self.session_tab_ids(&s.id).len())
-                    .unwrap_or(0);
-                if matches!(active_surface, SessionSurface::Agent)
-                    && tab_count >= 2
-                    && !next_tab.is_empty()
-                {
-                    spans.push(Span::styled("  ", desc_style));
-                    spans.extend(self.theme.dim_key_badge_default(&next_tab));
-                    spans.push(Span::styled(" next tab", desc_style));
-                }
-                if !self.filtered_macros("").is_empty() && !macro_key.is_empty() {
-                    spans.push(Span::styled("  ", desc_style));
-                    spans.extend(self.theme.dim_key_badge_default(&macro_key));
-                    spans.push(Span::styled(" macros", desc_style));
-                }
-                spans.push(Span::styled(".", desc_style));
-                Line::from(spans)
+                self.typeable_hint_line(active_surface, hint_area.width)
             } else {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
@@ -12639,6 +12686,79 @@ mod tests {
         assert_eq!(
             corner_count, 1,
             "fullscreen must draw only the agent pane's own box — no tab boxes"
+        );
+    }
+
+    fn rendered_line(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// With the option off the typeable pane names Tab, and the cue that says
+    /// tabs go to the agent is absent because they do not.
+    #[test]
+    fn typeable_hint_names_tab_while_tab_reaches_agent_is_off() {
+        let app = test_app(default_bindings());
+        assert!(!app.engine.config.ui.tab_reaches_agent);
+
+        let rendered = rendered_line(&app.typeable_hint_line(SessionSurface::Agent, 180));
+
+        assert!(rendered.contains("<Tab> next pane"), "got {rendered:?}");
+        assert!(
+            !rendered.contains("tabs are sent to the agent"),
+            "the cue must not appear while Tab still moves panes: {rendered:?}"
+        );
+    }
+
+    /// With the option on the line names both pane chords instead of Tab, and a
+    /// wide pane also carries the flush-right cue.
+    #[test]
+    fn typeable_hint_names_both_pane_chords_and_the_cue_when_wide() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.ui.tab_reaches_agent = true;
+
+        let width = 180u16;
+        let rendered = rendered_line(&app.typeable_hint_line(SessionSurface::Agent, width));
+
+        assert!(rendered.contains("<Ctrl-o> next pane"), "got {rendered:?}");
+        assert!(
+            rendered.contains("<Ctrl-y> previous pane"),
+            "got {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("<Tab> next pane"),
+            "Tab is the agent's now: {rendered:?}"
+        );
+        assert!(
+            rendered.ends_with("tabs are sent to the agent"),
+            "the cue must be flush right: {rendered:?}"
+        );
+        assert_eq!(
+            rendered.chars().count(),
+            width as usize,
+            "the padded line must fill the pane exactly: {rendered:?}"
+        );
+    }
+
+    /// The cue is the first thing to go when the pane is narrow; the chords
+    /// that move panes are what must survive.
+    #[test]
+    fn typeable_hint_drops_the_cue_before_the_chords_when_narrow() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.ui.tab_reaches_agent = true;
+
+        let rendered = rendered_line(&app.typeable_hint_line(SessionSurface::Agent, 60));
+
+        assert!(rendered.contains("<Ctrl-o> next pane"), "got {rendered:?}");
+        assert!(
+            rendered.contains("<Ctrl-y> previous pane"),
+            "got {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("tabs are sent to the agent"),
+            "the cue must drop first: {rendered:?}"
         );
     }
 

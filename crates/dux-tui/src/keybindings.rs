@@ -1789,6 +1789,24 @@ impl RuntimeBindings {
         self.label_for_reaching(action, |k| !text_field_owns_key(k))
     }
 
+    /// Display label for an action's first key that still reaches the bindings
+    /// from the typeable center pane ([`center_typing_owns_key`]).
+    ///
+    /// `None` means every one of the action's keys types into the agent there,
+    /// so the hint must drop rather than name a key the pane swallows. This is
+    /// what keeps the hint from naming Tab once `tab_reaches_agent` hands it
+    /// over.
+    pub fn label_for_typeable_center(
+        &self,
+        action: Action,
+        tab_reaches_agent: bool,
+    ) -> Option<String> {
+        self.label_for_reaching(action, |k| {
+            let event: KeyEvent = k.into();
+            !center_typing_owns_key(&event, tab_reaches_agent)
+        })
+    }
+
     /// Combined label for two related actions (e.g. MoveDown + MoveUp → "j/k").
     /// Takes the first key from each action.
     pub fn combined_label(&self, a: Action, b: Action) -> String {
