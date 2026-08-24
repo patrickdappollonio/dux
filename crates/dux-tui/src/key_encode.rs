@@ -136,7 +136,9 @@ pub(crate) fn encode_key(code: KeyCode, mods: KeyModifiers, app_cursor: bool) ->
             Some(vec![0x0d])
         }
         KeyCode::Tab if !mods.contains(KeyModifiers::SHIFT) => Some(vec![0x09]),
-        KeyCode::BackTab => Some(vec![0x1b, b'[', b'Z']),
+        // Two spellings of shift-tab: crossterm sends BackTab on a legacy
+        // terminal and Tab + SHIFT under the Kitty protocol.
+        KeyCode::Tab | KeyCode::BackTab => Some(vec![0x1b, b'[', b'Z']),
         KeyCode::Backspace if has_ctrl && has_alt => Some(vec![0x1b, 0x08]),
         KeyCode::Backspace if has_ctrl => Some(vec![0x08]),
         KeyCode::Backspace if has_alt => Some(vec![0x1b, 0x7f]),
@@ -187,6 +189,27 @@ mod tests {
         // None here would make capitals untypeable in the minimized pane.
         let ev = press(KeyCode::Char('P'), KeyModifiers::SHIFT);
         assert_eq!(key_event_to_pty_bytes(&ev, false), Some(b"P".to_vec()));
+    }
+
+    /// Crossterm spells shift-tab `BackTab` on most terminals and `Tab + SHIFT`
+    /// under the Kitty protocol. Both are the same keystroke and both must send
+    /// the CSI backtab sequence.
+    #[test]
+    fn both_spellings_of_shift_tab_encode_to_csi_backtab() {
+        let csi_backtab = Some(vec![0x1b, b'[', b'Z']);
+        assert_eq!(
+            key_event_to_pty_bytes(&press(KeyCode::BackTab, KeyModifiers::SHIFT), false),
+            csi_backtab
+        );
+        assert_eq!(
+            key_event_to_pty_bytes(&press(KeyCode::Tab, KeyModifiers::SHIFT), false),
+            csi_backtab
+        );
+        assert_eq!(
+            key_event_to_pty_bytes(&press(KeyCode::Tab, KeyModifiers::NONE), false),
+            Some(vec![0x09]),
+            "plain Tab is still the tab byte"
+        );
     }
 
     #[test]
