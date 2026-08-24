@@ -413,6 +413,16 @@ impl App {
         // without deciding anything about next time, and that distinction lives in
         // config, which this deliberately does not touch.
         self.background_server_wanted = false;
+        // A mode request queued on the runtime this stop tears down has nobody
+        // left to answer it, so answer it here rather than leaving its busy for
+        // the leak guard to expire.
+        if let Some(pending) = self.pending_tailscale_mode_op.take() {
+            self.apply_reaction(
+                pending
+                    .resolve(&dux_core::config::TailscaleModeOutcome::NotServing)
+                    .into_reaction(),
+            );
+        }
         // Let go of every pty this surface is driving FIRST, while the serve's
         // buses are still up to carry the news. After the stop there is nothing
         // left to announce on, and every browser watching one of those ptys would
@@ -1840,6 +1850,46 @@ pub(crate) mod tests {
                 app.engine.config.server.tailscale_mode(),
                 mode,
                 "the config value saves even when the listener refuses it"
+            );
+        }
+    }
+
+    #[test]
+    fn stopping_the_serve_answers_a_tailscale_mode_request_it_can_no_longer_carry() {
+        // The request is queued on the serve's runtime, which the stop tears
+        // down, so nothing is ever going to answer it. Left open, its busy sits
+        // there until the leak guard expires it.
+        for stop in [
+            "the palette's stop",
+            "a reload that turns serve_while_tui off",
+        ] {
+            let mut app = test_app(default_bindings());
+            let (companion, _recorded) = FakeCompanion::serving();
+            app.companion = Some(companion);
+            app.background_server_wanted = true;
+            app.engine.config.server.serve_while_tui = true;
+            app.save_and_apply_tailscale_mode(dux_core::config::TailscaleMode::Yes);
+            assert!(
+                app.pending_tailscale_mode_op.is_some(),
+                "{stop}: the request is in flight before the stop"
+            );
+
+            if stop == "the palette's stop" {
+                app.stop_background_server();
+            } else {
+                app.apply_serve_while_tui_setting(false);
+            }
+
+            assert!(
+                app.pending_tailscale_mode_op.is_none(),
+                "{stop} must resolve the request rather than strand it"
+            );
+            assert!(
+                !app.status
+                    .snapshot()
+                    .iter()
+                    .any(|s| s.tone == dux_core::statusline::StatusTone::Busy.as_wire()),
+                "{stop} must leave no busy open"
             );
         }
     }
