@@ -1178,6 +1178,66 @@ mod tests {
         );
     }
 
+    /// The unstage batch is the mirror image: it names what it reset, leaves
+    /// nothing in `refused`, and refreshes the changed files exactly once.
+    #[tokio::test]
+    async fn unstage_files_unstages_every_named_path_and_refreshes_once() {
+        let (tmp, app, state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        dirty_three(&worktree);
+        run_git(&worktree, &["add", "--", "f.txt", "second.txt"]);
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/unstage-files",
+                r#"{"paths":["f.txt","second.txt"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(parsed["done"], serde_json::json!(["f.txt", "second.txt"]));
+        assert_eq!(parsed["refused"], serde_json::json!([]));
+
+        let staged = tokio::task::spawn_blocking(move || {
+            let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+            staged.into_iter().map(|f| f.path).collect::<Vec<_>>()
+        })
+        .await
+        .unwrap();
+        assert!(
+            staged.is_empty(),
+            "both paths should have left the index: {staged:?}"
+        );
+        assert_eq!(
+            state.engine.refresh_requests().len(),
+            1,
+            "a batch must refresh the changed files exactly once",
+        );
+    }
+
+    /// The batch routes carry their own body limit, so an oversized request is
+    /// rejected by the layer before any handler allocates it.
+    #[tokio::test]
+    async fn a_batch_body_over_the_size_cap_is_rejected() {
+        let (_tmp, app, _state) = router_with_session_and_state().await;
+        let filler = "x".repeat(MAX_BATCH_BODY_BYTES + 1);
+        let body = serde_json::json!({ "paths": [filler] }).to_string();
+        assert!(body.len() > MAX_BATCH_BODY_BYTES);
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/stage-files",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     /// A path that left the section between the click and the request must not
     /// take the rest of the batch down with it: the route acts on what it can
     /// and says what it could not.
