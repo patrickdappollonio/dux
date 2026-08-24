@@ -57,6 +57,15 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(20);
 /// the price of the reconnect being honest.
 pub const FINAL_REPLAY_WINDOW: Duration = Duration::from_secs(30);
 
+/// How many `ui.status_clear_seconds` windows a `Warning` stays up, relative to
+/// the single window an `Info` gets.
+///
+/// Must stay equal to `WARNING_DURATION_FACTOR` in
+/// `crates/dux-web/web/src/lib/notify.ts` so the status line and the browser
+/// toast agree; `the_web_mirrors_the_warning_clear_factor` reads that file and
+/// fails if they drift.
+pub const WARNING_CLEAR_FACTOR: u32 = 3;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusTone {
     Info,
@@ -87,12 +96,16 @@ impl StatusTone {
         }
     }
 
-    /// Whether a status of this tone auto-clears after the timeout. Only `Info`
-    /// (which dux uses for success/positive confirmations) expires: `Busy` waits
-    /// for the final state that replaces it, and `Warning`/`Error` persist until
-    /// the next status so a problem is never missed.
-    fn auto_clears(self) -> bool {
-        matches!(self, StatusTone::Info)
+    /// How long a status of this tone stays up, as a multiple of the
+    /// auto-clear window. `None` means it stays until something replaces it:
+    /// `Busy` waits for its final, and an `Error` is the one outcome the user
+    /// must not be able to miss by looking away.
+    fn clear_windows(self) -> Option<u32> {
+        match self {
+            StatusTone::Info => Some(1),
+            StatusTone::Warning => Some(WARNING_CLEAR_FACTOR),
+            StatusTone::Busy | StatusTone::Error => None,
+        }
     }
 }
 
@@ -403,8 +416,11 @@ impl KeyedStatusController {
     /// Expire timed-out entries.
     ///
     /// Under [`StatusRetention::Retain`]:
-    /// - `Info`/success entries older than `clear_after` are removed AND
-    ///   reported in `cleared_keys`.
+    /// - A final older than its tone's window ([`StatusTone::clear_windows`]:
+    ///   one `clear_after` for `Info`, [`WARNING_CLEAR_FACTOR`] of them for
+    ///   `Warning`, never for `Error`) is removed AND reported in
+    ///   `cleared_keys`. A `sticky` final and the pinned anonymous slot are
+    ///   exempt, because both wait for the user rather than for a timer.
     ///
     /// Under [`StatusRetention::Emit`]:
     /// - EVERY final (info, warning, error alike) older than
@@ -432,9 +448,11 @@ impl KeyedStatusController {
                 a.tone != StatusTone::Busy && now.duration_since(a.since) >= FINAL_REPLAY_WINDOW
             } else {
                 !self.anon_pinned
-                    && a.tone.auto_clears()
+                    && !a.sticky
                     && !self.clear_after.is_zero()
-                    && now.duration_since(a.since) >= self.clear_after
+                    && a.tone.clear_windows().is_some_and(|windows| {
+                        now.duration_since(a.since) >= self.clear_after * windows
+                    })
             }
         });
         if anon_expired {
@@ -504,9 +522,10 @@ impl KeyedStatusController {
                 if age >= FINAL_REPLAY_WINDOW {
                     to_purge.push(key.clone());
                 }
-            } else if entry.tone.auto_clears()
+            } else if !entry.sticky
                 && !self.clear_after.is_zero()
-                && age >= self.clear_after
+                && let Some(windows) = entry.tone.clear_windows()
+                && age >= self.clear_after * windows
             {
                 to_clear.push(key.clone());
             }
@@ -796,18 +815,119 @@ mod tests {
     }
 
     #[test]
+    fn a_warning_clears_after_three_windows_and_an_error_never_does() {
+        let t0 = Instant::now();
+        let window = Duration::from_secs(6);
+        let mut c = KeyedStatusController::with_clear_after(window);
+        c.set(t0, None, StatusTone::Warning, "Already serving.");
+        c.set(t0, Some("push".into()), StatusTone::Warning, "Push is stale.");
+        c.set(t0, Some("pull".into()), StatusTone::Error, "Pull failed.");
+
+        // One window in, a warning is still there: it outlives an info.
+        let changes = c.tick(t0 + window, BUSY_TIMEOUT);
+        assert!(changes.cleared_keys.is_empty(), "{changes:?}");
+        assert_eq!(c.snapshot().len(), 3);
+
+        // A second short of three windows still keeps them.
+        let changes = c.tick(t0 + window * 3 - Duration::from_secs(1), BUSY_TIMEOUT);
+        assert!(changes.cleared_keys.is_empty(), "{changes:?}");
+        assert_eq!(c.snapshot().len(), 3);
+
+        // At three windows both warnings go, announced, and the error stays.
+        let changes = c.tick(t0 + window * 3, BUSY_TIMEOUT);
+        assert!(changes.cleared_keys.contains(&None));
+        assert!(changes.cleared_keys.contains(&Some("push".to_string())));
+        assert_eq!(changes.cleared_keys.len(), 2);
+        let snap = c.snapshot();
+        assert_eq!(snap.len(), 1, "only the error survives: {snap:?}");
+        assert_eq!(snap[0].key.as_deref(), Some("pull"));
+
+        // And the error is still there an hour later.
+        let _ = c.tick(t0 + Duration::from_secs(3600), BUSY_TIMEOUT);
+        assert_eq!(c.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn a_zero_window_keeps_warnings_too() {
+        // `status_clear_seconds = 0` means "never auto-clear", for every tone.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::ZERO);
+        c.set(t0, None, StatusTone::Warning, "Already serving.");
+        c.set(t0, Some("save".into()), StatusTone::Info, "Saved.");
+        let changes = c.tick(t0 + Duration::from_secs(3600), BUSY_TIMEOUT);
+        assert!(changes.cleared_keys.is_empty(), "{changes:?}");
+        assert_eq!(c.snapshot().len(), 2);
+    }
+
+    #[test]
+    fn a_sticky_warning_does_not_expire_under_retain() {
+        // `sticky` means the status waits for the user, so the tone's window
+        // does not apply to it on either slot.
+        let t0 = Instant::now();
+        let window = Duration::from_secs(6);
+        let mut c = KeyedStatusController::with_clear_after(window);
+        c.set_scoped(
+            t0,
+            None,
+            StatusTone::Warning,
+            "Saved the file but could not paste its path.",
+            super::StatusScope::All,
+            true,
+        );
+        c.set_scoped(
+            t0,
+            Some("upload".into()),
+            StatusTone::Info,
+            "Saved the file but could not paste its path.",
+            super::StatusScope::All,
+            true,
+        );
+        let changes = c.tick(t0 + Duration::from_secs(3600), BUSY_TIMEOUT);
+        assert!(changes.cleared_keys.is_empty(), "{changes:?}");
+        assert_eq!(c.snapshot().len(), 2, "a sticky final waits for the user");
+    }
+
+    #[test]
+    fn the_web_mirrors_the_warning_clear_factor() {
+        // The status line and the browser toast must agree on how much longer a
+        // warning lasts than an info.
+        const NOTIFY_TS: &str = include_str!("../../dux-web/web/src/lib/notify.ts");
+        let declared = NOTIFY_TS
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("export const WARNING_DURATION_FACTOR = ")
+            })
+            .expect("notify.ts must declare WARNING_DURATION_FACTOR");
+        assert_eq!(
+            declared.trim(),
+            super::WARNING_CLEAR_FACTOR.to_string(),
+            "notify.ts WARNING_DURATION_FACTOR must match WARNING_CLEAR_FACTOR"
+        );
+    }
+
+    #[test]
     fn keyed_info_auto_clears_anonymous_and_keyed() {
         let t0 = Instant::now();
         let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
         c.set(t0, None, StatusTone::Info, "Saved.");
         c.set(t0, Some("commit".into()), StatusTone::Info, "Committed.");
-        // Warning/error do not auto-clear.
+        // A warning outlasts the info window; an error outlasts everything.
+        c.set(t0, Some("stale".into()), StatusTone::Warning, "Heads up.");
         c.set(t0, Some("push".into()), StatusTone::Error, "Push error.");
         let changes = c.tick(t0 + Duration::from_secs(6), Duration::from_secs(20));
-        // Both Info entries cleared; the error persists.
+        // Both Info entries cleared; the warning and the error persist.
         assert_eq!(changes.cleared_keys.len(), 2);
         assert!(changes.cleared_keys.contains(&None));
         assert!(changes.cleared_keys.contains(&Some("commit".to_string())));
+        assert_eq!(c.snapshot().len(), 2);
+
+        // The warning is still on the line at seventeen seconds and gone at
+        // eighteen, three times the six-second window.
+        let changes = c.tick(t0 + Duration::from_secs(17), Duration::from_secs(20));
+        assert!(changes.cleared_keys.is_empty(), "{changes:?}");
+        let changes = c.tick(t0 + Duration::from_secs(18), Duration::from_secs(20));
+        assert_eq!(changes.cleared_keys, vec![Some("stale".to_string())]);
         assert_eq!(c.snapshot().len(), 1);
         assert_eq!(c.snapshot()[0].key.as_deref(), Some("push"));
     }
@@ -882,18 +1002,14 @@ mod tests {
     fn retain_policy_keeps_a_final_until_something_replaces_it() {
         // The TUI's contract, pinned so the Emit work cannot quietly change it:
         // an error stays on the single status line indefinitely, well past the
-        // window that governs the web.
+        // window that governs the web. Only an error: a warning has a window of
+        // its own (see `a_warning_clears_after_three_windows_and_an_error_never_does`).
         let t0 = Instant::now();
         let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
         c.set(t0, Some("push".into()), StatusTone::Error, "Push failed.");
-        c.set(t0, None, StatusTone::Warning, "Heads up.");
         let _ = c.tick(t0 + Duration::from_secs(3600), Duration::from_secs(20));
-        assert_eq!(
-            c.snapshot().len(),
-            2,
-            "Retain must keep both finals available"
-        );
-        assert_eq!(c.most_recent().unwrap().tone, "warning");
+        assert_eq!(c.snapshot().len(), 1, "Retain must keep the error available");
+        assert_eq!(c.most_recent().unwrap().tone, "error");
     }
 
     #[test]

@@ -49,8 +49,13 @@ import { toast } from "sonner"
 /// the config default for `ui.status_clear_seconds`.
 export const DEFAULT_STATUS_CLEAR_SECONDS = 6
 
-/// A warning stays up twice as long as a success.
-export const WARNING_DURATION_FACTOR = 2
+/// A warning stays up three times as long as a success.
+///
+/// Must stay equal to `WARNING_CLEAR_FACTOR` in
+/// `crates/dux-core/src/statusline.rs`, which gives a warning the same lifetime
+/// on the terminal UI's status line; a Rust test reads this file and fails if
+/// the two drift.
+export const WARNING_DURATION_FACTOR = 3
 
 /// An error stays up four times as long as a success: it is the tone the user
 /// most needs to actually read, and the one most likely to arrive while they

@@ -44,8 +44,10 @@ describe("statusToastDuration", () => {
     expect(statusToastDuration("success", 6)).toBe(6000)
   })
 
-  it("gives a warning twice the info window so it survives a glance away", () => {
-    expect(statusToastDuration("warning", 6)).toBe(12000)
+  it("gives a warning three times the info window so it survives a glance away", () => {
+    // The same factor the status line uses: `WARNING_CLEAR_FACTOR` in
+    // `crates/dux-core/src/statusline.rs`.
+    expect(statusToastDuration("warning", 6)).toBe(18000)
   })
 
   it("gives an error four times the info window, the longest final", () => {
@@ -64,7 +66,7 @@ describe("statusToastDuration", () => {
 
   it("scales every final off the user's status_clear_seconds", () => {
     expect(statusToastDuration("info", 10)).toBe(10000)
-    expect(statusToastDuration("warning", 10)).toBe(20000)
+    expect(statusToastDuration("warning", 10)).toBe(30000)
     expect(statusToastDuration("error", 10)).toBe(40000)
   })
 
@@ -223,7 +225,7 @@ describe("tone routing", () => {
     notifyError("e")
     expect(toast.info).toHaveBeenCalledWith("i", { duration: 6000 })
     expect(toast.success).toHaveBeenCalledWith("s", { duration: 6000 })
-    expect(toast.warning).toHaveBeenCalledWith("w", { duration: 12000 })
+    expect(toast.warning).toHaveBeenCalledWith("w", { duration: 18000 })
     expect(toast.error).toHaveBeenCalledWith("e", { duration: 24000 })
   })
 
