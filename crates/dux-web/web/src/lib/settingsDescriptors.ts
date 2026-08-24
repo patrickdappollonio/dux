@@ -86,8 +86,16 @@ export interface SettingDescriptor {
    * when it actually changed, so "present in the write" implies "flip". If anyone
    * ever "simplifies" `persist` to write unconditionally, this silently INVERTS
    * the setting. Pinned by `CustomizeWebappDialog.test.tsx`'s "does not call the
-   * GitHub endpoint when the row is unchanged". */
-  writeTarget: "settings" | "identity" | "changesPane" | "github"
+   * GitHub endpoint when the row is unchanged".
+   *
+   * `"tailscale"` is bespoke for a third reason: saving `[server] tailscale` is
+   * only half of what the row does. The other half moves the RUNNING listener
+   * (stop or start the interface watcher, bind or drop the Tailscale leg, move
+   * the Host guard's tailnet-literal rule with it), which only the serve loop
+   * can perform, and the endpoint answers with what it actually did. Unlike
+   * `"github"` this one carries an explicit value, so the unchanged-row skip is
+   * an optimization here rather than a correctness requirement. */
+  writeTarget: "settings" | "identity" | "changesPane" | "github" | "tailscale"
   /** True when the config field is the NEGATIVE of what this row shows: the row
    * says "Show the welcome screen" while `ui.disable_automated_welcome_screen`
    * says the opposite. Every row in this modal is phrased positively, because a
@@ -434,6 +442,26 @@ export const SETTING_GROUPS: SettingGroup[] = [
         // engine-side PR-sync side effects that only the dedicated endpoint has.
         writeTarget: "github",
         read: (b) => b.github_integration ?? true,
+      },
+      {
+        key: "server.tailscale",
+        label: "Bind your Tailscale address",
+        description:
+          "Whether dux also serves on this machine's Tailscale address. \"Auto\" binds it whenever the interface appears and drops it when it goes, so a laptop that roams keeps working. \"Yes\" looks once and keeps whatever it finds. \"No\" never binds it. Changing this applies to the listener that is serving right now, so choosing \"No\" from a browser on your tailnet will close this tab's connection; reopen dux on its other address.",
+        surface: "both",
+        control: {
+          kind: "enum",
+          options: [
+            { value: "auto", label: "Auto" },
+            { value: "yes", label: "Yes" },
+            { value: "no", label: "No" },
+          ],
+        },
+        default: "auto",
+        // NOT "settings": see the writeTarget doc above. Saving the value is
+        // only half of it; the other half moves a live listener.
+        writeTarget: "tailscale",
+        read: (b) => b.tailscale_mode ?? "auto",
       },
       {
         key: "defaults.enable_randomized_pet_name_by_default",

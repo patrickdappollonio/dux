@@ -145,6 +145,13 @@ export interface Bootstrap {
   agent_scrollback_lines: number
   /** Mirrors `config.ui.show_changes_pane`; the desktop Changes-pane default. */
   show_changes_pane: boolean
+  /** Mirrors `[server] tailscale` as its canonical name: "auto" | "yes" | "no".
+   * An older server omits it, so the Preferences row falls back to "auto". */
+  tailscale_mode?: string
+  /** True when THIS RUN of the server was started with `--no-tailscale`, which
+   * outranks the saved mode until it restarts. Injected per request by the
+   * server process, not projected from config. */
+  tailscale_forced_no?: boolean
   /** Mirrors `config.ui.always_show_tab_strip`: when true the agent tab strip
    * renders even with a single tab (default false, matching today's chrome-free
    * single-tab pane). */

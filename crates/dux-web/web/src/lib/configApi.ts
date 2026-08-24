@@ -62,6 +62,43 @@ export const configApi = {
   // `writeTarget` doc in settingsDescriptors.ts.
   toggleGithubIntegration: () =>
     send("POST", "/api/v1/ui/toggle-github-integration", {}),
+  // Save `[server] tailscale` and, when a listener is up, move the Tailscale
+  // listener to match. Bespoke rather than part of the generic settings PATCH
+  // because the second half is a live act only the serve loop can perform.
+  //
+  // The reply is the SENTENCE the server composed, not a status code to
+  // interpret: the TUI shows the same one, and a second copy written here is
+  // how the two drift apart. Choosing "no" from a browser reached over the
+  // Tailscale address cuts this tab's own connection; the reply is written
+  // before the unbind lands, so it still arrives.
+  setTailscaleMode: async (
+    mode: string,
+  ): Promise<{ mode: string; warning: boolean; message: string }> => {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+    }
+    const id = getConnectionId()
+    if (id) headers["x-connection-id"] = id
+    let resp: Response
+    try {
+      resp = await fetch("/api/v1/server/tailscale-mode", {
+        method: "POST",
+        credentials: "same-origin",
+        headers,
+        body: JSON.stringify({ mode }),
+        // Above the server's own bound on the change (it runs one bounded
+        // address detection), so a slow answer is still an answer.
+        signal: AbortSignal.timeout(15_000),
+      })
+    } catch {
+      throw new Error("Could not reach the server.")
+    }
+    if (!resp.ok) {
+      const detail = (await resp.text().catch(() => "")).trim()
+      throw new Error(detail || `request failed (${resp.status})`)
+    }
+    return resp.json()
+  },
   // Persist the instance identity (browser tab title + favicon colour). Either
   // field may be omitted; the server validates the favicon against the curated
   // colour set, caps/normalizes the title, persists to config.toml, and emits

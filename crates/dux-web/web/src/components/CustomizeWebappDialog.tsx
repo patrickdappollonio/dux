@@ -1,6 +1,11 @@
 import { Fragment, useRef, useState } from "react"
 import { Check } from "lucide-react"
-import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify"
+import {
+  notifyError,
+  notifyInfo,
+  notifySuccess,
+  notifyWarning,
+} from "@/lib/notify"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -450,12 +455,14 @@ function buildWrites(
   } | null
   changesPane: boolean | null
   github: boolean | null
+  tailscale: string | null
 } {
   const identity: { title?: string; favicon?: string } = {}
   const ui: Record<string, SettingValue> = {}
   const capabilities: Record<string, SettingValue> = {}
   const defaults: Record<string, SettingValue> = {}
   let changesPane: boolean | null = null
+  let tailscale: string | null = null
   let github: boolean | null = null
   for (const [d, value] of entries) {
     // THE unchanged-row skip. Load-bearing well beyond avoiding a redundant
@@ -470,6 +477,8 @@ function buildWrites(
       changesPane = value as boolean
     } else if (d.writeTarget === "github") {
       github = value as boolean
+    } else if (d.writeTarget === "tailscale") {
+      tailscale = value as string
     } else {
       const [group, field] = d.key.split(".")
       // THE single flip point for an `inverted` row (see the descriptor's doc):
@@ -497,6 +506,7 @@ function buildWrites(
       : null,
     changesPane,
     github,
+    tailscale,
   }
 }
 
@@ -504,7 +514,7 @@ async function persist(
   entries: [SettingDescriptor, SettingValue][],
   originalOf: (d: SettingDescriptor) => SettingValue,
 ): Promise<boolean> {
-  const { identity, settings, changesPane, github } = buildWrites(
+  const { identity, settings, changesPane, github, tailscale } = buildWrites(
     entries,
     originalOf,
   )
@@ -523,6 +533,30 @@ async function persist(
         .catch((e) => {
           notifyError(
             e instanceof Error ? e.message : "Could not toggle GitHub integration.",
+          )
+          return false
+        }),
+    )
+  }
+  // The one row whose reply is a sentence rather than a status code: the server
+  // says what happened to the listener, and that sentence is the toast. It is
+  // raised even on success, because "saved" and "your Tailscale listener just
+  // went away" are different outcomes of the same click.
+  if (tailscale !== null) {
+    const mode = tailscale
+    writes.push(
+      configApi
+        .setTailscaleMode(mode)
+        .then((reply) => {
+          if (reply.warning) notifyWarning(reply.message)
+          else notifyInfo(reply.message)
+          return true
+        })
+        .catch((e) => {
+          notifyError(
+            e instanceof Error
+              ? e.message
+              : "Could not change the Tailscale mode.",
           )
           return false
         }),

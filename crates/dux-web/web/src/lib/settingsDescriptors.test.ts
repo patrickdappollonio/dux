@@ -28,6 +28,8 @@ const sampleBootstrap: Bootstrap = {
   pr_banner_position: "top",
   agent_scrollback_lines: 10000,
   show_changes_pane: false,
+  tailscale_mode: "yes",
+  tailscale_forced_no: false,
   global_env: {},
   status_clear_seconds: 42,
   title: "prod dux",
@@ -80,6 +82,7 @@ describe("settingsDescriptors", () => {
         "ui.pr_banner_position",
         "capabilities.hyperlinks",
         "ui.github_integration",
+        "server.tailscale",
         "ui.disable_automated_welcome_screen",
         "ui.disable_release_notes",
         "defaults.enable_randomized_pet_name_by_default",
@@ -143,6 +146,7 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.pr_banner_position"]).toBe("top")
     expect(byKey["capabilities.hyperlinks"]).toBe(false)
     expect(byKey["ui.github_integration"]).toBe(false)
+    expect(byKey["server.tailscale"]).toBe("yes")
     expect(byKey["defaults.enable_randomized_pet_name_by_default"]).toBe(false)
     expect(byKey["defaults.provider"]).toBe("codex")
     // The two first-load rows are INVERTED: the bootstrap says "disabled: true",
@@ -300,6 +304,27 @@ describe("settingsDescriptors", () => {
   // logic lives behind the dedicated endpoint; duplicating it into set_settings
   // would fork it. Precedent: `changesPane` is already a bespoke target for the
   // same reason.
+  it("routes the Tailscale mode to its own endpoint and warns about the tab it may cut", () => {
+    // Saving the value is only half of the row: the other half moves a live
+    // listener, which the generic settings PATCH cannot do.
+    const d = allSettingDescriptors().find((x) => x.key === "server.tailscale")
+    expect(d?.writeTarget).toBe("tailscale")
+    expect(d?.default).toBe("auto")
+    expect(d?.control).toEqual({
+      kind: "enum",
+      options: [
+        { value: "auto", label: "Auto" },
+        { value: "yes", label: "Yes" },
+        { value: "no", label: "No" },
+      ],
+    })
+    // Choosing "No" from a browser reached over the tailnet closes that tab's
+    // own connection, so the row has to say so before it happens.
+    const description = d!.description.toLowerCase()
+    expect(description).toContain("connection")
+    expect(description).toContain("reopen dux")
+  })
+
   it("routes github_integration to the dedicated toggle endpoint", () => {
     const d = allSettingDescriptors().find((d) => d.key === "ui.github_integration")
     expect(d?.writeTarget).toBe("github")

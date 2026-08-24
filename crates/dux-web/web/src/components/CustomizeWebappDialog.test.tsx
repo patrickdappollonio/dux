@@ -25,7 +25,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
 // The GitHub row does NOT ride the generic settings PATCH: it routes to the
 // dedicated endpoint that also drives the engine's PR-sync side effects.
 vi.mock("@/lib/configApi", () => ({
-  configApi: { toggleGithubIntegration: vi.fn() },
+  configApi: { toggleGithubIntegration: vi.fn(), setTailscaleMode: vi.fn() },
 }))
 
 // The real tooltip only mounts its popup on hover and needs a ResizeObserver
@@ -77,6 +77,7 @@ const saveSettings = vi.mocked(store.saveSettings)
 const setChangesPaneVisibility = vi.mocked(store.setChangesPaneVisibility)
 const { configApi } = await import("@/lib/configApi")
 const toggleGithubIntegration = vi.mocked(configApi.toggleGithubIntegration)
+const setTailscaleMode = vi.mocked(configApi.setTailscaleMode)
 
 const fullBootstrap: Bootstrap = {
   available_providers: [],
@@ -125,6 +126,11 @@ beforeEach(() => {
   saveSettings.mockClear().mockResolvedValue(true)
   setChangesPaneVisibility.mockClear().mockResolvedValue(true)
   toggleGithubIntegration.mockClear().mockResolvedValue(undefined as never)
+  setTailscaleMode.mockClear().mockResolvedValue({
+    mode: "no",
+    warning: false,
+    message: "saved",
+  })
 })
 
 afterEach(() => {
@@ -167,9 +173,10 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    // Three select rows: pr_banner_position and compose_bar (static enums),
-    // and defaults.provider (enum-dynamic, sourced from available_providers).
-    expect(screen.getAllByRole("combobox").length).toBe(3)
+    // Four select rows: pr_banner_position, compose_bar and server.tailscale
+    // (static enums), and defaults.provider (enum-dynamic, sourced from
+    // available_providers).
+    expect(screen.getAllByRole("combobox").length).toBe(4)
   })
 
   it("shows the documented default for each row", () => {
@@ -626,6 +633,42 @@ describe("CustomizeWebappDialog", () => {
     for (const [patch] of saveSettings.mock.calls) {
       expect(patch.ui ?? {}).not.toHaveProperty("github_integration")
     }
+  })
+
+  // ── The Tailscale mode row ────────────────────────────────────────────────
+
+  it("saves the Tailscale mode through its own endpoint, not the settings PATCH", async () => {
+    // Saving the value is only half of the row: the other half moves a live
+    // listener, which the generic PATCH cannot do.
+    seed({ tailscale_mode: "auto" })
+    render(<CustomizeWebappDialog />)
+
+    const trigger = screen.getByLabelText("Bind your Tailscale address")
+    fireEvent.click(trigger)
+    await waitFor(() => expect(trigger.getAttribute("aria-expanded")).toBe("true"))
+    const option = await screen.findByRole("option", { name: "No" })
+    fireEvent.pointerDown(option, { pointerType: "mouse" })
+    fireEvent.click(option)
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(setTailscaleMode).toHaveBeenCalledTimes(1)
+    expect(setTailscaleMode).toHaveBeenCalledWith("no")
+    for (const [patch] of saveSettings.mock.calls) {
+      expect(patch.ui ?? {}).not.toHaveProperty("tailscale")
+    }
+  })
+
+  it("leaves the Tailscale endpoint alone when the row is unchanged", async () => {
+    seed({ tailscale_mode: "auto" })
+    render(<CustomizeWebappDialog />)
+
+    // Touch a different row so there is a save to perform at all.
+    fireEvent.click(screen.getByLabelText("Copy on select"))
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(setTailscaleMode).not.toHaveBeenCalled()
   })
 
   // THE HAZARD PIN. The endpoint is a blind read-and-flip while this modal saves
