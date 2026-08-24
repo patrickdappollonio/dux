@@ -809,13 +809,7 @@ impl App {
                     self.force_redraw = true;
                     self.set_info("Interface redrawn. All screen contents have been repainted.");
                 }
-                Action::OpenPalette => {
-                    self.prompt = PromptState::Command {
-                        input: TextInput::new(),
-                        selected: 0,
-                    };
-                    self.set_info("Command palette opened.");
-                }
+                Action::OpenPalette => self.open_command_palette(),
                 Action::FocusNext => {
                     let has_staged = !self.engine.staged_files.is_empty();
                     if self.focus == FocusPane::Left
@@ -2408,6 +2402,14 @@ impl App {
     /// fullscreen byte-pattern intercept and the minimized Center binding so
     /// the two entry points cannot drift. Sets an info line and opens nothing
     /// when no macros are defined for the surface.
+    fn open_command_palette(&mut self) {
+        self.prompt = PromptState::Command {
+            input: TextInput::new(),
+            selected: 0,
+        };
+        self.set_info("Command palette opened.");
+    }
+
     fn open_macro_bar(&mut self) {
         if self.filtered_macros("").is_empty() {
             self.set_info("No macros defined for this surface.");
@@ -2903,8 +2905,25 @@ impl App {
         // pasted literal `ESC[I` classifies as a focus report), so the
         // typing stamp is asserted directly at the tail.
         let mut normalized_paste_forwarded = false;
+        // While another device drives this pty no key reaches the child, so
+        // the palette chord is dux's here as everywhere else: the demoted cue
+        // names it as the way out, and a way out has to work where the cue
+        // shows. With nobody else driving, the chord rides to the child.
+        let demoted_palette_patterns = if self.focused_pty_driven_elsewhere().is_some() {
+            self.bindings.byte_patterns_for(Action::OpenPalette)
+        } else {
+            Vec::new()
+        };
         for parsed in &sequences {
             let seq = parsed.bytes.as_slice();
+            if demoted_palette_patterns.iter().any(|p| p == seq) {
+                actions.push(SeqAction::Intercept(
+                    Action::OpenPalette,
+                    false,
+                    seq.to_vec(),
+                ));
+                continue;
+            }
             if seq == crate::raw_input::BRACKET_PASTE_START {
                 self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
                 // dux enables host bracketed paste globally, so EVERY host
@@ -3026,7 +3045,11 @@ impl App {
             // dux's own keys. Both arms below flush whatever forward bytes the
             // batch had already collected, and those bytes are counted by the
             // `Forward` arm above; the key itself writes nothing.
-            SeqAction::Intercept(Action::OpenMacroBar | Action::ToggleFullscreen, _, _) => false,
+            SeqAction::Intercept(
+                Action::OpenMacroBar | Action::ToggleFullscreen | Action::OpenPalette,
+                _,
+                _,
+            ) => false,
             // A page key either scrolls locally (no write) or is forwarded, and
             // which one it is depends on the provider's `forward_scroll` and the
             // child's live alt-screen state. Its arm consults the gate itself, at
@@ -3116,6 +3139,23 @@ impl App {
                         continue;
                     }
                     self.open_macro_bar();
+                    self.raw_input_buf.clear();
+                    self.raw_input_parser.clear();
+                    return Ok(false);
+                }
+                // Only reachable while another device drives the pty (see the
+                // match above); the prompt takes over input from here.
+                SeqAction::Intercept(Action::OpenPalette, _, _) => {
+                    flush_forward_batch(
+                        &mut forward_batch,
+                        is_scrolled_back,
+                        may_write_pty,
+                        &mut needs_selection_clear,
+                        &mut forwarded_to_pty,
+                        self.selected_terminal_surface_client(),
+                    );
+                    self.stamp_forwarded_input(&mut forwarded_to_pty);
+                    self.open_command_palette();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
                     return Ok(false);

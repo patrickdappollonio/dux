@@ -2019,6 +2019,16 @@ impl InteractiveBytePatterns {
 }
 
 impl RuntimeBindings {
+    /// The raw byte patterns of every key bound to `action`, whatever its
+    /// scope. Keys with no byte form are skipped.
+    pub fn byte_patterns_for(&self, action: Action) -> Vec<Vec<u8>> {
+        self.bindings
+            .iter()
+            .filter(|rb| rb.action == action)
+            .flat_map(|rb| rb.keys.iter().filter_map(key_combination_to_bytes))
+            .collect()
+    }
+
     /// Build byte patterns for all `Interactive`-scoped bindings.
     /// Each key combination is converted to its raw terminal byte
     /// representation. Bindings that cannot be byte-encoded are skipped.

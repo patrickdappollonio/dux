@@ -1233,6 +1233,45 @@ mod tests {
     /// which is true of the batched forwards and NOT true of a page key the
     /// provider's `forward_scroll` says to send. Reusing that verdict here sent a
     /// demoted surface's page keys straight into somebody else's terminal.
+    /// The demoted cue names the palette key as the way out, so that key must
+    /// work where the cue shows: in fullscreen the palette chord normally rides
+    /// to the child verbatim, but a demoted pane has nowhere to send it, and
+    /// dux owns it instead. With nobody else driving, the same bytes still
+    /// reach the child untouched.
+    #[test]
+    fn the_palette_chord_opens_the_palette_over_a_demoted_fullscreen_pane() {
+        for demoted in [true, false] {
+            let (mut app, _recorded, seat) = app_with_a_live_pty_running("sleep 5");
+            app.input_target = InputTarget::Agent;
+            app.last_pty_size = (10, 10);
+            if demoted {
+                let browser = seat.owners.next_conn_id();
+                seat.owners.claim("session-1", browser).expect("claimed");
+            }
+            let palette_key = app.bindings.label_for(Action::OpenPalette);
+            assert_eq!(
+                palette_key, "Ctrl-p",
+                "test setup: the default palette chord"
+            );
+
+            app.process_raw_input_bytes(b"\x10")
+                .expect("the chord is handled");
+
+            assert_eq!(
+                matches!(app.prompt, PromptState::Command { .. }),
+                demoted,
+                "the palette chord must open the palette exactly when this surface \
+                 cannot write to the child (demoted: {demoted})"
+            );
+            assert_eq!(
+                app.engine.is_typing("session-1"),
+                !demoted,
+                "the chord must reach the child exactly when this surface may write \
+                 to it (demoted: {demoted})"
+            );
+        }
+    }
+
     #[test]
     fn a_demoted_pane_does_not_forward_a_page_key_even_while_scrolled_back() {
         for demoted in [true, false] {
