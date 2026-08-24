@@ -452,9 +452,10 @@
     --admonition-accent: var(--color-accent);
     margin: 1.5rem 0;
     padding: 0.85rem 1.1rem;
-    border: 1px solid
-      color-mix(in oklab, var(--admonition-accent) 28%, var(--color-border-soft));
-    border-left: 3px solid var(--admonition-accent);
+    /* One even border all the way round, in a softened accent: a heavier left
+       edge alone reads as a stripe rather than a box, and the full-strength
+       accent on four sides shouts over the text it frames. */
+    border: 3px solid color-mix(in oklab, var(--admonition-accent) 45%, var(--color-border-soft));
     border-radius: 0.6rem;
     background: color-mix(in oklab, var(--admonition-accent) 7%, var(--color-panel));
   }
