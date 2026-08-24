@@ -684,11 +684,10 @@ pub struct ProviderCommandConfig {
     /// Scroll-forwarding policy for the wheel and PgUp/PgDn over this
     /// provider's embedded PTY. Tri-state:
     ///
-    /// - `None` (key absent) — auto: forward to the child only when it owns
-    ///   the screen and asked for the wheel (alternate screen + mouse
-    ///   reporting for the wheel; alternate screen alone for the page keys),
-    ///   otherwise scroll dux's own host scrollback. This adapts to apps like
-    ///   Claude Code that switch to a fullscreen alt-screen renderer.
+    /// - `None` (key absent) — auto: forward the wheel to the child when it
+    ///   asked for mouse reporting (an app that takes the mouse owns the
+    ///   wheel, alternate screen or not) and the page keys when it owns the
+    ///   alternate screen; otherwise scroll dux's own host scrollback.
     /// - `Some(true)` — always forward scroll and page keys to the child.
     /// - `Some(false)` — never forward; always use dux host scrollback.
     pub forward_scroll: Option<bool>,
