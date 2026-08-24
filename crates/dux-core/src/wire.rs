@@ -786,6 +786,10 @@ pub struct SettingsPatch {
     pub show_changes_pane: Option<bool>,
     pub web_notifications: Option<bool>,
     pub always_show_tab_strip: Option<bool>,
+    /// `ui.tab_reaches_agent`: whether the TUI's typeable center pane hands Tab
+    /// and Shift-Tab to the agent. A plain field write the TUI reads live, so it
+    /// rides the generic settings path even though nothing in the web reads it.
+    pub tab_reaches_agent: Option<bool>,
     pub status_clear_seconds: Option<u16>,
     pub attention_grace_seconds: Option<u64>,
     pub attention_indicator: Option<bool>,
@@ -1689,6 +1693,7 @@ impl Engine {
             show_changes_pane,
             web_notifications,
             always_show_tab_strip,
+            tab_reaches_agent,
             status_clear_seconds,
             attention_grace_seconds,
             attention_indicator,
@@ -1768,6 +1773,9 @@ impl Engine {
         }
         if let Some(v) = always_show_tab_strip {
             candidate.ui.always_show_tab_strip = v;
+        }
+        if let Some(v) = tab_reaches_agent {
+            candidate.ui.tab_reaches_agent = v;
         }
         if let Some(v) = status_clear_seconds {
             candidate.ui.status_clear_seconds =
@@ -10938,6 +10946,13 @@ mod tests {
                 expect: "true",
             },
             SettingsFieldRow {
+                key: "tab_reaches_agent",
+                seed: |c| c.ui.tab_reaches_agent = false,
+                sent: serde_json::json!(true),
+                read: |c| c.ui.tab_reaches_agent.to_string(),
+                expect: "true",
+            },
+            SettingsFieldRow {
                 key: "status_clear_seconds",
                 seed: |c| c.ui.status_clear_seconds = 6,
                 sent: serde_json::json!(11),
@@ -11039,7 +11054,7 @@ mod tests {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            22,
+            23,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -11095,6 +11110,7 @@ mod tests {
             show_changes_pane: Some(!before.ui.show_changes_pane),
             web_notifications: Some(!before.capabilities.web_notifications),
             always_show_tab_strip: Some(!before.ui.always_show_tab_strip),
+            tab_reaches_agent: Some(!before.ui.tab_reaches_agent),
             status_clear_seconds: Some(before.ui.status_clear_seconds + 1),
             attention_grace_seconds: Some(before.ui.attention_grace_seconds + 1),
             attention_indicator: Some(!before.ui.attention_indicator),
@@ -11143,6 +11159,7 @@ mod tests {
             after.ui.always_show_tab_strip,
             !before.ui.always_show_tab_strip
         );
+        assert_eq!(after.ui.tab_reaches_agent, !before.ui.tab_reaches_agent);
         assert_eq!(
             after.ui.status_clear_seconds,
             before.ui.status_clear_seconds + 1
