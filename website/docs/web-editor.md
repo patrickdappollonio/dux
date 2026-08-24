@@ -278,12 +278,11 @@ JavaScript and TypeScript, C and C++, Java, shell, SQL, YAML, HCL, Dockerfile, M
 many more, including bare-filename matches like `Makefile` and `Dockerfile`. Two file types
 get extra help:
 
-- **JSON** gets full validation, so a misplaced comma is flagged as you type. This is the
-  same editor behind the app menu's **Edit config file…** entry.
-- **TOML** gets a dedicated tokenizer, which is what you want when editing a `config.toml`.
+- **JSON** and **TOML** get dedicated highlighting, which is what you want when editing a
+  `config.toml`. This is the same editor behind the app menu's **Edit config file…** entry.
 
-This is a deliberately trimmed Monaco: highlighting and JSON validation, but no
-IntelliSense or cross-file diagnostics.
+This is a deliberately trimmed Monaco: highlighting only, with no validation, no
+IntelliSense and no cross-file diagnostics.
 
 ## Markdown and SVG preview
 
