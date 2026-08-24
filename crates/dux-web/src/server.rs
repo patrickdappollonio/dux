@@ -319,6 +319,11 @@ pub struct RouterParams {
     /// (`[server] tailscale` is not `"no"`). Only meaningful when the host guard
     /// is active (see [`bound_ips`]).
     pub tailscale_host_literals: bool,
+    /// The serve's Tailscale-mode cell, when a serve is behind this router. The
+    /// Host guard reads rule 5 from it per request, so a mode change applied
+    /// while dux serves moves the guard with the listener. `None` in tests and on
+    /// any path with no live mode control.
+    pub live_tailscale_host_literals: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Base URL for release-notes fetches. Defaults to
     /// `dux_core::urls::GITHUB_API_BASE`; overridden only by tests (see
     /// [`RouterParams::with_release_notes_api_base`]).
@@ -367,6 +372,7 @@ impl RouterParams {
             bound_ips: Vec::new(),
             configured_hosts: Vec::new(),
             tailscale_host_literals: false,
+            live_tailscale_host_literals: None,
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
             ownership_publisher: None,
             connections_gauge: None,
@@ -494,6 +500,16 @@ impl RouterParams {
         self.bound_ips = bound_ips;
         self.configured_hosts = configured;
         self.tailscale_host_literals = tailscale_host_literals;
+        self
+    }
+
+    /// Let the Host guard read rule 5 from the serve's live Tailscale-mode cell,
+    /// so a mode change applied while dux serves moves the guard with it.
+    pub fn with_live_tailscale_host_literals(
+        mut self,
+        cell: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.live_tailscale_host_literals = Some(cell);
         self
     }
 }
@@ -747,6 +763,7 @@ pub fn build_app(
             params.bound_ips,
             params.configured_hosts,
             params.tailscale_host_literals,
+            params.live_tailscale_host_literals,
         )
     } else {
         router
@@ -4936,6 +4953,46 @@ mod tests {
     /// normal state on `auto` (the interface is away, or it just came back and the
     /// router was built long before), and it must not be a 403. An unknown NAME is
     /// still refused, which is the property the guard exists for.
+    #[tokio::test]
+    async fn host_guard_follows_a_live_tailscale_mode_change_on_the_same_router() {
+        // The router is built once per serve and the mode can change under it, so
+        // the whole stack (not just the allowlist) has to answer differently on
+        // the same app instance.
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let literals = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let app = build_app(
+            handle,
+            Router::new(),
+            RouterParams::plain_http()
+                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], false)
+                .with_live_tailscale_host_literals(Arc::clone(&literals)),
+        );
+        let tailnet_probe = || {
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/healthz")
+                .header("Host", "100.101.102.103:8080")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+
+        let refused = app.clone().oneshot(tailnet_probe()).await.unwrap();
+        assert_eq!(
+            refused.status(),
+            StatusCode::FORBIDDEN,
+            "the mode is no, so a tailnet Host is refused"
+        );
+
+        literals.store(true, std::sync::atomic::Ordering::SeqCst);
+        let served = app.oneshot(tailnet_probe()).await.unwrap();
+        assert_eq!(
+            served.status(),
+            StatusCode::OK,
+            "the same router must serve it once the mode wants Tailscale"
+        );
+    }
+
     #[tokio::test]
     async fn host_guard_serves_a_tailnet_host_while_only_loopback_is_bound() {
         let tmp = tempfile::tempdir().unwrap();

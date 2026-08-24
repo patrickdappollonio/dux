@@ -25,13 +25,18 @@
 //!    Tailscale's own ranges** (CGNAT `100.64.0.0/10` or the `fd7a:115c:a1e0::/48`
 //!    ULA). This is what makes the `auto` mode usable: the Tailscale listener
 //!    comes and goes with the interface, and the router (with this allowlist
-//!    inside it) is built ONCE at startup, so a rule derived from what happened
+//!    inside it) is built once per serve, so a rule derived from what happened
 //!    to be bound at that moment would 403 every tailnet device whenever dux
 //!    re-bound the leg later. The rule is therefore STRUCTURAL: it is evaluated
 //!    on every listener including loopback, and it fires even while the Tailscale
 //!    leg is unbound. That is harmless under dux's trust model, because it admits
 //!    a Host value and nothing else: reaching a listener at all is still the
 //!    operator's network's business.
+//!
+//!    The MODE itself is live. A serve threads its Tailscale-mode cell in through
+//!    [`HostAllowlist::with_live_tailscale_literals`], so changing
+//!    `[server] tailscale` while dux serves moves this rule with the listener
+//!    instead of leaving `no` admitting tailnet literals until a restart.
 //!
 //! A Tailscale MagicDNS name (`box.tailnet.ts.net`) is NOT an IP literal, so
 //! rule 5 does not cover it and it still only works when the user adds it to
@@ -146,10 +151,30 @@ pub struct HostAllowlist {
     /// stripped, no trailing dot) so per-request comparison is a simple
     /// `contains`. Rule 4.
     configured: Vec<String>,
-    /// True when `[server] tailscale` is not `"no"`, so an IP literal in
-    /// Tailscale's own ranges is accepted whether or not that leg is bound right
-    /// now. Rule 5; see the module doc for why it is structural.
-    tailscale_literals: bool,
+    /// Whether an IP literal in Tailscale's own ranges is accepted, whether or
+    /// not that leg is bound right now. Rule 5; see the module doc for why it is
+    /// structural and why a serve reads it live.
+    tailscale_literals: TailscaleLiterals,
+}
+
+/// Where rule 5's answer comes from: a value fixed at construction, or a cell the
+/// serve loop writes when `[server] tailscale` changes while dux is serving.
+///
+/// A serve threads the live cell in so one mode change moves the guard with the
+/// listener. Tests and callers with no serve behind them use the fixed form.
+#[derive(Debug, Clone)]
+enum TailscaleLiterals {
+    Fixed(bool),
+    Live(Arc<std::sync::atomic::AtomicBool>),
+}
+
+impl TailscaleLiterals {
+    fn allowed(&self) -> bool {
+        match self {
+            Self::Fixed(value) => *value,
+            Self::Live(cell) => cell.load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
 }
 
 impl HostAllowlist {
@@ -160,7 +185,9 @@ impl HostAllowlist {
     ///
     /// `tailscale_literals` comes from the serve mode (`[server] tailscale` not
     /// being `"no"`) rather than from what bound, because the Tailscale leg may
-    /// be bound and unbound many times behind this one immutable allowlist.
+    /// be bound and unbound many times behind this one allowlist. A serve that
+    /// can change that mode while running follows this call with
+    /// [`Self::with_live_tailscale_literals`].
     pub fn new(bound_ips: &[IpAddr], configured: &[String], tailscale_literals: bool) -> Self {
         let has_unspecified = bound_ips.iter().any(|ip| ip.is_unspecified());
         let configured = configured
@@ -171,8 +198,19 @@ impl HostAllowlist {
             bound_ips: bound_ips.to_vec(),
             has_unspecified,
             configured,
-            tailscale_literals,
+            tailscale_literals: TailscaleLiterals::Fixed(tailscale_literals),
         }
+    }
+
+    /// Read rule 5 from a live cell instead of the constructed value, so a
+    /// `[server] tailscale` change applied while dux serves moves the Host guard
+    /// with the listener rather than waiting for a restart.
+    pub fn with_live_tailscale_literals(
+        mut self,
+        cell: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.tailscale_literals = TailscaleLiterals::Live(cell);
+        self
     }
 
     /// Whether a raw `Host` header value is allowed by any of the five rules.
@@ -209,7 +247,7 @@ impl HostAllowlist {
             // Rule 5: a literal in Tailscale's own ranges, while this server is
             // willing to serve the tailnet at all. Deliberately independent of
             // whether that leg is bound at this instant.
-            return self.tailscale_literals && is_tailscale_range(ip);
+            return self.tailscale_literals.allowed() && is_tailscale_range(ip);
         }
 
         // Rule 4: operator-configured hostname (case-insensitive, port-stripped).
@@ -246,17 +284,21 @@ async fn host_allowlist_middleware(
 /// Wrap a router with the Host allowlist middleware. Every route in the router
 /// is pinned to the allowed host set (DNS-rebinding defense). This layer should
 /// sit OUTSIDE the access-log layer so rejected probes are not access-logged.
+/// `live_tailscale_literals` is the serve's Tailscale-mode cell when there is a
+/// serve behind this router, so rule 5 follows a mode change that happens while
+/// dux is serving; `None` pins rule 5 to `tailscale_literals`.
 pub fn host_allowlist_layer(
     router: Router,
     bound_ips: Vec<IpAddr>,
     configured: Vec<String>,
     tailscale_literals: bool,
+    live_tailscale_literals: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> Router {
-    let allowlist = Arc::new(HostAllowlist::new(
-        &bound_ips,
-        &configured,
-        tailscale_literals,
-    ));
+    let allowlist = HostAllowlist::new(&bound_ips, &configured, tailscale_literals);
+    let allowlist = Arc::new(match live_tailscale_literals {
+        Some(cell) => allowlist.with_live_tailscale_literals(cell),
+        None => allowlist,
+    });
     router.layer(axum::middleware::from_fn_with_state(
         allowlist,
         host_allowlist_middleware,
@@ -449,6 +491,33 @@ mod tests {
         // One past the /48, and a plain ULA, are not Tailscale addresses.
         assert!(!al.allows_host("[fd7a:115c:a1e1::1]"), "outside the /48");
         assert!(!al.allows_host("[fc00::1]"), "an ordinary ULA");
+    }
+
+    /// The rule follows a LIVE mode change: switching `[server] tailscale` while
+    /// dux serves must move the Host guard with it, or `no` keeps admitting
+    /// tailnet literals and `auto` keeps refusing them until a restart.
+    #[test]
+    fn a_live_flag_moves_the_tailscale_literal_rule_while_the_server_serves() {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], false)
+            .with_live_tailscale_literals(Arc::clone(&flag));
+        assert!(
+            !al.allows_host("100.101.102.103"),
+            "the mode is no, so a tailnet literal is refused"
+        );
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            al.allows_host("100.101.102.103"),
+            "the same allowlist must admit it once the mode wants Tailscale"
+        );
+        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            !al.allows_host("100.101.102.103"),
+            "and refuse it again on the way back"
+        );
+        // Every other rule is untouched by the live flag.
+        assert!(al.allows_host("127.0.0.1"), "loopback is always allowed");
+        assert!(!al.allows_host("box.tailnet.ts.net"), "names are unaffected");
     }
 
     /// The rule is off when the mode is `no`: a deployment that told dux to stay
