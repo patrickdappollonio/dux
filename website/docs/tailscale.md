@@ -69,10 +69,11 @@ only debounce, so an interface that flaps faster than dux looks costs at most on
 unbind. Every bind and unbind is written to `dux.log`, printed by `dux server`, and listed
 in the flip's activity panel.
 
-> [!IMPORTANT]
-> `"auto"` does not notice that you changed the *setting*. The mode is read when serving
-> starts, so switching between `"auto"`, `"yes"` and `"no"` needs a server restart, and dux
-> says so when you reload your config.
+> [!TIP]
+> The mode itself is a live switch: change it from the terminal UI's palette, the
+> browser's Preferences dialog, or by editing the file and reloading your config, and the
+> listener follows without a restart. See
+> [Changing the mode while dux is serving](#changing-the-mode-while-dux-is-serving).
 
 ### When Tailscale isn't there
 
