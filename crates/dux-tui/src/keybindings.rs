@@ -1817,6 +1817,21 @@ impl RuntimeBindings {
         })
     }
 
+    /// Whether `tab_reaches_agent` leaves the typeable center pane with no
+    /// keyboard way out: every key bound to `focus_next` AND every key bound to
+    /// `focus_prev` types into the agent there, so nothing on the keyboard
+    /// moves focus off the pane. A user who rebinds both to Tab alone lands
+    /// here, and the surfaces answer with [`NO_PANE_CHORD_ADVICE`].
+    pub fn typeable_center_traps_focus(&self, tab_reaches_agent: bool) -> bool {
+        tab_reaches_agent
+            && self
+                .label_for_typeable_center(Action::FocusNext, true)
+                .is_none()
+            && self
+                .label_for_typeable_center(Action::FocusPrev, true)
+                .is_none()
+    }
+
     /// Combined label for two related actions (e.g. MoveDown + MoveUp → "j/k").
     /// Takes the first key from each action.
     pub fn combined_label(&self, a: Action, b: Action) -> String {
@@ -2257,6 +2272,39 @@ mod tests {
                 "{key:?} stays a dux chord whatever the option says"
             );
         }
+    }
+
+    /// The trap is the pane actions bound to nothing but keys the pane types,
+    /// and only while the option is on: with it off, Tab still moves panes, so
+    /// the same bindings are perfectly usable.
+    #[test]
+    fn typeable_center_traps_focus_only_when_every_pane_key_is_typed() {
+        let defaults = default_bindings();
+        assert!(
+            !defaults.typeable_center_traps_focus(true),
+            "the default Ctrl-o and Ctrl-y are the way out"
+        );
+
+        let tab_only = RuntimeBindings::new(
+            |action| match action {
+                Action::FocusNext => vec![key!(tab)],
+                Action::FocusPrev => vec![key!(shift - tab)],
+                _ => BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default(),
+            },
+            true,
+        );
+        assert!(
+            tab_only.typeable_center_traps_focus(true),
+            "with both pane actions on Tab alone, nothing moves focus off the pane"
+        );
+        assert!(
+            !tab_only.typeable_center_traps_focus(false),
+            "the same bindings are fine while Tab still moves panes"
+        );
     }
 
     #[test]

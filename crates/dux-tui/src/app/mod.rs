@@ -3022,6 +3022,25 @@ impl AgentSortMode {
     }
 }
 
+/// The startup and reload warning for a `[ui] tab_reaches_agent` that leaves the
+/// typeable center pane with no keyboard way out. `None` in every healthy case,
+/// which is every case where at least one `focus_next` or `focus_prev` key
+/// survives the pane's typing ownership. Shared by bootstrap, the post-flip
+/// resume and the config reload so the three cannot drift.
+pub(crate) fn tab_reaches_agent_trap_warning(
+    bindings: &RuntimeBindings,
+    config: &Config,
+) -> Option<String> {
+    bindings
+        .typeable_center_traps_focus(config.ui.tab_reaches_agent)
+        .then(|| {
+            format!(
+                "Tab reaches the agent in the center pane, but {}",
+                crate::keybindings::NO_PANE_CHORD_ADVICE
+            )
+        })
+}
+
 /// Build the flat left-pane list: a single globally-ordered agent list with no
 /// project grouping. Active agents come first; detached/exited ("inactive") agents
 /// collapse under an `InactiveToggle` tail (default collapsed). Orphan
@@ -3108,11 +3127,17 @@ pub(crate) use first_load::{FirstLoadButton, FirstLoadPrompt, NotesFetched};
 fn boot_status(
     clear_after: Duration,
     orientation: impl Into<String>,
+    trap_warning: Option<String>,
     theme_warning: Option<String>,
 ) -> KeyedStatusController {
     let mut status = KeyedStatusController::with_clear_after(clear_after);
     status.set(Instant::now(), None, StatusTone::Info, orientation.into());
     status.pin();
+    // The pane-chord trap is a plain warning: it expires like any other, and
+    // the theme warning below outranks it when both apply.
+    if let Some(message) = trap_warning {
+        status.set(Instant::now(), None, StatusTone::Warning, message);
+    }
     if let Some(message) = theme_warning {
         status.set(Instant::now(), None, StatusTone::Warning, message);
         status.pin();
@@ -3191,6 +3216,7 @@ impl App {
         let status = boot_status(
             Duration::from_secs(config.ui.status_clear_seconds as u64),
             initial_status,
+            tab_reaches_agent_trap_warning(&bindings, &config),
             theme_warning,
         );
         let gh_integration_val = config.ui.github_integration;
@@ -3469,6 +3495,7 @@ impl App {
         let status = boot_status(
             Duration::from_secs(engine.config.ui.status_clear_seconds as u64),
             "Web server stopped. Your agents kept running — reconnect to any session to pick up where it left off.",
+            tab_reaches_agent_trap_warning(&bindings, &engine.config),
             theme_warning,
         );
         Self::assemble(
@@ -4746,6 +4773,14 @@ impl App {
         {
             let mode = self.engine.config.server.tailscale_mode();
             self.ask_companion_for_tailscale_mode(mode);
+        }
+        // A config file can hand Tab to the agent while every `focus_next` and
+        // `focus_prev` key is one the typeable pane types, and nobody toggled
+        // anything, so the load is the only place that can say the pane has no
+        // keyboard way out. Said before the theme warning, which is the more
+        // urgent of the two when both land in the same reload.
+        if let Some(message) = tab_reaches_agent_trap_warning(&self.bindings, &self.engine.config) {
+            self.set_warning(message);
         }
         if let Some(message) = theme_warning {
             self.set_pinned_warning(message);
@@ -7921,6 +7956,52 @@ leading_branch = "main"
         assert_eq!(app.engine.gh_probe.generation, 1);
     }
 
+    /// A config file that turns the option on and leaves both pane actions on
+    /// Tab arrives without anyone toggling anything, so the reload is the only
+    /// place that can say the pane now has no keyboard way out.
+    #[test]
+    fn a_tui_config_reload_warns_when_tab_reaches_agent_leaves_no_pane_chord() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+
+        let mut config = app.engine.config.clone();
+        config.ui.tab_reaches_agent = true;
+        config
+            .keys
+            .bindings
+            .insert("focus_next".to_string(), vec!["tab".to_string()]);
+        config
+            .keys
+            .bindings
+            .insert("focus_prev".to_string(), vec!["shift-tab".to_string()]);
+        app.apply_reloaded_config(config.clone())
+            .expect("apply reloaded config");
+
+        let message = app.status.message();
+        assert_eq!(
+            app.status.tone(),
+            StatusTone::Warning,
+            "the reload must warn, got: {message}"
+        );
+        assert!(
+            message.contains("no pane chord reaches dux") && message.contains("focus_next"),
+            "the warning must say what is wrong and what to rebind, got: {message}"
+        );
+
+        // A reload that leaves a chord in place says nothing.
+        config
+            .keys
+            .bindings
+            .insert("focus_next".to_string(), vec!["ctrl-o".to_string()]);
+        app.set_info("nothing to report");
+        app.apply_reloaded_config(config)
+            .expect("apply reloaded config again");
+        assert_eq!(
+            app.status.message(),
+            "nothing to report",
+            "a reload with a surviving pane chord must not warn"
+        );
+    }
+
     /// `ui.status_clear_seconds` is one of the settings the web Preferences
     /// dialog writes, so the TUI's controller must adopt the reloaded value
     /// rather than keeping the lifetime it was constructed with.
@@ -8274,7 +8355,7 @@ mod pinned_warning_tests {
     #[test]
     fn the_boot_status_holds_the_orientation_hint_past_every_window() {
         let t0 = Instant::now();
-        let mut status = boot_status(WINDOW, "Press ? for help.", None);
+        let mut status = boot_status(WINDOW, "Press ? for help.", None, None);
         let _ = status.tick(t0 + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
         assert_eq!(
             status.message(),
@@ -8289,6 +8370,7 @@ mod pinned_warning_tests {
         let mut status = boot_status(
             WINDOW,
             "Press ? for help.",
+            None,
             Some("Theme 'nope' could not be loaded.".to_string()),
         );
         let _ = status.tick(t0 + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
