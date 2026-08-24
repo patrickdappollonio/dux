@@ -449,6 +449,11 @@ impl Section {
 /// list, and a path that left its section between the click and the request is
 /// reported in `refused` while the rest proceed. Only an empty present set is a
 /// 400.
+///
+/// Partitioning does not make the git call itself partial: the present subset
+/// runs as one batch, so a path that vanishes between the status read and the
+/// git call fails the whole batch with git's own error rather than turning into
+/// another `refused` entry.
 async fn files_op(
     state: AppState,
     session_id: String,

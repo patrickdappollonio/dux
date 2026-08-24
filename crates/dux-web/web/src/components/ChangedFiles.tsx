@@ -147,7 +147,9 @@ function FileRow({
     >
       {/* Selection checkbox. The click stops here: base-ui re-dispatches the
           root's click onto its hidden input and both bubble, so without this
-          every tick would also open the diff. */}
+          every tick would also open the diff. There is deliberately no
+          shift-click range: the rows carry no keyboard model, and a range
+          gesture needs one to be reachable at all. */}
       <div className={CHECKBOX_SLOT} onClick={(e) => e.stopPropagation()}>
         <Checkbox
           checked={selected}

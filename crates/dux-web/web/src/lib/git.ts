@@ -81,8 +81,9 @@ export const git = {
     postGitJson<BatchResult>(gitUrl(sessionId, "unstage-files"), { paths }),
   // Discard has no batch route: each file is independent, and a refusal on one
   // ("unstage it first") must not block the rest. Sequential because parallel
-  // checkouts contend on index.lock. The per-file outcomes come back to the
-  // caller, which raises one toast for the lot.
+  // checkouts contend on index.lock. N discards therefore cost N changed-files
+  // refreshes and N broadcasts, which is accepted. The per-file outcomes come
+  // back to the caller, which raises one toast for the lot.
   discardMany: async (
     sessionId: string,
     paths: string[],
