@@ -513,7 +513,7 @@ export function AgentActionsMenu({
 // (a result that matched on its project must explain itself).
 function ProjectTag({ name, query }: { name: string; query: string }) {
   return (
-    <span className="flex min-w-0 shrink items-center gap-1 text-muted-foreground">
+    <span className="flex min-w-0 shrink items-center gap-1 self-center text-muted-foreground">
       <Folder className="size-3 shrink-0" />
       <span className="min-w-0 truncate">
         <HighlightedText text={name} query={query} />
@@ -536,9 +536,14 @@ function ProjectTag({ name, query }: { name: string; query: string }) {
 // label is home-collapsed server-side because the browser is not necessarily
 // on the server's machine. Searched like the project name, so a query that
 // matched a path explains itself.
+//
+// Baseline-aligned, inside and out: the label is mono and the rest of line two
+// is sans, and the two faces carry different ascents, so centering their
+// equal-height boxes leaves the path visibly higher than the state word.
+// Aligning baselines is the only alignment that survives a font change.
 function StandaloneTag({ label, query }: { label: string; query: string }) {
   return (
-    <span className="flex min-w-0 shrink items-center gap-1 text-dux-standalone">
+    <span className="flex min-w-0 shrink items-baseline gap-1 text-dux-standalone">
       <span aria-hidden>✷</span>
       <span className="sr-only">standalone</span>
       <span className="min-w-0 truncate font-mono">
@@ -548,8 +553,10 @@ function StandaloneTag({ label, query }: { label: string; query: string }) {
   )
 }
 
+// `self-center` because line two aligns its text by baseline, and a box with
+// no text has no baseline to align: unpinned, the dot sinks to the bottom edge.
 function Dot({ className }: { className: string }) {
-  return <span className={cn("size-1 shrink-0 rounded-full bg-current opacity-50", className)} />
+  return <span className={cn("size-1 shrink-0 self-center rounded-full bg-current opacity-50", className)} />
 }
 
 // The typing cue: a thin blinking caret in the soft-violet typing token, shared by
@@ -749,9 +756,11 @@ function AgentFlatRow({
                     typing, so this is the sole cue. */}
                 {typing ? <TypingCaret /> : null}
               </span>
-              {/* Line two: display-only project + state word + tabs. Sans
-                  throughout to match the app. */}
-              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              {/* Line two: display-only project + state word + tabs. Aligned
+                  by baseline, not center, because a standalone agent's folder
+                  is mono and the state word is sans (see StandaloneTag); the
+                  icon-led project tag and the dot re-center themselves. */}
+              <span className="flex items-baseline gap-1.5 text-xs text-muted-foreground">
                 {location.kind === "folder" ? (
                   <StandaloneTag label={location.label} query={query} />
                 ) : (
@@ -928,7 +937,7 @@ function TerminalFlatRow({
             </SimpleTooltip>
             {terminal.typing ? <TypingCaret /> : null}
           </span>
-          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span className="flex items-baseline gap-1.5 text-xs text-muted-foreground">
             {/* The owner tag mirrors the agent row's project tag: which owner
                 this terminal belongs to, then its colored state word. A
                 STANDALONE terminal has no owner, so it wears the shared
