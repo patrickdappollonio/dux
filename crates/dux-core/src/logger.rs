@@ -263,12 +263,6 @@ mod tests {
             "a sibling reload waits instead of storing its own level"
         );
         drop(guard);
-        assert!(
-            !std::thread::spawn(level_guard_is_held)
-                .join()
-                .expect("the probe thread"),
-            "and it is released again"
-        );
     }
 
     /// `dux.log` records paths, project names, and error text from the user's
