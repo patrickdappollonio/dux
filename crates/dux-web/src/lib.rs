@@ -881,28 +881,32 @@ async fn run_serve_loop(
     // up); saying the same sentence forever is not.
     let mut last_bind_failure: Option<SocketAddr> = None;
     let mut pending_detect: Option<PendingDetect> = None;
+    let mut mode_lane_open = true;
     while !*parent.borrow_and_update() {
         tokio::select! {
             _ = parent.changed() => {}
-            request = mode_requests.recv() => {
-                if let Some(request) = request {
-                    apply_mode_request(
-                        request,
-                        &mut ts,
-                        &mut pending_detect,
-                        &mut tasks,
-                        &shutdown,
-                        &app,
-                        &console,
-                        &mut last_bind_failure,
-                    )
-                    .await;
+            request = mode_requests.recv(), if mode_lane_open => {
+                match request {
+                    Some(request) => {
+                        apply_mode_request(
+                            request,
+                            &mut ts,
+                            &mut pending_detect,
+                            &mut tasks,
+                            &shutdown,
+                            &app,
+                            &console,
+                            &mut last_bind_failure,
+                        )
+                        .await;
+                    }
+                    // Every control handle has been dropped, so nothing can ask
+                    // for a mode change any more. The arm MUST be disabled: a
+                    // closed receiver resolves instantly and forever, and an arm
+                    // left enabled over one is a spin that starves the runtime
+                    // this loop shares with every serve leg.
+                    None => mode_lane_open = false,
                 }
-                // A `None` means every control handle has been dropped. Nothing
-                // can ask for a mode change any more; keep serving. The arm is
-                // left enabled because a closed receiver resolves immediately
-                // forever, which is why the whole select is bounded by the parent
-                // lane rather than by any one arm.
             }
             detected = async {
                 (&mut pending_detect
@@ -2806,6 +2810,52 @@ mod live_tailscale_mode_tests {
             .expect("the request task joins");
         assert_eq!(answered, TailscaleModeOutcome::NotServing);
         drop(release);
+    }
+
+    #[tokio::test]
+    async fn a_closed_mode_lane_leaves_the_rest_of_the_loop_working() {
+        // Every control handle is gone, so no mode change can arrive again. The
+        // loop keeps serving: the legs, the parent lane and the teardown all
+        // still work, and the mode arm is simply disabled rather than left
+        // resolving instantly over a closed receiver.
+        let (_primary, primary_addr) = primary_listener();
+        let h = Harness::start(
+            TailscaleMode::No,
+            false,
+            Some(primary_addr),
+            None,
+            Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
+        );
+        let Harness {
+            shutdown,
+            control,
+            legs,
+            task,
+            ..
+        } = h;
+        drop(control);
+
+        // Ordinary work, on the same runtime, after the lane closed.
+        let leg = SocketAddr::new(leg_ip(), primary_addr.port());
+        legs.send((0, LegCommand::Bind(leg)))
+            .await
+            .expect("the leg lane is still open");
+        tokio::time::timeout(WAIT, async {
+            loop {
+                if shutdown.has_leg(leg) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a closed mode lane must not starve the rest of the loop");
+
+        shutdown.trigger();
+        tokio::time::timeout(WAIT, task)
+            .await
+            .expect("a tripped lane must end the serve loop")
+            .expect("the serve loop task joins");
     }
 
     #[tokio::test]
