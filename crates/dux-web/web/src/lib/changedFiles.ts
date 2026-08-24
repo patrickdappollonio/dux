@@ -78,3 +78,28 @@ export function shouldShowChangedFiles(
 ): boolean {
   return selectedSessionId !== null && watchedSessionId === selectedSessionId
 }
+
+// One section's worth of checked paths each. Staged and unstaged are kept apart
+// because the two sections carry opposite verbs.
+export interface ChangedFileSelection {
+  staged: Set<string>
+  unstaged: Set<string>
+}
+
+// Drop every checked path that is no longer in the section it was checked in. A
+// file selected to be staged and then staged is no longer selected to stage, so
+// it leaves the set rather than following the file across. Pure and applied at
+// render, so keeping the selection honest across a refresh needs no effect.
+export function reconcileSelection(
+  prev: ChangedFileSelection,
+  slice: { staged: ChangedFileView[]; unstaged: ChangedFileView[] },
+): ChangedFileSelection {
+  const survivors = (checked: Set<string>, files: ChangedFileView[]) => {
+    const live = new Set(files.map((f) => f.path))
+    return new Set([...checked].filter((path) => live.has(path)))
+  }
+  return {
+    staged: survivors(prev.staged, slice.staged),
+    unstaged: survivors(prev.unstaged, slice.unstaged),
+  }
+}

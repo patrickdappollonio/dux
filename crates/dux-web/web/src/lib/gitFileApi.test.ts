@@ -238,3 +238,114 @@ describe("the guarded save", () => {
     expect(err.message).toBe("something went wrong")
   })
 })
+
+// The batch routes exist so a multi-file stage is ONE request, one git call and
+// one refresh. A client that looped the single-path route would broadcast N
+// times and churn the pane.
+describe("the batch stage and unstage clients", () => {
+  function batchResponse(done: string[], refused: string[]) {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ done, refused }),
+      text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response)
+  }
+
+  it("stageMany POSTs every path once to the batch route", async () => {
+    batchResponse(["a.txt", "b.txt"], [])
+    await git.stageMany("s1", ["a.txt", "b.txt"])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/sessions/s1/git/stage-files",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ paths: ["a.txt", "b.txt"] }),
+      }),
+    )
+  })
+
+  it("unstageMany POSTs to its own route", async () => {
+    batchResponse(["a.txt"], [])
+    await git.unstageMany("s1", ["a.txt"])
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/sessions/s1/git/unstage-files",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ paths: ["a.txt"] }),
+      }),
+    )
+  })
+
+  it("hands back the server's partition so the caller can say what was skipped", async () => {
+    batchResponse(["a.txt"], ["gone.txt"])
+    const result = await git.stageMany("s1", ["a.txt", "gone.txt"])
+    expect(result).toEqual({ done: ["a.txt"], refused: ["gone.txt"] })
+  })
+})
+
+// Discard has no batch route: each file is independent and a refusal on one
+// ("unstage it first") must not block the rest.
+describe("discardMany", () => {
+  it("runs the single-path route once per file and never in parallel", async () => {
+    const releases: Array<() => void> = []
+    fetchMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releases.push(() =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({}),
+              text: async () => "",
+              headers: { get: () => null },
+            } as unknown as Response),
+          )
+        }),
+    )
+
+    const pending = git.discardMany("s1", ["a.txt", "b.txt"])
+    // Parallel checkouts contend on index.lock, so the second request must not
+    // exist until the first has answered.
+    await Promise.resolve()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    releases[0]()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    releases[1]()
+    const result = await pending
+
+    expect(result.done).toEqual(["a.txt", "b.txt"])
+    expect(result.failed).toEqual([])
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/sessions/s1/git/discard",
+      expect.objectContaining({ body: JSON.stringify({ path: "a.txt" }) }),
+    )
+  })
+
+  it("carries each refusal back to the caller instead of failing the rest", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({}),
+      text: async () => "Unstage the file first.",
+      headers: { get: () => null },
+    } as unknown as Response)
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response)
+
+    const result = await git.discardMany("s1", ["locked.txt", "ok.txt"])
+    expect(result.done).toEqual(["ok.txt"])
+    expect(result.failed).toEqual([
+      { path: "locked.txt", message: "Unstage the file first." },
+    ])
+  })
+})

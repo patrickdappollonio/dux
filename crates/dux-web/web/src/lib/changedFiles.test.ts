@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   fileStatusMeta,
   filterChangedFiles,
+  reconcileSelection,
   shouldShowChangedFiles,
 } from "./changedFiles"
 import type { ChangedFileView } from "./types"
@@ -98,5 +99,41 @@ describe("fileStatusMeta", () => {
   it("falls back to a generic 'Changed' label for unknown or empty codes", () => {
     expect(fileStatusMeta("")).toEqual({ kind: "other", label: "Changed" })
     expect(fileStatusMeta("X")).toEqual({ kind: "other", label: "Changed" })
+  })
+})
+
+describe("reconcileSelection", () => {
+  const slice = {
+    staged: [file("kept-staged.ts")],
+    unstaged: [file("kept-unstaged.ts"), file("moved.ts")],
+  }
+
+  it("keeps a path that is still in its own section", () => {
+    const next = reconcileSelection(
+      { staged: new Set(["kept-staged.ts"]), unstaged: new Set(["kept-unstaged.ts"]) },
+      slice,
+    )
+    expect([...next.staged]).toEqual(["kept-staged.ts"])
+    expect([...next.unstaged]).toEqual(["kept-unstaged.ts"])
+  })
+
+  it("drops a path that vanished from the changes entirely", () => {
+    const next = reconcileSelection(
+      { staged: new Set(["gone.ts"]), unstaged: new Set(["also-gone.ts"]) },
+      slice,
+    )
+    expect(next.staged.size).toBe(0)
+    expect(next.unstaged.size).toBe(0)
+  })
+
+  // A file selected to be staged, then staged: it is no longer "selected to
+  // stage", so it leaves the unstaged set rather than following the file.
+  it("drops a path that moved to the other section", () => {
+    const next = reconcileSelection(
+      { staged: new Set(["moved.ts"]), unstaged: new Set(["kept-staged.ts"]) },
+      slice,
+    )
+    expect(next.staged.size).toBe(0)
+    expect(next.unstaged.size).toBe(0)
   })
 })

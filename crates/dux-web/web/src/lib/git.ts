@@ -39,6 +39,30 @@ async function postGit(
   }
 }
 
+// A batch route's answer: what it acted on, and what had already left the
+// section it validates against.
+export interface BatchResult {
+  done: string[]
+  refused: string[]
+}
+
+async function postGitJson<T>(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<T> {
+  const resp = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  })
+  if (!resp.ok) {
+    const detail = (await resp.text().catch(() => "")).trim()
+    throw new Error(detail || `request failed (${resp.status})`)
+  }
+  return (await resp.json()) as T
+}
+
 // The session id is the `:id` path segment (encoded), never a body field.
 const gitUrl = (sessionId: string, action: string) =>
   `/api/v1/sessions/${encodeURIComponent(sessionId)}/git/${action}`
@@ -48,6 +72,36 @@ export const git = {
     postGit(gitUrl(sessionId, "stage"), { path }),
   unstage: (sessionId: string, path: string) =>
     postGit(gitUrl(sessionId, "unstage"), { path }),
+  // A whole checked selection in one request: one git call, one changed-files
+  // refresh, one broadcast. The server partitions the batch and names what it
+  // could not act on, so the caller raises a single toast for the outcome.
+  stageMany: (sessionId: string, paths: string[]) =>
+    postGitJson<BatchResult>(gitUrl(sessionId, "stage-files"), { paths }),
+  unstageMany: (sessionId: string, paths: string[]) =>
+    postGitJson<BatchResult>(gitUrl(sessionId, "unstage-files"), { paths }),
+  // Discard has no batch route: each file is independent, and a refusal on one
+  // ("unstage it first") must not block the rest. Sequential because parallel
+  // checkouts contend on index.lock. The per-file outcomes come back to the
+  // caller, which raises one toast for the lot.
+  discardMany: async (
+    sessionId: string,
+    paths: string[],
+  ): Promise<{ done: string[]; failed: { path: string; message: string }[] }> => {
+    const done: string[] = []
+    const failed: { path: string; message: string }[] = []
+    for (const path of paths) {
+      try {
+        await postGit(gitUrl(sessionId, "discard"), { path })
+        done.push(path)
+      } catch (err) {
+        failed.push({
+          path,
+          message: err instanceof Error ? err.message : "discard failed",
+        })
+      }
+    }
+    return { done, failed }
+  },
   // `untracked` is intentionally NOT sent: the server re-derives the
   // delete-vs-restore distinction from live git status (never trusting the
   // client about a destructive outcome).
