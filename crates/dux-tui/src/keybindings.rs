@@ -1499,6 +1499,16 @@ pub fn text_field_owns_key(key: impl Into<KeyCombination>) -> bool {
     }
 }
 
+/// The one sentence every surface uses for the state `tab_reaches_agent` can
+/// strand a user in: the option is on and the user's own `focus_next` and
+/// `focus_prev` bindings are all keys the typeable pane types, so no keystroke
+/// moves focus out of it. dux warns rather than refusing (the mouse and the
+/// palette still work, and it does not overrule a user's bindings), so the
+/// sentence has to carry the fix with it.
+pub const NO_PANE_CHORD_ADVICE: &str = "no pane chord reaches dux from the typeable center pane: \
+     every key bound to focus_next and focus_prev types into the agent there. Rebind focus_next \
+     under [keys] in config.toml (Ctrl-o is its default) to get a keyboard way out.";
+
 /// Keys the minimized, typeable center pane forwards to the agent's PTY
 /// instead of resolving as dux bindings.
 ///

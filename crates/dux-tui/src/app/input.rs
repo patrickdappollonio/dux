@@ -9292,18 +9292,37 @@ impl App {
             .config_writer
             .save_lazy(self.engine.config.clone());
         let palette_key = self.bindings.label_for(Action::OpenPalette);
-        let next_pane = self.bindings.label_for(Action::FocusNext);
-        let prev_pane = self.bindings.label_for(Action::FocusPrev);
-        let message = if next {
-            format!(
-                "Tab and Shift-Tab now reach the agent in the center pane. Use {next_pane} and {prev_pane} to move between panes. Press {palette_key} to open the palette and toggle back."
-            )
-        } else {
-            format!(
+        if !next {
+            self.set_info(format!(
                 "Tab moves between panes again. Press {palette_key} to open the palette and toggle back."
-            )
-        };
-        self.set_info(message);
+            ));
+            return;
+        }
+        // The keys named here must be keys that still REACH dux from the pane
+        // the message is about. `label_for` hands back an action's first key,
+        // which for both pane actions is Tab, so it would offer the very key
+        // this toggle just gave to the agent.
+        let next_pane = self
+            .bindings
+            .label_for_typeable_center(Action::FocusNext, true);
+        let prev_pane = self
+            .bindings
+            .label_for_typeable_center(Action::FocusPrev, true);
+        let handed_over = "Tab and Shift-Tab now reach the agent in the center pane.";
+        match (next_pane, prev_pane) {
+            (Some(next_pane), Some(prev_pane)) => self.set_info(format!(
+                "{handed_over} Use {next_pane} and {prev_pane} to move between panes. Press {palette_key} to open the palette and toggle back."
+            )),
+            (Some(only), None) | (None, Some(only)) => self.set_info(format!(
+                "{handed_over} Use {only} to move between panes. Press {palette_key} to open the palette and toggle back."
+            )),
+            (None, None) => {
+                let advice = crate::keybindings::NO_PANE_CHORD_ADVICE;
+                self.set_warning(format!(
+                    "{handed_over} But {advice} Press {palette_key} to open the palette and toggle back."
+                ))
+            }
+        }
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -24321,6 +24340,63 @@ cyan = "#00ffff"
                 "Ctrl-y must move focus (tab_reaches_agent = {tab_reaches_agent})"
             );
         }
+    }
+
+    /// The toggle's "on" message must name keys that still reach dux from the
+    /// typeable pane. Resolving the pane actions through `label_for` names
+    /// their FIRST key, which is Tab: the message would hand the user the very
+    /// key it had just given to the agent.
+    #[test]
+    fn toggling_tab_reaches_agent_on_names_the_pane_chords_never_tab() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.ui.tab_reaches_agent = false;
+
+        app.toggle_tab_reaches_agent();
+
+        let message = app.status.message();
+        assert!(
+            message.contains("Use Ctrl-o and Ctrl-y to move between panes."),
+            "the message must name the surviving pane chords, got: {message}"
+        );
+        assert!(
+            !message.contains("Use Tab"),
+            "the message must never offer Tab as the way out, got: {message}"
+        );
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Info,
+            "a usable way out is not a warning"
+        );
+    }
+
+    /// A user who binds both pane actions to Tab alone and turns the option on
+    /// has no keyboard way off the pane. dux does not overrule their bindings,
+    /// so this is a warning rather than a refusal, and it names the key to
+    /// rebind.
+    #[test]
+    fn toggling_tab_reaches_agent_on_with_no_pane_chord_warns_and_says_what_to_rebind() {
+        let mut app = test_app(bindings_with_overrides(&[
+            (Action::FocusNext, &["tab"]),
+            (Action::FocusPrev, &["shift-tab"]),
+        ]));
+        app.engine.config.ui.tab_reaches_agent = false;
+
+        app.toggle_tab_reaches_agent();
+
+        let message = app.status.message();
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Warning,
+            "a pane with no way out is a warning, got: {message}"
+        );
+        assert!(
+            message.contains("no pane chord reaches dux"),
+            "the warning must say the pane has no way out, got: {message}"
+        );
+        assert!(
+            message.contains("focus_next") && message.contains("[keys]"),
+            "the warning must name what to rebind and where, got: {message}"
+        );
     }
 
     /// The Ctrl arrows keep switching tabs while the pane is typeable: chords
