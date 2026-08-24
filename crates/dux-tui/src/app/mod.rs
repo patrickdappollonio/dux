@@ -3095,6 +3095,31 @@ pub(crate) use render::ASCII_LOGO;
 
 pub(crate) use first_load::{FirstLoadButton, FirstLoadPrompt, NotesFetched};
 
+/// Seed a freshly booted status line: the orientation message on the anonymous
+/// slot, pinned, and the theme warning over it when the configured theme would
+/// not load, pinned too.
+///
+/// Both boot paths use this (a cold start and the resume after the web server
+/// hands the terminal back) so the two can never drift, and so what they do is
+/// testable without booting an App. Both messages are PINNED because neither is
+/// an outcome that has finished happening: the hint waits for the user's first
+/// action to write over it, and a theme that will not load is still true
+/// tomorrow.
+fn boot_status(
+    clear_after: Duration,
+    orientation: impl Into<String>,
+    theme_warning: Option<String>,
+) -> KeyedStatusController {
+    let mut status = KeyedStatusController::with_clear_after(clear_after);
+    status.set(Instant::now(), None, StatusTone::Info, orientation.into());
+    status.pin();
+    if let Some(message) = theme_warning {
+        status.set(Instant::now(), None, StatusTone::Warning, message);
+        status.pin();
+    }
+    status
+}
+
 impl App {
     /// Bootstrap the TUI. The caller must have already resolved `paths`,
     /// created its directories, and acquired the single-instance lock.
@@ -3155,27 +3180,19 @@ impl App {
             bindings.label_for(Action::ToggleHelp),
         );
         let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &paths);
-        let mut status = KeyedStatusController::with_clear_after(Duration::from_secs(
-            config.ui.status_clear_seconds as u64,
-        ));
-        // Write the orientation hint into the anonymous slot and pin it so it
-        // persists until the user's first action replaces it.
-        //
-        // KEPT despite the arrival of the welcome screen, which says all of this
-        // and more. The comment here used to call this a "first-run hint", which
-        // was never accurate: it is set on EVERY cold boot, not only the first, so
-        // deleting it would take the orientation line away from every existing
-        // user in exchange for de-duplicating one launch in a fresh install's
-        // lifetime. On that one launch the welcome modal covers it anyway, and
-        // dismissing the modal writes its own status over it.
-        status.set(Instant::now(), None, StatusTone::Info, initial_status);
-        status.pin();
-        if let Some(message) = theme_warning {
-            status.set(Instant::now(), None, StatusTone::Warning, message);
-            // A theme that will not load is still true tomorrow, so it waits
-            // for the user rather than for the warning window.
-            status.pin();
-        }
+        // The orientation hint is KEPT despite the arrival of the welcome
+        // screen, which says all of this and more. It used to be called a
+        // "first-run hint", which was never accurate: it is set on EVERY cold
+        // boot, not only the first, so deleting it would take the orientation
+        // line away from every existing user in exchange for de-duplicating one
+        // launch in a fresh install's lifetime. On that one launch the welcome
+        // modal covers it anyway, and dismissing the modal writes its own
+        // status over it.
+        let status = boot_status(
+            Duration::from_secs(config.ui.status_clear_seconds as u64),
+            initial_status,
+            theme_warning,
+        );
         let gh_integration_val = config.ui.github_integration;
         let config_writer =
             dux_core::config_queue::ConfigWriteQueue::new(paths.config_path.clone());
@@ -3449,23 +3466,11 @@ impl App {
         let signals = register_signal_handles()?;
         let (theme, theme_warning) =
             crate::theme::load_or_fallback(&engine.config.ui.theme, &engine.paths);
-        let mut status = KeyedStatusController::with_clear_after(Duration::from_secs(
-            engine.config.ui.status_clear_seconds as u64,
-        ));
-        // Write the post-flip guidance into the anonymous slot and pin it so it
-        // persists until the user acts, not auto-clear like a confirmation.
-        status.set(
-            Instant::now(),
-            None,
-            StatusTone::Info,
+        let status = boot_status(
+            Duration::from_secs(engine.config.ui.status_clear_seconds as u64),
             "Web server stopped. Your agents kept running — reconnect to any session to pick up where it left off.",
+            theme_warning,
         );
-        status.pin();
-        if let Some(message) = theme_warning {
-            status.set(Instant::now(), None, StatusTone::Warning, message);
-            // Still true after the warning window, so it waits for the user.
-            status.pin();
-        }
         Self::assemble(
             engine,
             bindings,
@@ -8256,6 +8261,37 @@ mod pinned_warning_tests {
                 .most_recent_tui()
                 .is_some_and(|(_, message)| message.contains("could not be loaded")),
             "it must survive the warning window"
+        );
+    }
+
+    /// Both boot paths (a cold start and the resume after the web server hands
+    /// the terminal back) seed their status line through `boot_status`, so this
+    /// pins what both of them do.
+    #[test]
+    fn the_boot_status_holds_the_orientation_hint_past_every_window() {
+        let t0 = Instant::now();
+        let mut status = boot_status(WINDOW, "Press ? for help.", None);
+        let _ = status.tick(t0 + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
+        assert_eq!(
+            status.message(),
+            "Press ? for help.",
+            "the pinned hint waits for the user's first action, not for a timer"
+        );
+    }
+
+    #[test]
+    fn the_boot_status_holds_an_unloadable_theme_warning_past_every_window() {
+        let t0 = Instant::now();
+        let mut status = boot_status(
+            WINDOW,
+            "Press ? for help.",
+            Some("Theme 'nope' could not be loaded.".to_string()),
+        );
+        let _ = status.tick(t0 + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
+        assert!(
+            status.message().contains("could not be loaded"),
+            "a theme that will not load is still true tomorrow: {}",
+            status.message()
         );
     }
 }
