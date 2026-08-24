@@ -765,10 +765,10 @@ describe("CustomizeWebappDialog", () => {
     seed({ tailscale_mode: "no", tailscale_forced_no: true, hyperlinks: false })
     render(<CustomizeWebappDialog />)
 
-    const resets = screen.getAllByRole("button", {
-      name: /Reset section to defaults/i,
-    })
-    fireEvent.click(resets[resets.length - 1])
+    // The Tailscale and hyperlinks rows both live in the "Both surfaces"
+    // section, so reset that one by its caption rather than by position.
+    const caption = screen.getByText(/^Both surfaces\./)
+    fireEvent.click(caption.parentElement!.querySelector("button")!)
 
     await waitFor(() => expect(saveSettings).toHaveBeenCalled())
     expect(saveSettings.mock.calls[0][0].capabilities).toEqual({ hyperlinks: true })

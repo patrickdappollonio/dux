@@ -37,7 +37,7 @@ import {
   MIN_TERMINAL_FONT_SIZE,
 } from "./terminalFont"
 
-export type SettingSurface = "web" | "both"
+export type SettingSurface = "web" | "both" | "tui"
 
 export type SettingControl =
   | { kind: "bool" }
@@ -529,6 +529,23 @@ export const SETTING_GROUPS: SettingGroup[] = [
         // per-project `default_provider` field the project settings dialog
         // reads.
         read: (b) => b.global_default_provider ?? "claude",
+      },
+    ],
+  },
+  {
+    surface: "tui",
+    caption: "Terminal UI. These affect the terminal app only.",
+    settings: [
+      {
+        key: "ui.tab_reaches_agent",
+        label: "Send Tab to the agent",
+        description:
+          "In the terminal app, Tab and Shift-Tab are typed into the agent in the center pane instead of moving between panes. Off by default, because Tab has moved between panes since dux's first version. The pane chords (Ctrl-o and Ctrl-y unless you have rebound them) move between panes either way. The web terminal is unaffected: Tab always reaches the agent there.",
+        surface: "tui",
+        control: { kind: "bool" },
+        default: false,
+        writeTarget: "settings",
+        read: (b) => b.tab_reaches_agent ?? false,
       },
     ],
   },

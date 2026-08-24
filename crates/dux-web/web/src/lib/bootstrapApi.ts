@@ -156,6 +156,12 @@ export interface Bootstrap {
    * renders even with a single tab (default false, matching today's chrome-free
    * single-tab pane). */
   always_show_tab_strip: boolean
+  /** Mirrors `config.ui.tab_reaches_agent`: when true the TERMINAL app's
+   * typeable center pane sends Tab and Shift-Tab to the agent instead of
+   * cycling panes. Nothing in the web UI acts on it; it is here so the
+   * Preferences dialog can show and change it. Older servers omit it, so
+   * consumers fall back to `false`. */
+  tab_reaches_agent?: boolean
   /** Global environment variables applied to every spawned agent/terminal. */
   global_env: Record<string, string>
   /** Mirrors `config.ui.status_clear_seconds`: how long an info/success toast
