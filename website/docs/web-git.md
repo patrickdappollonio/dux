@@ -12,8 +12,9 @@ chores too, so you rarely need to drop to a shell.
 
 The right-hand Changes pane tracks the focused agent's working tree. Files split into two
 collapsible groups, **Staged** and **Unstaged**, each with a count badge, and a filter box
-narrows a long list by path. Every row shows a status icon, the file path, and the green
-and red line counts. When the worktree is clean it says so plainly.
+narrows a long list by path. Every row leads with a checkbox and then shows the file path,
+its status icon, and the green and red line counts. When the worktree is clean it says so
+plainly.
 
 Click any row to open its diff in the [code editor](/docs/web-editor), read-only and
 syntax-highlighted, HEAD against the working copy.
@@ -22,9 +23,30 @@ Status icons are the same ones the editor's file tree uses, each with a tooltip 
 out: **M** modified, **A** added, **D** deleted, **R** renamed, **C** copied, **U**
 conflict, **T** type changed, and **?** untracked.
 
+## Several files at once
+
+Tick the checkbox on any row and a bar appears above the list with the verbs for
+what you picked: **Stage 3**, **Unstage 2**, **Discard 3…**, and **Clear**. Each
+section keeps its own selection, because the two carry opposite verbs, and the
+checkbox beside a section heading picks up every row that section is currently
+showing.
+
+Staging and unstaging a selection is a single request: one git call, one refresh,
+one message telling you what happened. If a file moved out of its group between
+the tick and the click, the rest still go through and the message names what was
+skipped. Discarding a selection confirms first, and the dialog counts the two
+outcomes separately: how many untracked files it will delete, and how many
+tracked files it will restore.
+
+> [!TIP]
+> The filter and the selection are independent. Filter the list, tick what you
+> want, clear the filter and tick some more: the bar still counts and acts on
+> everything you picked, not just the rows on screen.
+
 ## Stage, unstage, discard
 
-Hover a file row for its `⋯` menu:
+Clicking a row still opens its diff; only the checkbox selects. For a single
+file, hover a row for its `⋯` menu:
 
 - **Stage** and **Unstage** move a file between the two groups. The row jumps to its new
   group as soon as the engine confirms.
