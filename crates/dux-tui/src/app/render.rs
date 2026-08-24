@@ -2816,8 +2816,13 @@ impl App {
 
         let mut spans: Vec<Span> = Vec::new();
         spans.extend(self.theme.dim_key_badge_default(&exit_key));
-        spans.push(Span::styled(" fullscreen  ", desc_style));
+        // The gap between items belongs to the item that FOLLOWS it, never to
+        // the one before: every item here is conditional, and a trailing
+        // separator on the last one shows up as a gap before the period (or,
+        // with the cue on, as a widening of the flush-right padding).
+        spans.push(Span::styled(" fullscreen", desc_style));
         if !next_pane.is_empty() {
+            spans.push(Span::styled("  ", desc_style));
             spans.extend(self.theme.dim_key_badge_default(&next_pane));
             spans.push(Span::styled(" next pane", desc_style));
         }
@@ -12760,6 +12765,46 @@ mod tests {
             !rendered.contains("tabs are sent to the agent"),
             "the cue must drop first: {rendered:?}"
         );
+    }
+
+    /// A user whose pane actions are all keys the pane types loses the "next
+    /// pane" item, and the line must close up behind it: the separator belongs
+    /// to the item that follows it, so nothing may trail the last one.
+    #[test]
+    fn typeable_hint_closes_up_when_no_pane_chord_survives() {
+        let bindings = crate::keybindings::RuntimeBindings::new(
+            |action| match action {
+                Action::FocusNext => vec![crokey::key!(tab)],
+                Action::FocusPrev => vec![crokey::key!(shift - tab)],
+                _ => crate::keybindings::BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default(),
+            },
+            true,
+        );
+        let mut app = test_app(bindings);
+        app.engine.config.ui.tab_reaches_agent = true;
+
+        // Narrow enough that the cue drops: the whole row is the one item.
+        assert_eq!(
+            rendered_line(&app.typeable_hint_line(SessionSurface::Agent, 20)),
+            "<Ctrl-g> fullscreen.",
+            "the chord-less line is the fullscreen key and nothing else"
+        );
+
+        // Wide enough for the cue: only the flush-right padding may follow.
+        let rendered = rendered_line(&app.typeable_hint_line(SessionSurface::Agent, 60));
+        assert!(
+            rendered.starts_with("<Ctrl-g> fullscreen."),
+            "no separator may trail the last item: {rendered:?}"
+        );
+        assert!(
+            rendered.ends_with("tabs are sent to the agent"),
+            "the cue must still be flush right: {rendered:?}"
+        );
+        assert_eq!(rendered.chars().count(), 60);
     }
 
     /// `always_show_tab_strip = false` (the default) must keep hiding the strip
