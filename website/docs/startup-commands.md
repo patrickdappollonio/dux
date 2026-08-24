@@ -133,7 +133,7 @@ picks which one:
 # Shell used to run project startup commands before launching a new agent.
 # "$SHELL" is expanded when the command runs and falls back to /bin/sh if unset.
 command = "$SHELL"
-# Arguments passed before the startup command text.
+# Arguments passed before the configured project startup command.
 # The default ["-l", "-c"] runs a login shell without interactive job-control warnings.
 args = ["-l", "-c"]
 ```

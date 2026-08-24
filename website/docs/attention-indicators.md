@@ -80,13 +80,18 @@ Two switches and a timer live in the `[ui]` section, all on by default:
 
 ```toml
 [ui]
-# Show an indicator when an agent asks for attention (permission prompts,
-# finished turns). Detected from the agent's terminal notifications.
+# Show an indicator when an agent asks for attention (a permission
+# prompt, a finished turn). Detected from the agent's terminal
+# notifications and bell. The TUI blinks a marker in the sidebar; the web
+# UI shows a dot, a browser-tab count, and a favicon dot. Set to false to
+# disable it everywhere.
 attention_indicator = true
 
-# Also treat a plain terminal bell as an attention request. The bell is the
-# most compatible signal (Codex falls back to it; Claude Code emits it in
-# terminal_bell mode) but can occasionally ring for mundane reasons.
+# Also treat a plain terminal bell as an attention request. The bell is
+# the most compatible signal (Codex falls back to it; Claude Code emits it
+# in terminal_bell mode) but can occasionally ring for mundane reasons, so
+# turn this off if you find it noisy. Has no effect when
+# attention_indicator is false.
 attention_on_bell = true
 
 # Seconds the attention indicators stay visible after dux regains your

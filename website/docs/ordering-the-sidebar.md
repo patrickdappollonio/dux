@@ -16,18 +16,36 @@ it: pick a sort mode and let dux keep the list in order, or place things by hand
 
 Agents sit up top; terminals get their own section below them. In the terminal UI those
 are two panes; on the web they are two labelled groups, and the Terminals group is
-collapsible. Dormant agents fold away into a collapsible "Inactive" tail.
+collapsible. Dormant agents fold away into a collapsible "Inactive" tail. On the web the
+Terminals group sits above that tail; in the terminal UI the tail closes the Agents pane
+and Terminals is its own pane below. Every row is two lines: the name, then who it
+belongs to and what it is doing. The terminal UI looks like this (the spinner glyph
+animates while an agent works):
 
 ```text
-▾ Agents
-  ● auth-refactor        ⎇ #42   Working
-  ▍ docs-pass                    Typing
-  ◐ billing-fix                  Detached
-  ▸ Inactive (2)
-▾ Terminals
-  ● cargo test    ↳ auth-refactor@dux   Running
-  ○ zsh           ↳ project              Idle
-  ○ Terminal      ✷ ~/code               Idle
+Agents (4) ────────────────────────────────
+  ⠹ auth-refactor                      ⎇#42
+  ※ dux · Working
+
+  ▍ docs-pass
+  ※ dux · Typing
+
+  ● scratchpad
+  ✷ ~/code/scratch · Idle
+
+  ▾ Inactive (1) ───────────────────────────
+  ◎ billing-fix
+  ※ dux · Detached
+
+Terminals (3) ─────────────────────────────
+  ⠹ cargo
+  ↳ auth-refactor@dux · Running
+
+  ● Terminal
+  ↳ dux · Idle
+
+  ● Terminal
+  ✷ ~/code · Idle
 ```
 
 A terminal's second line names its owner as `agent@project`, or just the project for a
