@@ -3700,6 +3700,10 @@ impl App {
                     let fg = s.style.fg.unwrap_or(Color::Reset);
                     Span::styled(s.content, stats_base.fg(fg))
                 }));
+                // The reserved right-margin column is part of the row: painted
+                // in the row's own style so a selection highlight reaches the
+                // pane edge instead of stopping at the stats.
+                spans.push(Span::styled(" ", base_style));
                 ListItem::new(Line::from(spans))
             })
             .collect::<Vec<_>>();
@@ -18493,6 +18497,62 @@ mod tests {
         assert!(
             screen.contains("Space toggle"),
             "with the checkbox focused Space really does toggle:\n{screen}"
+        );
+    }
+
+    /// The changes pane paints a selected row's highlight edge to edge: the
+    /// one-column right margin that keeps the stats off the border is part of
+    /// the row, so it wears the selection background too. Unpainted, the
+    /// highlight stops at the stats text while the left inset is filled, and
+    /// the row reads as cut short.
+    #[test]
+    fn selected_changed_file_row_highlights_through_the_right_margin() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = test_app(default_bindings());
+        app.engine.unstaged_files = vec![dux_core::model::ChangedFile {
+            path: "notes.md".to_string(),
+            status: "M".to_string(),
+            additions: 12,
+            deletions: 3,
+            binary: false,
+        }];
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+        app.files_index = 0;
+        app.right_hidden = false;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width;
+        let row = (0..buffer.area.height)
+            .find(|y| {
+                let line: String = (0..width).map(|x| buffer[(x, *y)].symbol()).collect();
+                line.contains("notes.md")
+            })
+            .expect("the unstaged file renders a row");
+        // The last content column before the pane's right border.
+        let stats_end = (0..width)
+            .rev()
+            .find(|x| buffer[(*x, row)].symbol() == "3")
+            .expect("the stats render on the row");
+        let margin = stats_end + 1;
+        assert_ne!(
+            buffer[(margin, row)].symbol(),
+            "\u{2502}",
+            "the column after the stats is the reserved right margin, not the border"
+        );
+        assert_eq!(
+            buffer[(margin, row)].bg,
+            app.theme.selection_bg,
+            "the selection highlight must reach the pane edge through the right margin"
+        );
+        assert_eq!(
+            buffer[(stats_end, row)].bg,
+            app.theme.selection_bg,
+            "the stats cells carry the selection background"
         );
     }
 }
