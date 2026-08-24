@@ -165,6 +165,8 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync: Arc::new(Default::default()),
         pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        branch_sync_wait: Arc::new(Default::default()),
         pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         refs_watcher: None,
         refs_watch_paths: std::collections::HashMap::new(),

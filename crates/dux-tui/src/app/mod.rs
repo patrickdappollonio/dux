@@ -3173,6 +3173,8 @@ impl App {
             pr_sync_sessions,
             pr_sync,
             pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            branch_sync_wait: Arc::new(Default::default()),
             pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             refs_watcher: None,
             refs_watch_paths: HashMap::new(),
@@ -4592,6 +4594,7 @@ impl App {
             &self.engine.session_store,
         )?;
         self.engine.config = config;
+        self.engine.retune_after_config_swap();
 
         self.engine.refresh_project_defaults();
         // No project-count clamp here: the flat list indexes agent rows, not
@@ -7825,6 +7828,26 @@ leading_branch = "main"
         assert!(
             app.status.most_recent_tui().is_none(),
             "a two-second-old info status is gone once the lifetime is one second",
+        );
+    }
+
+    /// The terminal UI applies a reload without going through
+    /// `Engine::apply_reloaded_config`, so it has to retune the live poll loops
+    /// itself or `ui.branch_sync_interval` stays a restart-only setting here.
+    #[test]
+    fn a_tui_config_reload_retunes_the_live_branch_sync_interval() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let mut config = app.engine.config.clone();
+        config.ui.branch_sync_interval = 45;
+
+        app.apply_reloaded_config(config)
+            .expect("apply reloaded config");
+
+        assert_eq!(
+            app.engine
+                .branch_sync_interval_secs
+                .load(std::sync::atomic::Ordering::Relaxed),
+            45,
         );
     }
 

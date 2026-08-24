@@ -485,7 +485,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # omits the unit for backward compatibility, but the value IS in\n\
                  # seconds, like every other interval in this file.\n\
                  # Keeps dux in sync if a branch is renamed outside the app.\n\
-                 # Set to 0 to disable.",
+                 # Set to 0 to disable.\n\
+                 # A config reload retunes this live, including turning it back on\n\
+                 # from 0; no restart needed.",
             )),
             value_fn: |c| FieldValue::U16(c.ui.branch_sync_interval),
         },

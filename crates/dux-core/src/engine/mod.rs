@@ -299,6 +299,15 @@ pub struct Engine {
     /// then come only from the refs watcher and foreground focus). Seeded from
     /// `config.ui.pr_poll_interval_seconds` at spawn and in `apply_reloaded_config`.
     pub pr_poll_interval_secs: Arc<AtomicU64>,
+    /// Seconds between branch-sync sweeps, shared with the loop thread so a
+    /// config reload can retune it live. `0` reaching the loop means "nap and
+    /// look again", never "exit": the thread stays live so
+    /// `branch_sync_worker_started` keeps meaning "a thread is live". Seeded
+    /// from `config.ui.branch_sync_interval` at spawn and in
+    /// [`Engine::retune_after_config_swap`].
+    pub branch_sync_interval_secs: Arc<AtomicU64>,
+    /// Observation points on the branch-sync wait, shared with the loop thread.
+    pub branch_sync_wait: Arc<BranchSyncWait>,
     /// Active PR-check backoff windows, keyed by GitHub host (`host -> until`).
     /// A host present with a future instant means every PR-check path (the
     /// batched safety poll AND the event-driven one-shot checks) skips that host
@@ -1021,6 +1030,50 @@ const PR_RATE_LIMIT_BACKOFF_SECS: u64 = 300;
 /// change is observed within a few seconds rather than after a full (up to
 /// multi-hour) interval elapses.
 const PR_SYNC_SLICE_SECS: u64 = 3;
+
+/// Default sleep granularity of the branch-sync wait, for the same reason as
+/// [`PR_SYNC_SLICE_SECS`]: a retuned or disabled interval must be observed in a
+/// few seconds, not after a full one.
+pub const BRANCH_SYNC_SLICE_MS: u64 = 3_000;
+
+/// The branch-sync wait's tunable granularity and its progress counter.
+///
+/// `slice_ms` is the sleep granularity; `waits_started` counts waits the loop
+/// has begun. Both exist so a test can shrink the slice and then retune only
+/// once the loop is provably waiting on the old interval, which is the whole
+/// claim: a running loop adopts a new interval mid-wait.
+#[derive(Debug)]
+pub struct BranchSyncWait {
+    pub slice_ms: AtomicU64,
+    pub waits_started: AtomicU64,
+}
+
+impl Default for BranchSyncWait {
+    fn default() -> Self {
+        Self {
+            slice_ms: AtomicU64::new(BRANCH_SYNC_SLICE_MS),
+            waits_started: AtomicU64::new(0),
+        }
+    }
+}
+
+/// What the branch-sync loop naps for while its interval is `0`.
+const BRANCH_SYNC_IDLE_NAP_SECS: u64 = 60;
+
+/// How long one branch-sync wait lasts. A `0` interval naps instead of ending
+/// the thread, so a later retune to N is picked up by this same loop.
+fn branch_sync_nap_secs(interval_secs: u64) -> u64 {
+    if interval_secs == 0 {
+        BRANCH_SYNC_IDLE_NAP_SECS
+    } else {
+        interval_secs
+    }
+}
+
+/// Whether a completed branch-sync wait ends in a sweep or in another nap.
+fn branch_sync_should_poll(interval_secs: u64) -> bool {
+    interval_secs != 0
+}
 
 /// Rewrite an absolute path under the user's home directory to the portable
 /// `$HOME/...` form so config.toml stays machine-independent (the tenet:
@@ -1806,16 +1859,25 @@ impl Engine {
             &config,
         );
         self.config = config;
-        // Retune the live PR-sync poll interval (the loop reads this each tick).
+        self.retune_after_config_swap();
+        self.refresh_project_defaults();
+        self.update_branch_sync_sessions();
+        Ok(())
+    }
+
+    /// Re-point the live poll loops at `self.config` after a reload swapped it
+    /// in. Both loops re-read their shared interval on every wait, and the
+    /// branch-sync spawn is idempotent, so this also covers a reload that turns
+    /// branch sync on from `0`. Each surface applies a reload its own way, so
+    /// both call this rather than relying on the other's path.
+    pub fn retune_after_config_swap(&mut self) {
         self.pr_poll_interval_secs.store(
             u64::from(crate::config::normalized_pr_poll_interval(
                 self.config.ui.pr_poll_interval_seconds,
             )),
             Ordering::Relaxed,
         );
-        self.refresh_project_defaults();
-        self.update_branch_sync_sessions();
-        Ok(())
+        self.spawn_branch_sync_worker();
     }
 
     /// Re-resolve the in-memory `default_provider` for each project against
@@ -1832,8 +1894,12 @@ impl Engine {
     }
 
     pub fn spawn_branch_sync_worker(&self) {
-        let interval_secs = self.config.ui.branch_sync_interval;
-        if interval_secs == 0 {
+        let configured = self.config.ui.branch_sync_interval;
+        // Seeded even on the disabled path so a running loop from an earlier,
+        // enabled config sees the `0` and naps instead of sweeping.
+        self.branch_sync_interval_secs
+            .store(u64::from(configured), Ordering::Relaxed);
+        if configured == 0 {
             return; // disabled by config
         }
         // Idempotent: a long-lived poller must never be duplicated. The flip
@@ -1846,14 +1912,35 @@ impl Engine {
         {
             return;
         }
-        let interval = Duration::from_secs(u64::from(interval_secs));
+        let interval_secs = Arc::clone(&self.branch_sync_interval_secs);
+        let wait = Arc::clone(&self.branch_sync_wait);
         let sessions = Arc::clone(&self.branch_sync_sessions);
         self.spawn_loop_worker(
             LoopWorkerSpec {
                 label: "branch-sync".into(),
             },
             move |tx| {
-                thread::sleep(interval);
+                let secs = interval_secs.load(Ordering::Relaxed);
+                let nap_ms = branch_sync_nap_secs(secs).saturating_mul(1_000);
+                let mut slept_ms = 0u64;
+                wait.waits_started.fetch_add(1, Ordering::Relaxed);
+                while slept_ms < nap_ms {
+                    let slice = wait
+                        .slice_ms
+                        .load(Ordering::Relaxed)
+                        .max(1)
+                        .min(nap_ms - slept_ms);
+                    thread::sleep(Duration::from_millis(slice));
+                    slept_ms += slice;
+                    if interval_secs.load(Ordering::Relaxed) != secs {
+                        // Retuned (including 0<->N): restart the wait on the new
+                        // value rather than finishing one measured for the old.
+                        return LoopControl::Continue;
+                    }
+                }
+                if !branch_sync_should_poll(secs) {
+                    return LoopControl::Continue;
+                }
                 let snapshot = match sessions.lock() {
                     Ok(guard) => guard.clone(),
                     Err(_) => return LoopControl::Continue,
@@ -7037,6 +7124,98 @@ mod tests {
             engine.branch_sync_worker_started.load(Ordering::Relaxed),
             "second call stays guarded, no second poller"
         );
+    }
+
+    #[test]
+    fn branch_sync_wait_treats_zero_as_an_idle_nap_rather_than_an_exit() {
+        // `0` inside the loop must never end the thread: the guard means "a
+        // thread is live", and a later retune to N is picked up by this loop.
+        assert_eq!(branch_sync_nap_secs(0), BRANCH_SYNC_IDLE_NAP_SECS);
+        assert!(!branch_sync_should_poll(0));
+        assert_eq!(branch_sync_nap_secs(7), 7);
+        assert!(branch_sync_should_poll(7));
+    }
+
+    #[test]
+    fn a_config_reload_retunes_the_live_branch_sync_interval() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.ui.branch_sync_interval = 30;
+        engine.spawn_branch_sync_worker();
+        assert_eq!(engine.branch_sync_interval_secs.load(Ordering::Relaxed), 30);
+
+        let mut config = engine.config.clone();
+        config.ui.branch_sync_interval = 45;
+        engine
+            .apply_reloaded_config(config)
+            .expect("reload applies");
+        assert_eq!(engine.branch_sync_interval_secs.load(Ordering::Relaxed), 45);
+    }
+
+    #[test]
+    fn a_config_reload_that_turns_branch_sync_on_from_zero_starts_the_worker() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.ui.branch_sync_interval = 0;
+        engine.spawn_branch_sync_worker();
+        assert!(!engine.branch_sync_worker_started.load(Ordering::Relaxed));
+
+        let mut config = engine.config.clone();
+        config.ui.branch_sync_interval = 5;
+        engine
+            .apply_reloaded_config(config)
+            .expect("reload applies");
+        assert!(
+            engine.branch_sync_worker_started.load(Ordering::Relaxed),
+            "turning the poller on needs no restart",
+        );
+        assert_eq!(engine.branch_sync_interval_secs.load(Ordering::Relaxed), 5);
+    }
+
+    /// The running loop re-reads the shared interval on every wait slice, so a
+    /// retune reaches a thread that is already napping on the old value.
+    #[test]
+    fn the_running_branch_sync_loop_adopts_a_retuned_interval() {
+        let (mut engine, tmp) = test_engine();
+        let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+        engine.worker_tx = worker_tx;
+        // A short slice keeps the retune observable without a long wait; the
+        // shipped granularity is BRANCH_SYNC_SLICE_MS.
+        engine.branch_sync_wait.slice_ms.store(5, Ordering::Relaxed);
+
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        crate::git::init_repo(&worktree).expect("init repo");
+        let actual = crate::git::current_branch(&worktree).expect("a branch");
+        engine
+            .branch_sync_sessions
+            .lock()
+            .expect("branch sync sessions")
+            .push(BranchSyncEntry {
+                session_id: "session-1".to_string(),
+                worktree_path: worktree.to_string_lossy().to_string(),
+                branch_name: format!("{actual}-stale"),
+            });
+
+        // An hour, so nothing polls unless the loop notices the retune.
+        engine.config.ui.branch_sync_interval = 3600;
+        engine.spawn_branch_sync_worker();
+        // Retune only once the loop is provably waiting on the hour, so a pass
+        // cannot come from the thread reading the new value on its way in.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while engine
+            .branch_sync_wait
+            .waits_started
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            assert!(Instant::now() < deadline, "the branch-sync loop never woke");
+            thread::sleep(Duration::from_millis(1));
+        }
+        engine.branch_sync_interval_secs.store(1, Ordering::Relaxed);
+
+        let event = worker_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the retuned interval produces a branch sync");
+        assert!(matches!(event, WorkerEvent::BranchSyncReady(_)));
     }
 
     #[test]
