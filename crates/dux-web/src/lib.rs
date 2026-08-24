@@ -924,6 +924,7 @@ fn start_tailscale_watcher(
             watch_tailscale_leg(
                 primary,
                 WATCH_PERIOD,
+                false,
                 &dux_core::tailscale::detect_ip,
                 &|| watcher_bound.lock().ok().and_then(|slot| *slot),
                 &|command| tx.blocking_send(command).is_ok(),

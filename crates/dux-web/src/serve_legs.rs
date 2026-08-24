@@ -312,6 +312,65 @@ pub(crate) fn desired_leg(
     Some(SocketAddr::new(ip, primary.port()))
 }
 
+/// One step of a live `[server] tailscale` mode change, decided by
+/// [`plan_mode_change`] and carried out by the serve loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModeStep {
+    /// End the watcher that is running, so its in-flight probe cannot re-bind a
+    /// leg the new mode does not want.
+    StopWatcher,
+    /// Drop the Tailscale listener at this address.
+    Unbind(SocketAddr),
+    /// Look for the Tailscale address once and bind whatever that implies.
+    DetectAndBind,
+    /// Start a watcher for the rest of the serve. `probe_now` skips its first
+    /// park so the command that asked for `auto` has a visible outcome.
+    StartWatcher { probe_now: bool },
+    /// Accept (or stop accepting) Tailscale IP literals in the Host guard.
+    SetHostLiterals(bool),
+    /// This run was started with `--no-tailscale`, so nothing is done to the
+    /// listeners.
+    Refuse,
+}
+
+/// The steps a live mode change implies. Pure, so the whole transition matrix is
+/// a unit test rather than nine socket-holding integration cases.
+///
+/// The Host-literal step comes BEFORE the bind on the way up and AFTER the
+/// unbind on the way down, so there is never a window where dux is serving a
+/// Tailscale address its own Host guard refuses.
+pub(crate) fn plan_mode_change(
+    prev: TailscaleMode,
+    next: TailscaleMode,
+    bound: Option<SocketAddr>,
+    forced_no: bool,
+) -> Vec<ModeStep> {
+    if forced_no && next.wants_tailscale() {
+        return vec![ModeStep::Refuse];
+    }
+    let mut steps = Vec::new();
+    if prev.watches_interface() {
+        steps.push(ModeStep::StopWatcher);
+    }
+    match next {
+        TailscaleMode::No => {
+            if let Some(addr) = bound {
+                steps.push(ModeStep::Unbind(addr));
+            }
+            steps.push(ModeStep::SetHostLiterals(false));
+        }
+        TailscaleMode::Yes => {
+            steps.push(ModeStep::SetHostLiterals(true));
+            steps.push(ModeStep::DetectAndBind);
+        }
+        TailscaleMode::Auto => {
+            steps.push(ModeStep::SetHostLiterals(true));
+            steps.push(ModeStep::StartWatcher { probe_now: true });
+        }
+    }
+    steps
+}
+
 /// Run the watch loop: poll the detector, compare against what is bound, emit at
 /// most one transition per period, and stop when `stop` says serving is over.
 ///
@@ -321,20 +380,38 @@ pub(crate) fn desired_leg(
 /// rather than being lost), `emit` hands a command to the serve loop and returns
 /// false when nobody is listening any more, and `stop` ends the loop.
 ///
-/// The loop starts by SLEEPING. The startup bind has already happened by the time
-/// a watcher exists, so checking immediately would only re-ask a question that
-/// was answered a moment ago.
+/// `probe_first` decides whether the loop starts by probing or by SLEEPING. A
+/// watcher started at serve time sleeps: the startup bind answered the same
+/// question a moment ago. A watcher started by a live switch to `auto` probes,
+/// because the gesture that started it needs an outcome to report.
+///
+/// `stop` is consulted again after the probe and before the emit: a detection
+/// can take seconds, and a watcher stopped during one must not hand the serve
+/// loop a command for the mode it just left.
 pub(crate) fn watch_tailscale_leg(
     primary: SocketAddr,
     period: Duration,
+    probe_first: bool,
     detect: &dyn Fn() -> Result<IpAddr, TailscaleUnavailable>,
     bound: &dyn Fn() -> Option<SocketAddr>,
     emit: &dyn Fn(LegCommand) -> bool,
     stop: &dyn Fn() -> bool,
 ) {
-    while park(period, stop) {
+    let mut immediate = probe_first;
+    loop {
+        if immediate {
+            immediate = false;
+            if stop() {
+                return;
+            }
+        } else if !park(period, stop) {
+            return;
+        }
         let desired = desired_leg(primary, detect());
         let step = plan_leg_step(bound(), desired);
+        if stop() {
+            return;
+        }
         let sent = match step {
             LegStep::Nothing => true,
             LegStep::Bind(addr) => emit(LegCommand::Bind(addr)),
@@ -471,6 +548,12 @@ mod tests {
     /// watch loop with no Tailscale binary, no sockets and no waiting.
     struct Harness {
         script: Mutex<Vec<Result<IpAddr, TailscaleUnavailable>>>,
+        /// How many periods the script covers. The stop closure lags one probe
+        /// behind it, because the loop re-checks `stop` AFTER the probe: a stop
+        /// that fired on the last scripted probe would swallow that period's
+        /// command and every script would be one transition short.
+        periods: usize,
+        probes: Mutex<usize>,
         bound: Mutex<Option<SocketAddr>>,
         /// When set, a Bind command is NOT reflected into `bound`, standing in for
         /// a best-effort bind that failed.
@@ -481,7 +564,9 @@ mod tests {
     impl Harness {
         fn new(script: Vec<Result<IpAddr, TailscaleUnavailable>>) -> Self {
             Self {
+                periods: script.len(),
                 script: Mutex::new(script),
+                probes: Mutex::new(0),
                 bound: Mutex::new(None),
                 refuse_binds: false,
                 sent: Mutex::new(Vec::new()),
@@ -492,11 +577,13 @@ mod tests {
             watch_tailscale_leg(
                 primary,
                 Duration::ZERO,
+                false,
                 &|| {
+                    *self.probes.lock().unwrap() += 1;
                     let mut script = self.script.lock().unwrap();
                     if script.is_empty() {
-                        // Exhausted: the stop closure below ends the loop on the
-                        // same period, so this is never consulted for a decision.
+                        // Exhausted: the stop closure below ends the loop on this
+                        // probe, so this is never consulted for a decision.
                         return Err(TailscaleUnavailable::NoAddress);
                     }
                     script.remove(0)
@@ -513,7 +600,7 @@ mod tests {
                     }
                     true
                 },
-                &|| self.script.lock().unwrap().is_empty(),
+                &|| *self.probes.lock().unwrap() > self.periods,
             );
             self.sent.lock().unwrap().clone()
         }
@@ -605,6 +692,7 @@ mod tests {
         watch_tailscale_leg(
             addr("127.0.0.1:8080"),
             Duration::ZERO,
+            false,
             &|| {
                 *calls.lock().unwrap() += 1;
                 Ok(ip("100.64.0.5"))
@@ -626,6 +714,7 @@ mod tests {
         watch_tailscale_leg(
             addr("127.0.0.1:8080"),
             Duration::ZERO,
+            false,
             &|| {
                 *calls.lock().unwrap() += 1;
                 Ok(ip("100.64.0.5"))
@@ -635,6 +724,160 @@ mod tests {
             &|| true,
         );
         assert_eq!(*calls.lock().unwrap(), 0, "a stopped watcher never probes");
+    }
+
+    // ── A live mode change ────────────────────────────────────────────────
+
+    #[test]
+    fn every_mode_transition_plans_the_steps_that_mode_needs() {
+        let ts = addr("100.64.0.5:8080");
+        use TailscaleMode::{Auto, No, Yes};
+
+        // → no: stop watching, drop the leg, and stop admitting Tailscale Host
+        // literals, in that order.
+        assert_eq!(
+            plan_mode_change(Auto, No, Some(ts), false),
+            vec![
+                ModeStep::StopWatcher,
+                ModeStep::Unbind(ts),
+                ModeStep::SetHostLiterals(false),
+            ]
+        );
+        assert_eq!(
+            plan_mode_change(Yes, No, Some(ts), false),
+            vec![ModeStep::Unbind(ts), ModeStep::SetHostLiterals(false)],
+            "nothing was watching, so there is no watcher to stop"
+        );
+        assert_eq!(
+            plan_mode_change(No, No, None, false),
+            vec![ModeStep::SetHostLiterals(false)]
+        );
+
+        // → yes: a one-shot detection, with the literals opened first so a
+        // tailnet browser is not refused between the two steps.
+        assert_eq!(
+            plan_mode_change(No, Yes, None, false),
+            vec![ModeStep::SetHostLiterals(true), ModeStep::DetectAndBind]
+        );
+        assert_eq!(
+            plan_mode_change(Auto, Yes, Some(ts), false),
+            vec![
+                ModeStep::StopWatcher,
+                ModeStep::SetHostLiterals(true),
+                ModeStep::DetectAndBind,
+            ]
+        );
+
+        // → auto: a watcher whose first probe is immediate, so the command has a
+        // visible outcome rather than one ten seconds later.
+        assert_eq!(
+            plan_mode_change(No, Auto, None, false),
+            vec![
+                ModeStep::SetHostLiterals(true),
+                ModeStep::StartWatcher { probe_now: true },
+            ]
+        );
+        assert_eq!(
+            plan_mode_change(Yes, Auto, Some(ts), false),
+            vec![
+                ModeStep::SetHostLiterals(true),
+                ModeStep::StartWatcher { probe_now: true },
+            ],
+            "the bound leg is left alone; the watcher reconciles it"
+        );
+        // auto → auto replaces the watcher rather than adding a second one.
+        assert_eq!(
+            plan_mode_change(Auto, Auto, Some(ts), false),
+            vec![
+                ModeStep::StopWatcher,
+                ModeStep::SetHostLiterals(true),
+                ModeStep::StartWatcher { probe_now: true },
+            ]
+        );
+        // yes → yes still re-detects: the user asked for the address to be
+        // looked up again, which is the only thing "yes" does.
+        assert_eq!(
+            plan_mode_change(Yes, Yes, None, false),
+            vec![ModeStep::SetHostLiterals(true), ModeStep::DetectAndBind]
+        );
+    }
+
+    #[test]
+    fn a_run_started_with_no_tailscale_refuses_every_mode_that_wants_it() {
+        use TailscaleMode::{Auto, No, Yes};
+        for next in [Auto, Yes] {
+            assert_eq!(
+                plan_mode_change(No, next, None, true),
+                vec![ModeStep::Refuse],
+                "--no-tailscale outranks a live {next:?}"
+            );
+        }
+        // Asking for the mode the run is already in is not a refusal: the
+        // ordinary plan runs, and on a forced-no run it has nothing to undo.
+        assert_eq!(
+            plan_mode_change(No, No, None, true),
+            vec![ModeStep::SetHostLiterals(false)]
+        );
+    }
+
+    #[test]
+    fn a_probe_first_watcher_checks_before_it_parks() {
+        // The palette command has to have a visible outcome, so a watcher started
+        // by a live switch to `auto` cannot wait out a whole period before its
+        // first look. The period here is an hour: a watcher that parked first
+        // would still be parked, so the bounded receive below is what fails
+        // rather than any assertion about elapsed time.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let calls = Mutex::new(0usize);
+            watch_tailscale_leg(
+                addr("127.0.0.1:8080"),
+                Duration::from_secs(3600),
+                true,
+                &|| {
+                    *calls.lock().unwrap() += 1;
+                    Ok(ip("100.64.0.5"))
+                },
+                &|| None,
+                &|_| true,
+                // Stops once a probe has happened, so the loop ends by itself the
+                // moment the immediate probe is done.
+                &|| *calls.lock().unwrap() >= 1,
+            );
+            let _ = tx.send(*calls.lock().unwrap());
+        });
+        let probes = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a probe_first watcher must probe before it parks");
+        assert_eq!(probes, 1, "exactly one probe, then the stop flag ends it");
+    }
+
+    #[test]
+    fn a_watcher_stopped_mid_probe_never_emits_what_it_found() {
+        // A watcher parked in a five-second detection while the mode flips to
+        // `no` would otherwise come back and re-bind the leg that was just
+        // dropped. The stop flag is checked again after the probe.
+        let stopped = AtomicBool::new(false);
+        let sent = Mutex::new(Vec::new());
+        watch_tailscale_leg(
+            addr("127.0.0.1:8080"),
+            Duration::ZERO,
+            true,
+            &|| {
+                stopped.store(true, Ordering::SeqCst);
+                Ok(ip("100.64.0.5"))
+            },
+            &|| None,
+            &|cmd| {
+                sent.lock().unwrap().push(cmd);
+                true
+            },
+            &|| stopped.load(Ordering::SeqCst),
+        );
+        assert!(
+            sent.lock().unwrap().is_empty(),
+            "a stopped watcher must not emit the command it had already planned"
+        );
     }
 
     // ── The waiting note ──────────────────────────────────────────────────
