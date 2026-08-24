@@ -652,6 +652,126 @@ mod tests {
         );
     }
 
+    /// A router with a serve behind its Tailscale route: a stub loop that
+    /// records every mode it is asked for and answers each with `answer`. The
+    /// real loop's decisions are covered where the loop lives; what a route test
+    /// needs is that the request reaches the serve and its answer reaches the
+    /// reply body.
+    fn tailscale_router(
+        answer: dux_core::config::TailscaleModeOutcome,
+        forced_no: bool,
+    ) -> (
+        tempfile::TempDir,
+        axum::Router,
+        std::sync::Arc<std::sync::Mutex<Vec<dux_core::config::TailscaleMode>>>,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = crate::test_support::test_engine_handle(tmp.path());
+        let (control, mut requests) = crate::serve_legs::TailscaleModeControl::new(
+            tokio::runtime::Handle::current(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = std::sync::Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Some(request) = requests.recv().await {
+                recorder.lock().expect("not poisoned").push(request.mode);
+                let _ = request.reply.send(answer);
+            }
+        });
+        let app = crate::server::build_app(
+            handle,
+            axum::Router::new(),
+            crate::server::RouterParams::plain_http()
+                .with_tailscale_mode_control(control, forced_no),
+        );
+        (tmp, app, seen)
+    }
+
+    async fn reply_of(app: axum::Router, mode: &str) -> serde_json::Value {
+        let resp = app
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/server/tailscale-mode",
+                &format!(r#"{{"mode":"{mode}"}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_run_started_with_no_tailscale_answers_the_route_with_its_refusal() {
+        // The flag outranks the config for as long as the run lasts, so the
+        // reply has to say that AND that the choice is saved for the next one.
+        let (_tmp, app, seen) = tailscale_router(
+            dux_core::config::TailscaleModeOutcome::RefusedForcedNo,
+            true,
+        );
+        let reply = reply_of(app.clone(), "yes").await;
+        assert_eq!(reply["mode"], "yes");
+        assert_eq!(reply["warning"], true, "{reply}");
+        let message = reply["message"].as_str().expect("a sentence");
+        assert!(message.contains("--no-tailscale"), "{message}");
+        assert!(
+            message.contains("saved as \"yes\""),
+            "the saved half is the other half of the answer: {message}"
+        );
+        assert_eq!(
+            *seen.lock().expect("not poisoned"),
+            vec![dux_core::config::TailscaleMode::Yes],
+            "the serve is asked exactly once"
+        );
+
+        // The write still happened, and the bootstrap tells the browser why the
+        // row it just saved cannot take effect yet.
+        let boot = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/bootstrap")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let boot = axum::body::to_bytes(boot.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let boot: serde_json::Value = serde_json::from_slice(&boot).unwrap();
+        assert_eq!(boot["tailscale_mode"], "yes");
+        assert_eq!(boot["tailscale_forced_no"], true);
+    }
+
+    #[tokio::test]
+    async fn the_route_answers_with_what_the_serve_did_to_the_listener() {
+        let leg: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
+        let (_tmp, app, seen) = tailscale_router(
+            dux_core::config::TailscaleModeOutcome::Applied { bound: Some(leg) },
+            false,
+        );
+
+        let reply = reply_of(app, "yes").await;
+        assert_eq!(reply["mode"], "yes");
+        assert_eq!(reply["warning"], false, "{reply}");
+        assert!(
+            reply["message"]
+                .as_str()
+                .expect("a sentence")
+                .contains("100.64.0.5:8080"),
+            "the reply names the address the leg landed on: {reply}"
+        );
+        assert_eq!(
+            *seen.lock().expect("not poisoned"),
+            vec![dux_core::config::TailscaleMode::Yes]
+        );
+    }
+
     #[tokio::test]
     async fn a_tailscale_mode_outside_the_tri_state_is_refused() {
         let (_tmp, app) = router_no_auth();

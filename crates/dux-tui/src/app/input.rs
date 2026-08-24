@@ -29553,6 +29553,42 @@ cyan = "#00ffff"
         )
     }
 
+    /// The picker's footer names the close key, so the key has to reach the
+    /// handler through the binding rather than a hardcoded Esc.
+    #[test]
+    fn the_close_key_leaves_the_tailscale_picker_and_writes_nothing() {
+        use dux_core::config::TailscaleMode;
+        let mut app = test_app(default_bindings());
+        app.engine.config.server.tailscale = "auto".to_string();
+        app.open_set_tailscale_mode_prompt();
+        if let PromptState::SetTailscaleMode(prompt) = &mut app.prompt {
+            prompt.selected = prompt
+                .options
+                .iter()
+                .position(|o| o.mode == TailscaleMode::No)
+                .expect("no is one of the three");
+        }
+
+        let close = press(
+            app.bindings
+                .first_key_reaching(Action::CloseOverlay, |_| true)
+                .expect("a close-overlay binding"),
+        );
+        app.handle_key(close).expect("the close key");
+
+        assert!(matches!(app.prompt, PromptState::None), "the picker closes");
+        assert_eq!(
+            app.engine.config.server.tailscale_mode(),
+            TailscaleMode::Auto,
+            "moving the cursor is not choosing"
+        );
+        let (_, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(
+            message,
+            "Left the Tailscale mode as it was; config.toml is untouched."
+        );
+    }
+
     #[test]
     fn clear_text_field_empties_the_commit_message_pane() {
         let mut app = test_app(default_bindings());

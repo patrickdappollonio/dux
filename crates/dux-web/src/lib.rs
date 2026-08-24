@@ -2833,6 +2833,36 @@ mod live_tailscale_mode_tests {
         }
     }
 
+    #[tokio::test]
+    async fn choosing_yes_again_leaves_a_leg_that_is_already_bound_alone() {
+        // Re-binding dux's own port fails with EADDRINUSE and warns about a
+        // conflict that is dux itself, so the idempotence guard has to hold on
+        // the mode the serve is already in.
+        let (_primary, primary_addr) = primary_listener();
+        let leg = SocketAddr::new(leg_ip(), primary_addr.port());
+        // The leg's address genuinely occupied, so a re-bind cannot succeed
+        // quietly: it would drop the leg from the registry on the way through.
+        let _occupied = std::net::TcpListener::bind(leg).expect("the leg address is free");
+        let h = Harness::start(
+            TailscaleMode::Yes,
+            false,
+            Some(primary_addr),
+            Some(leg),
+            Arc::new(|| Ok(leg_ip())),
+        );
+
+        assert_eq!(
+            h.control.set_mode(TailscaleMode::Yes).await,
+            TailscaleModeOutcome::Applied { bound: Some(leg) }
+        );
+        assert!(
+            h.shutdown.has_leg(leg),
+            "the leg that was serving must still be serving"
+        );
+        assert_eq!(h.bound(), Some(leg));
+        h.finish().await;
+    }
+
     /// The probe the loop calls, boxed so a test can script it.
     type Detector = Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>;
 
