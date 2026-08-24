@@ -45,6 +45,8 @@ A terminal's two entries open the editor rooted at the directory that terminal s
 A project terminal gets the repo root, a standalone terminal gets wherever it opened, home
 included. It is the whole tree from there, files you can create and rename and save.
 
+![The editor opened from a terminal, rooted at the repository, with the file tree on the left and a file open beside it.](/screens/editor-terminal-root.png#full)
+
 The root is pinned to where the terminal **started** and stays there when you `cd`, so
 your file tree, open buffers, unsaved drafts and bookmarkable address keep meaning the
 same thing.
@@ -308,6 +310,8 @@ pane shows the picture as it is on disk right now.
 ## Diffs against HEAD
 
 This one is for agent worktrees; a terminal-rooted editor has no Diff button.
+
+![A file's diff against its last committed version, added lines in green and a replaced line in red.](/screens/editor-diff-head.png)
 
 Flip to the **Diff** view (or click a changed file in the Changes pane) to see a read-only,
 syntax-highlighted comparison of the file's working copy against its last committed version,

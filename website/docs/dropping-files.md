@@ -14,6 +14,8 @@ it on the server and pastes its path into the prompt, ready for you to finish th
 Drag, paste, or pick from a menu. All three save the file on the server and paste its path,
 with one toast at the end.
 
+![A dashed outline over the terminal saying the dropped file will be saved and its path pasted.](/screens/file-drop-overlay.png)
+
 **Paste** is the shortest: take the screenshot, press `Ctrl+v` (`Cmd+v` on a Mac), and the
 image on your clipboard takes the same route.
 

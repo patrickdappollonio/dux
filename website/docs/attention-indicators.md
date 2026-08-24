@@ -25,6 +25,8 @@ looking.
 - **The favicon** gets a small cyan dot in the corner of the duck while the count is
   above zero.
 
+![The sidebar with one agent lit cyan and marked Needs you, while the others carry on working.](/screens/attention-sidebar.png)
+
 The flag clears the moment you look. Selecting the agent and focusing its terminal in
 the terminal UI, opening its live view on the web, or typing into it all put the flag
 down. An agent you are already watching never nags you.

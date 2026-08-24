@@ -289,6 +289,8 @@ Everything above creates a branch and a working copy. A **standalone agent** doe
 you pick a folder, and the AI runs there. Good for a scratch directory, a notes folder, a
 pile of downloads to sort, or a repository you want worked on in place.
 
+![A standalone agent in the sidebar showing the folder it runs in, with the changes panel saying the folder has no git repository.](/screens/sidebar-standalone.png)
+
 In the browser, the launcher's `⋯` menu and **New standalone agent…**; in the terminal
 UI, the `new-standalone-agent` palette command. Both open a folder browser. Any folder is
 accepted: it does not have to be a git repository, and dux initializes nothing in it.

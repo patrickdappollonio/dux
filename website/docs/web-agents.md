@@ -48,6 +48,8 @@ field first. **No project is chosen and none is asked for.** Paste a PR link (or
 `owner/repo#123`, or a bare `owner/repo`) and dux compares the repository it names against
 every project you have:
 
+![The New agent from PR dialog with a pull request reference typed into its first field.](/screens/new-agent-from-pr-dialog.png)
+
 - **One project is a checkout of that repository** and dux goes straight on to resolve the
   pull request.
 - **Two or more are** and dux shows you just those and asks which.
@@ -92,6 +94,8 @@ on disk, and a warning when it is holding uncommitted changes. Pick one that has
 and it becomes a live agent again on its existing branch, which is how you reclaim work a
 deleted agent left behind.
 
+![The Worktrees dialog listing every worktree dux manages for a project, with the agent holding each one.](/screens/worktree-manager-dialog.png)
+
 Each unused worktree carries a `⋯` menu with **Delete worktree…**, which removes the
 directory from disk after a confirmation naming the branch and the full path. That
 confirmation carries an **"Also delete the branch"** checkbox, ticked by default, because a
@@ -117,6 +121,8 @@ drive the same rules.
 An agent's `⋯` menu is where the rest lives: rename it (a display title, the branch keeps
 its own name), change its provider, view its info, inspect its project's environment and
 [startup command](/docs/startup-commands), and read startup-command logs.
+
+![An agent's menu open beside its sidebar row, listing rename, fork, change provider, editor and delete actions.](/screens/agent-session-menu.png)
 
 **Change provider** and **Force recreate** are the two knobs around resume:
 

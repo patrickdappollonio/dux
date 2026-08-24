@@ -17,6 +17,8 @@ one tab, and the strip stays hidden until you add a second.
 There is no "main" tab and no "support" tab. Every tab is a provider session in the
 agent's shared worktree, and they all behave the same.
 
+![Three provider tabs on one agent, the first one active, with a plus button for adding another.](/screens/agent-tabs-strip.png)
+
 - **On the web**, the `+` button on the strip adds a tab running the project's default
   provider immediately. The dropdown attached to it picks a different one.
 - **In the terminal UI**, the `new-agent-tab` palette command opens a picker of your
@@ -99,6 +101,8 @@ file carries as a commented-out row ready to fill in.
 Closing a tab ends that session, so dux asks you to confirm. Closing the agent's
 **last** tab detaches the whole agent: it leaves the sidebar's active list but stays in
 Projects, ready to reopen.
+
+![A tab's menu open over the tab strip, offering Change provider and Close tab.](/screens/agent-tab-actions-menu.png)
 
 A separate **Detach agent** action stops every one of the agent's tabs at once and parks
 it in Projects. Deleting the agent takes every tab with it.

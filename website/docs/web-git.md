@@ -31,6 +31,8 @@ section keeps its own selection, because the two carry opposite verbs, and the
 checkbox beside a section heading picks up every row that section is currently
 showing.
 
+![Two changed files ticked, with a bar above the list offering Stage 2, Discard 2 and Clear.](/screens/changes-bulk-bar.png)
+
 Staging and unstaging a selection is a single request: one git call, one refresh,
 one message telling you what happened. If a file moved out of its group between
 the tick and the click, the rest still go through and the message names what was
@@ -81,6 +83,8 @@ When a session is tied to a GitHub pull request, a one-line strip shows the PR n
 state, and its title, color-coded (open is green, merged is purple, closed is red).
 Clicking it opens the PR in a new tab. You can move the banner above or below the terminal
 in **Preferences** (the cog menu).
+
+![A green strip under the terminal showing pull request 123, its open state and its title.](/screens/pr-banner.png)
 
 > [!NOTE]
 > There is no "create a PR" button in the web UI. The banner surfaces an **existing** PR;

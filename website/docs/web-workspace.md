@@ -13,6 +13,8 @@ way, so if you know the terminal UI the shape will be familiar.
 
 On a desktop-width screen it is three panes.
 
+![The dux web workspace on a desktop screen: the sidebar of agents and terminals on the left, the running agent's terminal in the middle, and the list of changed files on the right.](/screens/web-workspace-layout.png#full)
+
 **The collapsible left sidebar** lists your agents in a single flat list, with the
 dormant ones tucked into a collapsible Inactive tail. Toggle it with `Ctrl-b`. It
 carries:
@@ -122,6 +124,8 @@ Every device pointed at the same terminal sees the same output at the same time,
 **only one device at a time can type.** That device is the owner, and **you join as a
 watcher unless nobody is driving.** If nobody holds the terminal, the first device to
 look at it picks it up.
+
+![A card covering the terminal that says the agent is open on another device, with a Take over button.](/screens/take-over-card.png)
 
 **The terminal UI is one of those devices.** When dux is
 [serving in the background of a running TUI](/docs/server-mode#serve-in-the-background-and-keep-the-tui),
@@ -286,6 +290,8 @@ by line. Full details in [Managing Macros](/docs/macros).
 
 Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one thumb:
 
+![The dux home screen on a phone, listing agents and terminals with their state, and the New agent button along the bottom.](/screens/phone-hub.png)
+
 - The **home** screen is the hub: your projects and sessions with the same `⋯` menus as
   desktop, the same launcher pair along the bottom, and a **cog** button that opens the
   app menu as a bottom sheet (submenus drill down in place, with a back arrow). The
@@ -300,6 +306,8 @@ Esc, Tab, a sticky Ctrl and Alt latch, arrow keys, PgUp/PgDn, and a dedicated **
 for the soft newline. Touch targets are sized generously. The soft keyboard is handled by
 the browser shrinking the layout, so the bar sits flush on top of it, and there is no
 fullscreen mode to fight with.
+
+![The phone typing bar: two rows of terminal keys above a message box with a send button.](/screens/phone-compose-bar.png)
 
 Below it sits the **compose bar**: a real text box where you type the message and hit
 **Send**. This is where your keyboard's autocorrect, swipe typing, and voice input actually
