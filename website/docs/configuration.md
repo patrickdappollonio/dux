@@ -272,7 +272,13 @@ surface they affect:
   stay hidden from git.
 - **Both surfaces**: status-message auto-clear, the attention indicator and its grace
   period, the always-show-tab-strip preference, the PR banner position, clickable
-  hyperlinks, GitHub integration, and whether new agents start with a random pet name.
+  hyperlinks, GitHub integration, whether dux binds your Tailscale address, and whether new
+  agents start with a random pet name.
+
+The Tailscale row does more than save a value: it also moves the listener that is
+serving right now and tells you what happened to it. Choosing **No** from a browser
+reached over your tailnet closes that tab's own connection, which the row says before
+you pick it. See [Changing the mode while dux is serving](/docs/tailscale#changing-the-mode-while-dux-is-serving).
 
 Each row shows its documented default and, where `0` means something special like "never
 auto-clear", that meaning too. Values are validated and clamped on save, and every

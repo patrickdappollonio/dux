@@ -25,8 +25,8 @@ tailscale = "auto"   # or "yes", or "no"
 - **`"auto"`** (the default) binds your Tailscale address whenever it exists, and keeps
   looking. This is the one you want on a laptop; see
   [it follows the interface](#it-follows-the-interface).
-- **`"yes"`** looks exactly once, at startup. If Tailscale is not up at that moment, that
-  run serves your configured host only.
+- **`"yes"`** looks exactly once and never again by itself. If Tailscale is not up at
+  that moment, dux serves your configured host only until you change the mode.
 - **`"no"`** never binds it and never runs the detection at all.
 
 `dux server --no-tailscale` forces `"no"` for a single run.
@@ -103,6 +103,29 @@ you need a specific interface, start with `dux server`.
 The `tailscale` mode applies to all three the same way, watcher included. On `"auto"` a
 flipped server picks up your tailnet address while its status screen sits there and says so
 in the activity panel, and a background server does it while you work in the TUI.
+
+### Changing the mode while dux is serving
+
+You do not have to edit `config.toml` and restart. In the terminal UI the palette's
+**set-tailscale-mode** opens a three-row picker; in the browser it is the **Bind your
+Tailscale address** row in the Preferences dialog. Both save the value to
+`config.toml` **and** apply it to the listener that is serving right now, and both
+tell you what actually happened rather than just "saved".
+
+- Choosing **`"no"`** stops the interface watcher and drops the Tailscale listener.
+  Anything connected over your tailnet loses its connection, including the browser
+  tab you clicked in. That is allowed on purpose, and the row says so: reopen dux on
+  its other address.
+- Choosing **`"yes"`** looks for the address right then. If nothing is found you get
+  a warning rather than an error, and the value still saves.
+- Choosing **`"auto"`** starts the watcher and probes immediately, so you see the
+  outcome now instead of up to ten seconds later.
+
+If nothing is serving, the choice is simply saved and applied the next time a
+listener starts, and the message says so. A run started with `dux server
+--no-tailscale` refuses a live change for as long as it lasts, because the flag
+outranks the file; the value still saves for the next run. Editing the file and
+running `reload-config` is live too, and takes the same path.
 
 ## The MagicDNS gotcha
 

@@ -862,14 +862,18 @@ fn config_schema() -> Vec<ConfigEntry> {
                  #                    stops), dux drops that ONE listener and keeps\n\
                  #                    serving; browsers connected over the tailnet\n\
                  #                    reconnect on their own when it comes back.\n\
-                 #   \"yes\":           bind it once, at startup, and never look again. If\n\
-                 #                    it is not there then, dux warns and serves the\n\
-                 #                    configured host only for the whole run.\n\
+                 #   \"yes\":           look once, bind what is found, and never look\n\
+                 #                    again. If it is not there, dux warns and serves the\n\
+                 #                    configured host only until the mode changes.\n\
                  #   \"no\":            never bind it and never run the detection.\n\
                  # If the CLI is missing, the daemon is down, or something else already\n\
                  # holds that port, dux WARNS and keeps serving. A Tailscale problem\n\
                  # never stops dux from starting. `dux server --no-tailscale` forces\n\
-                 # \"no\" for a single run.\n\
+                 # \"no\" for a single run, and refuses a live change back.\n\
+                 # You do not need to edit this file to change your mind: the palette\n\
+                 # command set-tailscale-mode and the web Preferences dialog change this\n\
+                 # while dux runs, apply it to the listener that is serving, and save the\n\
+                 # choice back here.\n\
                  # NOTE: a shared tailnet means OTHER people's devices can reach dux, and\n\
                  # there is no login gate.",
             )),

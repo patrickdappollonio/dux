@@ -70,10 +70,11 @@ pub fn undetected_warning(
             reason.reason()
         ),
         TailscaleMode::Yes => format!(
-            "Tailscale not detected ({}), so dux is serving on {serving} only for this whole \
-             run: [server] tailscale = \"yes\" looks exactly once, at startup. Set \
+            "Tailscale not detected ({}), so dux is serving on {serving} only: [server] \
+             tailscale = \"yes\" looks exactly once and does not look again by itself. Set \
              tailscale = \"auto\" to have dux bind it whenever the interface appears, or \
-             \"no\" to silence this.",
+             \"no\" to silence this. Either way you can change the mode while dux runs, \
+             from the TUI palette or the web Preferences dialog.",
             reason.reason()
         ),
         TailscaleMode::No => format!(

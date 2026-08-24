@@ -116,6 +116,9 @@ line and your TUI is untouched. Stopping leaves every agent and terminal running
 the listener goes away, and connected browsers report the connection closed. Quitting
 the TUI stops the listener too, and changes nothing about your saved setting.
 
+**set-tailscale-mode** in the same palette changes whether the Tailscale leg exists,
+without stopping anything: see [Changing the mode while dux is serving](/docs/tailscale#changing-the-mode-while-dux-is-serving).
+
 It binds exactly the way the flip does: loopback plus your Tailscale address, never a
 custom host.
 
@@ -257,7 +260,7 @@ The rest tune presentation and limits:
 
 > [!IMPORTANT]
 > Most of these are read once, when serving starts, so changing them needs a **server
-> restart**, not just a config reload: `host`, `port`, `allowed_hosts`, `tailscale`,
+> restart**, not just a config reload: `host`, `port`, `allowed_hosts`,
 > both `file_drop_*` keys, every connection cap, and the two `*_max_concurrency`
 > limits. A config reload says so for all of them, on either surface: the browser
 > and the terminal app each warn you.
@@ -270,8 +273,10 @@ The rest tune presentation and limits:
 > The two exceptions are `access_log` and `search_index_max_files`, which a reload
 > applies to a running server.
 
-`serve_while_tui` is the one binding key that is a live switch: a config reload that
-flips it acts on it there and then, in both directions.
+`serve_while_tui` and `tailscale` are the two binding keys that are live switches: a
+config reload that flips either acts on it there and then, in both directions.
+`tailscale` can also be changed without touching the file at all, from the TUI palette
+or the browser's Preferences dialog: see [Changing the mode while dux is serving](/docs/tailscale#changing-the-mode-while-dux-is-serving).
 
 Going over a connection cap returns HTTP `503` until a slot frees. Setting a cap to `0`
 blocks that whole class of socket until restart. Leave the caps alone unless you are

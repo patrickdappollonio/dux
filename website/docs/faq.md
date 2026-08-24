@@ -138,7 +138,7 @@ hands it back. Your agents keep running through every one of these transitions. 
 ### Can I reach it from my phone?
 
 Yes. dux binds your Tailscale address by default, so any device on your tailnet can
-open it. Read [Reaching dux over Tailscale](/docs/tailscale) first, because there is no
+open it, and you can turn that leg on or off while dux is serving. Read [Reaching dux over Tailscale](/docs/tailscale) first, because there is no
 login in front of it.
 
 ## Configuration
