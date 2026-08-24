@@ -889,6 +889,12 @@ impl App {
                     Ok(()) => TuiConfigReloadOutcome::Applied,
                 };
                 let applied = matches!(outcome, TuiConfigReloadOutcome::Applied);
+                // Post-apply, and only on success: the two live `[server]` limits
+                // the routes read must move with the config the engine actually
+                // adopted, never with one whose apply failed.
+                if applied && let Some(companion) = self.companion.as_mut() {
+                    companion.note_config_applied(&self.engine.config.server);
+                }
                 if let Some(op) = self.pending_config_reload_op.take() {
                     self.apply_reaction(op.resolve(&outcome).into_reaction());
                 } else {

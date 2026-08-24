@@ -186,6 +186,15 @@ pub trait BackgroundServeCompanion {
     /// what it saw last time.
     fn note_engine_activity(&mut self, command_applies: u64);
 
+    /// Adopt the `[server]` section the terminal UI has just swapped in, so the
+    /// handful of settings a running listener can honor take effect.
+    ///
+    /// Post-apply, unlike [`Self::on_reaction`]: the reload's apply can fail
+    /// after validation passed, and a route answering on the incoming caps while
+    /// the old config is still in force is worse than one answering a request
+    /// late. Called only when the apply succeeded.
+    fn note_config_applied(&mut self, server: &crate::config::ServerConfig);
+
     /// Whether a listener is serving right now.
     fn is_serving(&self) -> bool;
 

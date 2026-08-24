@@ -270,6 +270,12 @@ impl BackgroundServer {
     /// fingerprint backstop after every action taken at the keyboard.
     /// Deliberately conservative: any apply opens the gate, and the fingerprint
     /// compare decides whether anything is actually emitted.
+    /// Adopt the `[server]` section the terminal UI just swapped in, so the two
+    /// limits the routes read per request stop answering on the old config.
+    pub fn note_config_applied(&mut self, server: &dux_core::config::ServerConfig) {
+        self.service.note_config_applied(server);
+    }
+
     pub fn note_engine_activity(&mut self, command_applies: u64) {
         if command_applies != self.last_command_applies {
             self.last_command_applies = command_applies;

@@ -2079,21 +2079,19 @@ impl EngineService {
     /// arm has never had a reason to fire this.
     ///
     /// Called BEFORE the drainer applies the config, because the seam is
-    /// pre-consume. The cost, accepted and stated: if the drainer's apply then
-    /// FAILS, a browser has been told to refetch a config that did not take. It
-    /// refetches `/api/v1/bootstrap` and reads the config still in force, so the
-    /// browser ends up correct either way; what it loses is the news that the
-    /// reload failed, which the surface that failed it is the one showing.
+    /// pre-consume, so nothing here may change what a route answers: the two
+    /// live limits move in [`Self::note_config_applied`] instead. The cost,
+    /// accepted and stated: if the drainer's apply then FAILS, a browser has been
+    /// told to refetch a config that did not take. It refetches
+    /// `/api/v1/bootstrap` and reads the config still in force, so the browser
+    /// ends up correct either way; what it loses is the news that the reload
+    /// failed, which the surface that failed it is the one showing.
     pub(crate) fn announce_config_reload(&mut self, engine: &Engine, reaction: &EventReaction) {
         let Some(config) = peek_apply_reloaded_config(reaction) else {
             return;
         };
         let restart_warning =
             server_restart_warning_copy(&engine.config.server, &config.server, true);
-        // The drainer applies the config after this seam, so store the two live
-        // limits from the INCOMING section: the routes must not answer one more
-        // request on the old caps.
-        self.live_limits.store_from(&config.server);
         let _ = self.config_reload_tx.send(());
         // Says what has actually happened at this point, and no more. The
         // drainer has not adopted the config yet (the seam is pre-consume), so
@@ -2107,6 +2105,13 @@ impl EngineService {
         if let Some(warning) = restart_warning {
             let _ = self.status.send(WireStatus::new("warning", warning));
         }
+    }
+
+    /// Adopt the two live `[server]` limits from a config the drainer has already
+    /// applied. The companion seam's post-apply half; see
+    /// [`dux_core::background_serve::BackgroundServeCompanion::note_config_applied`].
+    pub(crate) fn note_config_applied(&self, server: &dux_core::config::ServerConfig) {
+        self.live_limits.store_from(server);
     }
 
     /// The shared maintenance sweeps, run by whoever drains `worker_rx`.
@@ -3701,6 +3706,52 @@ mod tests {
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
         (tmp, paths)
+    }
+
+    /// The pre-consume seam announces a reload the drainer has not applied yet, so
+    /// it must not move the caps the routes answer on: an apply that fails would
+    /// leave every route running the incoming limits against the old config.
+    #[test]
+    fn announcing_a_reload_leaves_the_live_limits_where_they_were() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let limits = handle.live_limits();
+        limits.set_search_index_max_files(9);
+        limits.set_access_log(false);
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+
+        let mut config = engine.config.clone();
+        config.server.search_index_max_files = 4321;
+        config.server.access_log = true;
+        svc.announce_config_reload(
+            &engine,
+            &EventReaction::ApplyReloadedConfig(Box::new(config)),
+        );
+
+        assert_eq!(limits.search_index_max_files(), 9);
+        assert!(!limits.access_log());
+    }
+
+    /// And the post-apply half is what moves them, with the section the drainer
+    /// adopted.
+    #[test]
+    fn noting_an_applied_config_moves_the_live_limits() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let limits = handle.live_limits();
+        limits.set_search_index_max_files(9);
+        limits.set_access_log(false);
+        let svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+
+        let mut server = engine.config.server.clone();
+        server.search_index_max_files = 4321;
+        server.access_log = true;
+        svc.note_config_applied(&server);
+
+        assert_eq!(limits.search_index_max_files(), 4321);
+        assert!(limits.access_log());
     }
 
     /// A change made by the OTHER surface reaches a browser inside one spine-check

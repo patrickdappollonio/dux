@@ -590,6 +590,9 @@ pub(crate) mod tests {
         /// How many browser tabs the serve says are connected, standing in for the
         /// connection registry's own count.
         pub(crate) connections: usize,
+        /// One entry per `[server]` section the seam was handed after an applied
+        /// reload, standing in for the live limits a real serve would store.
+        pub(crate) config_applied: Vec<dux_core::config::ServerConfig>,
     }
 
     /// A companion that records instead of serving. Serving is a real socket and a
@@ -685,6 +688,14 @@ pub(crate) mod tests {
                 .expect("not poisoned")
                 .activity
                 .push(command_applies);
+        }
+
+        fn note_config_applied(&mut self, server: &dux_core::config::ServerConfig) {
+            self.recorded
+                .lock()
+                .expect("not poisoned")
+                .config_applied
+                .push(server.clone());
         }
 
         fn is_serving(&self) -> bool {
@@ -786,6 +797,72 @@ pub(crate) mod tests {
         let id = op.id().to_string();
         app.engine.pending_web_pr_lookup_ops.insert(id.clone(), op);
         id
+    }
+
+    /// The routes read the two live `[server]` limits off cells the seam stores
+    /// into, and the store must happen AFTER the terminal UI adopts the config:
+    /// the reload is what fails, and a route answering the incoming caps while
+    /// the old config is still in force is the whole hazard.
+    #[test]
+    fn an_applied_reload_hands_the_adopted_server_section_to_the_seam() {
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.engine.config.server.serve_while_tui = true;
+        app.companion = Some(companion);
+        let mut config = app.engine.config.clone();
+        config.server.serve_while_tui = true;
+        config.server.search_index_max_files = 17;
+        config.server.access_log = !app.engine.config.server.access_log;
+
+        app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
+
+        let applied = recorded
+            .lock()
+            .expect("not poisoned")
+            .config_applied
+            .clone();
+        assert_eq!(applied.len(), 1, "one store per applied reload");
+        assert_eq!(applied[0].search_index_max_files, 17);
+        assert_eq!(
+            applied[0].access_log, app.engine.config.server.access_log,
+            "the seam is handed the section the engine actually adopted"
+        );
+    }
+
+    #[test]
+    fn a_reload_whose_apply_fails_hands_the_seam_nothing() {
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.engine.config.server.serve_while_tui = true;
+        app.companion = Some(companion);
+        // Persisting the reloaded projects writes here, and a path under a
+        // directory that does not exist fails the apply after validation passed.
+        app.engine.paths.config_path = app
+            .engine
+            .paths
+            .root
+            .join("no-such-directory")
+            .join("config.toml");
+        let mut config = app.engine.config.clone();
+        config.server.serve_while_tui = true;
+        config.server.search_index_max_files = 17;
+
+        app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
+
+        let (tone, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(
+            tone,
+            crate::app::StatusTone::Error,
+            "the apply must be what failed, not something upstream: {message}"
+        );
+        assert!(
+            recorded
+                .lock()
+                .expect("not poisoned")
+                .config_applied
+                .is_empty(),
+            "a failed apply leaves the routes on the caps still in force"
+        );
     }
 
     /// A PR lookup a BROWSER started must not pop a name prompt in the terminal.
