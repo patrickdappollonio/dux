@@ -776,7 +776,10 @@ impl App {
         // handled above this point or excluded by `center_typeable` itself.
         if self.center_typeable()
             && !self.scroll_mode_active()
-            && crate::keybindings::center_typing_owns_key(&key)
+            && crate::keybindings::center_typing_owns_key(
+                &key,
+                self.engine.config.ui.tab_reaches_agent,
+            )
         {
             self.forward_typing_key_to_center(&key);
             return Ok(false);
@@ -24060,9 +24063,15 @@ cyan = "#00ffff"
     /// copied back into the grid in caret notation. A READY sentinel after
     /// the prelude marks both the prelude parsed and cat running.
     fn app_with_minimized_typeable_caret_child(prelude: &str) -> App {
+        app_with_minimized_typeable_echo_child(prelude, "cat -v")
+    }
+
+    /// The same fixture over an arbitrary echo command, so a test that needs a
+    /// visible Tab can ask for `cat -vT`.
+    fn app_with_minimized_typeable_echo_child(prelude: &str, echo_cmd: &str) -> App {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let cmd = format!("stty raw -echo; printf '{prelude}'; printf 'READY'; exec cat -v");
+        let cmd = format!("stty raw -echo; printf '{prelude}'; printf 'READY'; exec {echo_cmd}");
         let client = PtyClient::spawn(
             "/bin/sh",
             &["-c".to_string(), cmd],
@@ -24223,6 +24232,95 @@ cyan = "#00ffff"
 
         assert_ne!(app.focus, FocusPane::Center);
         assert!(!app.engine.pty_input.contains_key(&session_id));
+    }
+
+    /// With `tab_reaches_agent` on, both Tab and Shift-Tab are typed into the
+    /// live agent rather than moving between panes. `cat -vT` renders the tab
+    /// byte as `^I` and the CSI backtab as `^[[Z`, so the echoed row is proof
+    /// of the exact bytes.
+    #[test]
+    fn tab_and_shift_tab_reach_the_pty_when_the_option_is_on() {
+        let mut app = app_with_minimized_typeable_echo_child("", "cat -vT");
+        app.engine.config.ui.tab_reaches_agent = true;
+
+        tap_center(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        wait_for_grid_row(&mut app, "READY^I");
+
+        tap_center(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+        wait_for_grid_row(&mut app, "READY^I^[[Z");
+
+        // The Kitty-protocol spelling of the same keystroke sends the same
+        // bytes; ownership is decided before backtab normalization.
+        tap_center(&mut app, KeyCode::Tab, KeyModifiers::SHIFT);
+        wait_for_grid_row(&mut app, "READY^I^[[Z^[[Z");
+
+        assert_eq!(
+            app.focus,
+            FocusPane::Center,
+            "typing Tab must not move focus"
+        );
+    }
+
+    /// The option only reaches the typeable center pane: Tab from the Left pane
+    /// still cycles.
+    #[test]
+    fn tab_from_the_left_pane_still_cycles_when_the_option_is_on() {
+        let mut app = app_with_minimized_typeable_agent();
+        app.engine.config.ui.tab_reaches_agent = true;
+        app.focus = FocusPane::Left;
+
+        tap_center(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+
+        assert_ne!(app.focus, FocusPane::Left, "Tab must move focus off Left");
+    }
+
+    /// A dormant agent has nothing to type into, so Tab keeps cycling there
+    /// even with the option on.
+    #[test]
+    fn tab_cycles_on_a_dormant_agent_when_the_option_is_on() {
+        let mut app = app_with_minimized_typeable_agent();
+        app.engine.config.ui.tab_reaches_agent = true;
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.providers.remove(&session_id);
+        assert!(
+            !app.center_typeable(),
+            "test setup: a provider-less agent must not be typeable"
+        );
+
+        tap_center(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+
+        assert_ne!(
+            app.focus,
+            FocusPane::Center,
+            "with nothing to type into, Tab moves panes"
+        );
+    }
+
+    /// The pane chords move focus from the typeable pane whatever the option
+    /// says: they are the way out once Tab is the agent's.
+    #[test]
+    fn the_pane_chords_move_focus_while_typeable_in_both_modes() {
+        for tab_reaches_agent in [false, true] {
+            let mut app = app_with_minimized_typeable_agent();
+            app.engine.config.ui.tab_reaches_agent = tab_reaches_agent;
+
+            tap_center(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+            assert_ne!(
+                app.focus,
+                FocusPane::Center,
+                "Ctrl-o must move focus (tab_reaches_agent = {tab_reaches_agent})"
+            );
+
+            let mut app = app_with_minimized_typeable_agent();
+            app.engine.config.ui.tab_reaches_agent = tab_reaches_agent;
+
+            tap_center(&mut app, KeyCode::Char('y'), KeyModifiers::CONTROL);
+            assert_ne!(
+                app.focus,
+                FocusPane::Center,
+                "Ctrl-y must move focus (tab_reaches_agent = {tab_reaches_agent})"
+            );
+        }
     }
 
     /// The Ctrl arrows keep switching tabs while the pane is typeable: chords

@@ -1509,6 +1509,12 @@ pub fn text_field_owns_key(key: impl Into<KeyCombination>) -> bool {
 /// wins" cannot apply literally to plain letters, or `q`, `?`, `[` and `]`
 /// would make the pane untypeable.
 ///
+/// `tab_reaches_agent` (`[ui] tab_reaches_agent`) is the one opt-in that moves
+/// the line: with it on, Tab and both spellings of Shift-Tab type into the
+/// agent too, and the chords bound to `focus_next`/`focus_prev` are what move
+/// panes. Pass the RAW crossterm event, before backtab normalization, so both
+/// spellings are seen.
+///
 /// The ONE deliberate chord exception is Ctrl+c: it forwards to the agent (the
 /// encoder emits 0x03, SIGINT) because interrupting the agent quickly is the
 /// common intent, and Quit stays reachable via `q` from any non-typeable pane
@@ -1517,12 +1523,15 @@ pub fn text_field_owns_key(key: impl Into<KeyCombination>) -> bool {
 /// The sibling of [`text_field_owns_key`]: `app::input::handle_key` suppresses
 /// the Global and Center binding lookups with it while the pane is typeable
 /// and at the live edge, so hints must not advertise a key it swallows.
-pub fn center_typing_owns_key(key: &KeyEvent) -> bool {
+pub fn center_typing_owns_key(key: &KeyEvent, tab_reaches_agent: bool) -> bool {
     let mods = key.modifiers;
     if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) {
         // Ctrl+c is the one chord the agent gets (see above). Any extra
         // modifier turns it back into a dux-side chord.
         return key.code == KeyCode::Char('c') && mods == KeyModifiers::CONTROL;
+    }
+    if tab_reaches_agent && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+        return true;
     }
     matches!(
         key.code,
@@ -2157,7 +2166,10 @@ mod tests {
             // The one deliberate chord exception: Ctrl+c interrupts the agent.
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         ] {
-            assert!(center_typing_owns_key(&key), "{key:?} types into the agent");
+            assert!(
+                center_typing_owns_key(&key, false),
+                "{key:?} types into the agent"
+            );
         }
         // Chords belong to dux: these keep resolving through the bindings.
         for key in [
@@ -2178,8 +2190,43 @@ mod tests {
             ),
         ] {
             assert!(
-                !center_typing_owns_key(&key),
+                !center_typing_owns_key(&key, false),
                 "{key:?} reaches the bindings"
+            );
+        }
+    }
+
+    /// `tab_reaches_agent` moves exactly Tab and its two shift spellings across
+    /// the line, and nothing else: the page keys and the other chords stay dux's
+    /// in both settings.
+    #[test]
+    fn tab_reaches_agent_hands_over_tab_and_shift_tab_only() {
+        let tabs = [
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
+        ];
+        for key in tabs {
+            assert!(
+                !center_typing_owns_key(&key, false),
+                "{key:?} moves panes while the option is off"
+            );
+            assert!(
+                center_typing_owns_key(&key, true),
+                "{key:?} types into the agent while the option is on"
+            );
+        }
+        for key in [
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL),
+        ] {
+            assert!(
+                !center_typing_owns_key(&key, true),
+                "{key:?} stays a dux chord whatever the option says"
             );
         }
     }
