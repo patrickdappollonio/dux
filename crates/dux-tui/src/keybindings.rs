@@ -873,7 +873,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     // (placed after pane bindings so palette / help appear last in hints)
     BindingDef {
         action: Action::FocusNext,
-        default_keys: &[key!(tab)],
+        default_keys: &[key!(tab), key!(ctrl - o)],
         scopes: &[BindingScope::Global, BindingScope::RuntimeKill],
         help: Some(HelpEntry {
             section: "Global",
@@ -883,7 +883,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::FocusPrev,
-        default_keys: &[key!(shift - tab)],
+        default_keys: &[key!(shift - tab), key!(ctrl - y)],
         scopes: &[BindingScope::Global, BindingScope::RuntimeKill],
         help: Some(HelpEntry {
             section: "Global",
@@ -1235,10 +1235,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::OpenAgentInfo,
-        // Ctrl-i for "info" (Ctrl-p is already change-provider). Note: some
-        // terminals conflate Ctrl-i with Tab; the command palette ("agent-info")
-        // is the portable fallback.
-        default_keys: &[key!(ctrl - i)],
+        default_keys: &[],
         scopes: &[BindingScope::Left, BindingScope::Center],
         help: Some(HelpEntry {
             section: "Projects pane",
@@ -2862,6 +2859,52 @@ mod tests {
         assert_eq!(format_key_for_config(key!(ctrl - p)), "ctrl-p");
         assert_eq!(format_key_for_config(key!(shift - tab)), "shift-tab");
         assert_eq!(format_key_for_config(key!(enter)), "enter");
+    }
+
+    #[test]
+    fn pane_chords_move_focus_in_the_global_scope() {
+        let bindings = default_bindings();
+        for (key, action) in [
+            (
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+                Action::FocusNext,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+                Action::FocusPrev,
+            ),
+        ] {
+            assert_eq!(
+                bindings.lookup(&key, BindingScope::Global),
+                Some(action),
+                "{key:?} must move panes"
+            );
+        }
+    }
+
+    /// The legacy keyboard protocol has no Ctrl-i: the byte it sends is Tab.
+    /// A default bound to a chord spelling of that byte never fires and shadows
+    /// whatever Tab is bound to, so every default that encodes to `0x09` must
+    /// be spelled `tab`.
+    #[test]
+    fn every_default_encoding_to_tabs_byte_is_spelled_tab() {
+        assert_eq!(
+            key_combination_to_bytes(&key!(ctrl - i)),
+            Some(vec![0x09]),
+            "Ctrl-i is Tab on the wire"
+        );
+        for def in BINDING_DEFS {
+            for key in def.default_keys {
+                if key_combination_to_bytes(key) == Some(vec![0x09]) {
+                    assert!(
+                        matches!(key.codes, crokey::OneToThree::One(KeyCode::Tab)),
+                        "{:?} defaults to {}, which the terminal delivers as Tab",
+                        def.action,
+                        format_key_for_config(*key)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
