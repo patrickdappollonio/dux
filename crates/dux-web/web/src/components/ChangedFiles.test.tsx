@@ -392,6 +392,58 @@ describe("the changes pane's multi-select", () => {
     expect(notifySuccess).not.toHaveBeenCalled()
   })
 
+  // While a verb is in flight the bar says so and refuses a second start: the
+  // buttons are disabled, the acting one is aria-busy, and it wears the row's
+  // spinner idiom.
+  it("marks the bar busy while a verb is in flight", async () => {
+    let land: (result: { done: string[]; refused: string[] }) => void = () => {}
+    stageMany.mockImplementationOnce(
+      () =>
+        new Promise<{ done: string[]; refused: string[] }>((resolve) => {
+          land = resolve
+        }),
+    )
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("staged.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Stage 1" }))
+
+    const staging = bar().getByRole("button", { name: "Stage 1" })
+    expect(staging.getAttribute("aria-busy")).toBe("true")
+    expect(staging.hasAttribute("disabled")).toBe(true)
+    expect(staging.querySelector('svg[class*="animate-spin"]')).toBeTruthy()
+    // The other verb is disabled too, so nothing else can start behind it.
+    const unstaging = bar().getByRole("button", { name: "Unstage 1" })
+    expect(unstaging.hasAttribute("disabled")).toBe(true)
+    expect(unstaging.getAttribute("aria-busy")).toBe("false")
+
+    await act(async () => {
+      land({ done: ["a.ts"], refused: [] })
+    })
+
+    expect(
+      bar().getByRole("button", { name: "Unstage 1" }).hasAttribute("disabled"),
+    ).toBe(false)
+  })
+
+  // A request that never reached an answer is one error toast, not a success
+  // and not one per file.
+  it("raises a single error toast when the request itself fails", async () => {
+    stageMany.mockRejectedValueOnce(new Error("git is busy"))
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("b.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Stage 2" }))
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(notifyError).toHaveBeenCalledTimes(1)
+    expect(notifyError).toHaveBeenCalledWith("git is busy")
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(notifyWarning).not.toHaveBeenCalled()
+  })
+
   it("empties both sections when Clear is pressed", () => {
     render(<ChangedFiles />)
     check("a.ts")
@@ -467,6 +519,15 @@ describe("the section select-all", () => {
     ).toBe("mixed")
   })
 
+  // Each section's select-all names its own section, so a screen reader user
+  // is never offered two identically labelled controls.
+  it("names the staged section in its own select-all", () => {
+    mockState = withFiles([["staged.ts", "M"]], [["a.ts", "M"]])
+    render(<ChangedFiles />)
+    expect(screen.getByLabelText("Select all staged files")).toBeTruthy()
+    expect(screen.getByLabelText("Select all unstaged files")).toBeTruthy()
+  })
+
   it("checks every row in its own section", () => {
     render(<ChangedFiles />)
     fireEvent.click(screen.getByLabelText("Select all unstaged files"))
@@ -534,5 +595,88 @@ describe("the multi-file discard confirm", () => {
 
     expect(discardMany).toHaveBeenCalledWith("s1", ["a.ts", "gone.ts"])
     expect(notifySuccess).toHaveBeenCalledTimes(1)
+  })
+
+  // The dialog's copy and its target both come from the live unstaged list, so
+  // a file that leaves the list while the dialog is open is not discarded.
+  it("acts on the survivors when a checked path leaves the list", async () => {
+    const view = render(<ChangedFiles />)
+    check("a.ts")
+    check("gone.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+
+    mockState = withFiles([], [["a.ts", "M"]])
+    view.rerender(<ChangedFiles />)
+
+    const dialog = within(screen.getByRole("dialog"))
+    expect(dialog.getByText(/1 file/)).toBeTruthy()
+    fireEvent.click(dialog.getByRole("button", { name: "Discard" }))
+    await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
+
+    expect(discardMany).toHaveBeenCalledWith("s1", ["a.ts"])
+  })
+
+  it("closes itself once every checked path has left the list", async () => {
+    const view = render(<ChangedFiles />)
+    check("a.ts")
+    check("gone.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+    expect(screen.getByRole("dialog")).toBeTruthy()
+
+    mockState = withFiles([["a.ts", "M"], ["gone.ts", "??"]], [])
+    await act(async () => {
+      view.rerender(<ChangedFiles />)
+    })
+
+    expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
+  // The ladder is one toast whose severity is the outcome: a partial run warns,
+  // and a run that discarded nothing is an error.
+  it("warns once when only some files were discarded", async () => {
+    discardMany.mockResolvedValueOnce({
+      done: ["a.ts"],
+      failed: [{ path: "gone.ts", message: "unstage it first" }],
+    })
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("gone.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Discard",
+      }),
+    )
+    await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
+
+    expect(notifyWarning).toHaveBeenCalledTimes(1)
+    expect(String(notifyWarning.mock.calls[0]![0])).toContain("unstage it first")
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(notifyError).not.toHaveBeenCalled()
+  })
+
+  it("errors once when nothing at all was discarded", async () => {
+    discardMany.mockResolvedValueOnce({
+      done: [],
+      failed: [
+        { path: "a.ts", message: "unstage it first" },
+        { path: "gone.ts", message: "unstage it first" },
+      ],
+    })
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("gone.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Discard",
+      }),
+    )
+    await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
+
+    expect(notifyError).toHaveBeenCalledTimes(1)
+    expect(String(notifyError.mock.calls[0]![0])).toContain("a.ts")
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(notifyWarning).not.toHaveBeenCalled()
   })
 })
