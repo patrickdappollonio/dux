@@ -774,15 +774,27 @@ impl App {
         // mirroring the raw path's scroll-mode suppression). Every modal
         // surface (prompt, help, macro bar, filters, resize mode) is either
         // handled above this point or excluded by `center_typeable` itself.
-        if self.center_typeable()
-            && !self.scroll_mode_active()
-            && crate::keybindings::center_typing_owns_key(
-                &key,
-                self.engine.config.ui.tab_reaches_agent,
-            )
-        {
-            self.forward_typing_key_to_center(&key);
-            return Ok(false);
+        //
+        // The rule for a scrolled-back pane is that a key the option handed to
+        // the agent is SUPPRESSED there, like every other typed key: Tab and
+        // Shift-Tab are dropped rather than being let down to the Global
+        // ladder, where FocusNext would move the focus out from under a frozen
+        // view. That is the one place they differ from the keys the ladder is
+        // for (the scroll bindings), which keep working scrolled back.
+        let typing_owns_key = crate::keybindings::center_typing_owns_key(
+            &key,
+            self.engine.config.ui.tab_reaches_agent,
+        );
+        if self.center_typeable() && typing_owns_key {
+            if !self.scroll_mode_active() {
+                self.forward_typing_key_to_center(&key);
+                return Ok(false);
+            }
+            if self.engine.config.ui.tab_reaches_agent
+                && matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+            {
+                return Ok(false);
+            }
         }
         // Check if a Global binding should defer to a pane-scoped binding.
         // For example, `q` is Quit globally but ScrollToBottom in Center — if
@@ -24506,6 +24518,42 @@ cyan = "#00ffff"
             !app.engine.pty_input.contains_key(&session_id),
             "an Esc that closed an overlay must not also reach the agent"
         );
+    }
+
+    /// A key the option handed to the agent is a TYPED key, and while scrolled
+    /// back every typed key is suppressed. Tab used to be the one exception:
+    /// the scroll-mode gate sent it back down the Global ladder, where
+    /// FocusNext moved the focus out from under a frozen view.
+    #[test]
+    fn scrolled_back_tab_neither_types_nor_moves_focus_when_the_option_is_on() {
+        let mut app = app_with_minimized_typeable_agent();
+        app.engine.config.ui.tab_reaches_agent = true;
+        let session_id = app.engine.sessions[0].id.clone();
+        let mut fill = String::new();
+        for n in 0..40 {
+            fill.push_str(&format!("L{n:02}\n"));
+        }
+        feed_until_history(&mut app, &fill, 18);
+        enter_scroll_mode(&mut app, 3);
+        assert!(app.scroll_mode_active(), "test setup: scroll mode is on");
+        app.engine.pty_input.remove(&session_id);
+
+        for (code, mods) in [
+            (KeyCode::Tab, KeyModifiers::NONE),
+            (KeyCode::BackTab, KeyModifiers::SHIFT),
+            (KeyCode::Tab, KeyModifiers::SHIFT),
+        ] {
+            tap_center(&mut app, code, mods);
+            assert!(
+                !app.engine.pty_input.contains_key(&session_id),
+                "{code:?} while scrolled back must not reach the agent"
+            );
+            assert_eq!(
+                app.focus,
+                FocusPane::Center,
+                "{code:?} while scrolled back must not move focus either"
+            );
+        }
     }
 
     /// While scrolled back, the scroll bindings win and plain typing is
