@@ -869,6 +869,9 @@ impl App {
                 );
             }
 
+            EventReaction::TailscaleModeApplied { mode, outcome } => {
+                self.apply_tailscale_mode_outcome(mode, outcome);
+            }
             EventReaction::ApplyReloadedConfig(boxed) => {
                 // Compared before the swap, while `engine.config` still holds the
                 // running values. A listener binds once, so a `[server]` change

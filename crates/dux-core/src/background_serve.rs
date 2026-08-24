@@ -223,6 +223,15 @@ pub trait BackgroundServeCompanion {
         urls: Vec<String>,
     ) -> Result<Vec<String>, String>;
 
+    /// Change `[server] tailscale` on the running listener.
+    ///
+    /// Fire and forget: the answer arrives as a
+    /// [`crate::worker::WorkerEvent::TailscaleModeApplied`] on the engine's own
+    /// worker lane, because applying a mode can run a bounded address detection
+    /// and this is called from the terminal UI's run loop. Called only while
+    /// serving; the CONFIG write is the caller's, and happens either way.
+    fn set_tailscale_mode(&mut self, engine: &Engine, mode: crate::config::TailscaleMode);
+
     /// Stop serving and release everything the serve owned. A no-op when not
     /// serving, so a caller never has to check first.
     fn stop(&mut self, engine: &mut Engine);

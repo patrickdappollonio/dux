@@ -5094,6 +5094,134 @@ impl App {
                     offset: state.offset(),
                 };
             }
+            PromptState::SetTailscaleMode(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(66, 55, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let picks = if prompt.serving {
+                    "apply now"
+                } else {
+                    "save for next time"
+                };
+                let bottom_spans = vec![
+                    Span::styled(
+                        format!(" {move_up}/{move_down} "),
+                        Style::default().fg(self.theme.hint_key_fg),
+                    ),
+                    Span::styled("move  ", Style::default().fg(self.theme.hint_desc_fg)),
+                    Span::styled(
+                        format!("{confirm_key} "),
+                        Style::default().fg(self.theme.hint_key_fg),
+                    ),
+                    Span::styled(picks, Style::default().fg(self.theme.hint_desc_fg)),
+                    Span::styled(
+                        format!("  {close_key} "),
+                        Style::default().fg(self.theme.hint_key_fg),
+                    ),
+                    Span::styled("cancel ", Style::default().fg(self.theme.hint_desc_fg)),
+                ];
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(4), Constraint::Min(5)])
+                    .areas(area);
+
+                let where_at = if prompt.serving {
+                    "A listener is up, so the choice applies to it right away."
+                } else {
+                    "Nothing is serving, so the choice applies when a listener starts."
+                };
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            " Saved mode: ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ),
+                        Span::styled(
+                            prompt.current.as_str().to_string(),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![Span::styled(
+                        format!(" {where_at}"),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )]),
+                ];
+                let details = Paragraph::new(detail_lines).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(self.theme.overlay_border))
+                        .style(Style::default().bg(self.theme.overlay_bg))
+                        .title(" Tailscale address ")
+                        .title_style(
+                            Style::default()
+                                .fg(self.theme.title_focused)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                );
+                frame.render_widget(details, details_area);
+
+                let items = prompt
+                    .options
+                    .iter()
+                    .map(|option| {
+                        let name = format!("{:<6}", option.mode.as_str());
+                        let meaning = match option.mode {
+                            dux_core::config::TailscaleMode::Auto => {
+                                "bind it whenever the interface appears, and drop it when it goes"
+                            }
+                            dux_core::config::TailscaleMode::Yes => {
+                                "look once, now, and keep whatever is found"
+                            }
+                            dux_core::config::TailscaleMode::No => "never bind it and stop looking",
+                        };
+                        ListItem::new(Line::from(vec![
+                            active_provider_marker_span(option.is_current, &self.theme),
+                            Span::styled(
+                                name,
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  {meaning}"),
+                                Style::default().fg(self.theme.hint_desc_fg),
+                            ),
+                        ]))
+                    })
+                    .collect::<Vec<_>>();
+                let mut state = ListState::default().with_selected(Some(
+                    prompt.selected.min(prompt.options.len().saturating_sub(1)),
+                ));
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg))
+                    .title_bottom(Line::from(bottom_spans));
+                let list_inner = list_block.inner(list_area);
+                let highlight_style = self.theme.selection_style();
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(highlight_style),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+
+                self.overlay_layout.active = OverlayMouseLayout::SetTailscaleMode {
+                    list: list_inner,
+                    items: prompt.options.len(),
+                    offset: state.offset(),
+                };
+            }
             PromptState::ChangeTheme(prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(60, 60, frame.area());
@@ -17909,7 +18037,8 @@ mod tests {
             let list = match app.overlay_layout.active {
                 OverlayMouseLayout::ChangeAgentProvider { list, .. }
                 | OverlayMouseLayout::ChangeDefaultProvider { list, .. }
-                | OverlayMouseLayout::ChangeProjectDefaultProvider { list, .. } => list,
+                | OverlayMouseLayout::ChangeProjectDefaultProvider { list, .. }
+                | OverlayMouseLayout::SetTailscaleMode { list, .. } => list,
                 ref other => panic!("{name}: expected a provider picker layout, got {other:?}"),
             };
             let active = row_text(&buf, list, 0);

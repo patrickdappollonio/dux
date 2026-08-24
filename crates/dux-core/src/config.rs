@@ -443,9 +443,7 @@ pub enum TailscaleModeOutcome {
     /// The mode is live. `bound` is the Tailscale leg's address, or `None` when
     /// the mode wants no leg right now (`no`, or `auto` still waiting for the
     /// interface).
-    Applied {
-        bound: Option<std::net::SocketAddr>,
-    },
+    Applied { bound: Option<std::net::SocketAddr> },
     /// The Tailscale listener that was serving has been stopped.
     Detached,
     /// `yes` looked for a Tailscale address and found none. The mode still
@@ -544,7 +542,9 @@ impl TailscaleModeOutcome {
             },
             Self::NotServing => TailscaleModeReport {
                 warning: false,
-                message: format!("{saved} Nothing is serving, so it applies when a listener starts."),
+                message: format!(
+                    "{saved} Nothing is serving, so it applies when a listener starts."
+                ),
             },
             Self::Superseded => TailscaleModeReport {
                 warning: true,
@@ -3097,8 +3097,10 @@ mod resolve_plan_tests {
         assert!(forced.forced_no, "--no-tailscale must be carried");
         assert_eq!(forced.tailscale, TailscaleMode::No);
 
-        let mut configured_no = ServerConfig::default();
-        configured_no.tailscale = TailscaleMode::No.as_str().to_string();
+        let configured_no = ServerConfig {
+            tailscale: TailscaleMode::No.as_str().to_string(),
+            ..Default::default()
+        };
         let plain = resolve_server_plan(&configured_no, &cli(), Some(ts())).unwrap();
         assert!(
             !plain.forced_no,

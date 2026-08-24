@@ -539,7 +539,7 @@ async fn set_tailscale_mode(
     headers: HeaderMap,
     Json(body): Json<TailscaleModeBody>,
 ) -> Response {
-    let saved = match state
+    if let Err(e) = state
         .engine
         .apply_wire_scoped(
             WireCommand::SetTailscaleMode {
@@ -549,10 +549,8 @@ async fn set_tailscale_mode(
         )
         .await
     {
-        Ok(_) => (),
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
-    };
-    let _ = saved;
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
     // Parsing again rather than threading the engine's answer back: the engine
     // has already refused anything outside the tri-state, so this cannot fail,
     // and it keeps the reply's `mode` canonical.

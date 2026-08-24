@@ -232,6 +232,7 @@ enum PromptMouseTarget {
     ChangeAgentProviderItem(usize),
     ChangeDefaultProviderItem(usize),
     ChangeProjectDefaultProviderItem(usize),
+    SetTailscaleModeItem(usize),
     RuntimeKillInput,
     RuntimeKillItem(usize),
     RuntimeKillCancel,
@@ -401,6 +402,7 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::ChangeAgentProviderItem(_)
             | PromptMouseTarget::ChangeDefaultProviderItem(_)
             | PromptMouseTarget::ChangeProjectDefaultProviderItem(_)
+            | PromptMouseTarget::SetTailscaleModeItem(_)
             | PromptMouseTarget::RuntimeKillInput
             | PromptMouseTarget::RuntimeKillItem(_)
             | PromptMouseTarget::Checkbox(_)
@@ -1670,7 +1672,8 @@ impl App {
             | PromptState::ChangeTheme(_)
             | PromptState::ChangeAgentProvider(_)
             | PromptState::ChangeDefaultProvider(_)
-            | PromptState::ChangeProjectDefaultProvider(_) => {}
+            | PromptState::ChangeProjectDefaultProvider(_)
+            | PromptState::SetTailscaleMode(_) => {}
         }
         if refresh_path_completions {
             self.refresh_path_editor_completions();
@@ -4275,6 +4278,29 @@ impl App {
             return self.handle_provider_picker_key(key, which);
         }
 
+        if let PromptState::SetTailscaleMode(prompt) = &mut self.prompt {
+            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
+            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+            match palette_action.or(dialog_action) {
+                Some(Action::CloseOverlay) => {
+                    // Escape never saves: nothing is written and nothing moves.
+                    self.prompt = PromptState::None;
+                    self.set_info(
+                        "Left the Tailscale mode as it was; config.toml is untouched.".to_string(),
+                    );
+                }
+                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                    prompt.selected += 1;
+                }
+                Some(Action::MoveUp) if prompt.selected > 0 => {
+                    prompt.selected -= 1;
+                }
+                Some(Action::Confirm) => self.apply_set_tailscale_mode(),
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ChangeTheme(prompt) = &mut self.prompt {
             let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
             let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
@@ -6151,6 +6177,12 @@ impl App {
                 offset,
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::ChangeProjectDefaultProviderItem),
+            OverlayMouseLayout::SetTailscaleMode {
+                list,
+                items,
+                offset,
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::SetTailscaleModeItem),
             OverlayMouseLayout::KillRunning {
                 input,
                 list,
@@ -8282,6 +8314,18 @@ impl App {
                 self.select_startup_command_log_visual_index(index);
                 if double_click {
                     self.open_selected_startup_command_log();
+                }
+            }
+            PromptMouseTarget::SetTailscaleModeItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                if let PromptState::SetTailscaleMode(prompt) = &mut self.prompt
+                    && index < prompt.options.len()
+                {
+                    prompt.selected = index;
+                }
+                if double_click {
+                    self.apply_set_tailscale_mode();
                 }
             }
             PromptMouseTarget::ChangeThemeItem(index) => {

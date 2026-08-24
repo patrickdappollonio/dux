@@ -273,7 +273,10 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::ChangeTheme(_)
         | PromptState::ChangeAgentProvider(_)
         | PromptState::ChangeDefaultProvider(_)
-        | PromptState::ChangeProjectDefaultProvider(_) => ModalSpec::new(Picker, false, false),
+        | PromptState::ChangeProjectDefaultProvider(_)
+        // Three modes, the saved one marked, and picking one applies it. Rows and
+        // nothing else, so no buttons and no focus concept.
+        | PromptState::SetTailscaleMode(_) => ModalSpec::new(Picker, false, false),
 
         // Kill-running is the ONE picker that keeps its buttons, and it is not
         // an oversight to finish. Its three footer buttons are DISTINCT ACTIONS
@@ -355,7 +358,8 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::ChangeTheme(_)
         | PromptState::ChangeAgentProvider(_)
         | PromptState::ChangeDefaultProvider(_)
-        | PromptState::ChangeProjectDefaultProvider(_) => Vec::new(),
+        | PromptState::ChangeProjectDefaultProvider(_)
+        | PromptState::SetTailscaleMode(_) => Vec::new(),
 
         PromptState::Command { input, .. }
         | PromptState::ConfigureStartupCommand { input, .. }
@@ -406,6 +410,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::ChangeAgentProvider { .. }
         | OverlayMouseLayout::ChangeDefaultProvider { .. }
         | OverlayMouseLayout::ChangeProjectDefaultProvider { .. }
+        | OverlayMouseLayout::SetTailscaleMode { .. }
         | OverlayMouseLayout::AddProjectFailed { .. }
         | OverlayMouseLayout::AgentInfo { .. }
         | OverlayMouseLayout::FirstLoad { .. }
@@ -900,6 +905,18 @@ mod tests {
                         is_current: true,
                     }],
                     selected: 0,
+                }),
+            ),
+            (
+                "SetTailscaleMode",
+                PromptState::SetTailscaleMode(crate::app::SetTailscaleModePrompt {
+                    current: dux_core::config::TailscaleMode::Auto,
+                    options: vec![crate::app::SetTailscaleModeOption {
+                        mode: dux_core::config::TailscaleMode::Auto,
+                        is_current: true,
+                    }],
+                    selected: 0,
+                    serving: false,
                 }),
             ),
             (

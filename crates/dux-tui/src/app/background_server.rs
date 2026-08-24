@@ -428,6 +428,146 @@ impl App {
         }
     }
 
+    /// Palette action: open the `[server] tailscale` picker.
+    ///
+    /// The command always exists, whether or not anything is serving: with no
+    /// listener up it saves the choice for next time, and the picker's footer
+    /// says which of the two is about to happen.
+    pub(crate) fn open_set_tailscale_mode_prompt(&mut self) {
+        use dux_core::config::TailscaleMode;
+        let current = self.engine.config.server.tailscale_mode();
+        let options = [TailscaleMode::Auto, TailscaleMode::Yes, TailscaleMode::No]
+            .into_iter()
+            .map(|mode| SetTailscaleModeOption {
+                mode,
+                is_current: mode == current,
+            })
+            .collect::<Vec<_>>();
+        let selected = options
+            .iter()
+            .position(|option| option.is_current)
+            .unwrap_or(0);
+        let serving = self.background_server_is_serving();
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::SetTailscaleMode(SetTailscaleModePrompt {
+            current,
+            options,
+            selected,
+            serving,
+        });
+        self.set_info(if serving {
+            "Choose whether dux binds your Tailscale address. The choice is saved to config.toml \
+             and applied to the listener that is serving right now."
+                .to_string()
+        } else {
+            "Choose whether dux binds your Tailscale address. Nothing is serving, so the choice \
+             is saved to config.toml and applies the next time a listener starts."
+                .to_string()
+        });
+    }
+
+    /// Confirm the picker: save the mode and, when something is serving, move the
+    /// listener to match.
+    pub(crate) fn apply_set_tailscale_mode(&mut self) {
+        let picked = match &self.prompt {
+            PromptState::SetTailscaleMode(prompt) => {
+                prompt.options.get(prompt.selected).map(|o| o.mode)
+            }
+            _ => return,
+        };
+        self.prompt = PromptState::None;
+        let Some(mode) = picked else {
+            self.set_error("Choose a Tailscale mode first.".to_string());
+            return;
+        };
+        self.save_and_apply_tailscale_mode(mode);
+    }
+
+    /// Save `[server] tailscale` and apply it to whatever is serving.
+    ///
+    /// The write happens either way and FIRST, so the choice survives whatever
+    /// the listener does with it. Lazy rather than eager, matching the sibling
+    /// server preferences: the serve has already acted by the time the file
+    /// lands, and the saved value only decides what the next run does.
+    pub(crate) fn save_and_apply_tailscale_mode(&mut self, mode: dux_core::config::TailscaleMode) {
+        self.engine.config.server.tailscale = mode.as_str().to_string();
+        self.engine
+            .config_writer
+            .save_lazy(self.engine.config.clone());
+        if self.background_server_is_serving() {
+            self.ask_companion_for_tailscale_mode(mode);
+            return;
+        }
+        // Nothing is serving, so there is no second half. The flip's status
+        // screen has no palette, so a flip in progress cannot reach this at all;
+        // the web Preferences row is the way to change the mode from there.
+        let report = dux_core::config::TailscaleModeOutcome::NotServing.report(mode);
+        self.set_info(report.message);
+    }
+
+    /// Ask the background server to apply `mode` and open the status op its
+    /// outcome resolves.
+    ///
+    /// Fire and forget on purpose: applying `yes` runs a bounded address
+    /// detection, and this runs on the terminal UI's run loop, which is also the
+    /// serve's engine servicer. The answer arrives as
+    /// [`WorkerEvent::TailscaleModeApplied`].
+    pub(crate) fn ask_companion_for_tailscale_mode(
+        &mut self,
+        mode: dux_core::config::TailscaleMode,
+    ) {
+        // A request already in flight is superseded by this one, and the serve
+        // loop answers it as such. Resolve the op it is holding now rather than
+        // dropping it, or its busy would sit open until the leak guard expires it.
+        if let Some(previous) = self.pending_tailscale_mode_op.take() {
+            self.apply_reaction(
+                previous
+                    .resolve(&dux_core::config::TailscaleModeOutcome::Superseded)
+                    .into_reaction(),
+            );
+        }
+        let op = dux_core::engine::status_op(format!(
+            "Applying [server] tailscale = \"{}\" to the running listener…",
+            mode.as_str()
+        ))
+        .resolve_in_handler(move |outcome: &dux_core::config::TailscaleModeOutcome| {
+            let report = outcome.report(mode);
+            if report.warning {
+                dux_core::engine::Final::warning(report.message)
+            } else {
+                dux_core::engine::Final::info(report.message)
+            }
+        });
+        self.apply_reaction(EventReaction::Status(op.pending_status()));
+        self.pending_tailscale_mode_op = Some(op);
+        if let Some(companion) = self.companion.as_mut() {
+            companion.set_tailscale_mode(&self.engine, mode);
+        }
+    }
+
+    /// Resolve the pending status op with what the serve actually did.
+    pub(crate) fn apply_tailscale_mode_outcome(
+        &mut self,
+        mode: dux_core::config::TailscaleMode,
+        outcome: dux_core::config::TailscaleModeOutcome,
+    ) {
+        match self.pending_tailscale_mode_op.take() {
+            Some(op) => self.apply_reaction(op.resolve(&outcome).into_reaction()),
+            // No op waiting: the serve answered a request this surface no longer
+            // remembers (a stop and start across it, say). Say it anyway rather
+            // than swallowing a listener change nobody asked about.
+            None => {
+                let report = outcome.report(mode);
+                if report.warning {
+                    self.set_warning(report.message);
+                } else {
+                    self.set_info(report.message);
+                }
+            }
+        }
+    }
+
     /// Honor an `[server] serve_while_tui` change that arrived through a config
     /// reload, in both directions.
     ///
@@ -587,6 +727,8 @@ pub(crate) mod tests {
         /// Every ownership fact the seam published, in order, standing in for the
         /// `pty.owner` and grid broadcasts a real serve would have emitted.
         pub(crate) published: Vec<PtyOwnershipEvent>,
+        /// Every live Tailscale mode the seam was asked for, in order.
+        pub(crate) tailscale_modes: Vec<dux_core::config::TailscaleMode>,
         /// How many browser tabs the serve says are connected, standing in for the
         /// connection registry's own count.
         pub(crate) connections: usize,
@@ -721,6 +863,10 @@ pub(crate) mod tests {
         ) -> Result<Vec<String>, String> {
             self.serving = true;
             Ok(self.urls())
+        }
+
+        fn set_tailscale_mode(&mut self, _engine: &Engine, mode: dux_core::config::TailscaleMode) {
+            self.recorded.lock().unwrap().tailscale_modes.push(mode);
         }
 
         fn stop(&mut self, _engine: &mut Engine) {
@@ -1558,6 +1704,212 @@ pub(crate) mod tests {
     /// The last thing the user was told is the address it was serving on. A
     /// required leg dying while that sentence is still on screen makes it a lie,
     /// and `dux.log` is not where anybody looks to find that out.
+    fn tailscale_status(app: &App) -> String {
+        app.status
+            .most_recent_tui()
+            .map(|(_, message)| message)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_picker_opens_on_the_saved_mode_and_says_whether_it_will_apply_now() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.server.tailscale = "no".to_string();
+
+        app.open_set_tailscale_mode_prompt();
+        match &app.prompt {
+            PromptState::SetTailscaleMode(prompt) => {
+                assert_eq!(prompt.current, dux_core::config::TailscaleMode::No);
+                assert_eq!(prompt.options.len(), 3, "auto, yes and no");
+                assert!(
+                    prompt.options[prompt.selected].is_current,
+                    "the picker opens on the saved mode"
+                );
+                assert!(!prompt.serving);
+            }
+            other => panic!("expected the Tailscale picker, got {other:?}"),
+        }
+        assert!(
+            tailscale_status(&app).contains("the next time a listener starts"),
+            "with nothing serving the picker must say the choice is for next time: {}",
+            tailscale_status(&app)
+        );
+    }
+
+    #[test]
+    fn picking_a_mode_with_nothing_serving_saves_it_and_says_so() {
+        let mut app = test_app(default_bindings());
+        app.open_set_tailscale_mode_prompt();
+        if let PromptState::SetTailscaleMode(prompt) = &mut app.prompt {
+            prompt.selected = prompt
+                .options
+                .iter()
+                .position(|o| o.mode == dux_core::config::TailscaleMode::No)
+                .expect("no is one of the three");
+        }
+
+        app.apply_set_tailscale_mode();
+
+        assert!(matches!(app.prompt, PromptState::None), "the picker closes");
+        assert_eq!(
+            app.engine.config.server.tailscale_mode(),
+            dux_core::config::TailscaleMode::No,
+            "the choice is saved whether or not anything is serving"
+        );
+        let status = tailscale_status(&app);
+        assert!(
+            status.contains("applies when a listener starts"),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn picking_a_mode_while_serving_asks_the_companion_and_waits_for_its_answer() {
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+
+        app.open_set_tailscale_mode_prompt();
+        if let PromptState::SetTailscaleMode(prompt) = &mut app.prompt {
+            assert!(
+                prompt.serving,
+                "a live listener is what the footer promises"
+            );
+            prompt.selected = prompt
+                .options
+                .iter()
+                .position(|o| o.mode == dux_core::config::TailscaleMode::Yes)
+                .expect("yes is one of the three");
+        }
+        app.apply_set_tailscale_mode();
+
+        assert_eq!(
+            recorded.lock().unwrap().tailscale_modes,
+            vec![dux_core::config::TailscaleMode::Yes],
+            "the serve is asked exactly once"
+        );
+        assert!(
+            app.pending_tailscale_mode_op.is_some(),
+            "a busy op stays open until the serve answers"
+        );
+        assert!(
+            tailscale_status(&app).contains("Applying"),
+            "the busy must say what is happening: {}",
+            tailscale_status(&app)
+        );
+
+        // The answer lands on the worker lane and resolves the op.
+        app.apply_tailscale_mode_outcome(
+            dux_core::config::TailscaleMode::Yes,
+            dux_core::config::TailscaleModeOutcome::Applied {
+                bound: Some("100.64.0.5:8080".parse().unwrap()),
+            },
+        );
+        assert!(app.pending_tailscale_mode_op.is_none());
+        let status = tailscale_status(&app);
+        assert!(status.contains("100.64.0.5:8080"), "{status}");
+    }
+
+    #[test]
+    fn a_mode_that_found_nothing_and_one_the_run_refuses_both_warn() {
+        for (mode, outcome, needle) in [
+            (
+                dux_core::config::TailscaleMode::Yes,
+                dux_core::config::TailscaleModeOutcome::NothingDetected,
+                "No Tailscale address was found",
+            ),
+            (
+                dux_core::config::TailscaleMode::Auto,
+                dux_core::config::TailscaleModeOutcome::RefusedForcedNo,
+                "--no-tailscale",
+            ),
+        ] {
+            let mut app = test_app(default_bindings());
+            let (companion, _recorded) = FakeCompanion::serving();
+            app.companion = Some(companion);
+            app.save_and_apply_tailscale_mode(mode);
+            app.apply_tailscale_mode_outcome(mode, outcome);
+
+            let (tone, message) = app.status.most_recent_tui().expect("a status");
+            assert!(
+                matches!(tone, dux_core::statusline::StatusTone::Warning),
+                "{outcome:?} must warn, not inform"
+            );
+            assert!(message.contains(needle), "{message}");
+            assert_eq!(
+                app.engine.config.server.tailscale_mode(),
+                mode,
+                "the config value saves even when the listener refuses it"
+            );
+        }
+    }
+
+    #[test]
+    fn leaving_the_picker_writes_nothing() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.server.tailscale = "auto".to_string();
+        app.open_set_tailscale_mode_prompt();
+        if let PromptState::SetTailscaleMode(prompt) = &mut app.prompt {
+            prompt.selected = prompt
+                .options
+                .iter()
+                .position(|o| o.mode == dux_core::config::TailscaleMode::No)
+                .expect("no is one of the three");
+        }
+
+        app.cancel_prompt();
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(
+            app.engine.config.server.tailscale_mode(),
+            dux_core::config::TailscaleMode::Auto,
+            "moving the cursor is not choosing, and cancelling never saves"
+        );
+    }
+
+    #[test]
+    fn a_reload_that_changed_the_mode_routes_it_through_the_serve() {
+        // The background mode's reload owner is this surface: the actor arm that
+        // owns it for `dux server` and the flip has no control handle here.
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.background_server_wanted = true;
+        app.engine.config.server.tailscale = "auto".to_string();
+        app.engine.config.server.serve_while_tui = true;
+
+        let mut reloaded = app.engine.config.clone();
+        reloaded.server.tailscale = "no".to_string();
+        app.apply_reloaded_config(reloaded).expect("reload applies");
+
+        assert_eq!(
+            recorded.lock().unwrap().tailscale_modes,
+            vec![dux_core::config::TailscaleMode::No],
+            "a changed mode is applied to the running listener, not warned about"
+        );
+    }
+
+    #[test]
+    fn a_reload_that_left_the_mode_alone_asks_the_serve_for_nothing() {
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.background_server_wanted = true;
+        app.engine.config.server.tailscale = "auto".to_string();
+        app.engine.config.server.serve_while_tui = true;
+
+        let mut reloaded = app.engine.config.clone();
+        // The same mode, retyped. Stopping and starting the listener for this
+        // would be churn the user did not ask for.
+        reloaded.server.tailscale = "  AUTO ".to_string();
+        app.apply_reloaded_config(reloaded).expect("reload applies");
+
+        assert!(
+            recorded.lock().unwrap().tailscale_modes.is_empty(),
+            "the same mode written differently is not a change"
+        );
+    }
+
     #[test]
     fn a_self_retired_serve_warns_on_the_status_line() {
         let mut app = test_app(default_bindings());

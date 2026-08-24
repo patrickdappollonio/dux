@@ -180,6 +180,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // off the branch. Closing the browser tab is the web-side equivalent.
     },
     PaletteCommand {
+        action: Action::SetTailscaleMode,
+        name: "set-tailscale-mode",
+        description: "Choose whether dux binds your Tailscale address, and apply it now",
+        // GLOBAL: it is a workspace-wide server setting with no target. The web
+        // counterpart is the Preferences dialog's Tailscale row, not an app-menu
+        // entry, because a preference is a row and never a menu item.
+    },
+    PaletteCommand {
         action: Action::TakeOverTerminal,
         name: "take-over-terminal",
         description: "Drive the center terminal from here, demoting the device that has it",

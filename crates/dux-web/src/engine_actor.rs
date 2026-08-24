@@ -2554,7 +2554,8 @@ pub(crate) fn run_engine_loop(
                             && let Some(control) = svc.tailscale_mode_control.get()
                         {
                             let status = svc.status.tx.clone();
-                            control.set_mode_detached(next_tailscale, move |report| {
+                            control.set_mode_detached(next_tailscale, move |outcome| {
+                                let report = outcome.report(next_tailscale);
                                 let tone = if report.warning { "warning" } else { "info" };
                                 let _ = status.send(WireStatus::new(tone, report.message));
                             });

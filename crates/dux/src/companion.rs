@@ -115,6 +115,12 @@ impl BackgroundServeCompanion for WebCompanion {
         }
     }
 
+    fn set_tailscale_mode(&mut self, engine: &Engine, mode: dux_core::config::TailscaleMode) {
+        if let Some(server) = self.server.as_ref() {
+            server.set_tailscale_mode(mode, engine.worker_tx.clone());
+        }
+    }
+
     fn is_serving(&self) -> bool {
         self.server.is_some()
     }

@@ -175,6 +175,7 @@ pub enum Action {
     StartBackgroundServer,
     /// Palette-only: stop the background web server, leaving every agent running.
     StopBackgroundServer,
+    SetTailscaleMode,
     /// Palette-only: take over input for the terminal in the center pane, so this
     /// device drives it and whichever device was driving becomes a watcher.
     ///
@@ -332,6 +333,7 @@ impl Action {
             Action::StartWebServer => "start_web_server",
             Action::StartBackgroundServer => "start_background_server",
             Action::StopBackgroundServer => "stop_background_server",
+            Action::SetTailscaleMode => "set_tailscale_mode",
             Action::TakeOverTerminal => "take_over_terminal",
             Action::ToggleAlwaysShowTabs => "toggle_always_show_tabs",
             Action::OpenAgentInfo => "open_agent_info",
@@ -553,6 +555,9 @@ impl Action {
             Action::StopBackgroundServer => {
                 "Stop serving the web UI in the background; agents keep running."
             }
+            Action::SetTailscaleMode => {
+                "Choose whether dux binds your Tailscale address: auto, yes, or no."
+            }
             Action::TakeOverTerminal => {
                 "Take over input for the center terminal from the device driving it."
             }
@@ -710,6 +715,7 @@ impl Action {
             | Action::StartWebServer
             | Action::StartBackgroundServer
             | Action::StopBackgroundServer
+            | Action::SetTailscaleMode
             | Action::TakeOverTerminal
             | Action::ToggleAlwaysShowTabs
             | Action::OpenAgentInfo

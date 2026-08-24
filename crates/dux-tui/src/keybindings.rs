@@ -305,6 +305,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // No default key: a tri-state a user changes when they move between
+        // networks does not earn a chord, and the palette is where it lives.
+        action: Action::SetTailscaleMode,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         // No default key on purpose: it is only reachable while a background
         // server is serving and another device holds the pty, which is rare
         // enough that spending a chord on it would cost every other user a key.
@@ -2729,6 +2738,7 @@ mod tests {
             "rerun-startup-command-on-agent",
             "resource-monitor",
             "resume-pull-request-autodetection",
+            "set-tailscale-mode",
             "show-agent",
             "show-release-notes",
             "show-terminal",

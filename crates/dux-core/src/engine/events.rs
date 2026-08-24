@@ -345,6 +345,12 @@ pub enum EventReaction {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
     },
+    /// The background web server finished applying a live `[server] tailscale`
+    /// change. The terminal UI resolves its pending status op with it.
+    TailscaleModeApplied {
+        mode: crate::config::TailscaleMode,
+        outcome: crate::config::TailscaleModeOutcome,
+    },
 }
 
 /// Result of `Engine::detach_conflicting_worktree_session` — the App caller
@@ -3096,6 +3102,9 @@ impl Engine {
                 // Same story: the listeners belong to whoever asked to serve.
                 EventReaction::BackgroundServerPreflightReady { result, warning }
             }
+            WorkerEvent::TailscaleModeApplied { mode, outcome } => {
+                EventReaction::TailscaleModeApplied { mode, outcome }
+            }
         }
     }
 }
@@ -3876,6 +3885,7 @@ mod tests {
             EventReaction::Nothing => "Nothing",
             EventReaction::Status(_) => "Status",
             EventReaction::ClearStatus(_) => "ClearStatus",
+            EventReaction::TailscaleModeApplied { .. } => "TailscaleModeApplied",
             EventReaction::Multi(_) => "Multi",
             EventReaction::RebuildLeftItems => "RebuildLeftItems",
             EventReaction::ReloadChangedFiles => "ReloadChangedFiles",

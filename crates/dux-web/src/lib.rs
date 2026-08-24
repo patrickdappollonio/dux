@@ -79,11 +79,9 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::Router;
 use axum::serve::ListenerExt;
-use dux_core::config::{
-    DuxPaths, PlanAddr, ServerPlan, TailscaleMode, TailscaleModeOutcome,
-};
-use dux_core::tailscale::TailscaleUnavailable;
+use dux_core::config::{DuxPaths, PlanAddr, ServerPlan, TailscaleMode, TailscaleModeOutcome};
 use dux_core::engine::Engine;
+use dux_core::tailscale::TailscaleUnavailable;
 
 use crate::console::{Banner, Console, ListenerRow};
 use crate::engine_actor::LoopControl;
@@ -1023,9 +1021,7 @@ async fn apply_mode_request(
                 return;
             }
             ModeStep::StopWatcher => ts.stop_watcher(),
-            ModeStep::SetHostLiterals(allowed) => {
-                ts.host_literals.store(allowed, Ordering::SeqCst)
-            }
+            ModeStep::SetHostLiterals(allowed) => ts.host_literals.store(allowed, Ordering::SeqCst),
             ModeStep::Unbind(addr) => {
                 apply_leg_command(
                     LegCommand::Unbind(addr),
@@ -1598,12 +1594,6 @@ impl ServeCore {
     /// mode from outside the router.
     pub(crate) fn tailscale_mode(&self) -> TailscaleModeControl {
         self.tailscale_mode.clone()
-    }
-
-    /// The runtime this serve owns, so a caller with no runtime of its own can
-    /// drive an async handle (the mode control) on it.
-    pub(crate) fn runtime_handle(&self) -> tokio::runtime::Handle {
-        self.runtime.handle().clone()
     }
 
     /// Stop the listeners and reap the supervisor, bounded, WITHOUT tearing the
@@ -2380,7 +2370,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn dux_core_command_is_constructible() {
         let cmd = Command::OpenPath {
@@ -2457,7 +2446,8 @@ mod live_tailscale_mode_tests {
                 // registry answering rather than a cell being blanked.
                 let _ = shutdown.register_leg(addr);
             }
-            let mut ts = TailscaleLoop::new(mode, forced_no, primary, initial_leg, &control, detect);
+            let mut ts =
+                TailscaleLoop::new(mode, forced_no, primary, initial_leg, &control, detect);
             let leg_rx = ts.take_leg_receiver();
             let bound = ts.bound_cell();
             let legs = ts.leg_sender();
@@ -2741,9 +2731,12 @@ mod live_tailscale_mode_tests {
         h.finish().await;
     }
 
+    /// The probe the loop calls, boxed so a test can script it.
+    type Detector = Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>;
+
     /// A detector the test can hold parked, plus the signal that it started.
     fn parked_detector() -> (
-        Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>,
+        Detector,
         tokio::sync::mpsc::UnboundedReceiver<()>,
         std::sync::mpsc::Sender<()>,
     ) {
@@ -2754,12 +2747,11 @@ mod live_tailscale_mode_tests {
         let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let release_rx = std::sync::Mutex::new(release_rx);
-        let detect: Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync> =
-            Arc::new(move || {
-                let _ = started_tx.send(());
-                let _ = release_rx.lock().expect("not poisoned").recv();
-                Err(TailscaleUnavailable::NoAddress)
-            });
+        let detect: Detector = Arc::new(move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.lock().expect("not poisoned").recv();
+            Err(TailscaleUnavailable::NoAddress)
+        });
         (detect, started_rx, release_tx)
     }
 

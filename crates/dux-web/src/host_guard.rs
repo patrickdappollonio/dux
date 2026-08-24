@@ -517,7 +517,10 @@ mod tests {
         );
         // Every other rule is untouched by the live flag.
         assert!(al.allows_host("127.0.0.1"), "loopback is always allowed");
-        assert!(!al.allows_host("box.tailnet.ts.net"), "names are unaffected");
+        assert!(
+            !al.allows_host("box.tailnet.ts.net"),
+            "names are unaffected"
+        );
     }
 
     /// The rule is off when the mode is `no`: a deployment that told dux to stay

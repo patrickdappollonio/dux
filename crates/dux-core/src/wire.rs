@@ -1920,11 +1920,12 @@ impl Engine {
     /// Lazy rather than eager, matching the sibling preferences: the serve has
     /// already acted by the time the file lands, and the saved value only decides
     /// what the NEXT run does.
-    pub fn set_tailscale_mode(&mut self, mode: &str) -> anyhow::Result<crate::config::TailscaleMode> {
+    pub fn set_tailscale_mode(
+        &mut self,
+        mode: &str,
+    ) -> anyhow::Result<crate::config::TailscaleMode> {
         let parsed = crate::config::TailscaleMode::parse(mode).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Unknown Tailscale mode \"{mode}\". Expected one of: auto, yes, no."
-            )
+            anyhow::anyhow!("Unknown Tailscale mode \"{mode}\". Expected one of: auto, yes, no.")
         })?;
         if self.config.server.tailscale_mode() != parsed {
             self.config.server.tailscale = parsed.as_str().to_string();

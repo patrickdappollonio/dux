@@ -226,7 +226,12 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // arm for either, and by construction it cannot: they only exist on a
             // surface that can bind before it hands anything over.
             | EventReaction::ServerFlipPreflightReady { .. }
-            | EventReaction::BackgroundServerPreflightReady { .. } => FollowupOwner::Drainer,
+            | EventReaction::BackgroundServerPreflightReady { .. }
+            // A live Tailscale mode change the background serve carried out. Only
+            // the terminal UI asked for it and only the terminal UI has a status
+            // op waiting on it; the browsers on that serve learn about the mode
+            // from the `config.changed` refetch the write already fired.
+            | EventReaction::TailscaleModeApplied { .. } => FollowupOwner::Drainer,
     }
 }
 

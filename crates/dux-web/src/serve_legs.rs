@@ -539,11 +539,11 @@ impl TailscaleModeControl {
     pub fn set_mode_detached(
         &self,
         mode: TailscaleMode,
-        report: impl FnOnce(dux_core::config::TailscaleModeReport) + Send + 'static,
+        report: impl FnOnce(TailscaleModeOutcome) + Send + 'static,
     ) {
         let control = self.clone();
         self.runtime.spawn(async move {
-            report(control.set_mode(mode).await.report(mode));
+            report(control.set_mode(mode).await);
         });
     }
 

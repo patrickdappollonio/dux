@@ -186,6 +186,25 @@ impl BackgroundServer {
         self.core.installed_signal_handlers()
     }
 
+    /// Ask this serve to change `[server] tailscale` and report what it did
+    /// through the terminal UI's worker event lane.
+    ///
+    /// Never blocking: a `yes` runs a bounded detection, and the caller is the
+    /// terminal UI's run loop, which is also this serve's engine servicer. Waiting
+    /// here would stop both surfaces for the length of a subprocess call.
+    pub fn set_tailscale_mode(
+        &self,
+        mode: dux_core::config::TailscaleMode,
+        worker_tx: std::sync::mpsc::Sender<dux_core::worker::WorkerEvent>,
+    ) {
+        self.core
+            .tailscale_mode()
+            .set_mode_detached(mode, move |outcome| {
+                let _ = worker_tx
+                    .send(dux_core::worker::WorkerEvent::TailscaleModeApplied { mode, outcome });
+            });
+    }
+
     /// Stop serving and release everything, bounded. Returns the first listener
     /// failure if one was recorded.
     ///

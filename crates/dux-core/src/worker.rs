@@ -661,6 +661,16 @@ pub enum WorkerEvent {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
     },
+    /// A live `[server] tailscale` change the BACKGROUND web server carried out.
+    ///
+    /// It arrives on this lane rather than as a return value because applying a
+    /// mode can run a bounded address detection, and the caller is the terminal
+    /// UI's run loop, which is also the serve's engine servicer: blocking it
+    /// would stop both surfaces for the length of a subprocess call.
+    TailscaleModeApplied {
+        mode: crate::config::TailscaleMode,
+        outcome: crate::config::TailscaleModeOutcome,
+    },
 }
 
 /// How a successful (non-erroring) pull worker run ended. `current_branch` is

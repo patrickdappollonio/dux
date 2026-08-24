@@ -426,6 +426,12 @@ pub struct App {
     /// because the pre-flight is in-flight-guarded, so there is only ever one.
     pub(crate) pending_background_server_op:
         Option<dux_core::engine::HandlerStatusOp<BackgroundServerOutcome>>,
+    /// The keyed status op for a live `[server] tailscale` change, held from the
+    /// moment the background server is asked until its outcome lands on the
+    /// worker lane. `Option` rather than a map: the serve loop answers every
+    /// request, and a superseded one resolves as such, so at most one is open.
+    pub(crate) pending_tailscale_mode_op:
+        Option<dux_core::engine::HandlerStatusOp<dux_core::config::TailscaleModeOutcome>>,
     /// In-flight project-persistence status ops whose final is decided in the
     /// completion handler. Each non-`Add` persistence dispatch mints a
     /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its
@@ -1259,6 +1265,25 @@ pub(crate) fn agent_info_lines(
     lines
 }
 
+/// One row of the Tailscale-mode picker.
+#[derive(Clone, Debug)]
+pub(crate) struct SetTailscaleModeOption {
+    pub(crate) mode: dux_core::config::TailscaleMode,
+    pub(crate) is_current: bool,
+}
+
+/// The `[server] tailscale` picker: three rows, the saved one marked.
+#[derive(Clone, Debug)]
+pub(crate) struct SetTailscaleModePrompt {
+    pub(crate) current: dux_core::config::TailscaleMode,
+    pub(crate) options: Vec<SetTailscaleModeOption>,
+    pub(crate) selected: usize,
+    /// Whether a listener is up right now, which decides whether picking a mode
+    /// moves anything or only saves it. Captured when the picker opens so the
+    /// footer and the eventual status agree about what the gesture did.
+    pub(crate) serving: bool,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ChangeThemePrompt {
     pub(crate) options: Vec<crate::theme::ThemeListing>,
@@ -1785,6 +1810,7 @@ pub(crate) enum PromptState {
     FirstLoad(FirstLoadPrompt),
     ChangeDefaultProvider(ChangeDefaultProviderPrompt),
     ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt),
+    SetTailscaleMode(SetTailscaleModePrompt),
     ChangeTheme(ChangeThemePrompt),
     ConfigureStartupCommand {
         project_id: String,
@@ -2658,6 +2684,11 @@ pub(crate) enum OverlayMouseLayout {
         items: usize,
         offset: usize,
     },
+    SetTailscaleMode {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
     ChangeProjectDefaultProvider {
         list: Rect,
         items: usize,
@@ -3351,6 +3382,7 @@ impl App {
             background_server_wanted: false,
             companion_followup_ran: false,
             pending_background_server_op: None,
+            pending_tailscale_mode_op: None,
             server_flip_preflight_pending: false,
             pending_persist_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
@@ -4280,6 +4312,10 @@ impl App {
                 self.stop_background_server();
                 Ok(())
             }
+            "set-tailscale-mode" => {
+                self.open_set_tailscale_mode_prompt();
+                Ok(())
+            }
             "take-over-terminal" => {
                 self.take_over_focused_pty();
                 Ok(())
@@ -4605,6 +4641,9 @@ impl App {
             &self.bindings,
             &self.engine.session_store,
         )?;
+        // Captured BEFORE the swap, because the comparison is against what the
+        // running serve was told, not against what the file now says.
+        let tailscale_before = self.engine.config.server.tailscale_mode();
         self.engine.config = config;
         self.engine.retune_after_config_swap();
         self.sync_view_state_from_config();
@@ -4646,8 +4685,21 @@ impl App {
         // start: a user who edited the file to turn the listener off has asked for
         // the listener to go away. Done last, after `engine.config` holds the
         // reloaded values, so the start path reads the new port and Tailscale mode.
+        let serving_before = self.background_server_is_serving();
         let wanted = self.engine.config.server.serve_while_tui;
         self.apply_serve_while_tui_setting(wanted);
+        // `[server] tailscale` is live too, and in this mode the terminal UI owns
+        // the reload: the serve is the companion's, and the actor arm that owns it
+        // for `dux server` and the flip has no control handle here. Skipped when
+        // the same reload just STARTED the serve, because that serve read the new
+        // mode from config on its way up, and when it just stopped one.
+        if serving_before
+            && self.background_server_is_serving()
+            && tailscale_before != self.engine.config.server.tailscale_mode()
+        {
+            let mode = self.engine.config.server.tailscale_mode();
+            self.ask_companion_for_tailscale_mode(mode);
+        }
         if let Some(message) = theme_warning {
             self.set_warning(message);
         }
