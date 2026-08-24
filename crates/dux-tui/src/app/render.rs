@@ -3340,18 +3340,12 @@ impl App {
                 Line::from(spans)
             } else if self.center_typeable() {
                 // Windowed typing: keystrokes reach the focused surface's PTY
-                // while dux keeps its chords, so the line says where typing
-                // goes and names the chords that stay dux's (all resolved
-                // through the bindings, never hardcoded).
+                // while dux keeps its chords. The line names only the chords
+                // that stay dux's (all resolved through the bindings, never
+                // hardcoded); typing shows itself, so the line does not say
+                // where it goes.
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-                let target = match active_surface {
-                    SessionSurface::Agent => "agent",
-                    SessionSurface::Terminal => "terminal",
-                };
-                let mut spans: Vec<Span> = vec![Span::styled(
-                    format!("Typing goes to the {target}. "),
-                    Style::default().fg(self.theme.hint_key_fg),
-                )];
+                let mut spans: Vec<Span> = Vec::new();
                 spans.extend(self.theme.dim_key_badge_default(&exit_key));
                 spans.push(Span::styled(" fullscreen  ", desc_style));
                 spans.extend(self.theme.dim_key_badge_default(&next_pane));
@@ -13373,7 +13367,7 @@ mod tests {
     /// the chords that stay dux's (fullscreen toggle, next pane), every label
     /// resolved through the bindings rather than hardcoded.
     #[test]
-    fn typeable_pane_hint_says_typing_goes_to_the_agent() {
+    fn typeable_pane_hint_names_the_chords_without_saying_where_typing_goes() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -13393,13 +13387,17 @@ mod tests {
         let rows = buffer_rows(terminal.backend().buffer());
         let hint = rows
             .iter()
-            .find(|row| row.contains("Typing goes to the agent."))
+            .find(|row| row.contains(" fullscreen  "))
             .unwrap_or_else(|| {
                 panic!(
-                    "the typeable pane must say where typing goes; frame was:\n{}",
+                    "the typeable pane must show its chord hints; frame was:\n{}",
                     rows.join("\n")
                 )
             });
+        assert!(
+            !hint.contains("Typing goes to"),
+            "a typeable pane shows typing, so it must not say so; row was {hint:?}"
+        );
         let fullscreen_key = app.bindings.label_for(Action::ToggleFullscreen);
         let next_pane_key = app.bindings.label_for(Action::FocusNext);
         assert!(
@@ -13441,13 +13439,17 @@ mod tests {
         let rows = buffer_rows(terminal.backend().buffer());
         let hint = rows
             .iter()
-            .find(|row| row.contains("Typing goes to the agent."))
+            .find(|row| row.contains(" fullscreen  "))
             .unwrap_or_else(|| {
                 panic!(
-                    "the typeable pane must say where typing goes; frame was:\n{}",
+                    "the typeable pane must show its chord hints; frame was:\n{}",
                     rows.join("\n")
                 )
             });
+        assert!(
+            !hint.contains("Typing goes to"),
+            "a typeable pane shows typing, so it must not say so; row was {hint:?}"
+        );
         let next_tab_key = app.bindings.label_for(Action::NextTab);
         assert!(
             hint.contains(&next_tab_key) && hint.contains("next tab"),
