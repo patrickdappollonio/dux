@@ -955,7 +955,7 @@ impl App {
     /// Move the agents-section selection to `index` and run the side effects
     /// every agent-row move shares: drop any project-chooser context, close the
     /// diff overlay, and refresh the right pane for the newly selected agent.
-    fn select_left_agent_item(&mut self, index: usize) {
+    pub(crate) fn select_left_agent_item(&mut self, index: usize) {
         self.selected_left = index;
         self.project_chooser_context = None;
         self.close_diff_view();

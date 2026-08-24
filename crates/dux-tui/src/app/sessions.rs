@@ -4346,6 +4346,7 @@ mod tests {
         let mut app = App {
             engine,
             bindings,
+            missing_project_warning_gen: None,
             selected_left: 0,
             left_section: crate::app::LeftSection::Projects,
             selected_terminal_index: 0,

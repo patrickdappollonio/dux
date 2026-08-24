@@ -242,6 +242,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         fullscreen_overlay: FullscreenOverlay::None,
         startup_log_viewer: None,
         status: KeyedStatusController::with_clear_after(std::time::Duration::ZERO),
+        missing_project_warning_gen: None,
         prompt: PromptState::None,
         input_target: InputTarget::None,
         session_surface: crate::model::SessionSurface::Agent,

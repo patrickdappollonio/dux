@@ -154,6 +154,16 @@ pub struct App {
     pub(crate) fullscreen_overlay: FullscreenOverlay,
     pub(crate) startup_log_viewer: Option<StartupLogViewer>,
     pub(crate) status: KeyedStatusController,
+    /// The generation of the missing-project warning this App last wrote to the
+    /// anonymous status slot, so it can retire ITS OWN message when the
+    /// selection moves off the row and leave every other producer's alone.
+    ///
+    /// The check has to be by generation. `update_missing_project_warning` runs
+    /// on every selection move, the slot is shared, and several producers write
+    /// warnings to it, so "the line holds a warning" was true of the pinned
+    /// restart and theme warnings too and a Down key in the agent list wiped
+    /// them.
+    pub(crate) missing_project_warning_gen: Option<dux_core::statusline::Generation>,
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
     pub(crate) session_surface: SessionSurface,
@@ -3320,6 +3330,7 @@ impl App {
             fullscreen_overlay: FullscreenOverlay::None,
             startup_log_viewer: None,
             status,
+            missing_project_warning_gen: None,
             prompt: PromptState::None,
             input_target: InputTarget::None,
             session_surface: SessionSurface::Agent,
@@ -4074,9 +4085,20 @@ impl App {
     /// Set a warning that outlives the ordinary warning window because the
     /// condition it reports is still true: it stays until the user's next
     /// action writes over the anonymous slot, not until a timer.
-    pub(crate) fn set_pinned_warning(&mut self, message: impl Into<String>) {
-        self.set_warning(message);
+    ///
+    /// Returns the generation it wrote, so a producer that must retire its own
+    /// message later can tell it apart from whatever else has since taken the
+    /// slot.
+    pub(crate) fn set_pinned_warning(
+        &mut self,
+        message: impl Into<String>,
+    ) -> dux_core::statusline::Generation {
+        self.status
+            .set(Instant::now(), None, StatusTone::Warning, message);
         self.status.pin();
+        self.status
+            .anon_generation()
+            .expect("the warning just written is on the anonymous slot")
     }
 
     pub(crate) fn set_error(&mut self, message: impl Into<String>) {
@@ -4105,15 +4127,18 @@ impl App {
                 _ => None,
             });
         if let Some(path) = missing_path {
-            self.set_pinned_warning(format!("Project path not found: {path}"));
+            self.missing_project_warning_gen =
+                Some(self.set_pinned_warning(format!("Project path not found: {path}")));
             return;
         }
-        // Only clear if the current (most-recent) tone is Warning — don't clobber
-        // Info/Busy/Error statuses from other operations.
-        if matches!(
-            self.status.most_recent_tui(),
-            Some((StatusTone::Warning, _))
-        ) {
+        // Clear only the warning THIS helper wrote. It runs on every selection
+        // move, so a tone check ("the line holds a warning") also matched the
+        // pinned restart and theme warnings, and a move in the agent list wiped
+        // a message the user still had to act on. The generation names the exact
+        // message, so a slot somebody else has since written is left alone.
+        if let Some(generation) = self.missing_project_warning_gen.take()
+            && self.status.anon_generation() == Some(generation)
+        {
             self.set_info(String::new());
         }
     }
@@ -8101,20 +8126,18 @@ mod pinned_warning_tests {
     const WINDOW: Duration = Duration::from_secs(6);
 
     /// A warning that stays true for as long as the user leaves a row selected
-    /// is not a transient: the row is still there, so the reason is too.
+    /// is not a transient: the row is still there, so the reason is too. And
+    /// moving off the row is what retires it, through the real selection path.
     #[test]
-    fn the_missing_project_warning_holds_the_line_while_its_row_is_selected() {
+    fn the_missing_project_warning_holds_the_line_while_its_row_is_selected_and_goes_when_it_is_not()
+     {
         let mut app = test_support::test_app(test_support::default_bindings());
         app.status.set_clear_after(WINDOW);
         app.engine.projects[0].path_missing = true;
-        app.rebuild_left_items();
-        app.selected_left = app
-            .left_items()
-            .iter()
-            .position(|item| matches!(item, LeftItem::Session(_)))
-            .expect("the seeded agent needs a row");
+        let elsewhere = standalone_row(&mut app);
+        let missing_row = missing_project_row(&mut app);
 
-        app.update_missing_project_warning();
+        app.select_left_agent_item(missing_row);
         let message = app
             .status
             .most_recent_tui()
@@ -8136,14 +8159,72 @@ mod pinned_warning_tests {
             "it must survive the warning window while the row stays selected"
         );
 
-        // Moving off the row is what retires it.
-        app.engine.projects[0].path_missing = false;
-        app.update_missing_project_warning();
+        // Moving to a row with no missing project is what retires it, and the
+        // move goes through the same path a Down key takes.
+        app.select_left_agent_item(elsewhere);
         assert_eq!(
             app.status.most_recent_tui().map(|(_, message)| message),
             Some(String::new()),
             "leaving the row must clear the warning"
         );
+    }
+
+    /// The missing-project warning clears ITS OWN message and nothing else. It
+    /// runs on every selection move, so clearing whatever warning happens to be
+    /// on the line wipes standing warnings the user still has to act on.
+    #[test]
+    fn moving_the_selection_leaves_another_producers_pinned_warning_alone() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        app.status.set_clear_after(WINDOW);
+        let elsewhere = standalone_row(&mut app);
+        let agent_row = missing_project_row(&mut app);
+
+        // No project is missing here: the restart warning is the only thing on
+        // the line, and it is owed until the user restarts.
+        app.set_pinned_warning(workers::server_restart_warning(true));
+        app.select_left_agent_item(agent_row);
+        app.select_left_agent_item(elsewhere);
+        assert!(
+            app.status
+                .most_recent_tui()
+                .is_some_and(|(_, message)| message.contains("start it again")),
+            "moving the selection must not wipe a warning it never wrote: {}",
+            app.status.text()
+        );
+    }
+
+    /// The seeded managed agent's row, whose project is the one tests mark
+    /// missing.
+    fn missing_project_row(app: &mut App) -> usize {
+        app.rebuild_left_items();
+        app.left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
+            .expect("the seeded agent needs a row")
+    }
+
+    /// A second row to move onto: a standalone agent has no project at all, so
+    /// selecting it can never be the missing-project case.
+    fn standalone_row(app: &mut App) -> usize {
+        if !app
+            .engine
+            .sessions
+            .iter()
+            .any(|session| session.id == "standalone-1")
+        {
+            let mut standalone = app.engine.sessions[0].clone();
+            standalone.id = "standalone-1".to_string();
+            standalone.workspace =
+                dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                    folder_path: app.engine.paths.root.to_string_lossy().to_string(),
+                });
+            app.engine.sessions.push(standalone);
+        }
+        app.rebuild_left_items();
+        app.left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(index) if *index == 1))
+            .expect("the standalone agent needs a row")
     }
 
     /// A theme that will not load is a standing fact about the user's config,

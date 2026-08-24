@@ -1723,7 +1723,7 @@ fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput
 /// A background listener is restarted from inside dux, so the serving copy names
 /// that pair of commands; with nothing serving there is nothing to restart and
 /// the change simply waits for the next listener.
-fn server_restart_warning(serving_in_background: bool) -> &'static str {
+pub(crate) fn server_restart_warning(serving_in_background: bool) -> &'static str {
     match serving_in_background {
         true => {
             "Server settings changed in config, but a listener that is already bound cannot adopt \
