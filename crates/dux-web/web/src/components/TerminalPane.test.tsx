@@ -619,7 +619,7 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
   // The owner's browser tab closed. Nothing else would ever say so, because
   // ownership stopped following focus, and the card would name a device that is
   // gone. This pane is BACKGROUNDED, so it watches rather than auto-claiming.
-  it("says nobody is driving once the owner disconnects, to a backgrounded viewer", () => {
+  it("offers control once the owner disconnects, to a backgrounded viewer", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     act(() => last().onConnected("conn-self", "conn-other"))
     expect(screen.getByText("Active on another device")).toBeTruthy()
@@ -629,7 +629,7 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
     })
     try {
       act(() => notifyPtyOwner("s1", undefined, 7))
-      expect(screen.getByText("Nobody is driving")).toBeTruthy()
+      expect(screen.getByText("Take control")).toBeTruthy()
       expect(screen.queryByText("Active on another device")).toBeNull()
     } finally {
       Object.defineProperty(document, "visibilityState", {
@@ -651,7 +651,7 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
     pty.sendResize.mockClear()
     act(() => notifyPtyOwner("s1", undefined, 7))
     expect(screen.queryByText("Active on another device")).toBeNull()
-    expect(screen.getByText("Nobody is driving")).toBeTruthy()
+    expect(screen.getByText("Take control")).toBeTruthy()
     expect(pty.sendResize).not.toHaveBeenCalled()
   })
 

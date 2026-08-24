@@ -1084,25 +1084,24 @@ export function TerminalPane(props: TerminalPaneProps) {
           <Card className="w-full max-w-sm text-center">
             <CardHeader className="items-center gap-3">
               <MonitorSmartphone className="size-8 text-muted-foreground" />
-              {/* THREE TITLES, because there are three truths and the card used
-                  to tell only two of them. "Nobody is driving" is the one the
-                  owner-cleared broadcast made reachable: the device that was
+              {/* THREE TITLES for three truths. "Take control" is the one the
+                  owner-cleared broadcast makes reachable: the device that was
                   driving has disconnected, and nobody claims passively, so
-                  every viewer, foregrounded or not, keeps the card and this
-                  title until a deliberate act (the arc's own test asserts the
-                  foregrounded case). Saying "Active on another device" there
-                  would name a browser tab that has closed. */}
+                  every viewer, foregrounded or not, keeps the card until a
+                  deliberate act. It names the act rather than the absence:
+                  "Active on another device" would name a browser tab that has
+                  closed, and a card about who left is not the point. */}
               <CardTitle>
                 {takeoverLabel
                   ? `Open on ${takeoverLabel}`
                   : ownerPresent
                     ? "Active on another device"
-                    : "Nobody is driving"}
+                    : "Take control"}
               </CardTitle>
               <CardDescription>
                 {ownerPresent
-                  ? "Only one device can type at a time."
-                  : "Whoever was driving has disconnected."}{" "}
+                  ? "Only one device can type at a time. "
+                  : "No device is driving right now. "}
                 Take over to drive this{" "}
                 {kind === "agent" ? "agent" : "terminal"} from here.
               </CardDescription>

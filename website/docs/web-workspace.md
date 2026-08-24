@@ -143,7 +143,7 @@ so the screen you take over is clean from the first frame.
 > over**, reload, or navigate away and back, and it is yours. One tap is the whole cost of
 > switching devices.
 
-If the driving device disconnects, every card switches to **Nobody is driving** rather
+If the driving device disconnects, every card switches to **Take control** rather
 than naming a browser that has gone. The one device that gets its terminal back on its own
 is the one that lost it to a blip: come back from a dropped connection while the server is
 still holding your old, dead session, and you carry on typing (a page in the background

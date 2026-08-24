@@ -56,7 +56,7 @@
 //      is a blipped owner meeting its own ghost, and a foregrounded page takes
 //      its pty back with a flagged claim.
 //   5. an OWNER-CLEARED `pty.owner` (the driver disconnected): every client
-//      demotes and the card re-titles itself to "Nobody is driving". NOBODY
+//      demotes and the card re-titles itself to "Take control". NOBODY
 //      CLAIMS. Losing ownership is sticky until a deliberate act, and sitting
 //      on an open card is not one.
 //   6. the socket's CONN STATE: `failed` is the hard stop that means LOST; any
@@ -247,7 +247,7 @@ export function useTerminalOwnership(
   // driver disconnected and nobody holds the pty. Every client reads that as
   // "not me" (a missing id is "not us" by rule), so the fan-out below demotes
   // everyone, and that is ALL it does. LOSING OWNERSHIP IS STICKY: the
-  // broadcast re-titles the card to "Nobody is driving" and claims nothing,
+  // broadcast re-titles the card to "Take control" and claims nothing,
   // whatever this pane's visibility is.
   //
   // There used to be a passive claim here, taken by any mounted foregrounded
