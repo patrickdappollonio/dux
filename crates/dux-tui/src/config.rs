@@ -672,6 +672,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.always_show_tab_strip),
         },
         ConfigEntry::Field {
+            key: "tab_reaches_agent",
+            comment: Some(CommentSource::Static(
+                "# Send Tab and Shift-Tab to the agent in the center pane instead of moving\n# between panes with them. Default false: Tab has cycled panes since dux's\n# first version. Turn it on for agents that use Tab to autocomplete and\n# Shift-Tab to cycle modes. Panes still move either way, with the chords bound\n# under [keys] as focus_next and focus_prev (Ctrl-o and Ctrl-y by default).\n# Toggle at runtime from the TUI command palette, or the web UI's Preferences\n# dialog.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.tab_reaches_agent),
+        },
+        ConfigEntry::Field {
             key: "attention_indicator",
             comment: Some(CommentSource::Static(
                 "# Show an indicator when an agent asks for attention (a permission\n# prompt, a finished turn). Detected from the agent's terminal\n# notifications and bell. The TUI blinks a marker in the sidebar; the web\n# UI shows a dot, a browser-tab count, and a favicon dot. Set to false to\n# disable it everywhere.",
@@ -2632,6 +2639,19 @@ name = "test"
         assert!(saved.contains("[[projects]]"));
         assert!(saved.contains("project-1"));
         assert!(saved.contains("startup_command = \"echo ready\""));
+    }
+
+    /// The opt-in that hands Tab to the agent is documented where the user
+    /// meets it: the comment must name the default and the pane chords that
+    /// keep working once Tab is gone.
+    #[test]
+    fn canonical_template_documents_tab_reaches_agent() {
+        let rendered = render_default_config();
+        assert!(rendered.contains("tab_reaches_agent = false"));
+        assert!(
+            rendered.contains("Ctrl-o") && rendered.contains("Ctrl-y"),
+            "the comment must name the pane chords: {rendered}"
+        );
     }
 
     #[test]

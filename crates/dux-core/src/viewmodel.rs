@@ -252,6 +252,12 @@ pub struct BootstrapView {
     /// here.
     /// Older servers omit it, so the web treats a missing value as `false`.
     pub always_show_tab_strip: bool,
+    /// Mirrors `config.ui.tab_reaches_agent`: when true the TUI's typeable
+    /// center pane sends Tab and Shift-Tab to the agent instead of cycling
+    /// panes. Projected only so the web's Preferences dialog can show and
+    /// change it; nothing in the web UI reads it for its own behavior. Older
+    /// servers omit it, so the web treats a missing value as `false`.
+    pub tab_reaches_agent: bool,
     /// Mirrors `config.ui.attention_indicator`: whether an attention
     /// glyph/dot/tab-title/favicon cue is shown at all when an agent asks for
     /// attention (default true). The settings modal's "Both surfaces" group
@@ -1377,6 +1383,7 @@ impl Engine {
             favicon: self.config.server.favicon.clone(),
             agent_tabs_max: self.agent_tabs_max(),
             always_show_tab_strip: self.config.ui.always_show_tab_strip,
+            tab_reaches_agent: self.config.ui.tab_reaches_agent,
             attention_indicator: self.config.ui.attention_indicator,
             attention_on_bell: self.config.ui.attention_on_bell,
             global_default_provider: self.config.defaults.provider.clone(),
@@ -2424,6 +2431,17 @@ mod tests {
     }
 
     #[test]
+    fn tab_reaches_agent_is_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Default ships off: Tab keeps moving between panes.
+        assert!(!engine.bootstrap().tab_reaches_agent);
+
+        engine.config.ui.tab_reaches_agent = true;
+        assert!(engine.bootstrap().tab_reaches_agent);
+    }
+
+    #[test]
     fn pr_banner_position_is_projected_from_config() {
         let (mut engine, _tmp) = test_engine();
 
@@ -2903,6 +2921,7 @@ mod tests {
             "favicon",
             "status_clear_seconds",
             "always_show_tab_strip",
+            "tab_reaches_agent",
             "attention_indicator",
             "attention_on_bell",
             "global_default_provider",

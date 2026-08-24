@@ -1377,6 +1377,11 @@ pub struct UiConfig {
     /// Preferences dialog persists the new value here immediately; it is a
     /// shared preference, not a per-session override.
     pub always_show_tab_strip: bool,
+    /// Hand `Tab` and `Shift-Tab` to a live agent in the typeable center pane
+    /// instead of cycling panes with them. Default false, because Tab has moved
+    /// between panes since dux's first version. The pane chords bound to
+    /// `focus_next`/`focus_prev` move panes whatever this is set to.
+    pub tab_reaches_agent: bool,
     /// Show an indicator when an agent asks for attention (a permission prompt,
     /// a finished turn). Detected from the agent's terminal notifications and
     /// bell. When false, no attention glyph/dot/tab-title/favicon cue is shown on
@@ -1890,6 +1895,7 @@ impl Default for UiConfig {
             auto_reopen_agents: false,
             show_changes_pane: true,
             always_show_tab_strip: false,
+            tab_reaches_agent: false,
             attention_indicator: true,
             attention_on_bell: true,
             disable_automated_welcome_screen: false,
@@ -2444,6 +2450,7 @@ impl Default for Config {
                 auto_reopen_agents: false,
                 show_changes_pane: true,
                 always_show_tab_strip: false,
+                tab_reaches_agent: false,
                 attention_indicator: true,
                 attention_on_bell: true,
                 disable_automated_welcome_screen: false,
