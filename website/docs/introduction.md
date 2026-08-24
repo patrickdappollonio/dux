@@ -71,9 +71,11 @@ Both front ends lay the workspace out the same way:
 
 > [!TIP]
 > Every dux binding is configurable under `[keys]`, so you can free a specific chord for
-> the agent while windowed; see [Configuration](/docs/configuration#keybindings). The
-> `input-debugging` palette command shows exactly what dux receives for each keypress,
-> which is what you want open while crafting a binding.
+> the agent while windowed; see [Configuration](/docs/configuration#keybindings). Tab has
+> its own switch, `[ui] tab_reaches_agent`, because it moves between panes rather than
+> typing: turn it on and Tab and Shift-Tab go to the agent, with `Ctrl-o` and `Ctrl-y`
+> moving between panes instead. The `input-debugging` palette command shows exactly what
+> dux receives for each keypress, which is what you want open while crafting a binding.
 
 In the terminal UI, focus-next and focus-previous keys move between panes, and every
 pane has its own local key combinations; the in-app help overlay is the authoritative

@@ -172,6 +172,11 @@ shifted form, such as `shift-p`.
 > needs. The `input-debugging` palette command shows what dux receives for each keypress.
 > Full story in [Introduction](/docs/introduction#the-three-panes).
 
+Tab is the exception, because it moves between panes rather than typing. Set
+`tab_reaches_agent = true` under `[ui]` to send Tab and Shift-Tab to the agent in the
+windowed pane instead; `focus_next` and `focus_prev` (`Ctrl-o` and `Ctrl-y` by default)
+move between panes whichever way it is set.
+
 Rather than memorizing hotkeys, reach most actions through the terminal UI's command
 palette. It is the fastest way to discover what dux can do.
 

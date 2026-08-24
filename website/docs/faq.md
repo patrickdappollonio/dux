@@ -48,8 +48,14 @@ See [Custom CLI Agents](/docs/custom-agents).
 
 No. Focusing the agent's pane is enough: what you type goes to the agent right there in
 the windowed layout, while dux's own shortcuts (all modifier chords) keep working.
-Fullscreen is the escape hatch for when the agent needs every key verbatim, Tab
-completion and readline shortcuts included. The in-app help overlay shows its binding.
+Fullscreen is the escape hatch for when the agent needs every key verbatim, readline
+shortcuts included. The in-app help overlay shows its binding.
+
+Tab is the one exception worth naming, because it moves between panes by default. If your
+agent uses Tab to autocomplete or Shift-Tab to cycle modes, set `tab_reaches_agent = true`
+under `[ui]` (or turn on "Send Tab to the agent" in the web UI's Preferences) and both
+keys go to the agent in the windowed pane. `Ctrl-o` and `Ctrl-y` move between panes either
+way.
 
 ### The mouse wheel or PgUp won't scroll an agent. Why?
 
