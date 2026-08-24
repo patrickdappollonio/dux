@@ -495,9 +495,16 @@ impl TailscaleModeOutcome {
                         "{saved} dux is watching the Tailscale interface and binds your \
                          Tailscale address by itself when it appears."
                     ),
-                    TailscaleMode::Yes | TailscaleMode::No => format!(
+                    // On `yes` the detection found an address dux is already
+                    // reachable on (a wildcard primary, or the tailnet address
+                    // itself), so a second listener would be the same socket.
+                    TailscaleMode::Yes => format!(
                         "{saved} There is no separate Tailscale listener to add or remove; \
                          the address dux already serves covers it."
+                    ),
+                    TailscaleMode::No => format!(
+                        "{saved} Nothing was serving on your Tailscale address, and nothing \
+                         will be; dux is serving on its other address(es) only."
                     ),
                 },
             },
@@ -4244,6 +4251,36 @@ github_integration = false
             undetected.message.contains("auto"),
             "the undetected warning must point at the mode that would look again: {}",
             undetected.message
+        );
+    }
+
+    #[test]
+    fn a_change_that_left_the_listeners_alone_says_why_per_mode() {
+        // The same outcome means two different things. On `yes` it is "the
+        // address dux already serves reaches your tailnet, so there is no second
+        // listener to add"; on `no` it is "there was nothing to drop".
+        let covered = TailscaleModeOutcome::Applied { bound: None }.report(TailscaleMode::Yes);
+        assert!(
+            covered.message.contains("already serves covers it"),
+            "{}",
+            covered.message
+        );
+        let off = TailscaleModeOutcome::Applied { bound: None }.report(TailscaleMode::No);
+        assert!(
+            !off.message.contains("covers it"),
+            "\"no\" must not claim the address dux serves covers the tailnet: {}",
+            off.message
+        );
+        assert!(
+            off.message.contains("nothing will be"),
+            "\"no\" says nothing was bound and nothing is going to be: {}",
+            off.message
+        );
+        let watching = TailscaleModeOutcome::Applied { bound: None }.report(TailscaleMode::Auto);
+        assert!(
+            watching.message.contains("watching"),
+            "{}",
+            watching.message
         );
     }
 
