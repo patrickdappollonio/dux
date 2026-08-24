@@ -186,6 +186,9 @@ pub enum Action {
     /// action says so rather than pretending to act.
     TakeOverTerminal,
     ToggleAlwaysShowTabs,
+    /// Flip `ui.tab_reaches_agent`: whether the typeable center pane sends Tab
+    /// and Shift-Tab to the agent instead of cycling panes with them.
+    ToggleTabReachesAgent,
     /// Open the read-only Agent Info modal for the focused agent (name, provider,
     /// branch lineage, worktree, status).
     OpenAgentInfo,
@@ -338,6 +341,7 @@ impl Action {
             Action::SetTailscaleMode => "set_tailscale_mode",
             Action::TakeOverTerminal => "take_over_terminal",
             Action::ToggleAlwaysShowTabs => "toggle_always_show_tabs",
+            Action::ToggleTabReachesAgent => "toggle_tab_reaches_agent",
             Action::OpenAgentInfo => "open_agent_info",
             Action::ShowWelcomeScreen => "show_welcome_screen",
             Action::ShowReleaseNotes => "show_release_notes",
@@ -566,6 +570,9 @@ impl Action {
             Action::ToggleAlwaysShowTabs => {
                 "Toggle always showing the agent tab strip, even with a single tab."
             }
+            Action::ToggleTabReachesAgent => {
+                "Toggle whether Tab and Shift-Tab reach the agent instead of moving between panes."
+            }
             Action::OpenAgentInfo => {
                 "Show the selected agent's details: provider, branch lineage, worktree, and status."
             }
@@ -720,6 +727,7 @@ impl Action {
             | Action::SetTailscaleMode
             | Action::TakeOverTerminal
             | Action::ToggleAlwaysShowTabs
+            | Action::ToggleTabReachesAgent
             | Action::OpenAgentInfo
             | Action::ShowWelcomeScreen
             | Action::ShowReleaseNotes

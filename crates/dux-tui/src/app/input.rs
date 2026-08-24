@@ -9278,6 +9278,31 @@ impl App {
         ));
     }
 
+    /// Flip `ui.tab_reaches_agent` and persist it to `config.toml`. Shared by the
+    /// TUI and web command surfaces (the web toggles the same field via
+    /// `WireCommand::ToggleTabReachesAgent`), and every reader consults
+    /// `engine.config` live, so the next keystroke already routes the new way.
+    pub(crate) fn toggle_tab_reaches_agent(&mut self) {
+        let next = !self.engine.config.ui.tab_reaches_agent;
+        self.engine.config.ui.tab_reaches_agent = next;
+        self.engine
+            .config_writer
+            .save_lazy(self.engine.config.clone());
+        let palette_key = self.bindings.label_for(Action::OpenPalette);
+        let next_pane = self.bindings.label_for(Action::FocusNext);
+        let prev_pane = self.bindings.label_for(Action::FocusPrev);
+        let message = if next {
+            format!(
+                "Tab and Shift-Tab now reach the agent in the center pane. Use {next_pane} and {prev_pane} to move between panes. Press {palette_key} to open the palette and toggle back."
+            )
+        } else {
+            format!(
+                "Tab moves between panes again. Press {palette_key} to open the palette and toggle back."
+            )
+        };
+        self.set_info(message);
+    }
+
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
         // A prompt that opened MID-DRAG would consume the release below and
         // strand the forwarded button on the child (a stuck button, exactly
@@ -22635,6 +22660,20 @@ cyan = "#00ffff"
         app.execute_command("toggle-always-show-tabs".to_string())
             .unwrap();
         assert!(!app.engine.config.ui.always_show_tab_strip);
+    }
+
+    #[test]
+    fn toggle_tab_to_agent_flips_and_persists() {
+        let mut app = test_app(default_bindings());
+        assert!(!app.engine.config.ui.tab_reaches_agent);
+
+        app.execute_command("toggle-tab-to-agent".to_string())
+            .unwrap();
+        assert!(app.engine.config.ui.tab_reaches_agent);
+
+        app.execute_command("toggle-tab-to-agent".to_string())
+            .unwrap();
+        assert!(!app.engine.config.ui.tab_reaches_agent);
     }
 
     #[test]

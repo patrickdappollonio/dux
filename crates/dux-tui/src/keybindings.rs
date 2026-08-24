@@ -1367,6 +1367,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        action: Action::ToggleTabReachesAgent,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::ToggleRandomizedPetNameDefault,
         default_keys: &[],
         scopes: &[],
@@ -2759,6 +2766,7 @@ mod tests {
             "toggle-randomized-pet-name-default",
             "toggle-remove-git-pane",
             "toggle-sidebar",
+            "toggle-tab-to-agent",
         ];
 
         assert_eq!(

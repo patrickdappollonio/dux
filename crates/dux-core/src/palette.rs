@@ -554,6 +554,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // the Preferences dialog), not an app-menu entry.
     },
     PaletteCommand {
+        action: Action::ToggleTabReachesAgent,
+        name: "toggle-tab-to-agent",
+        description: "Toggle whether Tab reaches the agent instead of moving between panes",
+        // The web exposes this as a PREFERENCE row (ui.tab_reaches_agent in the
+        // Preferences dialog), not an app-menu entry. Only the TUI acts on the
+        // value; the row is there so it can be changed from a browser.
+    },
+    PaletteCommand {
         action: Action::ToggleRandomizedPetNameDefault,
         name: "toggle-randomized-pet-name-default",
         description: "Toggle whether new agent prompts start with a random pet name",
@@ -664,6 +672,17 @@ mod tests {
         assert!(
             !PALETTE_COMMANDS.iter().any(|c| c.name == "new-tab"),
             "the old new-tab palette command name should no longer exist"
+        );
+    }
+
+    #[test]
+    fn tab_to_agent_toggle_is_in_the_palette() {
+        assert!(
+            PALETTE_COMMANDS
+                .iter()
+                .any(|c| c.action == Action::ToggleTabReachesAgent
+                    && c.name == "toggle-tab-to-agent"),
+            "expected a toggle-tab-to-agent palette command"
         );
     }
 

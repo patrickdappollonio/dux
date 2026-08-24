@@ -236,6 +236,11 @@ pub enum WireCommand {
     /// refetch carries the new value so the web shows (or stops showing) the
     /// agent tab strip at a single tab. Low-stakes preference, lazy write.
     ToggleAlwaysShowTabStrip {},
+    /// Flip `ui.tab_reaches_agent` and persist it, mirroring the TUI's
+    /// `toggle-tab-to-agent` palette command. Only the TUI acts on the value; the
+    /// web carries the toggle so the setting can be changed from a browser.
+    /// Low-stakes preference, lazy write.
+    ToggleTabReachesAgent {},
     /// Save `[server] tailscale` as one of the three modes, mirroring the TUI's
     /// `set-tailscale-mode` palette command and the web Preferences row.
     ///
@@ -890,7 +895,7 @@ impl SettingsPatch {
 impl WireCommand {
     /// True for the commands that mutate config-static state surfaced in the
     /// bootstrap document — the macro set, the workspace-wide env map, the
-    /// Changes-pane visibility flag, and the three preference toggles. These
+    /// Changes-pane visibility flag, and the preference toggles. These
     /// save to `config.toml` (eager for github-integration, lazy for the
     /// low-stakes preferences) and adopt the change into the running config in
     /// place (no disk reload), so the web layer must fire a `config.changed`
@@ -924,6 +929,7 @@ impl WireCommand {
                 | WireCommand::ToggleCopyOnSelect {}
                 | WireCommand::ToggleGithubIntegration {}
                 | WireCommand::ToggleAlwaysShowTabStrip {}
+                | WireCommand::ToggleTabReachesAgent {}
                 | WireCommand::SetTailscaleMode { .. }
         )
     }
@@ -1411,6 +1417,14 @@ impl Engine {
             }
             WireCommand::ToggleAlwaysShowTabStrip {} => {
                 let status = self.toggle_always_show_tab_strip();
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    detached: None,
+                    created_op_id: None,
+                });
+            }
+            WireCommand::ToggleTabReachesAgent {} => {
+                let status = self.toggle_tab_reaches_agent();
                 return Ok(WireCommandOutcome {
                     status: Some(status),
                     detached: None,
@@ -1966,6 +1980,20 @@ impl Engine {
             "Agent tab strip is now always shown, even with a single tab. Change it back in Preferences."
         } else {
             "Agent tab strip now shows only once an agent has two or more tabs. Change it back in Preferences."
+        };
+        WireStatus::new("info", message.to_string())
+    }
+
+    /// Flip `ui.tab_reaches_agent` and persist it, mirroring the TUI's
+    /// `toggle-tab-to-agent` palette command. Low-stakes preference, lazy write.
+    fn toggle_tab_reaches_agent(&mut self) -> WireStatus {
+        let next = !self.config.ui.tab_reaches_agent;
+        self.config.ui.tab_reaches_agent = next;
+        self.config_writer.save_lazy(self.config.clone());
+        let message = if next {
+            "Tab and Shift-Tab now reach the agent in the terminal app's center pane. The pane chords still move between panes. Change it back in Preferences."
+        } else {
+            "Tab moves between panes again in the terminal app. Change it back in Preferences."
         };
         WireStatus::new("info", message.to_string())
     }
@@ -4242,6 +4270,7 @@ impl Engine {
             | WireCommand::ToggleCopyOnSelect {}
             | WireCommand::ToggleGithubIntegration {}
             | WireCommand::ToggleAlwaysShowTabStrip {}
+            | WireCommand::ToggleTabReachesAgent {}
             | WireCommand::SetTailscaleMode { .. }
             | WireCommand::KillSessionPty { .. }
             | WireCommand::DetachAgent { .. }
@@ -4249,7 +4278,7 @@ impl Engine {
             | WireCommand::ChangeAgentTabProvider { .. }
             | WireCommand::SetLastFocusedTab { .. } => {
                 unreachable!(
-                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -5634,6 +5663,10 @@ mod tests {
                 r#"{"command":"toggle_always_show_tab_strip","args":{}}"#,
                 WireCommand::ToggleAlwaysShowTabStrip {},
             ),
+            (
+                r#"{"command":"toggle_tab_reaches_agent","args":{}}"#,
+                WireCommand::ToggleTabReachesAgent {},
+            ),
         ] {
             let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
             assert_eq!(cmd, expected);
@@ -5975,6 +6008,33 @@ mod tests {
             .apply_wire(WireCommand::ToggleAlwaysShowTabStrip {})
             .expect("apply toggle back");
         assert_eq!(engine.config.ui.always_show_tab_strip, start);
+    }
+
+    #[test]
+    fn apply_wire_toggle_tab_reaches_agent_flips_and_persists() {
+        let (mut engine, _tmp) = test_engine();
+        let start = engine.config.ui.tab_reaches_agent;
+
+        engine
+            .apply_wire(WireCommand::ToggleTabReachesAgent {})
+            .expect("apply toggle");
+        assert_eq!(
+            engine.config.ui.tab_reaches_agent, !start,
+            "in-memory value must flip immediately"
+        );
+
+        engine.config_writer.flush();
+        let disk =
+            std::fs::read_to_string(&engine.paths.config_path).expect("read config after flush");
+        assert!(
+            disk.contains(&format!("tab_reaches_agent = {}", !start)),
+            "flushed config must carry the flipped value, got:\n{disk}"
+        );
+
+        engine
+            .apply_wire(WireCommand::ToggleTabReachesAgent {})
+            .expect("apply toggle back");
+        assert_eq!(engine.config.ui.tab_reaches_agent, start);
     }
 
     #[test]

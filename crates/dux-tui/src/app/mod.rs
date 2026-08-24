@@ -4451,6 +4451,10 @@ impl App {
                 self.toggle_always_show_tab_strip();
                 Ok(())
             }
+            "toggle-tab-to-agent" => {
+                self.toggle_tab_reaches_agent();
+                Ok(())
+            }
             "help" => {
                 self.help_scroll = Some(0);
                 Ok(())
