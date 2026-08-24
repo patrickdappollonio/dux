@@ -221,7 +221,7 @@ port = 8080
 # Whether dux also binds the machine's Tailscale address, so tailnet devices can
 # reach it. "auto" (the default) binds it whenever the interface exists and keeps
 # watching, so the listener comes and goes with your tailnet connection; "yes"
-# binds it once at startup and never looks again; "no" never binds it. If the
+# binds it once and then stops looking; "no" never binds it. If the
 # tailscale CLI is missing or the daemon is down, dux warns and serves the
 # configured host only.
 tailscale = "auto"

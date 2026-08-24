@@ -175,6 +175,8 @@ pub enum Action {
     StartBackgroundServer,
     /// Palette-only: stop the background web server, leaving every agent running.
     StopBackgroundServer,
+    /// Palette-only: open the `[server] tailscale` picker. The web counterpart is
+    /// the Preferences dialog's Tailscale row.
     SetTailscaleMode,
     /// Palette-only: take over input for the terminal in the center pane, so this
     /// device drives it and whichever device was driving becomes a watcher.

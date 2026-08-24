@@ -369,9 +369,9 @@ pub enum TailscaleMode {
     /// `tailscale_enabled = true` becomes.
     #[default]
     Auto,
-    /// Bind the Tailscale address once, at startup, and never look again. If it
-    /// is not there at startup dux warns and serves the configured host only,
-    /// for the whole run. This is the pre-tri-state behavior.
+    /// Bind the Tailscale address once and then stop looking. If it is not there
+    /// dux warns and serves the configured host only until the mode changes.
+    /// This is the pre-tri-state behavior.
     Yes,
     /// Never bind it and never run the detection at all. What the old
     /// `tailscale_enabled = false` becomes, and what `--no-tailscale` forces for
@@ -422,9 +422,8 @@ impl TailscaleMode {
         }
     }
 
-    /// Whether the Tailscale leg is watched for the whole run, so it can be
-    /// bound and dropped as the interface comes and goes. True only for
-    /// [`Self::Auto`].
+    /// Whether the Tailscale leg is watched, so it can be bound and dropped as
+    /// the interface comes and goes. True only for [`Self::Auto`].
     pub fn watches_interface(self) -> bool {
         match self {
             Self::Auto => true,

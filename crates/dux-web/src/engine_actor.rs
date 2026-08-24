@@ -1928,8 +1928,9 @@ pub(crate) struct EngineService {
     /// mutation performs). Drives the clobber-safe reconcile in `handle_request`.
     config_disk_ahead: bool,
     shutdown_echo: ShutdownEcho,
-    /// The serve's live Tailscale-mode handle. Empty when nothing is serving, and
-    /// when the terminal UI's background mode owns the reload instead.
+    /// The serve's live Tailscale-mode handle, empty only when nothing is
+    /// serving. Every serve fills it, background mode included; background mode
+    /// simply does not run this loop, so its reload is the terminal UI's.
     tailscale_mode_control: Arc<std::sync::OnceLock<crate::serve_legs::TailscaleModeControl>>,
 }
 
@@ -2547,9 +2548,10 @@ pub(crate) fn run_engine_loop(
 
                         // `[server] tailscale` IS live, so a reload that changed
                         // it acts rather than warning. This is the reload owner
-                        // for `dux server` and for the flip; the background mode
-                        // is owned by the terminal UI's own reload, which is why
-                        // this slot is empty there.
+                        // for `dux server` and for the flip. Background mode
+                        // fills the same slot but never runs this loop, so its
+                        // reload is the terminal UI's and there is no double
+                        // apply.
                         if previous_tailscale != next_tailscale
                             && let Some(control) = svc.tailscale_mode_control.get()
                         {

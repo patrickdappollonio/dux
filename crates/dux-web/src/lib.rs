@@ -731,7 +731,6 @@ struct PendingDetect {
     /// The generation this detection belongs to. A newer request bumps the
     /// counter, and the answer of an older one is discarded.
     generation: u64,
-    mode: TailscaleMode,
     reply: tokio::sync::oneshot::Sender<TailscaleModeOutcome>,
     task: tokio::task::JoinHandle<Result<IpAddr, TailscaleUnavailable>>,
 }
@@ -1073,7 +1072,6 @@ async fn apply_mode_request(
                 let detect = Arc::clone(&ts.detect);
                 *pending_detect = Some(PendingDetect {
                     generation: ts.generation,
-                    mode,
                     reply,
                     // `spawn_blocking`, never the loop: the probe is a bounded
                     // but blocking subprocess call, and awaiting it inline would
@@ -1114,7 +1112,6 @@ async fn finish_detection(
 ) {
     let PendingDetect {
         generation,
-        mode,
         reply,
         task: _,
     } = pending;
@@ -1160,10 +1157,7 @@ async fn finish_detection(
         // A leg was wanted and none is up: the address is there but its listener
         // would not bind.
         (Some(_), None) => TailscaleModeOutcome::BindFailed,
-        _ => {
-            let _ = mode;
-            TailscaleModeOutcome::Applied { bound }
-        }
+        _ => TailscaleModeOutcome::Applied { bound },
     });
 }
 

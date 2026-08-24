@@ -49,9 +49,10 @@ impl TailscaleUnavailable {
 ///
 /// The two modes end differently and the message has to say which one the reader
 /// is in: on [`TailscaleMode::Auto`] this is a "not yet" and dux keeps looking,
-/// on [`TailscaleMode::Yes`] it is settled for the whole run. Telling an `auto`
-/// user their tailnet is unavailable, when dux is about to bind it the moment
-/// tailscaled connects, is the kind of stale warning people learn to ignore.
+/// on [`TailscaleMode::Yes`] nothing looks again until the mode is changed.
+/// Telling an `auto` user their tailnet is unavailable, when dux is about to
+/// bind it the moment tailscaled connects, is the kind of stale warning people
+/// learn to ignore.
 ///
 /// [`TailscaleMode::No`] never reaches here (nothing is detected), and the
 /// function stays exhaustive over the enum so a fourth mode is a compile error.
