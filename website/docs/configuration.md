@@ -173,7 +173,7 @@ path = "$HOME/projects/web-app"
 name = "web-app"
 startup_command = """
 npm install
-ln -sfn "$DUX_WORKTREE_PATH/.env.local" .env
+ln -sfn "$DUX_PROJECT_PATH/.env.local" .env
 """
 ```
 
