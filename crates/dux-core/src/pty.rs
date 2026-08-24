@@ -5316,15 +5316,11 @@ mod tests {
 
     #[test]
     fn subscribe_after_exit_does_not_leak_a_dead_subscriber() {
-        // G5 regression: a subscribe landing after the reader thread's
-        // one-shot `subs.clear()` (on EOF) used to attach a live subscriber to
-        // a PTY that will never clear its subscriber list again — the
-        // receiver would see only `Timeout`, never `Disconnected`, so a web
-        // forwarder blocked on it would never complete and its socket/permit/
-        // sub-quota slot would leak until the client disconnected. `subscribe`
-        // now checks `is_exited()` (monotonic, set once by the reader thread)
-        // before registering, so a post-exit subscribe never joins the list
-        // and its receiver observes `Disconnected` immediately.
+        // `subscribe` checks `is_exited()` (monotonic, set once by the reader
+        // thread) before registering, so a subscribe landing after the reader
+        // thread's one-shot `subs.clear()` on EOF never joins a subscriber list
+        // that will never clear again, and its receiver observes `Disconnected`
+        // immediately instead of only ever seeing `Timeout`.
         let args = vec!["-c".to_string(), "exit 0".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");

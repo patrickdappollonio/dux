@@ -815,7 +815,7 @@ mod tests {
     #[test]
     fn tui_keyed_clear_dismisses_the_line() {
         // Verifies the TUI most-recent-wins projection: a matching keyed clear
-        // removes the entry so the TUI line becomes empty (Task 11).
+        // removes the entry so the TUI line becomes empty.
         let t0 = Instant::now();
         let mut c = KeyedStatusController::with_clear_after(Duration::ZERO);
         let g = c.set(t0, Some("pull".into()), StatusTone::Busy, "Pulling\u{2026}");

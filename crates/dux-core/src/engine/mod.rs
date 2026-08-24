@@ -1168,14 +1168,14 @@ impl Engine {
     /// `PersistGlobalEnv` / `UpdateMacros` write `config.toml` directly through
     /// the engine's config writer. `PersistProject` / `RemoveProject` write
     /// SQLite first and only mirror the change into `config.toml` afterward (via
-    /// `persist_projects_to_config`, wired up in Task 6); deferring them is still
-    /// correct so that mirror runs against the reloaded project set rather than a
-    /// stale one. `ReloadConfig` / `RecoverConfig` drive the barrier themselves
-    /// and are deliberately excluded. Provider/theme/pane-width saves are surface
+    /// `persist_projects_to_config`); deferring them is still correct so that
+    /// mirror runs against the reloaded project set rather than a stale one.
+    /// `ReloadConfig` / `RecoverConfig` drive the barrier themselves and are
+    /// deliberately excluded. Provider/theme/pane-width saves are surface
     /// (TUI App) handlers that currently write `config.toml` directly (not through
     /// `Engine::config_writer`), so they are NOT covered by this deferral nor by
-    /// the writer's quiesce backstop; routing them through the writer is later-task
-    /// work, and until then a save from those paths during a reload is unguarded.
+    /// the writer's quiesce backstop, and a save from those paths during a reload
+    /// is unguarded.
     fn is_config_mutating(cmd: &Command) -> bool {
         matches!(
             cmd,
@@ -8300,10 +8300,10 @@ mod tab_ops_tests {
 
     #[test]
     fn change_agent_provider_resume_available_matches_tab_resume_decision_under_collision() {
-        // G2 regression: `change_agent_provider` used to derive resume_available
-        // from `should_resume_session`, which is collision-blind. With a live
-        // same-provider extra tab, it must report `false` like
-        // `tab_resume_decision` (and like its sibling `change_tab_provider`).
+        // `change_agent_provider` must derive resume_available from
+        // `tab_resume_decision`, not the collision-blind `should_resume_session`:
+        // with a live same-provider extra tab it must report `false`, like its
+        // sibling `change_tab_provider`.
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
         session.started_providers = vec!["claude".into()];

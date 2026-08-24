@@ -1221,7 +1221,7 @@ impl App {
                 // through the eager queue (with SQLite rollback on failure). Do
                 // NOT write it a second time here — that would be a double write.
                 // The other arms route their config write through save_eager via
-                // update_config_projects_from_runtime (Task 7).
+                // update_config_projects_from_runtime.
                 self.set_info(status_message);
             }
 

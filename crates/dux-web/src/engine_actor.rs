@@ -2614,8 +2614,8 @@ fn peek_apply_reloaded_config(reaction: &EventReaction) -> Option<&dux_core::con
 /// refreshes the Vec snapshot watch (all open statuses, for clients connecting
 /// mid-operation), and broadcasts it LIVE so a transient pending flash is never
 /// coalesced away; [`tick`](Self::tick) — called once per loop iteration —
-/// expires timed-out entries, pushes removed keys onto `clear_tx` (so Task 7's
-/// WS forwarder sends `StatusCleared` frames), and upgrades stale Busy entries
+/// expires timed-out entries, pushes removed keys onto `clear_tx` (so the WS
+/// forwarder sends `StatusCleared` frames), and upgrades stale Busy entries
 /// to Warning (busy-timeout). The `send` method name and broadcast return type
 /// let the loop's existing call sites stay unchanged.
 struct StatusEmitter {
@@ -4884,7 +4884,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Change-gated spine check + self-healing backstop (Task 9)
+    // Change-gated spine check + self-healing backstop
     //
     // These drive the gating logic (`SpineCheck`, `poll_streaming_transitions`)
     // directly rather than through the async actor thread, so they are

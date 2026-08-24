@@ -3260,14 +3260,11 @@ mod tests {
 
     #[test]
     fn begin_delete_session_waits_for_a_straggler_already_in_terminating_ptys() {
-        // G6 regression: `begin_delete_session` used to compute its `live_tabs`
-        // barrier purely from `providers.contains_key`, so a tab closed moments
-        // earlier via `close_tab` — already out of `providers` and parked in
-        // `terminating_ptys` under its own SIGTERM grace period, but still an
-        // alive child process — was invisible to the barrier. The worktree
-        // removal would fire as soon as `providers` looked empty, racing that
-        // still-alive straggler's use of the worktree as its cwd. It must now be
-        // folded into the group barrier alongside any still-live tab.
+        // `begin_delete_session`'s `live_tabs` barrier must fold in a tab that
+        // is already out of `providers` but still parked in `terminating_ptys`
+        // under its own SIGTERM grace period: that process is still alive and
+        // still using the worktree as its cwd, so the barrier must not clear
+        // until it does too.
         use crate::engine::BeginDeleteSessionOutcome;
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");

@@ -6135,14 +6135,12 @@ mod tests {
 
     #[test]
     fn apply_wire_force_reconnect_clears_in_flight_launch_key() {
-        // G3 regression: the force branch of `reconnect_session` used to
-        // hand-roll the tab-runtime clear (providers/pins/pty_activity/
-        // pty_input/resume_fallback) and missed the in-flight `AgentLaunch`
-        // key. A ForceReconnect racing a (stale) in-flight launch for that tab
-        // left the key set, so the `DispatchAgentLaunch` chokepoint refused the
-        // new launch with "already launching". Routing through
-        // `clear_tab_runtime` fixes it: the stale key is cleared before the
-        // new launch is dispatched, so it proceeds instead of being refused.
+        // The force branch of `reconnect_session` must clear tab runtime state
+        // through `clear_tab_runtime`, which also drops the in-flight
+        // `AgentLaunch` key: a ForceReconnect racing a stale in-flight launch
+        // for that tab would otherwise leave the key set, and the
+        // `DispatchAgentLaunch` chokepoint would refuse the new launch with
+        // "already launching".
         let (mut engine, tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
         let mut session = sample_session("s1", "p1", "feat");

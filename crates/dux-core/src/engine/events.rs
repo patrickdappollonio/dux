@@ -6821,7 +6821,7 @@ mod tests {
 
     // ── spawn_loop_worker primitive ───────────────────────────────────────
 
-    // ── Keyed status pairs (Task 9) ──────────────────────────────────────
+    // ── Keyed status pairs ──────────────────────────────────────────────
 
     #[test]
     fn pull_completed_project_ok_carries_keyed_status() {

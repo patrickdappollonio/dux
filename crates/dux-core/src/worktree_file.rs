@@ -1278,7 +1278,7 @@ mod tests {
 
     #[test]
     fn read_file_git_objects_is_not_readable_via_read_file() {
-        // .git/objects is excluded from the listing (Task 1) but the read endpoint
+        // .git/objects is excluded from the listing but the read endpoint
         // could still be called directly. It is binary content; the binary flag
         // catches it (or size-cap for pack files). This test verifies the path
         // IS reachable (so the guard is on `read_only`, not an error) but the content

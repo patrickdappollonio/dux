@@ -10329,8 +10329,8 @@ not_a_real_action = ["x"]
         };
 
         app.resolve_config_reload_failed(true);
-        // RecoverConfig is now synchronous (Task 5): it writes through the engine
-        // while holding the quiesce barrier and returns the FINAL status directly.
+        // RecoverConfig is synchronous: it writes through the engine while
+        // holding the quiesce barrier and returns the FINAL status directly.
         // There is no trailing Busy (which would never clear) and nothing to drain.
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
         assert_eq!(

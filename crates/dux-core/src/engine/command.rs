@@ -723,10 +723,8 @@ impl Engine {
                 // lingering in `closing_sessions` past the synchronous delete.
                 if self.closing_sessions.contains(&session_id) {
                     // Log the refusal so it shows up in dux.log even when a
-                    // caller ignores the returned view's `launched` flag (a web
-                    // launch path used to do exactly that and swallow this
-                    // refusal silently — see the G4 fix in dux-web's
-                    // `launch_agent`).
+                    // caller ignores the returned view's `launched` flag, as
+                    // dux-web's `launch_agent` does.
                     crate::logger::warn(&format!(
                         "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": session \"{session_id}\" is being deleted"
                     ));
