@@ -167,7 +167,7 @@ function FileRow({
         <bdi dir="ltr">{file.path}</bdi>
       </span>
 
-      {/* Status marker — a neutral file-status icon (shared FileStatusIcon),
+      {/* Status marker: a neutral file-status icon (shared FileStatusIcon),
           with a tooltip naming the status (Modified/Added/Deleted/…). It rides
           the trailing cluster because the leading slot carries the checkbox. */}
       <FileStatusIcon status={file.status} />
