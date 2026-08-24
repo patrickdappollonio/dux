@@ -5,25 +5,22 @@ group: Guides
 order: 20
 ---
 
-Macros are named text snippets stored in your config. When you trigger one, dux
-shows only the macros that make sense for whatever is currently focused (agent
-pane or terminal pane) and writes the selected text directly into the PTY as if
-you had typed it yourself. Good for prompts you repeat constantly, long build
-commands you never want to mistype, or anything you find yourself copy-pasting.
+Macros are named text snippets stored in your config. Trigger one and dux types it into
+the focused agent or terminal for you. Good for prompts you repeat constantly, long
+build commands you never want to mistype, or anything you keep copy-pasting.
 
-The same `[macros]` config drives both the terminal UI and the web UI. There is
-one list, defined once; the TUI macro bar and the web macro picker both read it,
-and edits made in either place (or by hand in the file) land in the same block.
+One `[macros]` list drives both the terminal UI and the web UI. Edits made in either
+place, or by hand in the file, land in the same block.
 
 ## Defining macros
 
-Macros live under `[macros]` in `config.toml`. Each entry is a quoted name
-mapped to an inline table with two fields:
+Macros live under `[macros]` in `config.toml`. Each entry is a quoted name mapped to an
+inline table with two fields:
 
 | Field     | Type   | Required | Description |
 |-----------|--------|----------|-------------|
-| `text`    | string | yes      | The text that gets sent to the PTY when you trigger this macro. |
-| `surface` | string | yes      | Which pane the macro appears in. Accepted values: `"agent"`, `"terminal"`, or `"both"`. |
+| `text`    | string | yes      | The text sent when you trigger this macro. |
+| `surface` | string | yes      | Which pane the macro appears in: `"agent"`, `"terminal"`, or `"both"`. |
 
 ```toml
 [macros]
@@ -32,164 +29,128 @@ mapped to an inline table with two fields:
 "Lint"   = { text = "cargo clippy",              surface = "both" }
 ```
 
-Names are arbitrary strings: use whatever is memorable and scannable in the
-picker list. Declaration order in the file is preserved in the UI.
+Names are arbitrary strings: use whatever is scannable in the picker list. Declaration
+order in the file is preserved in the UI.
 
 ### Surface values
 
-The `surface` field controls which pane the macro appears in when you open the
-macro bar:
+- `"agent"`: shown only when the agent pane is focused. For prompts you send to the AI.
+- `"terminal"`: shown only when the terminal pane is focused. For shell commands you
+  would rather not retype.
+- `"both"`: shown on either pane.
 
-- `"agent"`: shown only when the agent pane is focused. Use this for prompts
-  you send to the AI (review requests, refactoring instructions, etc.).
-- `"terminal"`: shown only when the terminal pane is focused. Use this for
-  shell commands you'd rather not retype.
-- `"both"`: shown on either pane. Useful for text that makes sense in either
-  context.
-
-Macros that don't match the current surface are filtered out automatically, so
-the picker stays short.
+Macros that do not match the current surface are filtered out, so the picker stays
+short.
 
 ### Multi-line text
 
-You can write multi-line text by including `\n` in a quoted string or by using
-a TOML multi-line basic string. dux translates every newline to Alt+Enter
-(ESC + CR) before writing to the PTY. That means the whole macro arrives as a
-single composed prompt rather than submitting at each line break; you still
-press Enter yourself to send.
+Write multi-line text with `\n` in a quoted string, or with a TOML multi-line basic
+string:
 
 ```toml
 [macros]
 "Checklist" = { text = "check for:\n- logic errors\n- missing error handling\n- test coverage", surface = "agent" }
 ```
 
-There is no variable or placeholder expansion in macro text. What you write is
-exactly what gets sent.
+> [!NOTE]
+> Every newline arrives as a soft line break, not a submit, so the whole macro lands as
+> one composed prompt. You press Enter yourself to send it. There is no variable or
+> placeholder expansion: what you write is exactly what gets sent.
 
 ## Sending a macro in the terminal UI
 
-The macro bar is opened by the `open_macro_bar` binding in `[keys]`; the in-app
-help overlay shows the key it is currently bound to. It is available whenever the
-agent or terminal pane has your keys: with the center pane focused in the windowed
-layout, or in fullscreen, so you can fire a macro mid-typing without leaving the
-pane. If no macros are defined for the current surface, dux shows a status message
-and does nothing.
+The macro bar opens with the `open_macro_bar` binding in `[keys]`; the in-app help
+overlay shows the key it is currently bound to. It works whenever the agent or terminal
+pane has your keys, windowed or fullscreen, so you can fire a macro mid-typing. With no
+macros defined for the current surface, dux says so in the status line and does nothing.
 
 Once the bar is open:
 
-- **Type** to filter by name or text content (name matches are ranked first).
+- **Type** to filter by name or text content. Name matches rank first.
 - **Up / Down** to move through the list.
 - **Tab** to expand the highlighted name into the search field.
-- **Enter** to send the highlighted macro to the PTY and close the bar.
+- **Enter** to send the highlighted macro and close the bar.
 - **Esc** to dismiss without sending.
 
-dux writes the macro bytes directly to the active PTY client and shows
-`Sent macro "<name>".` in the status line.
+dux confirms with `Sent macro "<name>".` in the status line.
 
-A macro is a write like any other, so it goes through input ownership: if another
-device is driving that terminal (which can only happen while dux is
-[serving in the background](/docs/server-mode#serve-in-the-background-and-keep-the-tui)),
-the macro is not sent and the status line says which device has it and that you can
-take it over first. Nothing half-sends.
+> [!IMPORTANT]
+> A macro is a write like any other, so it goes through input ownership. If another
+> device is driving that terminal, which can only happen while dux is
+> [serving in the background](/docs/server-mode#serve-in-the-background-and-keep-the-tui),
+> the macro is not sent. The status line names the device holding it and tells you to
+> take it over first. Nothing half-sends.
 
 ## Sending a macro in the web UI
 
-In the browser, every terminal pane (agent or companion terminal) has a macro
-button in its corner. Click it to open a quick-picker popover listing the macros
-that match that pane's surface — the same filtering the TUI macro bar does, just
-scoped to the pane you clicked rather than whatever is focused. Type to filter,
-then click a macro (or press Enter) to send it. The web writes the macro straight
-into that pane's PTY, so there is no confirmation toast; the macro text simply
-appears at the prompt. (The TUI's `Sent macro "<name>".` status line has no
-counterpart here.)
+Every terminal pane, agent or companion terminal, has a macro button in its corner.
+Click it for a picker of the macros matching that pane's surface, scoped to the pane you
+clicked rather than whatever is focused. Type to filter, then click a macro or press
+Enter to send it. The text simply appears at the prompt; there is no confirmation toast.
 
-The same ownership rule applies, and here it is quieter: if you are watching a
-terminal somebody else is driving, the macro is dropped and nothing tells you so.
-Take the terminal over first (the pane's own **Take over** button), then send it.
+If a pane has no macros for its surface, the popover says so and points you at the
+editor. With no macros at all, it links straight to **Edit macros**.
 
-If a pane has no macros for its surface, the popover says so and points you at
-the editor; if you have no macros at all, it links straight to **Edit macros**.
+> [!WARNING]
+> The ownership rule applies here too, and it is quieter: if you are watching a terminal
+> somebody else is driving, the macro is dropped and nothing tells you so. Use the
+> pane's **Take over** button first.
 
 ## Managing macros in the terminal UI
 
-The `edit-macros` command palette action opens the macros editor overlay. You
-can reach it through the command palette (the help overlay shows the palette's
-current binding) by searching for `edit-macros`. The `EditMacros` action has no
-default key binding; the palette is the intended entry point.
+Run `edit-macros` from the command palette to open the macros editor overlay. The action
+has no default key binding; the palette is the intended entry point.
 
 Inside the list:
 
-- The list opens in declaration order. After you add or edit a macro the list
-  re-sorts alphabetically by name for the rest of the session; the order in
-  `config.toml` is unchanged, except that renaming a macro moves its entry to
-  the end.
-- The list is an ordinary picker: the movement keys walk it, `confirm` on a
-  highlighted entry opens it for editing, and `close_overlay` closes the
-  overlay. Every key is resolved through `[keys]`, so rebinding one moves the
-  footer hint with it.
-- `new_macro` creates a new macro. Either it or `confirm` opens the macro form
-  described below.
-- `delete_macro` stages a deletion and shows a confirmation dialog.
-- Rows are clickable: one click highlights a macro, a double click opens it.
+- The list opens in declaration order. After you add or edit a macro it re-sorts
+  alphabetically for the rest of the session. The order in `config.toml` is unchanged,
+  except that renaming a macro moves its entry to the end.
+- It is an ordinary picker: movement keys walk it, confirming on an entry opens it for
+  editing, and the close-overlay key closes it. Every key resolves through `[keys]`, so
+  rebinding one moves the footer hint with it.
+- `new_macro` creates a macro, `delete_macro` stages a deletion and asks you to confirm.
+- Rows are clickable: one click highlights, a double click opens.
 
-The macro form is an ordinary modal, not a wizard. It shows the name field, the
-text field, the Agent / Terminal / Both selector, and **Cancel** and **Save**
-buttons all at once, and every one of them is a focus stop:
+The macro form is an ordinary modal, not a wizard. The name field, the text field, the
+Agent / Terminal / Both selector, and the Cancel and Save buttons are all on screen at
+once, and each is a focus stop. The movement keys (`toggle_selection` in `[keys]`) move
+focus and never change a value; Space acts on whatever has focus. The name field takes
+typing immediately. The text field is multiline, so it has an explicit edit mode you
+enter deliberately (`confirm` while it has focus, `engage_commit_input`, or a double
+click) and leave with `exit_commit_input`, which keeps your text. Typing on the field
+before you engage it does nothing, and it draws no caret. Everything is clickable.
+Cancelling writes nothing.
 
-- The movement keys (`toggle_selection` in `[keys]`) move focus between the five
-  controls. They never change a value.
-- **Space** acts on whichever control has focus: it types a space in the name
-  field or in the engaged text field, advances the surface selector, and
-  activates a button.
-- The name field takes typing immediately. The text field is multiline, so
-  **Enter** there has to mean "new line" rather than "confirm", and it
-  therefore has an edit mode. Three things engage it, and nothing else does:
-  `confirm` while the field has focus, `engage_commit_input`, and a double click
-  on the field. Leave edit mode with `exit_commit_input`, which keeps
-  the form open and your text intact. `clear_text_field`
-  empties the text field whenever the text field is the focused
-  control, engaged or not; from any other focus stop it does nothing, so it can
-  never wipe the body while you are on the name field or a button. Typing on an
-  unengaged field does
-  nothing: the footer names the key that starts editing, and the field draws no
-  caret until it is really taking your keystrokes.
-- `close_overlay` outside the text field's edit mode cancels the edit and writes
-  nothing.
-- Everything is clickable: clicking a field focuses it (clicking the text field
-  again engages it), clicking a selector option picks it, clicking a button
-  activates it.
+> [!NOTE]
+> `clear_text_field` empties the text field only while the text field is the
+> focused control. From any other focus stop it does nothing, so it cannot wipe the body
+> while you are on the name field or a button.
 
-Saving requires a name and some text, and refuses a name another macro already
-uses; dux says which in the status line and keeps the form open.
+Saving requires a name and some text, and refuses a name another macro already uses. dux
+says which in the status line and keeps the form open.
 
-All changes (additions, edits, and deletions) are persisted immediately to
-`config.toml`. Hand-edits to the file are also respected: dux rewrites with
-`toml_edit`, so your formatting and ordering survive.
+Additions, edits, and deletions are written to `config.toml` immediately, and your
+hand-edits survive: dux preserves your formatting and ordering.
 
 ## Managing macros in the web UI
 
-The web UI has a full macro editor too. Open the cog menu and pick
-**Configuration → Edit macros…**, or click **Edit macros** from any terminal
-pane's macro popover. A dialog opens with the same list of macros in declaration order.
+Open the cog menu and pick **Configuration → Edit macros…**, or click **Edit macros**
+from any terminal pane's macro popover. A dialog opens with the same list in declaration
+order:
 
-In the dialog:
-
-- **Add macro** opens a form for a new entry: a name, the text, and a surface
-  picker (`Agent` / `Terminal` / `Both`).
-- The pencil button on a row edits it through the same form; renaming an entry
-  keeps its position in the list.
+- **Add macro** opens a form for a new entry: a name, the text, and a surface picker
+  (`Agent` / `Terminal` / `Both`).
+- The pencil button on a row edits it through the same form. Renaming keeps its position
+  in the list.
 - The trash button stages a deletion and asks you to confirm inline.
 - **Save** writes the whole list at once; **Cancel** discards your changes.
 
-Because it edits the same `[macros]` block, anything you save here shows up in
-the terminal UI (and on disk) just like a hand-edit would, and vice versa.
-
 ## Adding macros directly in config
 
-You can also manage macros entirely by hand. Open `config.toml` (use
-`dux config path` to locate it), add entries under `[macros]`, and save. The
-changes take effect the next time dux reads its config; no restart needed for
-new sessions.
+You can manage macros entirely by hand. Open `config.toml` (`dux config path` locates
+it), add entries under `[macros]`, and save. The changes take effect the next time dux
+reads its config; new sessions need no restart.
 
 - **Linux:** `~/.config/dux/config.toml`
 - **macOS:** `~/.dux/config.toml`

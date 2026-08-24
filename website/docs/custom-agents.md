@@ -6,21 +6,19 @@ order: 50
 ---
 
 A provider is the CLI behind an agent. Claude Code, Codex, OpenCode, and Copilot are
-configured out of the box, but the whole point of dux's design is that **any CLI can
-be a provider.** Adding one is a config change, not a code change. There are no
-adapters and no protocol layer to implement. dux runs the command exactly as it
-would in a normal terminal.
+configured out of the box, and **any other CLI can be a provider**. Adding one is a
+config change, not a code change.
 
 ## The one rule
 
 A tool can be a provider if and only if it supports **PTY mode**: an interactive
-session dux can embed in a pseudo-terminal. That's how you actually work with the
-agent. If your CLI can run interactively in a terminal, dux can drive it.
+session dux can embed in a pseudo-terminal. If your CLI runs interactively in a
+terminal, dux can drive it, with the same prompts, colors, and login flow it has in
+your own shell.
 
 ## Anatomy of a provider
 
-Providers live under `[providers.<name>]` in `config.toml`. Here's the full set of
-fields, with what each one does:
+Providers live under `[providers.<name>]` in `config.toml`. The full set of fields:
 
 ```toml
 [providers.claude]
@@ -44,11 +42,10 @@ install_hint = "curl -fsSL https://claude.ai/install.sh | bash"
 # forward (always use dux scrollback).
 # forward_scroll = true
 # What a dragged, dropped or pasted file's path looks like when the web UI
-# writes it into this provider's prompt. Web only, which is what the "web_" prefix says:
-# in the terminal UI, dropping a file on the window is your terminal emulator's
-# job. One of "bare", "single_quoted", "double_quoted" or "backslash_escaped";
-# absent means "bare". See "Dropping and pasting files onto an agent" for which
-# CLI needs which, and why.
+# writes it into this provider's prompt. Web only, which is what the "web_"
+# prefix says: in the terminal UI, dropping a file on the window is your
+# terminal emulator's job. One of "bare", "single_quoted", "double_quoted" or
+# "backslash_escaped"; absent means "bare".
 web_dragdrop_paste = "bare"
 ```
 
@@ -61,6 +58,12 @@ A file at `/home/you/My Project/it's here.png` goes out as:
 | `double_quoted` | `"/home/you/My Project/it's here.png"` |
 | `backslash_escaped` | `/home/you/My\ Project/it\'s\ here.png` |
 
+> [!TIP]
+> Which value your CLI wants is covered in
+> [Dropping and pasting files onto an agent](/docs/dropping-files). If a dropped path
+> arrives as plain text instead of attaching, try `single_quoted`. If it arrives
+> mangled with stray quotes or backslashes, the CLI wants it `bare`.
+
 ## A worked example
 
 Say you have a CLI called `myagent` that you launch interactively with no extra
@@ -72,18 +75,11 @@ command = "myagent"
 args = []
 resume_args = ["--continue"]
 install_hint = "see https://example.com/install"
-# forward_scroll left absent: auto-detect (the wheel goes to a mouse-aware
-# child, page keys to an alt-screen child, otherwise dux host scrollback;
-# windowed and fullscreen behave the same).
-# web_dragdrop_paste left absent: "bare", the do-nothing form. If dropping a
-# file on this agent in the browser leaves the path as plain text instead of
-# attaching it, the CLI probably wants the path quoted; try "single_quoted". If
-# the path arrives visibly mangled, with stray quote or backslash characters in
-# it, the CLI wants it bare and you are already there.
 ```
 
-Save the config, and `myagent` is now a provider you can pick when creating an
-agent. That's the entire process.
+Save the config, and `myagent` is a provider you can pick when creating an agent.
+`forward_scroll` and `web_dragdrop_paste` are left absent here, which means auto-detect
+scrolling and a bare path.
 
 ## Choosing a provider per project
 
@@ -97,16 +93,8 @@ name = "web-app"
 default_provider = "myagent"
 ```
 
-New agents in this project use this provider. There is no provider picker in the
-create-agent prompt: to move an existing agent to a different CLI, run the
-`change-agent-provider` palette command in the terminal UI, or pick **Change agent
-provider…** on the agent's `⋯` menu in the browser. It takes effect the next time
-that tab launches.
-
-## Why no adapters?
-
-Because the CLI runs as-is. dux embeds a real terminal emulator and spawns the
-command in a pseudo-terminal, so the tool behaves exactly like it does in your
-shell: same prompts, same colors, same login flow, same everything. Keeping it
-generic is what lets any future CLI become a provider with nothing more than a few
-lines of TOML.
+> [!NOTE]
+> There is no provider picker in the create-agent prompt. To move an existing agent to
+> a different CLI, run the `change-agent-provider` palette command in the terminal UI,
+> or pick **Change agent provider…** on the agent's `⋯` menu in the browser. It takes
+> effect the next time that tab launches.

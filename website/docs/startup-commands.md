@@ -5,18 +5,16 @@ group: Guides
 order: 30
 ---
 
-Some projects need a little ceremony before an agent is actually useful: pulling
-in dependencies, symlinking secrets files, or warming a cache. dux handles this
-with two complementary config features: per-project **environment variables** and
-**startup commands**. Both live inside `[[projects]]` entries in `config.toml`
-and run before the provider launches, so every agent your team creates starts
-from the same clean slate.
+Some projects need ceremony before an agent is useful: pulling in dependencies,
+symlinking secrets files, warming a cache. Two config features cover it, both inside
+`[[projects]]` entries in `config.toml`: per-project **environment variables** and
+**startup commands**.
 
 ## Per-project environment variables
 
-The `env` field on a project is an inline TOML table of `KEY = "value"` pairs.
-dux passes these variables to every PTY it spawns for that project: agent
-sessions, companion terminals, and the startup command itself.
+The `env` field on a project is an inline TOML table of `KEY = "value"` pairs. dux
+passes them to everything it spawns for that project: agent sessions, companion
+terminals, and the startup command.
 
 ```toml
 [[projects]]
@@ -26,15 +24,16 @@ name = "api"
 env  = { NODE_ENV = "development", API_KEY = "${MY_API_KEY}" }
 ```
 
-Values expand `$VAR` and `${VAR}` from your shell environment at the moment dux
-starts. That means secrets stay as references (never hardcoded in the file),
-which makes `config.toml` safe to commit to your dotfiles.
+> [!TIP]
+> Values expand `$VAR` and `${VAR}` from your shell environment when dux starts. Keep
+> secrets as references rather than literals and `config.toml` stays safe to commit to
+> your dotfiles.
 
 ### Global environment variables
 
-A top-level `[env]` table applies to every project. Project-level `env` keys
-override global ones when both are set, so a global `LOG_LEVEL = "info"` can be
-bumped to `"debug"` for one project without touching the rest.
+A top-level `[env]` table applies to every project. Project-level `env` keys override
+global ones, so a global `LOG_LEVEL = "info"` can be bumped to `"debug"` for one project
+without touching the rest.
 
 ```toml
 [env]
@@ -50,11 +49,10 @@ env  = { LOG_LEVEL = "debug" }   # overrides the global LOG_LEVEL for this proje
 
 ## Startup commands
 
-`startup_command` is a string (or multiline TOML string) that runs inside the
-agent's worktree immediately after that worktree is created, **before** the
-provider launches. It is the right place for anything the agent needs already
-done when it first opens: installing packages, symlinking config files, running
-code generators.
+`startup_command` is a string, or a multiline TOML string, that runs inside the agent's
+worktree right after that worktree is created and **before** the provider launches. Use
+it for anything the agent needs already done: installing packages, symlinking config
+files, running code generators.
 
 ```toml
 [[projects]]
@@ -67,42 +65,44 @@ ln -sfn "$DUX_PROJECT_PATH/.env.local" .env
 """
 ```
 
-A few things to know:
+- It runs with its working directory set to the **agent's worktree**, not the source
+  checkout.
+- dux waits for it to finish before launching the provider.
+- Every run writes a timestamped log under the dux config directory, at
+  `startup-command-logs/<project-id>/<session-id>/`. Browse them from the command
+  palette in the terminal UI or a row's actions menu on the web, for one agent or for
+  every agent in a project at once.
 
-- The command runs with its working directory set to the **agent's worktree**
-  (i.e. `$DUX_WORKTREE_PATH`), not the source checkout.
-- dux waits for the command to complete before launching the provider. If the
-  command exits non-zero, dux records the failure in the startup log and still
-  launches the agent; it does not block you.
-- Every run produces a timestamped log file under the dux config directory:
-  `startup-command-logs/<project-id>/<session-id>/`. You can browse these from
-  the command palette (terminal UI) or a row's actions menu (web UI), for a single agent
-  or for every agent in a project at once.
+> [!IMPORTANT]
+> A startup command that exits non-zero does not block you. dux records the failure in
+> the startup log and launches the agent anyway, so check the log when an agent starts
+> without its dependencies.
 
 ### Configuring and running from the app
 
-Both `env` and `startup_command` are ordinary config you can edit by hand, but
-you do not have to leave the app to manage them:
+You can edit both by hand, but you do not have to leave the app:
 
-- **Terminal UI:** the command palette exposes *configure startup command*,
-  *configure project env*, *configure global env*, *rerun startup command on
-  agent*, and *read startup command logs*.
-- **Web UI (server mode):** each agent's actions (`⋯`) menu carries
-  *Configure startup command*, *Configure environment variables*, *Rerun
-  startup command*, and *Startup command logs*. None of the four appear for a
-  standalone agent: they are project-scoped, and it belongs to no project. A project's `⋯` menu carries
-  *Startup command logs for all agents*, the same viewer widened to every run in
-  the project. Because env and startup commands
-  are project-scoped, the first two edit the agent's whole project (and the
-  change is written back to `config.toml`); global env stays in the cog menu's
-  Configuration submenu. *Rerun startup command* re-runs the project's startup command in that
-  one agent's worktree without recreating it, which is handy after editing the
-  command or when a dependency install needs a redo.
+- **Terminal UI:** the command palette carries *configure startup command*, *configure
+  project env*, *configure global env*, *rerun startup command on agent*, and *read
+  startup command logs*.
+- **Web UI:** each agent's `⋯` menu carries *Configure startup command*, *Configure
+  environment variables*, *Rerun startup command*, and *Startup command logs*. A
+  project's `⋯` menu carries *Startup command logs for all agents*. Global env lives in
+  the cog menu's Configuration submenu.
+
+*Rerun startup command* re-runs the command in one agent's worktree without recreating
+the agent. Reach for it after editing the command, or when a dependency install needs a
+redo.
+
+> [!NOTE]
+> Env and startup commands are project-scoped, so editing them from an agent changes the
+> agent's whole project, and the change is written back to `config.toml`. None of these
+> four entries appear for a standalone agent, which belongs to no project.
 
 ### Dux-injected variables
 
-dux sets the following environment variables for every startup command, in
-addition to any `[env]` and `[[projects]] env` keys you configure:
+dux sets these for every startup command, on top of any `[env]` and `[[projects]] env`
+keys you configure:
 
 | Variable | Value |
 |---|---|
@@ -113,20 +113,20 @@ addition to any `[env]` and `[[projects]] env` keys you configure:
 | `DUX_PROVIDER` | Provider name used for this agent (e.g. `claude`, `codex`) |
 | `DUX_STARTUP_COMMAND_LOG` | Absolute path to the log file for this run |
 
-These `DUX_*` variables are set only for startup commands. Agent PTY sessions and
-companion terminals do not get them: they inherit dux's own environment, plus the
-`TERM`/`COLORTERM` and terminal-identity values dux sets, with your `[env]` and
-`[[projects]] env` keys layered on top.
+> [!IMPORTANT]
+> The `DUX_*` variables exist **only** for startup commands. Agent sessions and
+> companion terminals do not get them. They inherit dux's own environment, plus the
+> `TERM`, `COLORTERM` and terminal-identity values dux sets, with your `[env]` and
+> `[[projects]] env` keys layered on top.
 
-A standalone terminal belongs to no project, so there is no `[[projects]] env` to
-layer: it gets the global `[env]` and nothing else. It runs no startup command
-either, for the same reason a project terminal does not: a startup command is
-worktree provisioning for a new agent, not a shell rc.
+A standalone terminal belongs to no project, so it gets the global `[env]` and nothing
+else, and it runs no startup command. Neither does a project terminal: a startup command
+is worktree provisioning for a new agent, not a shell rc.
 
 ## The startup shell
 
-Startup commands run through a shell, not directly. The global
-`[startup_command_terminal]` section controls which shell and arguments to use:
+Startup commands run through a shell. The global `[startup_command_terminal]` section
+picks which one:
 
 ```toml
 [startup_command_terminal]
@@ -138,20 +138,10 @@ command = "$SHELL"
 args = ["-l", "-c"]
 ```
 
-The defaults run your login shell (`$SHELL`) with `-l -c`, so your shell
-profile, `$PATH` extensions, and tool version managers (e.g. `nvm`, `rbenv`,
-`mise`) are active when the command runs. The effective invocation looks like:
-
-```
-$SHELL -l -c "<your startup_command>"
-```
-
-Because `[startup_command_terminal]` is global config (not project state), the
-shell behavior is the same for every project and every machine you sync the
-config to. Change it once and all startup commands pick it up.
-
-If you need a specific shell for a particular environment, point `command` at it
-directly:
+The defaults run your login shell as `$SHELL -l -c "<your startup_command>"`, so your
+shell profile, `$PATH` extensions, and version managers like `nvm`, `rbenv` or `mise`
+are active. The section is global, so every project and every machine you sync the
+config to behaves the same. To pin a specific shell:
 
 ```toml
 [startup_command_terminal]
@@ -175,9 +165,9 @@ ln -sfn "$DUX_PROJECT_PATH/.env.local" .env
 """
 ```
 
-`npm ci` runs inside the worktree so each agent gets its own `node_modules`.
-The symlink points back at the project source checkout's `.env.local` so all
-agents share the same local secrets without duplicating them.
+`npm ci` runs inside the worktree so each agent gets its own `node_modules`, and the
+symlink points at the source checkout's `.env.local` so all agents share one copy of the
+local secrets.
 
 ### Python project with a virtual environment
 
@@ -193,8 +183,7 @@ python -m venv .venv
 """
 ```
 
-Each worktree gets its own `.venv` so agents can't step on each other's
-installed packages.
+Each worktree gets its own `.venv` so agents cannot step on each other's packages.
 
 ### Cargo workspace with pre-built tools
 
@@ -206,6 +195,5 @@ name = "cli-tool"
 startup_command = "cargo build -q 2>&1 | tail -5"
 ```
 
-Builds the workspace quietly so the agent's first edit-compile-test loop is
-faster. The `2>&1 | tail -5` keeps the log compact: only the last five lines
-of build output are captured.
+Builds the workspace quietly so the agent's first edit-compile-test loop is faster.
+`2>&1 | tail -5` keeps only the last five lines in the log.

@@ -5,8 +5,8 @@ group: Reference
 order: 100
 ---
 
-Short questions, short answers. When a topic deserves more, the answer links to
-the page that covers it in full.
+Short questions, short answers. When a topic deserves more, the answer links to the
+page that covers it in full.
 
 ## Installing & platforms
 
@@ -36,8 +36,8 @@ other CLI that runs an interactive session in a terminal can be added. See
 ### Why was the Gemini provider removed?
 
 [Google deprecated the Gemini CLI](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/),
-so dux no longer ships it as a built-in provider. If a worktree was still pinned
-to Gemini, dux won't launch it — switch it to a supported provider and relaunch.
+so dux does not ship it as a built-in provider. A worktree still pinned to Gemini will
+not launch: switch it to a supported provider and relaunch.
 
 ### How do I add my own CLI as an agent?
 
@@ -46,28 +46,24 @@ See [Custom CLI Agents](/docs/custom-agents).
 
 ### Do I have to go fullscreen to type to an agent?
 
-No. In the terminal UI, focusing the agent's pane is enough: what you type goes
-to the agent right there in the windowed layout, while dux's own shortcuts (all
-modifier chords) keep working. Fullscreen is still there as a toggle for when
-the agent should get every key verbatim; the keys dux otherwise keeps for
-itself reach the agent there, so it is the escape hatch for Tab completion and
-readline shortcuts. The in-app help overlay shows the toggle's current binding.
+No. Focusing the agent's pane is enough: what you type goes to the agent right there in
+the windowed layout, while dux's own shortcuts (all modifier chords) keep working.
+Fullscreen is the escape hatch for when the agent needs every key verbatim, Tab
+completion and readline shortcuts included. The in-app help overlay shows its binding.
 
 ### The mouse wheel or PgUp won't scroll an agent. Why?
 
-Some agents scroll their own content. Claude Code's full-screen renderer and
-OpenCode both do: dux forwards the wheel to any agent that asked for the mouse,
-and `PgUp`/`PgDn` to one that took over the whole screen, while keeping its own
-scrollback for agents that do neither. The same rule applies whether the agent
-pane is windowed or fullscreen. An explicit
+Some agents scroll their own content, Claude Code's full-screen renderer and OpenCode
+included. dux forwards the wheel to any agent that asked for the mouse, and
+`PgUp`/`PgDn` to one that took over the whole screen, and keeps its own scrollback for
+agents that do neither. Windowed or fullscreen makes no difference. An explicit
 `forward_scroll = true`/`false` in a `[providers.<name>]` block overrides that
 detection; delete the line to return to auto-detect. See
 [Custom CLI Agents](/docs/custom-agents).
 
-The mobile web client behaves the same by touch: over a full-screen agent a
-one-finger drag and the on-screen `PgUp`/`PgDn` buttons forward to the agent
-instead of moving an empty scrollback. The web auto-detects from the agent's
-mouse mode (the `forward_scroll` config lever applies to the terminal UI only).
+The mobile web client behaves the same by touch: over a full-screen agent, a one-finger
+drag and the on-screen `PgUp`/`PgDn` buttons forward to the agent. The web always
+auto-detects, so `forward_scroll` applies to the terminal UI only.
 
 ### Can I start an agent from a GitHub PR?
 
@@ -76,11 +72,11 @@ Yes, when the `gh` CLI is installed and authenticated. See
 
 ### Do agents step on each other?
 
-No. Each agent in a project gets its own git worktree on its own branch, so two
-agents on the same project run in complete isolation. A standalone agent runs in a
-folder you picked, and dux refuses to put a second agent in a directory one is
-already working in, for the same reason: coding CLIs resume their conversation per
-directory. See [Creating agents](/docs/creating-agents).
+No. Each agent in a project gets its own git worktree on its own branch, so two agents
+on the same project run in complete isolation. A standalone agent runs in a folder you
+picked, and dux refuses to put a second agent in a directory one is already working in,
+because coding CLIs resume their conversation per directory. See
+[Creating agents](/docs/creating-agents).
 
 ### Can I branch off a running agent?
 
@@ -90,8 +86,8 @@ uncommitted edits included. See
 
 ### Do I need the GitHub CLI?
 
-It's optional. Install `gh` for PR tracking, creating agents from PRs, and
-agent-opened PRs; skip it and dux quietly disables anything GitHub.
+It is optional. Install `gh` for PR tracking, creating agents from PRs, and agent-opened
+PRs; skip it and dux quietly disables anything GitHub.
 
 ### Any recommended tools or MCP servers?
 
@@ -108,38 +104,42 @@ it is happy under `systemd`, `tmux`, or anything else that keeps a process alive
 
 ### Is there a login?
 
-No. There is no password, no token, and no user accounts, on purpose: dux is a
-single-tenant, trusted-access tool. Anyone who can reach the port gets the whole
-workspace, including typing into your agents. That is why it binds `127.0.0.1` by
-default. See [the trust model](/docs/server-mode#the-trust-model-stated-plainly).
+No, and that is deliberate: dux is a single-tenant, trusted-access tool.
+
+> [!WARNING]
+> There is no password, no token, and no user accounts. Anyone who can reach the port
+> gets the whole workspace, including typing into your agents. That is why it binds
+> `127.0.0.1` by default. See
+> [the trust model](/docs/server-mode#the-trust-model-stated-plainly).
 
 ### Is server mode a hosted service? Does my code leave my machine?
 
-Neither. There is no dux cloud and no account to make. `dux server` is the same
-binary serving a web UI from your own machine, over your own network, and your repos
-never leave it. Your agents' own CLIs talk to whatever AI providers they always talk
-to; dux adds no traffic of its own.
+Neither. There is no dux cloud and no account to make. `dux server` is the same binary
+serving a web UI from your own machine, over your own network, and your repos never
+leave it. Your agents' own CLIs talk to whatever AI providers they always talk to; dux
+adds no traffic of its own.
 
 ### Can I run the terminal UI and the browser at the same time?
 
-Yes, if you ask for it. Set `serve_while_tui = true` under `[server]` (or run the
-`start-background-server` palette command) and one dux process keeps the terminal UI
-in front of you and serves the browser behind it. Both are looking at the same live
-engine, one device drives a given terminal at a time, and everybody else watches.
+Yes. Set `serve_while_tui = true` under `[server]`, or run the
+`start-background-server` palette command, and one dux process keeps the terminal UI in
+front of you and serves the browser behind it. One device drives a given terminal at a
+time and everybody else watches.
 
-What you still cannot do is run two dux processes against one config directory: they
-share a single-instance lock, so the second one fails fast rather than two processes
-fighting over the same database. If you would rather hand the terminal over than keep
-it, the `start-web-server` palette command flips a running terminal UI into serving
-the browser and pressing `q` there hands it back. Your agents keep running through
-every one of these transitions. See
+If you would rather hand the terminal over than keep it, the `start-web-server` palette
+command flips a running terminal UI into serving the browser, and pressing `q` there
+hands it back. Your agents keep running through every one of these transitions. See
 [Three ways to serve it](/docs/server-mode#three-ways-to-serve-it).
+
+> [!IMPORTANT]
+> You cannot run two dux processes against one config directory. The second one fails
+> fast with an "already running" message.
 
 ### Can I reach it from my phone?
 
 Yes. dux binds your Tailscale address by default, so any device on your tailnet can
-open it. Read [Reaching dux over Tailscale](/docs/tailscale) first, because there is
-no login in front of it.
+open it. Read [Reaching dux over Tailscale](/docs/tailscale) first, because there is no
+login in front of it.
 
 ## Configuration
 
@@ -181,10 +181,9 @@ keystroke. See [Managing Macros](/docs/macros).
 
 ### How do I see every keyboard shortcut?
 
-Open the help overlay in the terminal UI; its key is shown in the footer hint bar,
-and it is the authoritative reference. Every
-binding is configurable under `[keys]`. See
-[keybindings](/docs/configuration#keybindings).
+Open the help overlay in the terminal UI. Its key is in the footer hint bar, and the
+overlay is the authoritative reference. Every binding is configurable under `[keys]`;
+see [keybindings](/docs/configuration#keybindings).
 
 ### How do I change the theme?
 

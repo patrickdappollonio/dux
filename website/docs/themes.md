@@ -5,28 +5,27 @@ group: Guides
 order: 40
 ---
 
-dux ships with a generous set of built-in themes and lets you write your own. Color
-is part of staying sane while juggling agents, so dux treats theming as a
-first-class setting rather than an afterthought.
+dux ships with a generous set of built-in themes and lets you write your own.
+
+> [!IMPORTANT]
+> Theming is a terminal UI feature. The web UI is dark-only: it ships one tuned dark
+> palette, ignores your `theme` setting, and does not follow your system light/dark
+> preference. A theme you write changes the terminal UI only.
 
 ## Changing the theme
 
-The theme lives under the `[ui]` section of `config.toml`:
+Open the **theme picker** from the terminal UI's command palette and arrow through the
+options with a live preview. It discovers every built-in plus anything you have
+authored, and labels where each one came from.
+
+To set it by hand instead, edit the `[ui]` section of `config.toml` and restart:
 
 ```toml
 [ui]
 theme = "dux_dark"   # the default
 ```
 
-Set it to any built-in name and restart, or (easier) open the **theme picker** from
-the terminal UI's command palette and arrow through the options with a live preview.
-No config editing, no guessing what a palette looks like.
-
-Theming is a terminal UI feature. The web UI is dark-only: it ships one tuned dark
-palette, it does not read your `theme` setting, and it does not follow your system or
-browser light/dark preference. A theme you write changes the terminal UI only.
-
-Built-in names use underscores. A few you might recognize:
+Built-in names use underscores:
 
 ```toml
 theme = "catppuccin_mocha"
@@ -36,22 +35,22 @@ theme = "tokyo_night"
 theme = "gruvbox_dark"
 ```
 
-There are far more than these: Catppuccin's four flavors, Tokyo Night's variants,
-Solarized, Rose Pine, Everforest, Kanagawa, One Dark, and others. Rather than
-memorize a list that drifts over time, open the theme picker: it discovers every
-built-in plus anything you've authored, and labels where each one came from.
+There are far more: Catppuccin's four flavors, Tokyo Night's variants, Solarized,
+Rose Pine, Everforest, Kanagawa, One Dark, and others. The picker is the list that
+never goes stale.
 
 ## How a theme name is resolved
 
 When you set `theme = "<name>"`, dux looks in this order:
 
-1. A user theme at `<config dir>/themes/<name>.toml` (your own themes win first).
-2. The bundled `dux_dark` theme, embedded in the binary.
+1. A user theme at `<config dir>/themes/<name>.toml`. Your own themes win first.
+2. The bundled `dux_dark` theme.
 3. An [Opaline](https://github.com/hyperb1iss/opaline) built-in (Catppuccin, Nord,
    Dracula, and friends).
 
-If none match, dux tells you so and falls back to a safe default rather than
-launching into an unreadable color scheme.
+> [!NOTE]
+> A name that matches nothing is not fatal. dux tells you so and falls back to a safe
+> default rather than launching into an unreadable color scheme.
 
 ## Writing your own theme
 
@@ -67,20 +66,17 @@ then point your config at it:
 theme = "my_theme"   # matches my_theme.toml in the themes directory
 ```
 
-The file name (without `.toml`) is the theme's id.
+The file name, without `.toml`, is the theme's id.
 
-### Start from the bundled theme
-
-The most reliable way to build a theme is to copy the one dux already uses and
-recolor it. Grab
-[`assets/themes/dux_dark.toml`](https://github.com/patrickdappollonio/dux/blob/main/assets/themes/dux_dark.toml)
-from the repository, drop it in your themes directory under a new name, and start
-changing values. It defines every surface dux paints, so you'll never hit a missing
-color.
+> [!TIP]
+> Start from the theme dux already uses. Grab
+> [`assets/themes/dux_dark.toml`](https://github.com/patrickdappollonio/dux/blob/main/assets/themes/dux_dark.toml)
+> from the repository, drop it in your themes directory under a new name, and recolor
+> it. It defines every surface dux paints, so you will never hit a missing color.
 
 ### The shape of a theme file
 
-Theme files use the Opaline format and have three parts that matter most:
+Theme files use the Opaline format. Three parts matter most:
 
 ```toml
 [meta]
@@ -108,16 +104,13 @@ pink   = "#ff4fd8"
 
 You have two ways to define colors:
 
-- **Set `dux.*` tokens explicitly** for pixel-level control over each surface
-  (borders, headers, selection, diff colors, status line, and the rest). This is
-  what the bundled theme does.
-- **Rely on the fallback.** Any `dux.*` token you leave out is derived from
-  Opaline's standard semantic tokens (`text.*`, `bg.*`, `accent.*`, `border.*`,
-  `code.*`). So a complete, standard Opaline theme works in dux as-is, even if it
-  was never written with dux in mind.
+- **Set `dux.*` tokens explicitly** for control over each surface: borders, headers,
+  selection, diff colors, status line, and the rest. This is what the bundled theme
+  does.
+- **Rely on the fallback.** Any `dux.*` token you leave out is derived from Opaline's
+  standard semantic tokens (`text.*`, `bg.*`, `accent.*`, `border.*`, `code.*`). A
+  complete, standard Opaline theme works in dux as-is, even if it was never written
+  with dux in mind.
 
-### Preview as you go
-
-After saving a theme file, open the theme picker from the command palette. Your
-theme shows up alongside the built-ins, labeled as user-authored, with the same
-live preview. Tweak, save, re-pick, repeat until it feels right.
+Save the file and open the theme picker: your theme is listed alongside the built-ins,
+labeled as user-authored, with the same live preview. Tweak, save, re-pick, repeat.
