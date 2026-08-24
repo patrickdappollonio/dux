@@ -6532,6 +6532,9 @@ mod tests {
 
     #[test]
     fn a_config_reload_that_enables_the_integration_re_runs_the_probe() {
+        // Held because the reload stores this config's `logging.level` into the
+        // process-wide threshold another test may be asserting on.
+        let _guard = crate::logger::level_test_guard();
         // Journey: a user logged in to only their company server starts dux with
         // the integration off, then turns it on by editing the config. The
         // enterprise host must become eligible without a restart.
@@ -6555,6 +6558,9 @@ mod tests {
 
     #[test]
     fn a_config_reload_that_leaves_the_integration_on_is_not_a_transition() {
+        // Held because the reload stores this config's `logging.level` into the
+        // process-wide threshold another test may be asserting on.
+        let _guard = crate::logger::level_test_guard();
         // Starting up is not an off-to-on transition and is already covered by
         // the surface's own boot probe, so a reload that changes nothing must
         // not fire another one.
@@ -6621,6 +6627,9 @@ mod tests {
 
     #[test]
     fn apply_reloaded_config_swaps_config_and_refreshes_state() {
+        // Held because the reload stores this config's `logging.level` into the
+        // process-wide threshold another test may be asserting on.
+        let _guard = crate::logger::level_test_guard();
         let (mut engine, _tmp) = test_engine();
         let dir = tempfile::tempdir().expect("tempdir");
         // The reload below flips the integration on, which now re-runs the host
@@ -6824,6 +6833,9 @@ mod tests {
 
     #[test]
     fn config_reload_ready_drains_deferred_commands() {
+        // Held because the reload stores this config's `logging.level` into the
+        // process-wide threshold another test may be asserting on.
+        let _guard = crate::logger::level_test_guard();
         let (mut engine, _tmp) = test_engine();
         // Baseline provider differs from the value the reload will deliver, so we
         // can prove the reloaded config actually landed (the reloaded config
@@ -7130,9 +7142,7 @@ mod tests {
 
     #[test]
     fn a_config_reload_adopts_a_new_logging_level() {
-        let _guard = crate::logger::LEVEL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::logger::level_test_guard();
         crate::logger::set_level("info");
         let (mut engine, _tmp) = test_engine();
 
@@ -7158,6 +7168,9 @@ mod tests {
 
     #[test]
     fn a_config_reload_retunes_the_live_branch_sync_interval() {
+        // Held because the reload stores this config's `logging.level` into the
+        // process-wide threshold another test may be asserting on.
+        let _guard = crate::logger::level_test_guard();
         let (mut engine, _tmp) = test_engine();
         engine.config.ui.branch_sync_interval = 30;
         engine.spawn_branch_sync_worker();
@@ -7173,6 +7186,9 @@ mod tests {
 
     #[test]
     fn a_config_reload_that_turns_branch_sync_on_from_zero_starts_the_worker() {
+        // Held because the reload stores this config's `logging.level` into the
+        // process-wide threshold another test may be asserting on.
+        let _guard = crate::logger::level_test_guard();
         let (mut engine, _tmp) = test_engine();
         engine.config.ui.branch_sync_interval = 0;
         engine.spawn_branch_sync_worker();

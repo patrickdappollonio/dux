@@ -206,7 +206,26 @@ pub fn resolve_log_path(config: &LoggingConfig, paths: &DuxPaths) -> PathBuf {
 /// Serializes the tests that move the process-wide [`LEVEL`], so a parallel run
 /// cannot read another test's threshold.
 #[cfg(test)]
-pub(crate) static LEVEL_TEST_LOCK: Mutex<()> = Mutex::new(());
+static LEVEL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Claim the process-wide log level for the duration of a test.
+///
+/// EVERY test that moves the level must hold this, including the ones that move
+/// it only as a side effect of `Engine::apply_reloaded_config`: cargo runs tests
+/// in parallel threads and the level is one static, so an unguarded reload
+/// storing its own config's level lands in the middle of another test's
+/// assertion window.
+#[cfg(test)]
+pub(crate) fn level_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    LEVEL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether the level guard is held right now, for a test that needs to see the
+/// exclusion rather than trust it.
+#[cfg(test)]
+pub(crate) fn level_guard_is_held() -> bool {
+    LEVEL_TEST_LOCK.try_lock().is_err()
+}
 
 #[cfg(test)]
 mod tests {
@@ -215,7 +234,7 @@ mod tests {
 
     #[test]
     fn set_level_retunes_the_threshold_log_gates_on() {
-        let _guard = LEVEL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = level_test_guard();
         set_level("info");
         assert!(LogLevel::Debug > LogLevel::from_u8(LEVEL.load(Ordering::Relaxed)));
 
@@ -228,6 +247,28 @@ mod tests {
         assert!(LogLevel::Error <= LogLevel::from_u8(LEVEL.load(Ordering::Relaxed)));
 
         set_level("info");
+    }
+
+    /// The reload path stores the level unconditionally, so the exclusion is what
+    /// keeps a sibling test's reload out of another test's assertion window.
+    /// Checked from a second thread, because the guard is not reentrant.
+    #[test]
+    fn the_level_guard_shuts_a_second_holder_out() {
+        let guard = level_test_guard();
+        let held = std::thread::spawn(level_guard_is_held)
+            .join()
+            .expect("the probe thread");
+        assert!(
+            held,
+            "a sibling reload waits instead of storing its own level"
+        );
+        drop(guard);
+        assert!(
+            !std::thread::spawn(level_guard_is_held)
+                .join()
+                .expect("the probe thread"),
+            "and it is released again"
+        );
     }
 
     /// `dux.log` records paths, project names, and error text from the user's
