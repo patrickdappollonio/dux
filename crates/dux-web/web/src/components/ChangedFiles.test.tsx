@@ -343,6 +343,34 @@ describe("the changes pane's multi-select", () => {
     expect(stageMany).toHaveBeenCalledTimes(1)
   })
 
+  // A tick that lands while a verb is in flight survives the response: the
+  // selection is written from the state at that moment, not from the render
+  // that started the request.
+  it("keeps a box ticked while a request was already in flight", async () => {
+    let land: (result: { done: string[]; refused: string[] }) => void = () => {}
+    stageMany.mockImplementationOnce(
+      () =>
+        new Promise<{ done: string[]; refused: string[] }>((resolve) => {
+          land = resolve
+        }),
+    )
+    render(<ChangedFiles />)
+    check("a.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Stage 1" }))
+
+    check("b.ts")
+    expect(bar().getByRole("button", { name: "Stage 2" })).toBeTruthy()
+
+    await act(async () => {
+      land({ done: ["a.ts"], refused: [] })
+    })
+
+    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+    expect(
+      screen.getByLabelText("Select b.ts").getAttribute("aria-checked"),
+    ).toBe("true")
+  })
+
   it("unstages from the staged section with its own verb", async () => {
     render(<ChangedFiles />)
     check("staged.ts")

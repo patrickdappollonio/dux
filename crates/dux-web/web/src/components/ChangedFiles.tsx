@@ -501,14 +501,32 @@ export function ChangedFiles() {
   const writeSelection = (next: ChangedFileSelection) =>
     setSelection({ sessionId: selectedSessionId, ...next })
 
+  // Every edit reads the CURRENT sets rather than the ones this render closed
+  // over: a request in flight resolves into a selection the user has meanwhile
+  // changed, and writing the old sets back would untick what they just ticked.
+  // A set belonging to another session reads as empty, the same rule the render
+  // above applies.
+  const editSelection = (
+    mutate: (next: { staged: Set<string>; unstaged: Set<string> }) => void,
+  ) =>
+    setSelection((prev) => {
+      const base =
+        prev.sessionId === sessionId
+          ? prev
+          : { staged: new Set<string>(), unstaged: new Set<string>() }
+      const next = {
+        staged: new Set(base.staged),
+        unstaged: new Set(base.unstaged),
+      }
+      mutate(next)
+      return { sessionId, ...next }
+    })
+
   function toggleOne(section: "staged" | "unstaged", path: string) {
-    const next = {
-      staged: new Set(selected.staged),
-      unstaged: new Set(selected.unstaged),
-    }
-    if (next[section].has(path)) next[section].delete(path)
-    else next[section].add(path)
-    writeSelection(next)
+    editSelection((next) => {
+      if (next[section].has(path)) next[section].delete(path)
+      else next[section].add(path)
+    })
   }
 
   function toggleMany(
@@ -516,24 +534,18 @@ export function ChangedFiles() {
     paths: string[],
     checked: boolean,
   ) {
-    const next = {
-      staged: new Set(selected.staged),
-      unstaged: new Set(selected.unstaged),
-    }
-    for (const path of paths) {
-      if (checked) next[section].add(path)
-      else next[section].delete(path)
-    }
-    writeSelection(next)
+    editSelection((next) => {
+      for (const path of paths) {
+        if (checked) next[section].add(path)
+        else next[section].delete(path)
+      }
+    })
   }
 
   function dropActed(section: "staged" | "unstaged", paths: string[]) {
-    const next = {
-      staged: new Set(selected.staged),
-      unstaged: new Set(selected.unstaged),
-    }
-    for (const path of paths) next[section].delete(path)
-    writeSelection(next)
+    editSelection((next) => {
+      for (const path of paths) next[section].delete(path)
+    })
   }
 
   // One request, one toast. The acted paths leave the selection as soon as the
