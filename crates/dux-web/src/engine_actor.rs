@@ -446,11 +446,12 @@ pub(crate) struct ActorLoopEnds {
 /// to hear that from the restart warning rather than discover it by finding dux
 /// still answering on their tailnet.
 ///
-/// The three per-class WebSocket caps
-/// (`max_websocket_events_connections`, `max_websocket_agent_connections`,
-/// `max_websocket_terminal_connections`) are also startup-bound (each
-/// connection-cap semaphore is built ONCE in `build_app` and never resized on
-/// reload). The deprecated `bind` field is migrated into `host`/`port` on load,
+/// All five WebSocket caps are also startup-bound: the three per-class
+/// connection-cap semaphores (`max_websocket_events_connections`,
+/// `max_websocket_agent_connections`, `max_websocket_terminal_connections`) are
+/// built ONCE in `build_app` and never resized on reload, and the two tab caps
+/// (`max_websocket_tab_connections`, `max_websocket_tabs_per_agent`) are frozen
+/// into `RouterParams`. The deprecated `bind` field is migrated into `host`/`port` on load,
 /// so a change to it surfaces through those fields.
 fn server_rebind_settings_changed(
     prev: &dux_core::config::ServerConfig,
@@ -466,6 +467,8 @@ fn server_rebind_settings_changed(
         || prev.max_websocket_events_connections != next.max_websocket_events_connections
         || prev.max_websocket_agent_connections != next.max_websocket_agent_connections
         || prev.max_websocket_terminal_connections != next.max_websocket_terminal_connections
+        || prev.max_websocket_tab_connections != next.max_websocket_tab_connections
+        || prev.max_websocket_tabs_per_agent != next.max_websocket_tabs_per_agent
         // The file-drop caps are frozen into RouterParams at bind time and the
         // routes enforce that frozen copy, while the viewmodel projects the
         // reloaded value live. Without this row a reload silently leaves the
@@ -4613,6 +4616,22 @@ mod tests {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.max_websocket_terminal_connections += 1;
+        assert!(server_rebind_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn rebind_drift_detects_max_websocket_tab_connections_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.max_websocket_tab_connections += 1;
+        assert!(server_rebind_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn rebind_drift_detects_max_websocket_tabs_per_agent_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.max_websocket_tabs_per_agent += 1;
         assert!(server_rebind_settings_changed(&prev, &next));
     }
 
