@@ -2256,10 +2256,83 @@ where
     Some((path, stat))
 }
 
+/// Stage every named path in one git call.
+///
+/// Paths are fed on stdin as NUL-delimited records, so a batch is bounded by
+/// the pipe rather than by `ARG_MAX`, and `--literal-pathspecs` makes each
+/// record a name rather than a pathspec: without it a file called `a*b.txt` or
+/// `:!magic.txt` would match, or exclude, its neighbours.
+///
+/// An empty slice is refused: git reads "no pathspec" as "the whole index",
+/// which for [`unstage_files`] means unstaging everything and exiting 0.
+pub fn stage_files(worktree_path: &Path, file_paths: &[String]) -> Result<()> {
+    run_pathspec_batch(worktree_path, &["add"], file_paths, "git add")
+}
+
+/// Unstage every named path in one git call. See [`stage_files`] for why the
+/// paths travel on stdin and why an empty slice is refused.
+pub fn unstage_files(worktree_path: &Path, file_paths: &[String]) -> Result<()> {
+    run_pathspec_batch(
+        worktree_path,
+        &["reset", "--quiet", "HEAD"],
+        file_paths,
+        "git reset",
+    )
+}
+
+fn run_pathspec_batch(
+    worktree_path: &Path,
+    subcommand: &[&str],
+    file_paths: &[String],
+    what: &str,
+) -> Result<()> {
+    if file_paths.is_empty() {
+        return Err(anyhow!(
+            "{what} was asked to act on no files; git would read that as the whole index"
+        ));
+    }
+    let wt = worktree_path.to_string_lossy();
+    let mut args: Vec<&str> = vec!["--literal-pathspecs", "-C", wt.as_ref()];
+    args.extend_from_slice(subcommand);
+    args.extend_from_slice(&["--pathspec-from-file=-", "--pathspec-file-nul"]);
+    let mut child = Command::new("git")
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("{what} failed: could not write the file list to git"))?;
+    let mut payload = Vec::new();
+    for path in file_paths {
+        payload.extend_from_slice(path.as_bytes());
+        payload.push(0);
+    }
+    std::io::Write::write_all(&mut stdin, &payload)?;
+    drop(stdin);
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{what} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
 pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")
-        .args(["-C", wt.as_ref(), "add", "--", file_path])
+        .args([
+            "--literal-pathspecs",
+            "-C",
+            wt.as_ref(),
+            "add",
+            "--",
+            file_path,
+        ])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -2273,7 +2346,15 @@ pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
 pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")
-        .args(["-C", wt.as_ref(), "reset", "HEAD", "--", file_path])
+        .args([
+            "--literal-pathspecs",
+            "-C",
+            wt.as_ref(),
+            "reset",
+            "HEAD",
+            "--",
+            file_path,
+        ])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -2306,7 +2387,14 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
     }
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")
-        .args(["-C", wt.as_ref(), "checkout", "--", file_path])
+        .args([
+            "--literal-pathspecs",
+            "-C",
+            wt.as_ref(),
+            "checkout",
+            "--",
+            file_path,
+        ])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -4597,6 +4685,121 @@ mod tests {
         assert!(
             clean_err.contains("No unstaged changes to discard"),
             "a clean tracked file must report nothing to discard, got: {clean_err}",
+        );
+    }
+
+    /// Every name here is ordinary to a filesystem and a pathspec to git.
+    /// MEASURED on git 2.55: with `--` alone, `git add -- ':!magic.txt'` stages
+    /// every OTHER changed file and `git add -- 'a*b.txt'` also stages
+    /// `ab.txt`, both exiting 0. `--literal-pathspecs` is what makes a name a
+    /// name.
+    fn write_option_looking_files(wt: &Path) -> Vec<&'static str> {
+        let odd = vec!["-lead.txt", ":!magic.txt", "a*b.txt"];
+        for name in odd.iter().chain(["ab.txt", "bystander.txt"].iter()) {
+            fs::write(wt.join(name), "one\n").unwrap();
+        }
+        commit_all(wt, "add option-looking names");
+        for name in odd.iter().chain(["ab.txt", "bystander.txt"].iter()) {
+            fs::write(wt.join(name), "two\n").unwrap();
+        }
+        odd
+    }
+
+    fn staged_paths(wt: &Path) -> Vec<String> {
+        let (staged, _) = changed_files(wt).unwrap();
+        let mut paths: Vec<String> = staged.into_iter().map(|f| f.path).collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn stage_files_and_unstage_files_read_option_looking_names_literally() {
+        let repo = init_test_repo();
+        let wt = repo.path();
+        let odd = write_option_looking_files(wt);
+        let paths: Vec<String> = odd.iter().map(|s| s.to_string()).collect();
+
+        stage_files(wt, &paths).unwrap();
+        let mut want = paths.clone();
+        want.sort();
+        assert_eq!(
+            staged_paths(wt),
+            want,
+            "only the named files may be staged: a glob or exclude pathspec would \
+             sweep in ab.txt or bystander.txt",
+        );
+
+        unstage_files(wt, &paths).unwrap();
+        assert!(
+            staged_paths(wt).is_empty(),
+            "the same names must unstage, and nothing else may be left staged",
+        );
+    }
+
+    #[test]
+    fn stage_file_and_unstage_file_read_an_option_looking_name_literally() {
+        let repo = init_test_repo();
+        let wt = repo.path();
+        write_option_looking_files(wt);
+
+        stage_file(wt, "a*b.txt").unwrap();
+        assert_eq!(
+            staged_paths(wt),
+            vec!["a*b.txt".to_string()],
+            "a single glob-looking name must stage itself alone, not ab.txt too",
+        );
+
+        stage_file(wt, "ab.txt").unwrap();
+        unstage_file(wt, "a*b.txt").unwrap();
+        assert_eq!(
+            staged_paths(wt),
+            vec!["ab.txt".to_string()],
+            "unstaging a glob-looking name must leave its lookalike staged",
+        );
+    }
+
+    #[test]
+    fn discard_file_reads_an_option_looking_name_literally() {
+        let repo = init_test_repo();
+        let wt = repo.path();
+        write_option_looking_files(wt);
+
+        discard_file(wt, "a*b.txt", false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(wt.join("a*b.txt")).unwrap(),
+            "one\n",
+            "the named file must be restored from HEAD",
+        );
+        assert_eq!(
+            fs::read_to_string(wt.join("ab.txt")).unwrap(),
+            "two\n",
+            "a destructive restore must not reach a file the glob would match",
+        );
+    }
+
+    /// MEASURED on git 2.55: `git reset HEAD` with an empty pathspec list
+    /// unstages the WHOLE index and exits 0, so an empty slice cannot be passed
+    /// through to git.
+    #[test]
+    fn stage_files_and_unstage_files_refuse_an_empty_slice() {
+        let repo = init_test_repo();
+        let wt = repo.path();
+        fs::write(wt.join("a.txt"), "one\n").unwrap();
+        run_git(wt, &["add", "a.txt"]);
+
+        assert!(
+            stage_files(wt, &[]).is_err(),
+            "an empty stage batch must be refused",
+        );
+        assert!(
+            unstage_files(wt, &[]).is_err(),
+            "an empty unstage batch must be refused",
+        );
+        assert_eq!(
+            staged_paths(wt),
+            vec!["a.txt".to_string()],
+            "a refused empty batch must leave the index exactly as it was",
         );
     }
 
