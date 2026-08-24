@@ -147,6 +147,15 @@ pub struct AppState {
     /// it is not computed per request and why the version is stamped on
     /// dismissal rather than at startup.
     pub first_load: Arc<crate::first_load_routes::FirstLoadState>,
+    /// This serve's live Tailscale-mode handle, or `None` when nothing is serving
+    /// behind this router (tests, and any path with no serve loop). The route
+    /// answers "the choice is saved and applies when a listener starts" for
+    /// `None` rather than pretending the listener moved.
+    pub tailscale_mode: Option<crate::serve_legs::TailscaleModeControl>,
+    /// Whether this run was started with `--no-tailscale`. Projected into the
+    /// bootstrap document so the Preferences row can say the flag outranks the
+    /// saved value for as long as this run lasts.
+    pub tailscale_forced_no: bool,
 }
 
 impl AppState {
@@ -324,6 +333,12 @@ pub struct RouterParams {
     /// while dux serves moves the guard with the listener. `None` in tests and on
     /// any path with no live mode control.
     pub live_tailscale_host_literals: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The handle the Tailscale-mode route changes `[server] tailscale` through
+    /// while dux serves. `None` on any path with no serve loop behind it, and in
+    /// tests.
+    pub tailscale_mode_control: Option<crate::serve_legs::TailscaleModeControl>,
+    /// Whether this run was started with `--no-tailscale`.
+    pub tailscale_forced_no: bool,
     /// Base URL for release-notes fetches. Defaults to
     /// `dux_core::urls::GITHUB_API_BASE`; overridden only by tests (see
     /// [`RouterParams::with_release_notes_api_base`]).
@@ -373,6 +388,8 @@ impl RouterParams {
             configured_hosts: Vec::new(),
             tailscale_host_literals: false,
             live_tailscale_host_literals: None,
+            tailscale_mode_control: None,
+            tailscale_forced_no: false,
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
             ownership_publisher: None,
             connections_gauge: None,
@@ -500,6 +517,27 @@ impl RouterParams {
         self.bound_ips = bound_ips;
         self.configured_hosts = configured;
         self.tailscale_host_literals = tailscale_host_literals;
+        self
+    }
+
+    /// Set rule 5's constructed value on its own, for a caller whose EFFECTIVE
+    /// mode differs from the configured one that [`crate::router_params`]
+    /// derived (a run started with `--no-tailscale`).
+    pub fn with_tailscale_host_literals(mut self, allowed: bool) -> Self {
+        self.tailscale_host_literals = allowed;
+        self
+    }
+
+    /// Give the routes the handle that changes `[server] tailscale` while dux
+    /// serves. Absent on any path with no serve loop behind it, which is what
+    /// makes the route answer "nothing is serving" rather than hanging.
+    pub fn with_tailscale_mode_control(
+        mut self,
+        control: crate::serve_legs::TailscaleModeControl,
+        forced_no: bool,
+    ) -> Self {
+        self.tailscale_mode_control = Some(control);
+        self.tailscale_forced_no = forced_no;
         self
     }
 
@@ -693,6 +731,8 @@ pub fn build_app(
             None => crate::rest_common::ConnectionRegistry::new(),
         }),
         first_load,
+        tailscale_mode: params.tailscale_mode_control.clone(),
+        tailscale_forced_no: params.tailscale_forced_no,
     };
 
     // Every route is served plainly (trusted-local: no login gate). `extra_gated`

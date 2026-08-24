@@ -454,6 +454,9 @@ pub enum TailscaleModeOutcome {
     /// There is no primary listener to derive the leg's port from, so there is
     /// nothing to hang a Tailscale leg on.
     NoPrimary,
+    /// A Tailscale address was found, but its listener would not bind (something
+    /// else holds that port).
+    BindFailed,
     /// This run was started with `--no-tailscale`, which outranks the config for
     /// as long as it runs.
     RefusedForcedNo,
@@ -514,6 +517,14 @@ impl TailscaleModeOutcome {
                     "{saved} No Tailscale address was found, and \"yes\" does not look again: \
                      dux serves without it until you restart or choose \"auto\", which binds \
                      it whenever the interface appears."
+                ),
+            },
+            Self::BindFailed => TailscaleModeReport {
+                warning: true,
+                message: format!(
+                    "{saved} Your Tailscale address was found, but its listener would not bind \
+                     (see dux.log); dux is serving on its other address(es). Free that port and \
+                     choose the mode again, or use \"auto\", which retries by itself."
                 ),
             },
             Self::NoPrimary => TailscaleModeReport {
@@ -4181,6 +4192,7 @@ github_integration = false
                 TailscaleMode::Yes,
                 true,
             ),
+            (TailscaleModeOutcome::BindFailed, TailscaleMode::Yes, true),
             (TailscaleModeOutcome::NoPrimary, TailscaleMode::Auto, true),
             (
                 TailscaleModeOutcome::RefusedForcedNo,

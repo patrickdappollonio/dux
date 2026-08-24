@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use dux_core::config::TailscaleMode;
+use dux_core::config::{TailscaleMode, TailscaleModeOutcome};
 use dux_core::tailscale::TailscaleUnavailable;
 
 /// How often the watcher asks whether the Tailscale address is there.
@@ -71,14 +71,16 @@ pub(crate) struct ServeShutdown {
     error: Arc<std::sync::Mutex<Option<anyhow::Error>>>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     legs: Arc<std::sync::Mutex<HashMap<SocketAddr, tokio::sync::watch::Sender<bool>>>>,
-    tailscale_watched: bool,
+    tailscale_watched: Arc<AtomicBool>,
 }
 
 impl ServeShutdown {
-    /// `tailscale_watched` is [`TailscaleMode::watches_interface`] for this run.
-    /// The registry deliberately knows nothing about config modes, so the serve
-    /// path states the fact once here instead of every leg restating it.
-    pub(crate) fn new(tailscale_watched: bool) -> Self {
+    /// `tailscale_watched` is the serve's live watcher flag, which starts at
+    /// [`TailscaleMode::watches_interface`] for this run and moves with a live
+    /// mode change. The registry deliberately knows nothing about config modes,
+    /// so the serve path states the fact once here instead of every leg
+    /// restating it.
+    pub(crate) fn new(tailscale_watched: Arc<AtomicBool>) -> Self {
         let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
         Self {
             failed: Arc::new(AtomicBool::new(false)),
@@ -87,6 +89,13 @@ impl ServeShutdown {
             legs: Arc::new(std::sync::Mutex::new(HashMap::new())),
             tailscale_watched,
         }
+    }
+
+    /// A shutdown primitive for a serve with no live mode control behind it
+    /// (tests, and any path that never changes the mode).
+    #[cfg(test)]
+    pub(crate) fn for_watched(watched: bool) -> Self {
+        Self::new(Arc::new(AtomicBool::new(watched)))
     }
 
     /// A fresh receiver on the parent lane.
@@ -189,7 +198,7 @@ impl ServeShutdown {
     pub(crate) fn record_best_effort_failure(&self, addr: SocketAddr, err: &anyhow::Error) {
         dux_core::logger::warn(&format!(
             "[server] {}",
-            best_effort_death_warning(addr, err, self.tailscale_watched)
+            best_effort_death_warning(addr, err, self.tailscale_watched.load(Ordering::SeqCst))
         ));
         self.forget_leg(addr);
     }
@@ -440,6 +449,95 @@ fn park(period: Duration, stop: &dyn Fn() -> bool) -> bool {
             return !stop();
         }
         std::thread::sleep(remaining.min(WATCH_SLICE));
+    }
+}
+
+// ── The live mode lane ───────────────────────────────────────────
+
+/// Depth of the mode-request lane. A person changing a tri-state, so anything
+/// above a couple of slots is theatre; the bound keeps a wedged serve loop from
+/// letting a caller grow memory.
+const MODE_REQUEST_QUEUE: usize = 8;
+
+/// How long a caller waits for the serve loop to answer a mode change.
+///
+/// Slightly above [`dux_core::tailscale::DETECT_TIMEOUT`], because a `yes` runs
+/// one bounded detection before it can say anything. No surface may wait longer
+/// than this: the TUI resolves a status op on the answer and a browser holds a
+/// request open for it.
+const MODE_REQUEST_TIMEOUT: Duration = Duration::from_secs(7);
+
+/// One live mode change on its way to the serve loop, with the lane its answer
+/// comes back on.
+pub(crate) struct ModeRequest {
+    pub(crate) mode: TailscaleMode,
+    pub(crate) reply: tokio::sync::oneshot::Sender<TailscaleModeOutcome>,
+}
+
+/// The one handle every surface changes `[server] tailscale` through while dux
+/// is serving: the `dux server` route, the flip's route, and the terminal UI's
+/// companion in background mode.
+///
+/// A request lane rather than a shared value, because a mode change is an ACT
+/// (stop a watcher, drop a listener, run a bounded detection) and only the serve
+/// loop may perform it. Every request is answered: one superseded by a later one
+/// resolves [`TailscaleModeOutcome::Superseded`] rather than being dropped
+/// silently, and a lane whose loop has gone resolves
+/// [`TailscaleModeOutcome::NotServing`].
+#[derive(Clone)]
+pub struct TailscaleModeControl {
+    tx: tokio::sync::mpsc::Sender<ModeRequest>,
+    /// Whether an interface watcher is running for this serve right now. Shared
+    /// with [`ServeShutdown`] so a dying best-effort leg's warning stays truthful
+    /// after a live switch between `auto` and the static modes.
+    watched: Arc<AtomicBool>,
+    /// Whether the Host guard accepts Tailscale IP literals. The serve loop is
+    /// its only writer; the guard reads it per request.
+    host_literals: Arc<AtomicBool>,
+}
+
+impl TailscaleModeControl {
+    /// Build the control and the receiving end the serve loop owns.
+    pub(crate) fn new(watched: Arc<AtomicBool>, host_literals: Arc<AtomicBool>) -> (Self, tokio::sync::mpsc::Receiver<ModeRequest>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(MODE_REQUEST_QUEUE);
+        (
+            Self {
+                tx,
+                watched,
+                host_literals,
+            },
+            rx,
+        )
+    }
+
+    /// The cell the Host guard reads rule 5 from.
+    pub fn host_literals(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.host_literals)
+    }
+
+    /// The cell [`ServeShutdown`] reads to say whether anything will bind the
+    /// Tailscale leg again.
+    pub(crate) fn watched(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.watched)
+    }
+
+    /// Ask the serve loop to change the mode and wait for what it did.
+    ///
+    /// Bounded on purpose: a `yes` runs a detection that is itself bounded, and
+    /// a caller that waited forever would be a hung status op or a hung HTTP
+    /// request.
+    pub async fn set_mode(&self, mode: TailscaleMode) -> TailscaleModeOutcome {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        if self.tx.send(ModeRequest { mode, reply }).await.is_err() {
+            return TailscaleModeOutcome::NotServing;
+        }
+        match tokio::time::timeout(MODE_REQUEST_TIMEOUT, answer).await {
+            Ok(Ok(outcome)) => outcome,
+            // The loop dropped the reply lane, which only happens as a serve
+            // ends.
+            Ok(Err(_)) => TailscaleModeOutcome::NotServing,
+            Err(_) => TailscaleModeOutcome::TimedOut,
+        }
     }
 }
 
@@ -974,7 +1072,7 @@ mod tests {
         // load-bearing logic, tested directly because forcing a real axum accept
         // loop to error mid-serve is inherently flaky. Exercised through the ONE
         // shared [`ServeShutdown`] primitive every serve path uses.
-        let shutdown = ServeShutdown::new(true);
+        let shutdown = ServeShutdown::for_watched(true);
         let mut shutdown_rx = shutdown.subscribe();
 
         let first = shutdown.record_failure(anyhow::anyhow!("listener A died"));
@@ -1007,7 +1105,7 @@ mod tests {
         // a plain `trigger()` (a SIGINT/SIGTERM or the flip's engine loop exiting)
         // must resolve `wait_for_shutdown` WITHOUT recording any error, so a clean
         // stop is not mistaken for a listener death.
-        let shutdown = ServeShutdown::new(true);
+        let shutdown = ServeShutdown::for_watched(true);
         let waiter = shutdown.subscribe();
         shutdown.trigger();
         // Resolves promptly (bounded so a regression fails rather than hangs).
@@ -1030,7 +1128,7 @@ mod tests {
         // the others down. This is the run_plain_http first-error behavior
         // exercised over a real accept loop (cheap, deterministic: no flaky
         // mid-serve error injection needed, we trip the lane the sibling would).
-        let shutdown = ServeShutdown::new(true);
+        let shutdown = ServeShutdown::for_watched(true);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
         let task_shutdown = shutdown.subscribe();
@@ -1064,7 +1162,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopping_one_leg_leaves_the_parent_and_its_siblings_alone() {
-        let shutdown = ServeShutdown::new(true);
+        let shutdown = ServeShutdown::for_watched(true);
         let ts = addr("100.64.0.5:8080");
         let leg = shutdown.register_leg(ts);
         let parent = shutdown.subscribe();
@@ -1092,7 +1190,7 @@ mod tests {
         // serving started, so it never saw the parent's initial state; if the
         // trigger did not fan out, its listener would still be holding the socket
         // when the TUI came back.
-        let shutdown = ServeShutdown::new(true);
+        let shutdown = ServeShutdown::for_watched(true);
         let ts = addr("100.64.0.5:8080");
         let leg = shutdown.register_leg(ts);
 
@@ -1123,7 +1221,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_best_effort_leg_death_is_isolated_but_a_required_one_is_fatal() {
-        let shutdown = ServeShutdown::new(true);
+        let shutdown = ServeShutdown::for_watched(true);
         let ts = addr("100.64.0.5:8080");
         let _leg = shutdown.register_leg(ts);
         let parent = shutdown.subscribe();
@@ -1163,7 +1261,7 @@ mod tests {
     async fn re_registering_an_address_trips_the_lane_it_replaces() {
         // Defence in depth: if a leg were ever registered twice for one address,
         // the listener behind the first lane must not be left unstoppable.
-        let shutdown = ServeShutdown::new(true);
+        let shutdown = ServeShutdown::for_watched(true);
         let ts = addr("100.64.0.5:8080");
         let first = shutdown.register_leg(ts);
         let _second = shutdown.register_leg(ts);

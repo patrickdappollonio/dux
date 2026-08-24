@@ -71,7 +71,7 @@ pub mod workspace_routes;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -79,13 +79,17 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::Router;
 use axum::serve::ListenerExt;
-use dux_core::config::{DuxPaths, PlanAddr, ServerPlan, TailscaleMode};
+use dux_core::config::{
+    DuxPaths, PlanAddr, ServerPlan, TailscaleMode, TailscaleModeOutcome,
+};
+use dux_core::tailscale::TailscaleUnavailable;
 use dux_core::engine::Engine;
 
 use crate::console::{Banner, Console, ListenerRow};
 use crate::engine_actor::LoopControl;
 use crate::serve_legs::{
-    LegCommand, ServeShutdown, StartupLeg, WATCH_PERIOD, wait_for_leg_shutdown, waiting_note,
+    LegCommand, LegStep, ModeStep, ServeShutdown, StartupLeg, TailscaleModeControl, WATCH_PERIOD,
+    desired_leg, plan_leg_step, plan_mode_change, wait_for_leg_shutdown, waiting_note,
     watch_tailscale_leg,
 };
 use crate::server::RouterParams;
@@ -413,21 +417,11 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
     // Build the vite-style CLI console (color from [server] color) + the access-log
     // toggle before the engine moves into the actor thread.
     let (console, access_log) = build_console(&engine.config);
-    // Capture the connection caps and allowed hosts before the engine moves into
-    // the actor thread. Both are read-only config values the router builder needs.
-    let max_ws_caps = (
-        engine.config.server.max_websocket_events_connections,
-        engine.config.server.max_websocket_agent_connections,
-        engine.config.server.max_websocket_terminal_connections,
-        engine.config.server.max_websocket_tab_connections,
-        engine.config.server.max_websocket_tabs_per_agent,
-    );
-    let search_index_max_files = engine.config.server.search_index_max_files;
-    let tree_list_max_concurrency = engine.config.server.tree_list_max_concurrency;
-    let release_notes_max_concurrency = engine.config.server.release_notes_max_concurrency;
-    let file_drop_max_bytes = engine.config.server.file_drop_max_bytes;
-    let file_drop_max_concurrency = engine.config.server.file_drop_max_concurrency;
-    let engine_allowed_hosts = engine.config.server.allowed_hosts.clone();
+    // The router's whole `[server]` input, snapshotted before the engine moves
+    // into the actor thread. One clone rather than a field-by-field capture, so
+    // this path and the two in-app ones derive their router from the same
+    // `router_params` recipe and a new limit cannot reach two of the three.
+    let router_config = engine.config.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -492,8 +486,13 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
         // failure flips its watch and every serve task awaits it. It carries the
         // mode's watched-ness so a dying Tailscale leg can say truthfully whether
         // anything is going to bind it again.
-        let _ = forced_no;
-        let shutdown = ServeShutdown::new(tailscale.watches_interface());
+        // The live-mode collaborators, created BEFORE the router so the Host
+        // guard can read the mode from the same cell the serve loop writes.
+        let (mode_control, mode_requests) = TailscaleModeControl::new(
+            Arc::new(AtomicBool::new(tailscale.watches_interface())),
+            Arc::new(AtomicBool::new(tailscale.wants_tailscale())),
+        );
+        let shutdown = ServeShutdown::new(mode_control.watched());
         // Collect the IPs the server actually bound to (for the host allowlist).
         // Uses the bound addresses captured above, BEFORE the listeners move into
         // the serve tasks. Together with `server.allowed_hosts` from config this
@@ -509,24 +508,20 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
         let app = server::build_app(
             handle.clone(),
             axum::Router::new(),
-            RouterParams::plain_http()
-                .with_console(console.clone(), access_log)
-                .with_max_websocket_connections(
-                    max_ws_caps.0,
-                    max_ws_caps.1,
-                    max_ws_caps.2,
-                    max_ws_caps.3,
-                    max_ws_caps.4,
-                )
-                .with_search_index_max_files(search_index_max_files)
-                .with_tree_list_max_concurrency(tree_list_max_concurrency)
-                .with_release_notes_max_concurrency(release_notes_max_concurrency)
-                .with_file_drop_limits(file_drop_max_bytes, file_drop_max_concurrency)
-                .with_host_allowlist(
-                    bound_ips,
-                    engine_allowed_hosts.clone(),
-                    tailscale.wants_tailscale(),
-                ),
+            router_params(
+                &router_config,
+                console.clone(),
+                access_log,
+                bound_ips,
+                BackgroundHooks::default(),
+            )
+            // `router_params` derives rule 5 from the CONFIGURED mode; this run
+            // serves under the EFFECTIVE one, so `--no-tailscale` would otherwise
+            // leave the guard admitting tailnet literals. The live cell is what
+            // the guard actually reads, and it starts from the effective mode.
+            .with_tailscale_host_literals(tailscale.wants_tailscale())
+            .with_live_tailscale_host_literals(mode_control.host_literals())
+            .with_tailscale_mode_control(mode_control.clone(), forced_no),
         );
 
         // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
@@ -561,27 +556,27 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
         }
 
         // On `auto`, watch the Tailscale interface for the rest of the run.
-        let watcher_stop = Arc::new(AtomicBool::new(false));
-        let (leg_commands, bound_tailscale) = start_tailscale_watcher(
+        let mut tailscale_loop = TailscaleLoop::new(
             tailscale,
+            forced_no,
             Some(primary),
             initial_tailscale_leg,
-            Arc::clone(&watcher_stop),
+            &mode_control,
+            Arc::new(dux_core::tailscale::detect_ip),
         );
+        let leg_commands = tailscale_loop.take_leg_receiver();
+        tailscale_loop.start_watcher_if_wanted();
 
         run_serve_loop(
             tasks,
             shutdown.clone(),
             leg_commands,
+            mode_requests,
             app,
             console.clone(),
-            bound_tailscale,
+            tailscale_loop,
         )
         .await;
-
-        // Serving is over: let the watcher thread finish its current park and
-        // exit rather than probing a server that has stopped.
-        watcher_stop.store(true, Ordering::SeqCst);
         // SIGTERM the agents (they save state for a later resume), mark their
         // sessions Detached, then exit; Drop hard-kills any straggler.
         shutdown.trigger();
@@ -685,8 +680,185 @@ fn spawn_leg(
     });
 }
 
+/// Everything one serve knows about its Tailscale leg: the mode it is in, the
+/// collaborators a live mode change acts through, and the watcher generation that
+/// makes a stale watcher's command harmless.
+///
+/// The serve loop is the ONLY writer of every cell in here. A watcher reads the
+/// bound cell and writes nothing; the Host guard reads the literals cell and
+/// writes nothing.
+pub(crate) struct TailscaleLoop {
+    /// The mode the serve is in right now, which is NOT necessarily the
+    /// configured one: `--no-tailscale` forces `no`, and a live change moves it.
+    mode: TailscaleMode,
+    /// Set by `--no-tailscale`. Refuses every live mode that wants Tailscale for
+    /// as long as this run lasts; the config value still saves for the next one.
+    forced_no: bool,
+    /// The primary listener's address, which is where the leg's PORT comes from.
+    /// `None` when it could not be read, in which case there is nothing to hang a
+    /// leg on.
+    primary: Option<SocketAddr>,
+    /// What is bound right now. One cell per serve, written only here, read by
+    /// whichever watcher is current.
+    bound: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+    /// Whether the Host guard admits Tailscale IP literals.
+    host_literals: Arc<AtomicBool>,
+    /// Whether a watcher is running, so a dying best-effort leg's warning stays
+    /// truthful across a live mode change.
+    watched: Arc<AtomicBool>,
+    /// The sender the loop keeps for the WHOLE serve, so the command lane never
+    /// closes under it and there is no "the watcher has ended" state to track.
+    /// Each watcher gets a clone stamped with its own generation.
+    leg_tx: tokio::sync::mpsc::Sender<(u64, LegCommand)>,
+    /// Taken once by the serve path and handed to the loop.
+    leg_rx: Option<tokio::sync::mpsc::Receiver<(u64, LegCommand)>>,
+    /// The current generation. Bumped by every watcher start AND every one-shot
+    /// detection, so a command from a watcher the mode already replaced is
+    /// dropped rather than re-binding a leg that was just let go.
+    generation: u64,
+    /// The current watcher's stop flag, per watcher rather than per serve: a mode
+    /// change stops exactly the watcher it is replacing.
+    watcher_stop: Option<Arc<AtomicBool>>,
+    /// The Tailscale address probe. Injected so the loop's mode transitions are
+    /// testable without a Tailscale binary.
+    detect: Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>,
+}
+
+/// A one-shot detection the loop is waiting on, kept OUT of the mode arm so the
+/// parent lane, leg deaths and watcher commands keep flowing while it runs.
+struct PendingDetect {
+    /// The generation this detection belongs to. A newer request bumps the
+    /// counter, and the answer of an older one is discarded.
+    generation: u64,
+    mode: TailscaleMode,
+    reply: tokio::sync::oneshot::Sender<TailscaleModeOutcome>,
+    task: tokio::task::JoinHandle<Result<IpAddr, TailscaleUnavailable>>,
+}
+
+impl TailscaleLoop {
+    pub(crate) fn new(
+        mode: TailscaleMode,
+        forced_no: bool,
+        primary: Option<SocketAddr>,
+        initial_leg: Option<SocketAddr>,
+        control: &TailscaleModeControl,
+        detect: Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>,
+    ) -> Self {
+        let (leg_tx, leg_rx) = tokio::sync::mpsc::channel(LEG_COMMAND_QUEUE);
+        Self {
+            mode,
+            forced_no,
+            primary,
+            bound: Arc::new(std::sync::Mutex::new(initial_leg)),
+            host_literals: control.host_literals(),
+            watched: control.watched(),
+            leg_tx,
+            leg_rx: Some(leg_rx),
+            generation: 0,
+            watcher_stop: None,
+            detect,
+        }
+    }
+
+    /// The command lane the serve loop listens on. Taken once.
+    pub(crate) fn take_leg_receiver(&mut self) -> tokio::sync::mpsc::Receiver<(u64, LegCommand)> {
+        self.leg_rx.take().expect("the leg receiver is taken once")
+    }
+
+    /// Start the startup watcher when the mode is `auto`. It PARKS first: the
+    /// startup bind answered the same question a moment ago.
+    pub(crate) fn start_watcher_if_wanted(&mut self) {
+        if self.mode.watches_interface() {
+            self.start_watcher(false);
+        }
+    }
+
+    fn bound_addr(&self) -> Option<SocketAddr> {
+        self.bound.lock().ok().and_then(|slot| *slot)
+    }
+
+    /// End the running watcher, if any, and say so in the shared flag.
+    fn stop_watcher(&mut self) {
+        if let Some(stop) = self.watcher_stop.take() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        self.watched.store(false, Ordering::SeqCst);
+    }
+
+    /// Spawn a watcher over the EXISTING bound cell and command sender, stamped
+    /// with a fresh generation. A dedicated std thread, never a runtime worker:
+    /// the probe is a bounded but blocking call, and a wedged `tailscaled` (a
+    /// suspend and resume, which is the exact scenario the watcher serves) must
+    /// not be able to occupy a tokio worker.
+    fn start_watcher(&mut self, probe_now: bool) -> bool {
+        self.stop_watcher();
+        let Some(primary) = self.primary else {
+            dux_core::logger::warn(
+                "[server] not starting the Tailscale interface watcher: the address of the \
+                 primary listener could not be read, so there is no port to serve the Tailscale \
+                 leg on. dux is serving on the addresses it bound at startup.",
+            );
+            return false;
+        };
+        self.generation += 1;
+        let generation = self.generation;
+        let stop = Arc::new(AtomicBool::new(false));
+        let watcher_stop = Arc::clone(&stop);
+        let bound = Arc::clone(&self.bound);
+        let tx = self.leg_tx.clone();
+        let detect = Arc::clone(&self.detect);
+        let started = std::thread::Builder::new()
+            .name("dux-tailscale-watch".to_string())
+            .spawn(move || {
+                watch_tailscale_leg(
+                    primary,
+                    WATCH_PERIOD,
+                    probe_now,
+                    &*detect,
+                    &|| bound.lock().ok().and_then(|slot| *slot),
+                    &|command| tx.blocking_send((generation, command)).is_ok(),
+                    &|| watcher_stop.load(Ordering::SeqCst),
+                );
+            })
+            .is_ok();
+        if started {
+            self.watcher_stop = Some(stop);
+            self.watched.store(true, Ordering::SeqCst);
+        } else {
+            // A thread dux cannot start is not a reason to refuse to serve; it is
+            // a reason to say the Tailscale leg is now static for this run.
+            dux_core::logger::warn(
+                "[server] could not start the Tailscale interface watcher. dux is serving on \
+                 the addresses it bound at startup; restart dux to pick up a Tailscale address \
+                 that appears later.",
+            );
+        }
+        started
+    }
+
+    /// Serving is over: let the current watcher finish its park and exit rather
+    /// than probing a server that has stopped.
+    pub(crate) fn shutdown(&mut self) {
+        self.stop_watcher();
+    }
+
+    /// The "what is bound" cell, so a test can read what the loop did without
+    /// opening a socket to look.
+    #[cfg(test)]
+    pub(crate) fn bound_cell(&self) -> Arc<std::sync::Mutex<Option<SocketAddr>>> {
+        Arc::clone(&self.bound)
+    }
+
+    /// A generation-stamping sender, so a test can play the part of a watcher.
+    #[cfg(test)]
+    pub(crate) fn leg_sender(&self) -> tokio::sync::mpsc::Sender<(u64, LegCommand)> {
+        self.leg_tx.clone()
+    }
+}
+
 /// The serve loop: hold the per-leg serve tasks, act on the Tailscale watcher's
-/// commands, and end only when the shutdown lane is tripped.
+/// commands and on live mode changes, and end only when the shutdown lane is
+/// tripped.
 ///
 /// Deliberately NOT a `while let Some(..) = join_next()` drain: with a watcher
 /// running, an empty task set is a legitimate mid-life state (the required leg is
@@ -696,21 +868,64 @@ fn spawn_leg(
 async fn run_serve_loop(
     mut tasks: tokio::task::JoinSet<()>,
     shutdown: ServeShutdown,
-    mut commands: tokio::sync::mpsc::Receiver<LegCommand>,
+    mut commands: tokio::sync::mpsc::Receiver<(u64, LegCommand)>,
+    mut mode_requests: tokio::sync::mpsc::Receiver<crate::serve_legs::ModeRequest>,
     app: Router,
     console: Console,
-    bound_tailscale: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+    mut ts: TailscaleLoop,
 ) {
     let mut parent = shutdown.subscribe();
-    let mut watcher_open = true;
     // The address whose bind failed on the previous attempt, so a permanently
     // occupied Tailscale port is reported once instead of once every period. The
     // retry itself is deliberate (a port frees up, an interface finishes coming
     // up); saying the same sentence forever is not.
     let mut last_bind_failure: Option<SocketAddr> = None;
+    let mut pending_detect: Option<PendingDetect> = None;
     while !*parent.borrow_and_update() {
         tokio::select! {
             _ = parent.changed() => {}
+            request = mode_requests.recv() => {
+                if let Some(request) = request {
+                    apply_mode_request(
+                        request,
+                        &mut ts,
+                        &mut pending_detect,
+                        &mut tasks,
+                        &shutdown,
+                        &app,
+                        &console,
+                        &mut last_bind_failure,
+                    )
+                    .await;
+                }
+                // A `None` means every control handle has been dropped. Nothing
+                // can ask for a mode change any more; keep serving. The arm is
+                // left enabled because a closed receiver resolves immediately
+                // forever, which is why the whole select is bounded by the parent
+                // lane rather than by any one arm.
+            }
+            detected = async {
+                (&mut pending_detect
+                    .as_mut()
+                    .expect("guarded by the arm's condition")
+                    .task)
+                    .await
+            }, if pending_detect.is_some() => {
+                let pending = pending_detect
+                    .take()
+                    .expect("guarded by the arm's condition");
+                finish_detection(
+                    pending,
+                    detected.unwrap_or(Err(TailscaleUnavailable::CommandFailed)),
+                    &mut ts,
+                    &mut tasks,
+                    &shutdown,
+                    &app,
+                    &console,
+                    &mut last_bind_failure,
+                )
+                .await;
+            }
             Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
                 if let Err(join_err) = joined {
                     // A task PANICKED and recorded nothing, so record it here and
@@ -733,32 +948,206 @@ async fn run_serve_loop(
                 // after a full interface flap. Reconcile here, where the serve loop
                 // is the cell's ONE writer, rather than letting a dying task write
                 // it from underneath.
-                reconcile_bound_tailscale(&shutdown, &bound_tailscale, &mut last_bind_failure);
+                reconcile_bound_tailscale(&shutdown, &ts.bound, &mut last_bind_failure);
             }
-            command = commands.recv(), if watcher_open => {
-                match command {
-                    Some(command) => {
+            command = commands.recv() => {
+                // The lane never closes while serving: the loop holds a sender
+                // for its whole life, so a mode that runs no watcher simply has
+                // nobody sending. A `None` therefore means the loop's own state
+                // is gone, which cannot happen before this arm stops running.
+                if let Some((generation, command)) = command {
+                    // A watcher parked in a five-second probe when the mode
+                    // changed comes back with a command for the mode dux already
+                    // left. Its generation is stale, so it is dropped: acting on
+                    // it would re-bind the leg the change just let go.
+                    if generation == ts.generation {
                         apply_leg_command(
                             command,
                             &mut tasks,
                             &shutdown,
                             &app,
                             &console,
-                            &bound_tailscale,
+                            &ts.bound,
                             &mut last_bind_failure,
                         )
                         .await;
                     }
-                    // The watcher has ended (mode is not auto, or serving is
-                    // winding down). Stop listening to it; keep serving.
-                    None => watcher_open = false,
                 }
             }
         }
     }
+    // An in-flight detection has nobody left to report to; say so rather than
+    // dropping its lane, which the caller would read as "not serving".
+    if let Some(pending) = pending_detect.take() {
+        pending.task.abort();
+        let _ = pending.reply.send(TailscaleModeOutcome::NotServing);
+    }
+    ts.shutdown();
     // The lane is tripped and `trigger` has fanned out to every leg, so each task
     // is winding down. Reap them; the CALLER bounds how long it waits for this.
     while tasks.join_next().await.is_some() {}
+}
+
+/// Carry out one live `[server] tailscale` change and answer the caller.
+///
+/// Every request is answered exactly once: here for the steps that finish
+/// immediately, and in [`finish_detection`] for a `yes`, whose bounded probe runs
+/// as its own select arm so the parent lane and the legs keep flowing under it.
+#[allow(clippy::too_many_arguments)]
+async fn apply_mode_request(
+    request: crate::serve_legs::ModeRequest,
+    ts: &mut TailscaleLoop,
+    pending_detect: &mut Option<PendingDetect>,
+    tasks: &mut tokio::task::JoinSet<()>,
+    shutdown: &ServeShutdown,
+    app: &Router,
+    console: &Console,
+    last_bind_failure: &mut Option<SocketAddr>,
+) {
+    let crate::serve_legs::ModeRequest { mode, reply } = request;
+    // A request that arrives while a probe is in flight replaces it. The older
+    // caller is told so rather than being left holding a lane that never answers.
+    if let Some(previous) = pending_detect.take() {
+        previous.task.abort();
+        let _ = previous.reply.send(TailscaleModeOutcome::Superseded);
+    }
+
+    let steps = plan_mode_change(ts.mode, mode, ts.bound_addr(), ts.forced_no);
+    let mut detached = false;
+    for step in steps {
+        match step {
+            ModeStep::Refuse => {
+                let _ = reply.send(TailscaleModeOutcome::RefusedForcedNo);
+                return;
+            }
+            ModeStep::StopWatcher => ts.stop_watcher(),
+            ModeStep::SetHostLiterals(allowed) => {
+                ts.host_literals.store(allowed, Ordering::SeqCst)
+            }
+            ModeStep::Unbind(addr) => {
+                apply_leg_command(
+                    LegCommand::Unbind(addr),
+                    tasks,
+                    shutdown,
+                    app,
+                    console,
+                    &ts.bound,
+                    last_bind_failure,
+                )
+                .await;
+                detached = true;
+            }
+            ModeStep::StartWatcher { probe_now } => {
+                ts.mode = mode;
+                if !ts.start_watcher(probe_now) {
+                    let _ = reply.send(TailscaleModeOutcome::NoPrimary);
+                    return;
+                }
+            }
+            ModeStep::DetectAndBind => {
+                ts.mode = mode;
+                if ts.primary.is_none() {
+                    let _ = reply.send(TailscaleModeOutcome::NoPrimary);
+                    return;
+                }
+                // A generation of its own, so a watcher this change replaced
+                // cannot land a command against the answer of this probe.
+                ts.generation += 1;
+                let detect = Arc::clone(&ts.detect);
+                *pending_detect = Some(PendingDetect {
+                    generation: ts.generation,
+                    mode,
+                    reply,
+                    // `spawn_blocking`, never the loop: the probe is a bounded
+                    // but blocking subprocess call, and awaiting it inline would
+                    // stop the legs and the parent lane for its whole window.
+                    task: tokio::task::spawn_blocking(move || detect()),
+                });
+                return;
+            }
+        }
+    }
+    ts.mode = mode;
+    let outcome = if detached {
+        TailscaleModeOutcome::Detached
+    } else {
+        TailscaleModeOutcome::Applied {
+            bound: ts.bound_addr(),
+        }
+    };
+    let _ = reply.send(outcome);
+}
+
+/// Act on a one-shot detection's answer and resolve the request that asked for
+/// it.
+///
+/// A FAILED probe deliberately leaves a leg that is already serving alone: `yes`
+/// means "bind it once and keep it", and dropping a working listener because one
+/// local daemon call did not answer is the wrong way to be wrong.
+#[allow(clippy::too_many_arguments)]
+async fn finish_detection(
+    pending: PendingDetect,
+    detected: Result<IpAddr, TailscaleUnavailable>,
+    ts: &mut TailscaleLoop,
+    tasks: &mut tokio::task::JoinSet<()>,
+    shutdown: &ServeShutdown,
+    app: &Router,
+    console: &Console,
+    last_bind_failure: &mut Option<SocketAddr>,
+) {
+    let PendingDetect {
+        generation,
+        mode,
+        reply,
+        task: _,
+    } = pending;
+    if generation != ts.generation {
+        let _ = reply.send(TailscaleModeOutcome::Superseded);
+        return;
+    }
+    let Some(primary) = ts.primary else {
+        let _ = reply.send(TailscaleModeOutcome::NoPrimary);
+        return;
+    };
+    let already = ts.bound_addr();
+    if detected.is_err() {
+        let _ = reply.send(match already {
+            Some(addr) => TailscaleModeOutcome::Applied { bound: Some(addr) },
+            None => TailscaleModeOutcome::NothingDetected,
+        });
+        return;
+    }
+    let desired = desired_leg(primary, detected);
+    // The idempotence guard: an address that is already bound plans `Nothing`,
+    // so choosing the mode dux is already in never re-binds dux's own port and
+    // reports an EADDRINUSE that says nothing is wrong.
+    for command in match plan_leg_step(already, desired) {
+        LegStep::Nothing => Vec::new(),
+        LegStep::Bind(addr) => vec![LegCommand::Bind(addr)],
+        LegStep::Unbind(addr) => vec![LegCommand::Unbind(addr)],
+        LegStep::Rebind { old, new } => vec![LegCommand::Unbind(old), LegCommand::Bind(new)],
+    } {
+        apply_leg_command(
+            command,
+            tasks,
+            shutdown,
+            app,
+            console,
+            &ts.bound,
+            last_bind_failure,
+        )
+        .await;
+    }
+    let bound = ts.bound_addr();
+    let _ = reply.send(match (desired, bound) {
+        // A leg was wanted and none is up: the address is there but its listener
+        // would not bind.
+        (Some(_), None) => TailscaleModeOutcome::BindFailed,
+        _ => {
+            let _ = mode;
+            TailscaleModeOutcome::Applied { bound }
+        }
+    });
 }
 
 /// Reconcile the watcher-facing "what is bound" cell against the leg registry,
@@ -876,74 +1265,6 @@ async fn apply_leg_command(
     }
 }
 
-/// Start the Tailscale interface watcher on its OWN std thread when the mode is
-/// `auto`, returning the command receiver the serve loop listens on and the
-/// shared "what is bound" cell they both read.
-///
-/// A dedicated thread, never a runtime worker: the probe is a bounded but
-/// blocking subprocess call, and a wedged `tailscaled` (a suspend and resume,
-/// which is the exact scenario this watcher serves) must not be able to occupy a
-/// tokio worker or, worse, stop the watcher from ever checking again.
-///
-/// For every other mode this still returns a receiver, one that simply never
-/// yields, so the serve loop has a single shape.
-/// `primary` is an `Option` because the flip derives it from a listener's
-/// `local_addr`, which can in principle fail. Without a primary there is nothing
-/// to derive the leg's port from, and inventing one would have the watcher bind
-/// the Tailscale address on a port nobody was told about, so that case starts no
-/// watcher and says why.
-fn start_tailscale_watcher(
-    mode: TailscaleMode,
-    primary: Option<SocketAddr>,
-    initial: Option<SocketAddr>,
-    stop: Arc<AtomicBool>,
-) -> (
-    tokio::sync::mpsc::Receiver<LegCommand>,
-    Arc<std::sync::Mutex<Option<SocketAddr>>>,
-) {
-    let bound = Arc::new(std::sync::Mutex::new(initial));
-    let (tx, rx) = tokio::sync::mpsc::channel(LEG_COMMAND_QUEUE);
-    if !mode.watches_interface() {
-        // `yes` and `no` are static answers: nothing watches, and dropping the
-        // sender closes the channel so the serve loop stops listening for good.
-        return (rx, bound);
-    }
-    let Some(primary) = primary else {
-        dux_core::logger::warn(
-            "[server] not starting the Tailscale interface watcher: the address of the \
-             primary listener could not be read, so there is no port to serve the Tailscale \
-             leg on. dux is serving on the addresses it bound at startup; restart dux to pick \
-             up a Tailscale address that appears later.",
-        );
-        return (rx, bound);
-    };
-    let watcher_bound = Arc::clone(&bound);
-    std::thread::Builder::new()
-        .name("dux-tailscale-watch".to_string())
-        .spawn(move || {
-            watch_tailscale_leg(
-                primary,
-                WATCH_PERIOD,
-                false,
-                &dux_core::tailscale::detect_ip,
-                &|| watcher_bound.lock().ok().and_then(|slot| *slot),
-                &|command| tx.blocking_send(command).is_ok(),
-                &|| stop.load(Ordering::SeqCst),
-            );
-        })
-        .map(|_| ())
-        .unwrap_or_else(|err| {
-            // A thread dux cannot start is not a reason to refuse to serve; it is
-            // a reason to say the Tailscale leg is now static for this run.
-            dux_core::logger::warn(&format!(
-                "[server] could not start the Tailscale interface watcher: {err}. dux is \
-                 serving on the addresses it bound at startup; restart dux to pick up a \
-                 Tailscale address that appears later."
-            ));
-        });
-    (rx, bound)
-}
-
 /// The hooks only the BACKGROUND serve wants, because it is the only serve with a
 /// terminal UI beside it: somewhere for `build_app` to leave this serve's
 /// ownership publisher, and a counter for its connection registry to keep the live
@@ -1041,7 +1362,10 @@ pub(crate) struct ServeCore {
     /// error path, where no forwarder is parked on this runtime yet.
     runtime: tokio::runtime::Runtime,
     shutdown: ServeShutdown,
-    watcher_stop: Arc<AtomicBool>,
+    /// The live Tailscale-mode handle this serve built, so the caller can hand it
+    /// to a surface that changes the mode from outside the router (the terminal
+    /// UI's companion in background mode).
+    tailscale_mode: TailscaleModeControl,
     /// Taken by [`Self::wind_down`], which joins it. `None` afterwards.
     supervisor: Option<tokio::task::JoinHandle<()>>,
     /// Which branch of [`SignalPolicy`] this serve actually took. Recorded so
@@ -1132,10 +1456,19 @@ impl ServeCore {
             out
         };
 
+        // The live-mode collaborators, created BEFORE the router so the Host
+        // guard reads the mode from the same cell the serve loop writes. Neither
+        // in-app mode is ever a forced-no run: `--no-tailscale` is a `dux server`
+        // flag, so both can change the mode live.
+        let (mode_control, mode_requests) = TailscaleModeControl::new(
+            Arc::new(AtomicBool::new(tailscale.watches_interface())),
+            Arc::new(AtomicBool::new(tailscale.wants_tailscale())),
+        );
+
         // The shared shutdown primitive — the SAME [`ServeShutdown`] the CLI serve
         // path uses. Its watch is the graceful-shutdown lane every serve task and
         // the sweep await; a dying listener flips it via `record_failure`.
-        let shutdown = ServeShutdown::new(tailscale.watches_interface());
+        let shutdown = ServeShutdown::new(mode_control.watched());
 
         // Build ONE app, shared across listeners (the router is a cheap
         // `Arc`-backed service). `build_app` constructs the `ChangesService`,
@@ -1146,23 +1479,29 @@ impl ServeCore {
             server::build_app(
                 handle.clone(),
                 axum::Router::new(),
-                router_params(config, console.clone(), access_log, bound_ips, hooks),
+                router_params(config, console.clone(), access_log, bound_ips, hooks)
+                    .with_live_tailscale_host_literals(mode_control.host_literals())
+                    .with_tailscale_mode_control(mode_control.clone(), false),
             )
         };
 
         // On `auto`, watch the Tailscale interface for the rest of the serve.
-        let watcher_stop = Arc::new(AtomicBool::new(false));
-        let (leg_commands, bound_tailscale) = {
+        let mut tailscale_loop = {
             let _guard = runtime.enter();
-            start_tailscale_watcher(
+            let mut tailscale_loop = TailscaleLoop::new(
                 tailscale,
+                false,
                 // No loopback listener address means no port to hang the leg on,
                 // so this deliberately starts no watcher rather than guessing one.
                 primary,
                 tailscale_leg,
-                Arc::clone(&watcher_stop),
-            )
+                &mode_control,
+                Arc::new(dux_core::tailscale::detect_ip),
+            );
+            tailscale_loop.start_watcher_if_wanted();
+            tailscale_loop
         };
+        let leg_commands = tailscale_loop.take_leg_receiver();
 
         // One serve leg per listener plus the loop that acts on the watcher, all
         // as ONE supervisor task, so teardown is a single bounded join and a leg
@@ -1209,9 +1548,10 @@ impl ServeCore {
                 legs,
                 shutdown,
                 leg_commands,
+                mode_requests,
                 app,
                 console,
-                bound_tailscale,
+                tailscale_loop,
             ))
         };
         // The router holds its own cloned handle(s); drop ours so only the serve
@@ -1233,7 +1573,7 @@ impl ServeCore {
         Ok(Self {
             runtime,
             shutdown,
-            watcher_stop,
+            tailscale_mode: mode_control,
             supervisor: Some(supervisor),
             installed_signal_handlers,
         })
@@ -1248,6 +1588,18 @@ impl ServeCore {
     /// Whether this serve installed the process's SIGINT/SIGTERM handlers.
     pub(crate) fn installed_signal_handlers(&self) -> bool {
         self.installed_signal_handlers
+    }
+
+    /// This serve's live Tailscale-mode handle, for a surface that changes the
+    /// mode from outside the router.
+    pub(crate) fn tailscale_mode(&self) -> TailscaleModeControl {
+        self.tailscale_mode.clone()
+    }
+
+    /// The runtime this serve owns, so a caller with no runtime of its own can
+    /// drive an async handle (the mode control) on it.
+    pub(crate) fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.handle().clone()
     }
 
     /// Stop the listeners and reap the supervisor, bounded, WITHOUT tearing the
@@ -1266,11 +1618,6 @@ impl ServeCore {
     /// watcher and take the operator's escape hatch with it.
     pub(crate) fn wind_down(&mut self, shutdown_flag: &Arc<AtomicBool>) {
         shutdown_flag.store(true, Ordering::SeqCst);
-
-        // Serving is over: let the watcher thread finish its current park and
-        // exit rather than probing a server that has stopped (or, worse, handing
-        // a bind command to a loop that is winding down).
-        self.watcher_stop.store(true, Ordering::SeqCst);
 
         // Trigger graceful axum shutdown and wait (bounded) for the supervisor to
         // reap every leg. `trigger` fans out over the leg registry, so a Tailscale
@@ -1586,7 +1933,7 @@ mod tests {
         // blanked, or every reaped sibling task would have the watcher rebind a
         // healthy listener.
         let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
-        let shutdown = crate::serve_legs::ServeShutdown::new(true);
+        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
         let _leg = shutdown.register_leg(ts);
         let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
         let mut streak = Some(ts);
@@ -1602,7 +1949,7 @@ mod tests {
         // and its bind failure must be said out loud rather than swallowed by a
         // streak that predates the flap.
         let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
-        let shutdown = crate::serve_legs::ServeShutdown::new(true);
+        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
         let _leg = shutdown.register_leg(ts);
         let console = crate::console::Console::capture(dux_core::activity::ActivityRing::new());
         let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
@@ -1636,8 +1983,7 @@ mod tests {
         // death that leaves the cell naming the dead address makes every period
         // plan Nothing and the leg stays down until the interface itself flaps.
         let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
-        let shutdown = crate::serve_legs::ServeShutdown::new(true);
-        let bound_tailscale = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
+        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
         let leg_lane = shutdown.register_leg(ts);
         let console = crate::console::Console::capture(dux_core::activity::ActivityRing::new());
 
@@ -1655,16 +2001,28 @@ mod tests {
             });
         }
 
-        // A sender kept alive, so the loop's command arm stays pending rather than
-        // reporting the watcher gone.
-        let (_commands_tx, commands_rx) = tokio::sync::mpsc::channel(super::LEG_COMMAND_QUEUE);
+        let (control, mode_rx) = crate::serve_legs::TailscaleModeControl::new(
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
+        let mut tailscale_loop = super::TailscaleLoop::new(
+            TailscaleMode::Auto,
+            false,
+            Some("127.0.0.1:8080".parse().unwrap()),
+            Some(ts),
+            &control,
+            std::sync::Arc::new(|| Err(dux_core::tailscale::TailscaleUnavailable::NoAddress)),
+        );
+        let commands_rx = tailscale_loop.take_leg_receiver();
+        let bound_tailscale = tailscale_loop.bound_cell();
         let loop_task = tokio::spawn(super::run_serve_loop(
             legs,
             shutdown.clone(),
             commands_rx,
+            mode_rx,
             axum::Router::new(),
             console,
-            std::sync::Arc::clone(&bound_tailscale),
+            tailscale_loop,
         ));
 
         let cleared = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -2017,36 +2375,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn no_watcher_runs_unless_the_mode_is_auto() {
-        // `yes` is the pre-tri-state behavior and must stay exactly that: bind
-        // once, never look again. The observable difference is that no watcher
-        // exists, which shows up as a command channel that is already closed
-        // (nothing holds a sender), so the serve loop stops listening for good.
-        for mode in [TailscaleMode::Yes, TailscaleMode::No] {
-            let (mut commands, bound) = super::start_tailscale_watcher(
-                mode,
-                Some("127.0.0.1:8080".parse().unwrap()),
-                None,
-                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            );
-            assert!(
-                commands.recv().await.is_none(),
-                "{mode:?} must start no watcher"
-            );
-            assert_eq!(
-                *bound.lock().unwrap(),
-                None,
-                "and must report nothing bound of its own"
-            );
-        }
-
-        // The `auto` side is not asserted here on purpose: what it does is decided
-        // by the loop this function spawns, and that loop is tested directly in
-        // `serve_legs` with the detector, the clock and the channel all injected.
-        // Exercising it through this function would mean either probing the real
-        // `tailscale` CLI or waiting out a real watch period.
-    }
 
     #[test]
     fn dux_core_command_is_constructible() {
@@ -2063,6 +2391,436 @@ mod tests {
             }
             _ => unreachable!("constructed an OpenPath variant"),
         }
+    }
+}
+
+/// The live `[server] tailscale` mode, driven through the real serve loop with
+/// the detector injected and no Tailscale binary anywhere.
+///
+/// The Tailscale leg is stood in for by a second loopback address: `desired_leg`
+/// only refuses an address the primary already covers, so `127.0.0.2` is a leg
+/// like any other and binds for real, which is what makes "did the listener
+/// actually move" a fact rather than a claim about a cell.
+#[cfg(test)]
+mod live_tailscale_mode_tests {
+    use super::*;
+    use dux_core::tailscale::TailscaleUnavailable;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    /// Bounds every wait in this module. Long enough that a loaded machine never
+    /// trips it, short enough that a regression fails instead of hanging.
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// The stand-in Tailscale address.
+    fn leg_ip() -> IpAddr {
+        "127.0.0.2".parse().unwrap()
+    }
+
+    /// A primary listener held open for the whole test, so its port stays
+    /// reserved on `127.0.0.1` while the leg binds the same port on `127.0.0.2`.
+    fn primary_listener() -> (std::net::TcpListener, SocketAddr) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free loopback port");
+        let addr = listener.local_addr().expect("its address");
+        (listener, addr)
+    }
+
+    struct Harness {
+        shutdown: ServeShutdown,
+        control: TailscaleModeControl,
+        bound: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+        legs: tokio::sync::mpsc::Sender<(u64, LegCommand)>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Harness {
+        fn start(
+            mode: TailscaleMode,
+            forced_no: bool,
+            primary: Option<SocketAddr>,
+            initial_leg: Option<SocketAddr>,
+            detect: Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>,
+        ) -> Self {
+            let (control, mode_rx) = TailscaleModeControl::new(
+                Arc::new(AtomicBool::new(mode.watches_interface())),
+                Arc::new(AtomicBool::new(mode.wants_tailscale())),
+            );
+            let shutdown = ServeShutdown::new(control.watched());
+            if let Some(addr) = initial_leg {
+                // A live leg the loop can genuinely stop, so "it unbound" is the
+                // registry answering rather than a cell being blanked.
+                let _ = shutdown.register_leg(addr);
+            }
+            let mut ts = TailscaleLoop::new(mode, forced_no, primary, initial_leg, &control, detect);
+            let leg_rx = ts.take_leg_receiver();
+            let bound = ts.bound_cell();
+            let legs = ts.leg_sender();
+            ts.start_watcher_if_wanted();
+            let task = tokio::spawn(run_serve_loop(
+                tokio::task::JoinSet::new(),
+                shutdown.clone(),
+                leg_rx,
+                mode_rx,
+                axum::Router::new(),
+                Console::noop(),
+                ts,
+            ));
+            Self {
+                shutdown,
+                control,
+                bound,
+                legs,
+                task,
+            }
+        }
+
+        fn bound(&self) -> Option<SocketAddr> {
+            *self.bound.lock().expect("the cell is not poisoned")
+        }
+
+        async fn finish(self) {
+            self.shutdown.trigger();
+            tokio::time::timeout(WAIT, self.task)
+                .await
+                .expect("a tripped lane must end the serve loop")
+                .expect("the serve loop task joins");
+        }
+    }
+
+    #[tokio::test]
+    async fn switching_to_no_drops_the_leg_stops_the_watcher_and_closes_the_host_rule() {
+        let (_primary, primary_addr) = primary_listener();
+        let leg = SocketAddr::new(leg_ip(), primary_addr.port());
+        let h = Harness::start(
+            TailscaleMode::Auto,
+            false,
+            Some(primary_addr),
+            Some(leg),
+            Arc::new(|| Ok("127.0.0.2".parse().unwrap())),
+        );
+        assert!(
+            h.control.watched().load(Ordering::SeqCst),
+            "auto starts a watcher"
+        );
+
+        let outcome = h.control.set_mode(TailscaleMode::No).await;
+        assert_eq!(outcome, TailscaleModeOutcome::Detached);
+        assert_eq!(h.bound(), None, "the leg is gone");
+        assert!(
+            !h.control.watched().load(Ordering::SeqCst),
+            "and nothing is watching for it any more"
+        );
+        assert!(
+            !h.control.host_literals().load(Ordering::SeqCst),
+            "the Host guard must stop admitting tailnet literals with the leg"
+        );
+        h.finish().await;
+    }
+
+    #[tokio::test]
+    async fn switching_to_yes_binds_what_the_detection_found() {
+        let (_primary, primary_addr) = primary_listener();
+        let h = Harness::start(
+            TailscaleMode::No,
+            false,
+            Some(primary_addr),
+            None,
+            Arc::new(|| Ok(leg_ip())),
+        );
+
+        let outcome = h.control.set_mode(TailscaleMode::Yes).await;
+        let expected = SocketAddr::new(leg_ip(), primary_addr.port());
+        assert_eq!(
+            outcome,
+            TailscaleModeOutcome::Applied {
+                bound: Some(expected)
+            }
+        );
+        assert_eq!(h.bound(), Some(expected));
+        assert!(
+            h.shutdown.has_leg(expected),
+            "a real listener must be serving there"
+        );
+        assert!(
+            h.control.host_literals().load(Ordering::SeqCst),
+            "and the Host guard must admit tailnet literals again"
+        );
+        assert!(
+            !h.control.watched().load(Ordering::SeqCst),
+            "yes looks once; nothing keeps watching"
+        );
+        h.finish().await;
+    }
+
+    #[tokio::test]
+    async fn switching_to_yes_with_no_address_warns_and_binds_nothing() {
+        let (_primary, primary_addr) = primary_listener();
+        let h = Harness::start(
+            TailscaleMode::No,
+            false,
+            Some(primary_addr),
+            None,
+            Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
+        );
+
+        assert_eq!(
+            h.control.set_mode(TailscaleMode::Yes).await,
+            TailscaleModeOutcome::NothingDetected
+        );
+        assert_eq!(h.bound(), None);
+        h.finish().await;
+    }
+
+    #[tokio::test]
+    async fn switching_to_auto_starts_a_watcher_that_probes_at_once() {
+        let (_primary, primary_addr) = primary_listener();
+        let (probed_tx, probed_rx) = std::sync::mpsc::channel();
+        let h = Harness::start(
+            TailscaleMode::No,
+            false,
+            Some(primary_addr),
+            None,
+            Arc::new(move || {
+                let _ = probed_tx.send(());
+                Err(TailscaleUnavailable::NoAddress)
+            }),
+        );
+
+        assert_eq!(
+            h.control.set_mode(TailscaleMode::Auto).await,
+            TailscaleModeOutcome::Applied { bound: None },
+            "nothing is bound yet, and dux is watching for it"
+        );
+        assert!(h.control.watched().load(Ordering::SeqCst));
+        probed_rx
+            .recv_timeout(WAIT)
+            .expect("the watcher must probe before its first park, not ten seconds later");
+        h.finish().await;
+    }
+
+    #[tokio::test]
+    async fn switching_from_yes_to_auto_keeps_the_leg_that_is_already_serving() {
+        let (_primary, primary_addr) = primary_listener();
+        let leg = SocketAddr::new(leg_ip(), primary_addr.port());
+        let h = Harness::start(
+            TailscaleMode::Yes,
+            false,
+            Some(primary_addr),
+            Some(leg),
+            // The interface is still there, so the watcher's first probe plans
+            // nothing and the listener is left exactly where it was.
+            Arc::new(move || Ok(leg_ip())),
+        );
+
+        assert_eq!(
+            h.control.set_mode(TailscaleMode::Auto).await,
+            TailscaleModeOutcome::Applied { bound: Some(leg) }
+        );
+        assert_eq!(h.bound(), Some(leg), "the leg is untouched");
+        h.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_run_started_with_no_tailscale_refuses_and_changes_nothing() {
+        let (_primary, primary_addr) = primary_listener();
+        let h = Harness::start(
+            TailscaleMode::No,
+            true,
+            Some(primary_addr),
+            None,
+            Arc::new(|| Ok(leg_ip())),
+        );
+
+        for mode in [TailscaleMode::Auto, TailscaleMode::Yes] {
+            assert_eq!(
+                h.control.set_mode(mode).await,
+                TailscaleModeOutcome::RefusedForcedNo
+            );
+        }
+        assert_eq!(h.bound(), None, "nothing was bound behind the refusal");
+        assert!(!h.control.watched().load(Ordering::SeqCst));
+        assert!(
+            !h.control.host_literals().load(Ordering::SeqCst),
+            "and the Host guard stayed closed"
+        );
+        h.finish().await;
+    }
+
+    #[tokio::test]
+    async fn the_leg_command_lane_stays_open_in_the_static_modes() {
+        // The loop holds a sender for its whole life, so a mode with no watcher
+        // behind it is not a closed channel: switching back to `auto` later must
+        // find the arm still listening.
+        let (_primary, primary_addr) = primary_listener();
+        let leg = SocketAddr::new(leg_ip(), primary_addr.port());
+        let h = Harness::start(
+            TailscaleMode::Yes,
+            false,
+            Some(primary_addr),
+            None,
+            Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
+        );
+        assert!(
+            !h.control.watched().load(Ordering::SeqCst),
+            "yes starts no watcher thread"
+        );
+
+        // Generation 0 is what a serve that never started a watcher is on.
+        h.legs
+            .send((0, LegCommand::Bind(leg)))
+            .await
+            .expect("the lane must still be open");
+        let bound = tokio::time::timeout(WAIT, async {
+            loop {
+                if h.bound() == Some(leg) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(bound.is_ok(), "the loop must still act on leg commands");
+        h.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_command_from_a_replaced_watcher_generation_is_dropped() {
+        // A watcher parked in a probe when the mode changed comes back with a
+        // command for the mode dux already left. Acting on it would re-bind the
+        // leg the change just let go.
+        let (_primary, primary_addr) = primary_listener();
+        let stale = SocketAddr::new("127.0.0.3".parse::<IpAddr>().unwrap(), primary_addr.port());
+        let current = SocketAddr::new(leg_ip(), primary_addr.port());
+        // A detection that never answers, so neither watcher thread emits
+        // anything of its own and the only commands the loop sees are this
+        // test's.
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let parked = std::sync::Mutex::new(parked);
+        let h = Harness::start(
+            TailscaleMode::Auto,
+            false,
+            Some(primary_addr),
+            None,
+            Arc::new(move || {
+                let _ = parked.lock().expect("not poisoned").recv();
+                Err(TailscaleUnavailable::NoAddress)
+            }),
+        );
+
+        // The startup watcher is generation 1; this change replaces it with 2.
+        assert_eq!(
+            h.control.set_mode(TailscaleMode::Auto).await,
+            TailscaleModeOutcome::Applied { bound: None }
+        );
+
+        // One lane, so these arrive in order: once the current-generation command
+        // has been acted on, the stale one has already been decided.
+        h.legs.send((1, LegCommand::Bind(stale))).await.unwrap();
+        h.legs.send((2, LegCommand::Bind(current))).await.unwrap();
+        let landed = tokio::time::timeout(WAIT, async {
+            loop {
+                if h.bound() == Some(current) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(landed.is_ok(), "the current generation's command must land");
+        assert!(
+            !h.shutdown.has_leg(stale),
+            "a stale generation's bind must never have been served"
+        );
+        drop(release);
+        h.finish().await;
+    }
+
+    /// A detector the test can hold parked, plus the signal that it started.
+    fn parked_detector() -> (
+        Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        // The "it started" signal is a tokio channel and the park is a std one:
+        // the test AWAITS the first (blocking on it would stop the runtime the
+        // serve loop is on) and the detector BLOCKS on the second, which is the
+        // whole point of running it off the loop.
+        let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let detect: Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync> =
+            Arc::new(move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.lock().expect("not poisoned").recv();
+                Err(TailscaleUnavailable::NoAddress)
+            });
+        (detect, started_rx, release_tx)
+    }
+
+    #[tokio::test]
+    async fn a_superseded_request_is_answered_rather_than_left_hanging() {
+        let (_primary, primary_addr) = primary_listener();
+        let (detect, mut started, release) = parked_detector();
+        let h = Harness::start(TailscaleMode::No, false, Some(primary_addr), None, detect);
+
+        let control = h.control.clone();
+        let first = tokio::spawn(async move { control.set_mode(TailscaleMode::Yes).await });
+        tokio::time::timeout(WAIT, started.recv())
+            .await
+            .expect("the detection must have started");
+
+        assert_eq!(
+            h.control.set_mode(TailscaleMode::No).await,
+            TailscaleModeOutcome::Applied { bound: None },
+            "the newer request is carried out"
+        );
+        let superseded = tokio::time::timeout(WAIT, first)
+            .await
+            .expect("the older request must be answered, not dropped")
+            .expect("the request task joins");
+        assert_eq!(superseded, TailscaleModeOutcome::Superseded);
+        drop(release);
+        h.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_parked_detection_does_not_stop_the_parent_lane_from_ending_the_loop() {
+        // The detection is its own select arm precisely so a five-second probe
+        // cannot hold a teardown, a leg death or a watcher command behind it.
+        let (_primary, primary_addr) = primary_listener();
+        let (detect, mut started, release) = parked_detector();
+        let h = Harness::start(TailscaleMode::No, false, Some(primary_addr), None, detect);
+
+        let control = h.control.clone();
+        let pending = tokio::spawn(async move { control.set_mode(TailscaleMode::Yes).await });
+        tokio::time::timeout(WAIT, started.recv())
+            .await
+            .expect("the detection must have started");
+
+        h.shutdown.trigger();
+        tokio::time::timeout(WAIT, h.task)
+            .await
+            .expect("a parked detection must not hold the teardown")
+            .expect("the serve loop task joins");
+        let answered = tokio::time::timeout(WAIT, pending)
+            .await
+            .expect("the pending request must be answered as the loop ends")
+            .expect("the request task joins");
+        assert_eq!(answered, TailscaleModeOutcome::NotServing);
+        drop(release);
+    }
+
+    #[tokio::test]
+    async fn a_control_whose_loop_is_gone_reports_that_nothing_is_serving() {
+        let (control, mode_rx) = TailscaleModeControl::new(
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        drop(mode_rx);
+        assert_eq!(
+            control.set_mode(TailscaleMode::Auto).await,
+            TailscaleModeOutcome::NotServing
+        );
     }
 }
 
