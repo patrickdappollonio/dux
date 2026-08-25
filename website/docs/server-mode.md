@@ -142,13 +142,13 @@ is driving claims it, and everybody who arrives after that watches, with live ou
 scrolling and copying. Nothing passive ever takes a terminal away again.
 
 When someone else has the terminal you are looking at, a card covers it and names the
-device that is driving, in the terminal UI and in the browser alike. With the pane
-focused, press the key that focuses an agent (Enter unless you have rebound it) or click
-**Take over**, and it is yours again. The card calls the terminal UI `the dux TUI` when
-that is what has the keyboard. Taking a terminal over also retargets its size to the
-device that took it, and everyone watching adopts that geometry. Take-over works in both
-directions and is sticky either way: losing a terminal does not silently give it back to
-you.
+device that is driving, in the terminal UI and in the browser alike. The card carries one
+button, **Take over**, and two ways to press it: click it, or, with the pane focused, use
+the key that focuses an agent (Enter unless you have rebound it). Either way the terminal
+is yours again. The card calls the terminal UI `the dux TUI` when that is what has the
+keyboard. Taking a terminal over also retargets its size to the device that took it, and
+everyone watching adopts that geometry. Take-over works in both directions and is sticky
+either way: losing a terminal does not silently give it back to you.
 
 > [!NOTE]
 > The card covers the terminal only. The tabs above it, the pull-request banner and the
