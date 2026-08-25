@@ -57,9 +57,12 @@ import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import {
   CHANGES_PANE_COLLAPSE_EPSILON,
   CHANGES_PANE_DEFAULT_PERCENT,
+  CHANGES_PANE_INITIAL_PERCENT,
+  CHANGES_PANE_MIN_PERCENT,
   changesPaneVisible,
   collapseChangesPaneFromDrag,
   changesPaneCollapseStep,
+  persistChangesPanePercent,
   setChangesPanePercent,
   useDux,
 } from "@/lib/store"
@@ -336,6 +339,12 @@ export function DesktopShell() {
                 layout["changes-pane"] ?? CHANGES_PANE_DEFAULT_PERCENT,
               )
             }
+            // `onLayoutChanged` fires at the END of a gesture, which is where
+            // both dividers write: the sidebar's edge persists on release too.
+            onLayoutChanged={(layout) => {
+              const percent = layout["changes-pane"]
+              if (percent !== undefined) persistChangesPanePercent(percent)
+            }}
           >
             {/* The terminal panel's defaultSize drops to 100% when the Changes
                 panel is absent so it fills the width (no leftover sliver). The
@@ -353,7 +362,7 @@ export function DesktopShell() {
             <ResizablePanel
               id="terminal-pane"
               defaultSize={
-                showChanges ? `${100 - CHANGES_PANE_DEFAULT_PERCENT}%` : "100%"
+                showChanges ? `${100 - CHANGES_PANE_INITIAL_PERCENT}%` : "100%"
               }
               minSize="30%"
             >
@@ -365,8 +374,8 @@ export function DesktopShell() {
                 <ResizablePanel
                   id="changes-pane"
                   panelRef={changesPanelRef}
-                  defaultSize={`${CHANGES_PANE_DEFAULT_PERCENT}%`}
-                  minSize="14%"
+                  defaultSize={`${CHANGES_PANE_INITIAL_PERCENT}%`}
+                  minSize={`${CHANGES_PANE_MIN_PERCENT}%`}
                   // Still collapsible: dragging the divider off the edge is a
                   // legitimate way to put the pane away, and it WRITES that
                   // intent. The preference and the split are separate

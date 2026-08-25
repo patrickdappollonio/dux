@@ -89,8 +89,68 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
     selectedTarget: null,
     pendingSessionOrder: null,
     pendingProjectOrder: null,
+    sidebarWidth: "18rem",
     ...overrides,
   } as unknown as DuxState
+}
+
+// ── Driving the sidebar's divider ──────────────────────────────────────────
+// The shared divider decides a press from the element's RECT rather than by
+// hit-testing it, and jsdom has no layout, so every drag test has to say where
+// the edge is. 288px is the default 18rem width the state above starts at, and
+// the drag is a DELTA from the press point, so pressing exactly on the edge
+// makes the released x the released width.
+const SIDEBAR_EDGE_X = 288
+
+function grabHandle(container: HTMLElement): HTMLElement {
+  const handle = container.querySelector(
+    '[data-sidebar="resize-handle"]',
+  ) as HTMLElement
+  handle.setPointerCapture = () => {}
+  handle.getBoundingClientRect = () =>
+    ({
+      x: SIDEBAR_EDGE_X - 2,
+      y: 0,
+      left: SIDEBAR_EDGE_X - 2,
+      right: SIDEBAR_EDGE_X + 2,
+      top: 0,
+      bottom: 800,
+      width: 4,
+      height: 800,
+      toJSON: () => ({}),
+    }) as DOMRect
+  return handle
+}
+
+function pressEdge(handle: HTMLElement, init: Record<string, unknown> = {}) {
+  fireEvent.pointerDown(handle, {
+    pointerId: 1,
+    clientX: SIDEBAR_EDGE_X,
+    clientY: 100,
+    ...init,
+  })
+}
+
+function moveEdge(clientX: number, init: Record<string, unknown> = {}) {
+  act(() => {
+    fireEvent.pointerMove(document, {
+      pointerId: 1,
+      clientX,
+      clientY: 100,
+      ...init,
+    })
+  })
+}
+
+function releaseEdge(clientX: number, init: Record<string, unknown> = {}) {
+  act(() => {
+    fireEvent.pointerUp(document, {
+      pointerId: 1,
+      clientX,
+      clientY: 100,
+      ...init,
+    })
+  })
 }
 
 // A minimal one-project/one-session spine, with the session's tab count
@@ -648,21 +708,150 @@ describe("AppSidebar resize affordances", () => {
       </SidebarProvider>,
     )
 
-    const handle = container.querySelector(
-      '[data-sidebar="resize-handle"]',
-    ) as HTMLElement
+    const handle = grabHandle(container)
     expect(handle).toBeTruthy()
-    // jsdom doesn't implement pointer capture; the handler calls it on press.
-    handle.setPointerCapture = () => {}
 
-    // Press, drag to x=400, release. 400px is inside [224, 448] (14rem..28rem),
-    // so it lands at exactly 25rem and is persisted on release. This exercises
-    // the real window-listener drag path, not just the element's presence.
-    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 240 })
-    window.dispatchEvent(new MouseEvent("pointermove", { clientX: 400 }))
-    window.dispatchEvent(new MouseEvent("pointerup", { clientX: 400 }))
+    // Press on the edge, drag to x=400, release. 400px is inside [224, 448]
+    // (14rem..28rem), so it lands at exactly 25rem and is persisted on release.
+    // This exercises the real document-listener drag path, not just presence.
+    pressEdge(handle)
+    moveEdge(400)
+    releaseEdge(400)
 
     expect(localStorage.getItem("dux:sidebar-width")).toBe("25rem")
+  })
+
+  // The library's separator moves by the DELTA from the press point, and so
+  // does this one: a press that lands off centre inside the 20px grab band must
+  // not teleport the divider to the finger before it has moved.
+  it("does not jump when the press lands off centre in the grab band", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = grabHandle(container)
+    // Pressed 4px left of the edge, still inside the 10px fine-pointer band,
+    // and released without moving: the width is unchanged, not dragged 4px
+    // narrower.
+    pressEdge(handle, { clientX: SIDEBAR_EDGE_X - 4 })
+    releaseEdge(SIDEBAR_EDGE_X - 4)
+
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("18rem")
+  })
+
+  it("acquires a press inside the band even when the element is covered", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = grabHandle(container)
+    // Dispatched at the document, never at the handle: the divider is claimed
+    // from the pointer's position, so nothing painted over it can swallow the
+    // press.
+    act(() => {
+      fireEvent.pointerDown(document.body, {
+        pointerId: 1,
+        clientX: SIDEBAR_EDGE_X,
+        clientY: 100,
+      })
+    })
+    expect(handle).toBeTruthy()
+    releaseEdge(400)
+
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("25rem")
+  })
+
+  // The Changes divider's double-click restores its panel's mount size, so the
+  // sidebar's restores the width the page loaded with. Nothing was persisted
+  // before this render, so that is the 18rem default.
+  it("restores the width the page loaded with on a double-click", () => {
+    mockState = makeState({ sidebarWidth: "26rem" })
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = grabHandle(container)
+    expect(handle).toBeTruthy()
+    act(() => {
+      fireEvent.dblClick(document.body, {
+        clientX: SIDEBAR_EDGE_X,
+        clientY: 100,
+      })
+    })
+
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("18rem")
+  })
+
+  // The panel library's separator vocabulary, in the sidebar's units: an arrow
+  // steps by 5% of the window, Home and End run the divider to its ends.
+  it("resizes from the keyboard the way the panel library's separator does", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = grabHandle(container)
+    expect(handle.getAttribute("role")).toBe("separator")
+    expect(handle.getAttribute("aria-orientation")).toBe("vertical")
+    expect(handle.tabIndex).toBe(0)
+
+    // jsdom's window is 1024px wide, so a 5% step is 51.2px: 288 + 51.2 lands
+    // at 339.2px, which is 21.2rem.
+    act(() => {
+      fireEvent.keyDown(handle, { key: "ArrowRight" })
+    })
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("21.2rem")
+
+    act(() => {
+      fireEvent.keyDown(handle, { key: "End" })
+    })
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("28rem")
+  })
+
+  it("collapses to the rail on Home, and on Enter", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    act(() => {
+      fireEvent.keyDown(grabHandle(container), { key: "Home" })
+    })
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("14rem")
+    expect(
+      container.querySelector('[data-sidebar="expand-handle"]'),
+    ).toBeTruthy()
+  })
+
+  it("collapses to the rail on Enter, the library's collapse key", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    act(() => {
+      fireEvent.keyDown(grabHandle(container), { key: "Enter" })
+    })
+    expect(
+      container.querySelector('[data-sidebar="resize-handle"]'),
+    ).toBeNull()
+    expect(
+      container.querySelector('[data-sidebar="expand-handle"]'),
+    ).toBeTruthy()
   })
 
   it("clamps the dragged width to the maximum", () => {
@@ -673,14 +862,11 @@ describe("AppSidebar resize affordances", () => {
       </SidebarProvider>,
     )
 
-    const handle = container.querySelector(
-      '[data-sidebar="resize-handle"]',
-    ) as HTMLElement
-    handle.setPointerCapture = () => {}
+    const handle = grabHandle(container)
 
     // 9999px is well past the 28rem (448px) cap, so it must clamp to 28rem.
-    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 240 })
-    window.dispatchEvent(new MouseEvent("pointerup", { clientX: 9999 }))
+    pressEdge(handle)
+    releaseEdge(9999)
 
     expect(localStorage.getItem("dux:sidebar-width")).toBe("28rem")
   })
@@ -722,7 +908,9 @@ describe("AppSidebar resize affordances", () => {
   // was 4px wide, well under the 20px the panel library itself uses as its
   // coarse-pointer minimum. Both are asserted on the CLASS, which is where the
   // fix lives (jsdom implements neither gesture arbitration nor hit testing, so
-  // the browser behaviour is not reproducible here).
+  // the browser behaviour is not reproducible here). Both now come from the
+  // shared divider chrome, which the Changes divider wears too; the parity
+  // test in paneDividerParity.test.tsx is what keeps the two together.
   it("suppresses touch-action on the drag handle so a finger drag is not stolen as a pan", () => {
     mockState = makeState()
     const { container } = render(
@@ -751,7 +939,8 @@ describe("AppSidebar resize affordances", () => {
     // The painted line stays 1 unit (4px) wide; a transparent ::after grows to
     // 5 units (20px) under a coarse pointer. Same trick components/ui/resizable.tsx uses.
     expect(handle.className).toContain("after:absolute")
-    expect(handle.className).toContain("pointer-coarse:after:w-5")
+    expect(handle.className).toContain("pointer-coarse:after:w-[20px]")
+    expect(handle.className).toContain("after:w-[10px]")
     expect(handle.className).toContain("w-1")
   })
 
@@ -767,7 +956,7 @@ describe("AppSidebar resize affordances", () => {
       '[data-sidebar="expand-handle"]',
     ) as HTMLElement
     expect(expand.className).toContain("after:absolute")
-    expect(expand.className).toContain("pointer-coarse:after:w-5")
+    expect(expand.className).toContain("pointer-coarse:after:w-[20px]")
   })
 
   it("resizes and persists from a touch-pointer drag", () => {
@@ -778,20 +967,11 @@ describe("AppSidebar resize affordances", () => {
       </SidebarProvider>,
     )
 
-    const handle = container.querySelector(
-      '[data-sidebar="resize-handle"]',
-    ) as HTMLElement
-    handle.setPointerCapture = () => {}
+    const handle = grabHandle(container)
 
-    fireEvent.pointerDown(handle, {
-      pointerId: 7,
-      pointerType: "touch",
-      clientX: 240,
-    })
-    act(() => {
-      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 336 }))
-      window.dispatchEvent(new MouseEvent("pointerup", { clientX: 336 }))
-    })
+    pressEdge(handle, { pointerId: 7, pointerType: "touch" })
+    moveEdge(336, { pointerId: 7, pointerType: "touch" })
+    releaseEdge(336, { pointerId: 7, pointerType: "touch" })
 
     expect(localStorage.getItem("dux:sidebar-width")).toBe("21rem")
   })
@@ -804,26 +984,22 @@ describe("AppSidebar resize affordances", () => {
       </SidebarProvider>,
     )
 
-    const handle = container.querySelector(
-      '[data-sidebar="resize-handle"]',
-    ) as HTMLElement
-    handle.setPointerCapture = () => {}
+    const handle = grabHandle(container)
 
-    fireEvent.pointerDown(handle, {
-      pointerId: 8,
-      pointerType: "touch",
-      clientX: 240,
-    })
+    pressEdge(handle, { pointerId: 8, pointerType: "touch" })
+    moveEdge(336, { pointerId: 8, pointerType: "touch" })
     act(() => {
-      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 336 }))
-      window.dispatchEvent(new Event("pointercancel"))
+      fireEvent.pointerCancel(document, {
+        pointerId: 8,
+        pointerType: "touch",
+        clientX: 336,
+        clientY: 100,
+      })
     })
     // Nothing is persisted by a cancel, and a later stray move must not move
-    // the sidebar: the listeners are gone.
+    // the sidebar: the gesture is over.
     expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
-    act(() => {
-      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 400 }))
-    })
+    releaseEdge(400, { pointerId: 8, pointerType: "touch" })
     expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
   })
 })
@@ -876,20 +1052,15 @@ describe("AppSidebar auto-collapse on narrow drag", () => {
       </SidebarProvider>,
     )
 
-    const handle = container.querySelector(
-      '[data-sidebar="resize-handle"]',
-    ) as HTMLElement
+    const handle = grabHandle(container)
     expect(handle).toBeTruthy()
-    handle.setPointerCapture = () => {}
 
     // Drag far left and release at x=100 (clamps to 14rem, under the 15rem
     // auto-collapse threshold): the sidebar snaps to the icon rail, so the drag
     // handle is replaced by the click-to-expand edge.
-    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 240 })
-    act(() => {
-      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 100 }))
-      window.dispatchEvent(new MouseEvent("pointerup", { clientX: 100 }))
-    })
+    pressEdge(handle)
+    moveEdge(100)
+    releaseEdge(100)
 
     expect(localStorage.getItem("dux:sidebar-width")).toBe("14rem")
     expect(
@@ -908,15 +1079,10 @@ describe("AppSidebar auto-collapse on narrow drag", () => {
       </SidebarProvider>,
     )
 
-    const handle = container.querySelector(
-      '[data-sidebar="resize-handle"]',
-    ) as HTMLElement
-    handle.setPointerCapture = () => {}
+    const handle = grabHandle(container)
 
-    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 240 })
-    act(() => {
-      window.dispatchEvent(new MouseEvent("pointerup", { clientX: 320 }))
-    })
+    pressEdge(handle)
+    releaseEdge(320)
 
     // Stays expanded: the drag handle remains, no expand edge appears.
     expect(localStorage.getItem("dux:sidebar-width")).toBe("20rem")

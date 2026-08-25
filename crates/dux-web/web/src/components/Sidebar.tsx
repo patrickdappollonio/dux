@@ -33,10 +33,13 @@ import { changesCountFor } from "@/lib/agentVitals"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import { partitionProjects } from "@/lib/projects"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
+import { DIVIDER_CHROME, dividerKeyAction } from "@/lib/paneDivider"
+import { useDividerDrag } from "@/hooks/use-divider-drag"
 import {
   MAX_SIDEBAR_PX,
   MIN_SIDEBAR_PX,
   sidebarResizeRelease,
+  sidebarWidthToPx,
 } from "@/lib/sidebarResize"
 import { applyPendingOrders } from "@/lib/reorder"
 import {
@@ -44,6 +47,7 @@ import {
   selectSession,
   selectTerminal,
   setSidebarWidth,
+  SIDEBAR_INITIAL_WIDTH,
   useDux,
 } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
@@ -178,99 +182,114 @@ function CollapsedAgentRail({
   )
 }
 
-// The transparent hit slop both edge affordances wear, so a FINGER can find a
-// 4px line. The painted strip stays 1 unit wide; a centred ::after grows to 5
-// units (20px, the panel library's own coarse-pointer minimum for a resize
-// target) only under a coarse pointer, so a mouse near the sidebar edge keeps
-// hitting the content behind it. Same pseudo-element trick as
-// components/ui/resizable.tsx.
-// The 20px coarse slop overlaps about 8px of each neighbour: the sidebar rows'
-// right edge on one side and the center pane's left edge on the other. Both
-// absorb a stray press harmlessly (a row press only selects; the terminal edge
-// carries no control), which is the per-axis justification the touch-target
-// tenet asks for. Rebuilding the sidebar as a resizable panel group was
-// evaluated and rejected: it would fight SidebarProvider's CSS-variable width
-// model for no visible gain; the two things the library's handle has that this
-// rail lacked are touch-action suppression and this hit slop, so those are
-// copied instead.
-const EDGE_HIT_SLOP =
-  "after:absolute after:inset-y-0 after:left-1/2 after:w-1 after:-translate-x-1/2 pointer-coarse:after:w-5"
-
 // Edge affordance pinned to the sidebar's right edge: drag-to-resize when
-// expanded, click-to-expand when collapsed. Desktop only. The clamp band and the
-// auto-collapse decision live in lib/sidebarResize.ts so they stay unit-testable.
+// expanded, click-to-expand when collapsed. Desktop only.
+//
+// The GESTURE is the shared one: `useDividerDrag` and `DIVIDER_CHROME` are the
+// same acquisition, grab band, touch-action suppression, cursor and keyboard
+// vocabulary the Changes divider gets from react-resizable-panels, so a finger
+// that can move one can move the other. The sidebar keeps its own band and its
+// own collapse target (the icon rail rather than nothing), which is the one
+// difference between the two dividers; that band lives in lib/sidebarResize.ts.
+//
+// Rebuilding the sidebar as a resizable panel group instead was evaluated and
+// rejected: it would fight SidebarProvider's CSS-variable width model, which
+// the collapsed rail and every `group-data-[collapsible=icon]` rule read.
 function SidebarResizeHandle() {
-  const { state, isMobile, setOpen } = useSidebar()
-  const cleanupRef = useRef<(() => void) | null>(null)
-  useEffect(() => () => cleanupRef.current?.(), [])
-
+  const { state, isMobile } = useSidebar()
   if (state === "collapsed") {
-    if (isMobile) {
-      return null
-    }
-    return (
-      <button
-        type="button"
-        data-sidebar="expand-handle"
-        aria-label="Expand sidebar"
-        onClick={() => setOpen(true)}
-        className={cn(
-          "absolute inset-y-0 -right-1 z-30 w-1 cursor-e-resize hover:bg-sidebar-border",
-          EDGE_HIT_SLOP,
-        )}
-      />
-    )
+    return isMobile ? null : <SidebarExpandStrip />
+  }
+  return <SidebarDragEdge />
+}
+
+function SidebarExpandStrip() {
+  const { setOpen } = useSidebar()
+  return (
+    <button
+      type="button"
+      data-sidebar="expand-handle"
+      aria-label="Expand sidebar"
+      onClick={() => setOpen(true)}
+      className={cn(
+        DIVIDER_CHROME,
+        "absolute inset-y-0 -right-1 z-30 w-1 cursor-e-resize hover:bg-sidebar-border",
+      )}
+    />
+  )
+}
+
+function SidebarDragEdge() {
+  const { setOpen } = useSidebar()
+  const { sidebarWidth } = useDux()
+
+  // The live width, and the width the current gesture is measured from. Refs
+  // because both change on pointer-move cadence and the listeners below are
+  // installed once.
+  const widthRef = useRef(sidebarWidth)
+  useEffect(() => {
+    widthRef.current = sidebarWidth
+  })
+  const grabbedPxRef = useRef(sidebarWidthToPx(sidebarWidth))
+
+  // Every way of moving this divider ends here, so a drag, an arrow key and a
+  // double-click cannot disagree about the band or about when the sidebar
+  // snaps to its rail.
+  const commit = (px: number) => {
+    const { widthRem, collapse } = sidebarResizeRelease(px)
+    setSidebarWidth(widthRem, true)
+    if (collapse) setOpen(false)
   }
 
-  function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
+  const ref = useDividerDrag({
+    onGrab: () => {
+      grabbedPxRef.current = sidebarWidthToPx(widthRef.current)
+    },
+    // Live, unpersisted: the width follows the finger by the DELTA from the
+    // press, so a press that landed off centre in the grab band does not
+    // teleport the divider on the first move.
+    onDrag: (deltaX) => {
+      const { widthRem } = sidebarResizeRelease(grabbedPxRef.current + deltaX)
+      setSidebarWidth(widthRem)
+    },
+    onDrop: (deltaX) => commit(grabbedPxRef.current + deltaX),
+    // A cancelled gesture writes nothing and leaves the sidebar where the
+    // finger left it, which is what the panel library's divider does too.
+    onCancel: () => {},
+    // Back to the width the page loaded with, which is exactly what the
+    // Changes divider's double-click restores on its side.
+    onReset: () => commit(sidebarWidthToPx(SIDEBAR_INITIAL_WIDTH)),
+  })
+
+  // The library's separator keyboard vocabulary, in the sidebar's own units: a
+  // step is a percentage of the window, which is the group both dividers split.
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const action = dividerKeyAction(event.key)
+    if (!action) return
     event.preventDefault()
-    const target = event.currentTarget
-    target.setPointerCapture(event.pointerId)
-
-    const onMove = (move: PointerEvent) => {
-      const px = Math.min(Math.max(move.clientX, MIN_SIDEBAR_PX), MAX_SIDEBAR_PX)
-      setSidebarWidth(`${px / 16}rem`)
+    if (action.kind === "toggle") {
+      setOpen(false)
+      return
     }
-
-    // On release, persist the clamped width; if the user dragged below the
-    // auto-collapse threshold, snap to the icon rail (same state the footer
-    // collapse button / Ctrl-b drive), which the edge's click-to-expand undoes.
-
-    const cleanup = () => {
-      window.removeEventListener("pointermove", onMove)
-      window.removeEventListener("pointerup", onUp)
-      window.removeEventListener("pointercancel", cleanup)
-      cleanupRef.current = null
-    }
-
-    const onUp = (up: PointerEvent) => {
-      const { widthRem, collapse } = sidebarResizeRelease(up.clientX)
-      setSidebarWidth(widthRem, true)
-      if (collapse) {
-        setOpen(false)
-      }
-      cleanup()
-    }
-
-    cleanupRef.current = cleanup
-    window.addEventListener("pointermove", onMove)
-    window.addEventListener("pointerup", onUp)
-    window.addEventListener("pointercancel", cleanup)
+    const step = (window.innerWidth * action.percent) / 100
+    commit(sidebarWidthToPx(widthRef.current) + step)
   }
 
   return (
     <div
+      ref={ref}
       data-sidebar="resize-handle"
-      onPointerDown={handlePointerDown}
-      // `touch-none` is load-bearing, not decoration: without it the browser
-      // claims a finger's horizontal drag as a page pan and answers with
-      // `pointercancel`, which this handler (correctly) treats as drag-end, so
-      // the divider never moves under a finger. The panel library hard-codes
-      // the same `touch-action: none` on its own Separator for this exact
-      // reason (react-resizable-panels issue 662).
+      role="separator"
+      aria-label="Resize sidebar"
+      aria-orientation="vertical"
+      aria-valuemin={MIN_SIDEBAR_PX}
+      aria-valuemax={MAX_SIDEBAR_PX}
+      aria-valuenow={Math.round(sidebarWidthToPx(sidebarWidth))}
+      tabIndex={0}
+      onKeyDown={onKeyDown}
       className={cn(
-        "absolute inset-y-0 -right-1 z-30 w-1 cursor-col-resize touch-none hover:bg-sidebar-border",
-        EDGE_HIT_SLOP,
+        DIVIDER_CHROME,
+        "absolute inset-y-0 -right-1 z-30 w-1 hover:bg-sidebar-border",
       )}
     />
   )

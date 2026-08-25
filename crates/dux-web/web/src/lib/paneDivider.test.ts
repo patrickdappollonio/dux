@@ -1,0 +1,156 @@
+// @vitest-environment jsdom
+import { describe, expect, it, vi } from "vitest"
+
+// jsdom does not expose localStorage as a bare global here, and the helpers
+// under test read it directly.
+const mem = new Map<string, string>()
+vi.stubGlobal("localStorage", {
+  getItem: (k: string) => mem.get(k) ?? null,
+  setItem: (k: string, v: string) => void mem.set(k, String(v)),
+  removeItem: (k: string) => void mem.delete(k),
+  clear: () => mem.clear(),
+})
+
+import {
+  DIVIDER_CHROME,
+  DIVIDER_HIT_SLOP,
+  DIVIDER_KEY_STEP_PERCENT,
+  DIVIDER_STORAGE_KEYS,
+  DIVIDER_TARGET_MIN,
+  dividerCursor,
+  dividerHitBand,
+  dividerKeyAction,
+  readStoredPanePercent,
+  withinDividerBand,
+} from "./paneDivider"
+
+const rect = (left: number, right: number) => ({
+  left,
+  right,
+  top: 0,
+  bottom: 100,
+})
+
+describe("dividerHitBand", () => {
+  it("grows a hair-thin divider to the coarse minimum, centred on the line", () => {
+    const band = dividerHitBand(rect(200, 201), DIVIDER_TARGET_MIN.coarse)
+    expect(band.right - band.left).toBe(DIVIDER_TARGET_MIN.coarse)
+    expect((band.left + band.right) / 2).toBe(200.5)
+  })
+
+  it("grows to the smaller fine minimum for a mouse", () => {
+    const band = dividerHitBand(rect(200, 204), DIVIDER_TARGET_MIN.fine)
+    expect(band.right - band.left).toBe(DIVIDER_TARGET_MIN.fine)
+  })
+
+  it("leaves a divider that is already wide enough alone", () => {
+    const band = dividerHitBand(rect(200, 240), DIVIDER_TARGET_MIN.coarse)
+    expect(band.left).toBe(200)
+    expect(band.right).toBe(240)
+  })
+
+  it("never widens the long axis", () => {
+    const band = dividerHitBand(rect(200, 201), DIVIDER_TARGET_MIN.coarse)
+    expect(band.top).toBe(0)
+    expect(band.bottom).toBe(100)
+  })
+})
+
+describe("withinDividerBand", () => {
+  const band = dividerHitBand(rect(200, 201), DIVIDER_TARGET_MIN.coarse)
+
+  it("accepts a press anywhere inside the band, including its edges", () => {
+    expect(withinDividerBand(band, 190.5, 50)).toBe(true)
+    expect(withinDividerBand(band, 200.5, 0)).toBe(true)
+    expect(withinDividerBand(band, 210.5, 100)).toBe(true)
+  })
+
+  it("refuses a press outside the band on either axis", () => {
+    expect(withinDividerBand(band, 189, 50)).toBe(false)
+    expect(withinDividerBand(band, 212, 50)).toBe(false)
+    expect(withinDividerBand(band, 200.5, 101)).toBe(false)
+  })
+})
+
+describe("the shared chrome", () => {
+  // The grab band is written as literal Tailwind classes because Tailwind
+  // scans source text, so nothing can build them from the constants. This is
+  // what keeps the two from drifting apart.
+  it("states the same widths the hit band is computed from", () => {
+    expect(DIVIDER_HIT_SLOP).toContain(`after:w-[${DIVIDER_TARGET_MIN.fine}px]`)
+    expect(DIVIDER_HIT_SLOP).toContain(
+      `pointer-coarse:after:w-[${DIVIDER_TARGET_MIN.coarse}px]`,
+    )
+  })
+
+  it("suppresses touch-action across the whole band", () => {
+    expect(DIVIDER_CHROME).toContain("touch-none")
+    expect(DIVIDER_CHROME).toContain(DIVIDER_HIT_SLOP)
+  })
+})
+
+describe("dividerKeyAction", () => {
+  it("steps by the library's five percent on the arrows", () => {
+    expect(dividerKeyAction("ArrowLeft")).toEqual({
+      kind: "step",
+      percent: -DIVIDER_KEY_STEP_PERCENT,
+    })
+    expect(dividerKeyAction("ArrowRight")).toEqual({
+      kind: "step",
+      percent: DIVIDER_KEY_STEP_PERCENT,
+    })
+  })
+
+  it("runs the divider to its ends on Home and End", () => {
+    expect(dividerKeyAction("Home")).toEqual({ kind: "step", percent: -100 })
+    expect(dividerKeyAction("End")).toEqual({ kind: "step", percent: 100 })
+  })
+
+  it("toggles the collapse on Enter", () => {
+    expect(dividerKeyAction("Enter")).toEqual({ kind: "toggle" })
+  })
+
+  it("ignores everything else, so typing never moves a divider", () => {
+    expect(dividerKeyAction("a")).toBeNull()
+    expect(dividerKeyAction("ArrowUp")).toBeNull()
+    expect(dividerKeyAction(" ")).toBeNull()
+  })
+})
+
+describe("dividerCursor", () => {
+  it("matches what the panel library paints per engine", () => {
+    expect(dividerCursor("Mozilla/5.0 Chrome/130")).toBe("ew-resize")
+    expect(dividerCursor("Mozilla/5.0 Firefox/130")).toBe("ew-resize")
+    expect(dividerCursor("Mozilla/5.0 Version/17 Safari/605")).toBe(
+      "col-resize",
+    )
+  })
+})
+
+describe("readStoredPanePercent", () => {
+  const key = DIVIDER_STORAGE_KEYS.changesPanePercent
+
+  it("reads a remembered split back", () => {
+    localStorage.setItem(key, "37.5")
+    expect(readStoredPanePercent(key, 26, 14)).toBe(37.5)
+  })
+
+  it("falls back when nothing was ever written", () => {
+    localStorage.removeItem(key)
+    expect(readStoredPanePercent(key, 26, 14)).toBe(26)
+  })
+
+  it("falls back rather than restoring a pane too narrow to use", () => {
+    localStorage.setItem(key, "0")
+    expect(readStoredPanePercent(key, 26, 14)).toBe(26)
+    localStorage.setItem(key, "13.9")
+    expect(readStoredPanePercent(key, 26, 14)).toBe(26)
+  })
+
+  it("falls back on a hand-edited entry it cannot read", () => {
+    localStorage.setItem(key, "wide please")
+    expect(readStoredPanePercent(key, 26, 14)).toBe(26)
+    localStorage.setItem(key, "400")
+    expect(readStoredPanePercent(key, 26, 14)).toBe(26)
+  })
+})

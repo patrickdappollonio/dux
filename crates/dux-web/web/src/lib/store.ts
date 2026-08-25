@@ -24,6 +24,12 @@ import {
 } from "./buildApi"
 import { reloadPage } from "./reloadPage"
 import {
+  DIVIDER_STORAGE_KEYS,
+  readStoredPanePercent,
+  writeStoredPanePercent,
+} from "./paneDivider"
+import { DEFAULT_SIDEBAR_WIDTH } from "./sidebarResize"
+import {
   ChangesFetchError,
   fetchChanges,
   type SessionChangesResponse,
@@ -741,19 +747,37 @@ const hasBrowser = typeof window !== "undefined"
 // The expanded sidebar width is drag-resizable and persisted across reloads.
 // 18rem gives agent names breathing room next to the PR/status badges; a
 // previously persisted width still wins.
-const SIDEBAR_WIDTH_KEY = "dux:sidebar-width"
+const SIDEBAR_WIDTH_KEY = DIVIDER_STORAGE_KEYS.sidebarWidth
 
 // The Changes panel's mount-time size, in percent. Shared by the panel's own
 // `defaultSize` and the store's initial `changesPanePercent`, so the header's
 // spacer is already the right width on the very first frame, before any layout
 // callback has fired.
 export const CHANGES_PANE_DEFAULT_PERCENT = 26
-const DEFAULT_SIDEBAR_WIDTH = "18rem"
+// The panel's own `minSize`, and the floor below which a released split is not
+// worth remembering: a pane restored under this would come back unusable.
+export const CHANGES_PANE_MIN_PERCENT = 14
+
+// What the Changes split actually mounts at: the width the user last released
+// the divider on, or the default. The sidebar's edge has remembered its width
+// across reloads since it existed; this is the same promise on the other side.
+export const CHANGES_PANE_INITIAL_PERCENT = hasBrowser
+  ? readStoredPanePercent(
+      DIVIDER_STORAGE_KEYS.changesPanePercent,
+      CHANGES_PANE_DEFAULT_PERCENT,
+      CHANGES_PANE_MIN_PERCENT,
+    )
+  : CHANGES_PANE_DEFAULT_PERCENT
 
 function loadSidebarWidth(): string {
   if (!hasBrowser) return DEFAULT_SIDEBAR_WIDTH
   return localStorage.getItem(SIDEBAR_WIDTH_KEY) || DEFAULT_SIDEBAR_WIDTH
 }
+
+// The width the page loaded with, which is what a double-click on the sidebar's
+// edge restores. The Changes divider's double-click restores its own mount
+// size, so this is the same promise on the other side.
+export const SIDEBAR_INITIAL_WIDTH = loadSidebarWidth()
 
 // One-time cleanup: the diff line-number toggle (and its persisted preference)
 // went away when the web diff moved to Monaco, which manages its own gutters.
@@ -892,9 +916,9 @@ let state: DuxState = {
   createAgentPrResolving: false,
   createAgentPrError: null,
   createAgentPrRequestId: null,
-  sidebarWidth: loadSidebarWidth(),
+  sidebarWidth: SIDEBAR_INITIAL_WIDTH,
   changesPaneOverride: null,
-  changesPanePercent: CHANGES_PANE_DEFAULT_PERCENT,
+  changesPanePercent: CHANGES_PANE_INITIAL_PERCENT,
   mobileTopBarOverride: null,
   mobileAccessoryBarOverride: null,
   ptyOwnership: {},
@@ -5516,6 +5540,18 @@ export function setChangesPanePercent(percent: number): void {
   const next = Math.min(100, Math.max(0, percent))
   if (state.changesPanePercent === next) return
   setState({ changesPanePercent: next })
+}
+
+// Remember a released split, so the Changes divider comes back where it was
+// left. Called at the END of a gesture only, never on the per-move cadence
+// above, which is the same rule the sidebar's edge follows.
+//
+// A split at or under the pane's own minimum is not written: a collapse is
+// carried by the visibility preference (see `collapseChangesPaneFromDrag`), and
+// remembering the zero as well would re-hide a pane the user had reopened.
+export function persistChangesPanePercent(percent: number): void {
+  if (percent < CHANGES_PANE_MIN_PERCENT) return
+  writeStoredPanePercent(DIVIDER_STORAGE_KEYS.changesPanePercent, percent)
 }
 
 // What the header must reserve on its right so the control before the spacer
