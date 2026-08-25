@@ -445,7 +445,8 @@ describe("FlatAgentList agent row branch", () => {
     ]
     mockState = state
     render(<FlatAgentList handlers={handlers} />)
-    expect(screen.getByText("~/work/notes")).toBeTruthy()
+    expect(screen.getByText("notes")).toBeTruthy()
+    expect(screen.queryByText("~/work/notes")).toBeNull()
     // And no project name, because it belongs to none.
     expect(screen.queryByText("Repo")).toBeNull()
   })
@@ -476,7 +477,7 @@ describe("FlatAgentList agent row branch", () => {
     ]
     mockState = state
     render(<FlatAgentList handlers={handlers} />)
-    const tag = screen.getByText("~/work/notes").closest("span")?.parentElement
+    const tag = screen.getByText("notes").closest("span")?.parentElement
     expect(tag).toBeTruthy()
     // The literal star as a text glyph, no icon component behind it.
     const star = tag!.querySelector("[aria-hidden]")
@@ -521,7 +522,7 @@ describe("FlatAgentList agent row branch", () => {
     } as DuxState
     render(<FlatAgentList handlers={handlers} />)
     // The standalone terminal's tag: star, sr-only meaning, identity tone.
-    const solo = screen.getByText("~/play").closest("span")?.parentElement
+    const solo = screen.getByText("play").closest("span")?.parentElement
     expect(solo).toBeTruthy()
     expect(solo!.querySelector("[aria-hidden]")?.textContent).toBe("✷")
     expect(solo!.querySelector(".sr-only")?.textContent).toBe("standalone")
@@ -1173,7 +1174,7 @@ describe("FlatAgentList line two alignment", () => {
     )
 
     // The standalone row: the mono folder label rides the same baseline.
-    const solo = screen.getByText("~/work/notes").closest("span")!.parentElement!
+    const solo = screen.getByText("notes").closest("span")!.parentElement!
     expect(solo.className).toContain("items-baseline")
     expect(solo.className).not.toContain("self-center")
 
@@ -1207,7 +1208,7 @@ describe("FlatAgentList line two alignment", () => {
     render(<FlatAgentList handlers={handlers} />)
 
     const owned = screen.getByText("Zeta@Repo").closest("span")!.parentElement!
-    const solo = screen.getByText("~/play").closest("span")!.parentElement!
+    const solo = screen.getByText("play").closest("span")!.parentElement!
     for (const tag of [owned, solo]) {
       expect(tag.className).toContain("items-baseline")
       expect(tag.className).not.toContain("items-center")

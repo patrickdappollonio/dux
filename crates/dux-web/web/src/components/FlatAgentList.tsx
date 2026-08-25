@@ -121,8 +121,7 @@ import {
   supportsBranchGit,
   workspaceDirectory,
   workspaceLocation,
-  workspaceProjectId,
-} from "@/lib/agentWorkspace"
+  workspaceProjectId, folderDisplayName } from "@/lib/agentWorkspace"
 import {
   addTab,
   agentSortValue,
@@ -541,8 +540,8 @@ function ProjectTag({ name, query }: { name: string; query: string }) {
 // cannot shout over the row's state cues, and scoped to this tag so the rest
 // of line two stays muted. The star is aria-hidden with an sr-only word beside
 // it, so a screen reader speaks the meaning rather than the Unicode name. The
-// label is home-collapsed server-side because the browser is not necessarily
-// on the server's machine. Searched like the project name, so a query that
+// label arrives home-collapsed from the server (the browser is not necessarily
+// on its machine) and is cut to its last component here. Searched like the project name, so a query that
 // matched a path explains itself.
 //
 // The path is set in the row's own face, not monospace: line two is one
@@ -555,7 +554,7 @@ function StandaloneTag({ label, query }: { label: string; query: string }) {
       <span aria-hidden>✷</span>
       <span className="sr-only">standalone</span>
       <span className="min-w-0 truncate">
-        <HighlightedText text={label} query={query} />
+        <HighlightedText text={folderDisplayName(label)} query={query} />
       </span>
     </span>
   )

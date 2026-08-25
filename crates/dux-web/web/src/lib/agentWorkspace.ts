@@ -243,3 +243,15 @@ export function branchDriftOf(workspace: AgentWorkspaceWire): {
     folder: () => ({ drifted: false, initial: "" }),
   })
 }
+
+// The sidebar names a standalone folder by its last component only: the star
+// and the identity tone already say "this lives in your folder", and the full
+// home-collapsed path is one glance away in the header chip and the info
+// panel. Home itself is written `$HOME`, since a bare `~` is a symbol rather
+// than a name; the root stays `/`.
+export function folderDisplayName(label: string): string {
+  const trimmed = label.replace(/\/+$/, "")
+  if (label === "~" || trimmed === "~") return "$HOME"
+  if (trimmed === "") return label === "" ? "" : "/"
+  return trimmed.split("/").pop() || trimmed
+}

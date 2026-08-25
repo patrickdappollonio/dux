@@ -12,8 +12,7 @@ import {
   workspaceBranchName,
   workspaceDirectory,
   workspaceLocation,
-  workspaceProjectId,
-} from "./agentWorkspace"
+  workspaceProjectId, folderDisplayName } from "./agentWorkspace"
 
 const managed: AgentWorkspaceWire = {
   kind: "managed",
@@ -159,5 +158,18 @@ describe("agent workspace", () => {
         folder: () => "folder",
       }),
     ).toThrow()
+  })
+})
+
+describe("folderDisplayName", () => {
+  it("keeps only the folder's last component", () => {
+    expect(folderDisplayName("~/work/notes")).toBe("notes")
+    expect(folderDisplayName("/srv/app")).toBe("app")
+    expect(folderDisplayName("~/design-notes/")).toBe("design-notes")
+  })
+  it("writes home as $HOME and keeps the root", () => {
+    expect(folderDisplayName("~")).toBe("$HOME")
+    expect(folderDisplayName("/")).toBe("/")
+    expect(folderDisplayName("")).toBe("")
   })
 })
