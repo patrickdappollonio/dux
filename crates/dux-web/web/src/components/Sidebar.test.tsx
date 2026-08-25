@@ -791,7 +791,7 @@ describe("AppSidebar resize affordances", () => {
   })
 
   // The panel library's separator vocabulary, in the sidebar's units: an arrow
-  // steps by 5% of the window, Home and End run the divider to its ends.
+  // nudges by 1rem, Home and End run the divider to its ends.
   it("resizes from the keyboard the way the panel library's separator does", () => {
     mockState = makeState()
     const { container } = render(
@@ -805,17 +805,105 @@ describe("AppSidebar resize affordances", () => {
     expect(handle.getAttribute("aria-orientation")).toBe("vertical")
     expect(handle.tabIndex).toBe(0)
 
-    // jsdom's window is 1024px wide, so a 5% step is 51.2px: 288 + 51.2 lands
-    // at 339.2px, which is 21.2rem.
     act(() => {
       fireEvent.keyDown(handle, { key: "ArrowRight" })
     })
-    expect(localStorage.getItem("dux:sidebar-width")).toBe("21.2rem")
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("19rem")
 
     act(() => {
       fireEvent.keyDown(handle, { key: "End" })
     })
     expect(localStorage.getItem("dux:sidebar-width")).toBe("28rem")
+  })
+
+  // The library steps by 5% of the group it splits. Here the group is the
+  // window, and 5% of anything wider than 960px is more than the 48px between
+  // the 18rem default and the 15rem auto-collapse threshold, so the library's
+  // own step would put the entire sidebar away on one press.
+  it("does not collapse the sidebar on a single ArrowLeft from the default", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    // jsdom's window is 1024px wide, which is exactly the case the 1rem step
+    // exists for.
+    expect(window.innerWidth).toBeGreaterThan(960)
+    act(() => {
+      fireEvent.keyDown(grabHandle(container), { key: "ArrowLeft" })
+    })
+
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("17rem")
+    expect(
+      container.querySelector('[data-sidebar="resize-handle"]'),
+    ).toBeTruthy()
+    expect(
+      container.querySelector('[data-sidebar="expand-handle"]'),
+    ).toBeNull()
+  })
+
+  // A keystroke that collapses the sidebar unmounts the control the user was
+  // standing on. Without a handoff, focus falls to the body and the next Tab
+  // starts from the top of the document.
+  it("hands focus to the expand strip when the keyboard collapses it", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    act(() => {
+      fireEvent.keyDown(grabHandle(container), { key: "Enter" })
+    })
+
+    const expand = container.querySelector('[data-sidebar="expand-handle"]')
+    expect(expand).toBeTruthy()
+    expect(document.activeElement).toBe(expand)
+  })
+
+  it("hands focus back to the drag edge when the keyboard expands it", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const expand = container.querySelector(
+      '[data-sidebar="expand-handle"]',
+    ) as HTMLElement
+    // `detail: 0` is what the browser sends for a click the keyboard
+    // synthesised from Enter or Space on a button.
+    act(() => {
+      fireEvent.click(expand, { detail: 0 })
+    })
+
+    const edge = container.querySelector('[data-sidebar="resize-handle"]')
+    expect(edge).toBeTruthy()
+    expect(document.activeElement).toBe(edge)
+  })
+
+  it("leaves focus alone when the mouse expands it", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    act(() => {
+      fireEvent.click(
+        container.querySelector('[data-sidebar="expand-handle"]') as HTMLElement,
+        { detail: 1 },
+      )
+    })
+
+    expect(document.activeElement).not.toBe(
+      container.querySelector('[data-sidebar="resize-handle"]'),
+    )
   })
 
   it("collapses to the rail on Home, and on Enter", () => {
@@ -936,12 +1024,34 @@ describe("AppSidebar resize affordances", () => {
     const handle = container.querySelector(
       '[data-sidebar="resize-handle"]',
     ) as HTMLElement
-    // The painted line stays 1 unit (4px) wide; a transparent ::after grows to
-    // 5 units (20px) under a coarse pointer. Same trick components/ui/resizable.tsx uses.
+    // The painted line stays hair-thin; a transparent ::after grows to 10px for
+    // a mouse and 20px under a coarse pointer. Both dividers wear the same
+    // string; see paneDividerParity.test.tsx.
     expect(handle.className).toContain("after:absolute")
     expect(handle.className).toContain("pointer-coarse:after:w-[20px]")
     expect(handle.className).toContain("after:w-[10px]")
-    expect(handle.className).toContain("w-1")
+    expect(handle.className).toContain("w-px")
+  })
+
+  // The drag edge paints this sidebar's right border now, in the same token and
+  // at the same hair-thin width as the Changes divider. If the container went
+  // on drawing its own, the sidebar's edge would be two lines where the other
+  // divider is one. This is a claim about tailwind-merge, so it is measured
+  // rather than asserted in a comment.
+  it("hands its right border to the drag edge instead of drawing a second one", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const shell = container.querySelector(
+      '[data-slot="sidebar-container"]',
+    ) as HTMLElement
+    const tokens = shell.className.split(/\s+/)
+    expect(tokens).toContain("group-data-[side=left]:border-r-0")
+    expect(tokens).not.toContain("group-data-[side=left]:border-r")
   })
 
   it("gives the collapsed expand handle the same coarse-pointer hit slop", () => {
@@ -1001,6 +1111,72 @@ describe("AppSidebar resize affordances", () => {
     expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
     releaseEdge(400, { pointerId: 8, pointerType: "touch" })
     expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
+  })
+
+  // A mouse released over another window, over browser chrome, or into a native
+  // drag never delivers its pointerup here. Without this the divider would keep
+  // following a mouse with nothing held down.
+  it("ends the drag when a mouse move reports no button held", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = grabHandle(container)
+    pressEdge(handle, { pointerType: "mouse", buttons: 1 })
+    moveEdge(352, { pointerType: "mouse", buttons: 1 })
+    // The lost release: the next move says the button is already up.
+    moveEdge(400, { pointerType: "mouse", buttons: 0 })
+
+    // Committed where the last real move left it, not where the stray one did.
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("22rem")
+
+    // And the gesture really is over: a later move moves nothing.
+    moveEdge(448, { pointerType: "mouse", buttons: 0 })
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("22rem")
+  })
+
+  it("ignores a second finger arriving mid-drag", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = grabHandle(container)
+    pressEdge(handle, { pointerId: 1, pointerType: "touch" })
+    // A second finger lands in the band; it must not restart the gesture from
+    // its own press point.
+    pressEdge(handle, { pointerId: 2, pointerType: "touch", clientX: 284 })
+    moveEdge(352, { pointerId: 1, pointerType: "touch" })
+    releaseEdge(352, { pointerId: 1, pointerType: "touch" })
+
+    // 288 + 64, measured from the FIRST finger's press.
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("22rem")
+  })
+
+  // The library paints the resize cursor over the whole document while its band
+  // is hovered. Leaving the document has to take that back, or every page the
+  // pointer returns to still reads as a splitter.
+  it("drops the document resize cursor when the pointer leaves the page", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    grabHandle(container)
+    moveEdge(SIDEBAR_EDGE_X, { pointerType: "mouse" })
+    expect(document.getElementById("dux-divider-cursor")).toBeTruthy()
+
+    act(() => {
+      fireEvent.pointerLeave(document, { pointerType: "mouse" })
+    })
+    expect(document.getElementById("dux-divider-cursor")).toBeNull()
   })
 })
 

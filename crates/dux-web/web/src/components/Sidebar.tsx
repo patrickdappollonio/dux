@@ -1,6 +1,6 @@
 import { Bot, EllipsisVertical, Plus } from "lucide-react"
 import type * as React from "react"
-import { useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import { agentRowVisual } from "@/lib/agentRow"
 
@@ -38,6 +38,7 @@ import { useDividerDrag } from "@/hooks/use-divider-drag"
 import {
   MAX_SIDEBAR_PX,
   MIN_SIDEBAR_PX,
+  SIDEBAR_KEY_STEP_PX,
   sidebarResizeRelease,
   sidebarWidthToPx,
 } from "@/lib/sidebarResize"
@@ -197,29 +198,91 @@ function CollapsedAgentRail({
 // the collapsed rail and every `group-data-[collapsible=icon]` rule read.
 function SidebarResizeHandle() {
   const { state, isMobile } = useSidebar()
+  // KEEPING FOCUS ACROSS THE COLLAPSE. Collapsing and expanding swap the drag
+  // edge for the expand strip and back, so the control the user was standing on
+  // is unmounted by their own keystroke and focus would fall to the body, which
+  // sends the next Tab back to the top of the document. This carries the intent
+  // across the swap: whichever control mounts next claims it, once.
+  //
+  // State rather than a ref, because the claim is made in one component's event
+  // handler and read during another's mount: the two are in the same commit, so
+  // a re-render is exactly the mechanism that gets it there.
+  const [focusOnMount, setFocusOnMount] = useState(false)
+  const claimFocus = useCallback(() => setFocusOnMount(true), [])
+  const releaseFocusClaim = useCallback(() => setFocusOnMount(false), [])
+
   if (state === "collapsed") {
-    return isMobile ? null : <SidebarExpandStrip />
+    return isMobile ? null : (
+      <SidebarExpandStrip
+        focusOnMount={focusOnMount}
+        onFocusClaimed={releaseFocusClaim}
+        claimFocus={claimFocus}
+      />
+    )
   }
-  return <SidebarDragEdge />
+  return (
+    <SidebarDragEdge
+      focusOnMount={focusOnMount}
+      onFocusClaimed={releaseFocusClaim}
+      claimFocus={claimFocus}
+    />
+  )
 }
 
-function SidebarExpandStrip() {
+// Take a pending focus handoff, once, on mount.
+function useFocusHandoff(
+  focusOnMount: boolean,
+  onFocusClaimed: () => void,
+  target: React.RefObject<HTMLElement | null>,
+) {
+  useEffect(() => {
+    if (!focusOnMount) return
+    onFocusClaimed()
+    target.current?.focus({ preventScroll: true })
+  }, [focusOnMount, onFocusClaimed, target])
+}
+
+interface SidebarEdgeProps {
+  focusOnMount: boolean
+  onFocusClaimed: () => void
+  claimFocus: () => void
+}
+
+function SidebarExpandStrip({
+  focusOnMount,
+  onFocusClaimed,
+  claimFocus,
+}: SidebarEdgeProps) {
   const { setOpen } = useSidebar()
+  const ref = useRef<HTMLButtonElement | null>(null)
+  useFocusHandoff(focusOnMount, onFocusClaimed, ref)
   return (
     <button
+      ref={ref}
       type="button"
       data-sidebar="expand-handle"
       aria-label="Expand sidebar"
-      onClick={() => setOpen(true)}
+      // `detail` is 0 only for a click the keyboard synthesised, which is how a
+      // button tells Enter and Space apart from a real press. A keyboard
+      // expand hands focus on to the drag edge that replaces this strip; a
+      // mouse click leaves focus where the mouse put it.
+      onClick={(event) => {
+        if (event.detail === 0) claimFocus()
+        setOpen(true)
+      }}
       className={cn(
         DIVIDER_CHROME,
-        "absolute inset-y-0 -right-1 z-30 w-1 cursor-e-resize hover:bg-sidebar-border",
+        "absolute inset-y-0 -right-px z-30 cursor-e-resize",
       )}
     />
   )
 }
 
-function SidebarDragEdge() {
+function SidebarDragEdge({
+  focusOnMount,
+  onFocusClaimed,
+  claimFocus,
+}: SidebarEdgeProps) {
   const { setOpen } = useSidebar()
   const { sidebarWidth } = useDux()
 
@@ -233,12 +296,14 @@ function SidebarDragEdge() {
   const grabbedPxRef = useRef(sidebarWidthToPx(sidebarWidth))
 
   // Every way of moving this divider ends here, so a drag, an arrow key and a
-  // double-click cannot disagree about the band or about when the sidebar
-  // snaps to its rail.
-  const commit = (px: number) => {
+  // double-click cannot disagree about the band or about when the sidebar snaps
+  // to its rail. Reports whether it collapsed, because a keyboard gesture that
+  // collapses has to hand focus on to the strip that replaces this edge.
+  const commit = (px: number): boolean => {
     const { widthRem, collapse } = sidebarResizeRelease(px)
     setSidebarWidth(widthRem, true)
     if (collapse) setOpen(false)
+    return collapse
   }
 
   const ref = useDividerDrag({
@@ -258,21 +323,34 @@ function SidebarDragEdge() {
     onCancel: () => {},
     // Back to the width the page loaded with, which is exactly what the
     // Changes divider's double-click restores on its side.
-    onReset: () => commit(sidebarWidthToPx(SIDEBAR_INITIAL_WIDTH)),
+    onReset: () => void commit(sidebarWidthToPx(SIDEBAR_INITIAL_WIDTH)),
   })
+  useFocusHandoff(focusOnMount, onFocusClaimed, ref)
 
-  // The library's separator keyboard vocabulary, in the sidebar's own units: a
-  // step is a percentage of the window, which is the group both dividers split.
+  // The library's separator keyboard vocabulary, in the sidebar's own units.
+  //
+  // A DELIBERATE DEVIATION on the step size. The library steps by 5% of the
+  // group its separator splits, which here is the window: on anything wider
+  // than 960px that is more than the 48px between the sidebar's default width
+  // and its auto-collapse threshold, so a single ArrowLeft would put the whole
+  // sidebar away. The sidebar steps by 1rem instead, which is a nudge in a band
+  // only 14rem wide. Home and End still run it to its ends.
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const action = dividerKeyAction(event.key)
     if (!action) return
     event.preventDefault()
     if (action.kind === "toggle") {
+      claimFocus()
       setOpen(false)
       return
     }
-    const step = (window.innerWidth * action.percent) / 100
-    commit(sidebarWidthToPx(widthRef.current) + step)
+    const step = action.toEnd
+      ? MAX_SIDEBAR_PX - MIN_SIDEBAR_PX
+      : SIDEBAR_KEY_STEP_PX
+    const collapsed = commit(
+      sidebarWidthToPx(widthRef.current) + action.direction * step,
+    )
+    if (collapsed) claimFocus()
   }
 
   return (
@@ -287,10 +365,7 @@ function SidebarDragEdge() {
       aria-valuenow={Math.round(sidebarWidthToPx(sidebarWidth))}
       tabIndex={0}
       onKeyDown={onKeyDown}
-      className={cn(
-        DIVIDER_CHROME,
-        "absolute inset-y-0 -right-1 z-30 w-1 hover:bg-sidebar-border",
-      )}
+      className={cn(DIVIDER_CHROME, "absolute inset-y-0 -right-px z-30")}
     />
   )
 }
@@ -324,7 +399,15 @@ export function AppSidebar() {
   const instanceTitle = resolveInstanceTitle(bootstrap?.title)
 
   return (
-    <Sidebar collapsible="icon">
+    // The drag edge IS this sidebar's right border now: it paints the same
+    // hair-thin line the Changes divider does, in the same token, so the
+    // container must not draw a second one a pixel to its left. Written with
+    // the same variant the primitive uses, so tailwind-merge drops that one
+    // rather than leaving two rules to fight over specificity.
+    <Sidebar
+      collapsible="icon"
+      className="group-data-[side=left]:border-r-0"
+    >
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem className="flex items-center gap-1">

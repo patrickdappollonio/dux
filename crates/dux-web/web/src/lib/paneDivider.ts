@@ -21,28 +21,44 @@ export const DIVIDER_TARGET_MIN = { coarse: 20, fine: 10 } as const
 // Tailwind scans source text for literal class names, so these cannot be built
 // from the constants above at runtime.
 //
-// The band overlaps its neighbours by half its width. That is the per-axis
-// justification the touch-target tenet asks for: on both dividers the
-// overlapped strip belongs to a scrollable list or a terminal edge that carries
-// no control of its own, and the acquisition below already claimed that band
-// before the neighbour could see the press. The band is horizontal-only; both
-// of dux's dividers are vertical lines.
+// WHAT THE BAND OVERLAPS, and why that is accepted. It reaches about 10px into
+// each neighbour under a finger, 5px under a mouse, and those neighbours do
+// carry controls:
+//
+//   - Left of the sidebar's edge sit the agent rows, whose right end is live:
+//     pressing one selects the agent and navigates to it.
+//   - Right of the Changes divider sits the changed-files list, whose status
+//     marker (which doubles as the selection checkbox) starts about 5px in.
+//
+// The overlap is accepted anyway, on two grounds. It is not new: the panel
+// library has always claimed exactly this band for the Changes divider in the
+// capture phase, so the strip was never reaching the file rows to begin with,
+// and the sidebar's edge has carried a 20px coarse slop since the touch pass
+// before this one. And both losses are cheap and instantly undone: selecting
+// the wrong agent is one press to correct and destroys nothing, and the file
+// row's checkbox has the whole rest of a 40px row to be hit in. What a
+// too-narrow divider costs is worse: on a touch screen the split simply cannot
+// be moved at all.
 export const DIVIDER_HIT_SLOP =
   "after:absolute after:inset-y-0 after:left-1/2 after:w-[10px] after:-translate-x-1/2 pointer-coarse:after:w-[20px]"
 
-// Everything a divider element wears whatever side it is on. `touch-none` is
-// load-bearing: without it the browser claims a finger's horizontal drag as a
-// page pan and answers with `pointercancel`, which every drag handler
-// (correctly) reads as drag-end, so the divider never moves under a finger.
-// The library hard-codes the same `touch-action: none` inline on its Separator
-// for the same reason (react-resizable-panels issue 662); this covers the whole
-// grab band rather than only the painted line, because a pseudo-element's
-// touch-action is its originating element's.
+// Everything a divider element wears whatever side it is on: the hair-thin
+// painted line, its hover tone, the resize cursor, the focus ring and the grab
+// band.
+//
+// `touch-none` is load-bearing: without it the browser claims a finger's
+// horizontal drag as a page pan and answers with `pointercancel`, which every
+// drag handler (correctly) reads as drag-end, so the divider never moves under
+// a finger. The library hard-codes the same `touch-action: none` inline on its
+// Separator for the same reason (react-resizable-panels issue 662); this covers
+// the whole grab band rather than only the painted line, because a
+// pseudo-element's touch-action is its originating element's.
+//
 // Positioning is deliberately NOT in here: the Changes divider is a flex item
 // and the sidebar's is pinned to the sidebar's edge, so each site declares its
-// own. Everything else about how a divider behaves is shared.
+// own. Everything else about how a divider looks and behaves is shared.
 export const DIVIDER_CHROME =
-  "cursor-col-resize touch-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-hidden " +
+  "w-px bg-border hover:bg-ring cursor-col-resize touch-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-hidden " +
   DIVIDER_HIT_SLOP
 
 // Where a press counts as a press on the divider.
@@ -81,26 +97,26 @@ export function withinDividerBand(
 }
 
 // The keyboard vocabulary of a vertical divider, copied from the library's own
-// separator keydown handler: arrows step by 5, Home and End run the divider to
-// its ends, Enter toggles the collapse of the collapsible side. Steps are
-// PERCENTAGES OF THE GROUP the divider splits, which for both of dux's
-// dividers is the window's width.
+// separator keydown handler: the arrows step, Home and End run the divider to
+// its ends, and Enter toggles the collapse of the collapsible side.
+//
+// The action says WHICH WAY and HOW FAR IN KIND, never how many pixels: the
+// library steps by 5% of the group it splits, and the sidebar deliberately does
+// not (see SidebarDragEdge, and the accepted-differences list in the plan).
 export type DividerKeyAction =
-  | { kind: "step"; percent: number }
+  | { kind: "step"; direction: -1 | 1; toEnd: boolean }
   | { kind: "toggle" }
-
-export const DIVIDER_KEY_STEP_PERCENT = 5
 
 export function dividerKeyAction(key: string): DividerKeyAction | null {
   switch (key) {
     case "ArrowLeft":
-      return { kind: "step", percent: -DIVIDER_KEY_STEP_PERCENT }
+      return { kind: "step", direction: -1, toEnd: false }
     case "ArrowRight":
-      return { kind: "step", percent: DIVIDER_KEY_STEP_PERCENT }
+      return { kind: "step", direction: 1, toEnd: false }
     case "Home":
-      return { kind: "step", percent: -100 }
+      return { kind: "step", direction: -1, toEnd: true }
     case "End":
-      return { kind: "step", percent: 100 }
+      return { kind: "step", direction: 1, toEnd: true }
     case "Enter":
       return { kind: "toggle" }
     default:
@@ -118,29 +134,52 @@ export function dividerCursor(userAgent: string): string {
 }
 
 // Where each divider's released size is remembered. Both are plain localStorage
-// entries written at the END of a gesture, never during it.
+// entries written at the END of a gesture, never during one and never from a
+// mount.
 export const DIVIDER_STORAGE_KEYS = {
   sidebarWidth: "dux:sidebar-width",
   changesPanePercent: "dux:changes-pane-percent",
 } as const
 
+// EVERY localStorage touch in here is guarded. A browser in private mode, with
+// site data blocked, or over its quota throws on both read and write, and a
+// divider that cannot remember its width must still be a divider: losing the
+// memory is the whole cost, never a screen that fails to render or a drag that
+// throws on release.
+export function readStoredText(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+export function writeStoredText(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // Nothing to do and nothing to say: the size is still applied, it just
+    // will not survive a reload.
+  }
+}
+
 export function readStoredPanePercent(
   key: string,
   fallback: number,
   min: number,
+  max: number,
 ): number {
-  if (typeof localStorage === "undefined") return fallback
-  const raw = localStorage.getItem(key)
+  const raw = readStoredText(key)
   if (raw === null) return fallback
   const parsed = Number.parseFloat(raw)
-  // A hand-edited or half-written entry must not strand the pane at nothing:
-  // anything unreadable, out of range, or below the width that still shows the
-  // pane falls back to the default rather than being clamped up to it.
-  if (!Number.isFinite(parsed) || parsed < min || parsed > 100) return fallback
+  // A hand-edited or half-written entry must not strand a pane at nothing, or
+  // squeeze its neighbour under the neighbour's own minimum: anything
+  // unreadable or outside the band falls back to the default rather than being
+  // clamped into it.
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) return fallback
   return parsed
 }
 
 export function writeStoredPanePercent(key: string, percent: number): void {
-  if (typeof localStorage === "undefined") return
-  localStorage.setItem(key, String(percent))
+  writeStoredText(key, String(percent))
 }

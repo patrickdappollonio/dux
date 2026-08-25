@@ -21,6 +21,11 @@ export const AUTO_COLLAPSE_SIDEBAR_PX = 15 * 16
 export const DEFAULT_SIDEBAR_WIDTH = "18rem"
 export const DEFAULT_SIDEBAR_PX = 18 * 16
 
+// One arrow key press. Deliberately NOT the panel library's 5% of the group:
+// see the note on SidebarDragEdge's keydown handler for why a percentage of
+// the window collapses the whole sidebar in one press on an ordinary screen.
+export const SIDEBAR_KEY_STEP_PX = 16
+
 // Read a stored or in-flight sidebar width back into pixels. dux only ever
 // writes `<n>rem`, but a hand-edited localStorage entry reaches this too, so an
 // unreadable value lands on the default rather than on NaN.

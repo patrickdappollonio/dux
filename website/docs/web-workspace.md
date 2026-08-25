@@ -38,10 +38,12 @@ header grows a button to bring it back. See
 
 **Both splits are yours to move, with the same gesture.** Drag the sidebar's right edge
 or the Changes divider, with a mouse or a finger; double-click either one to put it back
-where it started. Both remember where you left them. Tab to a divider and the arrow keys
-nudge it, `Home` and `End` run it to its ends, and `Enter` puts that side away. Drag the
-sidebar narrow enough and it snaps to its icon rail, which you reopen by clicking the
-same edge; drag the Changes split shut and the pane hides.
+where it was when the page loaded. Both remember where you left them. Tab to a divider
+and the arrow keys nudge it, `Home` and `End` run it to its ends, and `Enter` puts that
+side away. The sidebar's arrows move it one step of `1rem` at a time, small enough that a
+single press cannot fold the whole thing away. Drag the sidebar narrow enough and it
+snaps to its icon rail, which you reopen by clicking the same edge; drag the Changes
+split shut and the pane hides.
 
 A slim header shows breadcrumbs (agent, provider, project, branch) and a **cog** button
 that opens the app menu. The cog menu holds your preferences, the configuration dialogs,

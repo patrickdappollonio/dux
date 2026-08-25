@@ -1,5 +1,5 @@
 import type * as React from "react"
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { PanelImperativeHandle } from "react-resizable-panels"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
@@ -57,13 +57,14 @@ import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import {
   CHANGES_PANE_COLLAPSE_EPSILON,
   CHANGES_PANE_DEFAULT_PERCENT,
-  CHANGES_PANE_INITIAL_PERCENT,
   CHANGES_PANE_MIN_PERCENT,
+  changesPaneMountPercent,
   changesPaneVisible,
   collapseChangesPaneFromDrag,
   changesPaneCollapseStep,
   persistChangesPanePercent,
   setChangesPanePercent,
+  TERMINAL_PANE_MIN_PERCENT,
   useDux,
 } from "@/lib/store"
 import { keyboardLikelyOpen } from "@/lib/viewport"
@@ -138,6 +139,25 @@ export function DesktopShell() {
   // unmounted (no leftover sliver).
   const showChanges = changesPaneVisible(dux)
 
+  // WHAT THE PANEL COMES BACK AT. `defaultSize` is read when the panel mounts,
+  // and the panel mounts again every time the pane is shown after being
+  // hidden. So the remembered width is re-read on that transition and NOT
+  // captured once at page load: a constant frozen at load hands the pane back
+  // the width the page started with, and a 40 the user dragged to comes home as
+  // the mount default. Re-read on that transition only, because re-reading it
+  // mid-drag would fight the gesture.
+  //
+  // Read during the render that flips it rather than from an effect:
+  // `defaultSize` is consumed when the panel mounts, which is this very commit,
+  // so an effect would land a frame too late. This is React's own
+  // "adjust state while rendering" shape.
+  const [mountPercent, setMountPercent] = useState(changesPaneMountPercent)
+  const [mountedShowing, setMountedShowing] = useState(showChanges)
+  if (mountedShowing !== showChanges) {
+    setMountedShowing(showChanges)
+    if (showChanges) setMountPercent(changesPaneMountPercent())
+  }
+
   // The Changes panel's imperative handle, and the visibility it had on the
   // previous render. Both exist for the re-show below.
   const changesPanelRef = useRef<PanelImperativeHandle | null>(null)
@@ -210,7 +230,7 @@ export function DesktopShell() {
       reshowPendingRef.current = false
       if (percent >= CHANGES_PANE_COLLAPSE_EPSILON) return
       try {
-        handle.resize(`${CHANGES_PANE_DEFAULT_PERCENT}%`)
+        handle.resize(`${mountPercent}%`)
       } catch (err) {
         console.warn(
           "[dux] the Changes panel refused to resize back to its default width; it reopens at nothing. Hide and show it again to retry.",
@@ -221,13 +241,13 @@ export function DesktopShell() {
       // The header's spacer mirrors this number, so it has to move with the
       // panel; the group's own layout report would follow, but not before the
       // next frame.
-      setChangesPanePercent(CHANGES_PANE_DEFAULT_PERCENT)
+      setChangesPanePercent(mountPercent)
     })
     return () => {
       cancelAnimationFrame(scheduled)
       reshowPendingRef.current = false
     }
-  }, [showChanges])
+  }, [showChanges, mountPercent])
 
   // THE DRAG-COLLAPSE LATCH. `changesPaneCollapseStep` explains why the write
   // waits for the end of the gesture; these two refs are the state it reads.
@@ -236,6 +256,16 @@ export function DesktopShell() {
   const pointerDownRef = useRef(false)
   const collapseArmedRef = useRef(false)
   const collapseCommitRef = useRef<number | null>(null)
+
+  // THE PERSISTENCE LATCH, riding the same gesture tracker. The panel reports a
+  // layout for reasons that are not the user moving the divider: its own mount,
+  // its unmount, and the re-show heal all publish one. Writing every report
+  // would hand the remembered width back to itself on every hide-and-show, and
+  // a remembered 40 would come home as the mount default. So a report is
+  // remembered only while a pointer is down (flushed on its release, below) or
+  // inside a keydown, which is the library's other way of moving a separator.
+  const persistPendingRef = useRef<number | null>(null)
+  const keyboardStepRef = useRef(false)
 
   // WRITE THE COLLAPSE FROM A TASK OF ITS OWN, never from inside the event that
   // produced it. Flipping the preference unmounts the panel and its separator,
@@ -297,17 +327,33 @@ export function DesktopShell() {
     }
     const onUp = () => {
       pointerDownRef.current = false
+      const pending = persistPendingRef.current
+      persistPendingRef.current = null
+      if (pending !== null) persistChangesPanePercent(pending)
       if (!collapseArmedRef.current) return
       collapseArmedRef.current = false
       scheduleCollapseCommit()
     }
+    // The library moves a separator from its own keydown handler and publishes
+    // the new layout synchronously inside that same dispatch, so the flag only
+    // has to survive the event. Cleared in a microtask rather than on keyup, so
+    // a key released somewhere else can never leave it standing for a later
+    // mount to be mistaken for a gesture.
+    const onKeyDown = () => {
+      keyboardStepRef.current = true
+      queueMicrotask(() => {
+        keyboardStepRef.current = false
+      })
+    }
     window.addEventListener("pointerdown", onDown, true)
     window.addEventListener("pointerup", onUp, true)
     window.addEventListener("pointercancel", onUp, true)
+    window.addEventListener("keydown", onKeyDown, true)
     return () => {
       window.removeEventListener("pointerdown", onDown, true)
       window.removeEventListener("pointerup", onUp, true)
       window.removeEventListener("pointercancel", onUp, true)
+      window.removeEventListener("keydown", onKeyDown, true)
     }
   }, [])
 
@@ -334,16 +380,18 @@ export function DesktopShell() {
             // setter drops a write that would not change the value, so the
             // per-move cadence costs a render only when the split actually
             // moved.
-            onLayoutChange={(layout) =>
-              setChangesPanePercent(
-                layout["changes-pane"] ?? CHANGES_PANE_DEFAULT_PERCENT,
-              )
-            }
-            // `onLayoutChanged` fires at the END of a gesture, which is where
-            // both dividers write: the sidebar's edge persists on release too.
-            onLayoutChanged={(layout) => {
+            onLayoutChange={(layout) => {
               const percent = layout["changes-pane"]
-              if (percent !== undefined) persistChangesPanePercent(percent)
+              setChangesPanePercent(percent ?? CHANGES_PANE_DEFAULT_PERCENT)
+              // Remembering the split is the latch's job, not this callback's:
+              // see `persistPendingRef`. `onLayoutChanged` is deliberately NOT
+              // used for it, because it fires on the panel's own mount too.
+              if (percent === undefined) return
+              if (pointerDownRef.current) {
+                persistPendingRef.current = percent
+              } else if (keyboardStepRef.current) {
+                persistChangesPanePercent(percent)
+              }
             }}
           >
             {/* The terminal panel's defaultSize drops to 100% when the Changes
@@ -362,9 +410,9 @@ export function DesktopShell() {
             <ResizablePanel
               id="terminal-pane"
               defaultSize={
-                showChanges ? `${100 - CHANGES_PANE_INITIAL_PERCENT}%` : "100%"
+                showChanges ? `${100 - mountPercent}%` : "100%"
               }
-              minSize="30%"
+              minSize={`${TERMINAL_PANE_MIN_PERCENT}%`}
             >
               <TerminalArea />
             </ResizablePanel>
@@ -374,7 +422,7 @@ export function DesktopShell() {
                 <ResizablePanel
                   id="changes-pane"
                   panelRef={changesPanelRef}
-                  defaultSize={`${CHANGES_PANE_INITIAL_PERCENT}%`}
+                  defaultSize={`${mountPercent}%`}
                   minSize={`${CHANGES_PANE_MIN_PERCENT}%`}
                   // Still collapsible: dragging the divider off the edge is a
                   // legitimate way to put the pane away, and it WRITES that

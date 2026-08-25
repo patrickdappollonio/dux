@@ -15,12 +15,15 @@ import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 //   - the press is acquired on the DOCUMENT, in the capture phase, by testing
 //     the pointer against the divider's grab band rather than by hit-testing
 //     the element, so nothing painted over the divider can swallow it;
-//   - non-primary mouse buttons are ignored, the divider takes focus without a
-//     focus ring and without scrolling, and the press is default-prevented;
+//   - non-primary mouse buttons are ignored, a second pointer arriving mid-drag
+//     is ignored, the divider takes focus without a focus ring and without
+//     scrolling, and the press is default-prevented;
 //   - the move is a DELTA from the press point, so the divider does not
 //     teleport under a finger that landed off centre;
+//   - a mouse that reports no buttons held ends the gesture, because a
+//     `pointerup` delivered to another window never reaches us;
 //   - the resize cursor is painted over the whole document while the band is
-//     hovered or dragged, not only over the hair-thin line;
+//     hovered or dragged, and is dropped when the pointer leaves the document;
 //   - a double-click inside the band resets the divider.
 //
 // Everything above is measured against react-resizable-panels 4.11.2.
@@ -73,11 +76,9 @@ function claimCursor(owner: symbol, claimed: boolean) {
  */
 export function useDividerDrag(
   handlers: DividerDragHandlers,
-  options: { disabled?: boolean } = {},
 ): React.RefObject<HTMLDivElement | null> {
   const ref = React.useRef<HTMLDivElement | null>(null)
   const coarse = useIsCoarsePointer()
-  const disabled = options.disabled ?? false
 
   // The handlers are re-created on every render of the owning component (they
   // close over live state), so they are read through a ref and the listeners
@@ -88,13 +89,13 @@ export function useDividerDrag(
   })
 
   React.useEffect(() => {
-    if (disabled) return
     const owner = Symbol("divider")
     const minWidth = coarse
       ? DIVIDER_TARGET_MIN.coarse
       : DIVIDER_TARGET_MIN.fine
     let activePointer: number | null = null
     let startX = 0
+    let lastDeltaX = 0
 
     const bandFor = () => {
       const el = ref.current
@@ -104,7 +105,9 @@ export function useDividerDrag(
 
     const hits = (event: PointerEvent | MouseEvent) => {
       const band = bandFor()
-      return band !== null && withinDividerBand(band, event.clientX, event.clientY)
+      return (
+        band !== null && withinDividerBand(band, event.clientX, event.clientY)
+      )
     }
 
     const release = () => {
@@ -112,13 +115,23 @@ export function useDividerDrag(
       claimCursor(owner, false)
     }
 
+    const finish = () => {
+      const delta = lastDeltaX
+      release()
+      handlersRef.current.onDrop(delta)
+    }
+
     const onPointerDown = (event: PointerEvent) => {
       if (event.defaultPrevented) return
+      // A second finger arriving mid-drag is not a second divider gesture. The
+      // first pointer owns the divider until it ends.
+      if (activePointer !== null) return
       if (event.pointerType === "mouse" && event.button > 0) return
       if (!hits(event)) return
       event.preventDefault()
       activePointer = event.pointerId
       startX = event.clientX
+      lastDeltaX = 0
       handlersRef.current.onGrab?.()
       const el = ref.current
       el?.focus({ preventScroll: true })
@@ -135,20 +148,44 @@ export function useDividerDrag(
         return
       }
       if (event.pointerId !== activePointer) return
-      handlersRef.current.onDrag(event.clientX - startX)
+      // THE LOST POINTERUP. A release over another window, over browser chrome,
+      // or swallowed by a native drag never reaches this document, and the
+      // divider would then follow the mouse with nothing held down. The first
+      // move that reports no buttons ends the gesture where it stands, which is
+      // what the library does for the same reason.
+      if (event.pointerType === "mouse" && event.buttons === 0) {
+        finish()
+        return
+      }
+      lastDeltaX = event.clientX - startX
+      handlersRef.current.onDrag(lastDeltaX)
     }
 
     const onPointerUp = (event: PointerEvent) => {
       if (activePointer === null || event.pointerId !== activePointer) return
-      const delta = event.clientX - startX
-      release()
-      handlersRef.current.onDrop(delta)
+      lastDeltaX = event.clientX - startX
+      finish()
     }
 
     const onPointerCancel = (event: PointerEvent) => {
       if (activePointer === null || event.pointerId !== activePointer) return
       release()
       handlersRef.current.onCancel?.()
+    }
+
+    // Capture can be lost without a pointerup: the element is removed, or the
+    // browser hands the pointer to something else. Either way the gesture is
+    // over, and the divider must not keep following the pointer.
+    const onLostCapture = (event: PointerEvent) => {
+      if (activePointer === null || event.pointerId !== activePointer) return
+      finish()
+    }
+
+    // The pointer left the document entirely, so nothing is hovered any more.
+    // Without this the resize cursor stays claimed over the whole page.
+    const onPointerLeave = () => {
+      if (activePointer !== null) return
+      claimCursor(owner, false)
     }
 
     const onDoubleClick = (event: MouseEvent) => {
@@ -158,20 +195,28 @@ export function useDividerDrag(
       handlersRef.current.onReset()
     }
 
+    const el = ref.current
     document.addEventListener("pointerdown", onPointerDown, true)
     document.addEventListener("pointermove", onPointerMove, true)
     document.addEventListener("pointerup", onPointerUp, true)
     document.addEventListener("pointercancel", onPointerCancel, true)
+    document.addEventListener("pointerleave", onPointerLeave, true)
     document.addEventListener("dblclick", onDoubleClick, true)
+    el?.addEventListener("lostpointercapture", onLostCapture as EventListener)
     return () => {
       document.removeEventListener("pointerdown", onPointerDown, true)
       document.removeEventListener("pointermove", onPointerMove, true)
       document.removeEventListener("pointerup", onPointerUp, true)
       document.removeEventListener("pointercancel", onPointerCancel, true)
+      document.removeEventListener("pointerleave", onPointerLeave, true)
       document.removeEventListener("dblclick", onDoubleClick, true)
+      el?.removeEventListener(
+        "lostpointercapture",
+        onLostCapture as EventListener,
+      )
       release()
     }
-  }, [coarse, disabled])
+  }, [coarse])
 
   return ref
 }

@@ -5,9 +5,8 @@
 // a layout group); the right one is react-resizable-panels'. They drifted once,
 // and a finger could move one and not the other. This file is what makes that
 // drift a failing test rather than a bug report from a tablet.
-import { describe, expect, it, vi } from "vitest"
-import { cleanup, render } from "@testing-library/react"
-import { afterEach } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { act, cleanup, fireEvent, render } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -39,10 +38,15 @@ vi.stubGlobal(
     disconnect() {}
   },
 )
+// A finger is the pointer throughout this file, so both dividers offer their
+// 20px band. dux's hook asks for "(pointer: coarse)" and the library asks for
+// "(pointer:coarse)"; the library also memoizes its answer for the life of the
+// module, which is why this is stubbed once for the whole file rather than
+// flipped per test.
 vi.stubGlobal(
   "matchMedia",
   vi.fn((query: string) => ({
-    matches: false,
+    matches: query.includes("coarse"),
     media: query,
     onchange: null,
     addEventListener: () => {},
@@ -58,9 +62,8 @@ const { AppSidebar } = await import("./Sidebar")
 const { ResizableHandle, ResizablePanel, ResizablePanelGroup } = await import(
   "@/components/ui/resizable"
 )
-const { DIVIDER_CHROME, DIVIDER_TARGET_MIN } = await import(
-  "@/lib/paneDivider"
-)
+const { DIVIDER_CHROME, DIVIDER_TARGET_MIN } = await import("@/lib/paneDivider")
+const { sidebarWidthToPx } = await import("@/lib/sidebarResize")
 
 const mockState = {
   spine: null,
@@ -125,5 +128,171 @@ describe("the two workspace dividers", () => {
       expect(el.getAttribute("aria-orientation")).toBe("vertical")
       expect(el.tabIndex).toBe(0)
     }
+  })
+})
+
+// ── The gesture itself ─────────────────────────────────────────────────────
+// The class assertions above pin what the two dividers look like. These pin
+// what they DO, which is the half that actually broke: the sidebar's edge used
+// to acquire a press by hit-testing a 4px element and then move to the absolute
+// pointer position, so a finger that landed off the line either missed it
+// entirely or yanked the divider sideways before moving at all.
+//
+// jsdom has no layout, so both dividers are handed one. The panel library reads
+// `getBoundingClientRect` for its hit regions and `offsetWidth` for the group's
+// size, and dux's hook reads `getBoundingClientRect` for its band; all three
+// are answered from the table below.
+const LAYOUT: Record<string, [number, number]> = {
+  // The panel group, laid out so its separator sits at the same x as the
+  // sidebar's edge would be at the default 18rem. Both dividers are then
+  // pressed and dragged with the same numbers.
+  group: [0, 1000],
+  a: [0, 288],
+  separator: [287, 288],
+  b: [288, 1000],
+  // The sidebar's edge at its default 18rem width.
+  sidebar: [287, 288],
+}
+
+const EDGE_CENTRE = 287.5
+const OFF_CENTRE = 9
+const DRAG_BY = 50
+
+function layoutKey(el: HTMLElement): string | null {
+  if (el.dataset.sidebar === "resize-handle") return "sidebar"
+  if (el.dataset.slot === "resizable-panel-group") return "group"
+  if (el.hasAttribute("data-separator")) return "separator"
+  if (el.hasAttribute("data-panel")) return el.id
+  return null
+}
+
+describe("both dividers, driven by a finger", () => {
+  const realRect = HTMLElement.prototype.getBoundingClientRect
+  const realOffsetWidth = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    "offsetWidth",
+  )
+
+  beforeEach(() => {
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      const key = layoutKey(this)
+      const span = key === null ? undefined : LAYOUT[key]
+      if (!span) return realRect.call(this)
+      return new DOMRect(span[0], 0, span[1] - span[0], 600)
+    }
+    Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+      configurable: true,
+      get(this: HTMLElement) {
+        const key = layoutKey(this)
+        const span = key === null ? undefined : LAYOUT[key]
+        return span ? span[1] - span[0] : 0
+      },
+    })
+  })
+
+  afterEach(() => {
+    HTMLElement.prototype.getBoundingClientRect = realRect
+    if (realOffsetWidth) {
+      Object.defineProperty(
+        HTMLElement.prototype,
+        "offsetWidth",
+        realOffsetWidth,
+      )
+    } else {
+      delete (HTMLElement.prototype as { offsetWidth?: number }).offsetWidth
+    }
+  })
+
+  function press(target: HTMLElement, clientX: number) {
+    act(() => {
+      fireEvent.pointerDown(target, {
+        pointerId: 1,
+        pointerType: "touch",
+        clientX,
+        clientY: 300,
+        isPrimary: true,
+      })
+    })
+  }
+
+  function move(clientX: number) {
+    act(() => {
+      fireEvent.pointerMove(document, {
+        pointerId: 1,
+        pointerType: "touch",
+        clientX,
+        clientY: 300,
+        isPrimary: true,
+        buttons: 1,
+      })
+    })
+  }
+
+  function release(clientX: number) {
+    act(() => {
+      fireEvent.pointerUp(document, {
+        pointerId: 1,
+        pointerType: "touch",
+        clientX,
+        clientY: 300,
+        isPrimary: true,
+      })
+    })
+  }
+
+  // Press `OFF_CENTRE` to the right of the line, then drag `DRAG_BY` further
+  // right, and report where each divider ended up in pixels.
+  function dragSidebar(): number {
+    localStorage.removeItem("dux:sidebar-width")
+    const handle = sidebarDivider()
+    handle.setPointerCapture = () => {}
+    press(handle, EDGE_CENTRE + OFF_CENTRE)
+    move(EDGE_CENTRE + OFF_CENTRE + DRAG_BY)
+    // Released where the move left it. `useDux` is a fixture here, so the live
+    // width never reaches the DOM; the width written on release is what the
+    // gesture decided.
+    release(EDGE_CENTRE + OFF_CENTRE + DRAG_BY)
+    return sidebarWidthToPx(localStorage.getItem("dux:sidebar-width") ?? "0")
+  }
+
+  function dragChanges(): number {
+    let percent = 0
+    const { container } = render(
+      <ResizablePanelGroup
+        orientation="horizontal"
+        onLayoutChange={(l) => {
+          percent = l["a"] ?? percent
+        }}
+      >
+        <ResizablePanel id="a" defaultSize="28.8%" />
+        <ResizableHandle />
+        <ResizablePanel id="b" defaultSize="71.2%" />
+      </ResizablePanelGroup>,
+    )
+    const handle = container.querySelector(
+      '[data-slot="resizable-handle"]',
+    ) as HTMLElement
+    handle.setPointerCapture = () => {}
+    press(handle, EDGE_CENTRE + OFF_CENTRE)
+    move(EDGE_CENTRE + OFF_CENTRE + DRAG_BY)
+    release(EDGE_CENTRE + OFF_CENTRE + DRAG_BY)
+    return (percent / 100) * (LAYOUT.group[1] - LAYOUT.group[0])
+  }
+
+  // A press 9px off the line is outside a 4px element and inside the 20px band
+  // both dividers claim. Neither may miss it.
+  it("both acquire a press well off the painted line", () => {
+    expect(dragSidebar()).not.toBe(288)
+    cleanup()
+    expect(dragChanges()).not.toBe(288)
+  })
+
+  // And the move that follows is worth exactly its own distance. A divider that
+  // snapped to the pointer would land on the press point plus the drag, 9px
+  // further along, which is the jump the old sidebar edge had.
+  it("neither jumps to the pointer on the first move", () => {
+    expect(dragSidebar()).toBe(288 + DRAG_BY)
+    cleanup()
+    expect(dragChanges()).toBeCloseTo(288 + DRAG_BY, 5)
   })
 })

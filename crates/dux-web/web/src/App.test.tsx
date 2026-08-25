@@ -123,6 +123,28 @@ function panel(id: string): PanelProps | undefined {
   return recordedPanelProps.find((p) => p.id === id)
 }
 
+// The props of the MOST RECENT mount of a panel, which is what a test about
+// hiding and showing has to look at: `recordedPanelProps` accumulates across
+// every render, so `panel()` above answers with the first mount forever.
+function latestPanel(id: string): PanelProps | undefined {
+  return recordedPanelProps.filter((p) => p.id === id).pop()
+}
+
+const SPLIT_KEY = "dux:changes-pane-percent"
+
+function layout(changes: number): Record<string, number> {
+  return { "changes-pane": changes, "terminal-pane": 100 - changes }
+}
+
+function reportLayout(changes: number): void {
+  const onLayoutChange = lastGroupProps.onLayoutChange as (
+    l: Record<string, number>,
+  ) => void
+  act(() => {
+    onLayoutChange(layout(changes))
+  })
+}
+
 // A stand-in for the library's imperative handle, so a test can say what the
 // panel reports its width as and see what DesktopShell does about it.
 type FakeHandle = PanelImperativeHandle & { resized: Array<number | string> }
@@ -480,5 +502,115 @@ describe("DesktopShell re-show", () => {
     })
     flushScheduled()
     expect(collapseFromDrag).not.toHaveBeenCalled()
+  })
+})
+
+
+// THE REMEMBERED SPLIT. The panel publishes a layout for reasons that are not
+// the user moving the divider: its own mount, its unmount, and the re-show
+// heal. Writing every report handed the remembered width back to itself, so a
+// pane dragged to 40 came home from one hide-and-show as the mount default.
+describe("DesktopShell remembered split", () => {
+  it("writes a released drag, and brings it back through a hide and a show", () => {
+    mockState = stateWith(true)
+    const { rerender } = render(<DesktopShell />)
+    expect(panel("changes-pane")!.defaultSize).toBe(
+      `${CHANGES_PANE_DEFAULT_PERCENT}%`,
+    )
+
+    // A drag: pointer down, the panel reports as it moves, pointer up.
+    act(() => {
+      pointer("pointerdown")
+    })
+    reportLayout(40)
+    act(() => {
+      pointer("pointerup")
+    })
+    expect(localStorage.getItem(SPLIT_KEY)).toBe("40")
+
+    // Hide it, show it again: it comes back at 40, not at the default.
+    mockState = stateWith(false)
+    act(() => {
+      rerender(<DesktopShell />)
+    })
+    mockState = stateWith(true)
+    act(() => {
+      rerender(<DesktopShell />)
+    })
+    expect(latestPanel("changes-pane")!.defaultSize).toBe("40%")
+
+    // And the mount's own layout report leaves the memory alone.
+    reportLayout(40)
+    expect(localStorage.getItem(SPLIT_KEY)).toBe("40")
+  })
+
+  it("ignores a layout report with nothing held down", () => {
+    localStorage.setItem(SPLIT_KEY, "40")
+    mockState = stateWith(true)
+    render(<DesktopShell />)
+    expect(panel("changes-pane")!.defaultSize).toBe("40%")
+
+    // What a mount, an unmount or the heal publishes. No gesture, no write.
+    reportLayout(CHANGES_PANE_DEFAULT_PERCENT)
+    expect(localStorage.getItem(SPLIT_KEY)).toBe("40")
+  })
+
+  it("writes a keyboard step, which the library makes inside the keydown", () => {
+    mockState = stateWith(true)
+    render(<DesktopShell />)
+
+    act(() => {
+      window.dispatchEvent(new Event("keydown"))
+      const onLayoutChange = lastGroupProps.onLayoutChange as (
+        l: Record<string, number>,
+      ) => void
+      onLayoutChange(layout(33))
+    })
+    expect(localStorage.getItem(SPLIT_KEY)).toBe("33")
+  })
+
+  it("stops believing the keyboard once the keystroke is over", async () => {
+    mockState = stateWith(true)
+    render(<DesktopShell />)
+
+    act(() => {
+      window.dispatchEvent(new Event("keydown"))
+    })
+    // The flag is cleared in a microtask, so anything reported in a later task
+    // is a mount, not that keystroke.
+    await act(async () => {})
+    reportLayout(44)
+    expect(localStorage.getItem(SPLIT_KEY)).toBeNull()
+  })
+
+  it("refuses a split that would squeeze the terminal under its own floor", () => {
+    mockState = stateWith(true)
+    render(<DesktopShell />)
+
+    act(() => {
+      pointer("pointerdown")
+    })
+    reportLayout(85)
+    act(() => {
+      pointer("pointerup")
+    })
+    expect(localStorage.getItem(SPLIT_KEY)).toBeNull()
+  })
+
+  it("does not remember a drag that shut the pane", () => {
+    mockState = stateWith(true)
+    render(<DesktopShell />)
+
+    act(() => {
+      pointer("pointerdown")
+    })
+    reportLayout(0)
+    act(() => {
+      pointer("pointerup")
+    })
+    flushScheduled()
+    // The collapse rides the visibility preference, not the remembered split:
+    // a stored zero would reopen the pane at nothing.
+    expect(localStorage.getItem(SPLIT_KEY)).toBeNull()
   })
 })

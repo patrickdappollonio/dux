@@ -14,14 +14,15 @@ vi.stubGlobal("localStorage", {
 import {
   DIVIDER_CHROME,
   DIVIDER_HIT_SLOP,
-  DIVIDER_KEY_STEP_PERCENT,
   DIVIDER_STORAGE_KEYS,
   DIVIDER_TARGET_MIN,
   dividerCursor,
   dividerHitBand,
   dividerKeyAction,
   readStoredPanePercent,
+  readStoredText,
   withinDividerBand,
+  writeStoredText,
 } from "./paneDivider"
 
 const rect = (left: number, right: number) => ({
@@ -90,20 +91,33 @@ describe("the shared chrome", () => {
 })
 
 describe("dividerKeyAction", () => {
-  it("steps by the library's five percent on the arrows", () => {
+  // The action says which way and whether it is a nudge or a run to the end.
+  // How far a nudge goes is the caller's, because the two dividers deliberately
+  // disagree: see the note on SidebarDragEdge's keydown handler.
+  it("nudges either way on the arrows", () => {
     expect(dividerKeyAction("ArrowLeft")).toEqual({
       kind: "step",
-      percent: -DIVIDER_KEY_STEP_PERCENT,
+      direction: -1,
+      toEnd: false,
     })
     expect(dividerKeyAction("ArrowRight")).toEqual({
       kind: "step",
-      percent: DIVIDER_KEY_STEP_PERCENT,
+      direction: 1,
+      toEnd: false,
     })
   })
 
   it("runs the divider to its ends on Home and End", () => {
-    expect(dividerKeyAction("Home")).toEqual({ kind: "step", percent: -100 })
-    expect(dividerKeyAction("End")).toEqual({ kind: "step", percent: 100 })
+    expect(dividerKeyAction("Home")).toEqual({
+      kind: "step",
+      direction: -1,
+      toEnd: true,
+    })
+    expect(dividerKeyAction("End")).toEqual({
+      kind: "step",
+      direction: 1,
+      toEnd: true,
+    })
   })
 
   it("toggles the collapse on Enter", () => {
@@ -132,25 +146,69 @@ describe("readStoredPanePercent", () => {
 
   it("reads a remembered split back", () => {
     localStorage.setItem(key, "37.5")
-    expect(readStoredPanePercent(key, 26, 14)).toBe(37.5)
+    expect(readStoredPanePercent(key, 26, 14, 70)).toBe(37.5)
   })
 
   it("falls back when nothing was ever written", () => {
     localStorage.removeItem(key)
-    expect(readStoredPanePercent(key, 26, 14)).toBe(26)
+    expect(readStoredPanePercent(key, 26, 14, 70)).toBe(26)
   })
 
   it("falls back rather than restoring a pane too narrow to use", () => {
     localStorage.setItem(key, "0")
-    expect(readStoredPanePercent(key, 26, 14)).toBe(26)
+    expect(readStoredPanePercent(key, 26, 14, 70)).toBe(26)
     localStorage.setItem(key, "13.9")
-    expect(readStoredPanePercent(key, 26, 14)).toBe(26)
+    expect(readStoredPanePercent(key, 26, 14, 70)).toBe(26)
+  })
+
+  it("falls back rather than squeezing the neighbour under its own floor", () => {
+    localStorage.setItem(key, "70")
+    expect(readStoredPanePercent(key, 26, 14, 70)).toBe(70)
+    localStorage.setItem(key, "70.1")
+    expect(readStoredPanePercent(key, 26, 14, 70)).toBe(26)
   })
 
   it("falls back on a hand-edited entry it cannot read", () => {
     localStorage.setItem(key, "wide please")
-    expect(readStoredPanePercent(key, 26, 14)).toBe(26)
+    expect(readStoredPanePercent(key, 26, 14, 70)).toBe(26)
     localStorage.setItem(key, "400")
-    expect(readStoredPanePercent(key, 26, 14)).toBe(26)
+    expect(readStoredPanePercent(key, 26, 14, 70)).toBe(26)
+  })
+})
+
+// A browser in private mode, with site data blocked, or over quota throws on
+// both reads and writes. Losing the remembered size is the whole cost; a
+// divider that throws on release is not.
+describe("storage that throws", () => {
+  const key = DIVIDER_STORAGE_KEYS.sidebarWidth
+
+  function withHostileStorage(run: () => void) {
+    const previous = globalThis.localStorage
+    vi.stubGlobal("localStorage", {
+      getItem: () => {
+        throw new DOMException("denied", "SecurityError")
+      },
+      setItem: () => {
+        throw new DOMException("denied", "SecurityError")
+      },
+    })
+    try {
+      run()
+    } finally {
+      vi.stubGlobal("localStorage", previous)
+    }
+  }
+
+  it("reads as absent instead of throwing", () => {
+    withHostileStorage(() => {
+      expect(readStoredText(key)).toBeNull()
+      expect(readStoredPanePercent(key, 26, 14, 70)).toBe(26)
+    })
+  })
+
+  it("swallows a refused write", () => {
+    withHostileStorage(() => {
+      expect(() => writeStoredText(key, "20rem")).not.toThrow()
+    })
   })
 })

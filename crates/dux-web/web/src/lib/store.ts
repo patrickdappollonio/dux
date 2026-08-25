@@ -26,7 +26,9 @@ import { reloadPage } from "./reloadPage"
 import {
   DIVIDER_STORAGE_KEYS,
   readStoredPanePercent,
+  readStoredText,
   writeStoredPanePercent,
+  writeStoredText,
 } from "./paneDivider"
 import { DEFAULT_SIDEBAR_WIDTH } from "./sidebarResize"
 import {
@@ -758,20 +760,33 @@ export const CHANGES_PANE_DEFAULT_PERCENT = 26
 // worth remembering: a pane restored under this would come back unusable.
 export const CHANGES_PANE_MIN_PERCENT = 14
 
-// What the Changes split actually mounts at: the width the user last released
-// the divider on, or the default. The sidebar's edge has remembered its width
+// The terminal panel's own floor, and therefore the widest the Changes pane may
+// ever be remembered as: a stored split that squeezed its neighbour under this
+// could not be applied and would be silently clamped on every load.
+export const TERMINAL_PANE_MIN_PERCENT = 30
+export const CHANGES_PANE_MAX_PERCENT = 100 - TERMINAL_PANE_MIN_PERCENT
+
+// What the Changes split mounts at: the width the user last released the
+// divider on, or the default. The sidebar's edge has remembered its width
 // across reloads since it existed; this is the same promise on the other side.
-export const CHANGES_PANE_INITIAL_PERCENT = hasBrowser
-  ? readStoredPanePercent(
-      DIVIDER_STORAGE_KEYS.changesPanePercent,
-      CHANGES_PANE_DEFAULT_PERCENT,
-      CHANGES_PANE_MIN_PERCENT,
-    )
-  : CHANGES_PANE_DEFAULT_PERCENT
+//
+// READ LIVE, never captured at module load. The panel unmounts when the pane is
+// hidden and mounts again when it is shown, and its `defaultSize` is what it
+// comes back at: a constant frozen at page load would hand back the width the
+// page STARTED with and overwrite whatever the user dragged to since.
+export function changesPaneMountPercent(): number {
+  if (!hasBrowser) return CHANGES_PANE_DEFAULT_PERCENT
+  return readStoredPanePercent(
+    DIVIDER_STORAGE_KEYS.changesPanePercent,
+    CHANGES_PANE_DEFAULT_PERCENT,
+    CHANGES_PANE_MIN_PERCENT,
+    CHANGES_PANE_MAX_PERCENT,
+  )
+}
 
 function loadSidebarWidth(): string {
   if (!hasBrowser) return DEFAULT_SIDEBAR_WIDTH
-  return localStorage.getItem(SIDEBAR_WIDTH_KEY) || DEFAULT_SIDEBAR_WIDTH
+  return readStoredText(SIDEBAR_WIDTH_KEY) || DEFAULT_SIDEBAR_WIDTH
 }
 
 // The width the page loaded with, which is what a double-click on the sidebar's
@@ -918,7 +933,7 @@ let state: DuxState = {
   createAgentPrRequestId: null,
   sidebarWidth: SIDEBAR_INITIAL_WIDTH,
   changesPaneOverride: null,
-  changesPanePercent: CHANGES_PANE_INITIAL_PERCENT,
+  changesPanePercent: changesPaneMountPercent(),
   mobileTopBarOverride: null,
   mobileAccessoryBarOverride: null,
   ptyOwnership: {},
@@ -5520,7 +5535,7 @@ export function reconnect(): void {
 export function setSidebarWidth(width: string, persist = false): void {
   setState({ sidebarWidth: width })
   if (persist) {
-    localStorage.setItem(SIDEBAR_WIDTH_KEY, width)
+    writeStoredText(SIDEBAR_WIDTH_KEY, width)
   }
 }
 
@@ -5551,6 +5566,7 @@ export function setChangesPanePercent(percent: number): void {
 // remembering the zero as well would re-hide a pane the user had reopened.
 export function persistChangesPanePercent(percent: number): void {
   if (percent < CHANGES_PANE_MIN_PERCENT) return
+  if (percent > CHANGES_PANE_MAX_PERCENT) return
   writeStoredPanePercent(DIVIDER_STORAGE_KEYS.changesPanePercent, percent)
 }
 
