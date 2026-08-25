@@ -223,6 +223,27 @@ pub struct App {
     /// demoted pane is on screen, which without this would be tens of identical
     /// debug lines a second in the log.
     pub(crate) last_refused_pty_resize: Option<(String, u16, u16)>,
+    /// PTYs this surface LAUNCHED and has not yet claimed, keyed by pty id.
+    ///
+    /// Drawing a pane is not a claim, so an agent this terminal started would
+    /// otherwise stay unowned until somebody typed into it, and a window resize
+    /// in between would never reach its child. Starting one IS a deliberate act
+    /// though, so the launch claims the child once it exists. The id is recorded
+    /// at dispatch and spent (or dropped, on a failed launch) at the launch's
+    /// outcome, because the pty does not exist until then and a claim against an
+    /// id no child answers to is a phantom driver.
+    ///
+    /// Only ever populated by this surface's own launch paths. A launch a browser
+    /// asked for is nobody's entry here, which is exactly what leaves the pty free
+    /// for that browser's own attach.
+    pub(crate) tui_launched_ptys: std::collections::HashSet<String>,
+    /// Whether the agent create currently in flight was started HERE.
+    ///
+    /// A create mints its session id in a worker, so unlike every other launch
+    /// there is no id to record at dispatch. A boolean is enough because the
+    /// engine allows exactly one create at a time (`InFlightKey::CreateAgent`),
+    /// and it is spent by the create's own outcome, success or failure.
+    pub(crate) create_agent_started_here: bool,
     /// How many times the selected surface's grid has been REBUILT (see
     /// `refresh_snapshot_buf`). Not a clock and not a line count: it only
     /// answers "has the grid moved since I looked?", which is the one question
@@ -3398,6 +3419,8 @@ impl App {
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
             last_pty_resize_target: None,
+            tui_launched_ptys: Default::default(),
+            create_agent_started_here: false,
             pending_pty_takeover: None,
             last_refused_pty_resize: None,
             grid_generation: 0,

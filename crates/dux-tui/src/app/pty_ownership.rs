@@ -40,6 +40,18 @@
 //! and typing into a pty that nobody owns. The web's socket-specific
 //! self-succession rule has no counterpart here, because this surface has no
 //! socket to have a ghost of.
+//!
+//! ## Drawing a pane claims nothing
+//!
+//! Not even a pty nobody owns. The render pass measures the center pane and
+//! sends the child a resize, and a resize is a claim wherever it is allowed to
+//! be one; but this surface draws every agent the workspace grows, including the
+//! ones a browser just created and is a heartbeat away from attaching to. So a
+//! render's resize applies only for a pty this surface already drives, or one an
+//! armed take-over is transferring, and the FIRST claim always comes from a
+//! deliberate act: a keystroke, a launch started here, or the card's button.
+//! Each of those clears the resize dedupe, so the geometry follows on the next
+//! frame through the ordinary apply order.
 
 use dux_core::background_serve::{PtyOwnershipEvent, TUI_DEVICE_LABEL, TuiOwnership};
 
@@ -49,7 +61,9 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PtyDriver {
     /// Nobody has claimed it, or nothing is serving so the question does not
-    /// arise. Typing claims it; resizing claims it.
+    /// arise. A deliberate act claims it: typing into it, or starting it from
+    /// here. Merely looking at it does not, and neither does the resize that
+    /// drawing its pane would otherwise send.
     Free,
     /// This surface holds it.
     Mine,
@@ -160,6 +174,37 @@ impl App {
     /// The same gate for a named pty. Split out so a test can name its target and
     /// so a future write path with an explicit target has somewhere to go.
     pub(crate) fn may_type_into_pty(&mut self, pty_id: &str) -> bool {
+        let allowed = self.claim_pty_by_deliberate_act(pty_id);
+        if !allowed {
+            dux_core::logger::debug(&format!(
+                "keystroke for pty {pty_id} dropped: another device currently owns its input"
+            ));
+        }
+        allowed
+    }
+
+    /// Claim `pty_id` because THIS surface just started the child behind it.
+    ///
+    /// A launch is a deliberate act by the person at this keyboard, so it claims
+    /// the pty exactly as their first keystroke would, and for the same reason:
+    /// otherwise an agent started here stays unowned, and a window resize before
+    /// the first keystroke never reaches its child.
+    ///
+    /// It never steals. A pty another device already drives is left alone, so a
+    /// relaunch of a terminal a browser is driving does not quietly move the
+    /// driver's seat to this window.
+    pub(crate) fn claim_launched_pty(&mut self, pty_id: &str) {
+        let _ = self.claim_pty_by_deliberate_act(pty_id);
+    }
+
+    /// The one implementation of "this surface deliberately takes an unowned
+    /// pty", shared by the first keystroke and by a launch this surface started.
+    ///
+    /// Reports whether this surface may drive the pty afterwards: `true` when it
+    /// already did, `true` when this call claimed it, and `false` when another
+    /// device holds it. Nothing serving means no registry to ask and no claim to
+    /// make, so the answer is an unconditional `true`.
+    fn claim_pty_by_deliberate_act(&mut self, pty_id: &str) -> bool {
         let Some(seat) = self.pty_ownership() else {
             return true;
         };
@@ -188,11 +233,6 @@ impl App {
                 device: TUI_DEVICE_LABEL.to_string(),
             }]);
         }
-        if !claim.allowed {
-            dux_core::logger::debug(&format!(
-                "keystroke for pty {pty_id} dropped: another device currently owns its input"
-            ));
-        }
         claim.allowed
     }
 
@@ -206,6 +246,13 @@ impl App {
     /// pty can never be sized for a device that no longer drives it; and the
     /// child is resized HERE rather than by the caller, so the grid announcement
     /// that follows can be made only about a resize that actually happened.
+    ///
+    /// It never CLAIMS on its own. An unowned pty is refused here exactly as an
+    /// owned one is, because the caller is the render pass and drawing a pane is
+    /// not a decision to drive what is in it; the deliberate acts
+    /// ([`Self::may_type_into_pty`], [`Self::claim_launched_pty`] and the card's
+    /// button) are what take a free pty, and only a take-over armed by that
+    /// button takes one from another device.
     ///
     /// Returns whether the resize was granted, which is the caller's cue to
     /// record its dedupe. A refusal records nothing: the pane renders the
@@ -234,6 +281,26 @@ impl App {
         if takeover {
             self.pending_pty_takeover = None;
         }
+        // MERELY DRAWING A PANE IS NOT A CLAIM. This is asked from the render
+        // pass, which runs whenever the pane's geometry or its target changes,
+        // and a browser starting an agent changes both here: the new agent
+        // arrives, the selection moves onto it, and this surface draws it. A
+        // resize that claimed an unowned pty would make this terminal the driver
+        // of a child the browser is about to attach to, and attaching never
+        // steals, so the person who started the agent would be handed a take-over
+        // card over their own new terminal.
+        //
+        // So a plain resize applies only for a pty this surface ALREADY drives,
+        // or one an armed take-over is about to transfer. This surface's first
+        // claim of a free pty is a deliberate act instead: typing into it
+        // (`may_type_into_pty`), starting it from here (`claim_launched_pty`), or
+        // pressing the card's button. Each of those clears the resize dedupe, so
+        // the very next render sends this pane's geometry through the ordinary
+        // apply order below.
+        if !takeover && !seat.owners.is_owner(pty_id, seat.conn_id) {
+            self.log_refused_resize_once(&seat, pty_id, rows, cols);
+            return false;
+        }
         let outcome = seat.owners.claim_for_resize(
             pty_id,
             seat.conn_id,
@@ -251,19 +318,9 @@ impl App {
             });
         }
         if !outcome.apply {
-            // Logged only when the refusal is NEW information. This is asked from
-            // the render pass, which runs every tick, and a refused resize must
-            // not record the resize dedupe (recording it makes a stale geometry
-            // permanent), so an unchanged refusal repeats for as long as the pane
-            // is on screen.
-            let refusal = (pty_id.to_string(), rows, cols);
-            if self.last_refused_pty_resize.as_ref() != Some(&refusal) {
-                dux_core::logger::debug(&format!(
-                    "resize of pty {pty_id} refused: another device currently owns its sizing, \
-                     and a take-over must say so explicitly"
-                ));
-                self.last_refused_pty_resize = Some(refusal);
-            }
+            // Reachable only as a race: the ownership check above passed and
+            // another device took the pty between it and this claim.
+            self.log_refused_resize_once(&seat, pty_id, rows, cols);
             self.publish_ownership(&events);
             return false;
         }
@@ -318,6 +375,34 @@ impl App {
         }
         self.publish_ownership(&events);
         true
+    }
+
+    /// Say in the log why a resize was not sent, but only when it is NEW
+    /// information.
+    ///
+    /// This is asked from the render pass, which repeats for as long as the pane
+    /// is on screen, and a refused resize deliberately does not record the resize
+    /// dedupe (recording it makes a stale geometry permanent). Without the guard
+    /// that is tens of identical lines a second.
+    ///
+    /// The two refusals are different facts and get different sentences. A pty
+    /// somebody else drives is the take-over card's story; a pty nobody drives is
+    /// simply one this surface has not asked for yet, and reporting that as
+    /// another device's doing would be a lie about the user's own setup.
+    fn log_refused_resize_once(&mut self, seat: &TuiOwnership, pty_id: &str, rows: u16, cols: u16) {
+        let refusal = (pty_id.to_string(), rows, cols);
+        if self.last_refused_pty_resize.as_ref() == Some(&refusal) {
+            return;
+        }
+        let (owner, _, _) = seat.owners.current_owner(pty_id);
+        let reason = if owner.is_some() {
+            "another device currently owns its sizing, and a take-over must say so explicitly"
+        } else {
+            "nobody is driving it yet, and drawing a pane does not claim one: type into it, or \
+             let the device that started it size it"
+        };
+        dux_core::logger::debug(&format!("resize of pty {pty_id} refused: {reason}"));
+        self.last_refused_pty_resize = Some(refusal);
     }
 
     /// The PTY behind a pty id, agent tab or companion terminal, in the same
@@ -572,6 +657,9 @@ mod tests {
     #[test]
     fn a_granted_resize_publishes_the_grid_for_web_watchers() {
         let (mut app, recorded, seat) = app_with_a_live_pty();
+        // The claim is a deliberate act (here, a launch started on this surface);
+        // the resize that follows is the ordinary one the render pass sends.
+        app.claim_launched_pty("session-1");
 
         assert!(app.resize_pty_if_permitted("session-1", 24, 80));
         let published = recorded.lock().expect("not poisoned").published.clone();
@@ -604,10 +692,11 @@ mod tests {
     #[test]
     fn a_resize_with_no_child_left_to_apply_it_to_announces_no_grid() {
         let (mut app, recorded, seat) = serving_app();
+        app.claim_launched_pty("gone");
 
         assert!(
             app.resize_pty_if_permitted("gone", 24, 80),
-            "the claim itself is still granted: nobody else owns this pty"
+            "the resize itself is still granted: this surface owns this pty"
         );
         assert!(seat.owners.is_owner("gone", seat.conn_id));
         let published = recorded.lock().expect("not poisoned").published.clone();
@@ -981,6 +1070,9 @@ mod tests {
     fn a_driving_pane_shows_the_child_and_no_card() {
         let (mut app, _recorded, _seat) =
             app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
+        // Driving it because this surface started it. Drawing the pane would not
+        // have been enough, deliberately: see `claim_launched_pty`.
+        app.claim_launched_pty("session-1");
         wait_for_child_output(&app);
 
         let rows = render_rows(&mut app, 160, 40);
@@ -1002,7 +1094,7 @@ mod tests {
         assert_ne!(
             grid,
             Some((10, 10)),
-            "an uncontested pane claims the pty and sizes the child to itself"
+            "a pane that drives its pty sizes the child to itself"
         );
     }
 
@@ -2023,5 +2115,146 @@ mod tests {
                  to it (demoted: {demoted})"
             );
         }
+    }
+
+    /// THE REPORTED BUG, as a test. A browser starts an agent; this surface
+    /// merely draws the new pane, and that draw must not make this terminal the
+    /// agent's driver. The browser's own attach resize arrives afterwards, and
+    /// attaching never steals, so a passive claim here leaves the browser that
+    /// started the agent watching a take-over card over its own new terminal.
+    #[test]
+    fn merely_rendering_a_free_pty_leaves_it_free_for_the_browser_that_started_it() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+
+        let _ = render_rows(&mut app, 160, 40);
+
+        assert_eq!(
+            app.pty_driver("session-1"),
+            PtyDriver::Free,
+            "looking at a terminal is not driving it"
+        );
+        let browser = seat.owners.next_conn_id();
+        let claim =
+            seat.owners
+                .claim_for_resize("session-1", browser, false, Some(REAL_CHROME_UA), |_| {});
+        assert!(
+            claim.apply,
+            "the browser that started the agent must be able to attach to it"
+        );
+        assert!(
+            seat.owners.is_owner("session-1", browser),
+            "and its plain attach claims the pty nobody was driving"
+        );
+    }
+
+    /// The other half of the reported bug: once the browser has attached, this
+    /// surface keeps drawing the agent every frame, and none of those frames may
+    /// hand it the pty back. Losing (or never having) a pty is sticky.
+    #[test]
+    fn a_browser_launched_agent_stays_browser_driven_however_often_it_is_drawn() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+        let browser = seat.owners.next_conn_id();
+        seat.owners
+            .claim_for_resize("session-1", browser, false, Some(REAL_CHROME_UA), |_| {})
+            .epoch
+            .expect("the browser attached first");
+
+        for _ in 0..3 {
+            let _ = render_rows(&mut app, 160, 40);
+        }
+
+        assert!(
+            seat.owners.is_owner("session-1", browser),
+            "repeated frames must not accumulate into a claim"
+        );
+    }
+
+    /// A launch this surface started IS a claim, and the frame after it sizes the
+    /// child. Without this half the fix would leave an agent started here unowned
+    /// until its first keystroke, and a window resize before that would never
+    /// reach the child.
+    #[test]
+    fn a_launch_started_here_claims_its_pty_and_the_next_frame_sizes_the_child() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+
+        app.claim_launched_pty("session-1");
+        assert_eq!(app.pty_driver("session-1"), PtyDriver::Mine);
+
+        let _ = render_rows(&mut app, 160, 40);
+        let grid = app
+            .engine
+            .providers
+            .get("session-1")
+            .and_then(|client| client.grid_size());
+        assert_ne!(
+            grid,
+            Some((10, 10)),
+            "the render pass sized the child this surface drives"
+        );
+        assert!(seat.owners.is_owner("session-1", seat.conn_id));
+    }
+
+    /// A launch never steals. Starting a tab here while a browser drives that
+    /// pty leaves the browser driving it.
+    #[test]
+    fn a_launch_started_here_never_takes_a_pty_another_device_drives() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+        let browser = seat.owners.next_conn_id();
+        seat.owners.claim("session-1", browser).expect("claimed");
+
+        app.claim_launched_pty("session-1");
+
+        assert!(seat.owners.is_owner("session-1", browser));
+    }
+
+    /// Typing is the other way in. A keystroke into a pty nobody drives claims
+    /// it, and the frame after that sizes the child, which is what the cleared
+    /// resize dedupe is for.
+    #[test]
+    fn typing_into_a_free_pty_claims_it_and_the_next_frame_sizes_the_child() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+        let _ = render_rows(&mut app, 160, 40);
+        assert_eq!(
+            app.pty_driver("session-1"),
+            PtyDriver::Free,
+            "the frame before the keystroke claimed nothing"
+        );
+
+        assert!(app.may_type_into_pty("session-1"));
+        assert!(seat.owners.is_owner("session-1", seat.conn_id));
+
+        let _ = render_rows(&mut app, 160, 40);
+        let grid = app
+            .engine
+            .providers
+            .get("session-1")
+            .and_then(|client| client.grid_size());
+        assert_ne!(
+            grid,
+            Some((10, 10)),
+            "the claim cleared the resize dedupe, so the next frame sent this \
+             pane's geometry"
+        );
+    }
+
+    /// With nothing serving there is no seat, no registry and no gate, so a
+    /// render sizes the child exactly as it did before any of this existed.
+    #[test]
+    fn with_nothing_serving_a_render_still_sizes_the_child() {
+        let (mut app, _recorded, _seat) = app_with_a_live_pty();
+        app.companion = None;
+
+        let _ = render_rows(&mut app, 160, 40);
+
+        let grid = app
+            .engine
+            .providers
+            .get("session-1")
+            .and_then(|client| client.grid_size());
+        assert_ne!(
+            grid,
+            Some((10, 10)),
+            "no seat means no gate: the resize goes straight to the child"
+        );
     }
 }

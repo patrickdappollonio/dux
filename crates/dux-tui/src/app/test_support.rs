@@ -255,6 +255,8 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         terminal_return_to_list: false,
         last_pty_size: (0, 0),
         last_pty_resize_target: None,
+        tui_launched_ptys: Default::default(),
+        create_agent_started_here: false,
         pending_pty_takeover: None,
         last_refused_pty_resize: None,
         grid_generation: 0,

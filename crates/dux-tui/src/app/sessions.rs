@@ -1230,6 +1230,9 @@ impl App {
         busy_message: String,
     ) -> Result<()> {
         let term_size = crossterm::terminal::size().unwrap_or((80, 24));
+        // The create in flight is THIS surface's, so its child is claimed when it
+        // appears. A boolean is enough: the engine allows one create at a time.
+        self.create_agent_started_here = true;
         let reaction = self.engine.apply(Command::DispatchCreateAgentRequest {
             request: Box::new(request),
             busy_message,
@@ -1260,6 +1263,9 @@ impl App {
         let pty_size = self.pty_size_for_launch();
         match self.engine.create_tab(session_id, provider, pty_size) {
             Ok(tab_id) => {
+                // The dispatch happened inside `create_tab`, so the claim is
+                // armed here instead (see `dispatch_agent_launch`).
+                self.tui_launched_ptys.insert(tab_id.clone());
                 self.set_focused_tab(session_id, &tab_id);
                 self.rebuild_left_items();
                 self.set_info(
@@ -1422,6 +1428,12 @@ impl App {
     }
 
     pub(crate) fn dispatch_agent_launch(&mut self, request: AgentLaunchRequest) -> bool {
+        // Every launch that starts HERE arms an ownership claim on its own tab,
+        // spent when the child appears. This method is this surface's only launch
+        // dispatch; a browser's launches go through the web layer's own and arm
+        // nothing, which is what leaves their ptys free for the browser to attach
+        // to.
+        let tab_id = request.tab_id.clone();
         let reaction = match self.engine.apply(Command::DispatchAgentLaunch {
             request: Box::new(request),
         }) {
@@ -1435,6 +1447,9 @@ impl App {
             &reaction,
             EventReaction::DispatchAgentLaunchView(view) if view.launched
         );
+        if launched {
+            self.tui_launched_ptys.insert(tab_id);
+        }
         self.apply_reaction(reaction);
         launched
     }
@@ -1510,6 +1525,11 @@ impl App {
                 return Ok(());
             }
         };
+        // A terminal spawned from here is claimed straight away: its PTY already
+        // exists (unlike an agent launch, which finishes on a worker), and
+        // starting it is as deliberate an act as typing into it. See
+        // `claim_launched_pty`.
+        self.claim_launched_pty(&terminal_id);
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
         self.show_companion_terminal_surface();
@@ -1542,6 +1562,11 @@ impl App {
                 return Ok(());
             }
         };
+        // A terminal spawned from here is claimed straight away: its PTY already
+        // exists (unlike an agent launch, which finishes on a worker), and
+        // starting it is as deliberate an act as typing into it. See
+        // `claim_launched_pty`.
+        self.claim_launched_pty(&terminal_id);
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
         self.show_companion_terminal_surface();
@@ -1576,6 +1601,11 @@ impl App {
         };
         let where_it_is =
             dux_core::home_path::shorten_home(&dux_core::home_path::standalone_terminal_dir());
+        // A terminal spawned from here is claimed straight away: its PTY already
+        // exists (unlike an agent launch, which finishes on a worker), and
+        // starting it is as deliberate an act as typing into it. See
+        // `claim_launched_pty`.
+        self.claim_launched_pty(&terminal_id);
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
         self.show_companion_terminal_surface();
@@ -1682,6 +1712,11 @@ impl App {
                 return Ok(());
             }
         };
+        // A terminal spawned from here is claimed straight away: its PTY already
+        // exists (unlike an agent launch, which finishes on a worker), and
+        // starting it is as deliberate an act as typing into it. See
+        // `claim_launched_pty`.
+        self.claim_launched_pty(&terminal_id);
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
         self.show_companion_terminal_surface();
@@ -4403,6 +4438,8 @@ mod tests {
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
             last_pty_resize_target: None,
+            tui_launched_ptys: Default::default(),
+            create_agent_started_here: false,
             pending_pty_takeover: None,
             last_refused_pty_resize: None,
             grid_generation: 0,

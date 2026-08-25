@@ -88,6 +88,23 @@ impl App {
                 }
                 _ => None,
             };
+            // A launch this surface armed for an ownership claim is DISARMED
+            // here when it failed, before the event is consumed. Tab ids are
+            // stable across relaunches, so an arm left behind would fire on the
+            // next launch of that same tab, and that one may well be a launch a
+            // browser asked for.
+            match &event {
+                WorkerEvent::AgentLaunchFailed(data) => {
+                    self.tui_launched_ptys.remove(&data.request.tab_id);
+                    if matches!(data.request.kind, AgentLaunchKind::Create { .. }) {
+                        self.create_agent_started_here = false;
+                    }
+                }
+                WorkerEvent::CreateAgentFailed { .. } => {
+                    self.create_agent_started_here = false;
+                }
+                _ => {}
+            }
             let reaction = self.engine.process_worker_event(event);
             let chains_forward = matches!(
                 reaction,
@@ -1446,6 +1463,25 @@ impl App {
 
     fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
         self.last_pty_size = outcome.pty_size;
+        // OWNERSHIP OF A CHILD THIS SURFACE STARTED. This arm runs on both
+        // surfaces (see `owner_of_reaction`), so the launch has to be recognised
+        // as this one's rather than assumed: an id armed at dispatch for every
+        // ordinary launch, and the create flag for a create, whose session id is
+        // minted in the worker and so cannot be armed by id at all.
+        //
+        // Both are spent whether or not the claim happens, and the claim is made
+        // only for a launch that really produced a child: a claim recorded
+        // against an id no pty answers to is a driver nobody can see or take
+        // over.
+        let armed = self.tui_launched_ptys.remove(&outcome.tab_id);
+        let created_here = matches!(
+            &outcome.view,
+            AgentLaunchReadyView::CreateCommitted { .. }
+                | AgentLaunchReadyView::CreatePersistFailed { .. }
+        ) && std::mem::take(&mut self.create_agent_started_here);
+        if (armed || created_here) && self.engine.providers.contains_key(&outcome.tab_id) {
+            self.claim_launched_pty(&outcome.tab_id);
+        }
         // The engine's `detach_conflicting_worktree_session` already cleared every
         // runtime map (incl. pty_activity/pty_input) for the detached agent's
         // tabs, so no follow-up clear is needed here.
