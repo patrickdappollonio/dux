@@ -168,9 +168,14 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        is to be noticed from the corner of your eye. Pure opacity so reduced
        motion can drop it wholesale (`motion-reduce:animate-none` on the dot). */
     --animate-attention-pulse: attention-pulse 2s ease-in-out infinite;
-    /* One-shot fade+rise for the row's state word (Working / Idle / Detached / …)
-       so it transitions on change instead of snapping. Replayed by keying the span
-       on the label, which remounts it each time the state changes. */
+    /* One-shot fade for the row's state word (Working / Idle / Detached / …) so
+       it transitions on change instead of snapping. Replayed by keying the span
+       on the label, which remounts it each time the state changes. A FADE and
+       nothing else: the swap used to rise 3px, which put the word below the rest
+       of line two for the first fraction of a second after every change, and a
+       busy agent changes state often enough that this is what a screenshot
+       catches. Line two is baseline-aligned, so nothing on it may move
+       vertically. */
     --animate-state-word: state-word-swap 0.28s ease-out;
     /* The typing caret's slow blink. Pure opacity so reduced motion can drop it
        wholesale (`motion-reduce:animate-none` on the caret, which then rests
@@ -180,8 +185,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 }
 
 @keyframes state-word-swap {
-    from { opacity: 0; transform: translateY(3px); }
-    to { opacity: 1; transform: translateY(0); }
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 @keyframes typing-caret {

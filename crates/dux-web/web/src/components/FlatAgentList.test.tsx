@@ -1129,3 +1129,130 @@ describe("FlatAgentList empty state", () => {
     expect(openNewAgentPickerMock).not.toHaveBeenCalled()
   })
 })
+
+// Line two carries text in two faces (a mono folder label beside sans state
+// words) and boxes with no text at all (the dot, the project glyph). Baseline
+// is the only alignment that keeps them on one line through a font change, so
+// these pin the alignment classes on the SHARED pieces both row kinds render:
+// nothing else jsdom can check, since it computes no layout.
+describe("FlatAgentList line two alignment", () => {
+  // The line-two container of the row that shows `word`.
+  function lineTwo(word: string): HTMLElement {
+    const el = screen.getByText(word).parentElement
+    if (!el) throw new Error(`no line two around "${word}"`)
+    return el
+  }
+
+  it("aligns an agent row's line two on one baseline", () => {
+    const state = makeState("name")
+    state.spine!.sessions = [
+      makeSession({ id: "alpha", title: "Alpha" }),
+      {
+        ...makeSession({ id: "notes", title: "Notes" }),
+        workspace: {
+          kind: "folder",
+          folder_path: "/home/someone/work/notes",
+          folder_label: "~/work/notes",
+          repo_status: "no_repo",
+          quiet_reason: "This folder has no git repository.",
+        },
+      } as SessionView,
+    ]
+    mockState = state
+    render(<FlatAgentList handlers={handlers} />)
+
+    // The managed row's project tag.
+    const managed = screen.getByText("Repo").closest("span")!.parentElement!
+    expect(managed.className).toContain("items-baseline")
+    // `self-center` here would opt the whole tag out of the row's baseline.
+    expect(managed.className).not.toContain("self-center")
+    expect(managed.className).not.toContain("items-center")
+    // The glyph is the one centered thing: an icon has no baseline to sit on.
+    expect(managed.querySelector("svg")!.getAttribute("class")).toContain(
+      "self-center",
+    )
+
+    // The standalone row: the mono folder label rides the same baseline.
+    const solo = screen.getByText("~/work/notes").closest("span")!.parentElement!
+    expect(solo.className).toContain("items-baseline")
+    expect(solo.className).not.toContain("self-center")
+
+    // Both tags hang off a baseline-aligned line-two container.
+    for (const container of [managed.parentElement!, solo.parentElement!]) {
+      expect(container.className).toContain("items-baseline")
+      expect(container.className).not.toContain("items-center")
+    }
+  })
+
+  it("aligns a terminal row's line two on the same baseline", () => {
+    const base = makeState("name")
+    mockState = {
+      ...base,
+      spine: {
+        ...base.spine,
+        terminals: [
+          makeTerminal({
+            id: "t-owned",
+            label: "owned",
+            owner: { kind: "session", session_id: "zeta" },
+          }),
+          makeTerminal({
+            id: "t-solo",
+            label: "solo",
+            owner: { kind: "standalone", cwd_label: "~/play" },
+          }),
+        ],
+      },
+    } as DuxState
+    render(<FlatAgentList handlers={handlers} />)
+
+    const owned = screen.getByText("Zeta@Repo").closest("span")!.parentElement!
+    const solo = screen.getByText("~/play").closest("span")!.parentElement!
+    for (const tag of [owned, solo]) {
+      expect(tag.className).toContain("items-baseline")
+      expect(tag.className).not.toContain("items-center")
+      expect(tag.parentElement!.className).toContain("items-baseline")
+      expect(tag.parentElement!.className).not.toContain("items-center")
+    }
+  })
+
+  // A terminal row is an agent row: both render the SAME state-word component,
+  // so the two can never drift in tone or in motion.
+  it("renders the state word the same way on both row kinds", () => {
+    const base = makeState("name")
+    mockState = {
+      ...base,
+      spine: {
+        ...base.spine,
+        sessions: [makeSession({ id: "alpha", title: "Alpha", working: true })],
+        terminals: [makeTerminal({ id: "t-owned", label: "owned" })],
+      },
+    } as DuxState
+    render(<FlatAgentList handlers={handlers} />)
+
+    for (const el of [screen.getByText("Working"), screen.getByText("Idle")]) {
+      expect(el.className).toContain("motion-safe:animate-state-word")
+      expect(el.className).toContain("shrink-0")
+      // Nothing may nudge the word off the line the rest of line two sits on.
+      expect(el.className).not.toMatch(/translate|self-|align-|mt-|pt-/)
+    }
+    expect(lineTwo("Working").className).toContain("items-baseline")
+    expect(lineTwo("Idle").className).toContain("items-baseline")
+  })
+
+  // The swap animation is the one thing that CAN move the word after layout is
+  // settled, and it did: a 3px rise left the word below its own line for the
+  // first fraction of a second after every state change, which is exactly what
+  // a screenshot of a busy sidebar catches. Fade only, forever.
+  it("swaps the state word with a fade that never moves it", async () => {
+    // Read as text: the bundler hands back a processed stylesheet, and what is
+    // being pinned is the authored keyframe. Vitest runs with the web project
+    // as its root.
+    const { readFileSync } = await import("node:fs")
+    const css = readFileSync(`${process.cwd()}/src/index.css`, "utf8")
+    const frames = /@keyframes state-word-swap\s*\{([\s\S]*?)\n\}/.exec(css)
+    expect(frames).toBeTruthy()
+    expect(frames![1]).toContain("opacity")
+    expect(frames![1]).not.toMatch(/transform|translate|top:|margin/)
+  })
+})

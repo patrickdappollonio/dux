@@ -44,7 +44,7 @@ import {
   Variable,
   X,
 } from "lucide-react"
-import type { CSSProperties } from "react"
+import type { CSSProperties, ReactNode } from "react"
 import { useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
@@ -102,6 +102,7 @@ import {
   sortQuietTail,
   stateWord,
   type FlatSortKey,
+  type StateWord,
 } from "@/lib/flatList"
 import {
   assembleFlatTerminals,
@@ -513,8 +514,15 @@ export function AgentActionsMenu({
 // (a result that matched on its project must explain itself).
 function ProjectTag({ name, query }: { name: string; query: string }) {
   return (
-    <span className="flex min-w-0 shrink items-center gap-1 self-center text-muted-foreground">
-      <Folder className="size-3 shrink-0" />
+    // Baseline-aligned like every other tag on line two (see RowLineTwo), so
+    // the project name sits on the same line as the state word whatever the
+    // line's tallest item turns out to be. `self-center` on the tag opted the
+    // whole thing out of that shared baseline and only happened to look right
+    // while every item was the same height. The GLYPH is the one thing centered
+    // here: an icon has no baseline of its own, and resting its box on the text
+    // baseline would hang it into the descender space.
+    <span className="flex min-w-0 shrink items-baseline gap-1 text-muted-foreground">
+      <Folder className="size-3 shrink-0 self-center" />
       <span className="min-w-0 truncate">
         <HighlightedText text={name} query={query} />
       </span>
@@ -557,6 +565,42 @@ function StandaloneTag({ label, query }: { label: string; query: string }) {
 // no text has no baseline to align: unpinned, the dot sinks to the bottom edge.
 function Dot({ className }: { className: string }) {
   return <span className={cn("size-1 shrink-0 self-center rounded-full bg-current opacity-50", className)} />
+}
+
+// Line two of a row, shared by the agent row and the terminal row because a
+// terminal row IS an agent row: the location tag, the separator dot, the state
+// word and whatever else the row appends, all sitting on ONE text baseline.
+// Baseline, not center: a mono folder label and a sans state word carry
+// different ascents, so centering their boxes leaves one visibly higher than
+// the other, and baseline alignment is the only one that survives a font
+// change. Every child either has a real text baseline or pins itself with
+// `self-center` (the dot, the project tag's glyph) and says why.
+function RowLineTwo({ children }: { children: ReactNode }) {
+  return (
+    <span className="flex items-baseline gap-1.5 text-xs text-muted-foreground">
+      {children}
+    </span>
+  )
+}
+
+// The row's state word (Working / Typing / Idle / Detached / …), shared by both
+// row kinds so the two can never drift in tone or in motion. Keyed on the label
+// by the caller so a state change remounts the span and replays the one-shot
+// swap instead of snapping the text. The swap is a fade and ONLY a fade: it
+// used to rise 3px, which left the word sitting below its own line for the
+// first fraction of a second after every state change, and a busy agent flips
+// state often enough that this is what you see in a screenshot.
+function RowStateWord({ word }: { word: StateWord }) {
+  return (
+    <span
+      className={cn(
+        "shrink-0 font-medium motion-safe:animate-state-word",
+        word.className,
+      )}
+    >
+      {word.label}
+    </span>
+  )
 }
 
 // The typing cue: a thin blinking caret in the soft-violet typing token, shared by
@@ -756,11 +800,9 @@ function AgentFlatRow({
                     typing, so this is the sole cue. */}
                 {typing ? <TypingCaret /> : null}
               </span>
-              {/* Line two: display-only project + state word + tabs. Aligned
-                  by baseline, not center, because a standalone agent's folder
-                  is mono and the state word is sans (see StandaloneTag); the
-                  icon-led project tag and the dot re-center themselves. */}
-              <span className="flex items-baseline gap-1.5 text-xs text-muted-foreground">
+              {/* Line two: display-only project + state word + tabs, through the
+                  shared RowLineTwo the terminal row uses too. */}
+              <RowLineTwo>
                 {location.kind === "folder" ? (
                   <StandaloneTag label={location.label} query={query} />
                 ) : (
@@ -768,17 +810,9 @@ function AgentFlatRow({
                 )}
                 <Dot className="text-muted-foreground" />
                 {/* Keyed on the label so a state change (Working ⇄ Idle ⇄ Detached
-                    …) remounts the span and replays the one-shot fade+rise instead
-                    of snapping the text. */}
-                <span
-                  key={word.label}
-                  className={cn(
-                    "shrink-0 font-medium motion-safe:animate-state-word",
-                    word.className,
-                  )}
-                >
-                  {word.label}
-                </span>
+                    …) remounts the span and replays the one-shot fade instead of
+                    snapping the text. */}
+                <RowStateWord key={word.label} word={word} />
                 {/* No branch here, by decision: a drifted agent would put a
                     long mono branch inline on every row, noise, and worst on a
                     tablet. The branch's one home is the top bar's
@@ -792,7 +826,7 @@ function AgentFlatRow({
                     <span className="shrink-0">{tabCount} tabs</span>
                   </>
                 ) : null}
-              </span>
+              </RowLineTwo>
             </span>
           </button>
         </SimpleTooltip>
@@ -937,7 +971,7 @@ function TerminalFlatRow({
             </SimpleTooltip>
             {terminal.typing ? <TypingCaret /> : null}
           </span>
-          <span className="flex items-baseline gap-1.5 text-xs text-muted-foreground">
+          <RowLineTwo>
             {/* The owner tag mirrors the agent row's project tag: which owner
                 this terminal belongs to, then its colored state word. A
                 STANDALONE terminal has no owner, so it wears the shared
@@ -947,7 +981,7 @@ function TerminalFlatRow({
             {isStandalone ? (
               <StandaloneTag label={ownerLabel} query={query} />
             ) : (
-              <span className="flex min-w-0 shrink items-center gap-1">
+              <span className="flex min-w-0 shrink items-baseline gap-1">
                 <span aria-hidden>↳</span>
                 <span className="min-w-0 truncate">
                   <HighlightedText text={ownerLabel} query={query} />
@@ -955,16 +989,8 @@ function TerminalFlatRow({
               </span>
             )}
             <Dot className="text-muted-foreground" />
-            <span
-              key={word.label}
-              className={cn(
-                "shrink-0 font-medium motion-safe:animate-state-word",
-                word.className,
-              )}
-            >
-              {word.label}
-            </span>
-          </span>
+            <RowStateWord key={word.label} word={word} />
+          </RowLineTwo>
         </span>
       </button>
       <DropdownMenu>
