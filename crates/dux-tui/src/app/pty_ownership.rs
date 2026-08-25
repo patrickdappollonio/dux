@@ -52,6 +52,19 @@
 //! deliberate act: a keystroke, a launch started here, or the card's button.
 //! Each of those clears the resize dedupe, so the geometry follows on the next
 //! frame through the ordinary apply order.
+//!
+//! WHICH LAUNCHES COUNT, decided in [`launch_claims_its_pty`]. A launch claims
+//! when somebody at this keyboard asked for it: creating an agent (a fork, a
+//! pull request and a standalone agent included, which are all creates),
+//! reconnecting or force-reconnecting a dormant one, opening a tab, and
+//! spawning a terminal. The startup auto-reopen sweep does NOT: nobody has
+//! touched anything yet, the web server's own startup pass claims nothing
+//! either, and claiming there would hand this terminal every reopened agent in
+//! the workspace at once, each of which a browser would then have to take back
+//! by hand. A create is armed by a flag rather than by id, because its session
+//! id is minted in a worker, and it is armed only once the engine has ACCEPTED
+//! the dispatch: a refused create that armed anyway would spend its arm on the
+//! create that really was in flight, which is the browser's.
 
 use dux_core::background_serve::{PtyOwnershipEvent, TUI_DEVICE_LABEL, TuiOwnership};
 
@@ -82,6 +95,38 @@ pub(crate) enum PtyDriver {
     /// [`dux_core::device_label::short_device_label`] made of it, because the
     /// place it is rendered is the title bar of a card inside the center pane.
     Elsewhere { device: Option<String> },
+}
+
+/// Whether a launch of this kind claims the child it produces for this surface.
+///
+/// A launch claims when somebody at this keyboard asked for it, and only then.
+/// Matched exhaustively rather than by a `matches!` at the call site, so a new
+/// launch kind does not compile until somebody has said which it is.
+pub(crate) fn launch_claims_its_pty(kind: &dux_core::worker::AgentLaunchKind) -> bool {
+    use dux_core::worker::AgentLaunchKind;
+    match kind {
+        // NOBODY ACTED. The startup sweep reopens what was running last time,
+        // before the user has touched anything, and the web server's own startup
+        // pass claims nothing either. Claiming here would hand this terminal
+        // every auto-reopened agent in the workspace the moment it starts, and
+        // ownership is sticky, so a browser would have to take each one back by
+        // hand. The first keystroke claims, as it does for any free pty.
+        AgentLaunchKind::StartupAutoReopen => false,
+        // A person asked for each of these: a create (including a fork, a pull
+        // request and a standalone agent, which are all Create-kind), a
+        // reconnect or forced reconnect of a dormant agent, and a new or
+        // relaunched tab.
+        AgentLaunchKind::Create { .. }
+        | AgentLaunchKind::Reconnect { .. }
+        | AgentLaunchKind::ForceReconnect { .. }
+        | AgentLaunchKind::Tab { .. } => true,
+        // The tail of a launch somebody DID ask for: the provider refused to
+        // resume, so dux relaunches it fresh. dux-core dispatches this one
+        // directly, so it never reaches this surface's dispatch and the answer
+        // is moot in practice; it is `true` because the act it finishes was the
+        // user's, not because anything here acts on it.
+        AgentLaunchKind::ResumeFallback { .. } => true,
+    }
 }
 
 /// What PROSE calls a driver that gave dux no name for itself.
@@ -526,6 +571,7 @@ mod tests {
     use super::*;
     use crate::app::background_server::tests::{FakeCompanion, Recorded};
     use crate::app::test_support::{default_bindings, test_app};
+    use dux_core::engine::{AgentLaunchReadyOutcome, AgentLaunchReadyView};
 
     /// An app with a serving companion, plus the registry seat the companion
     /// handed it and the record of what it published.
@@ -2338,5 +2384,123 @@ mod tests {
         let left = inner.iter().take_while(|c| **c == ' ').count();
         let right = inner.iter().rev().take_while(|c| **c == ' ').count();
         (left, right, inner.len())
+    }
+
+    /// A ready view for `session-1`, built for a test that only cares which
+    /// launch produced it.
+    fn ready_view(app: &App, view: AgentLaunchReadyView) -> AgentLaunchReadyOutcome {
+        AgentLaunchReadyOutcome {
+            session: app.engine.sessions[0].clone(),
+            tab_id: "session-1".to_string(),
+            pty_size: (24, 80),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            view,
+        }
+    }
+
+    /// A create THIS surface asked for and the engine REFUSED must not arm a
+    /// claim, or the arm sits there waiting and lands on the browser's create
+    /// instead: the refusal comes back as an ordinary status rather than an
+    /// error, so a claim armed before the dispatch is never taken back.
+    #[test]
+    fn a_create_refused_here_never_claims_the_agent_the_browser_was_creating() {
+        let (mut app, _recorded, _seat) = app_with_a_live_pty();
+        // The browser's create is already in flight, which is precisely what
+        // makes the engine refuse this surface's.
+        assert!(
+            app.engine
+                .mark_in_flight(dux_core::engine::InFlightKey::CreateAgent),
+            "test setup: no create was in flight yet"
+        );
+        let provider = app.engine.sessions[0].provider.clone();
+
+        app.dispatch_create_agent_request(
+            dux_core::worker::CreateAgentRequest::Standalone {
+                folder: std::path::PathBuf::from("."),
+                title: "refused".to_string(),
+                provider,
+            },
+            "Creating an agent...".to_string(),
+        )
+        .expect("a refused create comes back as a status, not an error");
+        assert!(
+            !app.create_agent_started_here,
+            "a create the engine refused must arm nothing"
+        );
+
+        // The browser's create lands. Its child has to stay free for the
+        // browser that asked for it to attach to.
+        let outcome = ready_view(
+            &app,
+            AgentLaunchReadyView::CreateCommitted {
+                status_message: "Created.".to_string(),
+                startup_result_error: None,
+            },
+        );
+        app.apply_agent_launch_ready_view(outcome);
+
+        assert_eq!(
+            app.pty_driver("session-1"),
+            PtyDriver::Free,
+            "the browser's own create must not be claimed by this surface"
+        );
+    }
+
+    /// WHICH LAUNCHES ARE DELIBERATE. Everything a person at this keyboard asks
+    /// for claims the child it starts; the startup sweep does not, because
+    /// nobody asked for it.
+    #[test]
+    fn only_a_launch_somebody_asked_for_claims_the_child_it_starts() {
+        use dux_core::worker::AgentLaunchKind;
+
+        assert!(
+            !launch_claims_its_pty(&AgentLaunchKind::StartupAutoReopen),
+            "reopening at startup is dux catching up, not a person acting"
+        );
+        for kind in [
+            AgentLaunchKind::Reconnect {
+                status_message: String::new(),
+            },
+            AgentLaunchKind::ForceReconnect {
+                status_message: String::new(),
+            },
+            AgentLaunchKind::ResumeFallback {
+                status_message: String::new(),
+            },
+            AgentLaunchKind::Tab {
+                is_fresh: true,
+                status_message: String::new(),
+            },
+            AgentLaunchKind::Create {
+                status_message: String::new(),
+                repo_path: String::new(),
+                owns_worktree: false,
+                startup_result: None,
+                status_op_id: String::new(),
+            },
+        ] {
+            assert!(
+                launch_claims_its_pty(&kind),
+                "a launch somebody asked for claims its child"
+            );
+        }
+    }
+
+    /// The outcome half of the same rule: an agent reopened by the startup sweep
+    /// is left for whoever types into it first, browser included.
+    #[test]
+    fn a_startup_auto_reopened_agent_is_left_free_for_whoever_types_first() {
+        let (mut app, _recorded, _seat) = app_with_a_live_pty();
+
+        let outcome = ready_view(&app, AgentLaunchReadyView::StartupAutoReopen);
+        app.apply_agent_launch_ready_view(outcome);
+        let _ = render_rows(&mut app, 160, 40);
+
+        assert_eq!(
+            app.pty_driver("session-1"),
+            PtyDriver::Free,
+            "nobody acted, so nobody drives it yet"
+        );
     }
 }

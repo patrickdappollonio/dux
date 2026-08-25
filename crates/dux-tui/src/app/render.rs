@@ -3158,17 +3158,25 @@ impl App {
         let target_changed = self.last_pty_resize_target != resize_target;
         let should_resize =
             (new_size != self.last_pty_size || target_changed) && new_size.0 > 0 && new_size.1 > 0;
-        // THE SIZING CLAIM. One PTY has one authoritative grid, the driver's, so
-        // while a background web server is serving this pane may only re-grid the
-        // child when it is the one driving. A refusal is not a failure: this pane
-        // renders the child's real grid (clipped when it is larger than the pane,
-        // which it already does safely) and the hint bar names the device whose
-        // geometry it is. A GRANTED resize publishes its grid through the seam, so
-        // web watchers adopt it.
+        // THE SIZING QUESTION, which is deliberately NOT a claim. One PTY has one
+        // authoritative grid, the driver's, so while a background web server is
+        // serving this pane may re-grid the child only when it is already the one
+        // driving. Neither refusal is a failure, and they are different facts:
         //
-        // Asked only when a resize would actually be sent, so merely looking at a
-        // pane claims nothing, and asked BEFORE the dedupe state is written: an
-        // armed take-over is spent inside this call.
+        //   - ANOTHER DEVICE drives it, so the take-over card is over this pane
+        //     and names that device; the geometry on screen is its.
+        //   - NOBODY drives it yet, so there is no card and nothing is wrong.
+        //     Drawing a pane is not a decision to drive what is in it (a browser
+        //     may be a heartbeat away from attaching to an agent it just
+        //     started), so the pane shows the child at whatever grid it has until
+        //     a keystroke claims it, which is what sends this pane's geometry.
+        //
+        // Either way this pane renders the child's real grid, clipped when it is
+        // larger than the pane, which it already does safely. A GRANTED resize
+        // publishes its grid through the seam, so web watchers adopt it.
+        //
+        // Asked only when a resize would actually be sent, and asked BEFORE the
+        // dedupe state is written: an armed take-over is spent inside this call.
         let resize_granted = should_resize
             && match resize_target.as_deref() {
                 Some(pty_id) => {

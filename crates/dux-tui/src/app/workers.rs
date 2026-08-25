@@ -1461,7 +1461,7 @@ impl App {
         }
     }
 
-    fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
+    pub(super) fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
         self.last_pty_size = outcome.pty_size;
         // OWNERSHIP OF A CHILD THIS SURFACE STARTED. This arm runs on both
         // surfaces (see `owner_of_reaction`), so the launch has to be recognised

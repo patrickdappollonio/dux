@@ -1230,14 +1230,28 @@ impl App {
         busy_message: String,
     ) -> Result<()> {
         let term_size = crossterm::terminal::size().unwrap_or((80, 24));
-        // The create in flight is THIS surface's, so its child is claimed when it
-        // appears. A boolean is enough: the engine allows one create at a time.
-        self.create_agent_started_here = true;
+        // ARMED ONLY ONCE THE DISPATCH IS KNOWN ACCEPTED, and the in-flight key
+        // is what says so. The engine allows one create at a time and REFUSES a
+        // second one with an ordinary status rather than an error, so arming
+        // before the dispatch left the arm standing after a refusal, waiting to
+        // land on whichever create really was in flight, which is exactly the
+        // browser's. Taking the key is the one thing only an accepted dispatch
+        // does; an `Err` returns before this line and arms nothing either.
+        let was_in_flight = self
+            .engine
+            .is_in_flight(&dux_core::engine::InFlightKey::CreateAgent);
         let reaction = self.engine.apply(Command::DispatchCreateAgentRequest {
             request: Box::new(request),
             busy_message,
             term_size,
         })?;
+        if !was_in_flight
+            && self
+                .engine
+                .is_in_flight(&dux_core::engine::InFlightKey::CreateAgent)
+        {
+            self.create_agent_started_here = true;
+        }
         self.apply_reaction(reaction);
         Ok(())
     }
@@ -1428,12 +1442,14 @@ impl App {
     }
 
     pub(crate) fn dispatch_agent_launch(&mut self, request: AgentLaunchRequest) -> bool {
-        // Every launch that starts HERE arms an ownership claim on its own tab,
-        // spent when the child appears. This method is this surface's only launch
-        // dispatch; a browser's launches go through the web layer's own and arm
-        // nothing, which is what leaves their ptys free for the browser to attach
-        // to.
-        let tab_id = request.tab_id.clone();
+        // Every launch SOMEBODY ASKED FOR here arms an ownership claim on its own
+        // tab, spent when the child appears. This method is this surface's only
+        // launch dispatch; a browser's launches go through the web layer's own and
+        // arm nothing, which is what leaves their ptys free for the browser to
+        // attach to. The startup sweep comes through here too and deliberately
+        // arms nothing either: see `launch_claims_its_pty`.
+        let tab_id = super::pty_ownership::launch_claims_its_pty(&request.kind)
+            .then(|| request.tab_id.clone());
         let reaction = match self.engine.apply(Command::DispatchAgentLaunch {
             request: Box::new(request),
         }) {
@@ -1447,7 +1463,9 @@ impl App {
             &reaction,
             EventReaction::DispatchAgentLaunchView(view) if view.launched
         );
-        if launched {
+        if let Some(tab_id) = tab_id
+            && launched
+        {
             self.tui_launched_ptys.insert(tab_id);
         }
         self.apply_reaction(reaction);
