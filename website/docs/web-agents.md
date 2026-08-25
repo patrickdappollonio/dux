@@ -74,6 +74,8 @@ The **New agent** dialog, reached from a project's `⋯` menu, skips the resolut
 project is already chosen, so **New agent from PR…** here takes a reference scoped to that
 project and a bare `123` is meaningful.
 
+![The New agent dialog with a branch name typed, ready to create the worktree and launch the agent.](/screens/new-agent-dialog.png)
+
 - **New agent…** creates a fresh git worktree and branch and launches the agent. The branch
   name is optional; leave it blank and dux generates a memorable pet name.
 - **New agent from PR…** fetches a pull request's head branch into a new worktree. Give it
