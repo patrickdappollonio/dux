@@ -25,11 +25,15 @@ conflict, **T** type changed, and **?** untracked.
 
 ## Several files at once
 
-Tick the checkbox on any row and a bar appears above the list with the verbs for
-what you picked: **Stage 3**, **Unstage 2**, **Discard 3…**, and **Clear**. Each
-section keeps its own selection, because the two carry opposite verbs, and the
-checkbox beside a section heading picks up every row that section is currently
-showing.
+Hover a row and its status icon turns into a checkbox; tick it and a bar appears
+above the list with the verbs for what you picked: **Stage 3**, **Unstage 2**,
+**Discard 3…**, **Select all**, and **Clear**. On a touch screen there is no
+hover, so tapping the status icon is what ticks the row. Each section keeps its
+own selection, because the two carry opposite verbs.
+
+**Select all** picks up every row currently on screen, in both sections, and
+flips to **Select none** once they are all ticked. **Clear** is the wider one:
+it empties the whole selection, including rows a filter is hiding.
 
 ![Two changed files ticked, with a bar above the list offering Stage 2, Discard 2 and Clear.](/screens/changes-bulk-bar.png)
 

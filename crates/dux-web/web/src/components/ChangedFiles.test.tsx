@@ -10,6 +10,7 @@ import {
 } from "@testing-library/react"
 
 import type { ChangesSlice, DuxState } from "@/lib/store"
+import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
 
 // The Changes pane's "Refresh changes" item has exactly one job that a reader
 // cannot see by looking at it: it must take the FORCING path. The store's
@@ -473,15 +474,72 @@ describe("the changes pane's multi-select", () => {
     expect(openEditor).toHaveBeenCalledTimes(1)
   })
 
-  // The status marker moved out of the leading slot to make room for the
-  // checkbox, and must still be on the row, after the path.
-  it("keeps the status marker on the row, trailing the path", () => {
+  // The leading slot belongs to the status marker again. The checkbox lives IN
+  // that slot rather than in a column of its own, so nothing on the row moved
+  // to make room for multi-select.
+  it("keeps the status marker in the row's leading slot, before the path", () => {
     render(<ChangedFiles />)
     const path = screen.getByText("a.ts")
     const row = path.closest('[role="row"]')!
     const marker = within(row as HTMLElement).getByRole("img", { name: "Modified" })
     expect(
-      path.compareDocumentPosition(marker) & Node.DOCUMENT_POSITION_FOLLOWING,
+      path.compareDocumentPosition(marker) & Node.DOCUMENT_POSITION_PRECEDING,
+    ).toBeTruthy()
+  })
+
+  // The checkbox is ALWAYS in the DOM, never display-swapped: a keyboard user
+  // has to be able to reach it on a row nobody is hovering, and jsdom cannot
+  // hover at all.
+  it("renders a focusable checkbox on an unhovered, unchecked row", () => {
+    render(<ChangedFiles />)
+    const box = screen.getByLabelText("Select a.ts")
+    expect(box.getAttribute("aria-checked")).toBe("false")
+    box.focus()
+    expect(document.activeElement).toBe(box)
+  })
+
+  it("puts the checkbox in the leading slot, sharing it with the marker", () => {
+    render(<ChangedFiles />)
+    const path = screen.getByText("a.ts")
+    const box = screen.getByLabelText("Select a.ts")
+    const marker = within(
+      path.closest('[role="row"]') as HTMLElement,
+    ).getByRole("img", { name: "Modified" })
+    expect(
+      path.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_PRECEDING,
+    ).toBeTruthy()
+    expect(box.parentElement!.contains(marker)).toBe(true)
+  })
+
+  it("ticks the row when the checkbox is clicked", () => {
+    render(<ChangedFiles />)
+    const box = screen.getByLabelText("Select a.ts")
+    fireEvent.click(box)
+    expect(box.getAttribute("aria-checked")).toBe("true")
+  })
+
+  // On a mouse the slot stays small and its click halo is suppressed, so a
+  // near-miss lands on the row's open-diff click rather than on a checkbox the
+  // user cannot see reaching that far.
+  it("keeps the desktop slot small with the checkbox halo suppressed", () => {
+    render(<ChangedFiles />)
+    const box = screen.getByLabelText("Select a.ts")
+    expect(box.className).toContain("after:hidden")
+    expect(box.parentElement!.className).toContain("size-5")
+  })
+
+  // One baseline: the path and the +N/-N counts sit in one items-baseline
+  // container, so the digits stop reading as superscript beside the path.
+  it("puts the path and its counts in one baseline container, in that order", () => {
+    render(<ChangedFiles />)
+    const path = screen.getByText("a.ts")
+    const row = path.closest('[role="row"]') as HTMLElement
+    const counts = within(row).getByText("+1")
+    const box = path.closest(".items-baseline")
+    expect(box).toBeTruthy()
+    expect(box!.contains(counts)).toBe(true)
+    expect(
+      path.compareDocumentPosition(counts) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy()
   })
 
@@ -506,37 +564,96 @@ describe("the changes pane's multi-select", () => {
   })
 })
 
-describe("the section select-all", () => {
+describe("the changes pane's selection on a touch screen", () => {
+  let media: MatchMediaStub | null = null
+
   beforeEach(() => {
     mockState = withFiles([], [["a.ts", "M"], ["b.ts", "??"]])
+    // After installBootStubs, whose blanket matchMedia answers false.
+    media = stubCoarsePointer()
   })
 
-  it("reads mixed while only some rows are checked", () => {
+  afterEach(() => {
+    media?.restore()
+    media = null
+  })
+
+  // A finger cannot hover, so the slot itself is the tap target: it shows the
+  // marker at rest and ticks the row when tapped.
+  it("ticks the row when the status slot is tapped", () => {
+    render(<ChangedFiles />)
+    const box = screen.getByLabelText("Select a.ts")
+    expect(box.getAttribute("aria-checked")).toBe("false")
+
+    fireEvent.click(box)
+
+    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+  })
+
+  it("never opens the diff when the status slot is tapped", () => {
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Select a.ts"))
+    expect(openEditor).not.toHaveBeenCalled()
+  })
+
+  // The 40px floor on BOTH axes, and the checkbox halo grown to fill it rather
+  // than suppressed the way the desktop one is.
+  it("gives the slot the touch floor on both axes with a halo to match", () => {
+    render(<ChangedFiles />)
+    const box = screen.getByLabelText("Select a.ts")
+    expect(box.parentElement!.className).toContain("size-11")
+    expect(box.className).toContain("after:-inset-3.5")
+    expect(box.className).not.toContain("after:hidden")
+  })
+})
+
+describe("the bulk bar's Select all toggle", () => {
+  beforeEach(() => {
+    mockState = withFiles(
+      [["staged.ts", "M"]],
+      [["a.ts", "M"], ["b.ts", "??"]],
+    )
+  })
+
+  // The universe is every row the filter shows, across BOTH sections, which is
+  // the union of what the two per-section select-alls used to cover.
+  it("reads Select all while a visible row is unchecked, and checks every section", () => {
     render(<ChangedFiles />)
     check("a.ts")
-    expect(
-      screen.getByLabelText("Select all unstaged files").getAttribute("aria-checked"),
-    ).toBe("mixed")
-  })
 
-  // Each section's select-all names its own section, so a screen reader user
-  // is never offered two identically labelled controls.
-  it("names the staged section in its own select-all", () => {
-    mockState = withFiles([["staged.ts", "M"]], [["a.ts", "M"]])
-    render(<ChangedFiles />)
-    expect(screen.getByLabelText("Select all staged files")).toBeTruthy()
-    expect(screen.getByLabelText("Select all unstaged files")).toBeTruthy()
-  })
+    fireEvent.click(bar().getByRole("button", { name: "Select all" }))
 
-  it("checks every row in its own section", () => {
-    render(<ChangedFiles />)
-    fireEvent.click(screen.getByLabelText("Select all unstaged files"))
     expect(bar().getByRole("button", { name: "Stage 2" })).toBeTruthy()
+    expect(bar().getByRole("button", { name: "Unstage 1" })).toBeTruthy()
   })
 
-  // The header counts the rows on screen; the bar counts and acts on the whole
-  // selection, so a filter never silently shrinks what a verb will do.
-  it("counts the filtered rows while the bar keeps the whole selection", () => {
+  it("flips to Select none once every visible row is checked, and unchecks them", () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Select all" }))
+
+    fireEvent.click(bar().getByRole("button", { name: "Select none" }))
+
+    expect(
+      screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
+    ).toBeNull()
+  })
+
+  it("checks only the rows the filter shows", () => {
+    render(<ChangedFiles />)
+    check("staged.ts")
+    fireEvent.change(screen.getByLabelText("Filter changed files"), {
+      target: { value: "a.ts" },
+    })
+
+    fireEvent.click(bar().getByRole("button", { name: "Select all" }))
+
+    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+  })
+
+  // Select none acts on what is on screen, so a checked row the filter hides
+  // stays checked: the bar stays up and the label flips back.
+  it("leaves a hidden checked row alone and flips the label back", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("b.ts")
@@ -544,20 +661,63 @@ describe("the section select-all", () => {
       target: { value: "a.ts" },
     })
 
-    expect(
-      screen.getByLabelText("Select all unstaged files").getAttribute("aria-checked"),
-    ).toBe("true")
-    expect(bar().getByRole("button", { name: "Stage 2" })).toBeTruthy()
+    fireEvent.click(bar().getByRole("button", { name: "Select none" }))
+
+    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+    expect(bar().getByRole("button", { name: "Select all" })).toBeTruthy()
   })
 
-  it("checks only the filtered rows", () => {
+  // Clear is not the same control: it empties the WHOLE selection, including
+  // the rows the filter hides.
+  it("keeps Clear emptying rows the filter hides, unlike Select none", () => {
     render(<ChangedFiles />)
+    check("a.ts")
+    check("b.ts")
     fireEvent.change(screen.getByLabelText("Filter changed files"), {
       target: { value: "a.ts" },
     })
-    fireEvent.click(screen.getByLabelText("Select all unstaged files"))
 
-    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+    fireEvent.click(bar().getByRole("button", { name: "Clear" }))
+
+    expect(
+      screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
+    ).toBeNull()
+  })
+
+  // Nothing on screen to select: the toggle would be a lie about an empty
+  // universe, so it is absent rather than disabled.
+  it("renders no toggle when the filter hides every row", () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    fireEvent.change(screen.getByLabelText("Filter changed files"), {
+      target: { value: "no-such-file" },
+    })
+
+    expect(bar().queryByRole("button", { name: /^Select (all|none)$/ })).toBeNull()
+    expect(bar().getByRole("button", { name: "Clear" })).toBeTruthy()
+  })
+
+  // It matches the checkboxes, not the verbs: ticking stays possible while a
+  // verb is in flight, the same way the row checkboxes do.
+  it("stays enabled while a verb is in flight", () => {
+    stageMany.mockImplementationOnce(
+      () => new Promise<{ done: string[]; refused: string[] }>(() => {}),
+    )
+    render(<ChangedFiles />)
+    check("a.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Stage 1" }))
+
+    expect(
+      bar().getByRole("button", { name: "Select all" }).hasAttribute("disabled"),
+    ).toBe(false)
+  })
+
+  // The section headings lost their checkboxes: the bar is the one place a
+  // whole-list selection is made.
+  it("leaves no checkbox on a section heading", () => {
+    render(<ChangedFiles />)
+    expect(screen.queryByLabelText("Select all staged files")).toBeNull()
+    expect(screen.queryByLabelText("Select all unstaged files")).toBeNull()
   })
 })
 

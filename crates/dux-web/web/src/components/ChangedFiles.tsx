@@ -15,6 +15,8 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Square,
+  SquareCheck,
   TriangleAlert,
   Undo2,
 } from "lucide-react"
@@ -75,7 +77,9 @@ import {
   toggleChangesPane,
   useDux,
 } from "@/lib/store"
+import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { cn } from "@/lib/utils"
 import type { ChangedFileView } from "@/lib/types"
 import { agentRoot } from "@/lib/editorRoot"
 
@@ -84,12 +88,83 @@ const fileCount = (n: number) => `${n} file${n === 1 ? "" : "s"}`
 // One height for every control in the bulk bar; they differ in width only.
 const BULK_CONTROL = "h-9 max-md:h-11"
 
-// The leading checkbox slot, on the row and on a section header so the two
-// columns line up. The shared checkbox carries a click halo reaching 12px
-// sideways and 8px vertically past its 16px box, and the slot is sized to
-// contain it: a near-miss must not land on the row's open-diff click instead.
-const CHECKBOX_SLOT =
-  "flex shrink-0 items-center justify-center max-md:size-11 md:h-8 md:w-10"
+// The row's ONE leading slot. It holds the status marker and the selection
+// checkbox stacked in the same box, so which of the two is showing can never
+// shift the path sideways. Fixed on both axes for that reason.
+//
+// Mouse: a 20px box. The 14px glyph and the 16px checkbox both centre in it,
+// and the checkbox's own click halo is suppressed (`after:hidden` below) so a
+// near-miss lands on the row's open-diff click rather than on a target the
+// user cannot see.
+const STATUS_SLOT_MOUSE = "size-5"
+// Touch: the slot IS the selection control, since a finger cannot hover, so it
+// carries the 40px floor on BOTH axes. Its only neighbours are the row's path
+// and the row itself, whose click opens a read-only diff: a stray tap there
+// costs nothing and is undone by closing the diff.
+const STATUS_SLOT_TOUCH = "size-11"
+
+interface StatusSlotProps {
+  status: string
+  path: string
+  selected: boolean
+  onToggleSelected: (path: string) => void
+}
+
+// The status marker, which becomes the selection checkbox on hover, on focus
+// anywhere in the row, or while the row is checked.
+//
+// The checkbox is ALWAYS in the DOM and always focusable: the swap is opacity,
+// never `display`, so a keyboard user can reach it on a row nobody is hovering.
+// The marker keeps its `role="img"` label throughout for the same reason, so a
+// screen reader still hears the status of a row whose checkbox is showing.
+//
+// Known cost of the shared slot, accepted with the design: on a mouse the
+// marker's own tooltip is only reachable while the row is NOT hovered, which is
+// never, so the glyph and its colour carry the status visually and the label
+// carries it to assistive tech.
+function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProps) {
+  const coarse = useIsCoarsePointer()
+  const reveal = "transition-opacity duration-150 motion-reduce:transition-none"
+
+  return (
+    // The click stops here: base-ui re-dispatches the root's click onto its
+    // hidden input and both bubble, so without this every tick would also open
+    // the diff. There is deliberately no shift-click range: the rows carry no
+    // keyboard model, and a range gesture needs one to be reachable at all.
+    <div
+      className={cn(
+        "relative flex shrink-0 items-center justify-center",
+        coarse ? STATUS_SLOT_TOUCH : STATUS_SLOT_MOUSE,
+      )}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <span
+        className={cn(
+          "pointer-events-none absolute inset-0 flex items-center justify-center",
+          reveal,
+          "group-hover:opacity-0 group-focus-within:opacity-0",
+          selected && "opacity-0",
+        )}
+      >
+        <FileStatusIcon status={status} />
+      </span>
+      <Checkbox
+        checked={selected}
+        onCheckedChange={() => onToggleSelected(path)}
+        aria-label={`Select ${path}`}
+        className={cn(
+          reveal,
+          "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
+          selected && "opacity-100",
+          // On touch the halo is the tap target and is grown to fill the slot
+          // exactly (16px box + 14px each side = 44px). On a mouse it is
+          // suppressed so it cannot reach past the slot into the path.
+          coarse ? "after:-inset-3.5" : "after:hidden",
+        )}
+      />
+    </div>
+  )
+}
 
 interface FileRowProps {
   file: ChangedFileView
@@ -145,48 +220,45 @@ function FileRow({
       className="group flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-muted max-md:min-h-11"
       onClick={() => onOpenDiff(file.path)}
     >
-      {/* Selection checkbox. The click stops here: base-ui re-dispatches the
-          root's click onto its hidden input and both bubble, so without this
-          every tick would also open the diff. There is deliberately no
-          shift-click range: the rows carry no keyboard model, and a range
-          gesture needs one to be reachable at all. */}
-      <div className={CHECKBOX_SLOT} onClick={(e) => e.stopPropagation()}>
-        <Checkbox
-          checked={selected}
-          onCheckedChange={() => onToggleSelected(file.path)}
-          aria-label={`Select ${file.path}`}
-        />
-      </div>
+      {/* Leading slot: the status marker, which becomes the selection checkbox
+          on hover, on focus, or while the row is checked. */}
+      <StatusSlot
+        status={file.status}
+        path={file.path}
+        selected={selected}
+        onToggleSelected={onToggleSelected}
+      />
 
-      {/* File path — monospace (it's a path/code identifier). Long paths
-          ellipsize at the START (direction:rtl) so the filename at the end stays
-          visible; text-left keeps short paths normally left-aligned. The path
-          itself is wrapped in a <bdi> LTR isolate so a leading bidi-neutral
-          character in a dotfile path (e.g. ".github/...") isn't reordered by the
-          rtl container to the visual end — without it the leading "." renders
-          stuck onto the end of the filename. */}
-      <span className="min-w-0 flex-1 truncate text-left font-mono text-sm text-foreground [direction:rtl]">
-        <bdi dir="ltr">{file.path}</bdi>
-      </span>
-
-      {/* Status marker: a neutral file-status icon (shared FileStatusIcon),
-          with a tooltip naming the status (Modified/Added/Deleted/…). It rides
-          the trailing cluster because the leading slot carries the checkbox. */}
-      <FileStatusIcon status={file.status} />
-
-      {/* Additions / deletions (text-only, skip for binary). Added lines green,
-          removed lines red, matching the diff viewer's gutter coloring. */}
-      {!file.binary && (file.additions > 0 || file.deletions > 0) && (
-        <span className="shrink-0 font-mono text-xs">
-          {file.additions > 0 && (
-            <span className="text-green-500">+{file.additions}</span>
-          )}
-          {file.additions > 0 && file.deletions > 0 && " "}
-          {file.deletions > 0 && (
-            <span className="text-red-500">−{file.deletions}</span>
-          )}
+      {/* Path and counts share ONE baseline container. Their line boxes differ
+          (text-sm against text-xs), so under the row's items-center the digits
+          would centre inside the taller box and read as superscript. */}
+      <div className="flex min-w-0 flex-1 items-baseline gap-2">
+        {/* File path — monospace (it's a path/code identifier). Long paths
+            ellipsize at the START (direction:rtl) so the filename at the end
+            stays visible; text-left keeps short paths normally left-aligned.
+            The path itself is wrapped in a <bdi> LTR isolate so a leading
+            bidi-neutral character in a dotfile path (e.g. ".github/...") isn't
+            reordered by the rtl container to the visual end — without it the
+            leading "." renders stuck onto the end of the filename. */}
+        <span className="min-w-0 flex-1 truncate text-left font-mono text-sm text-foreground [direction:rtl]">
+          <bdi dir="ltr">{file.path}</bdi>
         </span>
-      )}
+
+        {/* Additions / deletions (text-only, skip for binary). Added lines
+            green, removed lines red, matching the diff viewer's gutter
+            coloring. */}
+        {!file.binary && (file.additions > 0 || file.deletions > 0) && (
+          <span className="shrink-0 font-mono text-xs">
+            {file.additions > 0 && (
+              <span className="text-green-500">+{file.additions}</span>
+            )}
+            {file.additions > 0 && file.deletions > 0 && " "}
+            {file.deletions > 0 && (
+              <span className="text-red-500">−{file.deletions}</span>
+            )}
+          </span>
+        )}
+      </div>
 
       {/* Row actions consolidated into a single ⋯ menu (like the sidebar's
           project/session rows). The wrapper consumes NO width until the row is
@@ -263,9 +335,6 @@ interface FileGroupProps {
   sessionId: string
   selected: Set<string>
   onToggleSelected: (path: string) => void
-  // Called with the rows currently on screen: the header acts on what the
-  // filter shows, never on the files it hides.
-  onToggleAll: (paths: string[], checked: boolean) => void
   onOpenDiff: (path: string) => void
 }
 
@@ -278,7 +347,6 @@ function FileGroup({
   sessionId,
   selected,
   onToggleSelected,
-  onToggleAll,
   onOpenDiff,
 }: FileGroupProps) {
   const [open, setOpen] = useState(true)
@@ -288,37 +356,16 @@ function FileGroup({
   // covers the "no matches anywhere" case).
   if (files.length === 0) return null
 
-  // Tri-state over the rows ON SCREEN, so it agrees with the "N of M" badge
-  // beside it while a filter is active.
-  const checkedHere = files.filter((f) => selected.has(f.path)).length
-  const allChecked = checkedHere === files.length
-  const someChecked = checkedHere > 0 && !allChecked
-
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
-      <div className="flex items-center">
-        {/* A sibling of the collapse trigger, not nested inside it: it is its
-            own control, and it sits in the same leading column as the rows'. */}
-        <div className={CHECKBOX_SLOT}>
-          <Checkbox
-            checked={allChecked}
-            indeterminate={someChecked}
-            onCheckedChange={() =>
-              onToggleAll(
-                files.map((f) => f.path),
-                !allChecked,
-              )
-            }
-            aria-label={`Select all ${heading.toLowerCase()} files`}
-          />
-        </div>
-        <CollapsibleTrigger className="flex flex-1 items-center gap-2 rounded px-1 py-1 text-sm font-medium hover:bg-muted max-md:min-h-11">
-          <span className="flex-1 text-left">{heading}</span>
-          <Badge variant="secondary">
-            {filtering ? `${files.length} of ${total}` : files.length}
-          </Badge>
-        </CollapsibleTrigger>
-      </div>
+      {/* No checkbox here: the whole-list selection is the bulk bar's Select
+          all / Select none, which spans both sections at once. */}
+      <CollapsibleTrigger className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium hover:bg-muted max-md:min-h-11">
+        <span className="flex-1 text-left">{heading}</span>
+        <Badge variant="secondary">
+          {filtering ? `${files.length} of ${total}` : files.length}
+        </Badge>
+      </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="mt-1 flex flex-col gap-0.5">
           {files.map((f) => (
@@ -497,6 +544,19 @@ export function ChangedFiles() {
     changed,
   )
   const anySelected = selected.staged.size > 0 || selected.unstaged.size > 0
+
+  // The Select all / Select none universe: every row the FILTER currently
+  // shows, across BOTH sections, which is the union of what the two
+  // per-section select-alls used to cover. A collapsed section is still part of
+  // it: collapsing hides rows from view, but the filter is what decides which
+  // files the pane is talking about.
+  const visibleStaged = filteredStaged.map((f) => f.path)
+  const visibleUnstaged = filteredUnstaged.map((f) => f.path)
+  const visibleCount = visibleStaged.length + visibleUnstaged.length
+  const allVisibleChecked =
+    visibleCount > 0 &&
+    visibleStaged.every((p) => selected.staged.has(p)) &&
+    visibleUnstaged.every((p) => selected.unstaged.has(p))
   // Narrowed once here so the async handlers below see a plain string.
   const sessionId: string = selectedSessionId
 
@@ -531,22 +591,26 @@ export function ChangedFiles() {
     })
   }
 
-  function toggleMany(
-    section: "staged" | "unstaged",
-    paths: string[],
-    checked: boolean,
-  ) {
-    editSelection((next) => {
-      for (const path of paths) {
-        if (checked) next[section].add(path)
-        else next[section].delete(path)
-      }
-    })
-  }
-
   function dropActed(section: "staged" | "unstaged", paths: string[]) {
     editSelection((next) => {
       for (const path of paths) next[section].delete(path)
+    })
+  }
+
+  // Select all / Select none over the visible universe. Unlike Clear, it only
+  // touches the rows on screen: a checked file the filter hides keeps its tick,
+  // so the bar stays up and the label flips back to "Select all".
+  function toggleVisible() {
+    const wanted = !allVisibleChecked
+    editSelection((next) => {
+      for (const path of visibleStaged) {
+        if (wanted) next.staged.add(path)
+        else next.staged.delete(path)
+      }
+      for (const path of visibleUnstaged) {
+        if (wanted) next.unstaged.add(path)
+        else next.unstaged.delete(path)
+      }
     })
   }
 
@@ -793,6 +857,24 @@ export function ChangedFiles() {
                   Discard {selected.unstaged.size}…
                 </Button>
               )}
+              {/* Select all / Select none. Absent rather than disabled when
+                  the filter leaves nothing on screen: there is no universe for
+                  it to name. Deliberately NOT disabled while a verb is in
+                  flight: it is a selection control, and ticking stays possible
+                  throughout, exactly like the row checkboxes. */}
+              {visibleCount > 0 && (
+                <Button
+                  variant="outline"
+                  className={BULK_CONTROL}
+                  onClick={toggleVisible}
+                >
+                  {allVisibleChecked ? <Square /> : <SquareCheck />}
+                  {allVisibleChecked ? "Select none" : "Select all"}
+                </Button>
+              )}
+              {/* Clear empties the WHOLE selection, the rows the filter hides
+                  included; Select none above only lets go of what is on
+                  screen. */}
               <Button
                 variant="outline"
                 className={BULK_CONTROL}
@@ -846,9 +928,6 @@ export function ChangedFiles() {
                 sessionId={selectedSessionId}
                 selected={selected.staged}
                 onToggleSelected={(path) => toggleOne("staged", path)}
-                onToggleAll={(paths, checked) =>
-                  toggleMany("staged", paths, checked)
-                }
                 onOpenDiff={(path) => openEditor(agentRoot(selectedSessionId), path, "diff")}
               />
 
@@ -863,9 +942,6 @@ export function ChangedFiles() {
                 sessionId={selectedSessionId}
                 selected={selected.unstaged}
                 onToggleSelected={(path) => toggleOne("unstaged", path)}
-                onToggleAll={(paths, checked) =>
-                  toggleMany("unstaged", paths, checked)
-                }
                 onOpenDiff={(path) => openEditor(agentRoot(selectedSessionId), path, "diff")}
               />
             </div>
