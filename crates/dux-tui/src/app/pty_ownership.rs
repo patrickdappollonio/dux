@@ -385,6 +385,12 @@ impl App {
         let PtyDriver::Elsewhere { device } = self.pty_driver(&pty_id) else {
             return;
         };
+        if self.pending_pty_takeover.as_deref() == Some(pty_id.as_str()) {
+            // Already asked for, and the arm is spent by the very next render.
+            // A second message would be dux reporting one act twice at a user
+            // who pressed a button that has not visibly done anything yet.
+            return;
+        }
         let device = device.unwrap_or_else(|| UNNAMED_DEVICE.to_string());
         self.set_info(format!(
             "Taking this terminal over from {device}. Typing here reaches it again, its size \
@@ -1215,6 +1221,145 @@ mod tests {
             !flat.contains("Scrolled back"),
             "and not the scroll cue it replaced: {flat}"
         );
+        assert_eq!(
+            app.engine
+                .providers
+                .get("session-1")
+                .map(|client| client.scrollback_offset()),
+            Some(0),
+            "the OFFSET has to go home with the mode. Retiring the mode alone \
+             leaves the pane frozen on old history with nothing saying so, and \
+             the next keystroke typing into a view that is not the live edge"
+        );
+
+        // And the pane really is live again: the browser lets go, the card
+        // follows it, and a keystroke reaches the child rather than a frozen
+        // view of it.
+        assert!(seat.owners.release("session-1", browser).is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .expect("the key is handled");
+        assert!(
+            app.engine.is_typing("session-1"),
+            "with the card gone and the offset home, typing reaches the child"
+        );
+    }
+
+    /// RESIZE MODE WINS. It is a dux mode the user turned on themselves, its
+    /// keys are arrows, and the card's rung sits above the ladder that runs it:
+    /// unguarded, the card swallowed every arrow and answered Enter with a
+    /// take-over the user was not asking for.
+    #[test]
+    fn resize_mode_wins_over_the_card() {
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.resize_mode = true;
+        let before = app.left_width_pct;
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .expect("the key is handled");
+        assert_ne!(
+            app.left_width_pct, before,
+            "the arrow must still resize the panes while the card is up"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the key is handled");
+        assert_eq!(
+            app.pending_pty_takeover, None,
+            "and no key of resize mode's may arm a take-over"
+        );
+        assert!(
+            app.resize_mode,
+            "resize mode is left for its own key to end"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL))
+            .expect("the key is handled");
+        assert!(!app.resize_mode);
+        assert_eq!(app.pending_pty_takeover, None);
+    }
+
+    /// A CARRIAGE RETURN INSIDE A PASTE IS CONTENT. The card's key is matched on
+    /// the raw byte stream, where a pasted body looks exactly like typing; a
+    /// paste with a line break in it would otherwise take a terminal over from
+    /// whoever is driving it, silently, on its second line.
+    #[test]
+    fn a_carriage_return_inside_a_paste_arms_nothing() {
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        let mut bytes = crate::raw_input::BRACKET_PASTE_START.to_vec();
+        bytes.extend_from_slice(b"a\rb");
+        // The palette chord is matched the same way and has the same hole.
+        bytes.extend_from_slice(b"\x10");
+        bytes.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
+        app.process_raw_input_bytes(&bytes)
+            .expect("the paste is handled");
+
+        assert_eq!(
+            app.pending_pty_takeover, None,
+            "a line break in pasted text is content, never the card's key"
+        );
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "and neither is a pasted control byte the palette chord"
+        );
+    }
+
+    /// A DRAG CAN PREDATE THE CARD: the user is selecting output when another
+    /// device claims the pty. The release lands on a covered pane, so it must
+    /// end the drag rather than leave a selection stuck to a hidden grid.
+    #[test]
+    fn a_release_under_the_card_ends_a_drag_that_predates_it() {
+        use ratatui::layout::Rect;
+
+        let (mut app, _recorded, seat) = app_with_a_live_pty_running("sleep 5");
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+
+        app.process_raw_input_bytes(b"\x1b[<0;6;6M")
+            .expect("the press is handled");
+        assert!(
+            app.terminal_selection
+                .as_ref()
+                .is_some_and(|selection| selection.dragging),
+            "test setup: a drag is in flight before the card appears"
+        );
+
+        let browser = seat.owners.next_conn_id();
+        seat.owners.claim("session-1", browser).expect("claimed");
+        app.process_raw_input_bytes(b"\x1b[<0;20;6m")
+            .expect("the release is handled");
+
+        assert!(
+            app.terminal_selection.is_none(),
+            "the card covers the text the selection was over, so the release \
+             retires it rather than leaving a drag that never ends"
+        );
+    }
+
+    /// Pressing the button twice says nothing the second time. The arm is
+    /// already placed and spent by the next render, so a second message is dux
+    /// reporting the same act twice at a user who pressed a button that had not
+    /// visibly done anything yet.
+    #[test]
+    fn a_second_press_of_the_button_says_nothing_new() {
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+
+        app.take_over_focused_pty();
+        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
+
+        app.set_info("a marker nothing else writes".to_string());
+        app.take_over_focused_pty();
+
+        let (_, message) = app.status.most_recent_tui().expect("a status was set");
+        assert_eq!(
+            message, "a marker nothing else writes",
+            "the second press must not write a second status: {message}"
+        );
+        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
     }
 
     // ── The card's keys and its button ──────────────────────────────────────

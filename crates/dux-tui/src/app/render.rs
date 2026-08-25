@@ -3194,14 +3194,17 @@ impl App {
         // for one frame over a terminal that is this device's again.
         let card_device = self.focused_pty_driven_elsewhere();
         let card_up = card_device.is_some();
-        if card_up {
+        if card_up && self.scroll_mode_active() {
             // Scroll mode is a way of reading the pane the card now covers, so
             // it ends with it, and quietly: `reconcile_scroll_mode`'s message
             // exists because the mode can die with nothing on screen to say so,
             // and here the card IS what says so.
-            if let Some(id) = self.selected_terminal_surface_id() {
-                self.scroll_mode.remove(&id);
-            }
+            //
+            // Through the same snap the live-edge key uses, because the OFFSET
+            // has to go home too. Retiring the mode on its own left the pane
+            // parked on old history with the cue that said so gone, and the
+            // first keystroke after a take-over typing into a frozen view.
+            self.reset_pty_scrollback();
         }
 
         if let Some(provider) = self.selected_terminal_surface_client() {

@@ -2264,6 +2264,11 @@ mod tests {
                 "the serve_while_tui comment must mention {needle:?}:\n{comment}"
             );
         }
+        assert!(
+            !toml.contains("take-over-terminal"),
+            "the palette command is gone, so the template must not still send \
+             users to it:\n{toml}"
+        );
     }
 
     #[test]

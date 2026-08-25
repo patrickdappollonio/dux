@@ -800,7 +800,13 @@ impl App {
         // nowhere today either, dropped at the ownership gate), and every dux
         // chord falls through to the ladders below exactly as it does anywhere
         // else.
+        //
+        // Resize mode is excluded for the same reason `center_typeable` excludes
+        // it: it is a dux mode the user turned on themselves, its keys are the
+        // arrows, and its ladder runs BELOW this rung. Every other exclusion
+        // `center_typeable` makes is already handled above this point.
         let card_owns_center = self.focus == FocusPane::Center
+            && !self.resize_mode
             && matches!(self.center_mode, CenterMode::Agent)
             && self.focused_pty_is_driven_elsewhere();
         if card_owns_center {
@@ -2977,7 +2983,13 @@ impl App {
             };
         for parsed in &sequences {
             let seq = parsed.bytes.as_slice();
-            if demoted_palette_patterns.iter().any(|p| p == seq) {
+            // PASTED BYTES ARE CONTENT, never a binding, which is the same rule
+            // the intercept matching below follows. A pasted line break looks
+            // exactly like the card's key on this stream, and a paste that took
+            // a terminal away from whoever is driving it on its second line
+            // would be the quietest kind of wrong.
+            let intercepts_allowed = !parsed.in_bracket_paste;
+            if intercepts_allowed && demoted_palette_patterns.iter().any(|p| p == seq) {
                 actions.push(SeqAction::Intercept(
                     Action::OpenPalette,
                     false,
@@ -2985,7 +2997,7 @@ impl App {
                 ));
                 continue;
             }
-            if demoted_takeover_patterns.iter().any(|p| p == seq) {
+            if intercepts_allowed && demoted_takeover_patterns.iter().any(|p| p == seq) {
                 actions.push(SeqAction::Intercept(
                     Action::FocusAgent,
                     false,
@@ -9785,6 +9797,14 @@ impl App {
                 true
             }
             _ => {
+                if matches!(mouse.kind, MouseEventKind::Up(_)) {
+                    // A DRAG CAN PREDATE THE CARD: the user was selecting output
+                    // when another device claimed the pty. The text it covers is
+                    // gone from the screen, so the release retires the selection
+                    // rather than leaving one stuck to a hidden grid, still
+                    // marked as dragging.
+                    self.terminal_selection = None;
+                }
                 let covered = self
                     .mouse_layout
                     .agent_term
