@@ -141,12 +141,19 @@ input-ownership model the browsers use. The first device to type into a terminal
 is driving claims it, and everybody who arrives after that watches, with live output,
 scrolling and copying. Nothing passive ever takes a terminal away again.
 
-When someone else has the terminal you are looking at, the hint bar names the device
-that is driving and your keystrokes do not reach the child. **take-over-terminal** takes
-it back; in the browser it is the take-over card on the pane, which names the terminal
-UI as `the dux TUI`. Taking a terminal over also retargets its size to the device that
-took it, and everyone watching adopts that geometry. Take-over works in both directions
-and is sticky either way: losing a terminal does not silently give it back to you.
+When someone else has the terminal you are looking at, a card covers it and names the
+device that is driving, in the terminal UI and in the browser alike. With the pane
+focused, press the key that focuses an agent (Enter unless you have rebound it) or click
+**Take over**, and it is yours again. The card calls the terminal UI `the dux TUI` when
+that is what has the keyboard. Taking a terminal over also retargets its size to the
+device that took it, and everyone watching adopts that geometry. Take-over works in both
+directions and is sticky either way: losing a terminal does not silently give it back to
+you.
+
+> [!NOTE]
+> The card covers the terminal only. The tabs above it, the pull-request banner and the
+> rest of the screen keep working, so you can move to another agent or another tab
+> without taking anything over.
 
 Which to reach for:
 

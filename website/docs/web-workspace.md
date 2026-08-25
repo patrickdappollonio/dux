@@ -130,7 +130,8 @@ look at it picks it up.
 **The terminal UI is one of those devices.** When dux is
 [serving in the background of a running TUI](/docs/server-mode#serve-in-the-background-and-keep-the-tui),
 that terminal can hold a terminal or be a watcher like any browser, and the card names it
-as `the dux TUI`. Its own hint bar names your browser the same way when you are driving.
+as `the dux TUI`. It shows the same card, with the same words, when your browser is the
+one driving.
 
 **A watcher sees the take-over card**, a full-pane card naming who has the keyboard
 ("Open on Chrome on macOS") with a **Take over** button. Hit it and dux resizes the PTY
