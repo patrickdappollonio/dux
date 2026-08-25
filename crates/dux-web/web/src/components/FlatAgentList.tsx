@@ -545,16 +545,16 @@ function ProjectTag({ name, query }: { name: string; query: string }) {
 // on the server's machine. Searched like the project name, so a query that
 // matched a path explains itself.
 //
-// Baseline-aligned, inside and out: the label is mono and the rest of line two
-// is sans, and the two faces carry different ascents, so centering their
-// equal-height boxes leaves the path visibly higher than the state word.
-// Aligning baselines is the only alignment that survives a font change.
+// The path is set in the row's own face, not monospace: line two is one
+// sentence (folder, dot, state word) and a second typeface inside it read as
+// a different element. Baseline-aligned all the same, because that is the
+// only alignment that survives a font change.
 function StandaloneTag({ label, query }: { label: string; query: string }) {
   return (
     <span className="flex min-w-0 shrink items-baseline gap-1 text-dux-standalone">
       <span aria-hidden>✷</span>
       <span className="sr-only">standalone</span>
-      <span className="min-w-0 truncate font-mono">
+      <span className="min-w-0 truncate">
         <HighlightedText text={label} query={query} />
       </span>
     </span>
