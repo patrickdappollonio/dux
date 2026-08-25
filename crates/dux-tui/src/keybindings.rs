@@ -314,17 +314,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // No default key on purpose: it is only reachable while a background
-        // server is serving and another device holds the pty, which is rare
-        // enough that spending a chord on it would cost every other user a key.
-        // The demoted hint bar names the palette and this command instead.
-        action: Action::TakeOverTerminal,
-        default_keys: &[],
-        scopes: &[],
-        help: None,
-        hint_contexts: &[],
-    },
-    BindingDef {
         action: Action::ToggleProjectAutoReopenAgents,
         default_keys: &[],
         scopes: &[],
@@ -2874,7 +2863,6 @@ mod tests {
             "start-background-server",
             "start-web-server",
             "stop-background-server",
-            "take-over-terminal",
             "toggle-agent-auto-reopen",
             "toggle-always-show-tabs",
             "toggle-diff-line-numbers",

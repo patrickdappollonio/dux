@@ -2843,7 +2843,7 @@ impl App {
         }
 
         // The key badges borrow locals, so hand back owned spans (the same
-        // pattern `remote_driver_cue_line` uses).
+        // pattern `takeover_hint_line` uses).
         Line::from(
             spans
                 .into_iter()
@@ -2852,104 +2852,239 @@ impl App {
         )
     }
 
-    /// The hint line shown while ANOTHER DEVICE is driving the terminal in the
-    /// center pane, replacing the usual hints the way the scroll-mode cue does and
-    /// for the same reason: while it is up, this keyboard is not reaching the
-    /// child, so a line listing keys that go nowhere would be a lie.
+    /// The hint line shown under the take-over card, replacing the usual hints
+    /// at the same rung the scroll-mode cue occupies and for the same reason:
+    /// while the card is up this keyboard is not reaching the child, so a line
+    /// listing the child's keys would be a lie.
     ///
-    /// It carries its own way out (the palette, and the command to run there),
-    /// because that is the only gesture that takes the terminal back, and the
-    /// minimize key, because this line is the whole hint bar and in fullscreen it
-    /// would otherwise be the only thing on screen with no way back.
+    /// It names the key that presses the card's button first, because that is
+    /// the one gesture the card offers; then the pane chords, which the card
+    /// deliberately leaves alone; then, in fullscreen, the way back to the
+    /// windowed layout, because there the line is the only dux chrome on screen.
     ///
-    /// Reads the registry live, on every frame, which is what makes it disappear
-    /// by itself the moment the other device lets go.
-    ///
-    /// `width` is the room the line actually has, which is the inner width of the
-    /// center pane and NOT the window's. The line is built to fit it: the fixed
-    /// half (the way out) is measured first and the DEVICE NAME is what gives way,
-    /// because a cue that names a problem with no way out of it is worse than one
-    /// that names the device approximately. The clause about the keys is the
-    /// second thing dropped, in the narrow panes where even a cut name would not
-    /// leave room for it.
-    pub(crate) fn remote_driver_cue_line(&self, device: &str, width: u16) -> Line<'static> {
-        let cue_style = Style::default().fg(self.theme.remote_driver_fg);
+    /// `width` is the room the line really has, which is the inner width of the
+    /// center pane and NOT the window's. Items are appended only while they fit,
+    /// so what a narrow pane gives up is the chords rather than the way out.
+    pub(crate) fn takeover_hint_line(&self, width: u16) -> Line<'static> {
         let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        // Tab is dux's again while the card is up, whatever `tab_reaches_agent`
+        // says, because the option hands it to an agent this keyboard cannot
+        // reach. So the pane chord named here is the real one, not the
+        // typeable-pane substitute.
+        let items: Vec<(String, &str)> = [
+            (self.bindings.label_for(Action::FocusAgent), "take over"),
+            (self.bindings.label_for(Action::FocusNext), "next pane"),
+            (
+                if self.fullscreen_overlay == FullscreenOverlay::None {
+                    String::new()
+                } else {
+                    self.bindings.label_for(Action::ToggleFullscreen)
+                },
+                "minimize",
+            ),
+        ]
+        .into_iter()
+        .filter(|(key, _)| !key.is_empty())
+        .collect();
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut used = 0usize;
+        for (key, desc) in items {
+            // The gap belongs to the item that FOLLOWS it, so a dropped tail
+            // never leaves a trailing run of padding behind.
+            let gap = if spans.is_empty() { 0 } else { 2 };
+            // `<key> desc`: two brackets and the space before the description.
+            let cost = gap + key.chars().count() + desc.chars().count() + 3;
+            if used + cost > width as usize {
+                break;
+            }
+            if gap > 0 {
+                spans.push(Span::styled("  ", desc_style));
+            }
+            spans.extend(
+                self.theme
+                    .dim_key_badge_default(&key)
+                    .into_iter()
+                    .map(|span| Span::styled(span.content.into_owned(), span.style)),
+            );
+            spans.push(Span::styled(format!(" {desc}"), desc_style));
+            used += cost;
+        }
+        if spans.is_empty() {
+            // Every key that could press the button has been unbound, or the
+            // pane is narrower than the shortest item. The button is still
+            // there to click, so the line says that instead of nothing.
+            let fallback = "Press Take over to type here";
+            if fallback.chars().count() <= width as usize {
+                spans.push(Span::styled(fallback, desc_style));
+            }
+        }
+        Line::from(spans)
+    }
+
+    /// THE TAKE-OVER CARD: the web's card, painted over this pane's grid while
+    /// another device is driving the child underneath it.
+    ///
+    /// Word for word the same card a browser puts over its own terminal (see
+    /// `TerminalPane.tsx`), because it is the same fact on both surfaces and a
+    /// user who learns it in one place should recognise it in the other. Built
+    /// from the modal primitives but deliberately NOT a modal: it must not block
+    /// pane or tab navigation, so it has no `PromptState`, no entry in the modal
+    /// registry, and no rect in the click-outside dismissal engine.
+    ///
+    /// `device` is what the driver called itself, `None` when it gave dux no
+    /// name; the card has a title for each, and neither prints a stand-in string
+    /// where a device name goes.
+    pub(crate) fn render_takeover_card(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        device: Option<&str>,
+    ) {
+        // COVER THE WHOLE GRID first, exactly as the web's card is an
+        // `absolute inset-0` over its pane: the child keeps streaming
+        // underneath and none of it is on screen. Through
+        // `clear_overlay_bar_area` rather than `clear_overlay_area`, because
+        // this is not a modal: recording its rect would hand the click-outside
+        // engine a frame for a surface nothing can dismiss.
+        self.clear_overlay_bar_area(frame, area);
+        self.mouse_layout.takeover_button = None;
+        if area.width < 4 || area.height < 3 {
+            return;
+        }
+
         let target = match self.session_surface {
             SessionSurface::Agent => "agent",
             SessionSurface::Terminal => "terminal",
         };
-        let palette = self.bindings.label_for(Action::OpenPalette);
-        let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
+        let button_label = "Take over";
+        let button_h: u16 = 3;
+        let button_w = button_width_for(button_label);
+        // A pane with no room for the card's border ring AND the button inside
+        // it drops the ring: two columns of chrome are worth more as label than
+        // as outline, and the button is the whole point of the card. The cleared
+        // pane is then the card's surface.
+        if area.width < button_w + 2 || area.height < button_h + 2 {
+            if area.height < button_h {
+                return;
+            }
+            let bare_w = button_w.min(area.width);
+            self.render_takeover_button(
+                frame,
+                Rect::new(
+                    area.x + (area.width - bare_w) / 2,
+                    area.y + (area.height - button_h) / 2,
+                    bare_w,
+                    button_h,
+                ),
+                button_label,
+            );
+            return;
+        }
 
-        // The way out, built first because it is the half that must survive.
-        let mut tail: Vec<Span> = Vec::new();
-        if palette.is_empty() {
-            // The palette has been unbound, so there is no key to name. Naming
-            // the command alone is still the honest answer.
-            tail.push(Span::styled(
-                "Run take-over-terminal to type here",
-                desc_style,
-            ));
+        // A comfortable measure for the sentence, capped by the pane. `-2` is
+        // the border ring the card is drawn with.
+        const PREFERRED_INNER: u16 = 46;
+        let inner_w = PREFERRED_INNER.min(area.width.saturating_sub(2)).max(1);
+
+        // `Open on {device}` is nine characters of chrome plus the padding
+        // spaces, so a pane with no room for a name falls back to the title that
+        // needs none rather than printing an ellipsis where the device goes.
+        const NAMED_TITLE_CHROME: u16 = 10;
+        let title = match device {
+            Some(device) if inner_w > NAMED_TITLE_CHROME + 3 => format!(
+                " Open on {} ",
+                dux_core::device_label::truncate_chars(
+                    device,
+                    (inner_w - NAMED_TITLE_CHROME) as usize
+                )
+            ),
+            _ => " Active on another device ".to_string(),
+        };
+
+        let prose = format!(
+            "Only one device can type at a time. Take over to drive this {target} from here."
+        );
+        // One column of padding on each side, the way the web's card pads its
+        // body: prose that touches the border ring reads as clipped.
+        const SIDE_PADDING: u16 = 1;
+        let prose_w = inner_w.saturating_sub(SIDE_PADDING * 2).max(1);
+        let prose_lines = wrap_styled_lines(
+            &[Line::from(Span::styled(
+                prose,
+                Style::default().fg(self.theme.hint_desc_fg),
+            ))],
+            prose_w as usize,
+        );
+        let prose_rows = u16::try_from(prose_lines.len()).unwrap_or(u16::MAX);
+
+        let available_h = area.height.saturating_sub(2);
+        let (show_prose, inner_h) = if available_h >= prose_rows.saturating_add(1 + button_h) {
+            (true, prose_rows + 1 + button_h)
+        } else if available_h >= button_h {
+            // The BUTTON is the way out, so it is the half that survives a pane
+            // too short to carry the sentence as well.
+            (false, button_h)
         } else {
-            tail.extend(self.theme.dim_key_badge_default(&palette));
-            tail.push(Span::styled(" take-over-terminal", desc_style));
-        }
-        if !exit_key.is_empty() && self.fullscreen_overlay != FullscreenOverlay::None {
-            tail.push(Span::styled("  ", desc_style));
-            tail.extend(self.theme.dim_key_badge_default(&exit_key));
-            tail.push(Span::styled(" minimize", desc_style));
-        }
-        let tail_width: usize = tail.iter().map(|span| span.content.chars().count()).sum();
+            return;
+        };
 
-        // Two spellings of the sentence, the fuller one preferred. Both name who
-        // is driving; only the fuller one also says what that means for the keys,
-        // which is the part a user can work out from the pane not responding.
-        // The spellings, longest first, and the first one that FITS in what the
-        // tail left over is the one used. What they give up, in order, is the
-        // clause about the keys (which a user can infer from a pane that does not
-        // respond) and then the device's name.
-        let room = (width as usize).saturating_sub(tail_width);
-        // Fewer characters than this is not a name any more, so the next spelling
-        // is a better answer than cutting further into the device.
-        const MIN_DEVICE_CHARS: usize = 3;
-        let named = [
-            format!(" is driving this {target}; your keys go nowhere. "),
-            format!(" is driving this {target}. "),
-        ];
-        let mut prefix = String::new();
-        for prose in named {
-            if let Some(budget) = room.checked_sub(prose.chars().count())
-                && budget >= MIN_DEVICE_CHARS
-            {
-                prefix = format!(
-                    "{}{prose}",
-                    dux_core::device_label::truncate_chars(device, budget)
+        let card = Rect::new(
+            area.x + (area.width - (inner_w + 2)) / 2,
+            area.y + (area.height - (inner_h + 2)) / 2,
+            inner_w + 2,
+            inner_h + 2,
+        );
+        // The one-shot refusal blink `themed_overlay_block` can flash is
+        // unreachable here: it is armed only by an outside click on a modal that
+        // refuses to be dismissed, and this card is neither a modal nor
+        // dismissible.
+        let block = self.themed_overlay_block(&title);
+        let inner = block.inner(card);
+        block.render(card, frame.buffer_mut());
+
+        let mut y = inner.y;
+        if show_prose {
+            Paragraph::new(prose_lines)
+                .alignment(ratatui::layout::Alignment::Center)
+                .render(
+                    Rect::new(inner.x + SIDE_PADDING, y, prose_w, prose_rows),
+                    frame.buffer_mut(),
                 );
-                break;
-            }
+            y += prose_rows + 1;
         }
-        if prefix.is_empty() {
-            // No room for a name at all. The fact still fits, and in a pane this
-            // narrow the way out matters more than which device took it.
-            let nameless = "Driving elsewhere. ";
-            if nameless.chars().count() <= room {
-                prefix = nameless.to_string();
-            }
-        }
-
-        let mut spans: Vec<Span> = vec![Span::styled(prefix, cue_style)];
-        spans.extend(tail);
-        // The key badges borrow locals, so hand back owned spans (the same
-        // pattern `scroll_mode_cue_line` uses).
-        Line::from(
-            spans
-                .into_iter()
-                .map(|span| Span::styled(span.content.into_owned(), span.style))
-                .collect::<Vec<_>>(),
-        )
+        let button_w = button_w.min(inner.width);
+        self.render_takeover_button(
+            frame,
+            Rect::new(
+                inner.x + (inner.width - button_w) / 2,
+                y,
+                button_w,
+                button_h,
+            ),
+            button_label,
+        );
     }
 
+    /// The card's one button, wherever the card ended up putting it, and the
+    /// publication of its rect for the mouse. Shared by the boxed card and the
+    /// bare-button degrade so the two can never disagree about where the button
+    /// is or what state it is in.
+    fn render_takeover_button(&mut self, frame: &mut Frame, area: Rect, label: &str) {
+        let state = button_state_for(
+            ButtonPressedTarget::TakeOverCard,
+            self.takeover_press,
+            self.focus == FocusPane::Center,
+            true,
+        );
+        Button::new(label)
+            .state(state)
+            .kind(ButtonKind::Confirm)
+            .render(frame, area, &self.theme);
+        // Published per frame and cleared by the caller before any of this, so a
+        // click can only ever land on a button that is on screen right now.
+        self.mouse_layout.takeover_button = Some(area);
+    }
     fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
         let outer_block = self.themed_block(title, focused);
         let inner = outer_block.inner(area);
@@ -3050,6 +3185,23 @@ impl App {
         if should_resize && resize_granted {
             self.last_pty_size = new_size;
             self.last_pty_resize_target = resize_target;
+        }
+
+        // THE TAKE-OVER CARD's one question, asked of the live registry and
+        // asked AFTER the sizing claim above, because that is where an armed
+        // take-over is SPENT: a claim granted in this very pass means the card
+        // is already gone by the time the pane is painted, rather than lingering
+        // for one frame over a terminal that is this device's again.
+        let card_device = self.focused_pty_driven_elsewhere();
+        let card_up = card_device.is_some();
+        if card_up {
+            // Scroll mode is a way of reading the pane the card now covers, so
+            // it ends with it, and quietly: `reconcile_scroll_mode`'s message
+            // exists because the mode can die with nothing on screen to say so,
+            // and here the card IS what says so.
+            if let Some(id) = self.selected_terminal_surface_id() {
+                self.scroll_mode.remove(&id);
+            }
         }
 
         if let Some(provider) = self.selected_terminal_surface_client() {
@@ -3242,8 +3394,14 @@ impl App {
                     }
                 }
 
-                // Render the caret whenever this pane receives keys.
+                // Render the caret whenever this pane receives keys, and never
+                // while the take-over card covers them. The caret IS the host's
+                // hardware cursor, which is both the "your keys land here" cue
+                // and the anchor an IME hangs its composition popup on; parking
+                // it under a card that is refusing every key points both at a
+                // pane that cannot answer.
                 if receives_keys
+                    && !card_up
                     && let Some(cursor) = self.snapshot_buf.cursor
                     && cursor.row < self.snapshot_buf.rows
                     && cursor.col < self.snapshot_buf.cols
@@ -3339,6 +3497,17 @@ impl App {
             }
         }
 
+        // THE CARD, painted last over the grid and only over the grid: the tab
+        // strip, the PR banner and the hint bar are siblings of this area, not
+        // children of it, and they stay exactly as they are. That is the web's
+        // geometry too, where the card is `absolute inset-0` inside the terminal
+        // pane and the strip above it is outside.
+        if let Some(device) = card_device {
+            self.render_takeover_card(frame, term_area, device.as_deref());
+        } else {
+            self.mouse_layout.takeover_button = None;
+        }
+
         // Macro bar overlays the hint area when active.
         if self.macro_bar.is_some() {
             self.render_macro_bar(frame, inner);
@@ -3357,9 +3526,6 @@ impl App {
 
             let macro_key = self.bindings.label_for(Action::OpenMacroBar);
             let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
-            // Resolved before the ladder so the branch below stays a plain
-            // condition, and asked of the live registry rather than a cached flag.
-            let driven_elsewhere = self.focused_pty_driven_elsewhere();
             let hint_line = if is_input && self.scroll_mode_active() {
                 // Scroll mode swallows every non-scroll key (see
                 // `process_raw_input_bytes`), so while it is on, this line says
@@ -3367,15 +3533,12 @@ impl App {
                 // signal is a pane that happens not to be moving, which stops
                 // being a signal the moment the pane is live again.
                 self.scroll_mode_cue_line()
-            } else if let Some(device) = driven_elsewhere.as_deref() {
-                // Ordered AFTER scroll mode, which the user turned on themselves
-                // and whose own line names the key that turns it off, and BEFORE
-                // every hint that names a key aimed at the child: while another
-                // device drives this pty, none of those keys reach it.
-                // The width the line really has is this pane's, not the window's:
-                // the cue is built to fit it, and what gives way is the device
-                // name rather than the way out. See `remote_driver_cue_line`.
-                self.remote_driver_cue_line(device, hint_area.width)
+            } else if card_up {
+                // Ordered BEFORE every hint that names a key aimed at the child:
+                // while the card is up, none of those keys reach it. The width
+                // the line really has is this pane's, not the window's. Scroll
+                // mode cannot still be on above it: the card ends it.
+                self.takeover_hint_line(hint_area.width)
             } else if is_input {
                 // Fullscreen interactive: keys go to the child verbatim, so
                 // the line names the way back plus the scroll keys.

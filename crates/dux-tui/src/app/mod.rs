@@ -313,6 +313,11 @@ pub struct App {
     /// cleared on `Up` (firing the button's action only when the cursor
     /// is still inside) and on any keystroke or modal-close event.
     pub(crate) pressed_button: Option<components::PressedButton>,
+    /// The take-over card's own in-flight press, separate from
+    /// `pressed_button` because the card is not a modal: the modal press is
+    /// wiped on every non-prompt mouse event (a watchdog for a dialog closed by
+    /// some other path), and the card's button lives on exactly such events.
+    pub(crate) takeover_press: Option<components::PressedButton>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
     pub(crate) raw_input_parser: crate::raw_input::RawInputParser,
     pub(crate) raw_input_buf: Vec<u8>,
@@ -2581,6 +2586,12 @@ pub(crate) struct MouseLayoutState {
     /// reverse map (see `render::left_row_to_item`, reused for both lists).
     pub(crate) terminal_row_to_item: Vec<usize>,
     pub(crate) agent_term: Option<Rect>,
+    /// The take-over card's button, when the card is on screen. Published by the
+    /// render pass and cleared with the rest of this state every frame, so a
+    /// click can only land on a button that is drawn right now: the card comes
+    /// and goes with the live ownership verdict, without anything on this
+    /// surface happening at all.
+    pub(crate) takeover_button: Option<Rect>,
     pub(crate) unstaged_list: Option<Rect>,
     pub(crate) staged_list: Option<Rect>,
     pub(crate) commit_area: Option<Rect>,
@@ -2598,6 +2609,7 @@ impl MouseLayoutState {
         self.terminal_list = Rect::default();
         self.terminal_row_to_item.clear();
         self.agent_term = None;
+        self.takeover_button = None;
         self.unstaged_list = None;
         self.staged_list = None;
         self.commit_area = None;
@@ -3406,6 +3418,7 @@ impl App {
             center_mouse_forward: None,
             last_mouse_click: None,
             pressed_button: None,
+            takeover_press: None,
             interactive_patterns,
             raw_input_parser: crate::raw_input::RawInputParser::default(),
             raw_input_buf: Vec::new(),
@@ -4384,10 +4397,6 @@ impl App {
             }
             "set-tailscale-mode" => {
                 self.open_set_tailscale_mode_prompt();
-                Ok(())
-            }
-            "take-over-terminal" => {
-                self.take_over_focused_pty();
                 Ok(())
             }
             "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),

@@ -4423,6 +4423,7 @@ mod tests {
             center_mouse_forward: None,
             last_mouse_click: None,
             pressed_button: None,
+            takeover_press: None,
             interactive_patterns: crate::keybindings::InteractiveBytePatterns {
                 bindings: Vec::new(),
             },

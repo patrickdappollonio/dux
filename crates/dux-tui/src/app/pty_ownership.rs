@@ -10,9 +10,19 @@
 //! background-serve seam hands it, and obeys the answer: a refusal drops the
 //! keystroke rather than writing it, and a refused resize leaves the child alone.
 //!
-//! READING IS NEVER GATED. A demoted terminal still renders the child's output,
-//! still scrolls its scrollback, still selects and copies. Ownership is about
-//! writing and sizing, and nothing else.
+//! WRITING IS WHAT IS GATED. Ownership is about who may type into a child and
+//! who decides its grid, and nothing else: the pty keeps streaming, and a
+//! surface that is not driving one still receives every byte of it.
+//!
+//! What that surface SHOWS is a separate decision, and this one is the web's:
+//! while another device drives the terminal in the center pane, the pane is
+//! covered by the take-over card, the same card and the same words a browser
+//! puts over its own terminal. Two deviations from the web's, both deliberate.
+//! It has no "Take control" state, because on this surface a pty nobody drives
+//! is one this keyboard already claims by typing, so a card asking for a click
+//! that changes nothing would be in the way. And the web suppresses its card
+//! while its socket is lost, which has no counterpart here: there is no socket
+//! between this surface and its own engine to lose.
 //!
 //! ## Nothing serving, nothing to ask
 //!
@@ -26,7 +36,7 @@
 //!
 //! Exactly as it is for a browser. Once another device is driving a pty, nothing
 //! passive takes it back: not selecting the agent, not looking at it, not the
-//! other device going quiet. The two ways back are the explicit take-over action
+//! other device going quiet. The two ways back are the card's Take over button
 //! and typing into a pty that nobody owns. The web's socket-specific
 //! self-succession rule has no counterpart here, because this surface has no
 //! socket to have a ghost of.
@@ -43,21 +53,27 @@ pub(crate) enum PtyDriver {
     Free,
     /// This surface holds it.
     Mine,
-    /// Another device holds it, named SHORT. Typing and resizing are refused
-    /// until an explicit take-over.
+    /// Another device holds it. Typing and resizing are refused until an
+    /// explicit take-over.
     ///
-    /// The registry records what the driver presented, which for a browser is a
-    /// raw `User-Agent` of well over a hundred characters. This carries the label
-    /// [`dux_core::device_label::short_device_label`] made of it, because the one
-    /// place it is rendered is a single line inside the center pane that also has
-    /// to carry the way to take the terminal back.
-    Elsewhere { device: String },
+    /// `device` is `None` when the driver gave dux no name for itself, which a
+    /// browser that presented no `User-Agent` at its upgrade really does. The
+    /// ABSENCE is carried rather than a stand-in string, because the card has a
+    /// different title for it: a screen that prints a sentinel where a device
+    /// name goes reads as a device called that.
+    ///
+    /// A name that is there is SHORT. The registry records what the driver
+    /// presented, which for a browser is a raw `User-Agent` of well over a
+    /// hundred characters; this carries the label
+    /// [`dux_core::device_label::short_device_label`] made of it, because the
+    /// place it is rendered is the title bar of a card inside the center pane.
+    Elsewhere { device: Option<String> },
 }
 
-/// What a watcher's screen calls a driver that gave dux no name for itself.
+/// What PROSE calls a driver that gave dux no name for itself.
 ///
-/// Reachable in practice: a browser that presented no `User-Agent` at its
-/// upgrade is recorded with no device. Naming it honestly beats naming it wrongly.
+/// The status line has to finish its sentence, so it needs a noun phrase where
+/// the card simply changes its title. Naming it honestly beats naming it wrongly.
 pub(crate) const UNNAMED_DEVICE: &str = "another device";
 
 impl App {
@@ -83,28 +99,39 @@ impl App {
             None => PtyDriver::Free,
             Some(conn) if conn == seat.conn_id => PtyDriver::Mine,
             // The recorded identity is SHORTENED here, at the one place it
-            // becomes something a screen renders, rather than at the cue: every
-            // reader of this verdict (the hint bar today, anything later) then
-            // gets a label that fits by construction.
+            // becomes something a screen renders, rather than at the card: every
+            // reader of this verdict (the card today, anything later) then gets
+            // a label that fits by construction.
             Some(_) => PtyDriver::Elsewhere {
                 device: device
                     .as_deref()
-                    .and_then(dux_core::device_label::short_device_label)
-                    .unwrap_or_else(|| UNNAMED_DEVICE.to_string()),
+                    .and_then(dux_core::device_label::short_device_label),
             },
         }
     }
 
-    /// The device driving the FOCUSED terminal surface, when it is not this one.
+    /// Whether the FOCUSED terminal surface is being driven by another device,
+    /// and what that device called itself.
     ///
-    /// The one question the demoted treatment asks, and it asks it of the live
-    /// registry on every frame.
-    pub(crate) fn focused_pty_driven_elsewhere(&self) -> Option<String> {
+    /// `Some(None)` is a driver that gave no name: somebody is driving, and the
+    /// card's second title is what says so. `None` is the whole absence of a
+    /// card, which is also what a surface with no live pty answers.
+    ///
+    /// The one question the card asks, and it asks it of the live registry on
+    /// every frame rather than of a latched flag: ownership moves between
+    /// devices while nothing on this surface happens at all.
+    pub(crate) fn focused_pty_driven_elsewhere(&self) -> Option<Option<String>> {
         let pty_id = self.selected_terminal_surface_id()?;
         match self.pty_driver(&pty_id) {
             PtyDriver::Elsewhere { device } => Some(device),
             PtyDriver::Free | PtyDriver::Mine => None,
         }
+    }
+
+    /// The same question with the name thrown away, for the gates that only need
+    /// to know whether the card is between the keyboard and the child.
+    pub(crate) fn focused_pty_is_driven_elsewhere(&self) -> bool {
+        self.focused_pty_driven_elsewhere().is_some()
     }
 
     /// THE TYPING CHOKEPOINT: may this surface write to the focused terminal
@@ -119,8 +146,8 @@ impl App {
     /// An uncontested first write CLAIMS the pty, exactly as a browser's first
     /// keystroke does, and that claim is announced so watchers learn who is
     /// driving. A write against a pty another device holds is DROPPED (logged at
-    /// debug, like the web's dropped non-owner keystroke) and the demoted
-    /// treatment on screen is what tells the user why.
+    /// debug, like the web's dropped non-owner keystroke) and the take-over card
+    /// covering the pane is what tells the user why.
     pub(crate) fn may_type_into_focused_pty(&mut self) -> bool {
         match self.selected_terminal_surface_id() {
             Some(pty_id) => self.may_type_into_pty(&pty_id),
@@ -151,7 +178,7 @@ impl App {
             // shape and disconnects, this surface types and claims, and the
             // dedupe sees the same pane size against the same target and sends
             // nothing. The terminal then owns a phone-sized child indefinitely,
-            // with nothing on screen to say so, because the demoted cue is gone
+            // with nothing on screen to say so, because the take-over card is gone
             // the moment the claim succeeds.
             self.last_pty_resize_target = None;
             self.publish_ownership(&[PtyOwnershipEvent::Claimed {
@@ -182,8 +209,8 @@ impl App {
     ///
     /// Returns whether the resize was granted, which is the caller's cue to
     /// record its dedupe. A refusal records nothing: the pane renders the
-    /// authoritative grid instead, which it already does safely, and the demoted
-    /// treatment says whose grid it is.
+    /// authoritative grid instead, which it already does safely, and the card
+    /// covering it names the device whose grid that is.
     pub(crate) fn resize_pty_if_permitted(&mut self, pty_id: &str, rows: u16, cols: u16) -> bool {
         let Some(seat) = self.pty_ownership() else {
             // Nothing serving means no registry, no gate and no apply order to
@@ -328,7 +355,8 @@ impl App {
         self.pending_pty_takeover = None;
         self.set_info(
             "The take-over was dropped because you moved to a different terminal before it \
-             could be claimed. Run take-over-terminal again on the one you want."
+             could be claimed. Go back to the one you want and press Take over on the card \
+             covering it."
                 .to_string(),
         );
     }
@@ -341,56 +369,27 @@ impl App {
     /// `last_pty_resize_target` is the other half: without it a take-over of a pty
     /// whose pane happens to measure exactly what it measured last time would be
     /// deduped away, and the claim would never be sent at all.
+    ///
+    /// ONE STATE CAN REACH THIS: the card's button, and the card is on screen
+    /// only while another device is driving the shown pty. So every other answer
+    /// returns QUIETLY rather than explaining itself. There is no palette command
+    /// behind this any more, so a status line about a terminal that is already
+    /// yours would be dux answering a question nobody asked.
     pub(crate) fn take_over_focused_pty(&mut self) {
         if self.pty_ownership().is_none() {
-            self.set_warning(
-                "Nothing is serving the web UI in the background, so no other device can be \
-                 driving this terminal and there is nothing to take over. Use \
-                 start-background-server to serve."
-                    .to_string(),
-            );
             return;
         }
         let Some(pty_id) = self.selected_terminal_surface_id() else {
-            self.set_warning(
-                "There is no running terminal in the center pane to take over. Select an agent or \
-                 a terminal that is running first."
-                    .to_string(),
-            );
             return;
         };
-        match self.pty_driver(&pty_id) {
-            PtyDriver::Mine => {
-                // Already ours, so there is no ownership to move. The command is
-                // still the way to RETARGET the child's geometry at this window:
-                // it clears the resize dedupe, which is the one thing standing
-                // between a child another device re-gridded and this pane's own
-                // measurements. Refusing outright left the user with a terminal
-                // sized for somebody else's phone and no gesture to fix it.
-                self.last_pty_resize_target = None;
-                self.set_info(
-                    "This terminal is already yours to type into, so there was nothing to take \
-                     over. Resizing it to this window anyway, in case another device left it at \
-                     a different size."
-                        .to_string(),
-                );
-                return;
-            }
-            PtyDriver::Free => {
-                self.set_info(
-                    "No other device is driving this terminal, so it is already yours to type \
-                     into. Taking it over anyway, so browsers watching it know."
-                        .to_string(),
-                );
-            }
-            PtyDriver::Elsewhere { device } => {
-                self.set_info(format!(
-                    "Taking this terminal over from {device}. Typing here reaches it again, its \
-                     size follows this window, and that device keeps watching without being able \
-                     to type."
-                ));
-            }
-        }
+        let PtyDriver::Elsewhere { device } = self.pty_driver(&pty_id) else {
+            return;
+        };
+        let device = device.unwrap_or_else(|| UNNAMED_DEVICE.to_string());
+        self.set_info(format!(
+            "Taking this terminal over from {device}. Typing here reaches it again, its size \
+             follows this window, and that device keeps watching without being able to type."
+        ));
         self.pending_pty_takeover = Some(pty_id);
         self.last_pty_resize_target = None;
     }
@@ -500,7 +499,7 @@ mod tests {
     }
 
     /// A browser is typing into the agent, so this surface's keystrokes are
-    /// DROPPED rather than written, and the demoted treatment has a device to
+    /// DROPPED rather than written, and the take-over card has a device to
     /// name. This is the refusal the whole participation exists to produce.
     #[test]
     fn typing_is_refused_while_a_browser_connection_owns_the_pty() {
@@ -528,25 +527,22 @@ mod tests {
         assert_eq!(
             app.pty_driver("s1"),
             PtyDriver::Elsewhere {
-                device: "Chrome on macOS".to_string()
+                device: Some("Chrome on macOS".to_string())
             },
-            "the demoted treatment names the driving device from the registry, \
-             shortened to something that fits a line inside the pane"
+            "the card names the driving device from the registry, shortened to \
+             something that fits the card's title bar"
         );
     }
 
-    /// A driver that gave dux no name for itself is still named, honestly.
+    /// A driver that gave dux no name for itself is recorded as HAVING no name,
+    /// rather than being handed a sentinel string that a title would then print.
+    /// The card's second title exists for exactly this answer.
     #[test]
-    fn an_unnamed_driver_is_described_rather_than_left_blank() {
+    fn an_unnamed_driver_is_recorded_as_nameless_rather_than_given_a_sentinel() {
         let (app, _recorded, seat) = serving_app();
         let browser = seat.owners.next_conn_id();
         seat.owners.claim("s1", browser).expect("claimed");
-        assert_eq!(
-            app.pty_driver("s1"),
-            PtyDriver::Elsewhere {
-                device: UNNAMED_DEVICE.to_string()
-            }
-        );
+        assert_eq!(app.pty_driver("s1"), PtyDriver::Elsewhere { device: None });
     }
 
     /// A resize against a pty a browser owns is refused WHOLE: the child is not
@@ -799,73 +795,134 @@ mod tests {
         (app, recorded, seat)
     }
 
+    /// Wait until the child has actually painted something, so a card test is
+    /// really covering a live grid rather than the loading card.
+    fn wait_for_child_output(app: &App) {
+        for _ in 0..300 {
+            if app
+                .engine
+                .providers
+                .get("session-1")
+                .is_some_and(|client| client.has_output())
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the child under test produced no output within 3s");
+    }
+
+    /// Read a drawn frame back as one string per screen row.
+    ///
+    /// Row by row rather than one flat string, because the card's prose is
+    /// centred and wrapped: a flat string welds the end of one row onto the
+    /// start of the next and onto whatever the panes beside it are showing.
+    fn rows_of(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// Draw the whole app at `width` x `height` and hand back its rows.
+    fn render_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render succeeds");
+        rows_of(&terminal)
+    }
+
+    /// The card's prose is wrapped, centred and boxed, so a test that wants to
+    /// compare it with the web's sentence has to undo all three: drop the box
+    /// drawing, join the rows and squeeze the padding back to single spaces.
+    fn flowed(rows: &[String]) -> String {
+        rows.iter()
+            .flat_map(|row| row.chars())
+            .map(|ch| {
+                if ('\u{2500}'..='\u{257f}').contains(&ch) {
+                    ' '
+                } else {
+                    ch
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// A real `User-Agent`, exactly as a browser presents one and exactly as the
     /// registry records it. Mirrored from the web's own `deviceLabel` fixtures.
     const REAL_CHROME_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
          AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-    /// Render the whole app with a browser holding the focused pty, and hand back
-    /// the frame as text. Shared by the two demoted-cue tests, which differ only
-    /// in what the driving connection called itself.
-    fn render_with_a_browser_driving(device: &str) -> (App, String) {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
+    /// Something the child prints that no piece of dux chrome ever would, so a
+    /// test can say "none of the child's cells are on screen" and mean it.
+    const CHILD_MARKER: &str = "CHILDMARKER";
 
-        let (mut app, _recorded, seat) = app_with_a_live_pty();
+    /// An app with a live, chatty child that a browser is driving, drawn once.
+    /// `device` is what that browser presented at its upgrade; `None` is the
+    /// browser that presented nothing.
+    fn render_with_a_browser_driving(device: Option<&str>) -> (App, Vec<String>) {
+        let (mut app, _recorded, seat) =
+            app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
         let browser = seat.owners.next_conn_id();
         seat.owners
-            .claim_for_resize("session-1", browser, false, Some(device), |_| {})
+            .claim_for_resize("session-1", browser, false, device, |_| {})
             .epoch
             .expect("the browser claimed the pty");
-
-        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render succeeds");
-        let rendered: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        (app, rendered)
+        wait_for_child_output(&app);
+        let rows = render_rows(&mut app, 160, 40);
+        (app, rows)
     }
 
-    /// THE DEMOTED TREATMENT, rendered, with a REAL `User-Agent` on the wire. A
-    /// browser holds the pty, so the center pane's hint bar stops listing keys
-    /// that go nowhere and says who is driving and how to take it back, and the
-    /// child is NOT re-gridded to this pane.
+    /// THE TAKE-OVER CARD, rendered, with a REAL `User-Agent` on the wire. A
+    /// browser holds the pty, so the pane it covers is the card's: the device
+    /// that is driving, the web's sentence word for word, and the one button.
     ///
     /// The UA is the point of the fixture. The registry records whatever the
-    /// browser presented, which is ~130 characters, and the cue is one line
-    /// inside a pane narrower than the window: rendered raw it pushed the command
-    /// name off the right edge, so the cue named a problem with no way out of it.
+    /// browser presented, which is ~130 characters, and the title bar of a card
+    /// inside the center pane cannot carry that; the shortener is what makes the
+    /// title a name rather than a wall.
     ///
-    /// A real render rather than a call to the cue builder, because the bug this
-    /// guards against is the branch never being reached: a hint ladder that still
-    /// picks "typing goes to the agent" is a screen telling the user their keys
-    /// are landing when every one of them is being dropped.
+    /// A real render rather than a call to the card builder, because the bug this
+    /// guards against is the branch never being reached: a pane that keeps
+    /// showing the child while every keystroke is dropped is a screen telling the
+    /// user their keys are landing.
     #[test]
-    fn a_demoted_pane_shortens_a_real_user_agent_and_leaves_the_child_grid_alone() {
-        let (app, rendered) = render_with_a_browser_driving(REAL_CHROME_UA);
+    fn the_take_over_card_covers_the_pane_and_names_the_driving_device() {
+        let (app, rows) = render_with_a_browser_driving(Some(REAL_CHROME_UA));
+        let flat = flowed(&rows);
 
         assert!(
-            rendered.contains("Chrome on macOS is driving this agent"),
-            "the hint bar must name the device that holds the pty, shortened"
+            flat.contains("Open on Chrome on macOS"),
+            "the card's title must name the device that holds the pty, shortened: {flat}"
         );
         assert!(
-            !rendered.contains("Mozilla/5.0"),
+            !flat.contains("Mozilla/5.0"),
             "the raw User-Agent must never reach the frame: it does not fit"
         );
         assert!(
-            rendered.contains("take-over-terminal"),
-            "and name the way to take it back, in full: the cue has to FIT in the \
-             center pane, and a truncated one names a problem with no way out"
+            flat.contains(
+                "Only one device can type at a time. Take over to drive this agent from here."
+            ),
+            "the description is the web's, word for word: {flat}"
         );
         assert!(
-            !rendered.contains("Typing goes to the agent"),
-            "a demoted pane must not claim that typing reaches the agent"
+            flat.contains("Take over"),
+            "the card carries the one button that takes the terminal back: {flat}"
+        );
+        assert!(
+            !flat.contains(CHILD_MARKER),
+            "the card covers the grid, so none of the child's cells may show: {flat}"
         );
 
         let grid = app
@@ -876,73 +933,60 @@ mod tests {
         assert_eq!(
             grid,
             Some((10, 10)),
-            "a refused resize must leave the child at the grid its driver set"
+            "a covered pane must leave the child at the grid its driver set"
         );
     }
 
-    /// The cue is built to the width it is given, and what gives way is the
-    /// DEVICE NAME: the way out has to survive every pane this can be rendered in.
+    /// A driver that presented no name for itself gets the card's second title,
+    /// which names the fact rather than printing a sentinel where a device
+    /// should be.
     #[test]
-    fn the_cue_fits_the_pane_it_is_given_and_keeps_its_way_out() {
-        let app = test_app(default_bindings());
-        for width in [46u16, 51, 60, 80, 89, 120] {
-            let line = app.remote_driver_cue_line(REAL_CHROME_UA, width);
-            let rendered: String = line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect();
-            assert!(
-                rendered.chars().count() <= width as usize,
-                "the cue must fit {width} columns, got {} for {rendered:?}",
-                rendered.chars().count()
-            );
-            assert!(
-                rendered.contains("take-over-terminal"),
-                "the way out must survive at {width} columns: {rendered:?}"
-            );
-        }
-    }
-
-    /// A driver that already calls itself something short is named verbatim, and
-    /// the cue still carries its way out. Kept alongside the real-UA test because
-    /// the shortener must not mangle a name that already fits.
-    #[test]
-    fn a_demoted_pane_names_a_short_device_verbatim() {
-        let (_app, rendered) = render_with_a_browser_driving(TUI_DEVICE_LABEL);
+    fn a_nameless_driver_gets_the_cards_second_title() {
+        let (_app, rows) = render_with_a_browser_driving(None);
+        let flat = flowed(&rows);
 
         assert!(
-            rendered.contains("the dux TUI is driving this agent"),
+            flat.contains("Active on another device"),
+            "a driver with no name still gets an honest title: {flat}"
+        );
+        assert!(
+            !flat.contains("Open on"),
+            "and never the named title with a blank in it: {flat}"
+        );
+        assert!(flat.contains("Take over"));
+    }
+
+    /// A driver that already calls itself something short is named verbatim.
+    /// Kept alongside the real-UA test because the shortener must not mangle a
+    /// name that already fits.
+    #[test]
+    fn the_card_names_a_short_device_verbatim() {
+        let (_app, rows) = render_with_a_browser_driving(Some(TUI_DEVICE_LABEL));
+        assert!(
+            flowed(&rows).contains(&format!("Open on {TUI_DEVICE_LABEL}")),
             "a label that already fits is copy, not something to parse"
         );
-        assert!(rendered.contains("take-over-terminal"));
     }
 
-    /// The same pane, driving it itself: the resize lands and the demoted cue is
-    /// nowhere. The other half of the render test, because "the cue never shows"
-    /// and "the cue always shows" would both pass the one above on its own.
+    /// The other half: driving it itself, the pane shows the CHILD and no card,
+    /// and the resize lands. "The card never shows" and "the card always shows"
+    /// would both pass the tests above on their own.
     #[test]
-    fn a_driving_pane_resizes_the_child_and_shows_no_demoted_cue() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
+    fn a_driving_pane_shows_the_child_and_no_card() {
+        let (mut app, _recorded, _seat) =
+            app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
+        wait_for_child_output(&app);
 
-        let (mut app, _recorded, _seat) = app_with_a_live_pty();
-
-        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render succeeds");
-        let rendered: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        let rows = render_rows(&mut app, 160, 40);
+        let flat = flowed(&rows);
 
         assert!(
-            !rendered.contains("is driving this agent"),
-            "nobody else holds this pty, so there is nothing to say about it"
+            flat.contains(CHILD_MARKER),
+            "nobody else holds this pty, so the child's own output is what shows: {flat}"
+        );
+        assert!(
+            !flat.contains("Take over"),
+            "and there is nothing to take over: {flat}"
         );
         let grid = app
             .engine
@@ -954,6 +998,520 @@ mod tests {
             Some((10, 10)),
             "an uncontested pane claims the pty and sizes the child to itself"
         );
+    }
+
+    /// Nothing serving means no registry, no driver and no card: the pane is
+    /// exactly what it was before this surface joined the ownership model.
+    #[test]
+    fn nothing_serving_shows_no_card_at_all() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 1;
+        app.center_mode = CenterMode::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.engine.providers.insert(
+            "session-1".to_string(),
+            crate::pty::PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), format!("printf {CHILD_MARKER}; sleep 5")],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        wait_for_child_output(&app);
+
+        let flat = flowed(&render_rows(&mut app, 160, 40));
+        assert!(flat.contains(CHILD_MARKER));
+        assert!(!flat.contains("Take over"));
+    }
+
+    /// The card covers the FULLSCREEN pane too. Fullscreen is where a demoted
+    /// terminal is most misleading: it is the whole screen, and every one of the
+    /// keys it invites are being dropped.
+    #[test]
+    fn the_card_covers_a_fullscreen_pane_too() {
+        let (mut app, _recorded, seat) =
+            app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
+        let browser = seat.owners.next_conn_id();
+        seat.owners.claim("session-1", browser).expect("claimed");
+        wait_for_child_output(&app);
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        let flat = flowed(&render_rows(&mut app, 160, 40));
+        assert!(flat.contains("Take over"), "{flat}");
+        assert!(!flat.contains(CHILD_MARKER), "{flat}");
+    }
+
+    /// PARITY WITH THE WEB, deliberately: the tab strip is OUTSIDE the pane the
+    /// card covers there, so it stays visible and switchable here too. A user
+    /// whose agent has two tabs can still move to the one nobody else is
+    /// driving.
+    #[test]
+    fn the_tab_strip_still_renders_above_the_card() {
+        let (mut app, _recorded, seat) =
+            app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.agent_tabs.insert(
+            "tab-2".to_string(),
+            dux_core::model::AgentTab {
+                id: "tab-2".to_string(),
+                session_id: session_id.clone(),
+                provider: dux_core::model::ProviderKind::new("claude"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        let browser = seat.owners.next_conn_id();
+        seat.owners.claim("session-1", browser).expect("claimed");
+        wait_for_child_output(&app);
+
+        let flat = flowed(&render_rows(&mut app, 160, 40));
+        assert!(flat.contains("Take over"), "the card is up: {flat}");
+        assert!(
+            flat.contains("claude"),
+            "the second tab's pill must still be on screen above the card: {flat}"
+        );
+    }
+
+    /// The hint bar under the card names the key that presses the button, and
+    /// nothing about the child: none of the child's keys reach it.
+    #[test]
+    fn the_cards_hint_bar_names_the_key_that_takes_over() {
+        let (app, rows) = render_with_a_browser_driving(Some("Chrome"));
+        let flat = flowed(&rows);
+        let key = app.bindings.label_for(Action::FocusAgent);
+        assert_eq!(key, "Enter", "test setup: the default FocusAgent binding");
+
+        assert!(
+            flat.contains(&format!("<{key}> take over")),
+            "the hint must resolve the binding rather than hardcode a key: {flat}"
+        );
+        assert!(
+            !flat.contains("Typing goes to the agent"),
+            "a covered pane must not claim that typing reaches the agent: {flat}"
+        );
+    }
+
+    /// The hint line is built to the width it is given, and what must survive
+    /// every width is the way out: the key that presses the button.
+    #[test]
+    fn the_card_hint_fits_the_pane_it_is_given_and_keeps_its_way_out() {
+        let app = test_app(default_bindings());
+        for width in [46u16, 51, 60, 80, 120] {
+            let line = app.takeover_hint_line(width);
+            let rendered: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert!(
+                rendered.chars().count() <= width as usize,
+                "the hint must fit {width} columns, got {} for {rendered:?}",
+                rendered.chars().count()
+            );
+            assert!(
+                rendered.contains("take over"),
+                "the way out must survive at {width} columns: {rendered:?}"
+            );
+        }
+    }
+
+    /// A pane too narrow for the prose keeps the BUTTON, and nothing panics on
+    /// the way down. The button is the way out, so it is the half that survives;
+    /// the arithmetic that centres a card is where an off-by-one becomes a crash.
+    #[test]
+    fn a_narrow_pane_keeps_the_button_and_never_panics() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+
+        for (w, h) in [(12u16, 10u16), (12, 3), (20, 4), (8, 2), (2, 1), (60, 12)] {
+            let (mut app, _recorded, _seat) = serving_app();
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    app.render_takeover_card(frame, Rect::new(0, 0, w, h), Some("Chrome"));
+                })
+                .expect("render succeeds");
+            let flat = flowed(&rows_of(&terminal));
+            if w >= 12 && h >= 3 {
+                assert!(
+                    flat.contains("Take over"),
+                    "a {w}x{h} pane must still carry the button: {flat:?}"
+                );
+            }
+        }
+    }
+
+    /// AMENDMENT 3. The hardware cursor is the caret, and there is nothing to
+    /// type into under the card, so it must not be parked on a cell the card is
+    /// painted over: the IME anchor and the "your keys land here" cue both point
+    /// at a pane that is refusing every key.
+    #[test]
+    fn the_card_leaves_the_hardware_cursor_at_the_origin() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // The control first, on a terminal of its own: a backend remembers the
+        // last position it was given, so re-drawing into the same one could not
+        // tell "left at the origin" from "never moved".
+        let (mut app, _recorded, _seat) = app_with_a_live_pty();
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::Agent;
+        wait_for_child_output(&app);
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render succeeds");
+        assert_ne!(
+            ratatui::backend::Backend::get_cursor_position(terminal.backend_mut()).expect("cursor"),
+            ratatui::layout::Position::new(0, 0),
+            "test premise: a driving pane parks the caret on the child's cursor"
+        );
+
+        // Now the same pane with a browser driving it.
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::Agent;
+        wait_for_child_output(&app);
+        let browser = seat.owners.next_conn_id();
+        seat.owners.claim("session-1", browser).expect("claimed");
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render succeeds");
+        terminal.backend_mut().assert_cursor_position((0u16, 0u16));
+    }
+
+    /// AMENDMENT 9. Scroll mode is a way of reading a pane; the card covers the
+    /// pane, so there is nothing left to read and the mode ends with it. Left on,
+    /// the hint bar would be the scroll cue and the card would have no line of
+    /// its own.
+    #[test]
+    fn the_card_ends_scroll_mode_and_owns_the_hint_line() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty_running(
+            "i=1; while [ $i -le 60 ]; do echo line$i; i=$((i+1)); done; sleep 5",
+        );
+        app.focus = FocusPane::Center;
+        app.last_pty_size = (10, 10);
+        crate::app::test_support::enter_scroll_mode(&mut app, 5);
+        assert!(app.scroll_mode_active(), "test setup: scrolled back");
+
+        let browser = seat.owners.next_conn_id();
+        seat.owners.claim("session-1", browser).expect("claimed");
+        let flat = flowed(&render_rows(&mut app, 160, 40));
+
+        assert!(
+            !app.scroll_mode_active(),
+            "the card covers what scroll mode was for, so the mode ends with it"
+        );
+        assert!(
+            flat.contains("take over"),
+            "the hint under the card is the card's: {flat}"
+        );
+        assert!(
+            !flat.contains("Scrolled back"),
+            "and not the scroll cue it replaced: {flat}"
+        );
+    }
+
+    // ── The card's keys and its button ──────────────────────────────────────
+
+    /// An app showing a live agent a browser is driving, focused on the center
+    /// pane: the exact state the card's key rule is about.
+    fn app_with_the_card_up() -> (
+        App,
+        std::sync::Arc<std::sync::Mutex<Recorded>>,
+        TuiOwnership,
+    ) {
+        let (mut app, recorded, seat) = app_with_a_live_pty_running("sleep 5");
+        app.focus = FocusPane::Center;
+        let browser = seat.owners.next_conn_id();
+        seat.owners
+            .claim_for_resize("session-1", browser, false, Some("Chrome"), |_| {})
+            .epoch
+            .expect("the browser claimed the pty");
+        (app, recorded, seat)
+    }
+
+    /// AMENDMENT 5. The FocusAgent binding presses the button, and so does Space:
+    /// activating the focused control is the universal convention and the card
+    /// has exactly one control.
+    #[test]
+    fn the_focus_key_and_space_press_the_cards_button() {
+        for key in [
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        ] {
+            let (mut app, _recorded, _seat) = app_with_the_card_up();
+            app.handle_key(key).expect("the key is handled");
+            assert_eq!(
+                app.pending_pty_takeover.as_deref(),
+                Some("session-1"),
+                "{key:?} must arm the take-over the card's button arms"
+            );
+            assert!(
+                !app.engine.is_typing("session-1"),
+                "and it must never reach the child: {key:?}"
+            );
+        }
+    }
+
+    /// Every other typing-owned key is SWALLOWED. It goes nowhere today either
+    /// (the gate drops it), but a key that falls through to the ladder while the
+    /// card is up would act on a pane the user cannot see.
+    #[test]
+    fn an_ordinary_key_is_swallowed_while_the_card_is_up() {
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .expect("the key is handled");
+        assert_eq!(app.pending_pty_takeover, None);
+        assert!(
+            !app.engine.is_typing("session-1"),
+            "a covered pane writes nothing to the child"
+        );
+    }
+
+    /// Tab ALWAYS moves panes while the card is up, even with `tab_reaches_agent`
+    /// on: the option hands Tab to an agent this keyboard cannot reach.
+    #[test]
+    fn tab_moves_panes_while_the_card_is_up_even_when_it_is_the_agents() {
+        for tab_reaches_agent in [false, true] {
+            let (mut app, _recorded, _seat) = app_with_the_card_up();
+            app.engine.config.ui.tab_reaches_agent = tab_reaches_agent;
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                .expect("the key is handled");
+            assert_ne!(
+                app.focus,
+                FocusPane::Center,
+                "Tab must move focus out of the covered pane (tab_reaches_agent: \
+                 {tab_reaches_agent})"
+            );
+        }
+    }
+
+    /// The dux chords keep working under the card: the tab switch and the
+    /// palette are how a user gets anywhere else from here.
+    #[test]
+    fn the_dux_chords_keep_working_under_the_card() {
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.agent_tabs.insert(
+            "tab-2".to_string(),
+            dux_core::model::AgentTab {
+                id: "tab-2".to_string(),
+                session_id,
+                provider: dux_core::model::ProviderKind::new("claude"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL))
+            .expect("the chord is handled");
+        assert_eq!(
+            app.focused_tab_id("session-1"),
+            "tab-2",
+            "the tab chord must still switch tabs while the card is up"
+        );
+
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .expect("the chord is handled");
+        assert!(
+            matches!(app.prompt, PromptState::Command { .. }),
+            "the palette chord must still open the palette while the card is up"
+        );
+    }
+
+    /// From the LEFT pane the same key keeps its own meaning: it focuses the
+    /// center pane. The card's rule is about the pane the card is on.
+    #[test]
+    fn the_left_panes_focus_key_focuses_without_taking_over() {
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.focus = FocusPane::Left;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the key is handled");
+        assert_eq!(
+            app.pending_pty_takeover, None,
+            "focusing a pane is not asking for the terminal"
+        );
+        assert_eq!(app.focus, FocusPane::Center);
+    }
+
+    /// A DORMANT tab has no pty, so there is no ownership question, no card, and
+    /// the key keeps its launch meaning.
+    #[test]
+    fn a_dormant_tab_has_no_card_and_keeps_its_launch_key() {
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.engine.providers.remove("session-1");
+        assert_eq!(
+            app.focused_pty_driven_elsewhere(),
+            None,
+            "with no live pty there is nothing to be driven elsewhere"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the key is handled");
+        assert_eq!(
+            app.pending_pty_takeover, None,
+            "a dormant tab's key launches; it does not take anything over"
+        );
+    }
+
+    /// AMENDMENT 6. In fullscreen the keyboard is a raw byte stream, so the
+    /// binding's own BYTES are what press the button; a literal CR would be a
+    /// hardcoded key by another name.
+    #[test]
+    fn the_focus_keys_bytes_press_the_button_on_the_raw_fullscreen_path() {
+        let (mut app, recorded, seat) = app_with_the_card_up();
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        let bytes = app
+            .bindings
+            .byte_patterns_for(Action::FocusAgent)
+            .first()
+            .cloned()
+            .expect("the FocusAgent binding has a byte form");
+
+        app.process_raw_input_bytes(&bytes)
+            .expect("the key is handled");
+
+        assert_eq!(
+            app.pending_pty_takeover.as_deref(),
+            Some("session-1"),
+            "the raw path must reach the same take-over the windowed key does"
+        );
+        assert!(
+            !seat.owners.is_owner("session-1", seat.conn_id),
+            "arming is not claiming: the resize that carries the claim is next"
+        );
+        assert!(
+            recorded.lock().expect("not poisoned").published.is_empty(),
+            "a key that writes nothing to the child announces nothing"
+        );
+    }
+
+    /// AMENDMENT 8. The button is a click target like any other: pressing it and
+    /// releasing inside it takes the terminal over, and a click anywhere else on
+    /// the covered pane does not.
+    #[test]
+    fn clicking_the_cards_button_takes_over_and_clicking_elsewhere_does_not() {
+        use ratatui::layout::Rect;
+
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
+
+        // Outside the button: no take-over, and the press is not armed.
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.pending_pty_takeover, None);
+
+        // On the button: pressed, then released inside it.
+        app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 34,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(
+            app.takeover_press.is_some(),
+            "the press must show as pressed while it is held"
+        );
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 34,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
+        assert_eq!(
+            app.takeover_press, None,
+            "the press is spent by the release"
+        );
+    }
+
+    /// Dragging off the button before releasing cancels the click, which is the
+    /// universal convention every other button in dux already follows.
+    #[test]
+    fn dragging_off_the_cards_button_cancels_the_click() {
+        use ratatui::layout::Rect;
+
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 34,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 4,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 4,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.pending_pty_takeover, None);
+        assert_eq!(app.takeover_press, None);
+    }
+
+    /// AMENDMENT 4. There is nothing readable under the card, so a press inside
+    /// the pane starts no selection: a highlight the user cannot see, over text
+    /// they cannot see, that copies the child's cells on release.
+    ///
+    /// Driven through the interactive raw path, because that is the one path
+    /// that starts a terminal selection at all.
+    #[test]
+    fn a_press_under_the_card_starts_no_selection() {
+        use ratatui::layout::Rect;
+
+        // The control: with nobody else driving, the same press DOES select, so
+        // the assertion below is about the card and not about a path that never
+        // selects anyway.
+        for card_up in [false, true] {
+            let (mut app, _recorded, seat) = app_with_a_live_pty_running("sleep 5");
+            app.focus = FocusPane::Center;
+            app.input_target = InputTarget::Agent;
+            app.fullscreen_overlay = FullscreenOverlay::Agent;
+            app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+            app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
+            if card_up {
+                let browser = seat.owners.next_conn_id();
+                seat.owners.claim("session-1", browser).expect("claimed");
+            }
+
+            // An SGR left press at column 6, row 6 (the wire is 1-based).
+            app.process_raw_input_bytes(b"\x1b[<0;6;6M")
+                .expect("the press is handled");
+
+            assert_eq!(
+                app.terminal_selection.is_some(),
+                !card_up,
+                "a press may start a selection exactly when there is text under \
+                 it to select (card up: {card_up})"
+            );
+        }
     }
 
     /// Every end of the participation lets go, and the ONE place that ends it is
@@ -981,21 +1539,35 @@ mod tests {
         );
     }
 
-    /// The take-over action refuses honestly when there is no ownership model to
-    /// take part in, rather than arming an intent that will never be spent.
+    /// The take-over has exactly one way in, the card's button, and the card is
+    /// on screen only while another device is driving. So the states the card
+    /// cannot be up in arm nothing and, crucially, say nothing: a status line
+    /// explaining a refusal the user never asked for is noise about a button
+    /// they could not have pressed.
     #[test]
-    fn the_take_over_action_says_so_when_nothing_is_serving() {
+    fn a_take_over_with_no_card_behind_it_arms_nothing_and_stays_quiet() {
+        // Nothing serving: no registry, no driver, no card.
         let mut app = test_app(default_bindings());
         app.take_over_focused_pty();
         assert_eq!(app.pending_pty_takeover, None);
-        let (_, message) = app
-            .status
-            .most_recent_tui()
-            .expect("the refusal must reach the status line");
         assert!(
-            message.contains("start-background-server"),
-            "the refusal must point at the thing that would make this possible: {message}"
+            app.status.most_recent_tui().is_none(),
+            "there was no card, so there is nothing to report"
         );
+
+        // Serving, but nobody else is driving: typing already reaches this pty.
+        let (mut app, _recorded, _seat) = app_with_a_live_pty();
+        app.take_over_focused_pty();
+        assert_eq!(app.pending_pty_takeover, None);
+        assert!(app.status.most_recent_tui().is_none());
+
+        // Serving, and this surface is the driver.
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+        assert!(app.may_type_into_pty("session-1"));
+        assert!(seat.owners.is_owner("session-1", seat.conn_id));
+        app.take_over_focused_pty();
+        assert_eq!(app.pending_pty_takeover, None);
+        assert!(app.status.most_recent_tui().is_none());
     }
 
     /// THE TRAP, end to end. A browser drives the agent, re-grids the child to a
@@ -1007,7 +1579,7 @@ mod tests {
     /// The refused resize recorded the dedupe, so the pane believed it had already
     /// sent this geometry to this target; and the claim by typing cleared nothing,
     /// so nothing ever asked again. The user was left driving a phone-sized child
-    /// with no cue on screen, because the demoted cue goes the moment the claim
+    /// with nothing on screen to say so, because the card goes the moment the claim
     /// succeeds.
     #[test]
     fn claiming_by_typing_after_a_foreign_re_grid_heals_the_childs_geometry() {
@@ -1081,45 +1653,40 @@ mod tests {
         );
     }
 
-    /// The take-over ACTION's own three transitions, driven through the action
-    /// rather than by arming the intent by hand.
+    /// The take-over ACTION, driven through the one state it is reachable in.
+    /// Another device drives the pty, so the intent is armed, the message names
+    /// the device that is losing the terminal, and the resize dedupe is cleared
+    /// so the claim's resize really is sent.
     #[test]
-    fn the_take_over_action_arms_or_retargets_depending_on_who_drives() {
-        // ANOTHER DEVICE drives it: the intent is armed and the message names the
-        // device, and the dedupe is cleared so the claim's resize really is sent.
+    fn the_take_over_action_arms_the_claim_and_names_the_device() {
         let (mut app, _recorded, seat) = app_with_a_live_pty();
         let browser = seat.owners.next_conn_id();
-        seat.owners.claim("session-1", browser).expect("claimed");
+        seat.owners
+            .claim_for_resize("session-1", browser, false, Some(REAL_CHROME_UA), |_| {})
+            .epoch
+            .expect("the browser claimed the pty");
         app.last_pty_resize_target = Some("session-1".to_string());
+
         app.take_over_focused_pty();
+
         assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
         assert_eq!(app.last_pty_resize_target, None);
         let (_, message) = app.status.most_recent_tui().expect("a status was set");
         assert!(
-            message.contains("Chrome on macOS") || message.contains("another device"),
+            message.contains("Chrome on macOS"),
             "the message must name whoever is losing the terminal: {message}"
         );
 
-        // NOBODY drives it: still armed, so watchers are told who took it.
-        let (mut app, _recorded, _seat) = app_with_a_live_pty();
-        app.take_over_focused_pty();
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
-
-        // ALREADY OURS: nothing to arm, but the dedupe is cleared so the command
-        // is still the way to retarget the child's geometry at this window.
+        // A driver that presented no name is still described, with the prose
+        // sentinel rather than a blank where a device should be.
         let (mut app, _recorded, seat) = app_with_a_live_pty();
-        assert!(app.may_type_into_pty("session-1"));
-        assert!(seat.owners.is_owner("session-1", seat.conn_id));
-        app.last_pty_resize_target = Some("session-1".to_string());
+        let browser = seat.owners.next_conn_id();
+        seat.owners.claim("session-1", browser).expect("claimed");
         app.take_over_focused_pty();
-        assert_eq!(
-            app.pending_pty_takeover, None,
-            "there is no ownership to move, so nothing is armed"
-        );
-        assert_eq!(
-            app.last_pty_resize_target, None,
-            "but the geometry can still be retargeted, which is what the dedupe \
-             clear is for"
+        let (_, message) = app.status.most_recent_tui().expect("a status was set");
+        assert!(
+            message.contains(UNNAMED_DEVICE),
+            "a nameless driver is still named, honestly: {message}"
         );
     }
 
@@ -1128,7 +1695,9 @@ mod tests {
     /// terminal away from whichever device is driving it by then.
     #[test]
     fn an_armed_take_over_is_dropped_when_the_user_moves_to_another_terminal() {
-        let (mut app, _recorded, _seat) = app_with_a_live_pty();
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+        let browser = seat.owners.next_conn_id();
+        seat.owners.claim("session-1", browser).expect("claimed");
         app.take_over_focused_pty();
         assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
 
@@ -1140,8 +1709,8 @@ mod tests {
         );
         let (_, message) = app.status.most_recent_tui().expect("a status was set");
         assert!(
-            message.contains("take-over-terminal"),
-            "the drop must say how to ask again: {message}"
+            message.contains("Take over"),
+            "the drop must point at the button that asks again: {message}"
         );
 
         // And a render pass about the armed pty leaves it alone, or the intent
@@ -1233,8 +1802,8 @@ mod tests {
     /// which is true of the batched forwards and NOT true of a page key the
     /// provider's `forward_scroll` says to send. Reusing that verdict here sent a
     /// demoted surface's page keys straight into somebody else's terminal.
-    /// The demoted cue names the palette key as the way out, so that key must
-    /// work where the cue shows: in fullscreen the palette chord normally rides
+    /// The card leaves the palette chord dux's, so that key must
+    /// work where the card shows: in fullscreen the palette chord normally rides
     /// to the child verbatim, but a demoted pane has nowhere to send it, and
     /// dux owns it instead. With nobody else driving, the same bytes still
     /// reach the child untouched.

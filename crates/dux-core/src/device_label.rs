@@ -4,10 +4,9 @@
 //! at its upgrade: for a browser that is its raw `User-Agent`, which is
 //! routinely 120 to 200 characters long, and for the terminal UI it is the fixed
 //! [`TUI_DEVICE_LABEL`]. Both end up as COPY on a watcher's screen, and a real
-//! `User-Agent` does not fit on a line inside a pane: the demoted cue that names
-//! it also has to name the way to take the terminal back, and the raw string
-//! pushed that half off the right edge, leaving the cue naming a problem with no
-//! way out of it.
+//! `User-Agent` does not fit where a surface has to put it: the title bar of a
+//! card inside a pane, or a card in a browser column, both of which are a name's
+//! worth of room and not a paragraph's.
 //!
 //! This is the terminal UI's twin of the web's `deviceLabel.ts`, and the two are
 //! deliberately kept in step: the same UA shapes must produce the same label on

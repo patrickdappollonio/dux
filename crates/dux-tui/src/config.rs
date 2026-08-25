@@ -954,9 +954,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # ONE DRIVER AT A TIME: the TUI and every browser take part in the same\n\
                  # input-ownership model, so a terminal is driven by whichever device\n\
                  # claimed it and the others watch. A watcher still sees the live output\n\
-                 # and can scroll and copy it; the hint bar (or the browser's card) names\n\
-                 # the device that has it, and take-over-terminal here (or Take over\n\
-                 # there) moves it to this device.\n\
+                 # and can scroll and copy it; on both the terminal and the browser a\n\
+                 # card covers the terminal, names the device that has it, and offers a\n\
+                 # Take over button that moves it to this device.\n\
                  # You do not need to edit this file to change your mind: the palette\n\
                  # commands start-background-server and stop-background-server turn it\n\
                  # on and off while dux runs, and they save the choice back here.",
@@ -2255,7 +2255,7 @@ mod tests {
             // the trust consequence
             "no login",
             // what happens when two devices want the same terminal
-            "take-over-terminal",
+            "take over",
             // how to stop it
             "stop-background-server",
         ] {

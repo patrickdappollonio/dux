@@ -785,7 +785,37 @@ impl App {
             &key,
             self.engine.config.ui.tab_reaches_agent,
         );
-        if self.center_typeable() && typing_owns_key {
+        // THE TAKE-OVER CARD owns the center pane's keyboard while it covers it,
+        // and it is asked BEFORE the typing bypass below, because every key that
+        // bypass would hand to the agent is a key this surface is not allowed to
+        // write. The card offers one gesture, so two keys press its button: the
+        // binding that focuses an agent (the key already in the user's hands for
+        // "act on the pane in front of me") and Space, which activates the
+        // focused control in every dialog dux has.
+        //
+        // Tab and Shift-Tab ALWAYS fall through to the pane ladder here, even
+        // with `tab_reaches_agent` on: that option hands them to an agent this
+        // keyboard cannot reach, so keeping them would trap the user on a pane
+        // they cannot use. Every other typing-owned key is swallowed (it goes
+        // nowhere today either, dropped at the ownership gate), and every dux
+        // chord falls through to the ladders below exactly as it does anywhere
+        // else.
+        let card_owns_center = self.focus == FocusPane::Center
+            && matches!(self.center_mode, CenterMode::Agent)
+            && self.focused_pty_is_driven_elsewhere();
+        if card_owns_center {
+            let presses_the_button = self.bindings.lookup(&key, BindingScope::Center)
+                == Some(Action::FocusAgent)
+                || (key.code == KeyCode::Char(' ') && key.modifiers.is_empty());
+            if presses_the_button {
+                self.take_over_focused_pty();
+                return Ok(false);
+            }
+            if typing_owns_key && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+                return Ok(false);
+            }
+        }
+        if !card_owns_center && self.center_typeable() && typing_owns_key {
             if !self.scroll_mode_active() {
                 self.forward_typing_key_to_center(&key);
                 return Ok(false);
@@ -2358,10 +2388,16 @@ impl App {
                     // ownership gate. A refusal must not then claim the macro was
                     // sent: say what actually happened and name the device.
                     match self.focused_pty_driven_elsewhere() {
-                        Some(device) => self.set_warning(format!(
-                            "Did not send macro \"{name}\": {device} is driving this terminal, so \
-                             keystrokes from here are not reaching it. Take it over first."
-                        )),
+                        Some(device) => {
+                            let device = device.unwrap_or_else(|| {
+                                crate::app::pty_ownership::UNNAMED_DEVICE.to_string()
+                            });
+                            self.set_warning(format!(
+                                "Did not send macro \"{name}\": {device} is driving this \
+                                 terminal, so keystrokes from here are not reaching it. Press \
+                                 Take over on the card covering it first."
+                            ))
+                        }
                         None => {
                             if self.may_type_into_focused_pty()
                                 && let Some(provider) = self.selected_terminal_surface_client()
@@ -2923,20 +2959,35 @@ impl App {
         // pasted literal `ESC[I` classifies as a focus report), so the
         // typing stamp is asserted directly at the tail.
         let mut normalized_paste_forwarded = false;
-        // While another device drives this pty no key reaches the child, so
-        // the palette chord is dux's here as everywhere else: the demoted cue
-        // names it as the way out, and a way out has to work where the cue
-        // shows. With nobody else driving, the chord rides to the child.
-        let demoted_palette_patterns = if self.focused_pty_driven_elsewhere().is_some() {
-            self.bindings.byte_patterns_for(Action::OpenPalette)
-        } else {
-            Vec::new()
-        };
+        // While another device drives this pty no key reaches the child, so the
+        // take-over card is covering this pane and two keys become dux's here
+        // exactly as they are in the windowed pane: the palette chord, because a
+        // way out of a covered pane has to work where the card shows, and the
+        // key that presses the card's button. The BYTES come from the bindings
+        // rather than a literal, or the card would name one key and answer
+        // another. With nobody else driving, both ride to the child untouched.
+        let (demoted_palette_patterns, demoted_takeover_patterns) =
+            if self.focused_pty_is_driven_elsewhere() {
+                (
+                    self.bindings.byte_patterns_for(Action::OpenPalette),
+                    self.bindings.byte_patterns_for(Action::FocusAgent),
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
         for parsed in &sequences {
             let seq = parsed.bytes.as_slice();
             if demoted_palette_patterns.iter().any(|p| p == seq) {
                 actions.push(SeqAction::Intercept(
                     Action::OpenPalette,
+                    false,
+                    seq.to_vec(),
+                ));
+                continue;
+            }
+            if demoted_takeover_patterns.iter().any(|p| p == seq) {
+                actions.push(SeqAction::Intercept(
+                    Action::FocusAgent,
                     false,
                     seq.to_vec(),
                 ));
@@ -3064,7 +3115,10 @@ impl App {
             // batch had already collected, and those bytes are counted by the
             // `Forward` arm above; the key itself writes nothing.
             SeqAction::Intercept(
-                Action::OpenMacroBar | Action::ToggleFullscreen | Action::OpenPalette,
+                Action::OpenMacroBar
+                | Action::ToggleFullscreen
+                | Action::OpenPalette
+                | Action::FocusAgent,
                 _,
                 _,
             ) => false,
@@ -3157,6 +3211,24 @@ impl App {
                         continue;
                     }
                     self.open_macro_bar();
+                    self.raw_input_buf.clear();
+                    self.raw_input_parser.clear();
+                    return Ok(false);
+                }
+                // Only reachable while the take-over card covers this pane (see
+                // the match above), which is the one state where this key means
+                // something other than "type into the child".
+                SeqAction::Intercept(Action::FocusAgent, _, _) => {
+                    flush_forward_batch(
+                        &mut forward_batch,
+                        is_scrolled_back,
+                        may_write_pty,
+                        &mut needs_selection_clear,
+                        &mut forwarded_to_pty,
+                        self.selected_terminal_surface_client(),
+                    );
+                    self.stamp_forwarded_input(&mut forwarded_to_pty);
+                    self.take_over_focused_pty();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
                     return Ok(false);
@@ -3344,6 +3416,12 @@ impl App {
                         &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
                     );
+                    // The take-over card covers the fullscreen grid too, and
+                    // takes its clicks first for the same reasons it does in the
+                    // windowed pane.
+                    if self.handle_takeover_card_mouse(&mouse_ev) {
+                        continue;
+                    }
                     let is_scroll = matches!(
                         mouse_ev.kind,
                         MouseEventKind::ScrollUp
@@ -8527,6 +8605,10 @@ impl App {
     /// arms one-for-one — only the trigger event differs.
     fn activate_button(&mut self, button: ButtonPressedTarget) -> bool {
         match button {
+            // The take-over card is not a modal and never rides
+            // `App::pressed_button`, so this dispatch cannot be reached for it;
+            // its own press field and handler own that gesture end to end.
+            ButtonPressedTarget::TakeOverCard => false,
             ButtonPressedTarget::PullRequestChooseProject => {
                 if let Err(e) = self.open_pull_request_project_picker() {
                     self.set_error(format!("{e:#}"));
@@ -9452,6 +9534,18 @@ impl App {
         // the child; see `handle_center_mouse_wheel`.)
         let windowed = matches!(self.fullscreen_overlay, FullscreenOverlay::None);
 
+        // THE TAKE-OVER CARD, ordered before every pane target below: while it
+        // covers the grid, a click there belongs to the card and never to the
+        // child, the selection or the tab strip underneath it. Scoped to the
+        // agent surface, because the startup-log viewer publishes the same rect
+        // and has no ownership question of its own.
+        if matches!(self.center_mode, CenterMode::Agent)
+            && !matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog)
+            && self.handle_takeover_card_mouse(&mouse)
+        {
+            return false;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if windowed && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
@@ -9640,6 +9734,71 @@ impl App {
     }
 
     /// Handle a mouse event for terminal text selection (click, drag, release).
+    /// THE TAKE-OVER CARD's answer to one mouse event. Returns whether the card
+    /// consumed it.
+    ///
+    /// The card covers the grid, so every event over the grid is the card's:
+    /// pressing its button and releasing inside it takes the terminal over
+    /// (dragging off cancels, the convention every other button in dux
+    /// follows), and everything else over the covered area is SWALLOWED. That
+    /// last part is the deliberate one. A press there starts no selection,
+    /// because there is nothing readable underneath to select and a highlight
+    /// the user cannot see would still copy the child's cells on release; and a
+    /// wheel scrolls nothing, because the card covers the viewport exactly as
+    /// the web's card covers xterm's.
+    ///
+    /// An in-flight press is tracked wherever the pointer goes, so a drag that
+    /// leaves the pane still ends in a released button rather than a stuck one.
+    pub(crate) fn handle_takeover_card_mouse(&mut self, mouse: &MouseEvent) -> bool {
+        if !self.focused_pty_is_driven_elsewhere() {
+            // The card can vanish under the pointer: the driver lets go, or this
+            // surface takes over, between the press and the release.
+            self.takeover_press = None;
+            return false;
+        }
+        let on_button = |app: &Self, mouse: &MouseEvent| {
+            app.mouse_layout.takeover_button.is_some_and(|rect| {
+                crate::app::modal::click_target(&[(rect, ())], mouse.column, mouse.row).is_some()
+            })
+        };
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) if on_button(self, mouse) => {
+                self.focus = FocusPane::Center;
+                self.takeover_press = Some(components::PressedButton {
+                    target: ButtonPressedTarget::TakeOverCard,
+                    inside: true,
+                });
+                true
+            }
+            MouseEventKind::Drag(_) if self.takeover_press.is_some() => {
+                let inside = on_button(self, mouse);
+                if let Some(press) = self.takeover_press.as_mut() {
+                    press.inside = inside;
+                }
+                true
+            }
+            MouseEventKind::Up(_) if self.takeover_press.is_some() => {
+                let held = self.takeover_press.take().is_some_and(|press| press.inside);
+                if held && on_button(self, mouse) {
+                    self.take_over_focused_pty();
+                }
+                true
+            }
+            _ => {
+                let covered = self
+                    .mouse_layout
+                    .agent_term
+                    .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row));
+                if covered && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    // A click on a pane still focuses it, which is the one thing
+                    // a click on the covered area may still do.
+                    self.focus = FocusPane::Center;
+                }
+                covered
+            }
+        }
+    }
+
     fn handle_terminal_selection_mouse(&mut self, mouse_ev: MouseEvent) {
         match mouse_ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -10242,6 +10401,7 @@ mod tests {
             terminal_list: Rect::default(),
             terminal_row_to_item: Vec::new(),
             agent_term: Some(Rect::new(21, 1, 55, 16)),
+            takeover_button: None,
             unstaged_list: Some(Rect::new(78, 1, 21, 8)),
             staged_list: Some(Rect::new(78, 9, 21, 5)),
             commit_area: Some(Rect::new(77, 14, 23, 6)),

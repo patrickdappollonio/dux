@@ -275,6 +275,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         center_mouse_forward: None,
         last_mouse_click: None,
         pressed_button: None,
+        takeover_press: None,
         interactive_patterns: crate::keybindings::InteractiveBytePatterns {
             bindings: Vec::new(),
         },

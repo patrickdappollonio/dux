@@ -178,13 +178,6 @@ pub enum Action {
     /// Palette-only: open the `[server] tailscale` picker. The web counterpart is
     /// the Preferences dialog's Tailscale row.
     SetTailscaleMode,
-    /// Palette-only: take over input for the terminal in the center pane, so this
-    /// device drives it and whichever device was driving becomes a watcher.
-    ///
-    /// Only ever meaningful while a background web server is serving: with nothing
-    /// serving there is no other device that could be driving anything, and the
-    /// action says so rather than pretending to act.
-    TakeOverTerminal,
     ToggleAlwaysShowTabs,
     /// Flip `ui.tab_reaches_agent`: whether the typeable center pane sends Tab
     /// and Shift-Tab to the agent instead of cycling panes with them.
@@ -339,7 +332,6 @@ impl Action {
             Action::StartBackgroundServer => "start_background_server",
             Action::StopBackgroundServer => "stop_background_server",
             Action::SetTailscaleMode => "set_tailscale_mode",
-            Action::TakeOverTerminal => "take_over_terminal",
             Action::ToggleAlwaysShowTabs => "toggle_always_show_tabs",
             Action::ToggleTabReachesAgent => "toggle_tab_reaches_agent",
             Action::OpenAgentInfo => "open_agent_info",
@@ -564,9 +556,6 @@ impl Action {
             Action::SetTailscaleMode => {
                 "Choose whether dux binds your Tailscale address: auto, yes, or no."
             }
-            Action::TakeOverTerminal => {
-                "Take over input for the center terminal from the device driving it."
-            }
             Action::ToggleAlwaysShowTabs => {
                 "Toggle always showing the agent tab strip, even with a single tab."
             }
@@ -725,7 +714,6 @@ impl Action {
             | Action::StartBackgroundServer
             | Action::StopBackgroundServer
             | Action::SetTailscaleMode
-            | Action::TakeOverTerminal
             | Action::ToggleAlwaysShowTabs
             | Action::ToggleTabReachesAgent
             | Action::OpenAgentInfo

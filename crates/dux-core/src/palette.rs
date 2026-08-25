@@ -188,14 +188,6 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // entry, because a preference is a row and never a menu item.
     },
     PaletteCommand {
-        action: Action::TakeOverTerminal,
-        name: "take-over-terminal",
-        description: "Drive the center terminal from here, demoting the device that has it",
-        // TUI-only, and the mirror of the web's Take over button: the web already
-        // has that button on the pane itself, so it needs no menu entry, and this
-        // is where the same gesture lives on this surface.
-    },
-    PaletteCommand {
         action: Action::ToggleProjectAutoReopenAgents,
         name: "toggle-project-auto-reopen-agents",
         description: "Opt the selected project in or out of startup agent reopening",

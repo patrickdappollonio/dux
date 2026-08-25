@@ -123,6 +123,13 @@ pub(crate) enum ButtonPressedTarget {
     /// the same press machinery so a mouse click behaves identically.
     FirstLoadPrimary,
     FirstLoadSecondary,
+    /// The take-over card's single button. The card is deliberately NOT a modal
+    /// (it must not block pane or tab navigation), so its press is tracked in a
+    /// field of its own rather than in `App::pressed_button`, which the modal
+    /// machinery owns and wipes on every non-prompt mouse event. What it shares
+    /// with every other button here is [`button_state_for`], so the pressed look
+    /// cannot drift from the rest of the app.
+    TakeOverCard,
 }
 
 /// In-flight state for a button the user is currently pressing. `target`
