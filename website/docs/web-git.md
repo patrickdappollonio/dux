@@ -12,9 +12,8 @@ chores too, so you rarely need to drop to a shell.
 
 The right-hand Changes pane tracks the focused agent's working tree. Files split into two
 collapsible groups, **Staged** and **Unstaged**, each with a count badge, and a filter box
-narrows a long list by path. Every row leads with a checkbox and then shows the file path,
-its status icon, and the green and red line counts. When the worktree is clean it says so
-plainly.
+narrows a long list by path. Every row leads with its status icon, then the file path and
+the green and red line counts. When the worktree is clean it says so plainly.
 
 Click any row to open its diff in the [code editor](/docs/web-editor), read-only and
 syntax-highlighted, HEAD against the working copy.
@@ -35,7 +34,7 @@ own selection, because the two carry opposite verbs.
 flips to **Select none** once they are all ticked. **Clear** is the wider one:
 it empties the whole selection, including rows a filter is hiding.
 
-![Two changed files ticked, with a bar above the list offering Stage 2, Discard 2 and Clear.](/screens/changes-bulk-bar.png)
+![Two changed files ticked, with a bar above the list offering Stage 2, Discard 2, Select all and Clear.](/screens/changes-bulk-bar.png)
 
 Staging and unstaging a selection is a single request: one git call, one refresh,
 one message telling you what happened. If a file moved out of its group between

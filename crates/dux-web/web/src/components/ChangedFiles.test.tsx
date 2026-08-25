@@ -9,6 +9,8 @@ import {
   within,
 } from "@testing-library/react"
 
+import type * as React from "react"
+
 import type { ChangesSlice, DuxState } from "@/lib/store"
 import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
 
@@ -59,6 +61,25 @@ vi.mock("@/lib/git", async (importOriginal) => {
     },
   }
 })
+
+// The real tooltip only mounts its popup into a portal on hover and needs a
+// ResizeObserver, which jsdom lacks. Render its `content` inline instead so a
+// test can assert what a row's status slot is wired to reveal, mirroring the
+// pattern used in Sidebar.test.tsx and PrBanner.test.tsx.
+vi.mock("@/components/SimpleTooltip", () => ({
+  SimpleTooltip: ({
+    children,
+    content,
+  }: {
+    children: React.ReactNode
+    content: React.ReactNode
+  }) => (
+    <>
+      {children}
+      <span data-testid="tooltip-content">{content}</span>
+    </>
+  ),
+}))
 
 const notifySuccess = vi.fn()
 const notifyWarning = vi.fn()
@@ -520,12 +541,55 @@ describe("the changes pane's multi-select", () => {
 
   // On a mouse the slot stays small and its click halo is suppressed, so a
   // near-miss lands on the row's open-diff click rather than on a checkbox the
-  // user cannot see reaching that far.
+  // user cannot see reaching that far. These are class pins: what the geometry
+  // actually measures is proven in the preview container, not by these strings.
   it("keeps the desktop slot small with the checkbox halo suppressed", () => {
     render(<ChangedFiles />)
     const box = screen.getByLabelText("Select a.ts")
     expect(box.className).toContain("after:hidden")
     expect(box.parentElement!.className).toContain("size-5")
+  })
+
+  // The reveal is keyed on KEYBOARD focus of the checkbox, never focus-within
+  // on the row: focus-within also fires when the row's ellipsis menu closes
+  // back onto its trigger, and when a mouse tick leaves the checkbox focused,
+  // stranding that row showing a checkbox and no marker.
+  it("reveals on keyboard focus of the checkbox, never on row focus-within", () => {
+    render(<ChangedFiles />)
+    const box = screen.getByLabelText("Select a.ts")
+    // The fading wrapper around the marker, not the marker glyph itself.
+    const markerWrap = box.parentElement!.querySelector('[role="img"]')!
+      .parentElement!
+    for (const el of [box, markerWrap]) {
+      expect(el.className).toContain("group-has-[[data-slot=checkbox]:focus-visible]:")
+      expect(el.className).not.toContain("group-focus-within:")
+    }
+  })
+
+  // Both of the row's hover reveals, this slot and the trailing ellipsis, run
+  // on the same duration and easing so they arrive together.
+  it("matches the trailing ellipsis's reveal timing", () => {
+    render(<ChangedFiles />)
+    const box = screen.getByLabelText("Select a.ts")
+    expect(box.className).toContain("duration-200")
+    expect(box.className).toContain("ease-out")
+  })
+
+  // The marker is pointer-transparent and fades on the very hover that would
+  // have opened its own tooltip, so the status word lives on the slot around
+  // it instead.
+  it("names the file's status in the slot's tooltip", () => {
+    render(<ChangedFiles />)
+    const row = screen.getByText("a.ts").closest('[role="row"]') as HTMLElement
+    const tip = within(row).getByTestId("tooltip-content")
+    expect(tip.textContent).toBe("Modified")
+    // Its trigger is the whole SLOT, the box holding both the marker and the
+    // checkbox, not the pointer-transparent marker inside it.
+    expect(
+      tip.previousElementSibling!.contains(screen.getByLabelText("Select a.ts")),
+    ).toBe(true)
+    // And the marker no longer carries a second tooltip of its own.
+    expect(within(row).getAllByTestId("tooltip-content")).toHaveLength(1)
   })
 
   // One baseline: the path and the +N/-N counts sit in one items-baseline
@@ -578,9 +642,11 @@ describe("the changes pane's selection on a touch screen", () => {
     media = null
   })
 
-  // A finger cannot hover, so the slot itself is the tap target: it shows the
-  // marker at rest and ticks the row when tapped.
-  it("ticks the row when the status slot is tapped", () => {
+  // A finger cannot hover, so the slot itself is the tap target. jsdom has no
+  // geometry, so this exercises the checkbox by its label; that the halo
+  // actually fills the slot is a measurement, pinned by class below and proven
+  // in the preview container.
+  it("ticks the row when the slot's checkbox is activated", () => {
     render(<ChangedFiles />)
     const box = screen.getByLabelText("Select a.ts")
     expect(box.getAttribute("aria-checked")).toBe("false")
@@ -590,14 +656,19 @@ describe("the changes pane's selection on a touch screen", () => {
     expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
   })
 
-  it("never opens the diff when the status slot is tapped", () => {
+  // A tap anywhere in the slot lands on the checkbox halo and bubbles to the
+  // slot wrapper, which is what has to stop it: this dispatches on the wrapper
+  // itself so the stopPropagation is what is being exercised.
+  it("never opens the diff when the slot itself is tapped", () => {
     render(<ChangedFiles />)
-    fireEvent.click(screen.getByLabelText("Select a.ts"))
+    const slot = screen.getByLabelText("Select a.ts").parentElement!
+    fireEvent.click(slot)
     expect(openEditor).not.toHaveBeenCalled()
   })
 
   // The 40px floor on BOTH axes, and the checkbox halo grown to fill it rather
-  // than suppressed the way the desktop one is.
+  // than suppressed the way the desktop one is. Class pins: the geometry they
+  // stand for is measured in the preview container.
   it("gives the slot the touch floor on both axes with a halo to match", () => {
     render(<ChangedFiles />)
     const box = screen.getByLabelText("Select a.ts")

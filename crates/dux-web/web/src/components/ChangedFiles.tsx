@@ -24,6 +24,7 @@ import { notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
 import { git } from "@/lib/git"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -95,7 +96,11 @@ const BULK_CONTROL = "h-9 max-md:h-11"
 // Mouse: a 20px box. The 14px glyph and the 16px checkbox both centre in it,
 // and the checkbox's own click halo is suppressed (`after:hidden` below) so a
 // near-miss lands on the row's open-diff click rather than on a target the
-// user cannot see.
+// user cannot see. A touchscreen that reports a FINE pointer (a pen tablet, a
+// hybrid laptop) lands here too: a fingertip inside the 16px box ticks the row
+// instead of opening the diff, which is the one direction that trade can go
+// wrong, and the neighbour it can be missed onto is the row's own read-only
+// diff click.
 const STATUS_SLOT_MOUSE = "size-5"
 // Touch: the slot IS the selection control, since a finger cannot hover, so it
 // carries the 40px floor on BOTH axes. Its only neighbours are the row's path
@@ -110,59 +115,77 @@ interface StatusSlotProps {
   onToggleSelected: (path: string) => void
 }
 
-// The status marker, which becomes the selection checkbox on hover, on focus
-// anywhere in the row, or while the row is checked.
+// The status marker, which becomes the selection checkbox on hover, on
+// keyboard focus of that checkbox, or while the row is checked.
 //
 // The checkbox is ALWAYS in the DOM and always focusable: the swap is opacity,
 // never `display`, so a keyboard user can reach it on a row nobody is hovering.
 // The marker keeps its `role="img"` label throughout for the same reason, so a
 // screen reader still hears the status of a row whose checkbox is showing.
 //
-// Known cost of the shared slot, accepted with the design: on a mouse the
-// marker's own tooltip is only reachable while the row is NOT hovered, which is
-// never, so the glyph and its colour carry the status visually and the label
-// carries it to assistive tech.
+// The status word stays reachable because the tooltip sits on the SLOT rather
+// than on the marker: hovering the slot reveals the checkbox and shows the
+// status at the same time.
 function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProps) {
   const coarse = useIsCoarsePointer()
-  const reveal = "transition-opacity duration-150 motion-reduce:transition-none"
+  const { label } = fileStatusMeta(status)
+  // Same duration and easing as the row's trailing ellipsis wrapper, so the two
+  // things a hover reveals on this row arrive together rather than at two
+  // visibly different speeds.
+  const reveal = "transition-opacity duration-200 ease-out motion-reduce:transition-none"
+  // Keyboard focus of the CHECKBOX reveals it, never focus-within on the row.
+  // focus-within also fires when the row's ellipsis menu closes and hands focus
+  // back to its trigger, and when a mouse tick leaves the checkbox focused,
+  // either of which would strand that one row showing a checkbox and no marker
+  // until focus moved on. `:focus-visible` keeps it to the keyboard.
+  const keyboard = "group-has-[[data-slot=checkbox]:focus-visible]:"
 
   return (
-    // The click stops here: base-ui re-dispatches the root's click onto its
-    // hidden input and both bubble, so without this every tick would also open
-    // the diff. There is deliberately no shift-click range: the rows carry no
-    // keyboard model, and a range gesture needs one to be reachable at all.
-    <div
-      className={cn(
-        "relative flex shrink-0 items-center justify-center",
-        coarse ? STATUS_SLOT_TOUCH : STATUS_SLOT_MOUSE,
-      )}
-      onClick={(e) => e.stopPropagation()}
-    >
-      <span
+    // The status tooltip belongs to the SLOT, not to the marker inside it: the
+    // marker is pointer-transparent and fades out on exactly the hover that
+    // would have opened its tooltip, so a tooltip on the marker itself is dead.
+    // Here it answers a hover or a keyboard focus of either state of the slot.
+    <SimpleTooltip content={label}>
+      {/* The click stops here: base-ui re-dispatches the root's click onto its
+          hidden input and both bubble, so without this every tick would also
+          open the diff. There is deliberately no shift-click range: the rows
+          carry no keyboard model, and a range gesture needs one to be
+          reachable at all. */}
+      <div
         className={cn(
-          "pointer-events-none absolute inset-0 flex items-center justify-center",
-          reveal,
-          "group-hover:opacity-0 group-focus-within:opacity-0",
-          selected && "opacity-0",
+          "relative flex shrink-0 items-center justify-center",
+          coarse ? STATUS_SLOT_TOUCH : STATUS_SLOT_MOUSE,
         )}
+        onClick={(e) => e.stopPropagation()}
       >
-        <FileStatusIcon status={status} />
-      </span>
-      <Checkbox
-        checked={selected}
-        onCheckedChange={() => onToggleSelected(path)}
-        aria-label={`Select ${path}`}
-        className={cn(
-          reveal,
-          "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
-          selected && "opacity-100",
-          // On touch the halo is the tap target and is grown to fill the slot
-          // exactly (16px box + 14px each side = 44px). On a mouse it is
-          // suppressed so it cannot reach past the slot into the path.
-          coarse ? "after:-inset-3.5" : "after:hidden",
-        )}
-      />
-    </div>
+        <span
+          className={cn(
+            "pointer-events-none absolute inset-0 flex items-center justify-center",
+            reveal,
+            "group-hover:opacity-0",
+            `${keyboard}opacity-0`,
+            selected && "opacity-0",
+          )}
+        >
+          <FileStatusIcon status={status} tooltip={false} />
+        </span>
+        <Checkbox
+          checked={selected}
+          onCheckedChange={() => onToggleSelected(path)}
+          aria-label={`Select ${path}`}
+          className={cn(
+            reveal,
+            "opacity-0 group-hover:opacity-100",
+            `${keyboard}opacity-100`,
+            selected && "opacity-100",
+            // On touch the halo is the tap target and is grown to fill the slot
+            // exactly (16px box + 14px each side = 44px). On a mouse it is
+            // suppressed so it cannot reach past the slot into the path.
+            coarse ? "after:-inset-3.5" : "after:hidden",
+          )}
+        />
+      </div>
+    </SimpleTooltip>
   )
 }
 
@@ -221,7 +244,8 @@ function FileRow({
       onClick={() => onOpenDiff(file.path)}
     >
       {/* Leading slot: the status marker, which becomes the selection checkbox
-          on hover, on focus, or while the row is checked. */}
+          on hover, on keyboard focus of the checkbox, or while the row is
+          checked. */}
       <StatusSlot
         status={file.status}
         path={file.path}

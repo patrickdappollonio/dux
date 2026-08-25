@@ -46,18 +46,29 @@ const COLORS: Record<FileStatusKind, string> = {
   other: "text-muted-foreground",
 }
 
-export function FileStatusIcon({ status }: { status: string }) {
+// `tooltip` defaults to true, which is what every ordinary site wants. It is
+// turned OFF only where the marker cannot own its own hover: the changes pane
+// stacks it under the selection checkbox and makes it pointer-transparent, so
+// the tooltip moves out to the slot around both and this one would be dead
+// weight (and a second popup on the same 20px box).
+export function FileStatusIcon({
+  status,
+  tooltip = true,
+}: {
+  status: string
+  tooltip?: boolean
+}) {
   const { kind, label } = fileStatusMeta(status)
   const Icon = ICONS[kind]
-  return (
-    <SimpleTooltip content={label}>
-      <span
-        role="img"
-        aria-label={label}
-        className={cn("inline-flex shrink-0", COLORS[kind])}
-      >
-        <Icon size={14} />
-      </span>
-    </SimpleTooltip>
+  const glyph = (
+    <span
+      role="img"
+      aria-label={label}
+      className={cn("inline-flex shrink-0", COLORS[kind])}
+    >
+      <Icon size={14} />
+    </span>
   )
+  if (!tooltip) return glyph
+  return <SimpleTooltip content={label}>{glyph}</SimpleTooltip>
 }
