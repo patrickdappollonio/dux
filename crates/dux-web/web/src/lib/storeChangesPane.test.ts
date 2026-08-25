@@ -290,13 +290,18 @@ describe("Changes-pane width", () => {
         pointerDown,
         armed,
         reshowPending: false,
+        // A real drag throughout this case: the pointer travelled and the
+        // browser never took the gesture away.
+        pointerMoved: true,
+        cancelled: false,
+        keyboardStep: false,
       })
 
     // Mid-drag the write waits: flipping the preference here unmounts the panel
     // under the library while the pointer is still down.
     expect(step(0, 26, true, false)).toBe("arm")
-    // The same collapse with nothing held down (a keyboard resize of the
-    // separator) has no gesture to wait for.
+    // The same collapse arriving after the drag has ended: the gesture moved,
+    // so there is nothing left to wait for.
     expect(step(0, 26, false, false)).toBe("commit")
     // Dragged back out before release: the escape hatch. Releasing now keeps
     // the pane.
@@ -308,6 +313,44 @@ describe("Changes-pane width", () => {
     expect(step(18, 26, true, false)).toBe("none")
     // A panel's first report has no previous size; it is not a collapse.
     expect(step(0, undefined, true, false)).toBe("none")
+  })
+
+  // The tablet bug, as a unit. A press that never moved cannot have dragged the
+  // pane shut, and a gesture the browser cancelled decided nothing at all. Both
+  // reach here as a collapse report, because react-resizable-panels 4.11.2
+  // drives the pane to zero from the `pointerleave` that follows a cancelled
+  // touch; the answer is to put the split back, never to write the preference.
+  it("changesPaneCollapseStep refuses a collapse no gesture asked for", async () => {
+    const mod = await loadStore()
+    const step = (args: {
+      pointerDown?: boolean
+      pointerMoved?: boolean
+      cancelled?: boolean
+      keyboardStep?: boolean
+    }) =>
+      mod.changesPaneCollapseStep({
+        percent: 0,
+        prevPercent: 26,
+        pointerDown: args.pointerDown ?? false,
+        armed: false,
+        reshowPending: false,
+        pointerMoved: args.pointerMoved ?? false,
+        cancelled: args.cancelled ?? false,
+        keyboardStep: args.keyboardStep ?? false,
+      })
+
+    // A press that went nowhere, still held.
+    expect(step({ pointerDown: true })).toBe("restore")
+    // The same press, already released.
+    expect(step({})).toBe("restore")
+    // A gesture that did travel but was then taken away by the browser. The
+    // user was scrolling a neighbour, not closing a pane.
+    expect(step({ pointerMoved: true, cancelled: true })).toBe("restore")
+    expect(step({ pointerDown: true, pointerMoved: true, cancelled: true })).toBe(
+      "restore",
+    )
+    // A keyboard step has no pointer to have moved, and is a deliberate act.
+    expect(step({ keyboardStep: true })).toBe("commit")
   })
 
   // A pane coming back from hidden re-mounts into whatever layout the library
@@ -330,6 +373,9 @@ describe("Changes-pane width", () => {
         pointerDown,
         armed,
         reshowPending: true,
+        pointerMoved: true,
+        cancelled: false,
+        keyboardStep: false,
       })
 
     // The dangerous one: it would commit immediately without this window.

@@ -45,6 +45,10 @@ single press cannot fold the whole thing away. Drag the sidebar narrow enough an
 snaps to its icon rail, which you reopen by clicking the same edge; drag the Changes
 split shut and the pane hides.
 
+Either divider lights up while you hold it, so a finger can tell it has the split and not
+the pane beside it. Only a real drag counts: tapping near a divider, or starting a drag
+the browser decides was a scroll, leaves both splits exactly where they were.
+
 A slim header shows breadcrumbs (agent, provider, project, branch) and a **cog** button
 that opens the app menu. The cog menu holds your preferences, the configuration dialogs,
 and the actions that apply to the whole workspace. Anything that acts on a *specific*

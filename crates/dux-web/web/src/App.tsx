@@ -67,6 +67,7 @@ import {
   TERMINAL_PANE_MIN_PERCENT,
   useDux,
 } from "@/lib/store"
+import { DIVIDER_DRAG_THRESHOLD_PX } from "@/lib/paneDivider"
 import { keyboardLikelyOpen } from "@/lib/viewport"
 
 // All dialogs and the toaster, rendered ONCE by `App()` above whichever shell
@@ -257,6 +258,27 @@ export function DesktopShell() {
   const collapseArmedRef = useRef(false)
   const collapseCommitRef = useRef<number | null>(null)
 
+  // WHAT SHAPE THE CURRENT GESTURE HAS. A press alone is not a drag, and a
+  // gesture the browser took away is not a decision. Both are read by
+  // `changesPaneCollapseStep`, whose comment carries the measurement: a tap
+  // beside the divider used to close the Changes pane and write that to the
+  // server.
+  //
+  // Neither is cleared on release. The layout report that carries an
+  // unwanted collapse arrives AFTER the gesture is over (Chrome fires
+  // `pointerleave` for a touch pointer once it is gone, and that is the event
+  // the panel library mishandles), so the verdict on the gesture has to
+  // outlive it. The next `pointerdown` resets both.
+  const pointerMovedRef = useRef(false)
+  const gestureCancelledRef = useRef(false)
+  const pointerOriginRef = useRef<{ x: number; y: number } | null>(null)
+
+  // The last width the Changes pane was seen at while it was genuinely open.
+  // Where a refused collapse is put back to, because it IS the split the
+  // gesture started from: an unwanted collapse takes the pane from this value
+  // to nothing in one report, with nothing in between.
+  const lastOpenPercentRef = useRef(mountPercent)
+
   // THE PERSISTENCE LATCH, riding the same gesture tracker. The panel reports a
   // layout for reasons that are not the user moving the divider: its own mount,
   // its unmount, and the re-show heal all publish one. Writing every report
@@ -305,6 +327,34 @@ export function DesktopShell() {
     [],
   )
 
+  // PUT A REFUSED COLLAPSE BACK. The panel really has been driven to zero by
+  // the library; refusing to write the preference only stops the pane being
+  // hidden, it does not restore its width, and a zero-width pane whose
+  // preference still says visible is the original stranding bug. So the split
+  // is pushed back to the width the pane was last genuinely open at, through
+  // the same imperative handle the re-show heal uses.
+  //
+  // Guarded the same way the heal is: a resize the library refuses must cost
+  // the reopen button one click, never the screen.
+  const restoreChangesPaneSplit = () => {
+    const handle = changesPanelRef.current
+    if (!handle) return
+    const percent = Math.max(
+      lastOpenPercentRef.current,
+      CHANGES_PANE_MIN_PERCENT,
+    )
+    try {
+      handle.resize(`${percent}%`)
+    } catch (err) {
+      console.warn(
+        "[dux] the Changes panel refused to go back to the width it was at before a cancelled gesture. Use the header's Changes button to reopen it.",
+        err,
+      )
+      return
+    }
+    setChangesPanePercent(percent)
+  }
+
   // The gesture tracker. One persistent subscription rather than a listener
   // installed when the latch arms: the latch needs to know whether a pointer is
   // down BEFORE it decides to arm, so the tracker has to be listening already,
@@ -322,8 +372,33 @@ export function DesktopShell() {
   // The commit runs while the panel is still mounted and the pointer is already
   // up, so the library is out of its drag by the time React unmounts anything.
   useEffect(() => {
-    const onDown = () => {
+    const onDown = (event: Event) => {
       pointerDownRef.current = true
+      pointerMovedRef.current = false
+      gestureCancelledRef.current = false
+      const point = event as PointerEvent
+      pointerOriginRef.current =
+        typeof point.clientX === "number"
+          ? { x: point.clientX, y: point.clientY }
+          : null
+    }
+    // A pointer has to TRAVEL before its gesture is allowed to decide
+    // anything. Measured against the press point rather than counting move
+    // events, because a finger resting on glass emits a stream of them without
+    // going anywhere.
+    const onMove = (event: Event) => {
+      if (!pointerDownRef.current || pointerMovedRef.current) return
+      const origin = pointerOriginRef.current
+      const point = event as PointerEvent
+      if (origin === null || typeof point.clientX !== "number") {
+        pointerMovedRef.current = true
+        return
+      }
+      const dx = Math.abs(point.clientX - origin.x)
+      const dy = Math.abs(point.clientY - origin.y)
+      if (Math.max(dx, dy) >= DIVIDER_DRAG_THRESHOLD_PX) {
+        pointerMovedRef.current = true
+      }
     }
     const onUp = () => {
       pointerDownRef.current = false
@@ -333,6 +408,16 @@ export function DesktopShell() {
       if (!collapseArmedRef.current) return
       collapseArmedRef.current = false
       scheduleCollapseCommit()
+    }
+    // THE BROWSER TOOK THE GESTURE AWAY. Nothing it produced is a decision:
+    // no preference write, no remembered split, and the collapse the panel
+    // library is about to report (see `changesPaneCollapseStep`) is undone
+    // rather than committed.
+    const onCancel = () => {
+      pointerDownRef.current = false
+      gestureCancelledRef.current = true
+      persistPendingRef.current = null
+      collapseArmedRef.current = false
     }
     // The library moves a separator from its own keydown handler and publishes
     // the new layout synchronously inside that same dispatch, so the flag only
@@ -346,13 +431,15 @@ export function DesktopShell() {
       })
     }
     window.addEventListener("pointerdown", onDown, true)
+    window.addEventListener("pointermove", onMove, true)
     window.addEventListener("pointerup", onUp, true)
-    window.addEventListener("pointercancel", onUp, true)
+    window.addEventListener("pointercancel", onCancel, true)
     window.addEventListener("keydown", onKeyDown, true)
     return () => {
       window.removeEventListener("pointerdown", onDown, true)
+      window.removeEventListener("pointermove", onMove, true)
       window.removeEventListener("pointerup", onUp, true)
-      window.removeEventListener("pointercancel", onUp, true)
+      window.removeEventListener("pointercancel", onCancel, true)
       window.removeEventListener("keydown", onKeyDown, true)
     }
   }, [])
@@ -440,13 +527,20 @@ export function DesktopShell() {
                   // latch above and `changesPaneCollapseStep`.
                   collapsible
                   onResize={(size, _id, prevSize) => {
+                    const percent = size.asPercentage
                     const step = changesPaneCollapseStep({
-                      percent: size.asPercentage,
+                      percent,
                       prevPercent: prevSize?.asPercentage,
                       pointerDown: pointerDownRef.current,
                       armed: collapseArmedRef.current,
                       reshowPending: reshowPendingRef.current,
+                      pointerMoved: pointerMovedRef.current,
+                      cancelled: gestureCancelledRef.current,
+                      keyboardStep: keyboardStepRef.current,
                     })
+                    if (percent >= CHANGES_PANE_COLLAPSE_EPSILON) {
+                      lastOpenPercentRef.current = percent
+                    }
                     if (step === "arm") {
                       collapseArmedRef.current = true
                     } else if (step === "disarm") {
@@ -454,6 +548,10 @@ export function DesktopShell() {
                     } else if (step === "commit") {
                       collapseArmedRef.current = false
                       scheduleCollapseCommit()
+                    } else if (step === "restore") {
+                      collapseArmedRef.current = false
+                      persistPendingRef.current = null
+                      restoreChangesPaneSplit()
                     }
                   }}
                 >

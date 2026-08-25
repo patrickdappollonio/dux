@@ -1,6 +1,9 @@
 import * as React from "react"
 
 import {
+  DIVIDER_STATE_ACTIVE,
+  DIVIDER_STATE_ATTR,
+  DIVIDER_STATE_INACTIVE,
   DIVIDER_TARGET_MIN,
   dividerCursor,
   dividerHitBand,
@@ -104,15 +107,44 @@ export function useDividerDrag(
     }
 
     const hits = (event: PointerEvent | MouseEvent) => {
+      const el = ref.current
+      if (el === null) return false
+      // THE PRESS THE BAND WOULD HAVE THROWN AWAY. A browser adjusts a touch
+      // point before it dispatches: Chrome grows a finger's contact area into a
+      // rectangle and picks the most plausible target inside it, which reaches
+      // about 20px on either side of a thin control. So a press the browser has
+      // ALREADY decided belongs to this divider can arrive with coordinates
+      // outside the divider's own band, and the rect test would refuse a
+      // gesture the platform had handed over. The strip between the two widths
+      // was dead: it neither resized nor scrolled.
+      //
+      // When the browser names the divider as the target, that verdict wins.
+      // The band still decides every press the browser gave to a NEIGHBOUR,
+      // which is the case it exists for (something painted over the divider
+      // must not be able to swallow the gesture).
+      const target = event.target
+      if (target === el || (target instanceof Node && el.contains(target))) {
+        return true
+      }
       const band = bandFor()
       return (
         band !== null && withinDividerBand(band, event.clientX, event.clientY)
       )
     }
 
+    // The held state, in the attribute react-resizable-panels' own separator
+    // uses, so one shared class lights both dividers under a finger.
+    const paintState = (active: boolean) => {
+      ref.current?.setAttribute(
+        DIVIDER_STATE_ATTR,
+        active ? DIVIDER_STATE_ACTIVE : DIVIDER_STATE_INACTIVE,
+      )
+    }
+
     const release = () => {
       activePointer = null
       claimCursor(owner, false)
+      paintState(false)
     }
 
     const finish = () => {
@@ -137,6 +169,7 @@ export function useDividerDrag(
       el?.focus({ preventScroll: true })
       el?.setPointerCapture?.(event.pointerId)
       claimCursor(owner, true)
+      paintState(true)
     }
 
     const onPointerMove = (event: PointerEvent) => {
@@ -196,6 +229,7 @@ export function useDividerDrag(
     }
 
     const el = ref.current
+    paintState(false)
     document.addEventListener("pointerdown", onPointerDown, true)
     document.addEventListener("pointermove", onPointerMove, true)
     document.addEventListener("pointerup", onPointerUp, true)

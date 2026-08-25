@@ -62,7 +62,13 @@ const { AppSidebar } = await import("./Sidebar")
 const { ResizableHandle, ResizablePanel, ResizablePanelGroup } = await import(
   "@/components/ui/resizable"
 )
-const { DIVIDER_CHROME, DIVIDER_TARGET_MIN } = await import("@/lib/paneDivider")
+const {
+  DIVIDER_ACTIVE_PAINT,
+  DIVIDER_CHROME,
+  DIVIDER_STACKING,
+  DIVIDER_STATE_ATTR,
+  DIVIDER_TARGET_MIN,
+} = await import("@/lib/paneDivider")
 const { sidebarWidthToPx } = await import("@/lib/sidebarResize")
 
 const mockState = {
@@ -122,6 +128,30 @@ describe("the two workspace dividers", () => {
     }
   })
 
+  // WHY STACKING IS A PARITY RULE. A divider is a sibling of the two panes it
+  // separates, so a pane painted later covers its transparent grab band, and a
+  // finger's press lands on the PANE. The pane's `touch-action` is `auto`, the
+  // browser claims the gesture as a scroll, and the divider never moves.
+  // Measured on a touch tablet: the Changes separator had no stacking of its
+  // own, so a press anywhere from its line to 9px on either side hit the
+  // changed-files list and closed the pane instead of dragging it.
+  it("both sit above the panes they separate", () => {
+    for (const el of [sidebarDivider(), changesDivider()]) {
+      expect(el.className.split(/\s+/)).toContain(DIVIDER_STACKING)
+    }
+  })
+
+  // `hover:` is unreachable with a finger, so a held divider looked exactly
+  // like an idle one on a touch screen. Both dividers publish the held state in
+  // the SAME attribute (react-resizable-panels' own `data-separator`), so one
+  // class lights both.
+  it("both paint a held state a finger can see", () => {
+    for (const el of [sidebarDivider(), changesDivider()]) {
+      expect(el.className.split(/\s+/)).toContain(DIVIDER_ACTIVE_PAINT)
+      expect(el.hasAttribute(DIVIDER_STATE_ATTR)).toBe(true)
+    }
+  })
+
   it("are both reachable and announced as separators", () => {
     for (const el of [sidebarDivider(), changesDivider()]) {
       expect(el.getAttribute("role")).toBe("separator")
@@ -172,6 +202,10 @@ describe("both dividers, driven by a finger", () => {
     HTMLElement.prototype,
     "offsetWidth",
   )
+  const realOffsetLeft = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    "offsetLeft",
+  )
 
   beforeEach(() => {
     HTMLElement.prototype.getBoundingClientRect = function () {
@@ -188,6 +222,22 @@ describe("both dividers, driven by a finger", () => {
         return span ? span[1] - span[0] : 0
       },
     })
+    // `offsetLeft` matters as much as the rects: react-resizable-panels 4.11.2
+    // sorts a group's children by `offsetLeft` (then by `offsetWidth`) to work
+    // out which panels each separator sits between. jsdom answers 0 for every
+    // element, so without this the hair-thin separator sorts FIRST, the library
+    // never pairs it with its panels, and it falls back to the bare gap between
+    // them. The drag still works, which is why this went unnoticed; everything
+    // that IDENTIFIES the separator (its focus, its `data-separator` state, its
+    // aria values) silently does not.
+    Object.defineProperty(HTMLElement.prototype, "offsetLeft", {
+      configurable: true,
+      get(this: HTMLElement) {
+        const key = layoutKey(this)
+        const span = key === null ? undefined : LAYOUT[key]
+        return span ? span[0] : 0
+      },
+    })
   })
 
   afterEach(() => {
@@ -200,6 +250,11 @@ describe("both dividers, driven by a finger", () => {
       )
     } else {
       delete (HTMLElement.prototype as { offsetWidth?: number }).offsetWidth
+    }
+    if (realOffsetLeft) {
+      Object.defineProperty(HTMLElement.prototype, "offsetLeft", realOffsetLeft)
+    } else {
+      delete (HTMLElement.prototype as { offsetLeft?: number }).offsetLeft
     }
   })
 
@@ -294,5 +349,59 @@ describe("both dividers, driven by a finger", () => {
     expect(dragSidebar()).toBe(288 + DRAG_BY)
     cleanup()
     expect(dragChanges()).toBeCloseTo(288 + DRAG_BY, 5)
+  })
+
+  // THE HELD STATE, driven rather than asserted from a class name. Both
+  // dividers must say "active" in the same attribute for the shared class to
+  // mean anything, and both must stop saying it when the finger lifts.
+  it("both report themselves active for the length of the gesture", () => {
+    for (const mount of [sidebarDivider, changesDivider]) {
+      const handle = mount()
+      handle.setPointerCapture = () => {}
+      expect(handle.getAttribute("data-separator")).not.toBe("active")
+      press(handle, EDGE_CENTRE)
+      expect(handle.getAttribute("data-separator"), mount.name).toBe("active")
+      move(EDGE_CENTRE + DRAG_BY)
+      expect(handle.getAttribute("data-separator")).toBe("active")
+      release(EDGE_CENTRE + DRAG_BY)
+      expect(handle.getAttribute("data-separator")).not.toBe("active")
+      cleanup()
+    }
+  })
+
+  // THE DEAD STRIP. A browser adjusts a touch point before dispatching it:
+  // Chrome grows a finger's contact area and picks the most plausible target
+  // inside it, which on a tablet reached about 20px either side of the thin
+  // sidebar edge. The press then arrived with the edge as its TARGET but with
+  // coordinates outside the 10px band the hook was testing, so it was thrown
+  // away: the strip between the two widths neither resized nor scrolled.
+  //
+  // 16px off centre is outside even the coarse band (which reaches 10px each
+  // way), so only the browser's own verdict can carry this press.
+  it("takes a press the browser has already given to the divider", () => {
+    localStorage.removeItem("dux:sidebar-width")
+    const handle = sidebarDivider()
+    handle.setPointerCapture = () => {}
+    const far = 16
+    press(handle, EDGE_CENTRE + far)
+    move(EDGE_CENTRE + far + DRAG_BY)
+    release(EDGE_CENTRE + far + DRAG_BY)
+    // Acquired, and still delta-based: the divider moved by the drag, not to
+    // the pointer.
+    expect(
+      sidebarWidthToPx(localStorage.getItem("dux:sidebar-width") ?? "0"),
+    ).toBe(288 + DRAG_BY)
+  })
+
+  // The band still decides a press the browser gave to a NEIGHBOUR. Without
+  // this the target rule would be a licence for anything to grab the divider.
+  it("still refuses a press outside the band that landed on something else", () => {
+    localStorage.removeItem("dux:sidebar-width")
+    const handle = sidebarDivider()
+    handle.setPointerCapture = () => {}
+    press(document.body, EDGE_CENTRE + 60)
+    move(EDGE_CENTRE + 60 + DRAG_BY)
+    release(EDGE_CENTRE + 60 + DRAG_BY)
+    expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
   })
 })

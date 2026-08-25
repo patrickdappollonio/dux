@@ -5605,11 +5605,17 @@ export function isChangesPaneDragCollapse(
 
 // What a layout report means for the drag-collapse latch.
 //
-//   arm     a collapse arrived mid-gesture; remember it, write nothing yet
-//   commit  write the preference now
-//   disarm  the pane came back out before the pointer was released
-//   none    nothing to do
-export type ChangesPaneCollapseStep = "none" | "arm" | "commit" | "disarm"
+//   arm      a collapse arrived mid-gesture; remember it, write nothing yet
+//   commit   write the preference now
+//   disarm   the pane came back out before the pointer was released
+//   restore  nobody asked for this; put the split back and write nothing
+//   none     nothing to do
+export type ChangesPaneCollapseStep =
+  | "none"
+  | "arm"
+  | "commit"
+  | "disarm"
+  | "restore"
 
 // WHY THE LATCH. Writing the visibility preference the instant the panel
 // reports zero unmounts the panel and its separator while the pointer is still
@@ -5636,15 +5642,47 @@ export type ChangesPaneCollapseStep = "none" | "arm" | "commit" | "disarm"
 // would hide the pane during the very act of showing it, and the user's click
 // would look like it did nothing. The re-show heal owns that window (it is the
 // thing that resizes the pane back to a real width); the latch stays out of it.
+// WHY A COLLAPSE CAN ARRIVE THAT NOBODY ASKED FOR, and why "restore" exists.
+//
+// Measured on a touch tablet, against react-resizable-panels 4.11.2. A press
+// that lands in the divider's grab band but on a NEIGHBOUR (which is what
+// happens when the neighbour is painted over the band) is still acquired by the
+// library, because it hit-tests a rectangle on the document rather than the
+// element. The neighbour's `touch-action` is `auto`, so the browser then claims
+// the same gesture as a scroll and sends `pointercancel`. The library has no
+// `pointercancel` listener, so its separator stays latched "active"; the
+// `pointerleave` Chrome fires next is handled as a move, and a move with no
+// recorded press point is read by its own code as a full-scale delta
+// (`clientX < 0 ? -100 : 100`). The pane is driven to zero, and the old rules
+// here read that as "the user dragged the pane shut" and wrote it to the
+// server. A tap near the divider closed the Changes pane.
+//
+// The stacking fix in lib/paneDivider.ts stops the press being stolen in the
+// first place. This is the second line: a collapse is believed only when the
+// gesture that produced it was real. Real means one of
+//
+//   - a pointer that actually travelled (`pointerMoved`), and was not taken
+//     away by the browser (`cancelled`), or
+//   - a keyboard step, which moves the separator with no pointer at all.
+//
+// Anything else is undone rather than committed, because the cost is not
+// symmetric: an unwritten collapse is one more drag, and a written one is a
+// pane that vanished and a preference changed on the server behind the user's
+// back.
 export function changesPaneCollapseStep(args: {
   percent: number
   prevPercent: number | undefined
   pointerDown: boolean
   armed: boolean
   reshowPending: boolean
+  pointerMoved: boolean
+  cancelled: boolean
+  keyboardStep: boolean
 }): ChangesPaneCollapseStep {
   if (args.reshowPending) return "none"
   if (isChangesPaneDragCollapse(args.percent, args.prevPercent)) {
+    if (args.keyboardStep) return "commit"
+    if (args.cancelled || !args.pointerMoved) return "restore"
     return args.pointerDown ? "arm" : "commit"
   }
   if (args.armed && args.percent >= CHANGES_PANE_COLLAPSE_EPSILON) {

@@ -272,7 +272,8 @@ function SidebarExpandStrip({
       }}
       className={cn(
         DIVIDER_CHROME,
-        "absolute inset-y-0 -right-px z-30 cursor-e-resize",
+        // Stacking comes from the shared chrome, which both dividers wear.
+        "absolute inset-y-0 -right-px cursor-e-resize",
       )}
     />
   )
@@ -365,7 +366,7 @@ function SidebarDragEdge({
       aria-valuenow={Math.round(sidebarWidthToPx(sidebarWidth))}
       tabIndex={0}
       onKeyDown={onKeyDown}
-      className={cn(DIVIDER_CHROME, "absolute inset-y-0 -right-px z-30")}
+      className={cn(DIVIDER_CHROME, "absolute inset-y-0 -right-px")}
     />
   )
 }

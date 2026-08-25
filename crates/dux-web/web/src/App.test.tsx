@@ -115,8 +115,22 @@ function stateWith(showChanges: boolean, percent = 26): DuxState {
 // jsdom has no PointerEvent constructor; the shell only reads the type, and it
 // listens on `window` in the capture phase, so a bare Event dispatched there is
 // exactly what it sees.
-function pointer(type: "pointerdown" | "pointerup" | "pointercancel"): void {
-  window.dispatchEvent(new Event(type))
+function pointer(
+  type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel",
+  clientX = 0,
+  clientY = 0,
+): void {
+  const event = new Event(type) as Event & { clientX: number; clientY: number }
+  event.clientX = clientX
+  event.clientY = clientY
+  window.dispatchEvent(event)
+}
+
+// A gesture that actually moved. A press that goes nowhere decides nothing, so
+// every test about a drag has to be a drag.
+function dragPointer(from = 0, to = 200): void {
+  pointer("pointerdown", from)
+  pointer("pointermove", to)
 }
 
 function panel(id: string): PanelProps | undefined {
@@ -255,12 +269,16 @@ describe("DesktopShell panel units", () => {
 })
 
 describe("DesktopShell drag-collapse", () => {
-  it("hides the pane through the preference when a collapse arrives with no gesture in flight", () => {
+  it("hides the pane through the preference when the keyboard collapses it", () => {
     mockState = stateWith(true)
     render(<DesktopShell />)
     const onResize = panel("changes-pane")!.onResize!
 
+    // The library moves its separator from its own keydown handler and reports
+    // the new layout inside that same dispatch. No pointer is involved, so the
+    // travel rule cannot speak for it; the keystroke does.
     act(() => {
+      window.dispatchEvent(new Event("keydown"))
       onResize(
         { asPercentage: 0, inPixels: 0 },
         "changes-pane",
@@ -282,7 +300,7 @@ describe("DesktopShell drag-collapse", () => {
     render(<DesktopShell />)
     const onResize = panel("changes-pane")!.onResize!
 
-    act(() => pointer("pointerdown"))
+    act(() => dragPointer())
     act(() => {
       onResize({ asPercentage: 0.5, inPixels: 8 }, "changes-pane", {
         asPercentage: 26,
@@ -318,7 +336,7 @@ describe("DesktopShell drag-collapse", () => {
     render(<DesktopShell />)
     const onResize = panel("changes-pane")!.onResize!
 
-    act(() => pointer("pointerdown"))
+    act(() => dragPointer())
     act(() => {
       onResize({ asPercentage: 0.5, inPixels: 8 }, "changes-pane", {
         asPercentage: 26,
@@ -334,6 +352,63 @@ describe("DesktopShell drag-collapse", () => {
     // Dragging past the snap and back out before letting go is the escape from
     // an accidental collapse; committing at the snap takes it away.
     expect(collapseFromDrag).not.toHaveBeenCalled()
+  })
+
+  // THE TABLET BUG. Measured on a 1180x820 touch viewport: a press within the
+  // divider's grab band but on the changed-files list beside it was still
+  // acquired by react-resizable-panels (it hit-tests a rectangle on the
+  // document, not the element), the browser then claimed the same touch as a
+  // scroll and sent `pointercancel`, and the `pointerleave` that followed was
+  // handled by the library as a move with no press point, which its own code
+  // reads as a full-scale delta. The pane went to zero and the shell wrote
+  // `show_changes_pane: false` to the server. A tap closed the Changes pane.
+  it("commits nothing when the browser cancels the gesture", () => {
+    mockState = stateWith(true)
+    nextChangesHandle = fakeHandle(26)
+    render(<DesktopShell />)
+    const onResize = panel("changes-pane")!.onResize!
+
+    act(() => {
+      pointer("pointerdown", 300)
+      pointer("pointercancel", 300)
+      // What the library reports out of the `pointerleave` that follows.
+      onResize({ asPercentage: 0, inPixels: 0 }, "changes-pane", {
+        asPercentage: 26,
+        inPixels: 400,
+      })
+    })
+    flushScheduled()
+
+    // No preference write, so the pane is still shown.
+    expect(collapseFromDrag).not.toHaveBeenCalled()
+    // And nothing remembered either: a cancelled gesture is not a decision.
+    expect(localStorage.getItem(SPLIT_KEY)).toBeNull()
+    // Refusing the write alone would leave a zero-width pane whose preference
+    // still says visible, which is the original stranding bug. The split goes
+    // back to where it was.
+    expect(nextChangesHandle!.resized).toEqual(["26%"])
+  })
+
+  it("commits nothing when a press never travelled", () => {
+    mockState = stateWith(true)
+    nextChangesHandle = fakeHandle(26)
+    render(<DesktopShell />)
+    const onResize = panel("changes-pane")!.onResize!
+
+    act(() => {
+      // Down and straight back up, a pixel of jitter apart: a tap.
+      pointer("pointerdown", 300)
+      pointer("pointermove", 301)
+      pointer("pointerup", 301)
+      onResize({ asPercentage: 0, inPixels: 0 }, "changes-pane", {
+        asPercentage: 26,
+        inPixels: 400,
+      })
+    })
+    flushScheduled()
+
+    expect(collapseFromDrag).not.toHaveBeenCalled()
+    expect(nextChangesHandle!.resized).toEqual(["26%"])
   })
 
   it("says nothing about an ordinary resize, or about a panel's first report", () => {
@@ -520,7 +595,7 @@ describe("DesktopShell remembered split", () => {
 
     // A drag: pointer down, the panel reports as it moves, pointer up.
     act(() => {
-      pointer("pointerdown")
+      dragPointer()
     })
     reportLayout(40)
     act(() => {
@@ -588,7 +663,7 @@ describe("DesktopShell remembered split", () => {
     render(<DesktopShell />)
 
     act(() => {
-      pointer("pointerdown")
+      dragPointer()
     })
     reportLayout(85)
     act(() => {
@@ -602,7 +677,7 @@ describe("DesktopShell remembered split", () => {
     render(<DesktopShell />)
 
     act(() => {
-      pointer("pointerdown")
+      dragPointer()
     })
     reportLayout(0)
     act(() => {
