@@ -248,15 +248,70 @@ impl<'a> Button<'a> {
             .border_style(Style::default().fg(border_color));
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
+        // CENTERED BY HAND, not by `Alignment::Center`. Ratatui centers with
+        // `(area_width / 2) - (label_width / 2)`, which halves each width on its
+        // own and so rounds an odd label's offset UP: a nine-character label in a
+        // fourteen-column button got three columns of padding on the left and two
+        // on the right, one cell right of centre. Splitting the slack itself puts
+        // the odd column on the right instead, which is where every other centred
+        // thing in the app puts it, and leaves every even case exactly where it
+        // already was.
+        //
+        // Measured in chars, the same unit `button_width_for` sizes the button in,
+        // so the two cannot disagree about where the label ends.
+        let label_w = u16::try_from(self.label.chars().count()).unwrap_or(u16::MAX);
+        let pad = inner.width.saturating_sub(label_w) / 2;
+        let label_area = Rect {
+            x: inner.x.saturating_add(pad),
+            width: inner.width.saturating_sub(pad),
+            ..inner
+        };
         Paragraph::new(Line::from(Span::styled(self.label, label_style)))
-            .alignment(Alignment::Center)
-            .render(inner, frame.buffer_mut());
+            .alignment(Alignment::Left)
+            .render(label_area, frame.buffer_mut());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The label is centred, and an odd column of slack falls on the RIGHT.
+    ///
+    /// Ratatui's `Alignment::Center` halves each width on its own
+    /// (`area / 2 - label / 2`), so an odd label in an even button came out one
+    /// cell right of centre: "Take over" sat with three columns of padding on
+    /// the left and two on the right. Measured off a rendered frame rather than
+    /// asserted about the arithmetic, because the arithmetic is exactly what was
+    /// wrong.
+    #[test]
+    fn a_buttons_label_is_centred_with_any_odd_column_on_the_right() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // "Take over" is 9 characters in the 16-wide minimum button: 5 columns
+        // of slack, which cannot split evenly. "Cancel" is 6, which can.
+        for (label, want_left, want_right) in [("Take over", 2, 3), ("Cancel", 4, 4)] {
+            let width = button_width_for(label);
+            let mut terminal = Terminal::new(TestBackend::new(width, 3)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    Button::new(label).render(frame, frame.area(), &Theme::default_dark());
+                })
+                .expect("render frame");
+            let buffer = terminal.backend().buffer();
+            let inside: Vec<String> = (1..width - 1)
+                .map(|x| buffer[(x, 1u16)].symbol().to_string())
+                .collect();
+            let left = inside.iter().take_while(|c| *c == " ").count();
+            let right = inside.iter().rev().take_while(|c| *c == " ").count();
+            assert_eq!(
+                (left, right),
+                (want_left, want_right),
+                "\"{label}\" in a {width}-wide button rendered as {inside:?}"
+            );
+        }
+    }
 
     #[test]
     fn button_width_for_short_label_clamps_to_min() {

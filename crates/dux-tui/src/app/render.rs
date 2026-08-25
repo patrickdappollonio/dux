@@ -3018,16 +3018,21 @@ impl App {
         );
         let prose_rows = u16::try_from(prose_lines.len()).unwrap_or(u16::MAX);
 
+        // One blank row under the title border, matching the blank row above the
+        // button: the card's body sits inside a ring of space rather than
+        // starting hard against the line that names the device.
+        const TOP_PADDING: u16 = 1;
         let available_h = area.height.saturating_sub(2);
-        let (show_prose, inner_h) = if available_h >= prose_rows.saturating_add(1 + button_h) {
-            (true, prose_rows + 1 + button_h)
-        } else if available_h >= button_h {
-            // The BUTTON is the way out, so it is the half that survives a pane
-            // too short to carry the sentence as well.
-            (false, button_h)
-        } else {
-            return;
-        };
+        let (show_prose, inner_h) =
+            if available_h >= prose_rows.saturating_add(TOP_PADDING + 1 + button_h) {
+                (true, TOP_PADDING + prose_rows + 1 + button_h)
+            } else if available_h >= button_h {
+                // The BUTTON is the way out, so it is the half that survives a pane
+                // too short to carry the sentence as well.
+                (false, button_h)
+            } else {
+                return;
+            };
 
         let card = Rect::new(
             area.x + (area.width - (inner_w + 2)) / 2,
@@ -3045,6 +3050,7 @@ impl App {
 
         let mut y = inner.y;
         if show_prose {
+            y += TOP_PADDING;
             Paragraph::new(prose_lines)
                 .alignment(ratatui::layout::Alignment::Center)
                 .render(
@@ -14028,6 +14034,54 @@ mod tests {
             assert!(!app.center_typeable());
             let (mut terminal, _) = draw_caret_frame(&mut app);
             terminal.backend_mut().assert_cursor_position((0u16, 0u16));
+        }
+    }
+
+    /// A Confirm-family modal's buttons centre their labels too.
+    ///
+    /// The take-over card's button was found one cell right of centre, and the
+    /// cause was in the SHARED button widget rather than in the card, so this
+    /// pins the fix where every other button in the app renders: the confirm
+    /// pair of an ordinary modal, measured off the drawn frame.
+    #[test]
+    fn a_confirm_modals_button_labels_are_centred_in_their_buttons() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmQuit {
+            agent_count: 1,
+            terminal_count: 0,
+            focus: ConfirmFocus::Cancel,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buffer = terminal.backend().buffer();
+
+        let OverlayMouseLayout::ConfirmQuit {
+            cancel_button,
+            quit_button,
+        } = app.overlay_layout.active
+        else {
+            panic!("the quit confirm publishes its two buttons");
+        };
+
+        for (name, button) in [("cancel", cancel_button), ("quit", quit_button)] {
+            // The label row is the middle one of the three-row button; its
+            // padding is whatever whitespace is left at each end of the inside.
+            let inside: Vec<String> = ((button.x + 1)..(button.x + button.width - 1))
+                .map(|x| buffer[(x, button.y + 1)].symbol().to_string())
+                .collect();
+            let left = inside.iter().take_while(|c| *c == " ").count();
+            let right = inside.iter().rev().take_while(|c| *c == " ").count();
+            assert!(
+                right == left || right == left + 1,
+                "the {name} button's label must be centred, with any odd column \
+                 on the right: left {left}, right {right}, inside {}",
+                inside.len()
+            );
         }
     }
 

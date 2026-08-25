@@ -2257,4 +2257,86 @@ mod tests {
             "no seat means no gate: the resize goes straight to the child"
         );
     }
+
+    /// The card's shape: a blank row under the title border, the prose, a blank
+    /// row, then the button. The top padding is the counterpart of the blank row
+    /// above the button, so the body sits inside a ring of space instead of
+    /// starting hard against the line that names the driving device.
+    #[test]
+    fn the_card_pads_one_blank_row_under_its_title_border() {
+        let (app, rows) = render_with_a_browser_driving(Some(REAL_CHROME_UA));
+        let button = app.mouse_layout.takeover_button.expect("the button is up");
+
+        // The title border names the driving device, so it is the one row above
+        // the button that cannot be confused with anything else on screen.
+        let title_row = u16::try_from(
+            rows.iter()
+                .position(|row| row.contains("Open on Chrome on macOS"))
+                .expect("the card's titled top border is on screen"),
+        )
+        .expect("a screen row index fits");
+        assert!(title_row < button.y, "the title is above the button");
+
+        let card_columns = |y: u16| {
+            rows[y as usize]
+                .chars()
+                .skip(button.x as usize)
+                .take(button.width as usize)
+                .collect::<String>()
+        };
+        assert!(
+            card_columns(title_row + 1).trim().is_empty(),
+            "the row under the title border is blank: {:?}",
+            card_columns(title_row + 1)
+        );
+        assert!(
+            !card_columns(title_row + 2).trim().is_empty(),
+            "and the prose starts on the row after it: {:?}",
+            card_columns(title_row + 2)
+        );
+        assert!(
+            card_columns(button.y - 1).trim().is_empty(),
+            "the blank row above the button is still there: {:?}",
+            card_columns(button.y - 1)
+        );
+    }
+
+    /// The button's label is CENTRED in it, within the one column an odd slack
+    /// leaves over, and that column falls on the right.
+    ///
+    /// Ratatui's own `Alignment::Center` halves each width separately
+    /// (`area / 2 - label / 2`), which rounds an odd label's offset up and put
+    /// this nine-character label one cell right of centre inside its fourteen
+    /// column button. The shared button widget splits the slack itself now, so
+    /// this measures the rendered cells rather than trusting the widget.
+    #[test]
+    fn the_cards_button_label_is_centred_in_it() {
+        let (app, rows) = render_with_a_browser_driving(Some(REAL_CHROME_UA));
+        let button = app.mouse_layout.takeover_button.expect("the button is up");
+
+        let (left, right, inner_w) = label_padding(&rows, button);
+        assert_eq!(
+            left + right + "Take over".chars().count(),
+            inner_w,
+            "the label and its padding fill the button's inside"
+        );
+        assert!(
+            right == left || right == left + 1,
+            "padding must be even, or one column longer on the right: \
+             left {left}, right {right}, inside {inner_w}"
+        );
+    }
+
+    /// The padding on either side of a button's label, measured off the drawn
+    /// frame: `(left, right, inner width)`.
+    fn label_padding(rows: &[String], button: ratatui::layout::Rect) -> (usize, usize, usize) {
+        let inner: Vec<char> = rows[(button.y + 1) as usize]
+            .chars()
+            .skip(button.x as usize + 1)
+            .take(button.width as usize - 2)
+            .collect();
+        let left = inner.iter().take_while(|c| **c == ' ').count();
+        let right = inner.iter().rev().take_while(|c| **c == ' ').count();
+        (left, right, inner.len())
+    }
 }
