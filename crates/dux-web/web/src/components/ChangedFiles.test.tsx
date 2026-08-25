@@ -673,7 +673,7 @@ describe("the changes pane's selection on a touch screen", () => {
     render(<ChangedFiles />)
     const box = screen.getByLabelText("Select a.ts")
     expect(box.parentElement!.className).toContain("size-11")
-    expect(box.className).toContain("after:-inset-3.5")
+    expect(box.className).toContain("after:-inset-[15px]")
     expect(box.className).not.toContain("after:hidden")
   })
 })

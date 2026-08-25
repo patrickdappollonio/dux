@@ -179,9 +179,11 @@ function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProp
             `${keyboard}opacity-100`,
             selected && "opacity-100",
             // On touch the halo is the tap target and is grown to fill the slot
-            // exactly (16px box + 14px each side = 44px). On a mouse it is
+            // exactly. The pseudo-element is sized from the padding box, which
+            // is 14px inside the 16px bordered box, so 15px a side makes 44px
+            // (measured; 14px left a 1px inert ring). On a mouse it is
             // suppressed so it cannot reach past the slot into the path.
-            coarse ? "after:-inset-3.5" : "after:hidden",
+            coarse ? "after:-inset-[15px]" : "after:hidden",
           )}
         />
       </div>
