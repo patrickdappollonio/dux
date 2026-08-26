@@ -26,6 +26,12 @@ import {
   insertIntoComposeDraft,
 } from "@/lib/composebar"
 import { notifyError } from "@/lib/notify"
+import {
+  composeDraft,
+  peekComposeDraft,
+  setComposeDraft,
+  useDux,
+} from "@/lib/store"
 import { pasteIntoTerm } from "@/lib/termClipboard"
 import type { PtySocket } from "@/lib/ptySocket"
 import { arrowSeq, ESC, pageKeySeq } from "@/lib/termkeys"
@@ -80,6 +86,35 @@ export function typingSurfaceHasFocusIn(refs: TypingSurfaceRefs): boolean {
   return active === (refs.termRef.current?.textarea ?? null)
 }
 
+/// MAY AN AUTOMATIC FOCUS MOVE HAPPEN RIGHT NOW? Pure, because the answer is a
+/// rule rather than a state, and because raising a soft keyboard at the wrong
+/// moment is exactly the kind of thing that is easier to argue about than to
+/// observe.
+///
+/// Focusing summons the keyboard on a phone, so it waits for the pane to have
+/// RECONCILED rather than for it to merely believe something:
+///
+///   - `isOwner` alone is not enough, because before the handshake it is only
+///     the foreground guess. `ownershipConfirmed` is the server's answer.
+///   - the replay for the CURRENT attach epoch must be on screen. A keyboard over
+///     a pane that is still reconciling covers a placeholder.
+///   - an IME composition in flight is never interrupted: moving focus mid
+///     composition destroys the half-typed text and its candidate popup.
+///
+/// It governs AUTOMATIC moves only. A user tapping the box focuses it themselves,
+/// and nothing here second-guesses that.
+export function typingFocusAllowed(ctx: {
+  isOwner: boolean
+  ownershipConfirmed: boolean
+  replayApplied: boolean
+  composing: boolean
+}): boolean {
+  if (!ctx.isOwner) return false
+  if (!ctx.ownershipConfirmed) return false
+  if (!ctx.replayApplied) return false
+  return !ctx.composing
+}
+
 // Accessory-bar key sends. Esc/Tab/arrows are full sequences, not single
 // chars, so they bypass `applyModifiers` (which only transforms single-char
 // input). We still honor a latched Alt by prefixing ESC, and we clear any
@@ -89,6 +124,9 @@ export function typingSurfaceHasFocusIn(refs: TypingSurfaceRefs): boolean {
 export type InputSurfaceDeps = TypingSurfaceRefs & {
   ptyRef: { current: PtySocket | null }
   ownership: OwnershipVerdict
+  /// The pane target this draft belongs to: an agent tab id or a terminal id.
+  /// Drafts are keyed by it, so switching agents keeps each pane's own text.
+  targetId: string
 }
 
 export type InputSurface = {
@@ -97,9 +135,13 @@ export type InputSurface = {
   alt: boolean
   /// The latch channel, whose only writer is this unit.
   mods: ModifierLatch
-  /// The compose draft. It lives HERE and not in `ComposeBar` precisely so the
-  /// bar can unmount (a preference flip, a rotation past the mobile
-  /// breakpoint) without destroying in-progress text.
+  /// The compose draft. It lives in the STORE, keyed by target id, and this hook
+  /// reads and writes it there. That is a stronger guarantee than the hook state
+  /// it replaces, which survived the bar unmounting (a preference flip, a
+  /// rotation past the mobile breakpoint) but not the pane REMOUNTING, and the
+  /// pane is remounted by `reconnect()` bumping `terminalEpoch`, which is the
+  /// Retry button a user presses after a bad network. The draft now also survives
+  /// that, and a `pagehide`/`pageshow` round trip with it.
   composeText: string
   setComposeText: (value: string) => void
   focusTypingSurface: () => void
@@ -116,7 +158,7 @@ export type InputSurface = {
 }
 
 export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
-  const { live, composeInputRef, termRef, ptyRef, ownership } = deps
+  const { live, composeInputRef, termRef, ptyRef, ownership, targetId } = deps
   const refs: TypingSurfaceRefs = { live, composeInputRef, termRef }
   const focusTypingSurface = () => focusTypingSurfaceIn(refs)
   const typingSurfaceHasFocus = () => typingSurfaceHasFocusIn(refs)
@@ -141,7 +183,8 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
     [],
   )
 
-  const [composeText, setComposeText] = useState("")
+  const composeText = composeDraft(useDux(), targetId)
+  const setComposeText = (value: string) => setComposeDraft(targetId, value)
   // Where the caret should land after a programmatic draft splice (a picked
   // macro inserting into the draft). A controlled textarea re-renders on the
   // value change and the browser parks the caret at the end of the new value,
@@ -179,19 +222,19 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
     const el = composeInputRef.current
     const selectionStart = el === null ? null : el.selectionStart
     const selectionEnd = el === null ? null : el.selectionEnd
-    setComposeText((prev) => {
-      const { next, caret } = insertIntoComposeDraft(
-        prev,
-        selectionStart,
-        selectionEnd,
-        text,
-      )
-      // A ref write inside the updater is idempotent: the same inputs yield
-      // the same caret on a re-run. The caret-placement effect applies it once
-      // the new draft value reaches the DOM.
-      pendingComposeCaretRef.current = caret
-      return next
-    })
+    const { next, caret } = insertIntoComposeDraft(
+      // Read at CALL time, not off this render's closure: the sink is registered
+      // once and outlives every keystroke after it.
+      peekComposeDraft(targetId),
+      selectionStart,
+      selectionEnd,
+      text,
+    )
+    // The caret-placement effect applies this once the new draft value reaches
+    // the DOM. The store write is idempotent, so a StrictMode double invoke
+    // splices the same way twice rather than twice over.
+    pendingComposeCaretRef.current = caret
+    setComposeText(next)
     // The draft the text just joined is where editing continues; the active
     // typing surface here IS the compose textarea.
     focusTypingSurface()

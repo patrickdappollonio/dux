@@ -53,6 +53,9 @@ import {
   notifyWarning,
   setStatusClearSeconds,
 } from "./notify"
+import { publishConnectionTiming } from "./connectionTiming"
+import { clearServerValidated, noteServerValidated } from "./serverValidated"
+import { registerPageLifecycle } from "./pageLifecycle"
 import { worktreeDeleteReport } from "./worktreeDelete"
 import { attentionCountForSurface, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
@@ -300,6 +303,17 @@ export interface DuxState {
   // already-focused pane (same target id) must re-issue `subscribe` to attach to
   // the new provider. Folded into the pane's React key alongside the target id.
   terminalEpoch: number
+  /// THE COMPOSE DRAFTS, keyed by target id (an agent tab id or a terminal id).
+  ///
+  /// They live here rather than in the pane precisely because `reconnect()` bumps
+  /// `terminalEpoch` to REMOUNT the pane, and the Retry button that bumps it is
+  /// the thing a user reaches for after a bad network, which is exactly when they
+  /// are most likely to have an unsent message typed. Hook state died with that
+  /// remount, and so did the message.
+  ///
+  /// Keyed rather than single, so switching agents keeps each pane's draft, and
+  /// entries are dropped only when their target leaves the spine.
+  composeDrafts: Record<string, string>
   commitTarget: string | null
   commitDraft: string
   deleteTarget: string | null
@@ -853,6 +867,7 @@ let state: DuxState = {
   selectedTarget: null,
   selectedSessionId: null,
   terminalEpoch: 0,
+  composeDrafts: {},
   commitTarget: null,
   commitDraft: "",
   deleteTarget: null,
@@ -1021,6 +1036,13 @@ export const eventsSocket = new EventsSocket(
 // site.
 eventsSocket.subscribe(["sessions", "projects", "config"])
 
+// PAGE LIFECYCLE for the app-wide socket. `pagehide` closes it (a page held in
+// the bfcache with an open socket is evicted anyway, and the server keeps a
+// phantom connection until its next send fails), `pageshow` and Chromium's
+// `resume` reopen it plain, and `freeze` parks it. It lives as long as the page
+// does, so the registration is never retired.
+registerPageLifecycle(eventsSocket)
+
 // A `session.changes` event invalidates one session's changed files. Refetch
 // when it is the selected session AND (the slice is in error — always re-fetch
 // to self-heal, since the error path has no usable rev) OR the event's rev is at
@@ -1188,7 +1210,15 @@ async function loadServerIdentityBaseline(): Promise<void> {
 // reload discards whatever it produced.
 async function reloadIfServerChanged(): Promise<void> {
   const current = await fetchServerIdentity()
-  if (serverChanged(serverIdentityBaseline, current)) reloadPage()
+  if (serverChanged(serverIdentityBaseline, current)) {
+    reloadPage()
+    return
+  }
+  // The check has RESOLVED and the run has not moved, which is the moment a PTY
+  // socket may attach again. `conn === "open"` is true a whole round trip before
+  // this, and attaching an agent's pty launches its provider, so the gate reads
+  // this signal and never that one. See `serverValidated.ts`.
+  noteServerValidated()
 }
 
 // After a (re)connect the socket has re-sent the whole interest set; re-fetch so
@@ -1412,6 +1442,10 @@ function applyBootstrap(b: Bootstrap): void {
   // notification raised anywhere in the app, including one raised from a mount
   // effect that ran long before the bootstrap document landed.
   setStatusClearSeconds(b.status_clear_seconds)
+  // The four connection timings, on the same idiom and for the same reason: the
+  // socket, cover and heartbeat callbacks that read them are long-lived, so they
+  // read through the module rather than closing over a render's copy.
+  publishConnectionTiming(b)
   setState({
     bootstrap: b,
     changesPaneOverride:
@@ -1594,6 +1628,11 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
     spine,
     startedDormantTabs:
       prunedDormant.length === state.startedDormantTabs.length ? state.startedDormantTabs : prunedDormant,
+    // A draft outlives a remount on purpose; it must not outlive its TARGET. An
+    // agent tab or terminal that has left the spine has no surface to type into
+    // and no way back to one, so its unsent text is unreachable rather than
+    // preserved.
+    composeDrafts: pruneComposeDrafts(state.composeDrafts, spine),
     pendingSessionOrder: reconcilePendingSessionOrder(spine, state.pendingSessionOrder),
     pendingProjectOrder: reconcilePendingProjectOrder(spine, state.pendingProjectOrder),
     pendingAgentOrder: reconcilePendingAgentOrder(spine, state.pendingAgentOrder),
@@ -1928,6 +1967,11 @@ eventsSocket.onConn = (conn) => {
   // falls back to scope `All` (broadcast) — visible to this client once it
   // reconnects, the safe default. The next `connected` frame re-issues a fresh id.
   if (conn === "closed" || conn === "failed") setConnectionId(null)
+  // Every drop owes a fresh run-identity check before any PTY socket attaches
+  // again: what was confirmed was confirmed about a connection that is gone, and
+  // the server may have been replaced in the gap. The next `onOpen`'s probe
+  // re-publishes it.
+  if (conn === "closed" || conn === "failed") clearServerValidated()
   // The per-session changed-files subscription re-establishes on reconnect in
   // `eventsSocket.onOpen` (which also refetches); nothing to re-arm here.
 }
@@ -5519,13 +5563,65 @@ export function navigateUp(): void {
   selectSessionRoute(null, urlMode)
 }
 
+/// Drop every draft whose target is no longer in the spine. Returns the SAME
+/// object when nothing changed, so an unrelated spine push does not invalidate
+/// every subscriber that reads the map.
+function pruneComposeDrafts(
+  drafts: Record<string, string>,
+  spine: Spine,
+): Record<string, string> {
+  const live = new Set<string>()
+  for (const session of spine.sessions) {
+    for (const tab of session.tabs) live.add(tab.id)
+  }
+  for (const terminal of spine.terminals) live.add(terminal.id)
+  const keys = Object.keys(drafts)
+  const kept = keys.filter((id) => live.has(id))
+  if (kept.length === keys.length) return drafts
+  const next: Record<string, string> = {}
+  for (const id of kept) next[id] = drafts[id]
+  return next
+}
+
+/// Record (or clear) one target compose draft. Called on every keystroke in the
+/// box, so it writes only when the value really moved.
+export function setComposeDraft(targetId: string, text: string): void {
+  if (composeDraft(state, targetId) === text) return
+  const next = { ...state.composeDrafts }
+  if (text === "") delete next[targetId]
+  else next[targetId] = text
+  setState({ composeDrafts: next })
+}
+
+/// One target draft read at CALL time, outside a render. The compose-insert sink
+/// is registered once and lives across every later keystroke, so reading the
+/// draft out of its render closure would splice a macro into whatever the box
+/// held when the sink was registered.
+export function peekComposeDraft(targetId: string): string {
+  return composeDraft(state, targetId)
+}
+
+/// One target draft, or the empty string.
+///
+/// The map is read defensively because a great many component tests build their
+/// `DuxState` as a deliberately partial fixture cast through `unknown`, and a
+/// selector that assumes a field is present turns every one of them into a crash
+/// the moment a new field is added. Production always has the map.
+export function composeDraft(s: DuxState, targetId: string): string {
+  return (s.composeDrafts as Record<string, string> | undefined)?.[targetId] ?? ""
+}
+
 export function reconnect(): void {
-  // Both sockets give up after the shared MAX_RECONNECT_ATTEMPTS and signal
-  // "failed"; a manual Retry must restore EVERYTHING. connect() resets the events
-  // socket's closedByUser/attempts/delay (safe on an exhausted socket), and the
-  // `terminalEpoch` bump remounts the focused TerminalPane so its (now-capped)
-  // PtySocket reconnects with a fresh budget too. Without the bump, one Retry
-  // would revive the spine but leave the terminal dead.
+  // Retrying is indefinite now, so this is not a rescue from a give-up state; it
+  // is the user saying "stop waiting out the backoff and try again". `connect()`
+  // resets the events socket backoff to the floor and attempts immediately, and
+  // the `terminalEpoch` bump remounts the focused TerminalPane so its PTY socket
+  // does the same. Without the bump, one Retry would hurry the spine along and
+  // leave the terminal waiting out its own gap.
+  //
+  // The remount is why the compose draft lives in this store and not in the pane:
+  // the gesture a user reaches for after a bad network is precisely the one that
+  // used to throw away the message they had typed.
   eventsSocket.connect()
   setState({ terminalEpoch: state.terminalEpoch + 1 })
 }

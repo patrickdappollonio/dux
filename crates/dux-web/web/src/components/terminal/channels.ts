@@ -99,15 +99,32 @@ export type ConnectionIdentity = Channel<string | null>
 /// wire write (`sendResize === true`). A frame the socket silently discarded
 /// must leave the intent armed, or the take-over is lost with it.
 ///
-/// ALSO CLEARED, without ever being sent, by a `pty.owner` naming ANOTHER
-/// owner (the take-over lost a race; re-arming is the user's to decide) and by
-/// the lifecycle teardown (unmount, or a switch to a different target). An
-/// owner-cleared `pty.owner` (freed) deliberately does NOT clear it: freed
-/// names no winner, so it clears nobody's victory, and the intent must survive
-/// the old owner disconnecting mid-bounce or the reap racing a
-/// self-succession's in-flight flagged frame.
+/// THE INTENT NEVER OUTLIVES THE SOCKET IT WAS ARMED FOR. An automatic
+/// reconnect is a plain attach and never a take-over: no retry, no resume, no
+/// heal bounce carries the flag, and only a press on the button does. So it is
+/// ALSO CLEARED, without ever being sent, by:
+///
+///   - ANY close of the live socket, delivered as `onConn("closed")`. The
+///     take-over's own deliberate close does not fire that, because `connect()`
+///     detaches the orphan's handlers first, which is exactly what lets the
+///     intent survive the bounce it armed and nothing else. A request made
+///     minutes ago on a train must not surface later and pull the terminal away
+///     from whoever is using it by then.
+///   - a `pty.owner` naming ANOTHER owner (the take-over lost a race; re-arming
+///     is the user's to decide), and an owner-cleared one too. The freed
+///     exemption that used to park the intent through a disconnect is gone: the
+///     bounce's own handshake seeds a plain claim on an unowned pty and reaches
+///     the same place without a flag outliving its socket.
+///   - the lifecycle teardown (unmount, or a switch to a different target).
+///
+/// `expectedOwner` is the connection id a SELF-SUCCESSION expects to displace:
+/// its own previous, dead connection. The server refuses the transfer if
+/// somebody else holds the pty by then, so a frame delayed on a mobile radio
+/// cannot steal from a legitimate claimer. A PRESSED take-over leaves it
+/// undefined, which means "take from anyone", because a press may.
 export type TakeoverIntent = {
   read: () => boolean
-  arm: () => void
+  expectedOwner: () => string | undefined
+  arm: (expectedOwner?: string) => void
   clear: () => void
 }

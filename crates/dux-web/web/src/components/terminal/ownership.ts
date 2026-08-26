@@ -101,7 +101,12 @@ export type TerminalOwnershipDeps = {
   /// can still be trusted.
   conn: ConnState
   ptyRef: { current: PtySocket | null }
-  focusTypingSurface: () => void
+  /// Who the SPINE says drives this pty, refetched on every events-socket open.
+  /// `null` when the server says nobody, `undefined` when it has not answered
+  /// (an older server, or a view that carries no such field). It is the only
+  /// thing that can correct a device NAME kept across an outage; see the name's
+  /// own comment below.
+  spineInputOwner?: string | null
   /// The pane's reconnect cue. The take-over bounce closes the socket
   /// deliberately, which fires no `onReconnecting` of its own (see
   /// `ReconnectingSocket.connect`), so the cue is raised here or the half-second
@@ -142,16 +147,30 @@ export type TerminalOwnership = {
   /// the card says out loud rather than claiming a device is active. Only
   /// meaningful while `isOwner` is false.
   ownerPresent: boolean
+  /// Whether the `connected` handshake has answered the ownership question at
+  /// least once on this mount. Until it has, `isOwner` is only the foreground
+  /// GUESS, which is not a good enough reason to raise a soft keyboard.
+  handshakeSeen: boolean
   /// Whether this socket has given up for good.
   connectionLost: boolean
   setConnectionLost: (value: boolean) => void
+  /// Feed the PTY socket connection state in. Owns the LOST state and the
+  /// take-over intent lifetime; see the function.
+  notePtyConn: (state: ConnState) => void
   takeOver: () => void
 }
 
 export function useTerminalOwnership(
   deps: TerminalOwnershipDeps,
 ): TerminalOwnership {
-  const { id, kind, conn, ptyRef, focusTypingSurface, setReconnecting } = deps
+  const {
+    id,
+    kind,
+    conn,
+    spineInputOwner,
+    ptyRef,
+    setReconnecting,
+  } = deps
 
   // SITE 1: the initial guess, and now ONLY a guess: it holds for the handful of
   // milliseconds before the `connected` handshake answers (site 4), and after
@@ -171,19 +190,24 @@ export function useTerminalOwnership(
   )
 
   const myConnIdRef = useRef<string | null>(null)
-  // THE GHOST: the last id this pane held before the socket retired it. The
-  // lifecycle nulls the live id on every drop, reopen and unmount, and this is
-  // what the null takes the place of, because a returning owner has to be able
-  // to recognise its own dead connection in the next handshake's answer (see
-  // the self-succession rule in `seedFromConnected`).
-  const prevConnIdRef = useRef<string | null>(null)
+  // THE GHOSTS: EVERY id this pane has ever held, not merely the last one.
+  //
+  // A returning owner has to recognise its own dead connection in the next
+  // handshake's answer (see the self-succession rule in `seedFromConnected`),
+  // and a single previous id is not enough to do that reliably: a flapping radio
+  // can produce two handshakes in a row, and the second one may still name the
+  // connection from before the first. Matching against the whole set means a
+  // dropped intent between two handshakes cannot land the returning driver as a
+  // watcher of itself.
+  //
+  // Pane-local and re-derived per handshake, so it is bounded by this pane's own
+  // reconnect count and dies with the mount.
+  const heldConnIdsRef = useRef<Set<string>>(new Set())
   const connId = useMemo<ConnectionIdentity>(
     () => ({
       read: () => myConnIdRef.current,
       write: (next) => {
-        if (myConnIdRef.current !== null) {
-          prevConnIdRef.current = myConnIdRef.current
-        }
+        if (next !== null) heldConnIdsRef.current.add(next)
         myConnIdRef.current = next
       },
     }),
@@ -193,14 +217,21 @@ export function useTerminalOwnership(
   // parked closure). The ref is the storage; the channel is the surface the
   // lifecycle and the coordinator see.
   const takeoverArmedRef = useRef(false)
+  // The ghost a SELF-SUCCESSION expects to displace, sent as the resize frame's
+  // `expected_owner`. Undefined for a PRESSED take-over, which may take from
+  // anyone.
+  const takeoverExpectedRef = useRef<string | undefined>(undefined)
   const takeoverIntent = useMemo<TakeoverIntent>(
     () => ({
       read: () => takeoverArmedRef.current,
-      arm: () => {
+      expectedOwner: () => takeoverExpectedRef.current,
+      arm: (expectedOwner) => {
         takeoverArmedRef.current = true
+        takeoverExpectedRef.current = expectedOwner
       },
       clear: () => {
         takeoverArmedRef.current = false
+        takeoverExpectedRef.current = undefined
       },
     }),
     [],
@@ -211,6 +242,19 @@ export function useTerminalOwnership(
   // for a watcher that merely attached (gated on the events socket, which
   // is the only channel that can later correct the name).
   const [takeoverDevice, setTakeoverDevice] = useState<string | null>(null)
+  // The connection id the name above was learned WITH. A kept name is only as
+  // good as the owner it describes, so the two travel together and the spine's
+  // `input_owner` is checked against this one rather than against nothing.
+  const takeoverDeviceOwnerRef = useRef<string | null>(null)
+  // One writer for the pair, so a name can never be set without the id it names
+  // or cleared without clearing it.
+  const setTakeoverDeviceFor = (
+    device: string | null,
+    ownerId: string | null,
+  ) => {
+    takeoverDeviceOwnerRef.current = device === null ? null : ownerId
+    setTakeoverDevice(device)
+  }
   // Whether ANY connection drives this pty, as far as this client knows. It
   // starts true and pessimistic: before the handshake answers, "somebody might
   // be driving" is the copy that is never wrong, and a foregrounded pane that
@@ -221,21 +265,35 @@ export function useTerminalOwnership(
   // an explicit Reconnect affordance. Only meaningful when the app is NOT
   // globally offline, which the pane's own overlay precedence handles.
   const [connectionLost, setConnectionLost] = useState(false)
+  // Whether the server has answered "who drives this pty" on this mount. The
+  // initial verdict is a foreground guess and nothing more, so the input surface
+  // waits for this before it summons a keyboard.
+  const [handshakeSeen, setHandshakeSeen] = useState(false)
 
-  // SITE 6. Drop the specific device name whenever the events socket is not
-  // open. A handover is delivered live over `/ws/events` with NO replay on
-  // reconnect, so if ownership changes while that socket is down this client
-  // would otherwise keep naming a now-wrong device. The generic "Active on
-  // another device" copy is never wrong, so it falls back to that across any
-  // outage; a real handover after reconnect repopulates the name. Cleared on
-  // the render-phase transition (React's "adjust state when input changes"
-  // pattern) rather than in an effect, which avoids the extra
-  // commit-then-clear render pass.
-  const [prevConn, setPrevConn] = useState(conn)
-  if (conn !== prevConn) {
-    setPrevConn(conn)
-    if (conn !== "open") setTakeoverDevice(null)
-  }
+  // SITE 6, REVERSED. Losing the events socket used to WIPE the device name
+  // while `ownerPresent` stayed true, so a flapping spine downgraded a perfectly
+  // good "Open on Chrome on Linux" to "Active on another device" and back again.
+  // The wipe was defending against a name going stale with no correction coming;
+  // the correction now exists, so the name is KEPT and only ever REPLACED by a
+  // newer fact:
+  //
+  //   - a `pty.owner` handover (a definitive new owner and device), or
+  //   - a `connected` handshake's owner snapshot, or
+  //   - the check below, which compares the id the name was learned with against
+  //     the SPINE's `input_owner` once the events socket is back and the spine
+  //     has been refetched. A mismatch (or the spine saying nobody drives) means
+  //     the name describes a device that is no longer driving, and it goes.
+  //
+  // The spine carries `input_owner` for companion terminals as well as agent
+  // tabs, so a terminal's card gets the same correction an agent's does.
+  useEffect(() => {
+    if (conn !== "open") return
+    const named = takeoverDeviceOwnerRef.current
+    if (named === null) return
+    // The server has not answered the question: no evidence, so no correction.
+    if (spineInputOwner === undefined) return
+    if (spineInputOwner !== named) setTakeoverDeviceFor(null, null)
+  }, [conn, spineInputOwner])
 
   // SITE 2. The server broadcasts a `pty.owner` carrying the claimer's
   // connection id; the store fans it out by pty id plus that owner id. For OUR
@@ -268,20 +326,22 @@ export function useTerminalOwnership(
       // ONE write implementation, so anything the channel ever grows reaches
       // this, the highest-traffic transition, by construction.
       ownership.write(mine)
-      if (!mine && !freed) {
-        // A genuine lost race, an event naming ANOTHER owner, retires any
-        // armed take-over WITHOUT sending it: re-arming is the user's
-        // decision, not a retry loop's. A FREED event does not: owner-cleared
-        // names no winner, so it clears nobody's victory. The intent survives
-        // it, which is what lets a mid-bounce take-over ride out the old
-        // owner's concurrent disconnect (the bounce's handshake seeds with
-        // the intent still armed and claims flagged) and keeps the reap's
-        // broadcast from killing a self-succession's in-flight claim.
+      if (!mine) {
+        // ANY event that does not name us retires an armed take-over WITHOUT
+        // sending it: re-arming is the user's decision, not a retry loop's.
+        //
+        // The FREED exemption that used to live here is gone. It parked the
+        // intent through the old owner's disconnect so a mid-bounce take-over
+        // could still claim flagged, but the bounce's own handshake finds the
+        // pty UNOWNED and seeds a plain claim that reaches exactly the same
+        // outcome. Keeping the flag alive past its socket was the cost, and
+        // the flag outliving its socket is the whole class of bug this rule
+        // exists to close.
         takeoverIntent.clear()
       }
       // Remember which device took over (for the placeholder's copy) while
       // demoted; clear it the moment ownership returns.
-      setTakeoverDevice(mine ? null : (device ?? null))
+      setTakeoverDeviceFor(mine ? null : (device ?? null), mine ? null : (ownerId ?? null))
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
@@ -333,6 +393,7 @@ export function useTerminalOwnership(
     ownerEpoch?: number,
     ownerDevice?: string,
   ) {
+    setHandshakeSeen(true)
     const appliedEpoch = appliedPtyOwnerEpoch(id)
     const superseded = handshakeSuperseded(ownerEpoch, appliedEpoch)
     if (!superseded) {
@@ -347,13 +408,20 @@ export function useTerminalOwnership(
     // it either: by the time the reap runs, `release` finds a different owner
     // recorded (or none) and broadcasts nothing at all.
     //
-    // So the id is compared against the ghost as well as against the live id,
-    // and a match on a FOREGROUNDED page is treated as succeeding ourselves.
-    // The claim goes out as a take-over: the server grants a flagged claim
-    // against any owner, and the owner being displaced here is a connection
-    // this pane already knows is gone, so nothing is stolen from anyone. Arming
-    // the intent is the whole mechanism, because the flag rides the first
-    // resize frame of this new connection like any other take-over.
+    // So the id is compared against EVERY id this pane has held, not merely the
+    // most recent one, and a match on a FOREGROUNDED page is treated as
+    // succeeding ourselves. The set matters: a flapping radio can produce two
+    // handshakes in a row, and the second may still name the connection from
+    // before the first, so a single-slot ghost would land the returning driver
+    // as a watcher of itself.
+    //
+    // The claim goes out as a take-over, and it NAMES THE GHOST it expects to
+    // displace. The server refuses the transfer inside its own critical section
+    // when anybody else holds the pty by then, so a frame delayed on a mobile
+    // radio cannot steal a pty somebody legitimately claimed in the gap; the
+    // client then lands as a watcher with the card, exactly like a refused plain
+    // resize. That expectation is what makes self-succession safe enough to be
+    // the one press-less re-claim.
     //
     // A BACKGROUNDED page does not self-succeed: that is the C15/C16
     // backgrounded-owner contract, which says a departed owner comes back as a
@@ -364,10 +432,10 @@ export function useTerminalOwnership(
       !superseded &&
       typeof owner === "string" &&
       owner !== myConnId &&
-      owner === prevConnIdRef.current &&
+      heldConnIdsRef.current.has(owner) &&
       isForeground()
     ) {
-      takeoverIntent.arm()
+      takeoverIntent.arm(owner)
     }
     const mine = seedVerdictFromConnected({
       owner,
@@ -390,10 +458,37 @@ export function useTerminalOwnership(
     // socket is down could go stale with no correction coming. The verdict
     // seed above is deliberately not gated; the generic title is never wrong.
     if (conn === "open") {
-      setTakeoverDevice((priorDevice) =>
-        seedDeviceFromConnected({ mine, superseded, owner, ownerDevice, priorDevice }),
-      )
+      const next = seedDeviceFromConnected({
+        mine,
+        superseded,
+        owner,
+        ownerDevice,
+        priorDevice: takeoverDevice,
+      })
+      setTakeoverDeviceFor(next, typeof owner === "string" ? owner : null)
     }
+  }
+
+  /// The PTY socket own connection state, delivered by the lifecycle.
+  ///
+  /// Two things hang off it. `failed` is the hard stop that means LOST, and any
+  /// retry or reopen clears it. And ANY `closed` retires an armed take-over: the
+  /// intent never outlives the socket it was armed for, so a press whose bounce
+  /// failed is spent rather than parked, and the button works again. The
+  /// take-over own deliberate close does not reach here, because `connect()`
+  /// detaches the orphan handlers before closing it, which is precisely how the
+  /// intent survives the one bounce it is meant to ride.
+  function notePtyConn(state: ConnState) {
+    if (state === "failed") {
+      setConnectionLost(true)
+      takeoverIntent.clear()
+      return
+    }
+    if (state === "closed") {
+      takeoverIntent.clear()
+      return
+    }
+    if (state === "connecting" || state === "open") setConnectionLost(false)
   }
 
   // SITE 3. TAKE-OVER IS A FRESH ATTACH: arm the intent, flip the verdict, bounce
@@ -425,7 +520,7 @@ export function useTerminalOwnership(
     // Clear the other device's name as ownership is optimistically claimed,
     // honoring the invariant that the name only ever names a device we do NOT
     // own.
-    setTakeoverDevice(null)
+    setTakeoverDeviceFor(null, null)
     const pty = ptyRef.current
     if (pty) {
       // The socket is deliberately going down for about half a second. Nothing
@@ -439,10 +534,12 @@ export function useTerminalOwnership(
       // one that gave up. The old dead-socket special case collapses into this.
       pty.connect()
     }
-    // Refocus the active typing surface (the compose textarea when the mobile
-    // compose bar is up, xterm's hidden textarea otherwise) so typing resumes
-    // where it belongs the moment ownership returns.
-    focusTypingSurface()
+    // Deliberately NO refocus here. It used to call `focusTypingSurface()` at
+    // once, which on a phone raises the soft keyboard over a pane that is a whole
+    // reconnect and one replay parse away from having anything to type into. The
+    // pane's own focus effect does it instead, when both facts are in: the
+    // handshake has confirmed ownership and the replay for this attach epoch is
+    // on screen.
   }
 
   return {
@@ -451,9 +548,11 @@ export function useTerminalOwnership(
     connId,
     takeoverIntent,
     seedFromConnected,
+    notePtyConn,
     // Parsing lives in the pure, tested `deviceLabel` helper.
     takeoverLabel: deviceLabel(takeoverDevice),
     ownerPresent,
+    handshakeSeen,
     connectionLost,
     setConnectionLost,
     takeOver,

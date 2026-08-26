@@ -128,6 +128,12 @@ export interface TerminalView {
    * `working`. Drives the terminal row's "Typing" state word and typing caret. An
    * older server omits it; `normalizeWorkspace` normalizes a missing value to `false`. */
   typing: boolean
+  /** The PTY-socket connection id currently input-owning this terminal's PTY,
+   * or absent when nobody does. The exact mirror of `AgentTabView.input_owner`,
+   * and read the same way: it is what lets a terminal's take-over card notice
+   * that the device it is naming stopped driving while the events socket was
+   * down. */
+  input_owner?: string
   /** The command running in the terminal's foreground, or null when the shell
    * itself is idle. Refreshed by the engine at most every ~2s. The displayed
    * terminal title follows this when present, falling back to `label` (see

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook } from "@testing-library/react"
+import { useEffect as reactUseEffect, useState as reactUseState } from "react"
 
 import type { Terminal } from "@xterm/xterm"
 
@@ -11,6 +12,7 @@ import type { OwnershipVerdict } from "./channels"
 import type { LiveSettings, TerminalLiveSettings } from "./liveValues"
 import {
   focusTypingSurfaceIn,
+  typingFocusAllowed,
   typingSurfaceHasFocusIn,
   useInputSurface,
 } from "./inputSurface"
@@ -19,6 +21,38 @@ const notified: string[] = []
 vi.mock("@/lib/notify", () => ({
   notifyError: (message: string) => {
     notified.push(message)
+  },
+}))
+
+// The compose draft lives in the store now, keyed by target id, so it survives
+// the pane remount `reconnect()` performs. The real module touches
+// `localStorage` at import time, which this environment does not provide, and
+// this suite is about the input surface rather than about the store, so it gets
+// the smallest map that behaves like the real slice.
+const { drafts, draftListeners } = vi.hoisted(() => ({
+  drafts: {} as Record<string, string>,
+  draftListeners: [] as (() => void)[],
+}))
+vi.mock("@/lib/store", () => ({
+  useDux: () => {
+    // A version counter is enough to re-render on a write; the hook reads the
+    // draft through `composeDraft`, not off this object.
+    const [, bump] = reactUseState(0)
+    reactUseEffect(() => {
+      const listener = () => bump((n) => n + 1)
+      draftListeners.push(listener)
+      return () => {
+        draftListeners.splice(draftListeners.indexOf(listener), 1)
+      }
+    }, [])
+    return { composeDrafts: drafts }
+  },
+  composeDraft: (_state: unknown, id: string) => drafts[id] ?? "",
+  peekComposeDraft: (id: string) => drafts[id] ?? "",
+  setComposeDraft: (id: string, text: string) => {
+    if (text === "") delete drafts[id]
+    else drafts[id] = text
+    for (const listener of [...draftListeners]) listener()
   },
 }))
 
@@ -80,12 +114,14 @@ function setup(
       termRef: { current: term as unknown as Terminal },
       ptyRef: { current: pty as unknown as PtySocket },
       ownership,
+      targetId: "pane-1",
     }),
   )
   return { view, term, compose, sent, live, composeInputRef, pty, ownership }
 }
 
 beforeEach(() => {
+  for (const key of Object.keys(drafts)) delete drafts[key]
   notified.length = 0
 })
 afterEach(() => {
@@ -273,5 +309,39 @@ describe("the draft", () => {
     act(() => view.result.current.setComposeText("ab"))
     act(() => view.result.current.insertComposeText("X"))
     expect(view.result.current.composeText).toContain("X")
+  })
+})
+
+// INPUT SAFETY. Focusing summons the soft keyboard, so an automatic focus move
+// waits for the pane to have RECONCILED rather than for it to merely believe
+// something, and it never interrupts an IME composition.
+describe("typingFocusAllowed", () => {
+  const ready = {
+    isOwner: true,
+    ownershipConfirmed: true,
+    replayApplied: true,
+    composing: false,
+  }
+
+  it("allows the move once ownership is confirmed and the screen is on", () => {
+    expect(typingFocusAllowed(ready)).toBe(true)
+  })
+
+  it("refuses while this device is only GUESSING it owns the pty", () => {
+    // Before the handshake, `isOwner` is the foreground guess and nothing more.
+    expect(typingFocusAllowed({ ...ready, ownershipConfirmed: false })).toBe(false)
+  })
+
+  it("refuses for a watcher", () => {
+    expect(typingFocusAllowed({ ...ready, isOwner: false })).toBe(false)
+  })
+
+  it("refuses until the replay for this attach epoch is on screen", () => {
+    // A keyboard over a pane that is still reconciling covers a placeholder.
+    expect(typingFocusAllowed({ ...ready, replayApplied: false })).toBe(false)
+  })
+
+  it("refuses mid-IME-composition, which moving focus would destroy", () => {
+    expect(typingFocusAllowed({ ...ready, composing: true })).toBe(false)
   })
 })

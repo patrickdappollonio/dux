@@ -33,15 +33,27 @@
 //     owner.
 //   - Close = detach (the server drops the subscription/forwarder).
 //
-// Reconnect behavior is the shared `ReconnectingSocket` base: capped exponential
-// backoff WITH the same hard 3-attempt cap the events socket uses. When the
-// budget is spent the socket emits `failed` and STOPS (rather than silently
-// reattaching behind a stuck offline overlay); the focused pane surfaces a
-// Reconnect affordance and a manual reconnect resets the budget. `close()` is the
-// deliberate, user-initiated teardown and suppresses the reconnect loop.
+// Reconnect behavior is the shared `ReconnectingSocket` base, with the two
+// PTY-specific policies it takes:
+//
+//   PARKING. A hidden page schedules nothing. This is the socket the policy
+//   exists for: the events socket keeps retrying while hidden, because attention
+//   indicators and OS notifications ride it precisely then, while a PTY nobody is
+//   looking at is worth nothing until they look again.
+//
+//   THE VALIDATED GATE. A retry is held until the run-identity check has
+//   RESOLVED, never merely until the events socket is open. Attaching an agent's
+//   pty LAUNCHES its provider, so attaching to a server that restarted under this
+//   tab is the one thing the check exists to prevent, and `conn === "open"` is
+//   true a whole round trip before it has answered. See `serverValidated.ts`.
+//
+// Retrying is otherwise indefinite; `failed` means a terminal close code and
+// nothing else. `close()` is the deliberate, user-initiated teardown and
+// suppresses the reconnect loop.
 
 import { assertNever } from "./assertNever"
 import { ReconnectingSocket } from "./reconnectingSocket"
+import { serverValidated } from "./serverValidated"
 import type { TerminalOwnerRef } from "./terminalOwner"
 
 // The WebSocket close code the server sends on a PTY socket when the provider is
@@ -143,6 +155,10 @@ function readGrid(frame: {
 }
 
 export class PtySocket extends ReconnectingSocket {
+  constructor(url: string) {
+    super(url, { parkWhileHidden: true, canRetry: serverValidated })
+  }
+
   private bytesCb: (bytes: Uint8Array) => void = () => {}
   // This socket's server-assigned connection id, delivered as the first Text frame
   // (`{event:"connected", id}`) on every (re)open (the server allocates a fresh id
@@ -231,6 +247,11 @@ export class PtySocket extends ReconnectingSocket {
     fromHandshake: boolean,
   ) => void = () => {}
 
+  // The server's answer to one of our beats: `{"event":"beat","n":N}`, echoing
+  // the number we sent. The heartbeat matches it against what it is waiting for,
+  // so an answer to a stale beat can never satisfy a newer deadline.
+  onBeat: (n: number) => void = () => {}
+
   // `onOpen`, `onReconnecting`, and `onConn` are inherited from ReconnectingSocket.
   // The pane wires `onOpen` (re-arm first-frame resize; the server replays
   // scrollback as the first Binary frame on every open), `onReconnecting` (show a
@@ -307,6 +328,7 @@ export class PtySocket extends ReconnectingSocket {
       try {
         const frame = JSON.parse(event.data) as {
           event?: string
+          n?: number
           id?: string
           gen?: number
           owner?: string | null
@@ -316,6 +338,12 @@ export class PtySocket extends ReconnectingSocket {
           cols?: number | null
           seq?: number
           grid_seq?: number
+        }
+        // The answer to one of our beats. Handled first because it is by far the
+        // most frequent text frame on a quiet socket.
+        if (frame.event === "beat") {
+          if (typeof frame.n === "number") this.onBeat(frame.n)
+          return
         }
         // A grid change on a PTY somebody else is driving. Handled before the
         // handshake branch because the two are told apart by `event` alone.
@@ -447,25 +475,46 @@ export class PtySocket extends ReconnectingSocket {
   // which is every reconnect) must be reported rather than swallowed, or the
   // size is booked as delivered and never re-asserted. A take-over intent rides
   // on exactly this answer: it is cleared only when this returns true.
-  sendResize(rows: number, cols: number, takeover = false): boolean {
+  sendResize(
+    rows: number,
+    cols: number,
+    takeover = false,
+    expectedOwner?: string,
+  ): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify(takeover ? { rows, cols, takeover: true } : { rows, cols }),
-      )
+      const frame = takeover
+        ? expectedOwner === undefined
+          ? { rows, cols, takeover: true }
+          : { rows, cols, takeover: true, expected_owner: expectedOwner }
+        : { rows, cols }
+      this.ws.send(JSON.stringify(frame))
       return true
     }
     return false
   }
 
-  // Send a "user is looking at this tab" ping as a Text frame. Unlike a resize,
-  // it NEVER claims sizing ownership server-side; it only stamps the engine's
-  // engagement window so an agent the user is actively watching keeps its
-  // attention flag down without requiring keystrokes. The caller gates this to
-  // the foregrounded input-owner (see `TerminalPane`'s viewed-ping effect).
-  sendViewed(): void {
+  // THE ONE PERIODIC CLIENT FRAME: `{"beat":N,"viewed":B}`.
+  //
+  // `viewed` is the older half. It NEVER claims sizing ownership server-side; it
+  // only stamps the engine's engagement window, so an agent the user is actively
+  // watching keeps its attention flag down without requiring keystrokes. The
+  // caller decides it through `shouldSendViewed`.
+  //
+  // `beat` is the liveness half, and a WATCHER sends it too (with `viewed`
+  // false): the server's own WebSocket ping is send-only with no pong deadline,
+  // so it reaps a socket the OS has given up on but cannot see the half-open one
+  // a Wi-Fi to cellular handoff leaves behind. The server echoes the number back.
+  //
+  // One frame rather than two, because they run on the same timer and a second
+  // periodic frame is a second thing to keep in step. Returns whether it went on
+  // the wire, so the heartbeat does not start a deadline for a frame it never
+  // sent.
+  sendBeat(n: number, viewed: boolean): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ viewed: true }))
+      this.ws.send(JSON.stringify({ beat: n, viewed }))
+      return true
     }
+    return false
   }
 }
 

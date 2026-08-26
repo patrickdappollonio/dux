@@ -37,21 +37,26 @@ function setVisibility(state: "visible" | "hidden") {
   })
 }
 
-function setup(opts: { kind?: "agent" | "terminal"; conn?: "open" | "connecting" } = {}) {
+function setup(
+  opts: {
+    kind?: "agent" | "terminal"
+    conn?: "open" | "connecting"
+    spineInputOwner?: string | null
+  } = {},
+) {
   const pty = new PtyFake()
-  const focuses: number[] = []
   const reconnecting: boolean[] = []
   const view = renderHook(() =>
     useTerminalOwnership({
       id: "p1",
       kind: opts.kind ?? "agent",
       conn: opts.conn ?? "open",
+      spineInputOwner: opts.spineInputOwner,
       ptyRef: { current: pty as unknown as PtySocket },
-      focusTypingSurface: () => focuses.push(1),
       setReconnecting: (v) => reconnecting.push(v),
     }),
   )
-  return { view, pty, focuses, reconnecting }
+  return { view, pty, reconnecting }
 }
 
 beforeEach(() => {
@@ -267,8 +272,12 @@ describe("seeding the verdict from the connected handshake", () => {
 })
 
 describe("taking over", () => {
-  it("arms the intent, flips the verdict, bounces the socket, and refocuses", () => {
-    const { view, pty, focuses, reconnecting } = setup()
+  // FLIPPED. The press used to focus the typing surface at once, which on a
+  // phone raises the soft keyboard over a pane that is a whole reconnect and one
+  // replay parse away from having anything to type into. Focus is the pane's now,
+  // and it waits for the handshake AND the replay.
+  it("arms the intent, flips the verdict and bounces the socket, WITHOUT focusing", () => {
+    const { view, pty, reconnecting } = setup()
     act(() => {
       view.result.current.connId.write("mine")
       notifyPtyOwner("p1", "theirs", 1, undefined)
@@ -285,7 +294,6 @@ describe("taking over", () => {
     // The bounce is visible. A deliberate `connect()` fires no `onReconnecting`
     // of its own, so the half-second window would otherwise read as dead.
     expect(reconnecting).toEqual([true])
-    expect(focuses).toHaveLength(1)
     expect(view.result.current.takeoverLabel).toBeNull()
   })
 
@@ -368,22 +376,42 @@ describe("a freed pty", () => {
     expect(view.result.current.ownerPresent).toBe(false)
   })
 
-  it("leaves an ARMED take-over intent in place, and the next unowned handshake claims flagged", () => {
+  // FLIPPED. The freed exemption is gone. It used to park an armed intent
+  // through the old owner's disconnect so a mid-bounce take-over could still
+  // claim flagged; the bounce's own handshake finds the pty UNOWNED and seeds a
+  // PLAIN claim that reaches exactly the same outcome, and keeping a flag alive
+  // past its socket is the whole class of bug the rule closes.
+  it("DROPS an armed take-over intent, and the next unowned handshake claims plain", () => {
     const { view } = setup()
     act(() => view.result.current.seedFromConnected("mine", "theirs"))
     act(() => view.result.current.takeOver())
     expect(view.result.current.takeoverIntent.read()).toBe(true)
     // The old owner disconnects mid-bounce and the server broadcasts
-    // owner-cleared. A freed event names no winner, so it clears nobody's
-    // victory: the armed intent must survive it.
+    // owner-cleared.
     act(() => notifyPtyOwner("p1", undefined, 2, undefined))
-    expect(view.result.current.takeoverIntent.read()).toBe(true)
-    // The bounce's handshake then finds the pty unowned; with the intent still
-    // armed the seed claims, and the flagged frame rides the first resize of
-    // the new connection.
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+    // The bounce's handshake then finds the pty unowned, and a foregrounded page
+    // claims it plainly. Same outcome, no parked flag.
     act(() => view.result.current.seedFromConnected("mine2", null, 3))
     expect(view.result.current.isOwner).toBe(true)
-    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+  })
+
+  it("lets a SECOND press bounce again once the first bounce's socket closed", () => {
+    const { view, pty } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
+    act(() => view.result.current.takeOver())
+    expect(pty.connects).toBe(1)
+    // A second press while the bounce is still in flight is a no-op guard: the
+    // intent is armed and the frame carrying it has not gone out.
+    act(() => view.result.current.takeOver())
+    expect(pty.connects).toBe(1)
+    // The bounce FAILED: the socket dropped. The intent dies with it, so the
+    // button works again rather than silently doing nothing.
+    act(() => view.result.current.notePtyConn("closed"))
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+    act(() => view.result.current.takeOver())
+    expect(pty.connects).toBe(2)
   })
 
   it("clears an armed intent only for a genuine lost race: an event naming ANOTHER owner", () => {
@@ -478,7 +506,13 @@ describe("the LOST state", () => {
 })
 
 describe("the other device's NAME across an events-socket outage", () => {
-  it("is dropped whenever the events socket is not open, while the verdict stands", () => {
+  // FLIPPED. Losing the events socket used to WIPE the name while
+  // `ownerPresent` stayed true, so a flapping spine downgraded a perfectly good
+  // "Open on Chrome on macOS" to the generic "Active on another device" and back
+  // again. The wipe was defending against a name going stale with no correction
+  // coming; the correction now exists (the spine's own `input_owner`), so the
+  // name is kept and only ever replaced by a newer fact.
+  it("is KEPT while the events socket is down, because the generic copy is worse, not safer", () => {
     const pty = new PtyFake()
     const view = renderHook(
       ({ conn }: { conn: "open" | "connecting" }) =>
@@ -487,7 +521,6 @@ describe("the other device's NAME across an events-socket outage", () => {
           kind: "agent",
           conn,
           ptyRef: { current: pty as unknown as PtySocket },
-          focusTypingSurface: () => {},
           setReconnecting: () => {},
         }),
       { initialProps: { conn: "open" as const } },
@@ -495,10 +528,187 @@ describe("the other device's NAME across an events-socket outage", () => {
     act(() => {
       notifyPtyOwner("p1", "theirs", 1, "Mozilla/5.0 (Macintosh) Chrome/1")
     })
-    expect(view.result.current.takeoverLabel).not.toBeNull()
+    expect(view.result.current.takeoverLabel).toBe("Chrome on macOS")
     view.rerender({ conn: "connecting" })
-    // The generic copy is never wrong; the specific name might be.
-    expect(view.result.current.takeoverLabel).toBeNull()
+    expect(view.result.current.takeoverLabel).toBe("Chrome on macOS")
     expect(view.result.current.isOwner).toBe(false)
+  })
+
+  it("is corrected by the refetched spine once the events socket is back", () => {
+    const pty = new PtyFake()
+    const view = renderHook(
+      ({
+        conn,
+        spineInputOwner,
+      }: {
+        conn: "open" | "connecting"
+        spineInputOwner?: string | null
+      }) =>
+        useTerminalOwnership({
+          id: "p1",
+          kind: "agent",
+          conn,
+          spineInputOwner,
+          ptyRef: { current: pty as unknown as PtySocket },
+          setReconnecting: () => {},
+        }),
+      { initialProps: { conn: "open" as const, spineInputOwner: "theirs" } },
+    )
+    act(() => {
+      notifyPtyOwner("p1", "theirs", 1, "Mozilla/5.0 (Macintosh) Chrome/1")
+    })
+    expect(view.result.current.takeoverLabel).toBe("Chrome on macOS")
+    // The outage. The name stands.
+    view.rerender({ conn: "connecting", spineInputOwner: "theirs" })
+    expect(view.result.current.takeoverLabel).toBe("Chrome on macOS")
+    // Back, and the refetched spine says a DIFFERENT connection drives it now.
+    // The name describes a device that stopped driving, so it goes.
+    view.rerender({ conn: "open", spineInputOwner: "somebody-else" })
+    expect(view.result.current.takeoverLabel).toBeNull()
+  })
+
+  it("keeps the name when the spine confirms the same driver", () => {
+    const pty = new PtyFake()
+    const view = renderHook(
+      ({ spineInputOwner }: { spineInputOwner?: string | null }) =>
+        useTerminalOwnership({
+          id: "p1",
+          kind: "agent",
+          conn: "open",
+          spineInputOwner,
+          ptyRef: { current: pty as unknown as PtySocket },
+          setReconnecting: () => {},
+        }),
+      { initialProps: { spineInputOwner: undefined } },
+    )
+    act(() => {
+      notifyPtyOwner("p1", "theirs", 1, "Mozilla/5.0 (Macintosh) Chrome/1")
+    })
+    view.rerender({ spineInputOwner: "theirs" })
+    expect(view.result.current.takeoverLabel).toBe("Chrome on macOS")
+  })
+
+  it("takes an UNANSWERED spine as no evidence rather than as a correction", () => {
+    const pty = new PtyFake()
+    const view = renderHook(
+      ({ spineInputOwner }: { spineInputOwner?: string | null }) =>
+        useTerminalOwnership({
+          id: "p1",
+          kind: "agent",
+          conn: "open",
+          spineInputOwner,
+          ptyRef: { current: pty as unknown as PtySocket },
+          setReconnecting: () => {},
+        }),
+      { initialProps: { spineInputOwner: undefined } },
+    )
+    act(() => {
+      notifyPtyOwner("p1", "theirs", 1, "Mozilla/5.0 (Macintosh) Chrome/1")
+    })
+    // An older server omits the field entirely; that is not a statement that
+    // nobody drives.
+    expect(view.result.current.takeoverLabel).toBe("Chrome on macOS")
+  })
+})
+
+// THE TWO PROPERTIES THE RULE EXISTS FOR. An automatic reconnect is a plain
+// attach and never a take-over: no retry, resume or heal bounce carries the
+// flag, and only a press on the button does.
+describe("an automatic reconnect never claims", () => {
+  it("lands a reconnect against another driver as a WATCHER, with the card up", () => {
+    const { view } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    // Another device took over while we were attached.
+    act(() =>
+      notifyPtyOwner("p1", "conn-other", 2, "Mozilla/5.0 (Macintosh) Chrome/1"),
+    )
+    expect(view.result.current.isOwner).toBe(false)
+    // The socket drops and the ordinary retry path brings it back. Nothing about
+    // that is a claim.
+    act(() => view.result.current.notePtyConn("closed"))
+    act(() => view.result.current.connId.write(null))
+    act(() => view.result.current.notePtyConn("connecting"))
+    act(() => view.result.current.notePtyConn("open"))
+    act(() =>
+      view.result.current.seedFromConnected(
+        "conn-b",
+        "conn-other",
+        3,
+        "Mozilla/5.0 (Macintosh) Chrome/1",
+      ),
+    )
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+    // The card is up, and the handshake's own owner snapshot names the driver.
+    expect(view.result.current.ownerPresent).toBe(true)
+    expect(view.result.current.takeoverLabel).toBe("Chrome on macOS")
+  })
+
+  it("spends a PRESSED intent on exactly one flagged resize, and never on a later reconnect", () => {
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
+    act(() => view.result.current.takeOver())
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    // A press names no expected owner: a press may take from anyone.
+    expect(view.result.current.takeoverIntent.expectedOwner()).toBeUndefined()
+    // The bounce's first resize carries the flag; the lifecycle clears the intent
+    // on the confirmed write.
+    act(() => view.result.current.takeoverIntent.clear())
+    // Much later, the network drops and reconnects on its own. Nothing re-arms.
+    act(() => view.result.current.notePtyConn("closed"))
+    act(() => view.result.current.notePtyConn("connecting"))
+    act(() => view.result.current.notePtyConn("open"))
+    act(() => view.result.current.seedFromConnected("mine2", null, 4))
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+  })
+
+  it("drops an armed intent on ANY close of the socket it was armed for", () => {
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
+    act(() => view.result.current.takeOver())
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    act(() => view.result.current.notePtyConn("closed"))
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+  })
+})
+
+describe("self-succession names the ghost it expects to displace", () => {
+  it("sends the dead connection id as the expected owner", () => {
+    const { view } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    expect(view.result.current.takeoverIntent.expectedOwner()).toBe("conn-a")
+  })
+
+  it("recognises ANY id this pane has held, not merely the most recent", () => {
+    const { view } = setup()
+    // Two reconnects in a row on a flapping radio.
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    act(() => view.result.current.connId.write("conn-b"))
+    act(() => view.result.current.connId.write(null))
+    // The server has still not reaped conn-a, so its handshake names it.
+    act(() => view.result.current.seedFromConnected("conn-c", "conn-a"))
+    expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.takeoverIntent.expectedOwner()).toBe("conn-a")
+  })
+
+  it("leaves the card up when the server REFUSES the succession", () => {
+    const { view } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    expect(view.result.current.isOwner).toBe(true)
+    // Somebody else legitimately claimed the pty in the gap, so the server
+    // refuses the transfer and broadcasts their claim instead. This client lands
+    // as a watcher with the card, exactly like a refused plain resize.
+    act(() =>
+      notifyPtyOwner("p1", "conn-other", 9, "Mozilla/5.0 (Macintosh) Chrome/1"),
+    )
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownerPresent).toBe(true)
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
   })
 })

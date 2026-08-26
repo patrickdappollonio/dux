@@ -23,10 +23,18 @@ const DUX_ART = `       ░██
 //
 // Driven by the sticky `offline` flag (see `store.ts`), NOT the raw `conn`, so a
 // reconnect attempt re-entering `connecting` between drops does not flicker it
-// off. While the socket is still auto-retrying it reads "Reconnecting…"; once the
-// retries are exhausted (`conn === "failed"`) it switches to the "unreachable"
-// give-up copy. Either way the button calls `reconnect()` (which resets the
-// attempt budget and reopens), so the user can always force a fresh attempt.
+// off.
+//
+// THERE IS NO GIVE-UP COPY ANY MORE. This used to switch to "dux is unreachable"
+// once the retry budget was spent, and the budget is gone: reconnecting is
+// indefinite while the page is visible, and parked (not abandoned) while it is
+// hidden. Saying the server is unreachable while the app is in fact still trying
+// every few seconds was telling the user to act on a state they were not in. The
+// copy says what is true instead, and names the two things that are usually
+// wrong, so a user who can act still knows what to check.
+//
+// The Retry button stays, and it is now a BACKOFF RESET rather than a rescue:
+// `reconnect()` stops waiting out the current gap and attempts immediately.
 //
 // Rendered through a body portal at a high z-index so it sits above every pane,
 // dialog, and toast. Its `backdrop-grayscale` desaturates the whole app behind
@@ -34,12 +42,8 @@ const DUX_ART = `       ░██
 // full-color modal as the only live thing on screen. `bg-background/40` adds a
 // light dim without hiding the grayscaled app the user asked to keep in view.
 export function OfflineOverlay() {
-  const { offline, conn } = useDux()
+  const { offline } = useDux()
   if (!offline) return null
-
-  // `failed` means the socket gave up after its retry budget; anything else while
-  // offline is an in-progress reconnect.
-  const gaveUp = conn === "failed"
 
   return createPortal(
     <div
@@ -60,25 +64,23 @@ export function OfflineOverlay() {
           id="offline-overlay-title"
           className="mb-1.5 flex items-center justify-center gap-2 text-lg font-semibold"
         >
-          {!gaveUp ? (
-            <Loader2
-              className="size-4 animate-spin text-muted-foreground"
-              aria-hidden
-            />
-          ) : null}
-          {gaveUp ? "dux is unreachable" : "Reconnecting to dux…"}
+          <Loader2
+            className="size-4 animate-spin text-muted-foreground"
+            aria-hidden
+          />
+          Reconnecting to dux…
         </h1>
         <p
           id="offline-overlay-desc"
           className="mb-6 text-sm leading-relaxed text-muted-foreground"
         >
-          {gaveUp
-            ? "The dux server may be down, or this device may be offline. Reconnect to the network or restart the server, then try again."
-            : "The connection to the dux server dropped. Trying to get you back online…"}
+          The connection to the dux server dropped, and dux keeps trying for as
+          long as this page is open. If it does not come back, the server may be
+          down or this device may be offline.
         </p>
         <Button onClick={reconnect}>
           <RefreshCw aria-hidden />
-          {gaveUp ? "Retry" : "Reconnect now"}
+          Reconnect now
         </Button>
       </div>
     </div>,

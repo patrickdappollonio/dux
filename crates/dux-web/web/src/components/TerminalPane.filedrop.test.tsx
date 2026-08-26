@@ -101,7 +101,14 @@ class FakePtySocket {
   // models a dropped frame (a socket mid-reconnect) by returning false.
   sendResize = vi.fn(() => true)
   sendInput = vi.fn()
-  sendViewed = vi.fn()
+  // THE ONE PERIODIC FRAME, and the three page-lifecycle entry points the base
+  // class grew with it. Answering `true` means "it went on the wire", which is
+  // what starts the heartbeat's answer deadline.
+  sendBeat = vi.fn(() => true)
+  onBeat: (n: number) => void = () => {}
+  dropForRetry = vi.fn()
+  resumeNow = vi.fn()
+  park = vi.fn()
   isOpen = true
   onConnected: (id: string) => void = () => {}
   onOpen: () => void = () => {}
@@ -150,9 +157,18 @@ vi.mock("@/lib/fileDropApi", async (importOriginal) => {
 })
 
 let mockState: DuxState
+// The compose drafts live in the real store, which is module state that outlives
+// one test. Cleared per test through the real setter (the ids these suites use).
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState }
+  // The compose draft genuinely lives in the store now (keyed by target id, so
+  // it survives the pane remount `reconnect()` performs), so the fake state must
+  // carry the REAL slice or nothing typed into the box would ever come back.
+  // Calling the real hook here also subscribes, so a draft write re-renders.
+  return {
+    ...actual,
+    useDux: () => ({ ...mockState, composeDrafts: actual.useDux().composeDrafts }),
+  }
 })
 
 function installStubs() {
@@ -192,6 +208,14 @@ function installStubs() {
 
 installStubs()
 const { TerminalPane } = await import("./TerminalPane")
+// The compose drafts live in the real store, which is module state outliving one
+// test, so each test starts from a clean map. Imported here rather than at the
+// top of the file because the store touches `localStorage` at import time and
+// `installStubs()` has to run first.
+const { setComposeDraft: setComposeDraftReal } = await import("@/lib/store")
+const resetComposeDrafts = () => {
+  for (const id of ["s1", "t1", "tab-2", "term-1"]) setComposeDraftReal(id, "")
+}
 const { toast } = await import("sonner")
 
 function makeState(): DuxState {
@@ -332,6 +356,7 @@ function sentToSocket(): string[] {
 }
 
 beforeEach(() => {
+  resetComposeDrafts()
   FakePtySocket.instances = []
   TermStub.instances = []
   TermStub.pastes = []

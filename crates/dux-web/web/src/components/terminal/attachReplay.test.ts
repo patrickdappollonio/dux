@@ -60,7 +60,7 @@ function setup(gen: () => number | null = () => null) {
 describe("the very first open", () => {
   it("writes the replay straight through, with no reset and no drain", () => {
     const { term, attach } = setup()
-    expect(attach.noteOpen()).toEqual({ firstOpen: true })
+    expect(attach.noteOpen()).toMatchObject({ firstOpen: true })
     attach.onBytes(bytes("hello"))
     expect(term.log).toEqual(["write:hello"])
   })
@@ -101,7 +101,7 @@ describe("a reconnect", () => {
     attach.noteOpen()
     attach.onBytes(bytes("first"))
     term.pump()
-    expect(attach.noteOpen()).toEqual({ firstOpen: false })
+    expect(attach.noteOpen()).toMatchObject({ firstOpen: false })
     attach.onBytes(bytes("replay"))
     // Nothing has been written yet: the previous connection's queue is
     // draining.
@@ -194,5 +194,143 @@ describe("replay idempotency by generation", () => {
     attach.onBytes(bytes("dropped"))
     attach.onBytes(bytes("live"))
     expect(term.log).toEqual(["write:replay", "write:live"])
+  })
+})
+
+// ATTACH EPOCHS. Every open mints one, and every piece of per-open state is
+// keyed to it. Before this, `awaitingRepaint`, `draining`, `heldChunks`,
+// `repaintNeedsReset` and `lastAppliedGen` were ONE set of closure variables
+// shared across every open of the pane's lifetime, so a close and reopen landing
+// mid-drain let the PREVIOUS open's write callback run against the NEW open's
+// state: it reset the terminal, flushed the old open's held chunks, and cleared
+// `draining` under the new open's feet.
+describe("attach epochs", () => {
+  it("mints a new epoch per open and reports it on the applied signal", () => {
+    const { term, attach } = setup()
+    const applied: number[] = []
+    attach.onReplayApplied((epoch) => applied.push(epoch))
+    const first = attach.noteOpen()
+    attach.onBytes(bytes("one"))
+    term.pump()
+    expect(applied).toEqual([first.epoch])
+    const second = attach.noteOpen()
+    expect(second.epoch).toBeGreaterThan(first.epoch)
+  })
+
+  it("counts a generation-deduped replay as applied, or the cover would hang on a duplicate", () => {
+    const { term, attach } = setup(() => 4)
+    const applied: number[] = []
+    attach.onReplayApplied((epoch) => applied.push(epoch))
+    attach.noteOpen()
+    attach.onBytes(bytes("replay"))
+    term.pump()
+    expect(applied).toHaveLength(1)
+    // The duplicate is dropped whole (no reset, no write) and must STILL report
+    // applied, for its own epoch: nothing else will ever clear this open's cover.
+    const dup = attach.noteOpen()
+    attach.onBytes(bytes("replay-again"))
+    expect(applied).toEqual([applied[0], dup.epoch])
+  })
+
+  it("fires the applied signal exactly once per open", () => {
+    const { term, attach } = setup()
+    const applied: number[] = []
+    attach.onReplayApplied((epoch) => applied.push(epoch))
+    attach.noteOpen()
+    attach.onBytes(bytes("replay"))
+    attach.onBytes(bytes("live"))
+    term.pump()
+    term.pump()
+    expect(applied).toHaveLength(1)
+  })
+
+  // (a) The reopen lands between noteOpen() and the first binary frame.
+  it("a reopen before the first frame answers for the NEW epoch alone", () => {
+    const { term, attach } = setup()
+    const applied: number[] = []
+    attach.onReplayApplied((epoch) => applied.push(epoch))
+    attach.noteOpen()
+    attach.onBytes(bytes("first"))
+    term.pump()
+    applied.length = 0
+    // Superseded before a byte arrived.
+    attach.noteOpen()
+    const live = attach.noteOpen()
+    attach.onBytes(bytes("second"))
+    term.pump()
+    term.pump()
+    expect(applied).toEqual([live.epoch])
+    expect(term.log.at(-1)).toBe("write:second")
+  })
+
+  // (b) The reopen lands MID-DRAIN, and the old drain callback fires afterwards.
+  it("a drain callback from a superseded open is inert, and discards its held chunks", () => {
+    const { term, attach } = setup()
+    const applied: number[] = []
+    attach.onReplayApplied((epoch) => applied.push(epoch))
+    attach.noteOpen()
+    attach.onBytes(bytes("first"))
+    term.pump()
+    applied.length = 0
+    term.log.length = 0
+
+    // A reconnect: this open drains before resetting.
+    attach.noteOpen()
+    attach.onBytes(bytes("stale-replay"))
+    expect(term.log).toEqual(["drain"])
+    // The socket drops and reopens BEFORE that drain callback runs.
+    const fresh = attach.noteOpen()
+    attach.onBytes(bytes("fresh-replay"))
+    // Now both drains complete, oldest first.
+    term.pump()
+    term.pump()
+    term.pump()
+
+    // The superseded open's drain wrote nothing: its held chunk belongs to a
+    // byte stream the server has already replaced.
+    expect(term.log).not.toContain("write:stale-replay")
+    expect(term.log).toContain("write:fresh-replay")
+    // And exactly one applied signal, for the live epoch.
+    expect(applied).toEqual([fresh.epoch])
+  })
+
+  // (c) The reopen lands mid-`writeReplayChunk`, and the old completion callback
+  // fires afterwards.
+  it("a replay write callback from a superseded open neither re-signals nor reopens the focus window", () => {
+    const { term, attach } = setup()
+    const applied: number[] = []
+    attach.onReplayApplied((epoch) => applied.push(epoch))
+    attach.noteOpen()
+    attach.onBytes(bytes("first"))
+    // The first open's replay is queued but NOT parsed yet.
+    applied.length = 0
+    const fresh = attach.noteOpen()
+    attach.onBytes(bytes("second"))
+    // Pump everything: the superseded write's callback runs first.
+    term.pump()
+    term.pump()
+    term.pump()
+    expect(applied).toEqual([fresh.epoch])
+    // The window is closed: a superseded callback must not leave the counter
+    // stuck open, and must not have decremented the live epoch's own count.
+    expect(attach.replayInFlight()).toBe(false)
+  })
+
+  it("keeps the generation dedupe per epoch rather than letting a superseded open advance it", () => {
+    let gen = 1
+    const { term, attach } = setup(() => gen)
+    attach.noteOpen()
+    attach.onBytes(bytes("gen-1"))
+    term.pump()
+    // A new open whose replay carries a NEW generation still applies after a
+    // superseded sibling: the dedupe mark is the machine's, not the epoch's, and
+    // a stale open must not have banked a generation the live one then drops.
+    attach.noteOpen()
+    gen = 2
+    attach.noteOpen()
+    attach.onBytes(bytes("gen-2"))
+    term.pump()
+    term.pump()
+    expect(term.log).toContain("write:gen-2")
   })
 })

@@ -1,0 +1,83 @@
+import { afterEach, describe, expect, it } from "vitest"
+
+import {
+  DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
+  DEFAULT_HEARTBEAT_SECONDS,
+  DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS,
+  DEFAULT_REPLAY_WAIT_SECONDS,
+  heartbeatDeadlineMs,
+  heartbeatPeriodMs,
+  publishConnectionTiming,
+  reconnectBackoffCapMs,
+  replayWaitMs,
+} from "./connectionTiming"
+
+afterEach(() => {
+  publishConnectionTiming(undefined)
+})
+
+describe("the documented defaults", () => {
+  it("are the four values an older server or a pre-bootstrap render falls back to", () => {
+    expect(DEFAULT_REPLAY_WAIT_SECONDS).toBe(8)
+    expect(DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS).toBe(10)
+    expect(DEFAULT_HEARTBEAT_SECONDS).toBe(15)
+    expect(DEFAULT_HEARTBEAT_DEADLINE_SECONDS).toBe(30)
+  })
+
+  it("are what every reader returns before the bootstrap document lands", () => {
+    expect(replayWaitMs()).toBe(8_000)
+    expect(reconnectBackoffCapMs()).toBe(10_000)
+    expect(heartbeatPeriodMs()).toBe(15_000)
+    expect(heartbeatDeadlineMs()).toBe(30_000)
+  })
+
+  it("are what a server that omits the keys falls back to", () => {
+    publishConnectionTiming({})
+    expect(replayWaitMs()).toBe(8_000)
+    expect(reconnectBackoffCapMs()).toBe(10_000)
+    expect(heartbeatPeriodMs()).toBe(15_000)
+    expect(heartbeatDeadlineMs()).toBe(30_000)
+  })
+})
+
+describe("a published document", () => {
+  it("is read by every getter", () => {
+    publishConnectionTiming({
+      replay_wait_seconds: 3,
+      reconnect_backoff_cap_seconds: 4,
+      heartbeat_seconds: 5,
+      heartbeat_deadline_seconds: 6,
+    })
+    expect(replayWaitMs()).toBe(3_000)
+    expect(reconnectBackoffCapMs()).toBe(4_000)
+    expect(heartbeatPeriodMs()).toBe(5_000)
+    expect(heartbeatDeadlineMs()).toBe(6_000)
+  })
+
+  it("keeps a configured zero for the replay wait, which DISABLES it", () => {
+    publishConnectionTiming({ replay_wait_seconds: 0 })
+    expect(replayWaitMs()).toBe(0)
+  })
+
+  it("refuses a negative or non-finite value and falls back", () => {
+    publishConnectionTiming({
+      replay_wait_seconds: -1,
+      heartbeat_seconds: Number.NaN,
+    })
+    expect(replayWaitMs()).toBe(8_000)
+    expect(heartbeatPeriodMs()).toBe(15_000)
+  })
+
+  it("floors the three periods that cannot meaningfully be zero", () => {
+    // A zero backoff cap would be a hot retry loop, a zero heartbeat period a
+    // frame per tick, and a zero deadline a reconnect on every beat.
+    publishConnectionTiming({
+      reconnect_backoff_cap_seconds: 0,
+      heartbeat_seconds: 0,
+      heartbeat_deadline_seconds: 0,
+    })
+    expect(reconnectBackoffCapMs()).toBe(10_000)
+    expect(heartbeatPeriodMs()).toBe(15_000)
+    expect(heartbeatDeadlineMs()).toBe(30_000)
+  })
+})

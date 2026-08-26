@@ -23,6 +23,15 @@ export const DRAG_THRESHOLD_PX = 4
 /// (`dragScrollLines`) is finger-proportional and unaffected.
 export const WHEEL_SCROLL_SENSITIVITY = 3
 
+/// How often the pane re-reads its replay-wait clock while a cover is up with
+/// no screen behind it. A poll rather than a `setTimeout` because the quantity
+/// being waited on is ACCUMULATED VISIBLE TIME (see `lib/visibleClock.ts`),
+/// which a timer cannot measure: a hidden tab throttles it and a suspended page
+/// resumes with it already fired. One second, so the Reconnect box appears
+/// within a second of the configured wait, and the poll exists only while there
+/// is something to wait for.
+export const REPLAY_WAIT_POLL_MS = 1000
+
 /// How long the container must hold still before its new size goes to the PTY.
 /// A PTY resize is a SIGWINCH, a full child repaint, so it is debounced to one
 /// send with the final dimensions, and the SAME delay is reused when a

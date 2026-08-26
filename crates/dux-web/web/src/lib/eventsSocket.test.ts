@@ -246,26 +246,31 @@ describe("EventsSocket", () => {
     expect(states).toEqual(["connecting", "open", "closed", "connecting"])
   })
 
-  it("gives up with 'failed' after exhausting reconnect attempts", () => {
+  // FLIPPED, both of these. They used to assert the events socket gave up after
+  // its attempt budget and emitted `failed`, and that a manual connect() then
+  // restored it. The budget is gone: the spine is what the whole app rides on,
+  // and abandoning it while the tab is open only ever produced a page that had
+  // quietly stopped updating. It retries indefinitely instead.
+  //
+  // The events socket does NOT park while hidden, which is the other half of the
+  // policy: attention indicators and OS notifications ride this socket precisely
+  // when the tab is in the background.
+  it("never gives up: it retries indefinitely, hidden or not", () => {
     vi.useFakeTimers()
     const sock = new EventsSocket("ws://x/ws/events")
     const states: ConnState[] = []
     sock.onConn = (s) => states.push(s)
     sock.connect()
-    // The socket never opens (the server keeps rejecting): each close schedules a
-    // capped-backoff reconnect until the attempt budget is spent, then "failed".
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 20; i++) {
       last().triggerClose()
-      vi.advanceTimersByTime(5000)
+      vi.advanceTimersByTime(60000)
     }
-    expect(states.at(-1)).toBe("failed")
-    // Once failed, the loop stops constructing sockets.
-    const count = FakeWS.instances.length
-    vi.advanceTimersByTime(60000)
-    expect(FakeWS.instances.length).toBe(count)
+    expect(states).not.toContain("failed")
+    expect(FakeWS.instances.length).toBe(21)
+    sock.close()
   })
 
-  it("a manual connect() after 'failed' resets the budget and retries", () => {
+  it("a manual connect() attempts at once instead of waiting out the backoff", () => {
     vi.useFakeTimers()
     const sock = new EventsSocket("ws://x/ws/events")
     const states: ConnState[] = []
@@ -273,14 +278,15 @@ describe("EventsSocket", () => {
     sock.connect()
     for (let i = 0; i < 6; i++) {
       last().triggerClose()
-      vi.advanceTimersByTime(5000)
+      vi.advanceTimersByTime(60000)
     }
-    expect(states.at(-1)).toBe("failed")
-    // The Reconnect button calls connect() again; it opens a fresh socket.
+    // The Reconnect button calls connect() again; it opens a fresh socket
+    // immediately rather than sitting out the grown gap.
     const before = FakeWS.instances.length
     sock.connect()
     expect(FakeWS.instances.length).toBe(before + 1)
     expect(states.at(-1)).toBe("connecting")
+    sock.close()
   })
 
   it("open() closes and detaches a prior socket instead of orphaning it", () => {

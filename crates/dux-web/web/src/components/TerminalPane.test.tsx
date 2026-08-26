@@ -307,7 +307,14 @@ class FakePtySocket {
   // models a dropped frame (a socket mid-reconnect) by returning false.
   sendResize = vi.fn(() => true)
   sendInput = vi.fn()
-  sendViewed = vi.fn()
+  // THE ONE PERIODIC FRAME, and the three page-lifecycle entry points the base
+  // class grew with it. Answering `true` means "it went on the wire", which is
+  // what starts the heartbeat's answer deadline.
+  sendBeat = vi.fn(() => true)
+  onBeat: (n: number) => void = () => {}
+  dropForRetry = vi.fn()
+  resumeNow = vi.fn()
+  park = vi.fn()
   // Mirrors the real socket's `isOpen` getter; a test flips it to false to
   // model a disconnected socket (the compose bar's Send checks it).
   isOpen = true
@@ -405,15 +412,32 @@ vi.mock("@/lib/ptySocket", async (importOriginal) => {
 })
 
 let mockState: DuxState
+// The compose drafts live in the real store, which is module state that outlives
+// one test. Cleared per test through the real setter (the ids these suites use).
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState }
+  // The compose draft genuinely lives in the store now (keyed by target id, so
+  // it survives the pane remount `reconnect()` performs), so the fake state must
+  // carry the REAL slice or nothing typed into the box would ever come back.
+  // Calling the real hook here also subscribes, so a draft write re-renders.
+  return {
+    ...actual,
+    useDux: () => ({ ...mockState, composeDrafts: actual.useDux().composeDrafts }),
+  }
 })
 
 // Stub browser globals BEFORE the store module evaluates (it touches
 // localStorage at import time, pulled in transitively by TerminalPane).
 installStubs()
 const { TerminalPane } = await import("./TerminalPane")
+// The compose drafts live in the real store, which is module state outliving one
+// test, so each test starts from a clean map. Imported here rather than at the
+// top of the file because the store touches `localStorage` at import time and
+// `installStubs()` has to run first.
+const { setComposeDraft: setComposeDraftReal } = await import("@/lib/store")
+const resetComposeDrafts = () => {
+  for (const id of ["s1", "t1", "tab-2", "term-1"]) setComposeDraftReal(id, "")
+}
 
 function makeState(offline = false, conn: ConnState = "open"): DuxState {
   return {
@@ -514,6 +538,7 @@ function last(): FakePtySocket {
 }
 
 beforeEach(() => {
+  resetComposeDrafts()
   FakePtySocket.instances = []
   TermStub.instances = []
   FitStub.fits = 0
@@ -686,8 +711,10 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
       act(() => {
         vi.advanceTimersByTime(400)
       })
-      // And the claim rode the first resize of the new connection, FLAGGED.
-      expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true)
+      // And the claim rode the first resize of the new connection, FLAGGED and
+      // NAMING THE GHOST it expects to displace: the server refuses the transfer
+      // if anybody else holds the pty by then.
+      expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true, "conn-a")
     } finally {
       vi.useRealTimers()
     }
@@ -796,10 +823,11 @@ describe("TerminalPane viewer grid divergence", () => {
       vi.advanceTimersByTime(600)
     })
     expect(pty.connect).toHaveBeenCalledTimes(1)
-    // The heal is a reconnect, and a deliberate `connect()` fires no
-    // `onReconnecting` of its own, so the cue is raised by hand exactly as the
-    // take-over bounce raises it.
-    expect(screen.getByText("Reconnecting…")).toBeTruthy()
+    // The heal is a reconnect, and the watcher's pane stays covered throughout
+    // by the take-over card, which is the cover a non-owner gets in every
+    // ordinary state (it is solid and full-pane, so it always painted over the
+    // reconnect spinner anyway).
+    expect(screen.getByText("Take over")).toBeTruthy()
     // Each announcement was ADOPTED before it armed the heal, so by the time
     // the bounce fires this pane is already rendering at the child's geometry.
     // The bounce is still worth taking, because adopting the grid does not
@@ -929,18 +957,22 @@ describe("TerminalPane take-over device naming", () => {
     expect(screen.queryByText("Active on another device")).toBeNull()
   })
 
-  it("drops the specific name to the generic copy when events socket is not open", () => {
+  // FLIPPED. Losing the events socket used to WIPE the name while
+  // `ownerPresent` stayed true, so a flapping spine downgraded a perfectly good
+  // "Open on Chrome on macOS" to the generic copy and back again. The wipe was
+  // defending against a name going stale with no correction coming; the
+  // correction now exists (the spine's own `input_owner`, checked on the next
+  // open), so the name is kept and only ever replaced by a newer fact.
+  it("KEEPS the specific name while the events socket is down", () => {
     const { rerender } = render(
       <TerminalPane kind="agent" id="s1" sessionId="s1" />,
     )
     act(() => notifyPtyOwner("s1", "conn-other", undefined, chromeMac))
     expect(screen.getByText("Open on Chrome on macOS")).toBeTruthy()
-    // The events socket drops (conn !== "open"): the specific-but-now-possibly-stale
-    // device name is cleared, falling back to the always-correct generic copy.
     mockState = makeState(false, "closed")
     act(() => rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />))
-    expect(screen.queryByText("Open on Chrome on macOS")).toBeNull()
-    expect(screen.getByText("Active on another device")).toBeTruthy()
+    expect(screen.getByText("Open on Chrome on macOS")).toBeTruthy()
+    expect(screen.queryByText("Active on another device")).toBeNull()
   })
 })
 
@@ -1010,8 +1042,13 @@ describe("TerminalPane take-over is a fresh attach", () => {
     expect(pty.connect).toHaveBeenCalledTimes(1)
     expect(pty.sendResize).not.toHaveBeenCalled()
     // A deliberate `connect()` fires no `onReconnecting` of its own, so the
-    // window would otherwise read as a frozen terminal.
-    expect(screen.getByText("Reconnecting…")).toBeTruthy()
+    // window would otherwise read as a frozen terminal. The press flipped the
+    // verdict optimistically, so this pane is the owner and gets a cue rather
+    // than the card. The wording is the launch one because this pane has never
+    // had a screen (no replay frame in this fixture), which is what "first
+    // attach" means: "Reconnecting…" would claim something went away.
+    expect(screen.getByText("Starting claude…")).toBeTruthy()
+    expect(screen.queryByText("Take over")).toBeNull()
   })
 
   it("carries the claim on the reconnect's FIRST resize frame, and spends it once", () => {
@@ -1022,8 +1059,9 @@ describe("TerminalPane take-over is a fresh attach", () => {
 
     completeBounce(pty)
     // Flagged: a plain resize would be refused, because the pty is still
-    // recorded to the other device until this frame lands.
-    expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true)
+    // recorded to the other device until this frame lands. A PRESS names no
+    // expected owner, because a press may take from anyone.
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true, undefined)
     // And the cue is gone: the reopen cleared it.
     expect(screen.queryByText("Reconnecting…")).toBeNull()
 
@@ -1050,7 +1088,7 @@ describe("TerminalPane take-over is a fresh attach", () => {
     // The reopen's first resize is written into a socket that has re-dropped.
     pty.sendResize.mockReturnValue(false)
     completeBounce(pty)
-    expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true)
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true, undefined)
 
     // The next frame that actually goes out still carries it.
     pty.sendResize.mockClear()
@@ -1059,7 +1097,7 @@ describe("TerminalPane take-over is a fresh attach", () => {
       TermStub.instances.at(-1)!.resize(100, 30)
       vi.advanceTimersByTime(400)
     })
-    expect(pty.sendResize).toHaveBeenCalledWith(30, 100, true)
+    expect(pty.sendResize).toHaveBeenCalledWith(30, 100, true, undefined)
   })
 
   // THE POINT OF THE WHOLE ARC. A take-over must run the reset-then-replay path,
@@ -2424,7 +2462,9 @@ describe("TerminalPane holds the PTY resize while a touch-scroll gesture is acti
     FitStub.fits = 0
     startScroll()
     act(() => {
-      window.dispatchEvent(new Event("focus"))
+      // The resync's trigger moved to the socket reopening; the property under
+      // test (a DIRECT send still defers to the gesture's lift) is unchanged.
+      pty.onOpen()
       vi.advanceTimersByTime(200)
     })
     expect(FitStub.fits).toBe(0)
@@ -2923,14 +2963,25 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
     act(() => {
       vi.advanceTimersByTime(400)
     })
-    expect(pty.sendResize).toHaveBeenCalledTimes(1)
-    expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true)
+    // The reopen also runs the foreground resync (it moved to `pty.onOpen`), so
+    // count the FLAGGED frame rather than every frame the reattach produces.
+    expect(
+      pty.sendResize.mock.calls.filter((c) => c[2] === true),
+    ).toHaveLength(1)
+    // A PRESSED take-over names no expected owner: a press may take from anyone.
+    expect(
+      pty.sendResize.mock.calls.find((c) => c[2] === true),
+    ).toEqual([24, 80, true, undefined])
   })
 
-  it("still re-asserts an UNCHANGED size on a foreground return (the dedupe bypass)", () => {
+  it("still re-asserts an UNCHANGED size when the socket REOPENS (the dedupe bypass)", () => {
+    // The foreground resync moved from the visibility listener to `pty.onOpen`:
+    // it used to run on every visibility signal, which meant it could fire at a
+    // DEAD socket and book a size as delivered that never went out.
     const pty = mountSettled()
+    pty.sendResize.mockClear()
     act(() => {
-      window.dispatchEvent(new Event("focus"))
+      pty.onOpen()
       vi.advanceTimersByTime(200)
     })
     expect(pty.sendResize).toHaveBeenCalledTimes(1)
@@ -4092,5 +4143,126 @@ describe("TerminalPane faithful-view overflow and live preference flips", () => 
     })
     fireEvent.touchEnd(container(), { touches: [], changedTouches: [] })
     expect(term().scrollLineCalls.length).toBeGreaterThan(0)
+  })
+})
+
+// THE DRAFT OUTLIVES THE PANE. It lives in the store keyed by target id
+// precisely because `reconnect()` bumps `terminalEpoch` to REMOUNT the pane, and
+// that Retry is the gesture a user reaches for after a bad network, which is
+// exactly when they are most likely to have an unsent message typed.
+describe("TerminalPane compose draft survives a remount", () => {
+  const desktopWidth = window.innerWidth
+  let pointerStub: MatchMediaStub | null = null
+  const goMobile = () => {
+    Object.defineProperty(window, "innerWidth", { value: 500, configurable: true })
+    pointerStub = stubCoarsePointer()
+  }
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+    pointerStub?.restore()
+    pointerStub = null
+  })
+
+  const composeTextarea = () =>
+    screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement
+
+  it("survives the pane REMOUNT that Retry performs", () => {
+    goMobile()
+    const { unmount } = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.change(composeTextarea(), { target: { value: "half a thought" } })
+    expect(composeTextarea().value).toBe("half a thought")
+    // `reconnect()` bumps `terminalEpoch`, which changes the pane's React key and
+    // throws this component away. The draft must not go with it.
+    unmount()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeTextarea().value).toBe("half a thought")
+  })
+
+  it("survives a pagehide / pageshow round trip", () => {
+    goMobile()
+    const { unmount } = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.change(composeTextarea(), { target: { value: "typed on a train" } })
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"))
+    })
+    unmount()
+    act(() => {
+      window.dispatchEvent(new Event("pageshow"))
+    })
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeTextarea().value).toBe("typed on a train")
+  })
+
+  it("keeps each target's draft apart", () => {
+    goMobile()
+    const { unmount } = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.change(composeTextarea(), { target: { value: "for the agent" } })
+    unmount()
+    render(
+      <TerminalPane
+        kind="terminal"
+        id="t1"
+        owner={{ kind: "session", session_id: "s1" }}
+      />,
+    )
+    expect(composeTextarea().value).toBe("")
+  })
+})
+
+// NO AUTOFOCUS, AND NO SOFT KEYBOARD, until the handshake has confirmed
+// ownership AND the replay for the current attach epoch is on screen.
+describe("TerminalPane does not summon the keyboard before it has reconciled", () => {
+  const desktopWidth = window.innerWidth
+  let pointerStub: MatchMediaStub | null = null
+  const goMobile = () => {
+    Object.defineProperty(window, "innerWidth", { value: 500, configurable: true })
+    pointerStub = stubCoarsePointer()
+  }
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+    pointerStub?.restore()
+    pointerStub = null
+  })
+
+  const composeTextarea = () =>
+    screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement
+
+  it("does not focus the message box before the handshake and the replay", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    // The socket opened, but the server has answered neither question yet.
+    act(() => pty.onOpen())
+    expect(document.activeElement).not.toBe(composeTextarea())
+    // The handshake alone is not enough: the screen is still missing.
+    act(() => pty.onConnected("conn-self", null))
+    expect(document.activeElement).not.toBe(composeTextarea())
+    // The replay lands, and only now does the keyboard come up.
+    act(() => pty.bytesCb?.(new Uint8Array([0x61])))
+    expect(document.activeElement).toBe(composeTextarea())
+  })
+
+  it("never interrupts an IME composition to take focus", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    // Somebody is mid-composition somewhere in the pane.
+    act(() => {
+      document.dispatchEvent(new Event("compositionstart", { bubbles: true }))
+    })
+    act(() => {
+      pty.onOpen()
+      pty.onConnected("conn-self", null)
+    })
+    act(() => pty.bytesCb?.(new Uint8Array([0x61])))
+    // Moving focus here would destroy the half-typed text and its candidate
+    // popup, so it does not happen.
+    expect(document.activeElement).not.toBe(composeTextarea())
   })
 })

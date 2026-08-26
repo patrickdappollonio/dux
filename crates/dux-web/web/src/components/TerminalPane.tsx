@@ -55,10 +55,10 @@ import {
   terminalFontFamily,
 } from "@/lib/terminalFont"
 import { terminalsForOwner } from "@/lib/terminals"
-import {
-  DEFAULT_ATTENTION_GRACE_SECONDS,
-  shouldSendViewed,
-} from "@/lib/viewedPing"
+import { DEFAULT_ATTENTION_GRACE_SECONDS } from "@/lib/viewedPing"
+import { attachCover } from "@/lib/attachCover"
+import { replayWaitMs } from "@/lib/connectionTiming"
+import { createVisibleClock, type VisibleClock } from "@/lib/visibleClock"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 import {
@@ -70,10 +70,14 @@ import { useTerminalOwnership } from "@/components/terminal/ownership"
 import {
   useViewerGrid,
 } from "@/components/terminal/viewerGrid"
-import { xtermScrollbarWidth } from "@/components/terminal/constants"
+import {
+  REPLAY_WAIT_POLL_MS,
+  xtermScrollbarWidth,
+} from "@/components/terminal/constants"
 import { viewerFontFit } from "@/lib/viewerFit"
 import {
   focusTypingSurfaceIn,
+  typingFocusAllowed,
   useInputSurface,
 } from "@/components/terminal/inputSurface"
 import { useUploadPipeline } from "@/components/terminal/uploadPipeline"
@@ -253,6 +257,21 @@ export function TerminalPane(props: TerminalPaneProps) {
       : (ownedTerminals?.find((t) => t.id === id)?.has_output ?? false)
   const providerName =
     kind === "agent" ? (focusedTab?.provider ?? session?.provider) : session?.provider
+  // The server-published driver of this pty, refetched on every events-socket
+  // open. `null` means the server said nobody drives it; `undefined` means it did
+  // not answer (an older server), which is no evidence either way.
+  const spineTerminal =
+    props.kind === "terminal"
+      ? ownedTerminals?.find((t) => t.id === id)
+      : undefined
+  const spineInputOwner =
+    kind === "agent"
+      ? focusedTab === undefined
+        ? undefined
+        : (focusedTab.input_owner ?? null)
+      : spineTerminal === undefined
+        ? undefined
+        : (spineTerminal.input_owner ?? null)
 
   // The compose textarea, owned by ComposeBar but targeted from here: the
   // tap-to-focus redirect and the scroll-gesture keyboard dismissal both need
@@ -314,6 +333,52 @@ export function TerminalPane(props: TerminalPaneProps) {
   // deliberate `connect()` fires no `onReconnecting` of its own.
   const [reconnecting, setReconnecting] = useState(false)
 
+  // THE ATTACH EPOCH AND ITS SCREEN. Every open of the socket mints an epoch
+  // (see `terminal/attachReplay.ts`); the cover comes down only when the replay
+  // for the CURRENT one has been parsed, and never merely because the socket
+  // opened. `null` means no open has happened yet, which is covered too.
+  const [attachEpoch, setAttachEpoch] = useState<number | null>(null)
+  const [appliedEpoch, setAppliedEpoch] = useState<number | null>(null)
+  const replayApplied = attachEpoch !== null && appliedEpoch === attachEpoch
+
+  // THE REPLAY WAIT, in ACCUMULATED VISIBLE TIME (see `lib/visibleClock.ts`): a
+  // hidden tab is throttled and a suspended one resumes believing hours passed,
+  // so a wall-clock wait would offer a Reconnect button to a phone the moment it
+  // came out of a pocket. Reset on every attach epoch, because each open's
+  // patience starts from zero.
+  const replayClockRef = useRef<VisibleClock | null>(null)
+  if (replayClockRef.current === null) {
+    replayClockRef.current = createVisibleClock()
+  }
+  const [replayWaitExpired, setReplayWaitExpired] = useState(false)
+  useEffect(() => {
+    const clock = replayClockRef.current
+    return () => clock?.dispose()
+  }, [])
+  // Poll the visible clock while a cover is up with no screen behind it. A poll
+  // rather than a timer because the quantity being waited on is visible time,
+  // which a `setTimeout` cannot measure; the interval is a second, so the box
+  // appears within a second of the configured wait. It runs only while there is
+  // something to wait for, so a settled pane pays nothing.
+  useEffect(() => {
+    // Nothing to wait for. The flag is not cleared here (that would be a
+    // setState inside an effect body, and a cascading render); it is cleared by
+    // `noteAttachEpoch`, which is the moment a NEW wait begins, and the cover
+    // ignores it entirely while the replay is applied.
+    if (replayApplied) return
+    const waitMs = replayWaitMs()
+    // A configured zero disables the wait entirely: the cover stays up
+    // indefinitely rather than ever offering the box.
+    if (waitMs <= 0) return
+    const check = () => {
+      const elapsed = replayClockRef.current?.elapsedMs() ?? 0
+      if (elapsed >= waitMs) setReplayWaitExpired(true)
+    }
+    check()
+    const timer = setInterval(check, REPLAY_WAIT_POLL_MS)
+    return () => clearInterval(timer)
+  }, [replayApplied, attachEpoch])
+
   // THE OWNERSHIP MACHINE: the four states, the seven transition sites, the
   // verdict channel, the connection identity and the take-over intent, all in
   // one module. See `terminal/ownership.ts`.
@@ -326,14 +391,18 @@ export function TerminalPane(props: TerminalPaneProps) {
     takeoverLabel,
     ownerPresent,
     connectionLost,
-    setConnectionLost,
+    notePtyConn,
+    handshakeSeen,
     takeOver,
   } = useTerminalOwnership({
     id,
     kind,
     conn,
+    // Who the SPINE says drives this pty. It is the only thing that can correct
+    // a device name kept across an events-socket outage, and it exists for a
+    // companion terminal as well as an agent tab, so both cards get it.
+    spineInputOwner,
     ptyRef,
-    focusTypingSurface,
     setReconnecting,
   })
 
@@ -378,6 +447,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     termRef,
     ptyRef,
     ownership,
+    // The pane's own target id keys the draft in the store, so each agent tab
+    // and each terminal keeps its own unsent message across a remount.
+    targetId: props.id,
   })
   const { ctrl, alt, composeText, setComposeText } = input
 
@@ -616,6 +688,27 @@ export function TerminalPane(props: TerminalPaneProps) {
   // with a mouse must still get right-click paste).
   const pointerTypeRef = useRef("")
 
+  // IS AN IME COMPOSITION IN FLIGHT? Moving focus mid-composition destroys the
+  // half-typed CJK text and the candidate popup with it, so every automatic
+  // focus move in this pane is gated on this being false. Tracked at the
+  // document, because the composition may be in xterm's hidden textarea or in
+  // the compose box and both are inside this pane.
+  const composingRef = useRef(false)
+  useEffect(() => {
+    const start = () => {
+      composingRef.current = true
+    }
+    const end = () => {
+      composingRef.current = false
+    }
+    document.addEventListener("compositionstart", start, true)
+    document.addEventListener("compositionend", end, true)
+    return () => {
+      document.removeEventListener("compositionstart", start, true)
+      document.removeEventListener("compositionend", end, true)
+    }
+  }, [])
+
   // WHICH INPUT ROWS EXIST. The accessory keys and the message box each answer
   // for themselves; the menu's own row exists only when neither does.
   const accessoryBarShown = isOwner && touchSurfaces && accessoryBarVisible
@@ -705,11 +798,17 @@ export function TerminalPane(props: TerminalPaneProps) {
     noteRemotePtyGrid: viewerGrid.noteRemoteGrid,
     noteLocalGrid: viewerGrid.noteLocalGrid,
     noteSocketOpen: viewerGrid.noteSocketOpen,
+    noteAttachEpoch: (epoch) => {
+      setAttachEpoch(epoch)
+      setReplayWaitExpired(false)
+    },
+    noteReplayApplied: (epoch) => setAppliedEpoch(epoch),
+    notePtyConn,
     focusTypingSurface,
     onClipboardPaste: (e) => upload.onClipboardPaste(e),
     armForcedTextPaste: () => upload.armForcedTextPaste(),
     setReconnecting,
-    setConnectionLost,
+    resetReplayWait: () => replayClockRef.current?.reset(),
   })
 
   // THE SURVIVING EFFECTS, inventoried in one place because "one lifecycle
@@ -746,9 +845,34 @@ export function TerminalPane(props: TerminalPaneProps) {
   // effect lands after the commit and moves the keyboard into the freshly
   // mounted compose box. Idempotent on the initial mobile mount, a no-op on
   // desktop (`composeBarEnabled` is mobile-gated).
+  //
+  // AND NOT BEFORE THE PANE HAS RECONCILED. Focusing summons the soft keyboard,
+  // and doing that over a pane that is still resolving ownership or still
+  // waiting for its screen puts a keyboard over a placeholder: the take-over
+  // used to focus optimistically the moment it was pressed, a whole reconnect
+  // and replay ahead of anything to type into. Both facts must be in before the
+  // keyboard comes up, and an IME composition in flight is never interrupted by
+  // it. The rule is the pure `typingFocusAllowed`.
   useEffect(() => {
-    if (isOwner && composeBarEnabled) composeInputRef.current?.focus()
-  }, [isOwner, composeBarEnabled])
+    if (
+      !typingFocusAllowed({
+        isOwner,
+        ownershipConfirmed: handshakeSeen,
+        replayApplied,
+        composing: composingRef.current,
+      })
+    ) {
+      return
+    }
+    // THE ONE AUTOMATIC FOCUS MOVE IN THE PANE, for both surfaces. The routing
+    // (compose textarea when the box is up, xterm's hidden textarea otherwise)
+    // lives in `focusTypingSurface`, and the mount-time focus that used to sit
+    // in the lifecycle is gone: two focus paths meant two rules.
+    focusTypingSurface()
+    // `focusTypingSurface` reads only refs, so its identity says nothing new and
+    // listing it would re-focus on every commit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOwner, composeBarEnabled, handshakeSeen, replayApplied])
   // While the compose bar is actually rendered (mobile, `ui.compose_bar` on,
   // input owner — the same gate as the render below), register the
   // compose-insert sink the store's `runMacro` routes a picked macro through:
@@ -834,26 +958,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
   }, [isSessionSlotTab, everReady, sessionStatus])
 
-  // Gaining ownership is a fresh "looking at it" moment: ping the server at once
-  // (when visible) so the agent's attention flag drops immediately, rather than
-  // waiting up to one interval for the periodic viewed ping in the mount effect.
-  useEffect(() => {
-    if (
-      shouldSendViewed({
-        isOwner,
-        visible: document.visibilityState === "visible",
-        now: Date.now(),
-        visibleSince: visibleSinceRef.current,
-        graceMs: live.current.attentionGraceMs,
-      })
-    ) {
-      ptyRef.current?.sendViewed()
-    }
-    // The trigger is the ownership TRANSITION and nothing else; `live` is a
-    // stable container read at call time, and listing it would re-fire the ping
-    // on every commit.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOwner])
+  // There is deliberately no extra ping on gaining ownership any more. There is
+  // exactly ONE periodic client frame and one timer behind it (see
+  // `lib/heartbeat.ts`), and its cadence is already the viewed ping's 2s in
+  // precisely the state a gain lands in (owner and visible), so the flag drops
+  // within one cadence without a second sender to keep in step.
 
   // The host div owns the padding so the resolved bg fills the padding area
   // seamlessly — no external "border" look. FitAddon measures the content box.
@@ -870,6 +979,21 @@ export function TerminalPane(props: TerminalPaneProps) {
   // the pane covers every host: the desktop ResizablePanel and the mobile
   // viewport-pinned root. The overlays (macro popover, readiness card) are
   // absolutely positioned inside these bounds, so clipping never affects them.
+  // THE ONE COVER DECISION, taken here and read three times below (the box, the
+  // spinner, the card) so the three can never disagree about which is on screen.
+  const cover = attachCover({
+    socket: connectionLost ? "failed" : reconnecting ? "connecting" : "open",
+    replayApplied,
+    everReady,
+    offline,
+    waitExpired: replayWaitExpired,
+    isOwner,
+    // "First attach" is a fact about the PICTURE, not the socket: this pane has
+    // never had a screen, so "Attaching…" is what a reader needs rather than
+    // "Reconnecting…", which would claim something went away.
+    firstAttach: appliedEpoch === null,
+  })
+
   const pane = (
     <div
       className={
@@ -1002,32 +1126,38 @@ export function TerminalPane(props: TerminalPaneProps) {
           unchanged: the terminal screen's header icon button (MobileShell).
           Focus still returns to this pane's typing surface on close, through the
           `terminalFocus` registration above rather than a prop. */}
-      {/* Readiness / reconnect overlay. Non-blocking (pointer-events-none) so it
-          never steals input. Shows while the PTY is still starting up (before its
-          first output latches `everReady`) OR whenever the socket has dropped and
-          is reconnecting — the latter re-arms even after `everReady`, so a
-          mid-session disconnect is visible instead of a silently frozen terminal.
-          Reconnect text wins when both apply.
+      {/* WHAT COVERS THE TERMINAL. One pure decision (`lib/attachCover.ts`)
+          replaces the chain of inline conditions this used to be, because the
+          bug it fixes was a HOLE between two of them rather than a wrong one:
+          the pane cleared its cover at WebSocket OPEN, while the picture only
+          exists once the server's replay frame has been parsed, and in between
+          it drew nothing at all. The helper's own test pins the property that
+          makes that unreachable: it never answers `none` while the replay for
+          the current attach epoch is unapplied.
 
-          But when the WHOLE app is offline (the events socket is down, so every
-          PTY dropped too), the app-wide `OfflineOverlay` already owns that signal
-          — and it deliberately leaves the grayscaled UI visible behind it, where a
-          per-pane "Reconnecting…" spinner would show through and double up. So
-          suppress the reconnect variant while globally offline; the initial
-          startup spinner (`!everReady`) is unrelated and still shows. */}
-      {connectionLost && !offline ? (
-        // Hard stop: the PTY socket exhausted its reconnect budget and gave up.
-        // Surface an explicit Reconnect affordance. Reconnect imperatively on THIS
-        // pane's own socket: `pty.connect()` resets the attempt budget and reopens
-        // in place, preserving the xterm buffer and working uniformly for an agent
-        // tab OR a companion terminal. (A `terminalEpoch` bump would NOT: it only
-        // feeds the pane key for `kind === "agent"`, so it is a no-op for a
-        // companion terminal and would leave its Reconnect button dead.) The
-        // resulting `onConn("connecting")`/`"open"` clears `connectionLost`.
-        <div className="absolute inset-0 flex items-center justify-center">
+          The take-over card below is the `card` answer, rendered separately
+          because it is a whole surface with its own copy rather than an
+          overlay. */}
+      {cover.kind === "box" ? (
+        // A Reconnect affordance, for two different reasons. `lost` is the
+        // socket giving up, which it now only does on a terminal close code (a
+        // provider that will not launch, a deleted tab's route). `no-screen` is
+        // the bounded wait: the socket is healthy and the server never sent a
+        // screen, so rather than leaving the pane blank forever we say what is
+        // missing and offer the one thing that can fix it.
+        //
+        // Reconnect imperatively on THIS pane's own socket: `pty.connect()`
+        // resets the backoff and reopens in place, working uniformly for an
+        // agent tab OR a companion terminal. (A `terminalEpoch` bump would NOT:
+        // it only feeds the pane key for `kind === "agent"`, so it is a no-op
+        // for a companion terminal and would leave its button dead.) It is a
+        // PLAIN attach: one press bounces the socket and claims nothing.
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-background">
           <div className="flex items-center gap-3 rounded-lg border bg-card px-4 py-3 text-card-foreground">
             <span className="text-sm text-muted-foreground">
-              Connection lost.
+              {cover.reason === "lost"
+                ? "Connection lost."
+                : "Still waiting for the terminal's screen."}
             </span>
             <Button
               size="sm"
@@ -1038,16 +1168,19 @@ export function TerminalPane(props: TerminalPaneProps) {
             </Button>
           </div>
         </div>
-      ) : !everReady || (reconnecting && !offline) ? (
+      ) : cover.kind === "spinner" ? (
+        // Non-blocking (pointer-events-none) so it never steals input.
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-card-foreground">
             <BrailleSpinner className="text-primary" />
             <span className="text-sm text-muted-foreground">
-              {reconnecting && !offline
+              {cover.wording === "reconnecting"
                 ? "Reconnecting…"
-                : kind === "agent"
-                  ? `Starting ${providerName ?? "agent"}…`
-                  : "Launching terminal…"}
+                : cover.wording === "attaching"
+                  ? "Attaching…"
+                  : kind === "agent"
+                    ? `Starting ${providerName ?? "agent"}…`
+                    : "Launching terminal…"}
             </span>
           </div>
         </div>
@@ -1079,7 +1212,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           stacked answers to one question. The condition mirrors the overlay's
           own `connectionLost && !offline`, so when the app-wide offline overlay
           owns the signal the card stays exactly as it was. */}
-      {!isOwner && !(connectionLost && !offline) ? (
+      {cover.kind === "card" ? (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-4">
           <Card className="w-full max-w-sm text-center">
             <CardHeader className="items-center gap-3">

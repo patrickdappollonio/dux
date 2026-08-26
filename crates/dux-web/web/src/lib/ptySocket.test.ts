@@ -12,6 +12,7 @@ import {
   terminalPtyUrl,
   terminalSocketUrl,
 } from "./ptySocket"
+import { clearServerValidated, noteServerValidated } from "./serverValidated"
 import type { ConnState } from "./types"
 
 // A controllable WebSocket double: tests trigger open/message/close explicitly
@@ -72,9 +73,15 @@ beforeEach(() => {
   FakeWS.instances = []
   vi.stubGlobal("WebSocket", FakeWS)
   vi.stubGlobal("location", { protocol: "http:", host: "localhost:7070" })
+  // The retry gate is real (see `serverValidated.ts`): a PTY socket may not
+  // attach until the run-identity check has resolved. Every case here is about
+  // something else, so the gate is opened once, centrally, and the one test that
+  // is about the gate shuts it itself.
+  noteServerValidated()
 })
 
 afterEach(() => {
+  clearServerValidated()
   vi.unstubAllGlobals()
   vi.useRealTimers()
   setActivePtySocket(null)
@@ -600,24 +607,23 @@ describe("PtySocket", () => {
     expect(reconnecting).toBe(0)
   })
 
-  it("gives up with 'failed' after exhausting reconnect attempts (matches events)", () => {
+  // FLIPPED. This used to assert the socket gave up after the shared 3-attempt
+  // budget and emitted `failed`. The budget is gone: it was never actually spent
+  // in practice (every successful open refilled it), and giving up is the wrong
+  // answer for a phone whose signal comes back in a minute. `failed` is now
+  // reserved for a terminal close code, tested immediately below.
+  it("never gives up on transient closes: it retries indefinitely while visible", () => {
     vi.useFakeTimers()
     const sock = new PtySocket("ws://x/pty")
     const states: ConnState[] = []
     sock.onConn = (s) => states.push(s)
     sock.connect()
-    // The socket never opens (the server keeps rejecting): each close schedules a
-    // capped-backoff reconnect until the shared 3-attempt budget is spent, then
-    // "failed" — the same cap the events socket uses (no more infinite retry).
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 20; i++) {
       last().triggerClose()
-      vi.advanceTimersByTime(5000)
+      vi.advanceTimersByTime(60000)
     }
-    expect(states.at(-1)).toBe("failed")
-    // Once failed, the loop stops constructing sockets.
-    const count = FakeWS.instances.length
-    vi.advanceTimersByTime(60000)
-    expect(FakeWS.instances.length).toBe(count)
+    expect(states).not.toContain("failed")
+    expect(FakeWS.instances.length).toBe(21)
   })
 
   it("stops without retrying when the server closes with the provider-unavailable code", () => {
@@ -653,18 +659,16 @@ describe("PtySocket", () => {
     expect(FakeWS.instances.length).toBe(2)
   })
 
-  it("a manual connect() after 'failed' resets the budget and retries", () => {
+  it("a manual connect() after a provider-unavailable stop retries", () => {
     vi.useFakeTimers()
     const sock = new PtySocket("ws://x/pty")
     const states: ConnState[] = []
     sock.onConn = (s) => states.push(s)
     sock.connect()
-    for (let i = 0; i < 6; i++) {
-      last().triggerClose()
-      vi.advanceTimersByTime(5000)
-    }
+    last().triggerClose(PROVIDER_UNAVAILABLE_CLOSE)
     expect(states.at(-1)).toBe("failed")
-    // The pane's Reconnect affordance calls connect() again; a fresh socket opens.
+    // The pane's Reconnect affordance calls connect() again; a fresh socket
+    // opens, and the stop the close code set is lifted.
     const before = FakeWS.instances.length
     sock.connect()
     expect(FakeWS.instances.length).toBe(before + 1)
@@ -730,5 +734,97 @@ describe("active PTY socket registry", () => {
     expect(getActivePtySocket()).toBe(sock)
     setActivePtySocket(null)
     expect(getActivePtySocket()).toBeNull()
+  })
+})
+
+describe("the take-over frame names the ghost it expects to succeed", () => {
+  it("a PRESSED take-over carries no expected_owner, because a press may take from anyone", () => {
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    expect(sock.sendResize(40, 120, true)).toBe(true)
+    expect(JSON.parse(last().sent.at(-1) as string)).toEqual({
+      rows: 40,
+      cols: 120,
+      takeover: true,
+    })
+  })
+
+  it("a SELF-SUCCESSION names the dead connection it believes still holds the pty", () => {
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    expect(sock.sendResize(40, 120, true, "41")).toBe(true)
+    expect(JSON.parse(last().sent.at(-1) as string)).toEqual({
+      rows: 40,
+      cols: 120,
+      takeover: true,
+      expected_owner: "41",
+    })
+  })
+
+  it("leaves an ordinary resize byte-identical to the one every prior version sent", () => {
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    sock.sendResize(40, 120)
+    expect(last().sent.at(-1)).toBe('{"rows":40,"cols":120}')
+    // And an expected owner is meaningless without the flag, so it is dropped
+    // rather than sent as a claim nobody asked for.
+    sock.sendResize(40, 120, false, "41")
+    expect(last().sent.at(-1)).toBe('{"rows":40,"cols":120}')
+  })
+})
+
+describe("the one periodic frame", () => {
+  it("carries the beat number and the viewed decision together", () => {
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    expect(sock.sendBeat(7, true)).toBe(true)
+    expect(JSON.parse(last().sent.at(-1) as string)).toEqual({
+      beat: 7,
+      viewed: true,
+    })
+  })
+
+  it("is sent by a WATCHER too, with viewed false", () => {
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    sock.sendBeat(8, false)
+    expect(JSON.parse(last().sent.at(-1) as string)).toEqual({
+      beat: 8,
+      viewed: false,
+    })
+  })
+
+  it("reports a frame the socket dropped, so no deadline is started for it", () => {
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    // Never opened: the send guard discards it.
+    expect(sock.sendBeat(1, false)).toBe(false)
+  })
+
+  it("surfaces the server's echo, so an answer to a stale beat is recognisable", () => {
+    const sock = new PtySocket("ws://x/pty")
+    const answers: number[] = []
+    sock.onBeat = (n) => answers.push(n)
+    sock.connect()
+    const ws = last()
+    ws.open()
+    ws.onmessage?.({ data: JSON.stringify({ event: "beat", n: 12 }) })
+    expect(answers).toEqual([12])
+  })
+
+  it("ignores a beat answer with no number rather than counting it", () => {
+    const sock = new PtySocket("ws://x/pty")
+    const answers: number[] = []
+    sock.onBeat = (n) => answers.push(n)
+    sock.connect()
+    const ws = last()
+    ws.open()
+    ws.onmessage?.({ data: JSON.stringify({ event: "beat" }) })
+    expect(answers).toEqual([])
   })
 })

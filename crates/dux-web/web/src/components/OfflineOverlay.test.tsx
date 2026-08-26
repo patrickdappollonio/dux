@@ -74,18 +74,33 @@ describe("OfflineOverlay", () => {
     expect(screen.getByText("Reconnecting to dux…")).toBeTruthy()
   })
 
-  it("switches to the unreachable give-up state once retries are exhausted", () => {
+  // FLIPPED. This used to assert a "dux is unreachable" give-up state once the
+  // retry budget was spent. There is no budget and no give-up: reconnecting is
+  // indefinite while the page is visible, so telling the user the server is
+  // unreachable while the app is still trying every few seconds was describing a
+  // state they were not in.
+  it("keeps the reconnecting copy even on 'failed', because the app has not stopped trying", () => {
     seed({ offline: true, conn: "failed" })
     render(<OfflineOverlay />)
-    expect(screen.getByText("dux is unreachable")).toBeTruthy()
-    expect(screen.getByRole("button", { name: /retry/i })).toBeTruthy()
-    expect(screen.queryByText("Reconnecting to dux…")).toBeNull()
+    expect(screen.getByText("Reconnecting to dux…")).toBeTruthy()
+    expect(screen.queryByText("dux is unreachable")).toBeNull()
+    expect(
+      screen.getByRole("button", { name: /reconnect now/i }),
+    ).toBeTruthy()
   })
 
-  it("the button forces a fresh reconnect attempt", () => {
-    seed({ offline: true, conn: "failed" })
+  it("names what might be wrong, without claiming dux has given up", () => {
+    seed({ offline: true, conn: "closed" })
     render(<OfflineOverlay />)
-    fireEvent.click(screen.getByRole("button", { name: /retry/i }))
+    expect(
+      screen.getByText(/keeps trying for as long as this page is open/i),
+    ).toBeTruthy()
+  })
+
+  it("the button forces an attempt now instead of waiting out the backoff", () => {
+    seed({ offline: true, conn: "closed" })
+    render(<OfflineOverlay />)
+    fireEvent.click(screen.getByRole("button", { name: /reconnect now/i }))
     expect(reconnectMock).toHaveBeenCalledTimes(1)
   })
 })

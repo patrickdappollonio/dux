@@ -63,11 +63,10 @@ import {
   loadTerminalFontsThenRefit,
   terminalFontFamily,
 } from "@/lib/terminalFont"
-import {
-  VIEWED_PING_INTERVAL_MS,
-  shouldSendViewed,
-  visibleSinceAfterTransition,
-} from "@/lib/viewedPing"
+import { shouldSendViewed, visibleSinceAfterTransition } from "@/lib/viewedPing"
+import { createHeartbeat } from "@/lib/heartbeat"
+import { registerPageLifecycle } from "@/lib/pageLifecycle"
+import type { ConnState } from "@/lib/types"
 import { isFocusReport } from "@/lib/suppressViewerReports"
 import { suppressViewerReports } from "@/lib/suppressViewerReports"
 import { registerAgentNotifications } from "@/lib/agentNotifications"
@@ -142,6 +141,9 @@ export type TerminalLifecyclePorts = {
   mods: ModifierLatch
   ownership: OwnershipVerdict
   connId: ConnectionIdentity
+  /// The PTY socket's connection state. Owns the LOST state and the take-over
+  /// intent's lifetime; see `ownership.ts`'s `notePtyConn`.
+  notePtyConn: (state: ConnState) => void
   /// Re-seed the ownership verdict from the `connected` handshake's `owner`
   /// field. The frame lands here; the decision lives in the ownership machine.
   /// `ownerDevice` is the handshake's `owner_device`, which seeds the take-over
@@ -165,6 +167,12 @@ export type TerminalLifecyclePorts = {
   noteLocalGrid: (grid: { rows: number; cols: number }) => void
   /// The socket opened, which retires any heal bounce that was in flight.
   noteSocketOpen: () => void
+  /// A new attach epoch was minted by this open. The pane resets its cover and
+  /// its replay clock on it, and ignores any applied signal for an older one.
+  noteAttachEpoch: (epoch: number) => void
+  /// The replay for `epoch` has been PARSED, so the picture exists. This is what
+  /// clears the cover; the socket merely opening never does.
+  noteReplayApplied: (epoch: number) => void
   focusTypingSurface: () => void
   onClipboardPaste: (e: ClipboardEvent) => void
   /// Arm the force-text-paste hatch. The key handler here arms it and the
@@ -172,7 +180,10 @@ export type TerminalLifecyclePorts = {
   /// clipboard contents and a paste event carries no modifiers.
   armForcedTextPaste: () => void
   setReconnecting: (value: boolean) => void
-  setConnectionLost: (value: boolean) => void
+  /// The pane's replay-wait clock. Owned by the pane (the render reads whether it
+  /// has expired) and RESET here on every attach epoch, because each open's
+  /// patience starts from zero.
+  resetReplayWait: () => void
 }
 
 export function useTerminalLifecycle(
@@ -216,11 +227,14 @@ export function useTerminalLifecycle(
     noteRemotePtyGrid,
     noteLocalGrid,
     noteSocketOpen,
+    noteAttachEpoch,
+    noteReplayApplied,
+    notePtyConn,
     focusTypingSurface,
     onClipboardPaste,
     armForcedTextPaste,
     setReconnecting,
-    setConnectionLost,
+    resetReplayWait,
   } = ports
 
   useEffect(() => {
@@ -386,8 +400,13 @@ export function useTerminalLifecycle(
         // The ordinary frame is left untouched, arity included: a take-over is
         // rare and a resize is not, so the common call stays exactly the call
         // it always was rather than growing a `false` every frame.
+        // A SELF-SUCCESSION names the ghost it expects to displace; a PRESSED
+        // take-over names nobody, because a press may take from anyone. The
+        // server refuses the transfer when the named ghost no longer holds the
+        // pty, and this client then lands as a watcher with the card, exactly
+        // like a refused plain resize.
         const sent = takeover
-          ? pty.sendResize(rows, cols, true)
+          ? pty.sendResize(rows, cols, true, takeoverIntent.expectedOwner())
           : pty.sendResize(rows, cols)
         if (sent && takeover) takeoverIntent.clear()
         return sent
@@ -608,18 +627,14 @@ export function useTerminalLifecycle(
       return false
     })
 
-    // Focus the typing surface on selection so the user can type immediately,
-    // with no extra click into the pane. This effect re-runs (and the pane remounts)
-    // on every agent OR companion-terminal selection (keyed by [kind, id]), so
-    // both cases are covered. Runs after the click that selected the row, so it
-    // wins focus. With the mobile compose bar up, the typing surface is the
-    // compose textarea (so the soft keyboard types into the buffer from the
-    // first moment), otherwise xterm's hidden textarea as always; the routing
-    // lives in `focusTypingSurface` (it reads only refs, so this once-created
-    // closure calling the mount-time instance is harmless). Skip when we
-    // attached as a read-only observer (non-owner): there is nothing to type
-    // into, and the take-over placeholder owns the surface instead.
-    if (ownership.read()) focusTypingSurface()
+    // THE MOUNT-TIME FOCUS USED TO LIVE HERE, gated only on the foreground
+    // guess. It is gone, and the pane's own focus effect does it instead, when
+    // the pane has actually RECONCILED: the handshake has confirmed ownership
+    // and the replay for this attach epoch is on screen. Focusing summons the
+    // soft keyboard, and doing that over a pane that is still resolving
+    // ownership puts a keyboard over a placeholder. There is now exactly one
+    // automatic focus move in the pane, and one rule deciding it
+    // (`typingFocusAllowed`).
 
     // Copy-on-select (highlight to copy), gated by the `copy_on_select`
     // preference. Runs in the `mouseup` user gesture so the clipboard write is
@@ -975,6 +990,12 @@ export function useTerminalLifecycle(
       firstFrameLanded: resize.firstFrameLanded,
     })
     pty.onBytes((bytes) => attach.onBytes(bytes))
+    // THE COVER CLEARS HERE, and nowhere else. Not at WebSocket open, which is
+    // the hole this closes: the pane used to drop its reconnect cover the moment
+    // the socket opened, while the screen only exists once the server's replay
+    // frame has been PARSED, so a socket that opened and stayed healthy without
+    // ever sending a replay left the pane drawing nothing at all.
+    attach.onReplayApplied((epoch) => noteReplayApplied(epoch))
     // On every (re)open the server replays a fresh repaint as the first binary
     // frame; re-arm the first-frame resize so a reconnect re-fits and re-asserts
     // this viewport's size (the same handling the very first open gets). A
@@ -1007,7 +1028,20 @@ export function useTerminalLifecycle(
       // plan it takes: the very first open jiggles, a reconnect must NOT (an
       // unchanged size would double-repaint the agent on every mobile
       // reconnect) and sends a single plain resize instead.
-      resize.noteOpen(attach.noteOpen().firstOpen)
+      const { firstOpen, epoch } = attach.noteOpen()
+      resize.noteOpen(firstOpen)
+      // A fresh attach epoch: the pane re-covers and its patience starts again
+      // from zero, because the previous open's wait says nothing about this one.
+      noteAttachEpoch(epoch)
+      resetReplayWait()
+      // A reopened socket moots whatever beat was outstanding on the old one.
+      beat.reset()
+      // THE SIZE HALF OF A RETURN, moved here from the visibility listener. It
+      // used to run on every visibility signal, which meant it could fire at a
+      // DEAD socket and silently book a size as delivered that never went out.
+      // An open is the moment the question is both answerable and worth asking:
+      // another client may have resized the shared pty while this tab was away.
+      resize.resyncToForeground()
     }
     // The socket dropped and is retrying: surface the non-blocking reconnect state.
     pty.onReconnecting = () => {
@@ -1024,18 +1058,14 @@ export function useTerminalLifecycle(
         connId.write(null)
       }
     }
-    // Connection-state transitions. The one we act on is `failed`: the PTY socket
-    // now shares the events socket's 3-attempt cap, so when its budget is spent it
-    // STOPS (no more silent behind-the-overlay reattach). Swap the endless
-    // "Reconnecting…" cue for an explicit "connection lost, Reconnect" affordance.
-    // Any retry (`connecting`) or a successful reopen (`open`) clears it.
+    // Connection-state transitions, routed to the ownership machine, which owns
+    // both things that hang off them: the LOST state (`failed`, which now means a
+    // terminal close code rather than a spent budget) and the take-over intent's
+    // lifetime (ANY close retires it, so an automatic reconnect is always a plain
+    // attach). The cue is the pane's own.
     pty.onConn = (connState) => {
-      if (connState === "failed") {
-        setReconnecting(false)
-        setConnectionLost(true)
-      } else if (connState === "connecting" || connState === "open") {
-        setConnectionLost(false)
-      }
+      if (connState === "failed") setReconnecting(false)
+      notePtyConn(connState)
     }
     // An extra tab's PTY route can go away out from under this client (another
     // client closed that tab); the closed WebSocket carries no HTTP status the
@@ -1050,8 +1080,37 @@ export function useTerminalLifecycle(
         handleTabGone(id)
       }
     }
+    // THE ONE PERIODIC CLIENT FRAME (see `lib/heartbeat.ts`): the viewed
+    // semantics and an application-level beat, folded into one message on one
+    // timer. There is never a second pinger. The beat exists because the
+    // server's own WebSocket ping is send-only with no pong deadline, so it
+    // cannot see the half-open socket a radio handoff leaves behind; a missed
+    // answer drops the socket and lets the ORDINARY retry path reattach, PLAIN.
+    const beat = createHeartbeat({
+      send: (n, viewed) => pty.sendBeat(n, viewed),
+      isOwner: () => ownership.read(),
+      viewed: () =>
+        shouldSendViewed({
+          isOwner: ownership.read(),
+          visible: document.visibilityState === "visible",
+          now: Date.now(),
+          visibleSince: visibleSinceRef.current,
+          graceMs: live.current.attentionGraceMs,
+        }),
+      onStalled: () => pty.dropForRetry(),
+    })
+    pty.onBeat = (n) => beat.noteAnswer(n)
+
+    // PAGE LIFECYCLE. `pagehide` closes this socket (a bfcache'd page holding an
+    // open socket is evicted anyway, and the server would keep a phantom owner
+    // until its next send failed), `pageshow` and Chromium's `resume` reopen it
+    // plain, and `freeze` parks it. Unregistered by the cleanup below, so a pane
+    // that unmounted is never revived by a page event.
+    const unregisterLifecycle = registerPageLifecycle(pty)
+
     // Open the socket now that the byte feed and first-frame handling are wired.
     pty.connect()
+    beat.start()
 
     // Re-assert THIS client's size whenever the tab or window returns to the
     // foreground. Two things can leave it stale on return:
@@ -1076,70 +1135,24 @@ export function useTerminalLifecycle(
     // streaming in, and resizing mid-replay corrupts the scroll position. The
     // empty-write callback fires only once the queued writes have drained, so we
     // fit + resize against a settled buffer.
-    // Periodic "user is looking at this tab" ping (see viewedPing.ts). While we
-    // own input AND the document is visible, tell the server we are watching so
-    // the agent's attention flag stays down without keystrokes, mirroring the
-    // TUI's per-tick focus stamp. A read-only observer or a backgrounded owner
-    // never pings (which would suppress attention for everyone on the shared
-    // engine, or on a tab whose PTY socket is merely open). Ownership-gain is
-    // handled by the [isOwner] effect below; becoming-visible is handled in
-    // `resyncToForeground`; this covers the steady-state case.
-    const pingViewed = () => {
-      if (
-        shouldSendViewed({
-          isOwner: ownership.read(),
-          visible: document.visibilityState === "visible",
-          now: Date.now(),
-          visibleSince: visibleSinceRef.current,
-          graceMs: live.current.attentionGraceMs,
-        })
-      ) {
-        pty.sendViewed()
-      }
-    }
-    const viewedTimer = setInterval(pingViewed, VIEWED_PING_INTERVAL_MS)
-
-    // Fires the one grace-boundary ping (see viewedPing.ts's module doc),
-    // cancelled via clearTimeout if the document goes hidden again first.
-    let graceTimer: ReturnType<typeof setTimeout> | undefined
-    const resyncToForeground = () => {
+    // Track the hidden -> visible transition the attention grace is measured
+    // from (see `viewedPing.ts`). This listener is now ONLY that: the grace
+    // timer that used to fire an extra ping at the boundary is gone (the beat
+    // below runs every 2s while this device is owner-and-visible, so the flag
+    // drops within one cadence of the boundary without a second timer), and the
+    // resize half of a return moved to `pty.onOpen`, where the socket is known
+    // to be alive.
+    const noteVisibility = () => {
       const nowVisible = document.visibilityState === "visible"
-      const now = Date.now()
-      // A real hidden -> visible flip (not a redundant focus-while-visible
-      // signal, and not the unobserved initial-load case) arms the grace.
-      const transitioned = prevVisibleRef.current === false && nowVisible
       visibleSinceRef.current = visibleSinceAfterTransition(
         prevVisibleRef.current,
         nowVisible,
         visibleSinceRef.current,
-        now,
+        Date.now(),
       )
       prevVisibleRef.current = nowVisible
-
-      if (!nowVisible) {
-        clearTimeout(graceTimer)
-        return
-      }
-
-      clearTimeout(graceTimer)
-      const graceMs = live.current.attentionGraceMs
-      if (transitioned && graceMs > 0) {
-        // Suppress the immediate ping; fire exactly once at the grace
-        // boundary instead (cancelled above if hidden again before then).
-        graceTimer = setTimeout(pingViewed, graceMs)
-      } else {
-        // Steady state (already visible, e.g. a window focus event) or grace
-        // disabled: ping immediately so the flag drops without waiting for
-        // the next interval tick, matching the pre-grace behavior.
-        pingViewed()
-      }
-
-      // The size half of the return: drain-gated, debounced, and forced past
-      // the dedupe, all inside the coordinator.
-      resize.resyncToForeground()
     }
-    document.addEventListener("visibilitychange", resyncToForeground)
-    window.addEventListener("focus", resyncToForeground)
+    document.addEventListener("visibilitychange", noteVisibility)
 
     return () => {
       resize.dispose()
@@ -1154,16 +1167,15 @@ export function useTerminalLifecycle(
       // pointing at this mount's coordinator, so retire it BEFORE the terminal
       // goes.
       if (viewerRegridRef.current !== null) viewerRegridRef.current = null
-      clearTimeout(graceTimer)
-      clearInterval(viewedTimer)
+      beat.stop()
+      unregisterLifecycle()
       container.removeEventListener("mousedown", onMouseDown)
       container.removeEventListener("mouseup", onMouseUp)
       links.dispose()
       container.removeEventListener("contextmenu", onContextMenuPasteGuard)
       container.removeEventListener("paste", onPasteCapture, true)
       gesture.dispose()
-      document.removeEventListener("visibilitychange", resyncToForeground)
-      window.removeEventListener("focus", resyncToForeground)
+      document.removeEventListener("visibilitychange", noteVisibility)
       dataSub.dispose()
       binarySub.dispose()
       localGridSub.dispose()
