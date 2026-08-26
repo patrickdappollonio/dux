@@ -705,11 +705,22 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     versions) always delivers. Fix: `src/lib/ptyOwnership.ts:154-201`.
     Pinned: `src/lib/ptyOwnership.test.ts` "pty.owner epoch dedup" suite.
 
-5. **The epoch high-water marks reset when the events socket reconnects.** Trap: the
-    server's counter restarts at zero on restart; a client holding a high mark would
-    drop every post-restart handover as stale. Fix: `src/lib/ptyOwnership.ts:163-171`.
+5. **The epoch high-water marks reset when the events socket reconnects, and NOTHING
+    ELSE rides that signal.** Trap: the server's counter restarts at zero on restart; a
+    client holding a high mark would drop every post-restart handover as stale. The
+    reset therefore fires on EVERY reconnect, restart or not, which is safe for the
+    marks (forgetting one can only make a client accept a handover it would otherwise
+    have dropped) and was catastrophic for the pane's ghost connection ids, which used
+    to be retired by the same callback: an ordinary mobile drop takes BOTH sockets, so
+    the events socket reconnected and wiped the ghosts strictly before the pty
+    handshake that named one arrived, and the returning driver landed on the take-over
+    card (measured: three returns in four). The ghosts retire on a CONFIRMED run change
+    instead, and the replay dedupe's high-water mark on a change or an unverifiable
+    probe; see C18. Fix: `src/lib/ptyOwnership.ts` (`resetPtyOwnerEpochs`),
+    `src/lib/serverRun.ts`.
     Pinned: `src/lib/ptyOwnership.test.ts` "resetPtyOwnerEpochs clears high-water marks
-    so a post-restart epoch is not dropped".
+    so a post-restart epoch is not dropped"; `src/components/terminal/ownership.test.ts`
+    "keeps its ghosts across an ordinary events reconnect".
 
 6. **Input is owner-gated two-deep: `onData`/`onBinary` return early client-side, and
     the server's `may_write` drops a non-owner's stdin too.** SIZES are gated the same
@@ -948,6 +959,55 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     three titles, the second sentence and the one action, and nothing at all
     for the owner), plus every pre-existing take-over test, which asserts the
     same titles and the same button.
+
+18. **The two client memories keyed to the server's own counters retire on the
+    RUN-IDENTITY probe, and they subscribe to different answers.** The pane's ghost
+    connection ids retire only on a CONFIRMED change, because retiring them on an
+    unproven one costs a returning driver its pty (C5); the attach machine's applied
+    replay generation retires on a change OR an unverifiable probe, because a restart
+    the probe could not confirm is exactly the case where the new run's lower
+    generation is dropped whole by the dedupe and the cover clears over the PREVIOUS
+    run's screen. Forgetting that mark costs nothing in normal operation: within one
+    run every open is strictly newer, so the dedupe is inert anyway.
+    Fix: `src/lib/serverRun.ts`, `src/lib/store.ts` (`reloadIfServerChanged` publishes
+    the verdict), src/components/terminal/ownership.ts (the ghost effect),
+    src/components/terminal/attachReplay.ts (`forgetAppliedGeneration`) wired in
+    src/components/terminal/useTerminalLifecycle.ts.
+    Pinned: `src/lib/serverRun.test.ts`; `src/components/terminal/ownership.test.ts`
+    "forgets its ghosts when the server run has actually changed" and "keeps its ghosts
+    when the run-identity probe could not answer";
+    `src/components/terminal/attachReplay.test.ts` "forgets the applied generation once
+    the run can no longer be vouched for".
+
+19. **Every reopen that is not a take-over goes through ONE plain-bounce helper, which
+    spends the take-over intent first.** Trap: `connect()` detaches the orphan socket's
+    handlers before closing it, so no `closed` reaches the ownership machine; that
+    silence is what lets a take-over's own bounce carry its intent, and every other
+    caller inherited it. An intent armed but never confirmed on the wire therefore
+    survived a press on the Reconnect box, and the next first resize carried the flag:
+    with no expected owner the server grants it unconditionally (a button labelled
+    Reconnect steals the pty), and with a stale one it refuses the transfer and leaves
+    the pane believing it owns a geometry that was never applied. Callers: the
+    Reconnect box, the viewer heal bounce (already guarded, routed anyway so no bounce
+    grows its own answer), and the mount attach. The take-over path deliberately does
+    not.
+    Fix: src/components/terminal/plainBounce.ts and its three call sites.
+    Pinned: `src/components/terminal/plainBounce.test.ts`;
+    `components/TerminalPane.test.tsx` "never carries a surviving take-over on a
+    Reconnect press" and "never carries a surviving self-succession on a Reconnect
+    press".
+
+20. **A FLAGGED resize books no geometry until the pty reports it back.** Trap: the
+    coordinator records what it wrote to the socket, which is right for a plain frame
+    but wrong for a claim: a self-succession is refused ROUTINELY (that is what its
+    compare-and-swap is for) and a refusal applies nothing, geometry included, so the
+    dedupe would then suppress every re-assert of that size. The confirmation is the
+    grid the wire reports, on the handshake and on every applied resize.
+    Fix: src/components/terminal/resizeCoordinator.ts (`sendOwned`, `noteRemoteGrid`),
+    fed by the lifecycle's `lastSendWasFlagged`.
+    Pinned: `src/components/terminal/resizeCoordinator.test.ts` "does not book the
+    geometry of a FLAGGED send until the wire confirms it" and "books the geometry a
+    flagged claim asked for once the pty reports it".
 
 ## D. Keys and clipboard
 
@@ -1996,12 +2056,42 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Pinned: `src/lib/attachRegistry.test.ts` "a stale retirement does not remove the
     live registration"; sink/socket variants exercised by the sink and unmount tests.
 
-3. **Unmount closes the socket deliberately (no reconnect), retires the connection id,
+3. **Unmount DISPOSES the socket (no reconnect, and no way back), retires the connection id,
     nulls the term/fit refs, disposes subscriptions, notifications and the OSC 8 gate,
     and clears every timer the effect armed.** Fix: src/components/terminal/useTerminalLifecycle.ts:1053-1098.
     Pinned: `src/lib/ptySocket.test.ts` "does not reconnect after a user-initiated
     close"; `components/TerminalPane.test.tsx` unmount halves of the ownership and sink
     tests.
+
+    **`close()` and `dispose()` are different acts, and only the second detaches the
+    wake signals.** Trap: `pagehide` routes to `close()`, and the return that follows is
+    not always a `pageshow`: an unlock reported as `visibilitychange`, a refocus, or a
+    network coming back are all returns, and with the listeners already detached they
+    found nobody home and left BOTH sockets dead until the user pressed Reconnect. A
+    lifecycle close keeps its listeners (and, for a PTY socket, its run-identity gate
+    subscription); a real teardown disposes.
+    Fix: `src/lib/reconnectingSocket.ts` (`close`/`dispose`), `src/lib/ptySocket.ts`
+    (`dispose` retires the gate).
+    Pinned: `src/lib/reconnectingSocket.test.ts` "reopens on a wake signal after a
+    lifecycle close", "reopens on a bare visibilitychange after a pagehide-shaped
+    close", "is a no-op after dispose(), whose listeners really are gone";
+    `src/lib/ptySocket.jsdom.test.ts` (the whole file, which is the browser wiring the
+    node suite beside it cannot see).
+
+    **The heartbeat's answer deadline does not run through an outage.** Trap:
+    `pendingSince` was cleared only on a reopen, so during a drop the deadline kept
+    running against a beat nobody could answer and, every deadline, dropped the
+    CONNECTING attempt that was trying to end the outage. Three guards now: a frame the
+    socket discards retires the outstanding beat rather than starting one, the deadline
+    is skipped while the last send failed, and `dropForRetry` refuses to touch anything
+    but an OPEN socket. `stop()` also no longer leaves `start()` reusing a disposed
+    (deaf) visible clock, which counted hidden time as visible.
+    Fix: `src/lib/heartbeat.ts`, `src/lib/reconnectingSocket.ts` (`dropForRetry`),
+    src/components/terminal/useTerminalLifecycle.ts (`beat.reset()` on any non-open conn state).
+    Pinned: `src/lib/heartbeat.test.ts` "stops timing an outstanding beat once the
+    socket refuses frames" and "times a fresh beat from the reattached socket, not the
+    outage"; `src/lib/heartbeat.jsdom.test.ts`; `src/lib/reconnectingSocket.test.ts`
+    "dropForRetry" suite.
 
 4. **The viewed ping: every 2s while owner AND visible, immediately on gaining
     ownership, and grace-gated after a hidden-to-visible transition (one ping fires at

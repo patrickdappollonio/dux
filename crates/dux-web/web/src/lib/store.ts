@@ -23,6 +23,7 @@ import {
   type ServerIdentity,
 } from "./buildApi"
 import { reloadPage } from "./reloadPage"
+import { noteServerRunProbe } from "./serverRun"
 import {
   DIVIDER_STORAGE_KEYS,
   readStoredPanePercent,
@@ -1252,9 +1253,15 @@ async function loadServerIdentityBaseline(): Promise<void> {
 async function reloadIfServerChanged(): Promise<void> {
   const current = await fetchServerIdentity()
   if (serverChanged(serverIdentityBaseline, current)) {
+    // Published BEFORE the reload, because the reload is not instantaneous and
+    // the memories keyed to the old run's counters (a pane's ghost connection
+    // ids, the applied replay generation) can be read in the meantime. See
+    // `serverRun.ts`.
+    noteServerRunProbe("changed")
     reloadPage()
     return
   }
+  noteServerRunProbe(current === null ? "unknown" : "same")
   // The check has RESOLVED and the run has not moved, which is the moment a PTY
   // socket may attach again. `conn === "open"` is true a whole round trip before
   // this, and attaching an agent's pty launches its provider, so the gate reads

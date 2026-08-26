@@ -100,7 +100,13 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
       typeof document === "undefined" || document.visibilityState === "visible")
   const period = deps.periodMs ?? heartbeatIntervalMs
   const deadline = deps.deadlineMs ?? heartbeatDeadlineMs
-  const clock = deps.clock ?? createVisibleClock()
+  // The OWNED clock is rebuilt by `start()` when a previous `stop()` disposed
+  // it. A disposed clock is not dead, it is DEAF: its visibility listener is
+  // gone, so it counts hidden time as visible and the deadline elapses against
+  // a page that spent the interval in a pocket. An injected clock belongs to the
+  // caller and is never disposed or replaced here.
+  let clock = deps.clock ?? createVisibleClock()
+  let clockDisposed = false
 
   let timer: ReturnType<typeof setTimeout> | null = null
   // The period the ARMED timer was armed with, so a change of cadence can be
@@ -115,6 +121,12 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
   // beats times out at the deadline rather than at deadline-plus-one-period.
   let pendingSince: number | null = null
   let pendingFrom: number | null = null
+  // Whether the most recent frame actually reached the wire. A socket that is
+  // CONNECTING or CLOSED discards every frame silently, and while it does there
+  // is no question outstanding for anybody to be late answering; timing one
+  // anyway made the deadline drop the reconnect attempt in flight, once per
+  // deadline, for the whole outage. Starts true because nothing has failed yet.
+  let lastSendReached = true
 
   const currentPeriod = () =>
     period({ isOwner: deps.isOwner(), visible: visible() })
@@ -170,7 +182,15 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
     // timer of its own: one periodic timer is the rule. The cost is that a miss
     // is noticed at the next tick after the deadline passes, which is within one
     // period of it.
-    if (pendingSince !== null && clock.elapsedMs() - pendingSince >= deadline()) {
+    //
+    // AND ONLY AGAINST A SOCKET THAT IS TAKING FRAMES. A deadline is a claim
+    // that an answer is overdue, which is only true of a question that was
+    // asked; a discarded frame asks nothing. See `lastSendReached`.
+    if (
+      lastSendReached &&
+      pendingSince !== null &&
+      clock.elapsedMs() - pendingSince >= deadline()
+    ) {
       pendingSince = null
       pendingFrom = null
       deps.onStalled()
@@ -178,10 +198,19 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
       return
     }
     const n = nextBeat++
-    if (deps.send(n, deps.viewed()) && pendingSince === null) {
-      pendingSince = clock.elapsedMs()
-      pendingFrom = n
+    const reached = deps.send(n, deps.viewed())
+    if (reached) {
+      if (pendingSince === null) {
+        pendingSince = clock.elapsedMs()
+        pendingFrom = n
+      }
+    } else {
+      // The socket is down or reconnecting. Retire whatever was outstanding: it
+      // was asked of a connection that is gone, and the next healthy frame
+      // starts a fresh deadline of its own.
+      clearPending()
     }
+    lastSendReached = reached
     schedule()
   }
 
@@ -202,6 +231,11 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
     start() {
       if (running) return
       running = true
+      if (clockDisposed) {
+        clock = createVisibleClock()
+        clockDisposed = false
+      }
+      lastSendReached = true
       if (canListen) {
         document.addEventListener("visibilitychange", onVisibilityChange)
       }
@@ -218,7 +252,10 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
       }
       armedPeriod = null
       clearPending()
-      if (deps.clock === undefined) clock.dispose()
+      if (deps.clock === undefined) {
+        clock.dispose()
+        clockDisposed = true
+      }
     },
     resync,
     noteAnswer(n) {

@@ -118,6 +118,9 @@ class FakePtySocket {
   url: string
   connect = vi.fn()
   close = vi.fn()
+  // The pane's teardown DISPOSES rather than closes: a socket whose pane is
+  // gone must lose its wake listeners too.
+  dispose = vi.fn()
   sendResize = vi.fn(() => true)
   sendInput = vi.fn()
   // THE ONE PERIODIC FRAME, and the three page-lifecycle entry points the base

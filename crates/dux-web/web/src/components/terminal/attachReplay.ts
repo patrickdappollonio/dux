@@ -77,6 +77,14 @@ export type AttachReplay = {
   /// Whether a REPLAY chunk is being parsed right now. The `onData` gate reads
   /// this to drop a focus report the replay itself provoked.
   replayInFlight: () => boolean
+  /// Retire the dedupe's high-water mark. The generation counter is
+  /// process-global on the server, so a restarted run starts low and its first
+  /// replay would be dropped as "already applied", clearing the cover over the
+  /// PREVIOUS run's screen. The lifecycle calls this when the run-identity probe
+  /// can no longer vouch for the run (see `lib/serverRun.ts`); forgetting the
+  /// mark costs nothing in normal operation, where every new open is strictly
+  /// newer and the dedupe is inert anyway.
+  forgetAppliedGeneration: () => void
   /// Register the "this open's screen is now on screen" listener. Fires exactly
   /// once per open, carrying the epoch it belongs to, when the replay write's
   /// COMPLETION callback has run: xterm has parsed the bytes and the picture
@@ -177,6 +185,9 @@ export function createAttachReplay(deps: AttachReplayDeps): AttachReplay {
 
   return {
     replayInFlight: () => replayWritesInFlight > 0,
+    forgetAppliedGeneration() {
+      lastAppliedGen = null
+    },
     onReplayApplied(cb) {
       appliedCb = cb
     },

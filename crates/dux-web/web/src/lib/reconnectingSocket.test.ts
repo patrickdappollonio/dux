@@ -96,7 +96,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  for (const sock of TestSocket.built.splice(0)) sock.close()
+  for (const sock of TestSocket.built.splice(0)) sock.dispose()
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
@@ -412,7 +412,13 @@ describe("the four wake signals", () => {
     expect(FakeWS.instances.length).toBe(1)
   })
 
-  it("is a no-op after a user-initiated close, whose listeners are gone", () => {
+  // A LIFECYCLE CLOSE KEEPS ITS LISTENERS, and this test used to say the
+  // opposite. `pagehide` routes to `close()`, and a return is not always a
+  // `pageshow`: a phone unlocking, a tab being switched back to, or a network
+  // coming back can announce themselves through visibility, focus or online
+  // alone. With the listeners detached by the close, those returns found nobody
+  // home and both sockets stayed dead until the user pressed Reconnect.
+  it("reopens on a wake signal after a lifecycle close", () => {
     vi.useFakeTimers()
     setVisibility("visible")
     const sock = new TestSocket("ws://x", { parkWhileHidden: true })
@@ -421,6 +427,35 @@ describe("the four wake signals", () => {
     sock.close()
     const before = FakeWS.instances.length
     window.dispatchEvent(new Event("focus"))
+    expect(FakeWS.instances.length).toBe(before + 1)
+  })
+
+  it("reopens on a bare visibilitychange after a pagehide-shaped close", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    const sock = new TestSocket("ws://x", { parkWhileHidden: true })
+    sock.connect()
+    last().open()
+    sock.close()
+    const before = FakeWS.instances.length
+    document.dispatchEvent(new Event("visibilitychange"))
+    expect(FakeWS.instances.length).toBe(before + 1)
+  })
+
+  // DISPOSE IS THE REAL TEARDOWN, and the only thing that detaches them. A pane
+  // that unmounted must never be revived by a window event.
+  it("is a no-op after dispose(), whose listeners really are gone", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    const sock = new TestSocket("ws://x", { parkWhileHidden: true })
+    sock.connect()
+    last().open()
+    sock.dispose()
+    const before = FakeWS.instances.length
+    window.dispatchEvent(new Event("focus"))
+    document.dispatchEvent(new Event("visibilitychange"))
+    window.dispatchEvent(new Event("pageshow"))
+    window.dispatchEvent(new Event("online"))
     expect(FakeWS.instances.length).toBe(before)
   })
 
@@ -446,6 +481,36 @@ describe("the four wake signals", () => {
 // armed either. Even the ordinary case is bad enough: an operating system's own
 // connect timeout can be a minute or two, and for all of it a returning phone
 // taps a button that does nothing.
+// The heartbeat's missed answer is the only caller, and it can fire against a
+// socket that is not open: during an outage the deadline keeps running while the
+// retry path is mid-attempt, and dropping the CONNECTING socket restarts the
+// reconnect from the beginning, once per deadline, for as long as the outage
+// lasts.
+describe("dropForRetry", () => {
+  it("drops a socket that is OPEN, which is the case it exists for", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    const sock = new TestSocket("ws://x")
+    sock.connect()
+    const live = last()
+    live.open()
+    sock.dropForRetry()
+    expect(live.readyState).toBe(3)
+  })
+
+  it("leaves a CONNECTING attempt alone", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    const sock = new TestSocket("ws://x")
+    sock.connect()
+    const attempt = last()
+    expect(attempt.readyState).toBe(0)
+    sock.dropForRetry()
+    expect(attempt.readyState).toBe(0)
+    expect(FakeWS.instances.length).toBe(1)
+  })
+})
+
 describe("the connect deadline", () => {
   it("abandons a socket that never opens and retries", () => {
     vi.useFakeTimers()

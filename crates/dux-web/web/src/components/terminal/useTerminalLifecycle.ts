@@ -65,6 +65,7 @@ import {
 } from "@/lib/terminalFont"
 import { shouldSendViewed, visibleSinceAfterTransition } from "@/lib/viewedPing"
 import { createHeartbeat, type Heartbeat } from "@/lib/heartbeat"
+import { onServerRunUnconfirmed } from "@/lib/serverRun"
 import { registerPageLifecycle } from "@/lib/pageLifecycle"
 import type { ConnState } from "@/lib/types"
 import { isFocusReport } from "@/lib/suppressViewerReports"
@@ -93,6 +94,7 @@ import {
 } from "./constants"
 import { createResizeCoordinator } from "./resizeCoordinator"
 import { createAttachReplay } from "./attachReplay"
+import { plainBounce } from "./plainBounce"
 import { createSelectionDrag } from "./selectionDrag"
 import { createTouchGesture } from "./touchGesture"
 import { createLinkPress } from "./linkPress"
@@ -397,6 +399,9 @@ export function useTerminalLifecycle(
     // THE RESIZE COORDINATOR: the one owner of `fit.fit()` and of every frame
     // that tells the child its size. Nothing below refits or notifies except
     // through it (see its module doc for the one stated font exception).
+    // Whether the frame the wrapper below just wrote carried the take-over flag.
+    // Read by the coordinator immediately after the call, and by nothing else.
+    let lastSendFlagged = false
     const resize = createResizeCoordinator({
       term,
       fit,
@@ -426,8 +431,13 @@ export function useTerminalLifecycle(
           ? pty.sendResize(rows, cols, true, takeoverIntent.expectedOwner())
           : pty.sendResize(rows, cols)
         if (sent && takeover) takeoverIntent.clear()
+        // The coordinator books a plain send's geometry immediately and a
+        // FLAGGED one's only once the pty reports it back, because a claim can
+        // be refused whole. It reads this right after the call above.
+        lastSendFlagged = sent && takeover
         return sent
       },
+      lastSendWasFlagged: () => lastSendFlagged,
       isOwner: () => ownership.read(),
       onViewerLayout: () => viewerRelayoutRef.current?.(),
     })
@@ -1007,6 +1017,13 @@ export function useTerminalLifecycle(
       firstFrameLanded: resize.firstFrameLanded,
     })
     pty.onBytes((bytes) => attach.onBytes(bytes))
+    // A run this tab can no longer vouch for retires the replay dedupe's
+    // high-water mark: the server's generation counter restarts with the
+    // process, so a surviving mark would drop the new run's replay whole and
+    // uncover the previous run's screen. See `lib/serverRun.ts`.
+    const unsubscribeRunProbe = onServerRunUnconfirmed(() => {
+      attach.forgetAppliedGeneration()
+    })
     // THE COVER CLEARS HERE, and nowhere else. Not at WebSocket open, which is
     // the hole this closes: the pane used to drop its reconnect cover the moment
     // the socket opened, while the screen only exists once the server's replay
@@ -1093,6 +1110,11 @@ export function useTerminalLifecycle(
     // attach). The cue is the pane's own.
     pty.onConn = (connState) => {
       if (connState === "failed") setReconnecting(false)
+      // A beat asked of a connection that is going away is not late, it is
+      // moot. Retiring it here as well as on the reopen keeps the answer
+      // deadline from running through the whole outage and dropping the retry
+      // attempt that is trying to end it.
+      if (connState !== "open") beat.reset()
       notePtyConn(connState)
     }
     // An extra tab's PTY route can go away out from under this client (another
@@ -1137,8 +1159,11 @@ export function useTerminalLifecycle(
     // that unmounted is never revived by a page event.
     const unregisterLifecycle = registerPageLifecycle(pty)
 
-    // Open the socket now that the byte feed and first-frame handling are wired.
-    pty.connect()
+    // Open the socket now that the byte feed and first-frame handling are
+    // wired. A mount attach is a plain attach, so it goes through the same
+    // helper every other non-take-over reopen uses; there is nothing armed this
+    // early, and that is the point of it being the same call.
+    plainBounce(pty, takeoverIntent)
     beat.start()
 
     // Re-assert THIS client's size whenever the tab or window returns to the
@@ -1201,6 +1226,7 @@ export function useTerminalLifecycle(
       beat.stop()
       if (beatRef.current === beat) beatRef.current = null
       unregisterLifecycle()
+      unsubscribeRunProbe()
       container.removeEventListener("mousedown", onMouseDown)
       container.removeEventListener("mouseup", onMouseUp)
       links.dispose()
@@ -1211,8 +1237,11 @@ export function useTerminalLifecycle(
       dataSub.dispose()
       binarySub.dispose()
       localGridSub.dispose()
-      // Close this target's PTY socket (user-initiated: no reconnect) and clear
-      // the active-socket registration ONLY if it still points at this one. A
+      // DISPOSE this target's PTY socket, never merely close it: the pane is
+      // gone, so its wake signals and its run-identity gate subscription go with
+      // it. (A `close()` here would leave a socket that a window event could
+      // revive into a pane that no longer exists.) Clear the active-socket
+      // registration ONLY if it still points at this one. A
       // focus switch swaps panes; whichever order React runs old-cleanup vs
       // new-effect, the guard ensures we never null out the incoming pane's
       // registration (it has already replaced ours by the time we'd clear it).
@@ -1223,7 +1252,7 @@ export function useTerminalLifecycle(
         noteOwnPtyConnection(connId.read() as string, false)
         connId.write(null)
       }
-      pty.close()
+      pty.dispose()
       if (ptyRef.current === pty) ptyRef.current = null
       if (getActivePtySocket() === pty) setActivePtySocket(null)
       termRef.current = null

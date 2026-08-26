@@ -155,8 +155,8 @@ function readGrid(frame: {
 }
 
 export class PtySocket extends ReconnectingSocket {
-  // Retired by `close()`. Kept as a field so the subscription dies with the
-  // socket rather than with the module.
+  // Retired by `dispose()`, NEVER by `close()`. Kept as a field so the
+  // subscription dies with the socket rather than with the module.
   private readonly unsubscribeGate: () => void
 
   constructor(url: string) {
@@ -170,9 +170,13 @@ export class PtySocket extends ReconnectingSocket {
     })
   }
 
-  override close(): void {
+  // A lifecycle close (`pagehide`) keeps the gate subscription, exactly as it
+  // keeps the four wake signals: the gate opening is one of the ways a PTY
+  // socket comes back, and a page that is still here must not lose it just
+  // because it went away for a moment. Only a real teardown retires it.
+  override dispose(): void {
     this.unsubscribeGate()
-    super.close()
+    super.dispose()
   }
 
   private bytesCb: (bytes: Uint8Array) => void = () => {}

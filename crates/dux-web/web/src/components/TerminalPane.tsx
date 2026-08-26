@@ -67,6 +67,7 @@ import {
 } from "@/components/terminal/liveValues"
 import { useTerminalLifecycle } from "@/components/terminal/useTerminalLifecycle"
 import { useTerminalOwnership } from "@/components/terminal/ownership"
+import { plainBounce } from "@/components/terminal/plainBounce"
 import {
   useViewerGrid,
 } from "@/components/terminal/viewerGrid"
@@ -1181,12 +1182,14 @@ export function TerminalPane(props: TerminalPaneProps) {
         // screen, so rather than leaving the pane blank forever we say what is
         // missing and offer the one thing that can fix it.
         //
-        // Reconnect imperatively on THIS pane's own socket: `pty.connect()`
-        // resets the backoff and reopens in place, working uniformly for an
-        // agent tab OR a companion terminal. (A `terminalEpoch` bump would NOT:
-        // it only feeds the pane key for `kind === "agent"`, so it is a no-op
-        // for a companion terminal and would leave its button dead.) It is a
-        // PLAIN attach: one press bounces the socket and claims nothing.
+        // Reconnect imperatively on THIS pane's own socket: the bounce resets
+        // the backoff and reopens in place, working uniformly for an agent tab
+        // OR a companion terminal. (A `terminalEpoch` bump would NOT: it only
+        // feeds the pane key for `kind === "agent"`, so it is a no-op for a
+        // companion terminal and would leave its button dead.) It is a PLAIN
+        // attach: it goes through `plainBounce`, which spends any armed
+        // take-over first, because a deliberate reopen fires no close and an
+        // unspent intent would make this button a silent steal.
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-background">
           <div className="flex items-center gap-3 rounded-lg border bg-card px-4 py-3 text-card-foreground">
             <span className="text-sm text-muted-foreground">
@@ -1197,7 +1200,7 @@ export function TerminalPane(props: TerminalPaneProps) {
             <Button
               size="sm"
               variant="secondary"
-              onClick={() => ptyRef.current?.connect()}
+              onClick={() => plainBounce(ptyRef.current, takeoverIntent)}
             >
               Reconnect
             </Button>

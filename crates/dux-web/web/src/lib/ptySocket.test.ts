@@ -508,7 +508,7 @@ describe("PtySocket", () => {
     const ws = last()
     ws.open()
     expect(sock.isOpen).toBe(true)
-    sock.close()
+    sock.dispose()
     expect(sock.isOpen).toBe(false)
   })
 
@@ -535,7 +535,7 @@ describe("PtySocket", () => {
     expect(sock.sendResize(40, 120)).toBe(false)
     ws.open()
     expect(sock.sendResize(40, 120)).toBe(true)
-    sock.close()
+    sock.dispose()
     expect(sock.sendResize(40, 120)).toBe(false)
     expect(ws.sent).toHaveLength(1)
   })
@@ -602,7 +602,7 @@ describe("PtySocket", () => {
     }
     sock.connect()
     last().open()
-    sock.close()
+    sock.dispose()
     vi.advanceTimersByTime(10000)
     expect(reconnecting).toBe(0)
   })
@@ -628,7 +628,7 @@ describe("PtySocket", () => {
     }
     expect(states).not.toContain("failed")
     expect(FakeWS.instances.length).toBe(21)
-    sock.close()
+    sock.dispose()
   })
 
   it("stops without retrying when the server closes with the provider-unavailable code", () => {
@@ -851,7 +851,7 @@ describe("the run-identity retry gate", () => {
     // consulting, and it says no.
     vi.advanceTimersByTime(600000)
     expect(FakeWS.instances).toHaveLength(1)
-    sock.close()
+    sock.dispose()
   })
 
   it("reattaches the moment the run IS validated, without waiting out the backoff", () => {
@@ -868,6 +868,6 @@ describe("the run-identity retry gate", () => {
     // had grown to after everything was already healthy.
     noteServerValidated()
     expect(FakeWS.instances).toHaveLength(2)
-    sock.close()
+    sock.dispose()
   })
 })

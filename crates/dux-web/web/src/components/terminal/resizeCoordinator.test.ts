@@ -73,7 +73,7 @@ function settleFirstFrame(
 }
 
 function setup(
-  opts: { owner?: boolean; wire?: boolean } = {},
+  opts: { owner?: boolean; wire?: boolean; flagged?: boolean } = {},
 ) {
   const term = new TermFake()
   const fit = new FitFake(term)
@@ -81,6 +81,7 @@ function setup(
   const relayouts: number[] = []
   let owner = opts.owner ?? true
   let wire = opts.wire ?? true
+  let flagged = opts.flagged ?? false
   const coord = createResizeCoordinator({
     term: term as unknown as Terminal,
     fit: fit as unknown as FitAddon,
@@ -90,6 +91,7 @@ function setup(
       return true
     },
     isOwner: () => owner,
+    lastSendWasFlagged: () => flagged,
     onViewerLayout: () => relayouts.push(1),
   })
   return {
@@ -103,6 +105,9 @@ function setup(
     },
     setWire: (v: boolean) => {
       wire = v
+    },
+    setFlagged: (v: boolean) => {
+      flagged = v
     },
   }
 }
@@ -168,6 +173,49 @@ describe("the resize coordinator's record of what the PTY was told", () => {
     term.regrid(30, 100)
     vi.advanceTimersByTime(500)
     expect(sent.at(-1)).toEqual({ rows: 30, cols: 100 })
+  })
+
+  // A FLAGGED FRAME IS A REQUEST, NOT A FACT. A take-over claim can be refused
+  // whole (a self-succession whose named predecessor no longer holds the pty),
+  // and a refusal applies NOTHING, geometry included. Booking the geometry as
+  // delivered would then let the dedupe suppress every re-assert of it, leaving
+  // the child drawing for a viewport nobody is looking at.
+  it("does not book the geometry of a FLAGGED send until the wire confirms it", () => {
+    const { term, coord, sent, setFlagged } = setup()
+    coord.start(document.createElement("div"))
+    settleFirstFrame(coord, sent)
+    setFlagged(true)
+    term.regrid(30, 100)
+    vi.advanceTimersByTime(500)
+    expect(sent).toEqual([{ rows: 30, cols: 100 }])
+    // The same geometry again: it still reaches the wire, because nothing has
+    // confirmed that the first one was applied.
+    setFlagged(false)
+    term.regrid(24, 80)
+    term.regrid(30, 100)
+    vi.advanceTimersByTime(500)
+    expect(sent).toEqual([
+      { rows: 30, cols: 100 },
+      { rows: 30, cols: 100 },
+    ])
+  })
+
+  it("books the geometry a flagged claim asked for once the pty reports it", () => {
+    const { term, coord, sent, setFlagged } = setup()
+    coord.start(document.createElement("div"))
+    settleFirstFrame(coord, sent)
+    setFlagged(true)
+    term.regrid(30, 100)
+    vi.advanceTimersByTime(500)
+    expect(sent).toHaveLength(1)
+    // The server applied it and says so, on the handshake or a `size` event.
+    setFlagged(false)
+    coord.noteRemoteGrid({ rows: 30, cols: 100 })
+    // Nothing to re-assert now: the record and the pty agree.
+    term.regrid(24, 80)
+    term.regrid(30, 100)
+    vi.advanceTimersByTime(500)
+    expect(sent).toHaveLength(1)
   })
 
   it("sends nothing when the geometry has not moved since the last send", () => {

@@ -280,6 +280,37 @@ describe("the answer deadline", () => {
     beat.stop()
   })
 
+  // THE OUTAGE, which is what the deadline used to punish. `pendingSince` was
+  // cleared only by a reopen, so during a drop the deadline kept running against
+  // a beat nobody could answer, and every period past it dropped the CONNECTING
+  // attempt and started the reconnect over. The socket refusing frames is the
+  // evidence: nothing is being asked, so nothing is overdue.
+  it("stops timing an outstanding beat once the socket refuses frames", () => {
+    const { beat, advance, stalls, state } = setup()
+    beat.start()
+    advance(2000) // beat 1 goes out and is never answered
+    state.sends = false // the socket drops; every frame after this is discarded
+    for (let i = 0; i < 40; i++) advance(2000)
+    expect(stalls()).toBe(0)
+    beat.stop()
+  })
+
+  // And the deadline comes back with the socket rather than firing immediately
+  // on the strength of the time the outage took.
+  it("times a fresh beat from the reattached socket, not the outage", () => {
+    const { beat, advance, stalls, state } = setup()
+    beat.start()
+    advance(2000)
+    state.sends = false
+    for (let i = 0; i < 40; i++) advance(2000)
+    state.sends = true
+    advance(2000) // the first frame of the healthy socket
+    expect(stalls()).toBe(0)
+    while (stalls() === 0) advance(2000)
+    expect(stalls()).toBe(1)
+    beat.stop()
+  })
+
   it("reset() forgets the outstanding beat, because a reopened socket moots it", () => {
     const { beat, advance, stalls } = setup()
     beat.start()

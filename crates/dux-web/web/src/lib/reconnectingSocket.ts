@@ -184,8 +184,18 @@ export abstract class ReconnectingSocket {
   // nothing would broadcast the close that retires an armed take-over), and the
   // consumers that react to a drop see the same event they see for a drop the
   // network caused.
+  //
+  // ONLY AGAINST AN OPEN SOCKET. "This connection has gone quiet" is a statement
+  // about a connection that exists; against an attempt that is still CONNECTING
+  // it is an abort, and it restarts the reconnect this method's own retry path
+  // had already begun. The heartbeat no longer times a socket that is refusing
+  // frames, so this is the second half of one guard rather than a substitute for
+  // it.
   dropForRetry(): void {
-    this.ws?.close()
+    const ws = this.ws
+    if (ws === null) return
+    if (ws.readyState !== WebSocket.OPEN) return
+    ws.close()
   }
 
   // Chromium's `freeze`: cancel anything armed. The page is about to stop
@@ -352,9 +362,10 @@ export abstract class ReconnectingSocket {
     }
   }
 
-  // The four wake signals. Attached on the first `connect()` and detached by
-  // `close()`, so a socket the app deliberately tore down (a pane unmounting)
-  // can never be revived by a window event.
+  // The four wake signals. Attached on the first `connect()` and detached only
+  // by `dispose()`, so a socket the app really tore down (a pane unmounting) can
+  // never be revived by a window event, while one merely CLOSED by the page
+  // lifecycle still hears the return that follows.
   private attachWakeSignals(): void {
     if (this.wakeAttached) return
     // Guard on the METHODS rather than on the globals: this runs off-browser
@@ -398,12 +409,29 @@ export abstract class ReconnectingSocket {
     this.resumeNow()
   }
 
+  // A LIFECYCLE CLOSE: the socket goes down deliberately and stays down until
+  // something says otherwise, but this object is still in use and the page it
+  // belongs to is still there. `pagehide` is the caller that matters, and the
+  // wake signals are what bring the socket back afterwards, so they STAY
+  // ATTACHED. Detaching them here left a page that returned through anything
+  // other than `pageshow` (an unlock reported as `visibilitychange`, a refocus,
+  // a network coming back) with two dead sockets and no way back but the
+  // Reconnect button.
   close(): void {
     this.closedByUser = true
     this.clearRetryTimer()
     this.clearConnectTimer()
-    this.detachWakeSignals()
     this.ws?.close()
+  }
+
+  // THE REAL TEARDOWN: this socket will never be used again (its pane
+  // unmounted, or switched to a different target). Everything `close()` does,
+  // plus the wake listeners, which is the difference between the two and the
+  // whole reason both exist.
+  dispose(): void {
+    this.stopped = true
+    this.detachWakeSignals()
+    this.close()
   }
 
   // Reset the backoff. Call it when the connection is confirmed usable so the next

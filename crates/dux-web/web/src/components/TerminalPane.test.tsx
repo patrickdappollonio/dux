@@ -12,6 +12,8 @@ import type { ConnState } from "@/lib/types"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 import { installXtermMouseModel } from "@/lib/xtermMouseModel"
 import { VIEWER_MIN_FONT_SIZE } from "@/lib/viewerFit"
+import { replayWaitMs } from "@/lib/connectionTiming"
+import { REPLAY_WAIT_POLL_MS } from "@/components/terminal/constants"
 import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
 
 // TerminalPane embeds xterm.js, whose canvas rendering jsdom cannot back (see the
@@ -303,6 +305,9 @@ class FakePtySocket {
   url: string
   connect = vi.fn()
   close = vi.fn()
+  // The pane's teardown DISPOSES rather than closes: a socket whose pane is
+  // gone must lose its wake listeners too.
+  dispose = vi.fn()
   // The real socket answers whether the frame actually went on the wire; a test
   // models a dropped frame (a socket mid-reconnect) by returning false.
   sendResize = vi.fn(() => true)
@@ -1016,13 +1021,46 @@ describe("TerminalPane take-over is a fresh attach", () => {
     return pty
   }
 
+  /// A reopen that never produces a screen: the socket comes back and the
+  /// handshake lands, but no replay frame follows, so the deferred first-frame
+  /// resize is fired by the fallback timer instead. That is the state the
+  /// bounded wait exists for.
+  const reopenWithNoScreen = (
+    pty: FakePtySocket,
+    id: string,
+    owner: string | null,
+  ) => {
+    act(() => {
+      pty.onOpen()
+      pty.onConnected(id, owner)
+    })
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+  }
+
+  /// Run the replay wait out. The wait is measured in VISIBLE time, which is a
+  /// sum of `performance.now()` deltas that fake timers do not move, so the
+  /// reading is pushed past the configured wait and the poll is then let fire.
+  const expireReplayWait = () => {
+    const past = performance.now() + replayWaitMs() + REPLAY_WAIT_POLL_MS
+    vi.spyOn(performance, "now").mockReturnValue(past)
+    act(() => {
+      vi.advanceTimersByTime(2 * REPLAY_WAIT_POLL_MS)
+    })
+  }
+
   /// Drive the reconnect the bounce asked for, all the way to the first PTY
   /// frame that triggers the first-frame resize. This is the reattach sequence
   /// the pane's own wiring runs on every reopen.
-  const completeBounce = (pty: FakePtySocket, id = "conn-2") => {
+  const completeBounce = (
+    pty: FakePtySocket,
+    id = "conn-2",
+    owner: string | null = "conn-other",
+  ) => {
     act(() => {
       pty.onOpen()
-      pty.onConnected(id, "conn-other")
+      pty.onConnected(id, owner)
     })
     act(() => pty.bytesCb?.(new Uint8Array([0x61])))
     act(() => {
@@ -1146,6 +1184,68 @@ describe("TerminalPane take-over is a fresh attach", () => {
 
     fireEvent.click(screen.getByText("Take over"))
     expect(pty.connect).toHaveBeenCalledTimes(2)
+  })
+
+  // A PLAIN BOUNCE IS NEVER A CLAIM, and the Reconnect box is a plain bounce.
+  // `connect()` detaches the orphan's handlers before closing it, so no `closed`
+  // reaches the ownership machine and an intent that was armed but never
+  // confirmed on the wire SURVIVES the press. The next first resize would then
+  // carry the take-over flag with no expected owner, which the server grants
+  // unconditionally: a button labelled Reconnect would steal the pty from
+  // whoever is typing into it by then.
+  it("never carries a surviving take-over on a Reconnect press", () => {
+    const pty = mountSettled()
+    pty.emit("open")
+    act(() => pty.onConnected("conn-self", null))
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    fireEvent.click(screen.getByText("Take over"))
+    // The claim frame is discarded by a socket that re-dropped, so the intent
+    // stays armed (which is the designed behavior; see the test above).
+    pty.sendResize.mockReturnValue(false)
+    reopenWithNoScreen(pty, "conn-2", "conn-other")
+    // No screen ever lands, so the bounded wait turns the cover into the box.
+    expireReplayWait()
+    expect(screen.getByText("Still waiting for the terminal's screen.")).toBeTruthy()
+
+    pty.sendResize.mockClear()
+    pty.sendResize.mockReturnValue(true)
+    fireEvent.click(screen.getByText("Reconnect"))
+    // The pty is UNOWNED by the time the press lands (the other device's own
+    // socket went away), so this pane keeps the verdict and its first resize
+    // reaches the wire. A flag on it would be granted unconditionally, which is
+    // how a surviving intent takes a pty a plain attach would have had to ask
+    // for.
+    completeBounce(pty, "conn-3", null)
+    // Every frame the press produced is an ordinary resize: no flag, no
+    // expected owner, nothing the server can read as a transfer.
+    expect(pty.sendResize.mock.calls.filter((call) => call[2] === true)).toEqual([])
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+  })
+
+  // The self-succession variant of the same press. The intent it arms NAMES the
+  // ghost it expects to displace, and a stale name is refused by the server, so
+  // the pane would sit at a geometry the pty never applied while believing it
+  // owns it.
+  it("never carries a surviving self-succession on a Reconnect press", () => {
+    const pty = mountSettled()
+    pty.emit("open")
+    act(() => pty.onConnected("conn-self", null))
+    // The socket blips and comes back; the handshake names this pane's own dead
+    // connection, so the returning driver self-succeeds.
+    pty.sendResize.mockReturnValue(false)
+    reopenWithNoScreen(pty, "conn-2", "conn-self")
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true, "conn-self")
+
+    expireReplayWait()
+    pty.sendResize.mockClear()
+    pty.sendResize.mockReturnValue(true)
+    fireEvent.click(screen.getByText("Reconnect"))
+    // Nobody holds the pty now, so the stale expected owner this intent still
+    // names would be refused by the server, leaving the pane believing it owns
+    // a pty at a geometry that was never applied.
+    completeBounce(pty, "conn-3", null)
+    expect(pty.sendResize.mock.calls.filter((call) => call[2] === true)).toEqual([])
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
   })
 
   it("shows the Reconnect affordance, not the take-over card, on a dead socket", () => {

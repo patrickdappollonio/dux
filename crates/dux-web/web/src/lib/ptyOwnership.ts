@@ -203,24 +203,16 @@ const lastEpochByPty = new Map<string, number>()
 // would wrongly ignore every post-restart handover as "stale". Call this when the
 // events socket reconnects (a reconnect is the only way a restarted server's epochs
 // reach this client). Exported primarily for that wiring and for test isolation.
+//
+// IT SPEAKS FOR NOTHING BUT THESE MARKS, and that boundary is load-bearing. It
+// fires on EVERY events reconnect, restart or not, which is safe here (a mark it
+// forgets can only make this client accept a handover it would otherwise have
+// dropped) and was not safe for the other memory that used to ride it: a pane's
+// ghost connection ids. An ordinary mobile drop takes both sockets, so this ran
+// before every returning pty handshake and left the driver watching itself. Those
+// retire on a real run change instead; see `serverRun.ts`.
 export function resetPtyOwnerEpochs(): void {
   lastEpochByPty.clear()
-  for (const cb of [...epochResetListeners]) cb()
-}
-
-// Listeners for that same reset. A restarted server restarts EVERY
-// process-global counter, connection ids included, so anything a client
-// remembers about the old run's identifiers is not merely stale but actively
-// wrong: an id from the previous run can be minted again for a different
-// connection. The epoch high-water marks are one such memory and a pane's set of
-// its own past connection ids is another, so they are retired on the one signal.
-const epochResetListeners = new Set<() => void>()
-
-export function onPtyOwnerEpochsReset(cb: () => void): () => void {
-  epochResetListeners.add(cb)
-  return () => {
-    epochResetListeners.delete(cb)
-  }
 }
 
 // The newest `pty.owner` epoch already applied for `ptyId`, or undefined when

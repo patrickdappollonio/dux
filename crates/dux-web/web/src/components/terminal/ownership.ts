@@ -80,11 +80,11 @@ import {
   isForeground,
   isOwnerAfterHandover,
   onPtyOwner,
-  onPtyOwnerEpochsReset,
   seedDeviceFromConnected,
   seedVerdictFromConnected,
   type HandshakeOwner,
 } from "@/lib/ptyOwnership"
+import { onServerRunChanged } from "@/lib/serverRun"
 import { noteAgentPtyOwnership } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
 
@@ -208,9 +208,15 @@ export function useTerminalOwnership(
   // process-global counter that starts again at zero, so an id this pane held
   // against the previous run can be minted afresh for somebody else's
   // connection, and self-succession would then hand this pane a pty it never
-  // owned. The store already clears the per-pty epoch high-water marks on a
-  // reconnect for exactly that reason; the ghost set retires on the same signal.
-  useEffect(() => onPtyOwnerEpochsReset(() => heldConnIdsRef.current.clear()), [])
+  // owned.
+  //
+  // ONLY A CONFIRMED CHANGE RETIRES THEM, and the previous signal (the epoch
+  // reset, which the store fires on every events reconnect) was the bug that
+  // killed self-succession in the exact case it exists for: an ordinary mobile
+  // drop takes BOTH sockets, so the events socket reconnects and clears this set
+  // strictly before the pty handshake that names the ghost arrives, and the
+  // returning driver lands on the take-over card. A reconnect is not a restart.
+  useEffect(() => onServerRunChanged(() => heldConnIdsRef.current.clear()), [])
   const connId = useMemo<ConnectionIdentity>(
     () => ({
       read: () => myConnIdRef.current,

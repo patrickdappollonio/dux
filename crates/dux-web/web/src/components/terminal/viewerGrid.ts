@@ -53,6 +53,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import type { PtySocket } from "@/lib/ptySocket"
 
 import type { OwnershipVerdict, TakeoverIntent } from "./channels"
+import { plainBounce } from "./plainBounce"
 import { VIEWER_HEAL_DEBOUNCE_MS } from "./constants"
 
 export type Grid = { rows: number; cols: number }
@@ -192,7 +193,12 @@ export function useViewerGrid(deps: ViewerGridDeps): ViewerGrid {
           if (!fire || !pty) return
           bouncing.current = true
           setReconnecting(true)
-          pty.connect()
+          // Through the one plain-bounce helper, like every reopen that is not
+          // a take-over. Guard 2 above already refuses to heal while an intent
+          // is armed, so this spends nothing in practice; it goes through the
+          // helper so no bounce anywhere can grow its own answer to the
+          // question of what happens to an unspent claim.
+          plainBounce(pty, takeoverIntent)
         }, VIEWER_HEAL_DEBOUNCE_MS)
       },
       noteLocalGrid(grid) {

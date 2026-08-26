@@ -104,6 +104,11 @@ export type ResizeCoordinatorDeps = {
   /// The ownership verdict, read live: a resize frame IS a claim server-side,
   /// so a read-only observer (and a backgrounded tab) drives nothing.
   isOwner: () => boolean
+  /// Whether the frame `sendResize` just wrote carried the take-over flag. Read
+  /// immediately after a confirmed send, and only then. A flagged frame is a
+  /// REQUEST the server may refuse whole, so its geometry is not booked until
+  /// the pty reports it back; see `sendOwned`.
+  lastSendWasFlagged?: () => boolean
   /// The observed layout (the pane's HOST; see `start`) moved while in VIEWER
   /// mode. There is no fit to run, but the font shrink is computed from that
   /// box, so the pane recomputes it here. Called from the same ResizeObserver
@@ -171,6 +176,7 @@ export function createResizeCoordinator(
   deps: ResizeCoordinatorDeps,
 ): ResizeCoordinator {
   const { term, fit, sendResize, isOwner, onViewerLayout } = deps
+  const lastSendWasFlagged = deps.lastSendWasFlagged ?? (() => false)
 
   // VIEWER MODE, derived and never latched: anybody who is not the driver.
   // Written as its own name because it is asked at six decision points and
@@ -257,16 +263,24 @@ export function createResizeCoordinator(
   // comment used to describe, where a claim ran while the verdict still said
   // somebody else owned the pty and had to bypass the record entirely.
   //
-  // What has NOT changed is the direction of the surviving error: a resize the
-  // server refuses is still booked here as sent (this records "written to the
-  // socket" and claims nothing about what the server did with it), so the next
-  // size check may skip a frame the PTY never actually got. The foreground
-  // resync's forced re-send is the standing recovery, and a same-size frame is
-  // a kernel no-op. A non-owner cannot reach here at all, so the only refusable
-  // frame is one whose ownership was lost between the gate and the wire.
+  // A FLAGGED FRAME IS BOOKED BY THE ANSWER, NOT BY THE SEND, and it is the one
+  // frame that gets that treatment. There are two refusable classes now: a plain
+  // resize whose ownership was lost between the gate and the wire, and a
+  // SELF-SUCCESSION whose named predecessor no longer holds the pty. The second
+  // is refused ROUTINELY (that is what its compare-and-swap is for) and refusing
+  // applies nothing at all, geometry included, so booking it would let the
+  // dedupe suppress every re-assert of that size and leave the child drawing for
+  // a viewport nobody is looking at. The confirmation is the pty's own reported
+  // grid, which arrives on the handshake and on every APPLIED resize; see
+  // `noteRemoteGrid`.
+  //
+  // The plain case keeps the older, accepted behavior: it records "written to
+  // the socket" and claims nothing about what the server did with it, with the
+  // foreground resync's forced re-send as the standing recovery.
   const sendOwned = (rows: number, cols: number): boolean => {
     if (!isOwner()) return false
     if (!sendResize(rows, cols)) return false
+    if (lastSendWasFlagged()) return true
     lastRows = rows
     lastCols = cols
     return true
@@ -534,6 +548,16 @@ export function createResizeCoordinator(
       // Null is "the server could not say", never "it matches": the last grid
       // it DID report stands, which is the same rule `gridsDiverge` applies.
       if (grid) remoteGrid = grid
+      // THE CONFIRMATION HALF of the flagged-send rule above. A reported grid is
+      // the pty's own geometry, so for the owner it is the answer to "was the
+      // size I asked for applied", and booking it here is what closes the loop a
+      // flagged send deliberately left open. It is the pty's truth even when it
+      // is not what this client last asked for, which is exactly what the dedupe
+      // should be comparing against.
+      if (grid && isOwner()) {
+        lastRows = grid.rows
+        lastCols = grid.cols
+      }
       applyViewerGrid()
     },
     applyViewerGrid,

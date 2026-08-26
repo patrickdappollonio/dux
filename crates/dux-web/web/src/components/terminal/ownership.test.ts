@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook } from "@testing-library/react"
 
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
+import { noteServerRunProbe } from "@/lib/serverRun"
 import type { PtySocket } from "@/lib/ptySocket"
 
 import { useTerminalOwnership } from "./ownership"
@@ -727,17 +728,43 @@ describe("self-succession names the ghost it expects to displace", () => {
 
   // A RESTARTED SERVER RESTARTS THE ID COUNTER, so an id this pane held against
   // the previous run can be handed to somebody else's connection on the new one.
-  // Self-succeeding on it would take a pty this pane never owned. The store
-  // already clears the epoch high-water marks on a reconnect for the same
-  // reason, so the ghosts go with them.
-  it("forgets its ghosts when the ownership epochs are reset", () => {
+  // Self-succeeding on it would take a pty this pane never owned.
+  it("forgets its ghosts when the server run has actually changed", () => {
+    const { view } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    act(() => noteServerRunProbe("changed"))
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+    expect(view.result.current.isOwner).toBe(false)
+  })
+
+  // THE ORDINARY MOBILE DROP, and the case self-succession exists for. A drop
+  // takes BOTH sockets, so the events socket reconnects (resetting the epoch
+  // high-water marks) strictly before the pty socket's handshake arrives. While
+  // the ghosts rode that reset, the returning driver's own dead id was already
+  // forgotten by the time its handshake named it, and the driver landed on the
+  // take-over card: measured, three returns in four.
+  it("keeps its ghosts across an ordinary events reconnect", () => {
     const { view } = setup()
     act(() => view.result.current.connId.write("conn-a"))
     act(() => view.result.current.connId.write(null))
     act(() => resetPtyOwnerEpochs())
     act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
-    expect(view.result.current.takeoverIntent.read()).toBe(false)
-    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    expect(view.result.current.takeoverIntent.expectedOwner()).toBe("conn-a")
+    expect(view.result.current.isOwner).toBe(true)
+  })
+
+  // A probe that could not answer is not evidence of a change, and treating it
+  // as one would put the flaky-network return back on the card.
+  it("keeps its ghosts when the run-identity probe could not answer", () => {
+    const { view } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    act(() => noteServerRunProbe("unknown"))
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    expect(view.result.current.isOwner).toBe(true)
   })
 
   // THE REFUSAL IS SILENT, and the replaced version of this test did not

@@ -27,6 +27,9 @@ class FakePtySocket {
   url: string
   connect = vi.fn()
   close = vi.fn()
+  // The pane's teardown DISPOSES rather than closes: a socket whose pane is
+  // gone must lose its wake listeners too.
+  dispose = vi.fn()
   // The real socket answers whether the frame actually went on the wire; a test
   // models a dropped frame (a socket mid-reconnect) by returning false.
   sendResize = vi.fn(() => true)

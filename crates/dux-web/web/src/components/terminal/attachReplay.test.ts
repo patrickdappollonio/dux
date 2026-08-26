@@ -170,6 +170,27 @@ describe("replay idempotency by generation", () => {
     expect(term.log).toContain("write:replay-2")
   })
 
+  // A RESTARTED SERVER RESTARTS THE GENERATION COUNTER, so the new run's first
+  // replay carries a LOWER number than this pane already applied and the dedupe
+  // drops it whole. The cover then clears (correctly: the dedupe reports the
+  // screen as applied) over the PREVIOUS run's picture. A restart the identity
+  // probe could not confirm is exactly the case that reaches here, so the
+  // high-water mark retires on the unconfirmed answer too.
+  it("forgets the applied generation once the run can no longer be vouched for", () => {
+    let gen = 7
+    const { term, attach } = setup(() => gen)
+    attach.noteOpen()
+    attach.onBytes(bytes("old-run"))
+    term.pump()
+    attach.forgetAppliedGeneration()
+    gen = 1
+    attach.noteOpen()
+    attach.onBytes(bytes("new-run"))
+    term.pump()
+    term.pump()
+    expect(term.log).toContain("write:new-run")
+  })
+
   it("always applies an UNTAGGED replay, because an older server sends no generation", () => {
     const { term, attach } = setup(() => null)
     attach.noteOpen()
