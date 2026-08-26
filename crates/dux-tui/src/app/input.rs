@@ -9991,6 +9991,28 @@ impl App {
                     return false;
                 }
 
+                // The pull-request banner, beside the tab strip because it is
+                // the same kind of thing: dux's own chrome in a lane of its
+                // own, outside the pane, which the child never painted. So
+                // there is no modifier rule and nothing to forward: every left
+                // press on the coloured band opens the pull request, the way
+                // the web banner is one link across the whole strip. The
+                // rect exists only while the band is on screen, which is what
+                // keeps a maximized surface (whose overlay covers the lane)
+                // from having a click target hidden behind it.
+                if self
+                    .mouse_layout
+                    .pr_banner
+                    .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row))
+                {
+                    // A consumed press is not half of a double click: leaving
+                    // the record standing would let a pane click either side of
+                    // this one read as a pair and maximize the surface.
+                    self.last_mouse_click = None;
+                    let _ = self.open_current_pr_in_browser();
+                    return false;
+                }
+
                 // After the divider and tab-strip short-circuits (the mouse
                 // "dux wins" rule): a plain click inside the windowed agent
                 // surface of a mouse-aware child is the child's, so it is
@@ -10852,6 +10874,7 @@ mod tests {
             terminal_row_to_item: Vec::new(),
             agent_term: Some(Rect::new(21, 1, 55, 16)),
             takeover_button: None,
+            pr_banner: None,
             unstaged_list: Some(Rect::new(78, 1, 21, 8)),
             staged_list: Some(Rect::new(78, 9, 21, 5)),
             commit_area: Some(Rect::new(77, 14, 23, 6)),
@@ -16885,6 +16908,157 @@ not_a_real_action = ["x"]
                 && message.contains("open it by hand"),
             "the failure must name the address, the error and the way out; got {message:?}"
         );
+    }
+
+    // -- The PR banner is a click target --
+
+    /// Give the selected agent a known pull request and put the banner's band
+    /// where the render pass would: the bottom lane of the center pane, one row
+    /// tall, spanning its width.
+    fn install_pr_banner(app: &mut App) -> String {
+        use crate::model::{PrInfo, PrState};
+
+        let session_id = app.engine.sessions[0].id.clone();
+        let url = "https://github.com/owner/repo/pull/42".to_string();
+        app.engine.pr_statuses.insert(
+            session_id,
+            PrInfo {
+                number: 42,
+                state: PrState::Open,
+                title: "Teach the banner to open its pull request".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "owner/repo".to_string(),
+                url: url.clone(),
+            },
+        );
+        app.mouse_layout.pr_banner = Some(Rect::new(20, 19, 57, 1));
+        url
+    }
+
+    /// Pump the engine until the status line says `needle`, or say what it said
+    /// instead. The open is a keyed busy answered by a worker, so the final
+    /// arrives on a later drain.
+    fn wait_for_status(app: &mut App, needle: &str) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            app.drain_events();
+            if app.status.message().contains(needle) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let message = app.status.message().to_string();
+        assert!(
+            message.contains(needle),
+            "expected a status containing {needle:?}, got {message:?}"
+        );
+        message
+    }
+
+    /// A left press anywhere on the coloured band opens the pull request, the
+    /// way the web banner is one link across the whole strip. The press is
+    /// dux's own chrome: no focus moves, and a mouse-tracking child sees
+    /// nothing of it.
+    #[test]
+    fn a_left_press_on_the_pr_banner_opens_the_pull_request() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        let rx = recording_opener(&mut app);
+        let url = install_pr_banner(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 19));
+
+        assert_eq!(opened_url(&rx), url);
+        assert_eq!(app.focus, FocusPane::Left, "the press moves no focus");
+        assert_eq!(
+            app.center_mouse_forward, None,
+            "the band is not the child's grid"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = forwarded_echo(&app);
+        assert!(
+            !rendered.contains("[<"),
+            "nothing about the banner reaches the child; got {rendered:?}"
+        );
+        let message = wait_for_status(&mut app, "Opened PR");
+        assert!(
+            message.contains("owner/repo#42"),
+            "the outcome names the pull request; got {message:?}"
+        );
+    }
+
+    /// A launcher that cannot start is reported on the same keyed status the
+    /// palette command uses, naming the address so it can be copied by hand.
+    #[test]
+    fn a_banner_press_reports_a_launcher_that_will_not_start() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        let url = install_pr_banner(&mut app);
+        app.url_opener = Arc::new(|_url: &str| Err(anyhow::anyhow!("no such file or directory")));
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 19));
+
+        let message = wait_for_status(&mut app, "Could not open");
+        assert!(
+            message.contains(&url) && message.contains("no such file or directory"),
+            "the failure names the address and the error; got {message:?}"
+        );
+    }
+
+    /// A consumed banner press is not half of a double click. Without dropping
+    /// the record, a click in the pane, a click on the banner and a click back
+    /// in the pane would read as a pair and maximize the surface.
+    #[test]
+    fn a_banner_press_cannot_become_half_of_a_double_click() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        let rx = recording_opener(&mut app);
+        install_pr_banner(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 19));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+
+        assert!(
+            matches!(app.fullscreen_overlay, FullscreenOverlay::None),
+            "two pane clicks either side of a banner click are not a double click"
+        );
+        assert_eq!(opened_url(&rx), "https://github.com/owner/repo/pull/42");
+        nothing_opened(&rx);
+    }
+
+    /// With no banner drawn there is no rect, and the row belongs to the pane
+    /// exactly as it did before any of this.
+    #[test]
+    fn without_a_banner_the_row_still_belongs_to_the_center_pane() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        let rx = recording_opener(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 19));
+
+        assert_eq!(app.focus, FocusPane::Center, "the pane took the press");
+        nothing_opened(&rx);
+    }
+
+    /// While the surface is maximized the banner is behind the overlay, so the
+    /// render pass publishes no rect and a press at that row opens nothing.
+    #[test]
+    fn a_press_where_the_banner_would_be_opens_nothing_while_maximized() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        let rx = recording_opener(&mut app);
+        install_pr_banner(&mut app);
+        // What the render pass does under a fullscreen overlay: no band, no
+        // rect. Asserted against the real renderer in `render.rs`.
+        app.mouse_layout.pr_banner = None;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 19));
+
+        nothing_opened(&rx);
     }
 
     // -- The pure decisions --

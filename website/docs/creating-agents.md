@@ -226,6 +226,13 @@ pr_poll_interval_seconds = 180
 If your GitHub API quota runs low, or GitHub starts erroring, dux pauses PR checks until
 it recovers and tells you: a status line in the terminal UI, a toast in the browser.
 
+Above or below the agent's terminal, a one-line banner carries the pull request's number,
+its state and its title, on both surfaces. Clicking the banner opens that pull request in
+your browser, wherever you click it. In the terminal UI the `open-current-pr` command does
+the same from the keyboard, and it is the way in while an agent pane is maximized, since
+the maximized surface covers the banner. Which side of the terminal the banner sits on is
+the `pr_banner_position` setting under `[ui]`.
+
 ## Creating an agent from an existing worktree
 
 In the browser, **Worktrees…** in a project's `⋯` menu, or **New agent from existing

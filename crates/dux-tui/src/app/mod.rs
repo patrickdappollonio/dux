@@ -2660,6 +2660,15 @@ pub(crate) struct MouseLayoutState {
     /// and goes with the live ownership verdict, without anything on this
     /// surface happening at all.
     pub(crate) takeover_button: Option<Rect>,
+    /// The pull-request banner's painted band, when one is on screen. The
+    /// banner fills its whole lane cap to cap, so the published rect IS what
+    /// the user sees, and a press anywhere inside it opens the pull request.
+    ///
+    /// Published by the render pass and cleared with the rest of this state
+    /// every frame, which is what makes the maximized case safe on its own: a
+    /// fullscreen surface covers the lane, the banner is not drawn behind it,
+    /// and a press at that row therefore finds nothing to open.
+    pub(crate) pr_banner: Option<Rect>,
     pub(crate) unstaged_list: Option<Rect>,
     pub(crate) staged_list: Option<Rect>,
     pub(crate) commit_area: Option<Rect>,
@@ -2678,6 +2687,7 @@ impl MouseLayoutState {
         self.terminal_row_to_item.clear();
         self.agent_term = None;
         self.takeover_button = None;
+        self.pr_banner = None;
         self.unstaged_list = None;
         self.staged_list = None;
         self.commit_area = None;

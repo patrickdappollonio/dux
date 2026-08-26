@@ -2095,7 +2095,12 @@ impl App {
             (InputTarget::Agent, SessionSurface::Agent)
                 | (InputTarget::Terminal, SessionSurface::Terminal)
         );
-        let pr_info = if !is_input {
+        // A maximized surface covers this lane. The banner is not painted
+        // behind it, so nothing publishes a click target the user cannot see:
+        // while a pane is maximized there is no way to click the banner open,
+        // and the open-current-pr binding stays the way in.
+        let covered = !matches!(self.fullscreen_overlay, FullscreenOverlay::None);
+        let pr_info = if !is_input && !covered {
             self.selected_session()
                 .and_then(|s| self.engine.pr_statuses.get(&s.id))
                 .cloned()
@@ -11224,7 +11229,12 @@ impl App {
     /// creates a pill-like shape without requiring Powerline/Nerd Fonts.
     /// The `│` divider uses terminal default colors so it blends with the
     /// user's background.
-    fn render_pr_banner(&self, frame: &mut Frame, area: Rect, pr: &crate::model::PrInfo) {
+    ///
+    /// The band is a click target: it publishes its painted rect so a left
+    /// press on it opens the pull request, the way the web banner is one link
+    /// across the whole strip. The rect is published only where the band is
+    /// actually painted, so every early return below leaves it unset.
+    fn render_pr_banner(&mut self, frame: &mut Frame, area: Rect, pr: &crate::model::PrInfo) {
         use crate::model::PrState;
 
         if area.height < 1 || area.width < 6 {
@@ -11275,6 +11285,15 @@ impl App {
         if inner_w < 4 {
             return;
         }
+
+        // From here the band is painted, so this is where it becomes clickable.
+        // The whole row is the target because the whole row is coloured: the
+        // caps at the ends, the pill's content and its fill between them.
+        //
+        // Misclick safety is the agent tab strip's, cell for cell: a lane of
+        // its own, one row tall, with the strip or the terminal as its only
+        // vertical neighbour and the caps as its horizontal padding.
+        self.mouse_layout.pr_banner = Some(Rect::new(area.x, area.y, area.width, 1));
 
         let prefix_w = prefix.chars().count();
         let buf = frame.buffer_mut();
@@ -19086,5 +19105,139 @@ mod tests {
             app.theme.selection_bg,
             "the stats cells carry the selection background"
         );
+    }
+
+    // -- The PR banner is a click target --
+
+    /// Give the selected agent a known pull request, the way the PR poller
+    /// would, so the banner lane is drawn.
+    fn install_pr(app: &mut App) -> crate::model::PrInfo {
+        use crate::model::{PrInfo, PrState};
+
+        let pr = PrInfo {
+            number: 42,
+            state: PrState::Open,
+            title: "Teach the banner to open its pull request".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "owner/repo".to_string(),
+            url: "https://github.com/owner/repo/pull/42".to_string(),
+        };
+        let id = app.selected_session().expect("a selected agent").id.clone();
+        app.engine.pr_statuses.insert(id, pr.clone());
+        pr
+    }
+
+    /// The band the banner paints IS the click target: the whole row of the
+    /// lane, caps included, published so a press can find it. Asserted at both
+    /// configured positions, because the lane moves with the setting.
+    #[test]
+    fn the_pr_banner_publishes_the_band_it_paints() {
+        for at_bottom in [false, true] {
+            let mut app = test_app(default_bindings());
+            install_pr(&mut app);
+            app.pr_banner_at_bottom = at_bottom;
+
+            let buf = draw(&mut app);
+            let band = app
+                .mouse_layout
+                .pr_banner
+                .expect("the drawn banner publishes its rect");
+            let center = app.mouse_layout.center;
+
+            assert_eq!(band.height, 1, "the lane is one row tall");
+            assert_eq!(band.x, center.x, "the band starts at the pane's left edge");
+            assert_eq!(band.width, center.width, "the band fills the lane");
+            if at_bottom {
+                assert_eq!(band.y, center.y + center.height - 1, "bottom lane");
+            } else {
+                assert_eq!(band.y, center.y, "top lane");
+            }
+
+            // Every cell of the published rect is painted by the banner: the
+            // caps at the ends and the pill's own colored content between them.
+            let row: String = (band.x..band.x + band.width)
+                .map(|x| buf[(x, band.y)].symbol())
+                .collect();
+            assert!(
+                row.starts_with('\u{2590}') && row.trim_end().ends_with('\u{258c}'),
+                "the published rect spans cap to cap; got {row:?}"
+            );
+            assert!(
+                row.contains("owner/repo#42"),
+                "the band carries the PR; got {row:?}"
+            );
+        }
+    }
+
+    /// No pull request, no band, no rect: a press at that row must fall through
+    /// to the pane underneath exactly as it did before.
+    #[test]
+    fn no_pull_request_publishes_no_banner_rect() {
+        let mut app = test_app(default_bindings());
+        draw(&mut app);
+        assert!(app.mouse_layout.pr_banner.is_none());
+    }
+
+    /// While the pane is taking input the banner is not drawn (an existing
+    /// rule), so there is nothing to click either.
+    #[test]
+    fn typing_into_the_pane_retires_the_banner_rect() {
+        let mut app = test_app(default_bindings());
+        install_pr(&mut app);
+        draw(&mut app);
+        assert!(app.mouse_layout.pr_banner.is_some(), "test setup");
+
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        draw(&mut app);
+        assert!(
+            app.mouse_layout.pr_banner.is_none(),
+            "the banner is not on screen while the pane takes input"
+        );
+    }
+
+    /// A maximized agent surface covers the banner's lane. It is not drawn
+    /// behind the overlay and no rect is published, so a press at that row can
+    /// never open the pull request the user cannot see.
+    #[test]
+    fn a_maximized_pane_leaves_no_banner_rect_behind_it() {
+        let mut app = test_app(default_bindings());
+        install_pr(&mut app);
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        draw(&mut app);
+
+        assert!(
+            app.mouse_layout.pr_banner.is_none(),
+            "nothing behind the overlay is clickable"
+        );
+    }
+
+    /// Too narrow to paint anything is too narrow to click: the early returns
+    /// publish no rect.
+    #[test]
+    fn a_lane_too_narrow_to_paint_publishes_no_rect() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        for width in [0u16, 5, 6] {
+            let mut app = test_app(default_bindings());
+            let pr = install_pr(&mut app);
+            app.mouse_layout.pr_banner = None;
+            let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let area = Rect::new(0, 0, width, 1);
+                    app.render_pr_banner(frame, area, &pr);
+                })
+                .expect("render frame");
+            // Width 6 has room for the caps and four inner cells, which is the
+            // narrowest band the renderer will paint.
+            assert_eq!(
+                app.mouse_layout.pr_banner.is_some(),
+                width == 6,
+                "width {width} published the wrong thing"
+            );
+        }
     }
 }
