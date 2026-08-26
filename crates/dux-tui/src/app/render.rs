@@ -140,6 +140,12 @@ struct TabStripItem {
     label: String,
     working: bool,
     needs_attention: bool,
+    /// The lifecycle tone the spinner is drawn in: the agent row's own glyph
+    /// color for this tab's session status (`Theme::session_dot`). NOT the
+    /// pill's title style, which on a focused pill is the same accent as
+    /// `session_attention`, so a focused working pill and a flagged one would
+    /// render the same color and the attention dot would lose its exclusivity.
+    glyph_tone: Color,
 }
 
 /// How an agent row's project tag should be rendered. Decided purely from the
@@ -1318,6 +1324,13 @@ impl App {
         // agent's tabs. The attention glyph blinks on wall-clock time.
         let needs_attention = self.engine.config.ui.attention_indicator
             && self.engine.session_needs_attention(&session.id);
+        // The blinking GLYPH additionally requires an Active session, because
+        // `any_row_animating` only raises the poll cadence for one: on a
+        // detached or exited agent the blink would freeze wherever the last
+        // lazy redraw left it. The line-two state word below keeps the ungated
+        // flag, since it is static text and its ladder is shared with the web.
+        let attention_cue =
+            needs_attention && matches!(session.status, crate::model::SessionStatus::Active);
         let working = matches!(session.status, crate::model::SessionStatus::Active)
             && self.engine.session_is_streaming(&session.id);
         // Typing is an Active-only cue and takes precedence over the working
@@ -1330,7 +1343,7 @@ impl App {
         // caret, working spinner, else the steady dot); its COLOR does not, so
         // identity stays stable. Only attention keeps an accent so the "act now"
         // cue still pops. The live-state color lives on the state word (line two).
-        let dot = if needs_attention {
+        let dot = if attention_cue {
             if self.attention_blink_on() {
                 crate::theme::ATTENTION_GLYPH
             } else {
@@ -1359,7 +1372,7 @@ impl App {
         };
         let glyph_color = if deleting {
             self.theme.session_deleting
-        } else if needs_attention {
+        } else if attention_cue {
             self.theme.session_attention
         } else {
             steady_color
@@ -2601,8 +2614,16 @@ impl App {
         // uses to raise the run loop's poll cadence: a recently exited or
         // detached tab whose PTY activity is still inside the streaming window
         // would otherwise spin at the lazy cadence, which looks broken.
+        //
+        // The attention flag carries that same Active guard, for the same
+        // reason: the dot BLINKS, and a blink nothing is polling fast enough to
+        // drive freezes mid-cycle. `render_agent_row` gates its own attention
+        // glyph identically, so the pill and the agent list always agree. The
+        // line-two state word is deliberately NOT gated (it is static text, and
+        // its ladder is shared with the web).
         let session_active = matches!(session.status, crate::model::SessionStatus::Active);
-        let attention_on = self.engine.config.ui.attention_indicator;
+        let attention_on = self.engine.config.ui.attention_indicator && session_active;
+        let glyph_tone = self.theme.session_dot(&session.status).1;
         let items: Vec<TabStripItem> = tab_ids
             .iter()
             .zip(labels)
@@ -2611,6 +2632,7 @@ impl App {
                 needs_attention: attention_on && self.engine.tab_needs_attention(id),
                 id: id.clone(),
                 label,
+                glyph_tone,
             })
             .collect();
         // Animation phase is read once per frame, before the buffer borrow, so
@@ -2787,9 +2809,15 @@ impl App {
             buf.set_string(x + 2 + ord_w, mid_y, &seg_content[i], label_style);
             // The activity slot: the label cell's second column, right after
             // its leading pad. Painted as one cell rather than spliced into
-            // `seg_content` because the attention dot carries its own accent
-            // color while the spinner takes the pill's title style. A label
-            // cell squeezed below 2 columns by truncation has no slot to paint.
+            // `seg_content` because each glyph carries a tone of its own.
+            //
+            // The guard is the truncation path's floor: a focused label squeezed
+            // to one column would put this write on the box's right border. It
+            // is not reachable today (the widest ordinal the tab cap allows is
+            // ` 100 `, which still leaves 2 columns at the 12-column minimum
+            // strip width) but the margin is exactly zero, so the guard stays
+            // and `the_activity_slot_stays_inside_the_narrowest_possible_pill`
+            // holds that boundary down.
             if label_w >= 2 {
                 let glyph_cell = &mut buf[(x + 2 + ord_w + 1, mid_y)];
                 match tab_activity_glyph(
@@ -2802,7 +2830,9 @@ impl App {
                         glyph_cell.set_symbol(" ").set_style(label_style);
                     }
                     TabActivityGlyph::Working(frame) => {
-                        glyph_cell.set_char(frame).set_style(label_style);
+                        glyph_cell
+                            .set_char(frame)
+                            .set_style(Style::default().fg(items[i].glyph_tone));
                     }
                     TabActivityGlyph::Attention => {
                         glyph_cell
@@ -13862,16 +13892,47 @@ mod tests {
     }
 
     /// The column of a pill's one-cell activity slot: the box's left border,
-    /// the ordinal cell (` 1 `), the divider, then the label cell's leading pad.
-    fn tab_glyph_col(app: &App, tab_id: &str) -> u16 {
-        const ORD_W: u16 = 3;
+    /// the ordinal cell, the divider, then the label cell's leading pad.
+    /// `ord_w` is the ordinal cell's own display width, which grows with the
+    /// tab's POSITION (` 1 ` is 3, ` 100 ` is 5); reading it wrong points the
+    /// assertion at a neighbouring column, where it passes for the wrong reason.
+    fn tab_glyph_col_with_ord(app: &App, tab_id: &str, ord_w: u16) -> u16 {
         let rect = app
             .agent_tab_regions
             .iter()
             .find(|(id, _)| id == tab_id)
             .map(|(_, rect)| *rect)
             .unwrap_or_else(|| panic!("no recorded region for {tab_id}"));
-        rect.x + 2 + ORD_W + 1
+        rect.x + 2 + ord_w + 1
+    }
+
+    /// The activity slot of a pill at a single-digit position, the only kind
+    /// the two-tab fixtures below produce.
+    fn tab_glyph_col(app: &App, tab_id: &str) -> u16 {
+        tab_glyph_col_with_ord(app, tab_id, 3)
+    }
+
+    /// The selected session's sidebar row, both lines, as plain text. Rendered
+    /// through a one-item `List` because `render_agent_row` hands back a
+    /// `ListItem`, whose spans have no public accessor.
+    fn agent_row_text(app: &App, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::List;
+
+        let session = app.engine.sessions[0].clone();
+        let item = app.render_agent_row(&session, width);
+        let mut terminal = Terminal::new(TestBackend::new(width, 4)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(List::new(vec![item]), Rect::new(0, 0, width, 4));
+            })
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        (0..4)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Render the strip and return the label row's cells as
@@ -13917,16 +13978,19 @@ mod tests {
             );
         }
 
-        // Only tab 2 works.
+        // Only tab 2 works. The frame is asserted by MEMBERSHIP, not identity:
+        // the render reads the wall clock itself, so pinning the frame this test
+        // computed a moment earlier would race the 80ms frame boundary.
         app.engine
             .pty_activity
             .insert("tab-2".to_string(), Instant::now());
-        let spinner = crate::theme::SPINNER_FRAMES[app.spinner_frame_index()].to_string();
         let cells = tab_strip_label_row(&mut app, 80);
-        assert_eq!(
-            cells[tab_glyph_col(&app, "tab-2") as usize].0,
-            spinner,
-            "the working tab must carry the agent list's spinner frame"
+        assert!(
+            cells[tab_glyph_col(&app, "tab-2") as usize]
+                .0
+                .chars()
+                .all(|c| crate::theme::SPINNER_FRAMES.contains(&c)),
+            "the working tab must carry a frame of the agent list's shared spinner"
         );
         assert_eq!(
             cells[tab_glyph_col(&app, &session_id) as usize].0,
@@ -13953,6 +14017,133 @@ mod tests {
                 .chars()
                 .all(|c| crate::theme::SPINNER_FRAMES.contains(&c)),
             "the still-working sibling keeps its spinner"
+        );
+    }
+
+    /// The spinner wears the agent row's own glyph tone, never the pill's title
+    /// style. On a FOCUSED pill the title color and `session_attention` are the
+    /// same accent in the default theme, so a spinner drawn in the title style
+    /// would be indistinguishable from the attention dot and the dot would lose
+    /// its exclusivity. This is parity with `render_agent_row`, whose glyph
+    /// keeps the lifecycle color and reserves the accent for attention.
+    #[test]
+    fn a_working_pills_spinner_wears_the_agent_rows_glyph_tone() {
+        let (mut app, session_id) = tab_activity_app(800);
+        app.set_focused_tab(&session_id, "tab-2");
+        app.engine
+            .pty_activity
+            .insert("tab-2".to_string(), Instant::now());
+
+        let sidebar_tone = app
+            .theme
+            .session_dot(&crate::model::SessionStatus::Active)
+            .1;
+        // The premise this test exists for: on a focused pill the title color
+        // collides with the attention accent.
+        assert_eq!(
+            app.theme.title_focused, app.theme.session_attention,
+            "test premise: the focused title style is the same accent as the attention dot"
+        );
+        assert_ne!(
+            sidebar_tone, app.theme.session_attention,
+            "test premise: the agent row's working glyph tone is NOT the attention accent"
+        );
+
+        let cells = tab_strip_label_row(&mut app, 80);
+        let glyph = &cells[tab_glyph_col(&app, "tab-2") as usize];
+        assert!(
+            glyph
+                .0
+                .chars()
+                .all(|c| crate::theme::SPINNER_FRAMES.contains(&c)),
+            "the focused pill must be spinning for this assertion to mean anything"
+        );
+        assert_eq!(
+            glyph.1, sidebar_tone,
+            "the spinner must wear the agent row's glyph tone"
+        );
+        assert_ne!(
+            glyph.1, app.theme.session_attention,
+            "a working pill must never render in the attention accent, or the dot \
+             stops meaning \"act now\""
+        );
+    }
+
+    /// The truncation path's floor. With the widest ordinal the tab cap allows
+    /// (` 100 `) in the narrowest pane the strip will draw in, the focused
+    /// pill's label cell is squeezed to its minimum, and the activity slot must
+    /// still land strictly INSIDE the box: one column past it is the right
+    /// border, and painting a spinner over a border breaks the frame.
+    #[test]
+    fn the_activity_slot_stays_inside_the_narrowest_possible_pill() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.sessions[0].status = crate::model::SessionStatus::Active;
+        // 99 extra tabs plus the session slot: the last pill's ordinal is 100,
+        // the widest `tab_pill_ordinal_cell` can produce under MAX_AGENT_TABS_MAX.
+        for i in 0..99 {
+            seed_render_tab(
+                &mut app,
+                &session_id,
+                &format!("tab-{i}"),
+                "a-very-long-custom-provider-name",
+                i as i64,
+            );
+        }
+        app.set_focused_tab(&session_id, "tab-98");
+        app.start_time = Instant::now() - Duration::from_millis(800);
+        for i in 0..99 {
+            app.engine
+                .pty_activity
+                .insert(format!("tab-{i}"), Instant::now());
+        }
+
+        // 12 columns is the narrowest pane `render_agent_tab_strip_if_needed`
+        // will draw a strip in at all.
+        let cells = tab_strip_label_row(&mut app, 12);
+        let row: String = cells.iter().map(|(sym, _, _)| sym.as_str()).collect();
+        let rect = app
+            .agent_tab_regions
+            .iter()
+            .find(|(id, _)| id == "tab-98")
+            .map(|(_, r)| *r)
+            .expect("the focused pill must be rendered even at the minimum width");
+
+        // ` 100 ` is 5 columns; the recorded region is the box (the segment
+        // minus its trailing inter-box gap), so the label cell is squeezed to
+        // exactly the 2 columns the guard floors at. If this stops holding, the
+        // guard's reachability argument has changed and needs re-deriving.
+        const ORD_W: u16 = 5;
+        let label_w = rect.width + 1 - ORD_W - 4;
+        assert_eq!(
+            label_w, 2,
+            "test premise: this is the label cell's floor, so the guard is at its \
+             boundary here (rect {rect:?}, row {row:?})"
+        );
+
+        // The box's own right border column survives the squeeze.
+        let right_border = (rect.x + rect.width - 1) as usize;
+        assert_eq!(
+            cells[right_border].0, "│",
+            "the focused pill's right border must survive the squeeze: {row:?}"
+        );
+        // And the slot is still PAINTED at that floor, strictly inside the
+        // frame. Asserting only that nothing overflowed would pass just as
+        // happily if the guard skipped the glyph entirely.
+        let slot = tab_glyph_col_with_ord(&app, "tab-98", ORD_W) as usize;
+        assert!(
+            slot < right_border,
+            "the activity slot ({slot}) must sit strictly inside the right border \
+             ({right_border})"
+        );
+        assert!(
+            cells[slot]
+                .0
+                .chars()
+                .all(|c| crate::theme::SPINNER_FRAMES.contains(&c)),
+            "the working pill must still show its spinner at the label cell's floor, \
+             got {sym:?} in {row:?}",
+            sym = cells[slot].0
         );
     }
 
@@ -14010,23 +14201,65 @@ mod tests {
     /// ACTIVE sessions. Snapshot the pill's working flag behind the same guard so
     /// a detached or exited tab can never spin at the lazy poll cadence.
     #[test]
-    fn a_detached_sessions_pill_does_not_spin() {
-        let (mut app, _session_id) = tab_activity_app(800);
-        app.engine.sessions[0].status = crate::model::SessionStatus::Detached;
-        app.engine
-            .pty_activity
-            .insert("tab-2".to_string(), Instant::now());
+    fn a_non_active_sessions_pill_does_not_animate() {
+        for status in [
+            crate::model::SessionStatus::Detached,
+            crate::model::SessionStatus::Exited,
+        ] {
+            let (mut app, _session_id) = tab_activity_app(800);
+            app.engine.sessions[0].status = status;
+            app.engine
+                .pty_activity
+                .insert("tab-2".to_string(), Instant::now());
+            // Flagged as well as streaming: the attention dot blinks, so it is
+            // gated by the same guard as the spinner.
+            app.engine.needs_attention.insert("tab-2".to_string());
+
+            let cells = tab_strip_label_row(&mut app, 80);
+            assert_eq!(
+                cells[tab_glyph_col(&app, "tab-2") as usize].0,
+                " ",
+                "a {status:?} session's pill must not animate, because the run loop \
+                 would not be polling fast enough to animate it smoothly"
+            );
+            assert!(
+                !app.any_row_animating(),
+                "test setup: a {status:?} session does not raise the animation cadence"
+            );
+        }
+    }
+
+    /// The pill's Active guard and the agent row's must agree, or the sidebar
+    /// and the strip would disagree about the same flagged agent. Both drop the
+    /// blinking dot on a non-Active session; the line-two state word keeps
+    /// saying "Needs you", because static text does not freeze mid-blink.
+    #[test]
+    fn a_flagged_non_active_agent_loses_the_dot_on_both_surfaces() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.sessions[0].status = crate::model::SessionStatus::Exited;
+        seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
+        app.engine.needs_attention.insert("tab-2".to_string());
+        app.engine.needs_attention.insert(session_id.clone());
+        // Deep in the blink's HOLD phase, where a live dot would certainly show.
+        app.start_time = Instant::now() - Duration::from_millis(1500);
+        assert!(app.attention_blink_on(), "test setup: the blink is visible");
 
         let cells = tab_strip_label_row(&mut app, 80);
         assert_eq!(
             cells[tab_glyph_col(&app, "tab-2") as usize].0,
             " ",
-            "a non-Active session's pill must not animate, because the run loop \
-             would not be polling fast enough to animate it smoothly"
+            "the pill of a flagged exited agent must not blink"
+        );
+
+        let row = agent_row_text(&app, 60);
+        assert!(
+            !row.contains(crate::theme::ATTENTION_GLYPH),
+            "the agent row of the same flagged exited agent must not blink either: {row:?}"
         );
         assert!(
-            !app.any_row_animating(),
-            "test setup: a detached session does not raise the animation cadence"
+            row.contains("Needs you"),
+            "the static state word still tells the truth about the flag: {row:?}"
         );
     }
 
