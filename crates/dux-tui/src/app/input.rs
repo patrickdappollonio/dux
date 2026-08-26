@@ -808,7 +808,7 @@ impl App {
         let card_owns_center = self.focus == FocusPane::Center
             && !self.resize_mode
             && matches!(self.center_mode, CenterMode::Agent)
-            && self.focused_pty_is_driven_elsewhere();
+            && self.focused_pty_is_covered_by_card();
         if card_owns_center {
             let presses_the_button = self.bindings.lookup(&key, BindingScope::Center)
                 == Some(Action::FocusAgent)
@@ -2393,8 +2393,8 @@ impl App {
                     // A macro is a write like any other, so it goes through the
                     // ownership gate. A refusal must not then claim the macro was
                     // sent: say what actually happened and name the device.
-                    match self.focused_pty_driven_elsewhere() {
-                        Some(device) => {
+                    match self.focused_pty_takeover_card() {
+                        Some(crate::app::pty_ownership::PtyTakeoverCard::Elsewhere { device }) => {
                             let device = device.unwrap_or_else(|| {
                                 crate::app::pty_ownership::UNNAMED_DEVICE.to_string()
                             });
@@ -2402,6 +2402,16 @@ impl App {
                                 "Did not send macro \"{name}\": {device} is driving this \
                                  terminal, so keystrokes from here are not reaching it. Press \
                                  Take over on the card covering it first."
+                            ))
+                        }
+                        // Nobody is driving it, so nothing was taken away; the
+                        // macro still went nowhere, and saying it was sent would
+                        // be the one thing this branch exists to prevent.
+                        Some(crate::app::pty_ownership::PtyTakeoverCard::Free) => {
+                            self.set_warning(format!(
+                                "Did not send macro \"{name}\": nothing is driving this terminal \
+                                 yet, so keystrokes from here are not reaching it. Press Take \
+                                 over on the card covering it first."
                             ))
                         }
                         None => {
@@ -2965,15 +2975,16 @@ impl App {
         // pasted literal `ESC[I` classifies as a focus report), so the
         // typing stamp is asserted directly at the tail.
         let mut normalized_paste_forwarded = false;
-        // While another device drives this pty no key reaches the child, so the
+        // While this pty is not this surface's, no key reaches the child, so the
         // take-over card is covering this pane and two keys become dux's here
         // exactly as they are in the windowed pane: the palette chord, because a
         // way out of a covered pane has to work where the card shows, and the
         // key that presses the card's button. The BYTES come from the bindings
         // rather than a literal, or the card would name one key and answer
-        // another. With nobody else driving, both ride to the child untouched.
+        // another. While this surface drives the pty, both ride to the child
+        // untouched.
         let (demoted_palette_patterns, demoted_takeover_patterns) =
-            if self.focused_pty_is_driven_elsewhere() {
+            if self.focused_pty_is_covered_by_card() {
                 (
                     self.bindings.byte_patterns_for(Action::OpenPalette),
                     self.bindings.byte_patterns_for(Action::FocusAgent),
@@ -9762,9 +9773,9 @@ impl App {
     /// An in-flight press is tracked wherever the pointer goes, so a drag that
     /// leaves the pane still ends in a released button rather than a stuck one.
     pub(crate) fn handle_takeover_card_mouse(&mut self, mouse: &MouseEvent) -> bool {
-        if !self.focused_pty_is_driven_elsewhere() {
-            // The card can vanish under the pointer: the driver lets go, or this
-            // surface takes over, between the press and the release.
+        if !self.focused_pty_is_covered_by_card() {
+            // The card can vanish under the pointer: this surface takes over, or
+            // a launch started here claims the pty, between press and release.
             self.takeover_press = None;
             return false;
         }

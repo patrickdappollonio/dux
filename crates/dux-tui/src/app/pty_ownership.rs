@@ -15,14 +15,14 @@
 //! surface that is not driving one still receives every byte of it.
 //!
 //! What that surface SHOWS is a separate decision, and this one is the web's:
-//! while another device drives the terminal in the center pane, the pane is
+//! whenever the terminal in the center pane is NOT this surface's, the pane is
 //! covered by the take-over card, the same card and the same words a browser
-//! puts over its own terminal. Two deviations from the web's, both deliberate.
-//! It has no "Take control" state, because on this surface a pty nobody drives
-//! is one this keyboard already claims by typing, so a card asking for a click
-//! that changes nothing would be in the way. And the web suppresses its card
-//! while its socket is lost, which has no counterpart here: there is no socket
-//! between this surface and its own engine to lose.
+//! puts over its own terminal. All three of the web's states, word for word:
+//! `Open on {device}` and `Active on another device` for a pty somebody else
+//! drives, and `Take control` for one nobody drives. One deviation from the
+//! web's, deliberate: the web suppresses its card while its socket is lost,
+//! which has no counterpart here, because there is no socket between this
+//! surface and its own engine to lose.
 //!
 //! ## Nothing serving, nothing to ask
 //!
@@ -36,10 +36,10 @@
 //!
 //! Exactly as it is for a browser. Once another device is driving a pty, nothing
 //! passive takes it back: not selecting the agent, not looking at it, not the
-//! other device going quiet. The two ways back are the card's Take over button
-//! and typing into a pty that nobody owns. The web's socket-specific
-//! self-succession rule has no counterpart here, because this surface has no
-//! socket to have a ghost of.
+//! other device going quiet, and not typing into it either. The one way back is
+//! the card's button, which is also the only way IN to a pty nobody drives. The
+//! web's socket-specific self-succession rule has no counterpart here, because
+//! this surface has no socket to have a ghost of.
 //!
 //! ## Drawing a pane claims nothing
 //!
@@ -49,9 +49,19 @@
 //! ones a browser just created and is a heartbeat away from attaching to. So a
 //! render's resize applies only for a pty this surface already drives, or one an
 //! armed take-over is transferring, and the FIRST claim always comes from a
-//! deliberate act: a keystroke, a launch started here, or the card's button.
-//! Each of those clears the resize dedupe, so the geometry follows on the next
-//! frame through the ordinary apply order.
+//! deliberate act. There are exactly two of them: the card's button, and a
+//! LAUNCH this surface started (creating an agent, forking one, opening a pull
+//! request, adding a tab, spawning a terminal). Each clears the resize dedupe,
+//! so the geometry follows on the next frame through the ordinary apply order.
+//!
+//! TYPING IS NOT ONE OF THEM. A keystroke into a pty this surface does not drive
+//! is dropped, whoever holds it and even when nobody does, because the card is
+//! already covering that pane and asking for the press. The cost is stated
+//! rather than hidden: the startup auto-reopen sweep claims nothing, so every
+//! agent reopened at startup shows `Take control` until somebody presses it,
+//! which is exactly what a browser shows for a terminal it did not start. An
+//! agent launched from this keyboard is this surface's immediately, with no card
+//! over it at all.
 //!
 //! WHICH LAUNCHES COUNT, decided in [`launch_claims_its_pty`]. A launch claims
 //! when somebody at this keyboard asked for it: creating an agent (a fork, a
@@ -74,9 +84,10 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PtyDriver {
     /// Nobody has claimed it, or nothing is serving so the question does not
-    /// arise. A deliberate act claims it: typing into it, or starting it from
-    /// here. Merely looking at it does not, and neither does the resize that
-    /// drawing its pane would otherwise send.
+    /// arise. While something IS serving this is a card state like any other
+    /// (`Take control`), and the two acts that claim it are the card's button
+    /// and a launch started from here. Typing does not, merely looking does
+    /// not, and neither does the resize that drawing its pane would send.
     Free,
     /// This surface holds it.
     Mine,
@@ -95,6 +106,23 @@ pub(crate) enum PtyDriver {
     /// [`dux_core::device_label::short_device_label`] made of it, because the
     /// place it is rendered is the title bar of a card inside the center pane.
     Elsewhere { device: Option<String> },
+}
+
+/// What the take-over card over the shown pane is saying, when there is one.
+///
+/// One variant per title the web's card has (see `TerminalPane.tsx`), because
+/// the two surfaces show the same three truths about the same registry. `None`
+/// from [`App::focused_pty_takeover_card`] is the whole absence of a card: this
+/// surface drives the pty, nothing is serving, or there is no live pty here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PtyTakeoverCard {
+    /// Another device drives it. `device` is what that device called itself,
+    /// `None` when it gave dux no name; the card has a title for each.
+    Elsewhere { device: Option<String> },
+    /// Nobody drives it. The card names the ACT rather than the absence, exactly
+    /// as the web's third title does: "Active on another device" would name a
+    /// device that is not there.
+    Free,
 }
 
 /// Whether a launch of this kind claims the child it produces for this surface.
@@ -169,28 +197,30 @@ impl App {
         }
     }
 
-    /// Whether the FOCUSED terminal surface is being driven by another device,
-    /// and what that device called itself.
+    /// WHICH CARD, if any, is over the shown pane.
     ///
-    /// `Some(None)` is a driver that gave no name: somebody is driving, and the
-    /// card's second title is what says so. `None` is the whole absence of a
-    /// card, which is also what a surface with no live pty answers.
+    /// The whole rule in one place: while a seat exists, every pty that is not
+    /// this surface's is covered, and which sentence it is covered with follows
+    /// from who holds it. With no seat there is no registry, no question and no
+    /// card, which is what keeps this surface exactly what it was before it
+    /// joined the ownership model.
     ///
-    /// The one question the card asks, and it asks it of the live registry on
-    /// every frame rather than of a latched flag: ownership moves between
-    /// devices while nothing on this surface happens at all.
-    pub(crate) fn focused_pty_driven_elsewhere(&self) -> Option<Option<String>> {
+    /// Asked of the live registry on every frame rather than of a latched flag:
+    /// ownership moves between devices while nothing on this surface happens.
+    pub(crate) fn focused_pty_takeover_card(&self) -> Option<PtyTakeoverCard> {
+        self.pty_ownership()?;
         let pty_id = self.selected_terminal_surface_id()?;
         match self.pty_driver(&pty_id) {
-            PtyDriver::Elsewhere { device } => Some(device),
-            PtyDriver::Free | PtyDriver::Mine => None,
+            PtyDriver::Mine => None,
+            PtyDriver::Free => Some(PtyTakeoverCard::Free),
+            PtyDriver::Elsewhere { device } => Some(PtyTakeoverCard::Elsewhere { device }),
         }
     }
 
-    /// The same question with the name thrown away, for the gates that only need
-    /// to know whether the card is between the keyboard and the child.
-    pub(crate) fn focused_pty_is_driven_elsewhere(&self) -> bool {
-        self.focused_pty_driven_elsewhere().is_some()
+    /// The same question with the sentence thrown away, for the gates that only
+    /// need to know whether the card is between the keyboard and the child.
+    pub(crate) fn focused_pty_is_covered_by_card(&self) -> bool {
+        self.focused_pty_takeover_card().is_some()
     }
 
     /// THE TYPING CHOKEPOINT: may this surface write to the focused terminal
@@ -202,11 +232,13 @@ impl App {
     /// that forgot to ask would be a hole in the gate that only shows up as one
     /// device stealing another's prompt.
     ///
-    /// An uncontested first write CLAIMS the pty, exactly as a browser's first
-    /// keystroke does, and that claim is announced so watchers learn who is
-    /// driving. A write against a pty another device holds is DROPPED (logged at
-    /// debug, like the web's dropped non-owner keystroke) and the take-over card
-    /// covering the pane is what tells the user why.
+    /// It CLAIMS NOTHING. While a seat exists this surface may write only to a
+    /// pty it already drives; every other write is DROPPED (logged at debug,
+    /// like the web's dropped non-owner keystroke), and the take-over card
+    /// covering the pane is what tells the user why. That is true of a pty
+    /// nobody drives as well as one another device holds: the card is up in both
+    /// states, and pressing its button is the deliberate act that claims. With
+    /// nothing serving there is no seat and no gate, and every write is allowed.
     pub(crate) fn may_type_into_focused_pty(&mut self) -> bool {
         match self.selected_terminal_surface_id() {
             Some(pty_id) => self.may_type_into_pty(&pty_id),
@@ -219,11 +251,21 @@ impl App {
     /// The same gate for a named pty. Split out so a test can name its target and
     /// so a future write path with an explicit target has somewhere to go.
     pub(crate) fn may_type_into_pty(&mut self, pty_id: &str) -> bool {
-        let allowed = self.claim_pty_by_deliberate_act(pty_id);
+        let Some(seat) = self.pty_ownership() else {
+            return true;
+        };
+        let allowed = seat.owners.is_owner(pty_id, seat.conn_id);
         if !allowed {
-            dux_core::logger::debug(&format!(
-                "keystroke for pty {pty_id} dropped: another device currently owns its input"
-            ));
+            // The two refusals are one rung with two stories, and the card over
+            // the pane is already telling whichever is true.
+            let (owner, _, _) = seat.owners.current_owner(pty_id);
+            let reason = if owner.is_some() {
+                "another device currently owns its input"
+            } else {
+                "nobody is driving it yet, and typing does not claim one: press the card's \
+                 Take over button"
+            };
+            dux_core::logger::debug(&format!("keystroke for pty {pty_id} dropped: {reason}"));
         }
         allowed
     }
@@ -239,19 +281,8 @@ impl App {
     /// relaunch of a terminal a browser is driving does not quietly move the
     /// driver's seat to this window.
     pub(crate) fn claim_launched_pty(&mut self, pty_id: &str) {
-        let _ = self.claim_pty_by_deliberate_act(pty_id);
-    }
-
-    /// The one implementation of "this surface deliberately takes an unowned
-    /// pty", shared by the first keystroke and by a launch this surface started.
-    ///
-    /// Reports whether this surface may drive the pty afterwards: `true` when it
-    /// already did, `true` when this call claimed it, and `false` when another
-    /// device holds it. Nothing serving means no registry to ask and no claim to
-    /// make, so the answer is an unconditional `true`.
-    fn claim_pty_by_deliberate_act(&mut self, pty_id: &str) -> bool {
         let Some(seat) = self.pty_ownership() else {
-            return true;
+            return;
         };
         let claim = seat
             .owners
@@ -259,13 +290,13 @@ impl App {
         if claim.claimed_new
             && let Some(epoch) = claim.epoch
         {
-            // A first-writer claim TRANSFERS the pty to this surface, so it gets
-            // the same treatment the explicit take-over gets: the resize dedupe
-            // is cleared, which is what makes the next render send this pane's
-            // geometry to a child the previous driver may have re-gridded.
+            // A launch's claim TRANSFERS the pty to this surface, so it gets the
+            // same treatment the explicit take-over gets: the resize dedupe is
+            // cleared, which is what makes the next render send this pane's
+            // geometry to a child a previous driver may have re-gridded.
             //
             // Without it the trap is: a browser re-grids the child to a phone's
-            // shape and disconnects, this surface types and claims, and the
+            // shape and disconnects, this surface relaunches and claims, and the
             // dedupe sees the same pane size against the same target and sends
             // nothing. The terminal then owns a phone-sized child indefinitely,
             // with nothing on screen to say so, because the take-over card is gone
@@ -278,7 +309,6 @@ impl App {
                 device: TUI_DEVICE_LABEL.to_string(),
             }]);
         }
-        claim.allowed
     }
 
     /// THE SIZING CHOKEPOINT: may this surface resize `pty_id` to `rows` x
@@ -430,10 +460,9 @@ impl App {
     /// dedupe (recording it makes a stale geometry permanent). Without the guard
     /// that is tens of identical lines a second.
     ///
-    /// The two refusals are different facts and get different sentences. A pty
-    /// somebody else drives is the take-over card's story; a pty nobody drives is
-    /// simply one this surface has not asked for yet, and reporting that as
-    /// another device's doing would be a lie about the user's own setup.
+    /// The two refusals are different facts and get different sentences. Both are
+    /// under a card, but reporting a pty nobody drives as another device's doing
+    /// would be a lie about the user's own setup.
     fn log_refused_resize_once(&mut self, seat: &TuiOwnership, pty_id: &str, rows: u16, cols: u16) {
         let refusal = (pty_id.to_string(), rows, cols);
         if self.last_refused_pty_resize.as_ref() == Some(&refusal) {
@@ -443,8 +472,8 @@ impl App {
         let reason = if owner.is_some() {
             "another device currently owns its sizing, and a take-over must say so explicitly"
         } else {
-            "nobody is driving it yet, and drawing a pane does not claim one: type into it, or \
-             let the device that started it size it"
+            "nobody is driving it yet, and drawing a pane does not claim one: press Take over \
+             on the card covering it, or let the device that starts driving it size it"
         };
         dux_core::logger::debug(&format!("resize of pty {pty_id} refused: {reason}"));
         self.last_refused_pty_resize = Some(refusal);
@@ -501,18 +530,21 @@ impl App {
     /// deduped away, and the claim would never be sent at all.
     ///
     /// ONE STATE CAN REACH THIS: the card's button, and the card is on screen
-    /// only while another device is driving the shown pty. So every other answer
-    /// returns QUIETLY rather than explaining itself. There is no palette command
-    /// behind this any more, so a status line about a terminal that is already
-    /// yours would be dux answering a question nobody asked.
+    /// exactly while the shown pty is not this surface's. So a pty this surface
+    /// already drives, and a pane with no pty at all, return QUIETLY rather than
+    /// explaining themselves. There is no palette command behind this any more,
+    /// so a status line about a terminal that is already yours would be dux
+    /// answering a question nobody asked.
+    ///
+    /// BOTH CARD STATES ARRIVE HERE and arm the same intent, because both are
+    /// the same act against the registry: a flagged claim, which an unowned pty
+    /// grants outright and an owned one transfers. Only the sentence differs,
+    /// because only one of them takes something away from somebody.
     pub(crate) fn take_over_focused_pty(&mut self) {
-        if self.pty_ownership().is_none() {
-            return;
-        }
-        let Some(pty_id) = self.selected_terminal_surface_id() else {
+        let Some(card) = self.focused_pty_takeover_card() else {
             return;
         };
-        let PtyDriver::Elsewhere { device } = self.pty_driver(&pty_id) else {
+        let Some(pty_id) = self.selected_terminal_surface_id() else {
             return;
         };
         if self.pending_pty_takeover.as_deref() == Some(pty_id.as_str()) {
@@ -521,11 +553,22 @@ impl App {
             // who pressed a button that has not visibly done anything yet.
             return;
         }
-        let device = device.unwrap_or_else(|| UNNAMED_DEVICE.to_string());
-        self.set_info(format!(
-            "Taking this terminal over from {device}. Typing here reaches it again, its size \
-             follows this window, and that device keeps watching without being able to type."
-        ));
+        let message = match card {
+            PtyTakeoverCard::Elsewhere { device } => {
+                let device = device.unwrap_or_else(|| UNNAMED_DEVICE.to_string());
+                format!(
+                    "Taking this terminal over from {device}. Typing here reaches it again, its \
+                     size follows this window, and that device keeps watching without being able \
+                     to type."
+                )
+            }
+            // Nobody is losing anything here, so the sentence says what this
+            // window gains rather than who it was taken from.
+            PtyTakeoverCard::Free => "Taking control of this terminal. Nobody was driving it, so \
+                 typing here reaches it now and its size follows this window."
+                .to_string(),
+        };
+        self.set_info(message);
         self.pending_pty_takeover = Some(pty_id);
         self.last_pty_resize_target = None;
     }
@@ -597,21 +640,21 @@ mod tests {
         assert!(app.may_type_into_pty("s1"));
         assert!(app.resize_pty_if_permitted("s1", 24, 80));
         assert_eq!(app.pty_driver("s1"), PtyDriver::Free);
-        assert_eq!(app.focused_pty_driven_elsewhere(), None);
+        assert_eq!(app.focused_pty_takeover_card(), None);
         // Repeated calls stay open: with no registry there is no state to
         // accumulate and nothing that can start refusing.
         assert!(app.may_type_into_pty("s1"));
         assert!(app.resize_pty_if_permitted("s1", 30, 100));
     }
 
-    /// The first write claims an unowned pty and announces it, exactly as a
-    /// browser's uncontested first keystroke does. Without the announcement a
-    /// browser watching the agent never learns this terminal is driving it.
+    /// A launch started here claims an unowned pty and announces it once.
+    /// Without the announcement a browser watching the agent never learns this
+    /// terminal is driving it.
     #[test]
-    fn the_first_keystroke_claims_an_unowned_pty_and_announces_it_once() {
+    fn a_launch_claims_an_unowned_pty_and_announces_it_once() {
         let (mut app, recorded, seat) = serving_app();
 
-        assert!(app.may_type_into_pty("s1"));
+        app.claim_launched_pty("s1");
         assert!(seat.owners.is_owner("s1", seat.conn_id));
         let published = recorded.lock().expect("not poisoned").published.clone();
         assert_eq!(
@@ -633,6 +676,11 @@ mod tests {
             1,
             "an owner's later keystrokes announce nothing"
         );
+
+        // And a relaunch of a pty this surface already drives announces nothing
+        // either: there is no handover to report.
+        app.claim_launched_pty("s1");
+        assert_eq!(recorded.lock().expect("not poisoned").published.len(), 1);
     }
 
     /// A browser is typing into the agent, so this surface's keystrokes are
@@ -857,8 +905,8 @@ mod tests {
     #[test]
     fn releasing_lets_go_of_every_owned_pty_and_announces_each_one() {
         let (mut app, recorded, seat) = serving_app();
-        assert!(app.may_type_into_pty("s1"));
-        assert!(app.may_type_into_pty("s2"));
+        app.claim_launched_pty("s1");
+        app.claim_launched_pty("s2");
         recorded.lock().expect("not poisoned").published.clear();
 
         app.release_owned_ptys();
@@ -882,7 +930,7 @@ mod tests {
         let (mut app, recorded, seat) = serving_app();
         let browser = seat.owners.next_conn_id();
         seat.owners.claim("theirs", browser).expect("claimed");
-        assert!(app.may_type_into_pty("mine"));
+        app.claim_launched_pty("mine");
         recorded.lock().expect("not poisoned").published.clear();
 
         app.release_owned_ptys();
@@ -1276,7 +1324,13 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
             terminal
                 .draw(|frame| {
-                    app.render_takeover_card(frame, Rect::new(0, 0, w, h), Some("Chrome"));
+                    app.render_takeover_card(
+                        frame,
+                        Rect::new(0, 0, w, h),
+                        &PtyTakeoverCard::Elsewhere {
+                            device: Some("Chrome".to_string()),
+                        },
+                    );
                 })
                 .expect("render succeeds");
             let flat = flowed(&rows_of(&terminal));
@@ -1304,6 +1358,7 @@ mod tests {
         let (mut app, _recorded, _seat) = app_with_a_live_pty();
         app.focus = FocusPane::Center;
         app.input_target = InputTarget::Agent;
+        app.claim_launched_pty("session-1");
         wait_for_child_output(&app);
         let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
         terminal
@@ -1370,10 +1425,15 @@ mod tests {
              the next keystroke typing into a view that is not the live edge"
         );
 
-        // And the pane really is live again: the browser lets go, the card
-        // follows it, and a keystroke reaches the child rather than a frozen
-        // view of it.
+        // And the pane really is live again once this surface drives it. The
+        // browser letting go is not enough on its own: nothing passive claims,
+        // so the card stays up saying "Take control" until it is pressed.
         assert!(seat.owners.release("session-1", browser).is_some());
+        assert!(
+            app.focused_pty_is_covered_by_card(),
+            "a pty nobody drives is still covered"
+        );
+        app.claim_launched_pty("session-1");
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .expect("the key is handled");
         assert!(
@@ -1456,6 +1516,8 @@ mod tests {
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        // Driving it, so there is an uncovered pane to start the drag on.
+        app.claim_launched_pty("session-1");
 
         app.process_raw_input_bytes(b"\x1b[<0;6;6M")
             .expect("the press is handled");
@@ -1467,7 +1529,10 @@ mod tests {
         );
 
         let browser = seat.owners.next_conn_id();
-        seat.owners.claim("session-1", browser).expect("claimed");
+        seat.owners
+            .claim_for_resize("session-1", browser, true, Some("Chrome"), |_| {})
+            .epoch
+            .expect("the browser takes the pty over mid-drag");
         app.process_raw_input_bytes(b"\x1b[<0;20;6m")
             .expect("the release is handled");
 
@@ -1630,9 +1695,9 @@ mod tests {
         let (mut app, _recorded, _seat) = app_with_the_card_up();
         app.engine.providers.remove("session-1");
         assert_eq!(
-            app.focused_pty_driven_elsewhere(),
+            app.focused_pty_takeover_card(),
             None,
-            "with no live pty there is nothing to be driven elsewhere"
+            "with no live pty there is no ownership question and so no card"
         );
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .expect("the key is handled");
@@ -1782,6 +1847,8 @@ mod tests {
             if card_up {
                 let browser = seat.owners.next_conn_id();
                 seat.owners.claim("session-1", browser).expect("claimed");
+            } else {
+                app.claim_launched_pty("session-1");
             }
 
             // An SGR left press at column 6, row 6 (the wire is 1-based).
@@ -1803,7 +1870,7 @@ mod tests {
     #[test]
     fn stopping_the_background_server_releases_this_surfaces_ptys() {
         let (mut app, recorded, seat) = serving_app();
-        assert!(app.may_type_into_pty("s1"));
+        app.claim_launched_pty("s1");
         assert!(seat.owners.is_owner("s1", seat.conn_id));
         recorded.lock().expect("not poisoned").published.clear();
 
@@ -1823,13 +1890,13 @@ mod tests {
     }
 
     /// The take-over has exactly one way in, the card's button, and the card is
-    /// on screen only while another device is driving. So the states the card
-    /// cannot be up in arm nothing and, crucially, say nothing: a status line
-    /// explaining a refusal the user never asked for is noise about a button
-    /// they could not have pressed.
+    /// on screen exactly while the shown pty is not this surface's. So the
+    /// states the card cannot be up in arm nothing and, crucially, say nothing:
+    /// a status line explaining a refusal the user never asked for is noise
+    /// about a button they could not have pressed.
     #[test]
     fn a_take_over_with_no_card_behind_it_arms_nothing_and_stays_quiet() {
-        // Nothing serving: no registry, no driver, no card.
+        // Nothing serving: no registry, no seat, no card.
         let mut app = test_app(default_bindings());
         app.take_over_focused_pty();
         assert_eq!(app.pending_pty_takeover, None);
@@ -1838,34 +1905,36 @@ mod tests {
             "there was no card, so there is nothing to report"
         );
 
-        // Serving, but nobody else is driving: typing already reaches this pty.
-        let (mut app, _recorded, _seat) = app_with_a_live_pty();
+        // Serving with a live pty, but this surface is already the driver.
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+        app.claim_launched_pty("session-1");
+        assert!(seat.owners.is_owner("session-1", seat.conn_id));
         app.take_over_focused_pty();
         assert_eq!(app.pending_pty_takeover, None);
         assert!(app.status.most_recent_tui().is_none());
 
-        // Serving, and this surface is the driver.
-        let (mut app, _recorded, seat) = app_with_a_live_pty();
-        assert!(app.may_type_into_pty("session-1"));
-        assert!(seat.owners.is_owner("session-1", seat.conn_id));
+        // Serving with NO live pty under the cursor: a dormant tab has no
+        // ownership question and so no card either.
+        let (mut app, _recorded, _seat) = app_with_a_live_pty();
+        app.engine.providers.remove("session-1");
         app.take_over_focused_pty();
         assert_eq!(app.pending_pty_takeover, None);
         assert!(app.status.most_recent_tui().is_none());
     }
 
     /// THE TRAP, end to end. A browser drives the agent, re-grids the child to a
-    /// phone's shape, and goes away. This surface types, which claims the pty. The
-    /// child must end up at THIS window's geometry.
+    /// phone's shape, and goes away. This surface presses the card's button,
+    /// which claims the pty. The child must end up at THIS window's geometry.
     ///
     /// Every step is the real one: a real claim, a real refusal, a real render
     /// pass measuring a real pane. What made this permanent was two bugs meeting.
     /// The refused resize recorded the dedupe, so the pane believed it had already
-    /// sent this geometry to this target; and the claim by typing cleared nothing,
-    /// so nothing ever asked again. The user was left driving a phone-sized child
+    /// sent this geometry to this target; and the claim cleared nothing, so
+    /// nothing ever asked again. The user was left driving a phone-sized child
     /// with nothing on screen to say so, because the card goes the moment the claim
     /// succeeds.
     #[test]
-    fn claiming_by_typing_after_a_foreign_re_grid_heals_the_childs_geometry() {
+    fn claiming_after_a_foreign_re_grid_heals_the_childs_geometry() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -1910,17 +1979,17 @@ mod tests {
         // The browser goes away, so the pty is unowned again.
         assert!(seat.owners.release("session-1", browser).is_some());
 
-        // The user types. That claims the pty, and the next render must send this
-        // pane's geometry even though the pane has not changed size at all.
-        app.process_raw_input_bytes(b"x")
-            .expect("the keystroke is handled");
-        assert!(
-            seat.owners.is_owner("session-1", seat.conn_id),
-            "typing into an unowned pty claims it"
-        );
+        // The user presses the card's button. The claim rides the next render,
+        // which must send this pane's geometry even though the pane has not
+        // changed size at all.
+        app.take_over_focused_pty();
         terminal
             .draw(|frame| app.render(frame))
             .expect("render succeeds");
+        assert!(
+            seat.owners.is_owner("session-1", seat.conn_id),
+            "a flagged claim on an unowned pty is granted"
+        );
 
         let healed = app
             .engine
@@ -2053,10 +2122,15 @@ mod tests {
         assert!(recorded.lock().expect("not poisoned").published.is_empty());
     }
 
-    /// The control: a real keystroke still claims an unowned pty and announces
-    /// it. Without this the two tests above would pass on a gate that never runs.
+    /// And a REAL keystroke claims nothing either, which is the whole change:
+    /// the card is over this pane asking for its button, so the key goes nowhere
+    /// and nobody's watchers lose a keyboard to it.
+    ///
+    /// The control that proves the raw path is reached at all is
+    /// [`the_focus_keys_bytes_press_the_button_on_a_free_pty`], where the same
+    /// path arms the take-over.
     #[test]
-    fn a_real_keystroke_still_claims_an_unowned_pty() {
+    fn a_real_keystroke_claims_nothing_on_a_free_pty() {
         let (mut app, recorded, seat) = app_with_a_live_pty();
         app.input_target = InputTarget::Agent;
 
@@ -2064,17 +2138,14 @@ mod tests {
             .expect("the keystroke is handled");
 
         assert!(
-            seat.owners.is_owner("session-1", seat.conn_id),
-            "typing into a pty nobody drives is how this surface claims it"
+            !seat.owners.is_owner("session-1", seat.conn_id),
+            "only the card's button claims a pty nobody drives"
         );
-        let published = recorded.lock().expect("not poisoned").published.clone();
         assert!(
-            matches!(
-                published.first(),
-                Some(PtyOwnershipEvent::Claimed { pty_id, .. }) if pty_id == "session-1"
-            ),
-            "the claim must be announced: {published:?}"
+            !app.engine.is_typing("session-1"),
+            "and the key reaches nothing"
         );
+        assert!(recorded.lock().expect("not poisoned").published.is_empty());
     }
 
     /// A page key that IS forwarded consults the gate at the forward site, so a
@@ -2099,6 +2170,8 @@ mod tests {
             if demoted {
                 let browser = seat.owners.next_conn_id();
                 seat.owners.claim("session-1", browser).expect("claimed");
+            } else {
+                app.claim_launched_pty("session-1");
             }
             let palette_key = app.bindings.label_for(Action::OpenPalette);
             assert_eq!(
@@ -2149,6 +2222,8 @@ mod tests {
             if demoted {
                 let browser = seat.owners.next_conn_id();
                 seat.owners.claim("session-1", browser).expect("claimed");
+            } else {
+                app.claim_launched_pty("session-1");
             }
 
             app.process_raw_input_bytes(PAGE_UP_BYTES)
@@ -2253,36 +2328,6 @@ mod tests {
         assert!(seat.owners.is_owner("session-1", browser));
     }
 
-    /// Typing is the other way in. A keystroke into a pty nobody drives claims
-    /// it, and the frame after that sizes the child, which is what the cleared
-    /// resize dedupe is for.
-    #[test]
-    fn typing_into_a_free_pty_claims_it_and_the_next_frame_sizes_the_child() {
-        let (mut app, _recorded, seat) = app_with_a_live_pty();
-        let _ = render_rows(&mut app, 160, 40);
-        assert_eq!(
-            app.pty_driver("session-1"),
-            PtyDriver::Free,
-            "the frame before the keystroke claimed nothing"
-        );
-
-        assert!(app.may_type_into_pty("session-1"));
-        assert!(seat.owners.is_owner("session-1", seat.conn_id));
-
-        let _ = render_rows(&mut app, 160, 40);
-        let grid = app
-            .engine
-            .providers
-            .get("session-1")
-            .and_then(|client| client.grid_size());
-        assert_ne!(
-            grid,
-            Some((10, 10)),
-            "the claim cleared the resize dedupe, so the next frame sent this \
-             pane's geometry"
-        );
-    }
-
     /// With nothing serving there is no seat, no registry and no gate, so a
     /// render sizes the child exactly as it did before any of this existed.
     #[test]
@@ -2301,6 +2346,225 @@ mod tests {
             grid,
             Some((10, 10)),
             "no seat means no gate: the resize goes straight to the child"
+        );
+    }
+
+    // ── The third card: a pty nobody is driving ─────────────────────────────
+
+    /// While a background server is serving, a pty NOBODY drives is covered by
+    /// the web's third card, word for word: the title that names the act, the
+    /// description that names the absence, and the same one button.
+    ///
+    /// A real render rather than a call to the card builder, for the same reason
+    /// the other card tests use one: the bug this guards against is a pane that
+    /// keeps showing a child every keystroke is being dropped into.
+    #[test]
+    fn a_free_pty_shows_the_take_control_card_while_serving() {
+        let (mut app, _recorded, _seat) =
+            app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
+        wait_for_child_output(&app);
+
+        let flat = flowed(&render_rows(&mut app, 160, 40));
+
+        assert!(
+            flat.contains("Take control"),
+            "a pty nobody drives gets the title that names the act: {flat}"
+        );
+        assert!(
+            flat.contains(
+                "No device is driving right now. Take over to drive this agent from here."
+            ),
+            "the description is the web's, word for word: {flat}"
+        );
+        assert!(
+            flat.contains("Take over"),
+            "the button is the same one every other card carries: {flat}"
+        );
+        assert!(
+            !flat.contains(CHILD_MARKER),
+            "the card covers the grid here exactly as it does over a driven pty: {flat}"
+        );
+    }
+
+    /// A companion terminal's card says "terminal" where an agent's says
+    /// "agent", the same word swap the web makes. Drawn through the terminal's
+    /// own surface, which is an overlay: the windowed center pane is always the
+    /// agent's.
+    #[test]
+    fn a_free_companion_terminals_card_names_a_terminal() {
+        let (mut app, _recorded, _seat) = app_with_a_live_pty_running("sleep 5");
+        app.session_surface = SessionSurface::Terminal;
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        app.active_terminal_id = Some("term-1".to_string());
+        app.engine.companion_terminals.insert(
+            "term-1".to_string(),
+            dux_core::model::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Session("session-1".to_string()),
+                label: "shell".to_string(),
+                foreground_cmd: None,
+                client: crate::pty::PtyClient::spawn(
+                    "sh",
+                    &["-c".to_string(), "sleep 5".to_string()],
+                    std::path::Path::new("."),
+                    10,
+                    10,
+                    100,
+                )
+                .expect("spawn pty"),
+                sort_order: 0,
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        let flat = flowed(&render_rows(&mut app, 160, 40));
+        assert!(
+            flat.contains(
+                "No device is driving right now. Take over to drive this terminal from here."
+            ),
+            "a terminal's card names a terminal: {flat}"
+        );
+    }
+
+    /// The button is the one act that claims a free pty, and the frame after it
+    /// sizes the child: the arm clears the resize dedupe exactly as a take-over
+    /// from another device does.
+    #[test]
+    fn pressing_take_control_claims_a_free_pty_and_the_next_frame_sizes_the_child() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+        let _ = render_rows(&mut app, 160, 40);
+        assert_eq!(
+            app.pty_driver("session-1"),
+            PtyDriver::Free,
+            "the frame before the press claimed nothing"
+        );
+
+        app.take_over_focused_pty();
+        assert_eq!(
+            app.pending_pty_takeover.as_deref(),
+            Some("session-1"),
+            "the press arms the claim; the render pass carries it"
+        );
+
+        let _ = render_rows(&mut app, 160, 40);
+        assert!(
+            seat.owners.is_owner("session-1", seat.conn_id),
+            "a flagged claim on an unowned pty is granted"
+        );
+        let grid = app
+            .engine
+            .providers
+            .get("session-1")
+            .and_then(|client| client.grid_size());
+        assert_ne!(
+            grid,
+            Some((10, 10)),
+            "the claim cleared the resize dedupe, so the next frame sent this \
+             pane's geometry"
+        );
+
+        let flat = flowed(&render_rows(&mut app, 160, 40));
+        assert!(
+            !flat.contains("Take control"),
+            "the card is gone once the pane is this surface's: {flat}"
+        );
+    }
+
+    /// Typing no longer claims. While the card is up the gate refuses the write,
+    /// which is the same rung every other card variant puts between this
+    /// keyboard and the child.
+    #[test]
+    fn typing_under_the_take_control_card_reaches_nothing() {
+        let (mut app, recorded, seat) = app_with_a_live_pty();
+        app.focus = FocusPane::Center;
+
+        assert!(
+            !app.may_type_into_pty("session-1"),
+            "the only act that claims a free pty is the card's button"
+        );
+        assert!(!seat.owners.is_owner("session-1", seat.conn_id));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .expect("the key is handled");
+        assert!(
+            !app.engine.is_typing("session-1"),
+            "a covered pane writes nothing to the child"
+        );
+        assert!(
+            recorded.lock().expect("not poisoned").published.is_empty(),
+            "a refusal changes nothing, so it announces nothing"
+        );
+    }
+
+    /// With nothing serving none of this exists: no seat, no card, and typing
+    /// goes straight into the child exactly as it did before this surface joined
+    /// the ownership model.
+    #[test]
+    fn with_nothing_serving_a_free_pty_is_typed_into_directly() {
+        let (mut app, _recorded, _seat) = app_with_a_live_pty();
+        app.companion = None;
+        app.focus = FocusPane::Center;
+
+        let flat = flowed(&render_rows(&mut app, 160, 40));
+        assert!(!flat.contains("Take control"), "no seat, no card: {flat}");
+        assert!(app.may_type_into_pty("session-1"));
+    }
+
+    /// The raw fullscreen path reaches the same button on a free pty, through
+    /// the binding's own bytes.
+    #[test]
+    fn the_focus_keys_bytes_press_the_button_on_a_free_pty() {
+        let (mut app, _recorded, _seat) = app_with_a_live_pty_running("sleep 5");
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        let bytes = app
+            .bindings
+            .byte_patterns_for(Action::FocusAgent)
+            .first()
+            .cloned()
+            .expect("the FocusAgent binding has a byte form");
+
+        app.process_raw_input_bytes(&bytes)
+            .expect("the key is handled");
+
+        assert_eq!(
+            app.pending_pty_takeover.as_deref(),
+            Some("session-1"),
+            "the raw path must reach the same take-over the windowed key does"
+        );
+        assert!(
+            !app.engine.is_typing("session-1"),
+            "and the bytes must never reach the child"
+        );
+    }
+
+    /// And the mouse: the button on a free pty's card is a click target like any
+    /// other.
+    #[test]
+    fn clicking_take_control_claims_a_free_pty() {
+        use ratatui::layout::Rect;
+
+        let (mut app, _recorded, _seat) = app_with_a_live_pty_running("sleep 5");
+        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 35,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 35,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(
+            app.pending_pty_takeover.as_deref(),
+            Some("session-1"),
+            "a press and release inside the button takes the pty over"
         );
     }
 
@@ -2487,20 +2751,35 @@ mod tests {
         }
     }
 
-    /// The outcome half of the same rule: an agent reopened by the startup sweep
-    /// is left for whoever types into it first, browser included.
+    /// The outcome half of the same rule, and the cost of it stated as a test:
+    /// an agent reopened by the startup sweep is claimed by nobody, so this
+    /// surface shows it the `Take control` card until somebody presses the
+    /// button. That is exactly what a browser shows for a terminal it did not
+    /// start, and pressing is what makes it this window's.
     #[test]
-    fn a_startup_auto_reopened_agent_is_left_free_for_whoever_types_first() {
-        let (mut app, _recorded, _seat) = app_with_a_live_pty();
+    fn a_startup_auto_reopened_agent_shows_take_control_until_pressed() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
 
         let outcome = ready_view(&app, AgentLaunchReadyView::StartupAutoReopen);
         app.apply_agent_launch_ready_view(outcome);
-        let _ = render_rows(&mut app, 160, 40);
+        let flat = flowed(&render_rows(&mut app, 160, 40));
 
         assert_eq!(
             app.pty_driver("session-1"),
             PtyDriver::Free,
             "nobody acted, so nobody drives it yet"
         );
+        assert!(
+            flat.contains("Take control"),
+            "and the pane says so rather than inviting keys it would drop: {flat}"
+        );
+
+        app.take_over_focused_pty();
+        let flat = flowed(&render_rows(&mut app, 160, 40));
+        assert!(
+            seat.owners.is_owner("session-1", seat.conn_id),
+            "the press is what claims it"
+        );
+        assert!(!flat.contains("Take control"), "and the card goes: {flat}");
     }
 }

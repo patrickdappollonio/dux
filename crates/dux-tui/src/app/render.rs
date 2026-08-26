@@ -2922,8 +2922,8 @@ impl App {
         Line::from(spans)
     }
 
-    /// THE TAKE-OVER CARD: the web's card, painted over this pane's grid while
-    /// another device is driving the child underneath it.
+    /// THE TAKE-OVER CARD: the web's card, painted over this pane's grid
+    /// whenever the child underneath it is not this surface's to type into.
     ///
     /// Word for word the same card a browser puts over its own terminal (see
     /// `TerminalPane.tsx`), because it is the same fact on both surfaces and a
@@ -2932,14 +2932,15 @@ impl App {
     /// pane or tab navigation, so it has no `PromptState`, no entry in the modal
     /// registry, and no rect in the click-outside dismissal engine.
     ///
-    /// `device` is what the driver called itself, `None` when it gave dux no
-    /// name; the card has a title for each, and neither prints a stand-in string
-    /// where a device name goes.
+    /// `card` carries which of the web's three truths this is. A driver that
+    /// gave dux no name gets the title that needs none, and a pty nobody drives
+    /// gets the title that names the ACT: neither prints a stand-in string where
+    /// a device name goes.
     pub(crate) fn render_takeover_card(
         &mut self,
         frame: &mut Frame,
         area: Rect,
-        device: Option<&str>,
+        card: &crate::app::pty_ownership::PtyTakeoverCard,
     ) {
         // COVER THE WHOLE GRID first, exactly as the web's card is an
         // `absolute inset-0` over its pane: the child keeps streaming
@@ -2991,20 +2992,27 @@ impl App {
         // spaces, so a pane with no room for a name falls back to the title that
         // needs none rather than printing an ellipsis where the device goes.
         const NAMED_TITLE_CHROME: u16 = 10;
-        let title = match device {
-            Some(device) if inner_w > NAMED_TITLE_CHROME + 3 => format!(
-                " Open on {} ",
-                dux_core::device_label::truncate_chars(
-                    device,
-                    (inner_w - NAMED_TITLE_CHROME) as usize
-                )
+        let (title, opening) = match card {
+            crate::app::pty_ownership::PtyTakeoverCard::Elsewhere { device } => {
+                let title = match device.as_deref() {
+                    Some(device) if inner_w > NAMED_TITLE_CHROME + 3 => format!(
+                        " Open on {} ",
+                        dux_core::device_label::truncate_chars(
+                            device,
+                            (inner_w - NAMED_TITLE_CHROME) as usize
+                        )
+                    ),
+                    _ => " Active on another device ".to_string(),
+                };
+                (title, "Only one device can type at a time.")
+            }
+            crate::app::pty_ownership::PtyTakeoverCard::Free => (
+                " Take control ".to_string(),
+                "No device is driving right now.",
             ),
-            _ => " Active on another device ".to_string(),
         };
 
-        let prose = format!(
-            "Only one device can type at a time. Take over to drive this {target} from here."
-        );
+        let prose = format!("{opening} Take over to drive this {target} from here.");
         // One column of padding on each side, the way the web's card pads its
         // body: prose that touches the border ring reads as clipped.
         const SIDE_PADDING: u16 = 1;
@@ -3163,13 +3171,13 @@ impl App {
         // serving this pane may re-grid the child only when it is already the one
         // driving. Neither refusal is a failure, and they are different facts:
         //
-        //   - ANOTHER DEVICE drives it, so the take-over card is over this pane
-        //     and names that device; the geometry on screen is its.
-        //   - NOBODY drives it yet, so there is no card and nothing is wrong.
-        //     Drawing a pane is not a decision to drive what is in it (a browser
-        //     may be a heartbeat away from attaching to an agent it just
-        //     started), so the pane shows the child at whatever grid it has until
-        //     a keystroke claims it, which is what sends this pane's geometry.
+        //   - ANOTHER DEVICE drives it, so the take-over card over this pane
+        //     names that device; the geometry on screen is its.
+        //   - NOBODY drives it yet, so the card asks for the press that would
+        //     claim it. Drawing a pane is not a decision to drive what is in it
+        //     (a browser may be a heartbeat away from attaching to an agent it
+        //     just started), so the child keeps whatever grid it has until that
+        //     button is pressed, which is what sends this pane's geometry.
         //
         // Either way this pane renders the child's real grid, clipped when it is
         // larger than the pane, which it already does safely. A GRANTED resize
@@ -3206,8 +3214,8 @@ impl App {
         // take-over is SPENT: a claim granted in this very pass means the card
         // is already gone by the time the pane is painted, rather than lingering
         // for one frame over a terminal that is this device's again.
-        let card_device = self.focused_pty_driven_elsewhere();
-        let card_up = card_device.is_some();
+        let takeover_card = self.focused_pty_takeover_card();
+        let card_up = takeover_card.is_some();
         if card_up && self.scroll_mode_active() {
             // Scroll mode is a way of reading the pane the card now covers, so
             // it ends with it, and quietly: `reconcile_scroll_mode`'s message
@@ -3519,8 +3527,8 @@ impl App {
         // children of it, and they stay exactly as they are. That is the web's
         // geometry too, where the card is `absolute inset-0` inside the terminal
         // pane and the strip above it is outside.
-        if let Some(device) = card_device {
-            self.render_takeover_card(frame, term_area, device.as_deref());
+        if let Some(card) = takeover_card {
+            self.render_takeover_card(frame, term_area, &card);
         } else {
             self.mouse_layout.takeover_button = None;
         }
