@@ -46,17 +46,25 @@ function setup(
 ) {
   const pty = new PtyFake()
   const reconnecting: boolean[] = []
-  const view = renderHook(() =>
-    useTerminalOwnership({
-      id: "p1",
-      kind: opts.kind ?? "agent",
-      conn: opts.conn ?? "open",
-      spineInputOwner: opts.spineInputOwner,
-      ptyRef: { current: pty as unknown as PtySocket },
-      setReconnecting: (v) => reconnecting.push(v),
-    }),
+  // Rendered through props rather than a captured constant so a test can move
+  // the SPINE under a mounted pane, which is the only way the spine correction
+  // ever happens in the app.
+  const view = renderHook(
+    ({ spineInputOwner }: { spineInputOwner?: string | null }) =>
+      useTerminalOwnership({
+        id: "p1",
+        kind: opts.kind ?? "agent",
+        conn: opts.conn ?? "open",
+        spineInputOwner,
+        ptyRef: { current: pty as unknown as PtySocket },
+        setReconnecting: (v) => reconnecting.push(v),
+      }),
+    { initialProps: { spineInputOwner: opts.spineInputOwner } },
   )
-  return { view, pty, reconnecting }
+  const setSpineInputOwner = (spineInputOwner: string | null | undefined) => {
+    act(() => view.rerender({ spineInputOwner }))
+  }
+  return { view, pty, reconnecting, setSpineInputOwner }
 }
 
 beforeEach(() => {
@@ -481,6 +489,28 @@ describe("self-succession after a blipped socket", () => {
     expect(view.result.current.isOwner).toBe(false)
     expect(view.result.current.takeoverIntent.read()).toBe(false)
   })
+
+  // AND IT KEEPS THE NAME THE NEWER EVENT WROTE. The seed runs from the PTY
+  // socket, whose handlers were wired on the mount render, so the prior name has
+  // to be read through a ref: passing the render closure's value pinned it to
+  // null forever and quietly downgraded "Open on Chrome on macOS" to the generic
+  // title on every superseded handshake.
+  it("keeps the device name a superseding handover wrote", () => {
+    const { view } = setup()
+    // CAPTURED AT MOUNT, deliberately. The lifecycle wires `pty.onConnected`
+    // once, from the render its attach effect ran on, so the seed the socket
+    // actually calls is this closure and not the newest one. Calling the fresh
+    // one would hide the bug entirely.
+    const seedFromMountRender = view.result.current.seedFromConnected
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    act(() =>
+      notifyPtyOwner("p1", "conn-other", 5, "Mozilla/5.0 (Macintosh) Chrome/1"),
+    )
+    expect(view.result.current.takeoverLabel).toBe("Chrome on macOS")
+    act(() => seedFromMountRender("conn-b", "conn-a", 3))
+    expect(view.result.current.takeoverLabel).toBe("Chrome on macOS")
+  })
 })
 
 describe("the LOST state", () => {
@@ -695,20 +725,96 @@ describe("self-succession names the ghost it expects to displace", () => {
     expect(view.result.current.takeoverIntent.expectedOwner()).toBe("conn-a")
   })
 
-  it("leaves the card up when the server REFUSES the succession", () => {
+  // A RESTARTED SERVER RESTARTS THE ID COUNTER, so an id this pane held against
+  // the previous run can be handed to somebody else's connection on the new one.
+  // Self-succeeding on it would take a pty this pane never owned. The store
+  // already clears the epoch high-water marks on a reconnect for the same
+  // reason, so the ghosts go with them.
+  it("forgets its ghosts when the ownership epochs are reset", () => {
     const { view } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    act(() => resetPtyOwnerEpochs())
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+    expect(view.result.current.isOwner).toBe(false)
+  })
+
+  // THE REFUSAL IS SILENT, and the replaced version of this test did not
+  // exercise it. It hand-delivered a `pty.owner` broadcast, which is the
+  // CORRECTION channel: it would have passed with `expected_owner` never sent
+  // and with the server granting every flagged claim. A refusal emits nothing
+  // at all (the transfer changes nothing, so there is nothing to broadcast), so
+  // the only thing that can ever tell this pane it lost is the spine's own
+  // `input_owner`, refetched on every events open.
+  it("lands as a WATCHER when the server silently refuses the succession", () => {
+    const { view, setSpineInputOwner } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    // Optimistic, and until the spine says otherwise it is the right guess.
+    expect(view.result.current.isOwner).toBe(true)
+    // Somebody else legitimately claimed the pty in the gap, so the server
+    // refuses the transfer inside its own critical section and says nothing.
+    // The next spine read names them, and that is the whole answer.
+    setSpineInputOwner("conn-other")
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownerPresent).toBe(true)
+  })
+
+  // The other direction, and the reason the demotion is not simply "the spine
+  // disagrees". A succession that will be GRANTED is exactly the case where the
+  // pty is still recorded to this pane's own dead connection, so a spine read
+  // naming that ghost must leave the returning driver alone.
+  it("is NOT demoted by a spine read that still names this pane's own ghost", () => {
+    const { view, setSpineInputOwner } = setup()
     act(() => view.result.current.connId.write("conn-a"))
     act(() => view.result.current.connId.write(null))
     act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
     expect(view.result.current.isOwner).toBe(true)
-    // Somebody else legitimately claimed the pty in the gap, so the server
-    // refuses the transfer and broadcasts their claim instead. This client lands
-    // as a watcher with the card, exactly like a refused plain resize.
-    act(() =>
-      notifyPtyOwner("p1", "conn-other", 9, "Mozilla/5.0 (Macintosh) Chrome/1"),
-    )
+    setSpineInputOwner("conn-a")
+    expect(view.result.current.isOwner).toBe(true)
+  })
+})
+
+describe("the spine corrects a phantom owner", () => {
+  it("demotes a pane the spine says another connection drives", () => {
+    const { view, setSpineInputOwner } = setup()
+    act(() => view.result.current.seedFromConnected("mine", null))
+    expect(view.result.current.isOwner).toBe(true)
+    setSpineInputOwner("conn-other")
     expect(view.result.current.isOwner).toBe(false)
     expect(view.result.current.ownerPresent).toBe(true)
-    expect(view.result.current.takeoverIntent.read()).toBe(false)
+  })
+
+  it("leaves a genuinely in-flight PRESS alone, because a press cannot be refused", () => {
+    const { view, setSpineInputOwner } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "conn-other"))
+    expect(view.result.current.isOwner).toBe(false)
+    act(() => view.result.current.takeOver())
+    expect(view.result.current.isOwner).toBe(true)
+    // A spine document rendered before the grant landed still names the device
+    // that was driving. That is staleness, not refusal.
+    setSpineInputOwner("conn-other")
+    expect(view.result.current.isOwner).toBe(true)
+  })
+
+  it("says nothing when the spine has not answered, or says nobody drives", () => {
+    const { view, setSpineInputOwner } = setup()
+    act(() => view.result.current.seedFromConnected("mine", null))
+    setSpineInputOwner(undefined)
+    expect(view.result.current.isOwner).toBe(true)
+    setSpineInputOwner(null)
+    expect(view.result.current.isOwner).toBe(true)
+  })
+
+  it("never demotes on a spine read that names this pane itself", () => {
+    const { view, setSpineInputOwner } = setup()
+    // The lifecycle records the id before it seeds; mirror that, because the
+    // correction compares the spine against this pane's OWN connection.
+    act(() => view.result.current.connId.write("mine"))
+    act(() => view.result.current.seedFromConnected("mine", null))
+    setSpineInputOwner("mine")
+    expect(view.result.current.isOwner).toBe(true)
   })
 })

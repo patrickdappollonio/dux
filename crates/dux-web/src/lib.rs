@@ -1323,6 +1323,7 @@ fn router_params(
             server.max_websocket_tabs_per_agent,
         )
         .with_search_index_max_files(server.search_index_max_files)
+        .with_pty_send_timeout_seconds(server.pty_send_timeout_seconds)
         .with_tree_list_max_concurrency(server.tree_list_max_concurrency)
         .with_release_notes_max_concurrency(server.release_notes_max_concurrency)
         .with_file_drop_limits(server.file_drop_max_bytes, server.file_drop_max_concurrency)

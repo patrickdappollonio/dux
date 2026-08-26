@@ -227,6 +227,18 @@ pub const DEFAULT_HEARTBEAT_SECONDS: u32 = 15;
 /// socket, and a needless reconnect costs a replay.
 pub const DEFAULT_HEARTBEAT_DEADLINE_SECONDS: u32 = 30;
 
+/// Default deadline, in seconds, on one of a PTY socket's OPENING sends (the
+/// `connected` handshake and the scrollback replay). Server-side, and the only
+/// timing here that is: it bounds a send against a wedged peer, which would
+/// otherwise hold the socket's sink lock forever.
+///
+/// A send completes when the bytes reach the peer, so on a degraded link this
+/// measures THROUGHPUT rather than liveness, and the replay is the whole
+/// scrollback (`agent_scrollback_lines` defaults to 10000). A minute is far
+/// longer than any healthy send of that needs even on a slow cellular link, and
+/// far shorter than forever.
+pub const DEFAULT_PTY_SEND_TIMEOUT_SECONDS: u32 = 60;
+
 /// Default cap on concurrent `/files/tree` directory listings (see
 /// [`crate::git::list_dir`]). Each listing does one blocking `read_dir` off
 /// the async reactor; this bounds how many can run at once so a burst of tree
@@ -852,9 +864,22 @@ pub struct ServerConfig {
     /// before forcing a plain reconnect. Default 30.
     ///
     /// Deliberately several times the interval: a slow radio is not a dead
-    /// socket, and reconnecting needlessly costs a screen replay.
+    /// socket, and reconnecting needlessly costs a screen replay. A value at or
+    /// below `heartbeat_seconds` would reconnect forever, so the browser clamps
+    /// such a pair up rather than obeying it.
     /// Browser-side, hot-reloadable.
     pub heartbeat_deadline_seconds: u32,
+    /// How long, in seconds, the server waits for one of a terminal
+    /// connection's opening sends (the handshake and the screen replay) to
+    /// reach the browser before it gives up on that connection. Default 60.
+    ///
+    /// Unlike its four siblings this one is SERVER-side. A send completes when
+    /// the bytes arrive, so on a slow link this is a measure of throughput and
+    /// not of liveness, and the screen replay can be the whole scrollback: too
+    /// small and a phone on a bad connection can never finish attaching, which
+    /// it then retries forever. Read live, so a config reload applies to the
+    /// next connection with no restart.
+    pub pty_send_timeout_seconds: u32,
 }
 
 impl ServerConfig {
@@ -901,7 +926,10 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
 /// `access_log` and `search_index_max_files` are: nothing on the server reads
 /// them. They ride the bootstrap document, which every client refetches on a
 /// config reload, so a change retimes every open tab live and warning about a
-/// restart there would be false.
+/// restart there would be false. `pty_send_timeout_seconds` is absent for the
+/// neighbouring reason: it IS read on the server, but it is read live, at the
+/// moment a terminal connection opens, so the next connection already has the
+/// new value.
 ///
 /// All five WebSocket caps are also startup-bound: the three per-class
 /// connection-cap semaphores (`max_websocket_events_connections`,
@@ -1923,6 +1951,7 @@ impl Default for ServerConfig {
             reconnect_backoff_cap_seconds: DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS,
             heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
             heartbeat_deadline_seconds: DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
+            pty_send_timeout_seconds: DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
         }
     }
 }

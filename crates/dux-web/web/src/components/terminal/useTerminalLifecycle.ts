@@ -21,7 +21,7 @@
 // focus target, the ownership ledger); those are inventoried in `TerminalPane`
 // beside their own code, so a reviewer can tell a deliberate subscription from a
 // smuggled-back settings mirror.
-import { useEffect, type RefObject } from "react"
+import { useEffect, useRef, type RefObject } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
@@ -64,7 +64,7 @@ import {
   terminalFontFamily,
 } from "@/lib/terminalFont"
 import { shouldSendViewed, visibleSinceAfterTransition } from "@/lib/viewedPing"
-import { createHeartbeat } from "@/lib/heartbeat"
+import { createHeartbeat, type Heartbeat } from "@/lib/heartbeat"
 import { registerPageLifecycle } from "@/lib/pageLifecycle"
 import type { ConnState } from "@/lib/types"
 import { isFocusReport } from "@/lib/suppressViewerReports"
@@ -184,6 +184,11 @@ export type TerminalLifecyclePorts = {
   /// has expired) and RESET here on every attach epoch, because each open's
   /// patience starts from zero.
   resetReplayWait: () => void
+  /// The RENDERED ownership verdict. Read for exactly one thing: the periodic
+  /// frame's cadence depends on it (2s while owner-and-visible, the configured
+  /// heartbeat otherwise), and a cadence change has to clear the armed timer
+  /// rather than wait it out.
+  isOwnerRendered: boolean
 }
 
 export function useTerminalLifecycle(
@@ -235,7 +240,19 @@ export function useTerminalLifecycle(
     armForcedTextPaste,
     setReconnecting,
     resetReplayWait,
+    isOwnerRendered,
   } = ports
+
+  // This mount's heartbeat, so the cadence can be retimed from outside the big
+  // attach effect. Null whenever no socket is wired.
+  const beatRef = useRef<Heartbeat | null>(null)
+  // A take-over (or losing one) changes the beat's cadence, and the pending
+  // timer was armed under the old one. Clearing and re-arming is what keeps the
+  // engine's attention flag from staying lit a whole slow period past the
+  // boundary; the hidden-to-visible half is the heartbeat's own listener.
+  useEffect(() => {
+    beatRef.current?.resync()
+  }, [isOwnerRendered])
 
   useEffect(() => {
     const host = hostRef.current
@@ -1041,6 +1058,17 @@ export function useTerminalLifecycle(
       // DEAD socket and silently book a size as delivered that never went out.
       // An open is the moment the question is both answerable and worth asking:
       // another client may have resized the shared pty while this tab was away.
+      //
+      // THE LIVE-SOCKET CASE IS DELIBERATELY NOT KEPT ALONGSIDE. It was there
+      // for two reasons and attach-never-steals retired the second one outright:
+      // another client can no longer resize a pty this pane owns, because a
+      // plain resize against an owned pty is refused, so if somebody else's
+      // geometry is on this pty then they TOOK it and this pane is a watcher,
+      // which must assert no size at all. The first reason, this tab's own
+      // layout having moved while hidden with rAF throttled, heals on its own:
+      // the deferred fit runs when rAF resumes. Stated rather than measured, and
+      // the symptom if it is wrong would be a pane that stays at its
+      // pre-background geometry until the next real resize or reconnect.
       resize.resyncToForeground()
     }
     // The socket dropped and is retrying: surface the non-blocking reconnect state.
@@ -1100,6 +1128,7 @@ export function useTerminalLifecycle(
       onStalled: () => pty.dropForRetry(),
     })
     pty.onBeat = (n) => beat.noteAnswer(n)
+    beatRef.current = beat
 
     // PAGE LIFECYCLE. `pagehide` closes this socket (a bfcache'd page holding an
     // open socket is evicted anyway, and the server would keep a phantom owner
@@ -1138,8 +1167,10 @@ export function useTerminalLifecycle(
     // Track the hidden -> visible transition the attention grace is measured
     // from (see `viewedPing.ts`). This listener is now ONLY that: the grace
     // timer that used to fire an extra ping at the boundary is gone (the beat
-    // below runs every 2s while this device is owner-and-visible, so the flag
-    // drops within one cadence of the boundary without a second timer), and the
+    // runs every 2s while this device is owner-and-visible, and the heartbeat
+    // RETIMES itself on the boundary through its own visibility listener rather
+    // than waiting out a gap armed under the slow cadence, so the flag drops
+    // within one fast cadence of the boundary without a second timer), and the
     // resize half of a return moved to `pty.onOpen`, where the socket is known
     // to be alive.
     const noteVisibility = () => {
@@ -1168,6 +1199,7 @@ export function useTerminalLifecycle(
       // goes.
       if (viewerRegridRef.current !== null) viewerRegridRef.current = null
       beat.stop()
+      if (beatRef.current === beat) beatRef.current = null
       unregisterLifecycle()
       container.removeEventListener("mousedown", onMouseDown)
       container.removeEventListener("mouseup", onMouseUp)

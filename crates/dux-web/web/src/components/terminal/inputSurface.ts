@@ -115,6 +115,46 @@ export function typingFocusAllowed(ctx: {
   return !ctx.composing
 }
 
+/// ONCE PER ATTACH, not once per epoch. Given what the pane has already moved
+/// the keyboard for, decide whether it owes another move and what it should
+/// remember afterwards.
+///
+/// `typingFocusAllowed` alone is a permission, not an occasion. Its inputs
+/// include `replayApplied`, which goes false and back to true on EVERY socket
+/// reopen, so acting on the permission each time it turns true meant a
+/// background reconnect pulled focus out of whatever a desktop user was typing
+/// in and raised the soft keyboard on a phone. `attach` names the thing a move
+/// is owed for (the target, plus which typing surface is up), so a reconnect
+/// onto the same one is silent while a target switch, a regained ownership or
+/// the compose bar appearing each move the keyboard exactly once.
+///
+/// Two more rules, both from real failures:
+///
+///   - LOSING OWNERSHIP FORGETS. The next time this pane owns the pty is a fresh
+///     attach as far as the keyboard is concerned, so a take-over after a
+///     demotion still focuses.
+///   - A REFUSAL IS NOT A CONSUMPTION. A move blocked by an in-flight IME
+///     composition leaves the memory alone, so the same attach is still owed one
+///     when the composition ends; recording it there would cancel that pane's
+///     one focus move permanently.
+export function nextTypingFocus(ctx: {
+  /// `typingFocusAllowed` for this same commit.
+  allowed: boolean
+  isOwner: boolean
+  /// What a move would be owed FOR, as an opaque key.
+  attach: string
+  /// What the pane last moved the keyboard for, or null.
+  focusedFor: string | null
+}): { focus: boolean; focusedFor: string | null } {
+  if (!ctx.allowed) {
+    return { focus: false, focusedFor: ctx.isOwner ? ctx.focusedFor : null }
+  }
+  if (ctx.focusedFor === ctx.attach) {
+    return { focus: false, focusedFor: ctx.focusedFor }
+  }
+  return { focus: true, focusedFor: ctx.attach }
+}
+
 // Accessory-bar key sends. Esc/Tab/arrows are full sequences, not single
 // chars, so they bypass `applyModifiers` (which only transforms single-char
 // input). We still honor a latched Alt by prefixing ESC, and we clear any

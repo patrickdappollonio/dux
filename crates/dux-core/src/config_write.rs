@@ -541,6 +541,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_usize(
         doc,
         "server",
+        "pty_send_timeout_seconds",
+        config.server.pty_send_timeout_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
         "tree_list_max_concurrency",
         config.server.tree_list_max_concurrency as usize,
     );
@@ -1795,6 +1801,10 @@ build = { text = \"cargo build\", surface = \"terminal\" }
             parsed.server.heartbeat_deadline_seconds,
             crate::config::DEFAULT_HEARTBEAT_DEADLINE_SECONDS
         );
+        assert_eq!(
+            parsed.server.pty_send_timeout_seconds,
+            crate::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS
+        );
 
         let config = Config {
             server: crate::config::ServerConfig {
@@ -1802,6 +1812,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
                 reconnect_backoff_cap_seconds: 22,
                 heartbeat_seconds: 23,
                 heartbeat_deadline_seconds: 24,
+                pty_send_timeout_seconds: 25,
                 ..Default::default()
             },
             ..Default::default()
@@ -1812,6 +1823,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         assert_eq!(parsed.server.reconnect_backoff_cap_seconds, 22);
         assert_eq!(parsed.server.heartbeat_seconds, 23);
         assert_eq!(parsed.server.heartbeat_deadline_seconds, 24);
+        assert_eq!(parsed.server.pty_send_timeout_seconds, 25);
     }
 
     /// And a patch rewrites each of them in a file that already carries other
@@ -1823,7 +1835,8 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         fs::write(
             &path,
             "[server]\nreplay_wait_seconds = 1\nreconnect_backoff_cap_seconds = 2\n\
-             heartbeat_seconds = 3\nheartbeat_deadline_seconds = 4\n",
+             heartbeat_seconds = 3\nheartbeat_deadline_seconds = 4\n\
+             pty_send_timeout_seconds = 5\n",
         )
         .expect("seed config");
 
@@ -1833,6 +1846,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
                 reconnect_backoff_cap_seconds: 32,
                 heartbeat_seconds: 33,
                 heartbeat_deadline_seconds: 34,
+                pty_send_timeout_seconds: 35,
                 ..Default::default()
             },
             ..Default::default()
@@ -1848,6 +1862,10 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         assert_eq!(parsed.server.heartbeat_seconds, 33, "saved:\n{saved}");
         assert_eq!(
             parsed.server.heartbeat_deadline_seconds, 34,
+            "saved:\n{saved}"
+        );
+        assert_eq!(
+            parsed.server.pty_send_timeout_seconds, 35,
             "saved:\n{saved}"
         );
     }

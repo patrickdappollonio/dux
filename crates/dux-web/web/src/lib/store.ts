@@ -1190,9 +1190,50 @@ let skipNextEventsOnOpenLoad = false
 // and a null baseline never forces a reload: unknown is not "changed".
 let serverIdentityBaseline: ServerIdentity | null = null
 
-// Learn the baseline. Called from `boot`, alongside the other initial reads.
+// How long before an identity read that answered UNKNOWN is asked again. A blip
+// on the one endpoint that decides whether this tab is running against the
+// server that served it is not a reason to stop asking, and re-asking is one
+// small GET.
+const IDENTITY_REPROBE_MS = 5000
+let identityReprobeTimer: ReturnType<typeof setTimeout> | null = null
+
+// Ask again, once, after the gap. Idempotent: several unknown answers in flight
+// at once still schedule a single re-ask.
+function scheduleIdentityReprobe(again: () => void): void {
+  if (!hasBrowser) return
+  if (identityReprobeTimer !== null) return
+  identityReprobeTimer = setTimeout(() => {
+    identityReprobeTimer = null
+    again()
+  }, IDENTITY_REPROBE_MS)
+}
+
+// Learn the baseline. Called from `boot`, alongside the other initial reads, and
+// again by its own retry while the answer is still unknown.
+//
+// TWO THINGS HANG OFF THIS READ, and the second is not obvious.
+//
+// It is the baseline the run-identity hard reload compares against, so a tab
+// that never learned one has that whole protection silently switched off for its
+// entire life. A page loaded during a network blip is exactly such a tab, so an
+// unknown answer is RETRIED rather than accepted forever.
+//
+// And its completion is what OPENS THE PTY RETRY GATE on a freshly loaded page.
+// The read is by construction a round trip to the very server this tab loaded
+// from, so finishing it, with an answer or without one, is proof the run has not
+// moved: nothing can have replaced the server between the document and this
+// fetch without the fetch noticing. A FAILED read validates too, matching this
+// module's standing "unknown is not evidence of a change" policy: holding every
+// terminal shut because one endpoint was unreachable is the wrong failure for a
+// tool whose job is to keep a terminal on screen.
 async function loadServerIdentityBaseline(): Promise<void> {
   serverIdentityBaseline = await fetchServerIdentity()
+  noteServerValidated()
+  if (serverIdentityBaseline === null) {
+    scheduleIdentityReprobe(() => {
+      void loadServerIdentityBaseline()
+    })
+  }
 }
 
 // The reconnect's first question: is this the server that served this tab?
@@ -1219,6 +1260,16 @@ async function reloadIfServerChanged(): Promise<void> {
   // this, and attaching an agent's pty launches its provider, so the gate reads
   // this signal and never that one. See `serverValidated.ts`.
   noteServerValidated()
+  // An UNKNOWN answer opens the gate (unknown is not evidence of a change) but it
+  // is not evidence of SAMENESS either, so it is never latched. Without the
+  // re-ask, one transient failure on a reconnect after a restart left the tab
+  // running old code against a new run indefinitely, which is the exact thing
+  // this check exists to prevent.
+  if (current === null) {
+    scheduleIdentityReprobe(() => {
+      void reloadIfServerChanged()
+    })
+  }
 }
 
 // After a (re)connect the socket has re-sent the whole interest set; re-fetch so
@@ -2045,7 +2096,9 @@ function boot(): void {
   loadBootstrap()
   loadWorkspace()
   // Remember which server served this tab, so a later reconnect can tell whether
-  // it is still talking to it.
+  // it is still talking to it. Completing this read is also what opens the PTY
+  // retry gate for this page; see the function's own doc for why boot has to be
+  // the one to do it.
   void loadServerIdentityBaseline()
 }
 // Off-browser (a build-time static render) there is no server to talk to and no

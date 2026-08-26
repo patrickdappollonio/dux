@@ -117,20 +117,68 @@ describe("the cadence", () => {
     beat.stop()
   })
 
-  it("changes cadence live when ownership does", () => {
+  // THE ARMED GAP DOES NOT HAVE TO RUN OUT. It used to: `schedule` returned
+  // early whenever a timer existed and read the period only when arming, so a
+  // take-over or a return to the tab waited out the slow gap already pending
+  // (15s configured, or a hidden page's platform-clamped minute) before the fast
+  // cadence began. The engine answers the attention boundary in 3s, so the flag
+  // stayed lit for 13 to 15 seconds past it. A cadence change now clears and
+  // re-arms.
+  it("clears the armed gap when ownership changes the cadence", () => {
     const { beat, frames, advance, state } = setup({ isOwner: false, viewed: false })
     beat.start()
     advance(15_000)
     expect(frames).toHaveLength(1)
     state.isOwner = true
     state.viewed = true
-    // The gap already scheduled runs out first: the period is re-read at each
-    // tick, so a change applies from the tick after it.
-    advance(15_000)
-    expect(frames).toHaveLength(2)
+    beat.resync()
+    // One fast cadence later, not one slow one.
     advance(2000)
-    expect(frames).toHaveLength(3)
+    expect(frames).toHaveLength(2)
     beat.stop()
+  })
+
+  it("leaves the armed gap alone when the cadence has NOT changed", () => {
+    const { beat, frames, advance } = setup()
+    beat.start()
+    advance(1000)
+    beat.resync()
+    beat.resync()
+    // The half-elapsed 2s gap is not restarted by a resync that changes nothing,
+    // or a burst of them would postpone the beat indefinitely.
+    advance(1000)
+    expect(frames).toHaveLength(1)
+    beat.stop()
+  })
+
+  // PARKED WHILE HIDDEN. A hidden page sends nothing and its visible clock is
+  // paused, so an armed timer there is a wake-up the platform throttles or drops
+  // rather than a heartbeat.
+  it("parks while the page is hidden and unparks on the way back", () => {
+    const { beat, frames, advance, state } = setup()
+    beat.start()
+    advance(2000)
+    expect(frames).toHaveLength(1)
+    // Answered, so nothing here is about the stall deadline.
+    beat.noteAnswer(1)
+    state.visible = false
+    beat.resync()
+    advance(600_000)
+    expect(frames).toHaveLength(1)
+    state.visible = true
+    beat.resync()
+    advance(2000)
+    expect(frames).toHaveLength(2)
+    beat.stop()
+  })
+
+  it("stays stopped when a resync arrives after stop()", () => {
+    const { beat, frames, advance } = setup()
+    beat.start()
+    beat.stop()
+    beat.resync()
+    advance(60_000)
+    expect(frames).toHaveLength(0)
   })
 })
 
@@ -210,8 +258,13 @@ describe("the answer deadline", () => {
     // cannot be reached, and nothing is sent either.
     vi.advanceTimersByTime(60 * 60 * 1000)
     expect(stalls()).toBe(0)
-    // Back in the foreground, the deadline resumes from where it paused.
+    // Back in the foreground. The page going hidden PARKED the beat (a hidden
+    // page's timer is throttled or dropped outright), so returning unparks it
+    // through the same resync the module's own visibility listener fires; this
+    // harness injects `visible`, so it says so by hand. The deadline resumes
+    // from where it paused.
     state.visible = true
+    beat.resync()
     clock.advance(30_000)
     vi.advanceTimersByTime(2000)
     expect(stalls()).toBe(1)

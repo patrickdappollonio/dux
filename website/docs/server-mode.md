@@ -272,7 +272,8 @@ The rest tune presentation and limits:
 | `replay_wait_seconds` | `8` | How long a browser waits for the terminal's screen to arrive after connecting before it stops waiting quietly and offers a Reconnect button. Counted in time the page is actually on screen, so a phone in your pocket does not burn through it. `0` disables the wait, leaving a slow screen covered indefinitely. A config reload applies it. |
 | `reconnect_backoff_cap_seconds` | `10` | The longest gap a browser leaves between automatic reconnect attempts. It starts at half a second and widens up to this. A visible tab never gives up; raise this to be gentler on a struggling server, lower it to come back faster. A config reload applies it. |
 | `heartbeat_seconds` | `15` | How often a visible browser tab checks its terminal connection is really alive. A Wi-Fi to cellular handoff can leave a connection that looks open and answers nothing, and this is what notices. A config reload applies it. |
-| `heartbeat_deadline_seconds` | `30` | How long the browser waits for the answer to that check before deciding the connection is dead and reconnecting. Counted in time the page is on screen. Must be comfortably larger than `heartbeat_seconds`, or a slow network reconnects you needlessly. A config reload applies it. |
+| `heartbeat_deadline_seconds` | `30` | How long the browser waits for the answer to that check before deciding the connection is dead and reconnecting. Counted in time the page is on screen. Must be comfortably larger than `heartbeat_seconds`, or a slow network reconnects you needlessly; a value at or below it would reconnect over and over, so dux quietly uses twice `heartbeat_seconds` instead. A config reload applies it. |
+| `pty_send_timeout_seconds` | `60` | How long dux waits for the first two things it sends a browser terminal, the handshake and the screen redraw, to actually arrive, before it gives up on that connection and lets the browser try again. A send finishes when the bytes get there, so on a slow connection this is really a measure of speed, and the screen redraw can be your whole scrollback. Set it too low and a phone on a bad signal can never finish attaching. A config reload applies it to the next terminal connection. |
 | `tree_list_max_concurrency` | `8` | How many editor directory listings run at once. `0` disables the bound. Read at startup. |
 | `release_notes_max_concurrency` | `2` | How many release-notes fetches run at once. `0` disables the bound. Read at startup. |
 
@@ -288,11 +289,13 @@ The rest tune presentation and limits:
 > and tells you it applies the next time you start `dux server`; the terminal app
 > stays quiet, because nothing it can start reads the setting.
 >
-> The exceptions are `access_log`, `search_index_max_files`, and the four reconnect
-> timings (`replay_wait_seconds`, `reconnect_backoff_cap_seconds`, `heartbeat_seconds`
-> and `heartbeat_deadline_seconds`), which a reload applies to a running server. The
-> four timings describe what the BROWSER does, so an open tab picks them up on the
-> next reload of its workspace document rather than needing a page refresh.
+> The exceptions are `access_log`, `search_index_max_files`, `pty_send_timeout_seconds`
+> and the four reconnect timings (`replay_wait_seconds`,
+> `reconnect_backoff_cap_seconds`, `heartbeat_seconds` and
+> `heartbeat_deadline_seconds`), which a reload applies to a running server. The four
+> timings describe what the BROWSER does, and an open tab picks them up on its own
+> within a moment of the reload; you do not have to refresh the page.
+> `pty_send_timeout_seconds` applies to the next terminal you open.
 
 `serve_while_tui` and `tailscale` are the two binding keys that are live switches: a
 config reload that flips either acts on it there and then, in both directions.

@@ -64,6 +64,17 @@ describe("the cover clears on the applied replay, never on the socket opening", 
                   firstAttach,
                 })
                 expect(cover.kind).not.toBe("none")
+                // AND THE BOX ONLY EVER CLAIMS WHAT IT CAN SEE. Its wording is
+                // about a healthy socket that never sent a screen, so a socket
+                // that is not open must never produce it: the visible clock is
+                // reset by `pty.onOpen` alone and keeps running across a drop,
+                // so a slow reconnect used to slam an opaque panel over a
+                // perfectly good frozen picture. The loop covered this input all
+                // along and only asserted "not none", which is exactly why it
+                // did not catch it.
+                if (cover.kind === "box" && cover.reason === "no-screen") {
+                  expect(socket).toBe("open")
+                }
               }
             }
           }
@@ -74,6 +85,14 @@ describe("the cover clears on the applied replay, never on the socket opening", 
 })
 
 describe("the bounded wait", () => {
+  it("stays a spinner past the wait while the socket is DOWN", () => {
+    for (const socket of ["connecting", "closed"] as const) {
+      expect(
+        attachCover({ ...settled, socket, replayApplied: false, waitExpired: true }),
+      ).toEqual({ kind: "spinner", wording: "reconnecting" })
+    }
+  })
+
   it("becomes the Reconnect box once the replay wait expires", () => {
     expect(
       attachCover({ ...settled, replayApplied: false, waitExpired: true }),

@@ -316,7 +316,7 @@ describe("attach epochs", () => {
     expect(attach.replayInFlight()).toBe(false)
   })
 
-  it("keeps the generation dedupe per epoch rather than letting a superseded open advance it", () => {
+  it("keeps the generation dedupe on the MACHINE rather than per epoch, so a live open still applies", () => {
     let gen = 1
     const { term, attach } = setup(() => gen)
     attach.noteOpen()

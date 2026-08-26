@@ -81,6 +81,16 @@ export type Heartbeat = {
   /// Forget any outstanding beat without treating it as a miss. The socket
   /// reopened, so the question the old beat asked is moot.
   reset: () => void
+  /// The inputs to the cadence may have changed: re-read them and, if the period
+  /// is now different, CLEAR the armed timer and arm the new one.
+  ///
+  /// Without it the pending timer had to expire first, so a take-over or a
+  /// return to the tab left the engine's attention flag lit for up to a whole
+  /// slow period (15s configured, or a hidden page's platform-clamped minute)
+  /// past a boundary the engine answers in 3s. It also unparks a heartbeat that
+  /// the page going hidden parked. Fired by this module's own visibility
+  /// listener, and by the pane when ownership flips.
+  resync: () => void
 }
 
 export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
@@ -93,6 +103,12 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
   const clock = deps.clock ?? createVisibleClock()
 
   let timer: ReturnType<typeof setTimeout> | null = null
+  // The period the ARMED timer was armed with, so a change of cadence can be
+  // recognised rather than waited out. Null whenever nothing is armed.
+  let armedPeriod: number | null = null
+  // Whether `start` has run and `stop` has not. A resync must never resurrect a
+  // heartbeat the pane deliberately stopped.
+  let running = false
   let nextBeat = 1
   // The visible-clock reading when the OLDEST unanswered beat went out, and its
   // number. Kept as the oldest rather than the newest so a run of unanswered
@@ -100,14 +116,50 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
   let pendingSince: number | null = null
   let pendingFrom: number | null = null
 
+  const currentPeriod = () =>
+    period({ isOwner: deps.isOwner(), visible: visible() })
+
   const schedule = () => {
+    if (!running) return
     if (timer !== null) return
-    const ms = period({ isOwner: deps.isOwner(), visible: visible() })
+    // PARKED. A hidden page sends nothing and its visible clock is paused, so an
+    // armed timer there is not a heartbeat, it is a wake-up the platform will
+    // throttle or drop. The visibility listener picks it straight back up.
+    if (!visible()) {
+      armedPeriod = null
+      return
+    }
+    const ms = currentPeriod()
+    armedPeriod = ms
     timer = setTimeout(tick, ms)
+  }
+
+  const resync = () => {
+    if (!running) return
+    if (timer === null) {
+      // Parked. Scheduling is the whole answer.
+      schedule()
+      return
+    }
+    if (!visible()) {
+      clearTimeout(timer)
+      timer = null
+      armedPeriod = null
+      return
+    }
+    if (currentPeriod() === armedPeriod) return
+    clearTimeout(timer)
+    timer = null
+    schedule()
+  }
+
+  const onVisibilityChange = () => {
+    resync()
   }
 
   const tick = () => {
     timer = null
+    armedPeriod = null
     // Only while visible. A hidden page sends nothing, and because the clock is
     // paused too, its outstanding beat's deadline cannot elapse while it waits.
     if (!visible()) {
@@ -138,18 +190,37 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
     pendingFrom = null
   }
 
+  // This module's own visibility listener, so a return to the tab retimes the
+  // beat without every caller having to remember to say so. Guarded on the
+  // method rather than the global: this runs off-browser and under harnesses
+  // that stub a partial `document`.
+  const canListen =
+    typeof document !== "undefined" &&
+    typeof document.addEventListener === "function"
+
   return {
     start() {
+      if (running) return
+      running = true
+      if (canListen) {
+        document.addEventListener("visibilitychange", onVisibilityChange)
+      }
       schedule()
     },
     stop() {
+      running = false
+      if (canListen) {
+        document.removeEventListener("visibilitychange", onVisibilityChange)
+      }
       if (timer !== null) {
         clearTimeout(timer)
         timer = null
       }
+      armedPeriod = null
       clearPending()
       if (deps.clock === undefined) clock.dispose()
     },
+    resync,
     noteAnswer(n) {
       // Any answer at or after the oldest outstanding beat proves the round trip
       // works; an answer to something older than what we are waiting on proves

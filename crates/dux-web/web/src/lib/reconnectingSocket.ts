@@ -37,6 +37,21 @@ import type { ConnState } from "./types"
 // socket would tear down a working connection each time.
 export const RECONNECT_MIN_MS = 500
 
+/// How long a socket may sit in CONNECTING before it is abandoned and retried.
+///
+/// A socket that never opens and never errors is the one state nothing else here
+/// can rescue: `resumeNow` returns early while `this.ws` is non-null, precisely
+/// so a wake signal cannot tear down a connection that is working, so all four
+/// wake signals are inert against it and the retry timer is not armed. That is a
+/// pane covered forever on a page whose user is pressing every button they have.
+///
+/// A client-side CONSTANT rather than a config key, deliberately. It is not a
+/// policy anybody would want to tune: it is a floor under a platform behavior,
+/// and it is set far above any healthy WebSocket handshake (which completes in
+/// milliseconds on a working link and in a couple of seconds on a bad one) so a
+/// slow network can never trip it.
+export const CONNECT_TIMEOUT_MS = 30_000
+
 /// The two behaviors a subclass chooses. Both default to the events socket's
 /// answer, so a socket that says nothing behaves exactly as that one does.
 export type ReconnectPolicy = {
@@ -62,6 +77,8 @@ export abstract class ReconnectingSocket {
   protected ws: WebSocket | null = null
   private reconnectDelay = RECONNECT_MIN_MS
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  // Armed while a socket is CONNECTING; see `CONNECT_TIMEOUT_MS`.
+  private connectTimer: ReturnType<typeof setTimeout> | null = null
   protected closedByUser = false
   // The far end said "do not come back": a terminal close code, or a route this
   // client knows is gone. Distinct from `closedByUser`, and the one state no
@@ -104,6 +121,21 @@ export abstract class ReconnectingSocket {
     this.reconnectDelay = RECONNECT_MIN_MS
     this.clearRetryTimer()
     this.attachWakeSignals()
+    // THE GATE BINDS HERE TOO, and for a while it did not. `connect()` is the
+    // mount attach, the take-over bounce, the heal bounce and the Reconnect
+    // button, so a gate that only guarded automatic retries was not guarding the
+    // gestures that matter: tapping an agent while the run-identity probe was
+    // still in flight against a RESTARTED server attached and force-launched its
+    // provider on the new run, which is the exact thing the gate exists to stop.
+    //
+    // Held rather than refused. The backoff reset above still stands (this is a
+    // deliberate re-entry, and it deserves a fresh schedule), and the timer
+    // re-arms itself while the gate stays shut, so the attach happens on its own
+    // the moment the check resolves. Nothing is lost, only deferred.
+    if (!this.policy.canRetry()) {
+      this.armRetryTimer({ grow: false })
+      return
+    }
     this.open()
   }
 
@@ -122,14 +154,23 @@ export abstract class ReconnectingSocket {
     if (this.ws !== null) return
     this.closedByUser = false
     this.attachWakeSignals()
-    this.clearRetryTimer()
     if (!this.policy.canRetry()) {
       // The gate is shut. Fall back to the ordinary polling retry rather than
       // opening: a return signal is not permission to attach to a server whose
       // identity has not been confirmed.
-      this.armRetryTimer()
+      //
+      // AND IT COSTS NOTHING. A wake against a shut gate used to clear the armed
+      // timer and arm a new one, spending a doubling every time; a phone coming
+      // back fires three or four of these signals in the same tick, and
+      // `clearServerValidated` shuts the gate on exactly the drop that return
+      // follows, so the four idempotent signals the module doc promises turned a
+      // 500ms reattach into eight seconds (measured: ten signals reached the
+      // 10s cap). An already-armed timer is left exactly as it is, and a fresh
+      // one is armed at the current delay without growing it.
+      if (this.reconnectTimer === null) this.armRetryTimer({ grow: false })
       return
     }
+    this.clearRetryTimer()
     this.open()
   }
 
@@ -175,12 +216,14 @@ export abstract class ReconnectingSocket {
     const ws = new WebSocket(this.url)
     this.configureSocket(ws)
     this.ws = ws
+    this.armConnectTimer(ws)
 
     ws.onopen = () => {
       // Identity guard: only the socket that is still the live `this.ws` may
       // mutate shared connection state. A late callback from a socket a newer
       // open() already replaced must be inert.
       if (this.ws !== ws) return
+      this.clearConnectTimer()
       // A successful open means the connection is usable again, so the next drop
       // starts a fresh retry schedule from the floor.
       this.markHealthy()
@@ -199,6 +242,7 @@ export abstract class ReconnectingSocket {
       // this identity check an orphan's close would null the live `this.ws`,
       // silently dropping every later outbound frame.
       if (this.ws !== ws) return
+      this.clearConnectTimer()
       this.ws = null
       this.onConn("closed")
       if (this.closedByUser) return
@@ -243,12 +287,20 @@ export abstract class ReconnectingSocket {
     )
   }
 
-  private armRetryTimer(): void {
+  // Arm the next attempt. `grow` says whether this arming SPENDS a doubling of
+  // the backoff, and it is false for every arming the gate caused rather than a
+  // failure: the backoff measures how badly the far end is answering, and a shut
+  // gate is a fact about this client's own bookkeeping. A gate-held socket
+  // therefore polls at a steady interval instead of drifting out to the cap
+  // while nothing is actually wrong with the network.
+  private armRetryTimer({ grow }: { grow: boolean } = { grow: true }): void {
     const delay = this.reconnectDelay
-    this.reconnectDelay = Math.min(
-      this.reconnectDelay * 2,
-      this.policy.backoffCapMs(),
-    )
+    if (grow) {
+      this.reconnectDelay = Math.min(
+        this.reconnectDelay * 2,
+        this.policy.backoffCapMs(),
+      )
+    }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       if (this.closedByUser || this.stopped) return
@@ -258,11 +310,39 @@ export abstract class ReconnectingSocket {
       // fact about NOW, and a retry held by it re-arms rather than ending, so it
       // resumes on its own without needing to be woken.
       if (!this.policy.canRetry()) {
-        this.armRetryTimer()
+        this.armRetryTimer({ grow: false })
         return
       }
       this.open()
     }, delay)
+  }
+
+  // Abandon a socket that has sat in CONNECTING past the deadline and let the
+  // ordinary retry path bring it back. The orphan's handlers are detached first,
+  // exactly as `open()` does, so a late callback from a socket the platform
+  // finally gets round to resolving can never touch shared state.
+  private armConnectTimer(ws: WebSocket): void {
+    this.clearConnectTimer()
+    this.connectTimer = setTimeout(() => {
+      this.connectTimer = null
+      if (this.ws !== ws) return
+      ws.onopen = null
+      ws.onmessage = null
+      ws.onclose = null
+      ws.onerror = null
+      this.ws = null
+      ws.close()
+      this.onConn("closed")
+      if (this.closedByUser || this.stopped) return
+      this.scheduleReconnect()
+    }, CONNECT_TIMEOUT_MS)
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer !== null) {
+      clearTimeout(this.connectTimer)
+      this.connectTimer = null
+    }
   }
 
   private clearRetryTimer(): void {
@@ -321,6 +401,7 @@ export abstract class ReconnectingSocket {
   close(): void {
     this.closedByUser = true
     this.clearRetryTimer()
+    this.clearConnectTimer()
     this.detachWakeSignals()
     this.ws?.close()
   }

@@ -77,6 +77,7 @@ import {
 import { viewerFontFit } from "@/lib/viewerFit"
 import {
   focusTypingSurfaceIn,
+  nextTypingFocus,
   typingFocusAllowed,
   useInputSurface,
 } from "@/components/terminal/inputSurface"
@@ -694,12 +695,21 @@ export function TerminalPane(props: TerminalPaneProps) {
   // document, because the composition may be in xterm's hidden textarea or in
   // the compose box and both are inside this pane.
   const composingRef = useRef(false)
+  // Which attach the pane has already moved the keyboard for, as
+  // `kind:id:composeBarEnabled`. Null when this pane does not own the pty.
+  const focusedForRef = useRef<string | null>(null)
+  // Bumped when a composition ENDS, so an automatic focus move the composition
+  // blocked is retried rather than dropped. Without it the guard read the ref
+  // once and the effect never ran again: a composition in flight when the replay
+  // landed cancelled that pane's one focus move permanently.
+  const [compositionEnded, setCompositionEnded] = useState(0)
   useEffect(() => {
     const start = () => {
       composingRef.current = true
     }
     const end = () => {
       composingRef.current = false
+      setCompositionEnded((n) => n + 1)
     }
     document.addEventListener("compositionstart", start, true)
     document.addEventListener("compositionend", end, true)
@@ -809,6 +819,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     armForcedTextPaste: () => upload.armForcedTextPaste(),
     setReconnecting,
     resetReplayWait: () => replayClockRef.current?.reset(),
+    isOwnerRendered: isOwner,
   })
 
   // THE SURVIVING EFFECTS, inventoried in one place because "one lifecycle
@@ -852,27 +863,49 @@ export function TerminalPane(props: TerminalPaneProps) {
   // used to focus optimistically the moment it was pressed, a whole reconnect
   // and replay ahead of anything to type into. Both facts must be in before the
   // keyboard comes up, and an IME composition in flight is never interrupted by
-  // it. The rule is the pure `typingFocusAllowed`.
+  // it. The two rules are the pure `typingFocusAllowed` (may we?) and
+  // `nextTypingFocus` (do we owe one?).
+  //
+  // ONCE PER ATTACH, NOT ONCE PER EPOCH. `replayApplied` goes false and back to
+  // true on EVERY socket reopen, so an effect keyed on it alone fired on every
+  // background reconnect: on a desktop that pulled focus out of whatever the user
+  // was typing in, and on a phone it raised the soft keyboard unbidden. The pane
+  // remembers what it has already focused for, so a reconnect onto the SAME
+  // target with the SAME ownership and the SAME typing surface is silent, while
+  // a target switch, a regained ownership, or the compose bar appearing still
+  // moves the keyboard exactly once.
   useEffect(() => {
-    if (
-      !typingFocusAllowed({
+    const decision = nextTypingFocus({
+      allowed: typingFocusAllowed({
         isOwner,
         ownershipConfirmed: handshakeSeen,
         replayApplied,
         composing: composingRef.current,
-      })
-    ) {
-      return
-    }
+      }),
+      isOwner,
+      attach: `${kind}:${id}:${composeBarEnabled}`,
+      focusedFor: focusedForRef.current,
+    })
+    focusedForRef.current = decision.focusedFor
+    if (!decision.focus) return
     // THE ONE AUTOMATIC FOCUS MOVE IN THE PANE, for both surfaces. The routing
     // (compose textarea when the box is up, xterm's hidden textarea otherwise)
     // lives in `focusTypingSurface`, and the mount-time focus that used to sit
     // in the lifecycle is gone: two focus paths meant two rules.
     focusTypingSurface()
     // `focusTypingSurface` reads only refs, so its identity says nothing new and
-    // listing it would re-focus on every commit.
+    // listing it would re-focus on every commit. `compositionEnded` is listed so
+    // a move an IME composition deferred is retried when it finishes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOwner, composeBarEnabled, handshakeSeen, replayApplied])
+  }, [
+    isOwner,
+    composeBarEnabled,
+    handshakeSeen,
+    replayApplied,
+    compositionEnded,
+    kind,
+    id,
+  ])
   // While the compose bar is actually rendered (mobile, `ui.compose_bar` on,
   // input owner — the same gate as the render below), register the
   // compose-insert sink the store's `runMacro` routes a picked macro through:
@@ -961,8 +994,10 @@ export function TerminalPane(props: TerminalPaneProps) {
   // There is deliberately no extra ping on gaining ownership any more. There is
   // exactly ONE periodic client frame and one timer behind it (see
   // `lib/heartbeat.ts`), and its cadence is already the viewed ping's 2s in
-  // precisely the state a gain lands in (owner and visible), so the flag drops
-  // within one cadence without a second sender to keep in step.
+  // precisely the state a gain lands in (owner and visible). The gain RETIMES
+  // that one timer rather than adding a second sender: the lifecycle resyncs the
+  // beat when this verdict flips, so the gap already armed under the slow
+  // cadence is cleared instead of waited out.
 
   // The host div owns the padding so the resolved bg fills the padding area
   // seamlessly — no external "border" look. FitAddon measures the content box.
@@ -1209,9 +1244,10 @@ export function TerminalPane(props: TerminalPaneProps) {
           card here (rather than lifting the overlays' z-order) keeps one state
           on screen at a time; raising the overlays instead would leave this
           solid card painted underneath a floating Reconnect box, reading as two
-          stacked answers to one question. The condition mirrors the overlay's
-          own `connectionLost && !offline`, so when the app-wide offline overlay
-          owns the signal the card stays exactly as it was. */}
+          stacked answers to one question. The precedence is not restated here
+          any more: `attachCover` decides it once, and a dead socket the app-wide
+          offline overlay is not already speaking for answers `box`, so this
+          branch simply does not run. */}
       {cover.kind === "card" ? (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-4">
           <Card className="w-full max-w-sm text-center">

@@ -518,13 +518,13 @@ const REQ_CHANNEL_CAPACITY: usize = 1024;
 /// [`EngineHandle`] and the loop-side [`ActorLoopEnds`]. Both server entry
 /// points (the dedicated engine thread and the in-process flip) call this so
 /// the channel topology is defined in exactly one place.
-/// The two `[server]` limits a running listener can adopt from a config reload.
+/// The `[server]` limits a running listener can adopt from a config reload.
 ///
 /// Everything else under `[server]` is frozen when the listener binds (a
 /// semaphore, a body-limit layer) or when `dux server` builds its console, and
-/// is reported by [`server_restart_warning_copy`] instead. These two are plain
-/// scalars the routes read per request, so the actor stores the reloaded values
-/// here and the next request honors them.
+/// is reported by [`server_restart_warning_copy`] instead. These are plain
+/// scalars the routes and socket handlers read per request, so the actor stores
+/// the reloaded values here and the next one honors them.
 ///
 /// Seeded from the router's own bind-time values in `build_app`, because a test
 /// or a serve path may pass something other than the engine's config.
@@ -532,6 +532,7 @@ const REQ_CHANNEL_CAPACITY: usize = 1024;
 pub struct LiveServerLimits {
     search_index_max_files: AtomicUsize,
     access_log: AtomicBool,
+    pty_send_timeout_seconds: AtomicUsize,
 }
 
 impl LiveServerLimits {
@@ -554,10 +555,26 @@ impl LiveServerLimits {
         self.access_log.store(value, Ordering::Relaxed);
     }
 
-    /// Adopt both values from a reloaded `[server]` section.
+    /// Deadline on one of a PTY socket's OPENING sends, in seconds. Read when a
+    /// socket opens, so a reload applies to the next connection rather than to
+    /// the ones already attached. `0` means "not seeded yet" and the caller
+    /// falls back to the compiled default; the config renderer never writes 0
+    /// and a user who does is asking for no bound at all, which is the one
+    /// answer this must not give.
+    pub fn pty_send_timeout_seconds(&self) -> usize {
+        self.pty_send_timeout_seconds.load(Ordering::Relaxed)
+    }
+
+    pub fn set_pty_send_timeout_seconds(&self, value: usize) {
+        self.pty_send_timeout_seconds
+            .store(value, Ordering::Relaxed);
+    }
+
+    /// Adopt every value from a reloaded `[server]` section.
     pub fn store_from(&self, server: &dux_core::config::ServerConfig) {
         self.set_search_index_max_files(server.search_index_max_files);
         self.set_access_log(server.access_log);
+        self.set_pty_send_timeout_seconds(server.pty_send_timeout_seconds as usize);
     }
 }
 

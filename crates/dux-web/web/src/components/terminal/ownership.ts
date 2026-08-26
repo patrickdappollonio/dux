@@ -80,6 +80,7 @@ import {
   isForeground,
   isOwnerAfterHandover,
   onPtyOwner,
+  onPtyOwnerEpochsReset,
   seedDeviceFromConnected,
   seedVerdictFromConnected,
   type HandshakeOwner,
@@ -203,6 +204,13 @@ export function useTerminalOwnership(
   // Pane-local and re-derived per handshake, so it is bounded by this pane's own
   // reconnect count and dies with the mount.
   const heldConnIdsRef = useRef<Set<string>>(new Set())
+  // GHOSTS DO NOT SURVIVE A SERVER RESTART. Connection ids come from a
+  // process-global counter that starts again at zero, so an id this pane held
+  // against the previous run can be minted afresh for somebody else's
+  // connection, and self-succession would then hand this pane a pty it never
+  // owned. The store already clears the per-pty epoch high-water marks on a
+  // reconnect for exactly that reason; the ghost set retires on the same signal.
+  useEffect(() => onPtyOwnerEpochsReset(() => heldConnIdsRef.current.clear()), [])
   const connId = useMemo<ConnectionIdentity>(
     () => ({
       read: () => myConnIdRef.current,
@@ -221,6 +229,14 @@ export function useTerminalOwnership(
   // `expected_owner`. Undefined for a PRESSED take-over, which may take from
   // anyone.
   const takeoverExpectedRef = useRef<string | undefined>(undefined)
+  // A PRESSED take-over of ours is in flight and the server has not answered.
+  // Distinct from the intent, which is spent the moment the flagged frame goes
+  // out; this outlives it, until an ownership answer arrives. It exists for one
+  // job: keeping a spine document that predates the grant from flashing the card
+  // back over a pane the user has just taken. A press cannot be refused (it names
+  // no expected owner, so the server grants it unconditionally), so blocking on
+  // it costs nothing in correctness.
+  const pressedClaimRef = useRef(false)
   const takeoverIntent = useMemo<TakeoverIntent>(
     () => ({
       read: () => takeoverArmedRef.current,
@@ -246,13 +262,22 @@ export function useTerminalOwnership(
   // good as the owner it describes, so the two travel together and the spine's
   // `input_owner` is checked against this one rather than against nothing.
   const takeoverDeviceOwnerRef = useRef<string | null>(null)
-  // One writer for the pair, so a name can never be set without the id it names
+  // The name as of NOW, rather than as of the render whose closure a socket
+  // callback happens to be holding. `seedFromConnected` runs from the PTY
+  // socket, which was wired on the mount render, so reading the state variable
+  // there pins it to that render forever: the superseded branch then saw a
+  // permanently null prior name and downgraded a perfectly good "Open on Chrome
+  // on macOS" to the generic title. Refs are how every other read in this file
+  // crosses that boundary.
+  const takeoverDeviceRef = useRef<string | null>(null)
+  // One writer for the trio, so a name can never be set without the id it names
   // or cleared without clearing it.
   const setTakeoverDeviceFor = (
     device: string | null,
     ownerId: string | null,
   ) => {
     takeoverDeviceOwnerRef.current = device === null ? null : ownerId
+    takeoverDeviceRef.current = device
     setTakeoverDevice(device)
   }
   // Whether ANY connection drives this pty, as far as this client knows. It
@@ -286,14 +311,51 @@ export function useTerminalOwnership(
   //
   // The spine carries `input_owner` for companion terminals as well as agent
   // tabs, so a terminal's card gets the same correction an agent's does.
+  //
+  // AND THE SAME READ CORRECTS THE VERDICT, not merely the name. That half was
+  // missing and it left a real hole. `seedVerdictFromConnected` returns true the
+  // instant a self-succession arms, which used to be right by construction
+  // because a flagged claim was granted unconditionally; the server now REFUSES
+  // it, silently, when the ghost no longer holds the pty. The pane was then a
+  // phantom owner: typing surfaces up, no card, every keystroke dying at the
+  // server write gate, and no broadcast coming to say so, because a refusal
+  // changes nothing and emits nothing.
+  //
+  // THE RULE, and each clause is load-bearing:
+  //
+  //   - The spine must NAME somebody. `undefined` is the server declining to
+  //     answer and `null` is nobody driving; neither is evidence against us.
+  //   - It must not name US.
+  //   - It must not name one of OUR OWN GHOSTS. A self-succession about to be
+  //     GRANTED is exactly the case where the pty is still recorded to this
+  //     pane's dead connection, so demoting on it would flash the card over the
+  //     returning driver a moment before the grant lands.
+  //   - No PRESSED claim of ours may be outstanding. A press names no expected
+  //     owner, so the server grants it unconditionally and the optimism is always
+  //     right; only a spine document rendered before the grant could disagree,
+  //     and that is staleness rather than refusal. A SELF-SUCCESSION deliberately
+  //     does NOT block the demotion, because refusal is exactly the answer it can
+  //     get, and the ghost clause above already protects the version of it that
+  //     will be granted.
   useEffect(() => {
     if (conn !== "open") return
-    const named = takeoverDeviceOwnerRef.current
-    if (named === null) return
     // The server has not answered the question: no evidence, so no correction.
     if (spineInputOwner === undefined) return
-    if (spineInputOwner !== named) setTakeoverDeviceFor(null, null)
-  }, [conn, spineInputOwner])
+    const myConnId = connId.read()
+    // The spine naming us is the grant landing, whichever way it reached us.
+    if (spineInputOwner !== null && spineInputOwner === myConnId) {
+      pressedClaimRef.current = false
+    }
+    const named = takeoverDeviceOwnerRef.current
+    if (named !== null && spineInputOwner !== named) setTakeoverDeviceFor(null, null)
+    if (!ownership.read()) return
+    if (spineInputOwner === null) return
+    if (spineInputOwner === myConnId) return
+    if (heldConnIdsRef.current.has(spineInputOwner)) return
+    if (pressedClaimRef.current) return
+    ownership.write(false)
+    setOwnerPresent(true)
+  }, [conn, spineInputOwner, connId, ownership])
 
   // SITE 2. The server broadcasts a `pty.owner` carrying the claimer's
   // connection id; the store fans it out by pty id plus that owner id. For OUR
@@ -319,6 +381,10 @@ export function useTerminalOwnership(
   useEffect(() => {
     return onPtyOwner((ptyId, ownerId, device) => {
       if (ptyId !== id) return
+      // Any handover for this pty is the server ANSWERING, so a pressed claim of
+      // ours is no longer in flight and stops shielding the verdict from the
+      // spine. This event is the definitive word either way.
+      pressedClaimRef.current = false
       const freed = ownerId === undefined || ownerId === null
       const mine = isOwnerAfterHandover(ownerId, myConnIdRef.current)
       setOwnerPresent(!freed)
@@ -463,7 +529,7 @@ export function useTerminalOwnership(
         superseded,
         owner,
         ownerDevice,
-        priorDevice: takeoverDevice,
+        priorDevice: takeoverDeviceRef.current,
       })
       setTakeoverDeviceFor(next, typeof owner === "string" ? owner : null)
     }
@@ -482,10 +548,14 @@ export function useTerminalOwnership(
     if (state === "failed") {
       setConnectionLost(true)
       takeoverIntent.clear()
+      // A press whose socket died was never answered and never will be on this
+      // connection, so it stops shielding the verdict along with the intent.
+      pressedClaimRef.current = false
       return
     }
     if (state === "closed") {
       takeoverIntent.clear()
+      pressedClaimRef.current = false
       return
     }
     if (state === "connecting" || state === "open") setConnectionLost(false)
@@ -516,6 +586,7 @@ export function useTerminalOwnership(
     // that carries it has not gone out yet.
     if (takeoverIntent.read()) return
     takeoverIntent.arm()
+    pressedClaimRef.current = true
     ownership.write(true)
     // Clear the other device's name as ownership is optimistically claimed,
     // honoring the invariant that the name only ever names a device we do NOT

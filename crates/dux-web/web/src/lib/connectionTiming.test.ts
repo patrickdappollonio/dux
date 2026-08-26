@@ -81,3 +81,30 @@ describe("a published document", () => {
     expect(heartbeatDeadlineMs()).toBe(30_000)
   })
 })
+
+// AN INVERTED PAIR IS A PERMANENT RECONNECT LOOP. The frame goes out, the next
+// tick arrives no earlier than the deadline, and the socket is dropped for a
+// miss that never had time to arrive. Zero and negative values were already
+// refused; this pair was not, and the docs already promise the deadline is
+// comfortably larger than the interval.
+describe("the heartbeat deadline against its own period", () => {
+  it("is clamped up when a config makes it smaller than the period", () => {
+    publishConnectionTiming({ heartbeat_seconds: 30, heartbeat_deadline_seconds: 5 })
+    expect(heartbeatDeadlineMs()).toBe(60_000)
+  })
+
+  it("is clamped up when the two are EQUAL, which loops just as surely", () => {
+    publishConnectionTiming({ heartbeat_seconds: 20, heartbeat_deadline_seconds: 20 })
+    expect(heartbeatDeadlineMs()).toBe(40_000)
+  })
+
+  it("leaves a sane pair exactly as configured", () => {
+    publishConnectionTiming({ heartbeat_seconds: 10, heartbeat_deadline_seconds: 45 })
+    expect(heartbeatDeadlineMs()).toBe(45_000)
+  })
+
+  it("leaves a merely TIGHT pair alone, because that one still works", () => {
+    publishConnectionTiming({ heartbeat_seconds: 5, heartbeat_deadline_seconds: 6 })
+    expect(heartbeatDeadlineMs()).toBe(6_000)
+  })
+})

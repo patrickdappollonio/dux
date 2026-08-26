@@ -53,7 +53,7 @@
 
 import { assertNever } from "./assertNever"
 import { ReconnectingSocket } from "./reconnectingSocket"
-import { serverValidated } from "./serverValidated"
+import { onServerValidated, serverValidated } from "./serverValidated"
 import type { TerminalOwnerRef } from "./terminalOwner"
 
 // The WebSocket close code the server sends on a PTY socket when the provider is
@@ -155,8 +155,24 @@ function readGrid(frame: {
 }
 
 export class PtySocket extends ReconnectingSocket {
+  // Retired by `close()`. Kept as a field so the subscription dies with the
+  // socket rather than with the module.
+  private readonly unsubscribeGate: () => void
+
   constructor(url: string) {
     super(url, { parkWhileHidden: true, canRetry: serverValidated })
+    // THE GATE PUSHES AS WELL AS BLOCKING. A retry held by the gate re-arms at
+    // whatever delay it had reached, so without this the socket waited out that
+    // gap AFTER the run check had already resolved and everything was healthy.
+    // The gate opening is the moment to try, so it says so.
+    this.unsubscribeGate = onServerValidated(() => {
+      this.resumeNow()
+    })
+  }
+
+  override close(): void {
+    this.unsubscribeGate()
+    super.close()
   }
 
   private bytesCb: (bytes: Uint8Array) => void = () => {}

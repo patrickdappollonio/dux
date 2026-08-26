@@ -22,11 +22,14 @@ const MAX_EVENT_TOPICS_PER_FRAME = 64
 // re-fetch the restored topics (a missed event during the outage is recovered
 // that way).
 //
-// The connection lifecycle (capped-exponential backoff, the 3-attempt cap →
-// `failed`, `connect()`/`close()`, `ConnState` emission, and the orphan/identity
-// guards) lives in the shared `ReconnectingSocket` base. This class only adds the
-// events-channel specifics: the interest set + its chunked resend, and text-frame
-// parsing.
+// The connection lifecycle (capped-exponential backoff that retries
+// INDEFINITELY, `failed` reserved for a terminal close code rather than for a
+// spent attempt budget, `connect()`/`close()`, `ConnState` emission, and the
+// orphan/identity guards) lives in the shared `ReconnectingSocket` base. This
+// class only adds the events-channel specifics: the interest set and its chunked
+// resend, and text-frame parsing. It is also the one socket that does NOT park
+// while the page is hidden, deliberately: attention indicators and OS
+// notifications ride it precisely then.
 export class EventsSocket extends ReconnectingSocket {
   // The complete, authoritative interest set. Coarse topics (sessions/projects/
   // config) plus the per-screen fine topics (session:<id>:changes) all live

@@ -5,7 +5,11 @@ import {
   DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS,
   publishConnectionTiming,
 } from "./connectionTiming"
-import { RECONNECT_MIN_MS, ReconnectingSocket } from "./reconnectingSocket"
+import {
+  CONNECT_TIMEOUT_MS,
+  RECONNECT_MIN_MS,
+  ReconnectingSocket,
+} from "./reconnectingSocket"
 import type { ConnState } from "./types"
 
 // A controllable WebSocket double: tests trigger open/close explicitly and drive
@@ -221,9 +225,13 @@ describe("ReconnectingSocket", () => {
       reconnecting++
     }
     sock.connect()
+    // Each cycle is a real one: the socket opens, drops, and the retry brings a
+    // fresh one. The advance stays under `CONNECT_TIMEOUT_MS` so the count is
+    // purely drops, with no socket abandoned for never opening.
     for (let i = 0; i < 20; i++) {
+      last().open()
       last().triggerClose()
-      vi.advanceTimersByTime(60000)
+      vi.advanceTimersByTime(10_000)
     }
     expect(states).not.toContain("failed")
     // One cue per drop, and one fresh socket per drop.
@@ -334,8 +342,9 @@ describe("parking while hidden (a PTY-only policy)", () => {
     setVisibility("hidden")
     const sock = new TestSocket("ws://x")
     sock.connect()
+    last().open()
     last().triggerClose()
-    vi.advanceTimersByTime(60000)
+    vi.advanceTimersByTime(10_000)
     expect(FakeWS.instances.length).toBe(2)
     setVisibility("visible")
   })
@@ -430,30 +439,120 @@ describe("the four wake signals", () => {
   })
 })
 
+// A SOCKET WEDGED IN CONNECTING IS THE ONE STATE NOTHING ELSE RESCUES.
+// `resumeNow` returns early while `this.ws` is non-null, deliberately, so a wake
+// signal cannot tear down a connection that is working. That makes all four wake
+// signals inert against a socket that is still connecting, and no retry timer is
+// armed either. Even the ordinary case is bad enough: an operating system's own
+// connect timeout can be a minute or two, and for all of it a returning phone
+// taps a button that does nothing.
+describe("the connect deadline", () => {
+  it("abandons a socket that never opens and retries", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    const sock = new TestSocket("ws://x")
+    const states: ConnState[] = []
+    sock.onConn = (s) => states.push(s)
+    sock.connect()
+    expect(FakeWS.instances).toHaveLength(1)
+    // Just short of the deadline: still waiting, still hopeful.
+    vi.advanceTimersByTime(CONNECT_TIMEOUT_MS - 1)
+    expect(FakeWS.instances).toHaveLength(1)
+    vi.advanceTimersByTime(1 + RECONNECT_MIN_MS)
+    expect(FakeWS.instances).toHaveLength(2)
+    expect(states).toContain("closed")
+  })
+
+  it("does not fire against a socket that opened in time", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    const sock = new TestSocket("ws://x")
+    sock.connect()
+    last().open()
+    vi.advanceTimersByTime(CONNECT_TIMEOUT_MS * 4)
+    expect(FakeWS.instances).toHaveLength(1)
+  })
+
+  it("does not fire against a socket the app deliberately closed", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    const sock = new TestSocket("ws://x")
+    sock.connect()
+    sock.close()
+    vi.advanceTimersByTime(CONNECT_TIMEOUT_MS * 4)
+    expect(FakeWS.instances).toHaveLength(1)
+  })
+})
+
 describe("the canRetry gate", () => {
   it("holds every retry while the gate is shut, and releases the moment it opens", () => {
     vi.useFakeTimers()
     setVisibility("visible")
-    let allowed = false
+    let allowed = true
     const sock = new TestSocket("ws://x", { canRetry: () => allowed })
     sock.connect()
+    last().open()
+    allowed = false
     last().triggerClose()
     // The gate is shut: the timer keeps re-arming rather than opening a socket,
     // so nothing force-launches a provider on a server we have not identified.
     vi.advanceTimersByTime(600000)
     expect(FakeWS.instances.length).toBe(1)
     allowed = true
-    vi.advanceTimersByTime(60000)
+    vi.advanceTimersByTime(10_000)
     expect(FakeWS.instances.length).toBe(2)
   })
 
   it("holds a wake signal too, rather than letting a return bypass it", () => {
     vi.useFakeTimers()
     setVisibility("visible")
-    const sock = new TestSocket("ws://x", { canRetry: () => false })
+    let allowed = true
+    const sock = new TestSocket("ws://x", { canRetry: () => allowed })
     sock.connect()
+    last().open()
+    allowed = false
     last().triggerClose()
     window.dispatchEvent(new Event("focus"))
     expect(FakeWS.instances.length).toBe(1)
+  })
+
+  // THE GATE GUARDS THE GESTURES TOO. `connect()` is the mount attach, the
+  // take-over bounce, the heal bounce and the Reconnect button, and it used to
+  // walk straight past the policy: only automatic retries were ever gated. A
+  // user tapping an agent while the identity probe was in flight against a
+  // restarted server attached and force-launched its provider on the new run.
+  it("DEFERS connect() itself while the gate is shut, and opens once it clears", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    let allowed = false
+    const sock = new TestSocket("ws://x", { canRetry: () => allowed })
+    sock.connect()
+    expect(FakeWS.instances).toHaveLength(0)
+    allowed = true
+    vi.advanceTimersByTime(RECONNECT_MIN_MS)
+    expect(FakeWS.instances).toHaveLength(1)
+    // And it was a genuine reset: the deferred attempt went out at the floor,
+    // not at whatever gap a previous session had grown to.
+    expect(sock.socketOpens).toBe(0)
+  })
+
+  // A RETURN COSTS NOTHING WHILE THE GATE IS SHUT. A phone coming back fires
+  // three or four wake signals in the same tick and the events drop that
+  // preceded it is exactly what shut the gate, so a wake that cleared the armed
+  // timer and armed a new one spent a doubling per signal: measured, four
+  // signals turned a 500ms reattach into eight seconds.
+  it("does not spend a doubling of the backoff per wake signal while the gate is shut", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    let allowed = true
+    const sock = new TestSocket("ws://x", { canRetry: () => allowed })
+    sock.connect()
+    last().open()
+    allowed = false
+    last().triggerClose()
+    for (let i = 0; i < 4; i++) window.dispatchEvent(new Event("focus"))
+    allowed = true
+    vi.advanceTimersByTime(RECONNECT_MIN_MS)
+    expect(FakeWS.instances).toHaveLength(2)
   })
 })

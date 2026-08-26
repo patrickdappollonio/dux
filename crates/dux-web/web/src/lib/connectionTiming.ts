@@ -81,11 +81,28 @@ export function heartbeatPeriodMs(): number {
   return seconds(published?.heartbeat_seconds, DEFAULT_HEARTBEAT_SECONDS, false)
 }
 
+/// What an inverted pair is clamped to, as a multiple of the beat period.
+const INVERTED_DEADLINE_PERIODS = 2
+
 /// `[server] heartbeat_deadline_seconds` in ms.
+///
+/// A deadline AT OR BELOW the period is a permanent reconnect loop rather than a
+/// tight setting: the deadline is checked on the send timer, so the very first
+/// tick after a frame goes out already finds it elapsed and drops a perfectly
+/// healthy socket, forever. Zero and negatives were already refused here; this
+/// pair was not, and the docs already promise the deadline is comfortably larger
+/// than the interval, so a pair that says otherwise is a typo. It is CLAMPED
+/// rather than rejected: a working terminal on a corrected timing beats no
+/// terminal on a refused config. A deadline merely a little larger than the
+/// period is left exactly as written; it costs an extra period before a miss is
+/// noticed and nothing else.
 export function heartbeatDeadlineMs(): number {
-  return seconds(
+  const configured = seconds(
     published?.heartbeat_deadline_seconds,
     DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
     false,
   )
+  const period = heartbeatPeriodMs()
+  if (configured > period) return configured
+  return period * INVERTED_DEADLINE_PERIODS
 }

@@ -50,8 +50,9 @@ export type AttachCover =
   /// A spinner with a non-blocking cue.
   | { kind: "spinner"; wording: "starting" | "attaching" | "reconnecting" }
   /// A Reconnect affordance. `lost` is the socket giving up (which it now only
-  /// does on a terminal close code); `no-screen` is a healthy socket that never
-  /// sent a screen.
+  /// does on a terminal close code); `no-screen` is an OPEN socket that never
+  /// sent a screen, and the openness is part of the claim rather than an
+  /// implication of it.
   | { kind: "box"; reason: "lost" | "no-screen" }
   /// The full-pane take-over card: another device drives this pty, or nobody
   /// does and this pane has not claimed it.
@@ -78,7 +79,27 @@ export function attachCover(input: AttachCoverInputs): AttachCover {
     // The bounded wait. Suppressed while globally offline, where the offline
     // overlay already carries a Retry and a second one underneath it would read
     // as two answers to one question.
-    if (input.waitExpired && !input.offline && !input.replayApplied) {
+    //
+    // Only the BOX is suppressed there, not the spinner, and that asymmetry is
+    // deliberate. The offline overlay is a full-viewport portal at a high
+    // z-index: whatever the pane paints is behind it and grayscaled, so a
+    // spinner underneath is not a second thing on screen. The box is different
+    // because it is an ACTION, and two Reconnect affordances for one outage is a
+    // real double-up whether or not both are visible at once.
+    //
+    // AND ONLY AGAINST A HEALTHY SOCKET, which is what the box's whole wording
+    // claims. The clock is reset only by `pty.onOpen`, so its visible time keeps
+    // accumulating straight through a drop; without this condition a pty socket
+    // that took longer than the wait to come back put an opaque "Still waiting
+    // for the terminal's screen" panel over a picture that was perfectly good
+    // and a reconnect that was already under way. A socket that is not open has
+    // its own honest cue, the reconnecting spinner below.
+    if (
+      input.socket === "open" &&
+      input.waitExpired &&
+      !input.offline &&
+      !input.replayApplied
+    ) {
       return { kind: "box", reason: "no-screen" }
     }
     if (input.firstAttach) {

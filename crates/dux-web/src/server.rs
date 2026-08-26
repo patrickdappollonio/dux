@@ -295,6 +295,11 @@ pub struct RouterParams {
     /// [`dux_core::config::DEFAULT_SEARCH_INDEX_MAX_FILES`]; the serve paths
     /// override it from config via [`with_search_index_max_files`].
     pub search_index_max_files: usize,
+    /// Deadline on one of a PTY socket's OPENING sends, in seconds
+    /// (`[server] pty_send_timeout_seconds`). Defaults to
+    /// [`dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS`]; the serve paths
+    /// override it from config via [`ServeParams::with_pty_send_timeout_seconds`].
+    pub pty_send_timeout_seconds: u32,
     /// Cap on concurrent `/files/tree` directory listings
     /// (`[server] tree_list_max_concurrency`). Defaults to
     /// [`dux_core::config::DEFAULT_TREE_LIST_MAX_CONCURRENCY`]; the serve
@@ -380,6 +385,7 @@ impl RouterParams {
             max_websocket_tab_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS,
             max_websocket_tabs_per_agent: dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
             search_index_max_files: dux_core::config::DEFAULT_SEARCH_INDEX_MAX_FILES,
+            pty_send_timeout_seconds: dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
             tree_list_max_concurrency: dux_core::config::DEFAULT_TREE_LIST_MAX_CONCURRENCY,
             release_notes_max_concurrency: dux_core::config::DEFAULT_RELEASE_NOTES_MAX_CONCURRENCY,
             file_drop_max_bytes: dux_core::config::DEFAULT_FILE_DROP_MAX_BYTES,
@@ -438,6 +444,14 @@ impl RouterParams {
     /// bounds the flat walk behind `/files/list`.
     pub fn with_search_index_max_files(mut self, max_files: usize) -> Self {
         self.search_index_max_files = max_files;
+        self
+    }
+
+    /// Set the opening-send deadline from `[server] pty_send_timeout_seconds`.
+    /// The serve paths call this so the configured value (not just the default)
+    /// bounds the handshake and the scrollback replay.
+    pub fn with_pty_send_timeout_seconds(mut self, seconds: u32) -> Self {
+        self.pty_send_timeout_seconds = seconds;
         self
     }
 
@@ -672,6 +686,7 @@ pub fn build_app(
     let live_limits = engine.live_limits();
     live_limits.set_access_log(params.access_log);
     live_limits.set_search_index_max_files(params.search_index_max_files);
+    live_limits.set_pty_send_timeout_seconds(params.pty_send_timeout_seconds as usize);
     let state = AppState {
         engine,
         console: params.console,
@@ -1172,8 +1187,23 @@ fn parse_expected_owner(raw: Option<&str>) -> Option<u64> {
 /// `viewed` carries `#[serde(default)]` so a client that sends only the beat is
 /// read as a watcher rather than rejected.
 #[derive(serde::Deserialize)]
+// `deny_unknown_fields` is what tells this frame apart from a resize now that
+// `beat` is optional: both of its fields have defaults, so without it a resize
+// frame that failed its own parse would fall through and be read as an empty
+// beat. The forward-compatibility cost is accepted and small: the two frames on
+// this socket are known, and a browser running against a server it was not
+// served by hard reloads.
+#[serde(deny_unknown_fields)]
 struct PtyBeatFrame {
-    beat: u64,
+    /// Absent on a page that predates the fold of the viewed ping into this one
+    /// message, which sent a bare `{"viewed":true}`. Optional rather than
+    /// required so such a frame still parses and its `viewed` half still counts:
+    /// a required `beat` made the whole frame unparseable, silently dropping the
+    /// attention signal. That window is short (a changed server run hard reloads
+    /// the page) but it is not zero, because the run-identity check treats an
+    /// unreachable endpoint as no evidence of a change.
+    #[serde(default)]
+    beat: Option<u64>,
     #[serde(default)]
     viewed: bool,
 }
@@ -1225,6 +1255,7 @@ async fn ws_session_pty_upgrade(
     let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
+    let live_limits = Arc::clone(&state.live_limits);
     let peer_ip = peer.ip();
     // Capture the claiming connection's User-Agent before the upgrade so the eventual
     // `pty.owner` handover can name this device to other viewers.
@@ -1243,6 +1274,7 @@ async fn ws_session_pty_upgrade(
                 bus,
                 connections,
                 user_agent,
+                live_limits,
             )
         })
         .into_response()
@@ -1301,6 +1333,7 @@ async fn ws_terminal_pty_upgrade(
     let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
+    let live_limits = Arc::clone(&state.live_limits);
     let peer_ip = peer.ip();
     let user_agent = captured_user_agent(&headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
@@ -1317,6 +1350,7 @@ async fn ws_terminal_pty_upgrade(
                 bus,
                 connections,
                 user_agent,
+                live_limits,
             )
         })
         .into_response()
@@ -1375,6 +1409,7 @@ async fn ws_project_terminal_pty_upgrade(
     let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
+    let live_limits = Arc::clone(&state.live_limits);
     let peer_ip = peer.ip();
     let user_agent = captured_user_agent(&headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
@@ -1391,6 +1426,7 @@ async fn ws_project_terminal_pty_upgrade(
                 bus,
                 connections,
                 user_agent,
+                live_limits,
             )
         })
         .into_response()
@@ -1444,6 +1480,7 @@ async fn ws_standalone_terminal_pty_upgrade(
     let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
+    let live_limits = Arc::clone(&state.live_limits);
     let peer_ip = peer.ip();
     let user_agent = captured_user_agent(&headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
@@ -1460,6 +1497,7 @@ async fn ws_standalone_terminal_pty_upgrade(
                 bus,
                 connections,
                 user_agent,
+                live_limits,
             )
         })
         .into_response()
@@ -1583,6 +1621,7 @@ async fn ws_tab_pty_upgrade(
     let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
+    let live_limits = Arc::clone(&state.live_limits);
     let peer_ip = peer.ip();
     let user_agent = captured_user_agent(&headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
@@ -1602,6 +1641,7 @@ async fn ws_tab_pty_upgrade(
                 bus,
                 connections,
                 user_agent,
+                live_limits,
             )
             .await
         })
@@ -1639,6 +1679,11 @@ async fn handle_pty_socket(
     // the value is a plain local (no per-conn map needed); it rides the handover so a
     // client on another device can name this one ("Chrome on macOS").
     user_agent: Option<String>,
+    // The reloadable `[server]` scalars. Exactly one is read here, at open:
+    // `pty_send_timeout_seconds`, which bounds the two opening sends. Read per
+    // socket rather than frozen at bind, so a config reload retimes the next
+    // connection.
+    live_limits: Arc<crate::engine_actor::LiveServerLimits>,
 ) {
     console.client_connected(peer_ip);
     // Register this PTY socket as a live connection (its class depends on which PTY
@@ -1655,6 +1700,13 @@ async fn handle_pty_socket(
     let _conn_guard = ConnectionGuard {
         id: registry_id,
         registry: Arc::clone(&connections),
+    };
+    // The console's live-client count, decremented on every exit path including
+    // an unwind. Declared immediately after the increment above so the pair is
+    // read as one thing.
+    let _client_count_guard = ClientCountGuard {
+        console: console.clone(),
+        peer_ip,
     };
     let (sink, mut stream) = socket.split();
     let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
@@ -1686,7 +1738,9 @@ async fn handle_pty_socket(
                 let mut guard = sink.lock().await;
                 let _ = guard.send(provider_gone_close()).await;
             }
-            console.client_disconnected(peer_ip);
+            // The console's count is decremented by `_client_count_guard` above,
+            // on this return like any other; saying so again here would count
+            // this socket out twice.
             return;
         }
     };
@@ -1695,8 +1749,20 @@ async fn handle_pty_socket(
     // only by resizing an UNOWNED pty or by sending a resize explicitly flagged
     // as a take-over (see the resize arm below), so no attach of any kind can
     // steal the device that is actually being typed on. Ownership is released on
-    // disconnect below.
+    // disconnect, through the guard declared immediately below.
     let conn_id = pty_size_owners.next_conn_id();
+    // The release, on EVERY exit path. A socket that gave up on its opening
+    // sends has to let go of the pty too (it may have claimed it at the
+    // handshake), and so does one a panic unwinds through: leaving it held wedges
+    // the pty behind a client that can never see it. `PtyOwnershipGuard` also
+    // broadcasts the owner-cleared `pty.owner`, without which every other
+    // device's card keeps naming a browser tab that closed.
+    let _ownership_guard = PtyOwnershipGuard {
+        pty_id: target.pty_id().to_string(),
+        conn_id,
+        owners: Arc::clone(&pty_size_owners),
+        bus: Arc::clone(&bus),
+    };
     // Who is driving right now, read once for the handshake frame. This is what
     // stops a foregrounded arrival from wedging itself as a phantom owner: with
     // a plain claim now refused SILENTLY, the client's optimistic "I am
@@ -1765,6 +1831,9 @@ async fn handle_pty_socket(
     // rendering the same byte stream into a differently sized terminal without,
     // until this frame, any way to know it.
     let grid = engine.pty_grid_size(target.pty_id().to_string()).await;
+    // Read ONCE per socket, before the two sends it bounds, so both halves of an
+    // attach share one deadline even if a reload lands between them.
+    let opening_send_deadline = pty_opening_send_timeout(&live_limits);
     'attached: {
         // A client that never receives its handshake or its replay sees a
         // permanently blank terminal pane on a connection that looks alive from both
@@ -1773,14 +1842,17 @@ async fn handle_pty_socket(
         // ownership is released and the connection permit is freed, exactly as a
         // clean disconnect would. Proceeding into the select loop instead would park
         // a socket nobody can ever see anything on.
-        if with_send_deadline(send_pty_connected(
-            &sink,
-            conn_id,
-            replay_generation,
-            owner_snapshot,
-            grid,
-            handshake_grid_seq,
-        ))
+        if with_send_deadline(
+            opening_send_deadline,
+            send_pty_connected(
+                &sink,
+                conn_id,
+                replay_generation,
+                owner_snapshot,
+                grid,
+                handshake_grid_seq,
+            ),
+        )
         .await
         .is_err()
         {
@@ -1792,7 +1864,7 @@ async fn handle_pty_socket(
         }
         // Replay the buffered scrollback/repaint before streaming live bytes.
         let replay_bytes = repaint.len();
-        if with_send_deadline(send_binary(&sink, repaint))
+        if with_send_deadline(opening_send_deadline, send_binary(&sink, repaint))
             .await
             .is_err()
         {
@@ -2025,7 +2097,24 @@ async fn handle_pty_socket(
                         // send here is left to the ping reaper rather than breaking
                         // the loop, because a single dropped answer is exactly what
                         // the browser's own deadline is for.
-                        let _ = send_text(&sink, pty_beat_frame_text(frame.beat)).await;
+                        //
+                        // BOUNDED for the same reason the opening sends are: this
+                        // holds the shared sink lock while it waits, so an
+                        // unbounded one against a wedged peer wedges every other
+                        // write on the socket behind it, which is precisely the
+                        // argument in `pty_opening_send_timeout`. It shares that
+                        // deadline rather than minting a second number.
+                        //
+                        // A frame with no `beat` is a page that predates the fold
+                        // of the viewed ping into this message. Its `viewed` half
+                        // is still honored above; there is simply nothing to echo.
+                        if let Some(n) = frame.beat {
+                            let _ = with_send_deadline(
+                                opening_send_deadline,
+                                send_text(&sink, pty_beat_frame_text(n)),
+                            )
+                            .await;
+                        }
                     }
                 }
                 Message::Close(_) => break,
@@ -2039,28 +2128,14 @@ async fn handle_pty_socket(
         pty_forwarder.abort();
     }
 
-    // Release sizing ownership so the next resize (or the next mounted viewer)
-    // can claim the now-unowned pty. OUTSIDE the block, because a socket that
-    // gave up on its opening sends has to let go of the pty too: it may have
-    // claimed it at the handshake, and leaving it held would wedge the pty
-    // behind a client that can never see it.
-    //
-    // A release that really cleared an owner is BROADCAST as an owner-cleared
-    // `pty.owner`. Ownership no longer follows focus, so nothing else would ever
-    // tell the other devices that the driver has gone: their "Active on another
-    // device" card would stay up, naming a browser tab that closed, until
-    // somebody pressed Take over. On the other side of the broadcast a mounted,
-    // foregrounded viewer claims the freed pty by itself, which is the same
-    // thing a fresh foreground attach on an unowned pty does.
-    if let Some(epoch) = pty_size_owners.release(target.pty_id(), conn_id) {
-        dux_core::logger::info(&crate::pty_log::describe_ownership_released(
-            target.pty_id(),
-            conn_id,
-            epoch,
-        ));
-        bus.emit(pty_owner_cleared_event(target.pty_id(), epoch));
-    }
-    console.client_disconnected(peer_ip);
+    // Ownership release and the console's client count are the two GUARDS
+    // declared at the top of this function, so they run here by falling out of
+    // scope rather than by being called. See `PtyOwnershipGuard` and
+    // `ClientCountGuard`: they used to be two plain statements at the end, which
+    // a panic unwinding through the handler skipped, leaving a phantom owner on
+    // the pty for the life of the process and a client count that only ever went
+    // up. `_conn_guard` above them has been a Drop guard for exactly this reason
+    // all along.
 }
 
 /// A `pty.owner` signal: the connection that owns a PTY's sizing+input changed (a
@@ -3204,32 +3279,48 @@ async fn send_binary(sink: &SharedSink, bytes: Vec<u8>) -> Result<(), ()> {
         .map_err(|_| ())
 }
 
-/// How long a PTY socket's OPENING sends (the `connected` handshake and the
-/// scrollback replay) may take before the socket gives up on the client.
+/// Resolve the deadline for a PTY socket's OPENING sends (the `connected`
+/// handshake and the scrollback replay), from `[server]
+/// pty_send_timeout_seconds`.
 ///
-/// An unbounded send against a wedged socket never returns, and it holds the
-/// sink lock while it waits, so nothing else on that socket can write either.
-/// The client is then left in front of a permanently blank terminal pane with a
-/// connection that looks alive from both ends, which is the exact bug report
-/// this bound exists to answer.
+/// WHY THERE IS A BOUND AT ALL. An unbounded send against a wedged socket never
+/// returns, and it holds the sink lock while it waits, so nothing else on that
+/// socket can write either. The client is then left in front of a permanently
+/// blank terminal pane with a connection that looks alive from both ends, which
+/// is the exact bug report this exists to answer.
 ///
-/// Deliberately GENEROUS. A slow mobile radio is not a dead socket, and the
-/// handshake and replay go out the moment a phone reconnects, which is the
-/// worst moment for throughput on a cellular link. Ten seconds is far longer
-/// than any healthy send needs and far shorter than a user will stare at a
-/// blank pane, so a false positive costs a reconnect and a true positive saves
-/// the socket from wedging forever.
-const PTY_OPENING_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// WHY IT IS CONFIGURABLE, AND GENEROUS. A send completes when the bytes reach
+/// the peer, so on a degraded link this measures THROUGHPUT and not liveness,
+/// and what it is measuring is the whole scrollback replay
+/// (`agent_scrollback_lines` defaults to 10000 lines and may be set as high as
+/// 100000). At cellular speeds a fixed ten seconds was exceeded
+/// DETERMINISTICALLY on a large buffer, and the client then retried forever,
+/// rebuilding and re-sending the same replay each time: a terminal that could
+/// never attach at all. A minute is far longer than any healthy send of that
+/// needs and still far shorter than forever, and a user on a genuinely slow link
+/// can raise it.
+///
+/// A zero or missing value falls back to the compiled default rather than
+/// removing the bound: no bound is the one answer this must not give.
+fn pty_opening_send_timeout(limits: &crate::engine_actor::LiveServerLimits) -> std::time::Duration {
+    let seconds = limits.pty_send_timeout_seconds();
+    let seconds = if seconds == 0 {
+        dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS as usize
+    } else {
+        seconds
+    };
+    std::time::Duration::from_secs(seconds as u64)
+}
 
-/// Bound one send by [`PTY_OPENING_SEND_TIMEOUT`], flattening "timed out" and
-/// "the send failed" into the one verdict the caller acts on: give up on this
-/// socket. Kept as a tiny generic wrapper so the deadline can be unit-tested
-/// without a live WebSocket, which the test harness cannot stall.
-async fn with_send_deadline<F>(send: F) -> Result<(), ()>
+/// Bound one send by `deadline`, flattening "timed out" and "the send failed"
+/// into the one verdict the caller acts on: give up on this socket. Kept as a
+/// tiny generic wrapper so the deadline can be unit-tested without a live
+/// WebSocket, which the test harness cannot stall.
+async fn with_send_deadline<F>(deadline: std::time::Duration, send: F) -> Result<(), ()>
 where
     F: std::future::Future<Output = Result<(), ()>>,
 {
-    match tokio::time::timeout(PTY_OPENING_SEND_TIMEOUT, send).await {
+    match tokio::time::timeout(deadline, send).await {
         Ok(result) => result,
         Err(_) => Err(()),
     }
@@ -3261,6 +3352,55 @@ struct ConnectionGuard {
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.registry.remove(&self.id);
+    }
+}
+
+/// Releases this PTY socket's sizing/input ownership on Drop, for the same reason
+/// [`ConnectionGuard`] deregisters on Drop: a socket that leaves by any path
+/// other than the normal loop break (a panic unwinding through the handler, task
+/// cancellation at an `.await` during a runtime shutdown) would otherwise leave
+/// the pty recorded to a connection that no longer exists, wedging it behind a
+/// client that can never see it for the rest of the process's life.
+///
+/// A release that really cleared an owner is BROADCAST as an owner-cleared
+/// `pty.owner`. Ownership no longer follows focus, so nothing else would ever
+/// tell the other devices that the driver has gone: their "Active on another
+/// device" card would stay up, naming a browser tab that closed, until somebody
+/// pressed Take over. Nobody claims the freed pty passively; the broadcast only
+/// re-titles the card.
+struct PtyOwnershipGuard {
+    pty_id: String,
+    conn_id: u64,
+    owners: Arc<PtySizeOwners>,
+    bus: Arc<EventBus>,
+}
+
+impl Drop for PtyOwnershipGuard {
+    fn drop(&mut self) {
+        let Some(epoch) = self.owners.release(&self.pty_id, self.conn_id) else {
+            return;
+        };
+        dux_core::logger::info(&crate::pty_log::describe_ownership_released(
+            &self.pty_id,
+            self.conn_id,
+            epoch,
+        ));
+        self.bus.emit(pty_owner_cleared_event(&self.pty_id, epoch));
+    }
+}
+
+/// Decrements the console's live-client count on Drop, so the number a serving
+/// dux prints cannot drift upwards over a process's life. Same reasoning as its
+/// two siblings above: the increment happens on one line at the top of the
+/// handler, and every exit path owes the matching decrement.
+struct ClientCountGuard {
+    console: Console,
+    peer_ip: std::net::IpAddr,
+}
+
+impl Drop for ClientCountGuard {
+    fn drop(&mut self) {
+        self.console.client_disconnected(self.peer_ip);
     }
 }
 
@@ -4834,10 +4974,18 @@ mod tests {
         assert!(owners.is_owner("p", owner));
     }
 
-    /// The two Text frames a PTY socket accepts are told apart by their own
-    /// required fields, and the resize parse is tried first. A beat frame has no
-    /// `rows`/`cols`, so it can never be read as a resize; a resize frame has no
-    /// `beat`, so it can never be read as a beat.
+    /// The two Text frames a PTY socket accepts are told apart by their FIELD
+    /// SETS, and the resize parse is tried first. A beat frame has no
+    /// `rows`/`cols`, so it can never be read as a resize; a resize frame's own
+    /// fields are unknown to the beat frame, which refuses them.
+    ///
+    /// The discrimination moved from "beat is required" to `deny_unknown_fields`
+    /// so a page that predates the fold of the viewed ping into this message,
+    /// and therefore sends a bare `{"viewed":true}`, still parses and still
+    /// stamps attention. Requiring `beat` made that frame unparseable and
+    /// silently dropped the signal. The window is short (a changed server run
+    /// hard reloads the page) but not zero, because the run-identity check
+    /// treats an unreachable endpoint as no evidence of a change.
     #[test]
     fn a_beat_frame_and_a_resize_frame_are_never_mistaken_for_each_other() {
         assert!(
@@ -4846,18 +4994,90 @@ mod tests {
         );
         let beat: PtyBeatFrame =
             serde_json::from_str(r#"{"beat":7,"viewed":true}"#).expect("a viewer's beat parses");
-        assert_eq!((beat.beat, beat.viewed), (7, true));
+        assert_eq!((beat.beat, beat.viewed), (Some(7), true));
 
         // A WATCHER sends the same frame with `viewed` false, and an older
         // client that omits it entirely must not suppress attention for
         // everybody.
         let watcher: PtyBeatFrame =
             serde_json::from_str(r#"{"beat":8}"#).expect("a watcher's beat parses");
-        assert_eq!((watcher.beat, watcher.viewed), (8, false));
+        assert_eq!((watcher.beat, watcher.viewed), (Some(8), false));
+
+        // The pre-fold viewed ping. Nothing to echo, and the attention stamp
+        // still lands.
+        let legacy: PtyBeatFrame =
+            serde_json::from_str(r#"{"viewed":true}"#).expect("a pre-fold viewed ping parses");
+        assert_eq!((legacy.beat, legacy.viewed), (None, true));
 
         assert!(
             serde_json::from_str::<PtyBeatFrame>(r#"{"rows":24,"cols":80}"#).is_err(),
             "a resize frame carries no beat and must not be answered as one"
+        );
+    }
+
+    /// OWNERSHIP RELEASE IS A DROP GUARD, and that is the whole point of this
+    /// test. It used to be a plain statement at the end of the socket handler,
+    /// which a panic unwinding through the handler skipped, leaving the pty
+    /// recorded to a connection that no longer exists for the life of the
+    /// process: a phantom owner nobody can take over from and nobody can type
+    /// into. `_conn_guard` beside it had been a Drop guard all along for exactly
+    /// this reason.
+    #[test]
+    fn a_panicking_socket_still_releases_its_pty_ownership() {
+        let owners = Arc::new(PtySizeOwners::default());
+        let bus = Arc::new(EventBus::new());
+        let conn_id = owners.next_conn_id();
+        // Claim it the way a granted take-over does, so there is something to
+        // release.
+        assert!(owners.claim("pty-1", conn_id).is_some());
+        assert_eq!(owners.current_owner("pty-1").0, Some(conn_id));
+
+        let panicked = std::panic::catch_unwind({
+            let owners = Arc::clone(&owners);
+            let bus = Arc::clone(&bus);
+            move || {
+                let _guard = PtyOwnershipGuard {
+                    pty_id: "pty-1".to_string(),
+                    conn_id,
+                    owners,
+                    bus,
+                };
+                panic!("the socket handler blew up");
+            }
+        });
+        assert!(panicked.is_err(), "the test's own panic must have happened");
+        assert_eq!(
+            owners.current_owner("pty-1").0,
+            None,
+            "an unwind must not leave a phantom owner on the pty"
+        );
+    }
+
+    /// And the console's live-client count comes back down on the same kind of
+    /// exit, for the same reason: the increment is one line at the top of the
+    /// handler and every path out owes the decrement.
+    #[test]
+    fn a_panicking_socket_still_counts_its_client_out() {
+        let ring = dux_core::activity::ActivityRing::new();
+        let console = Console::capture(ring.clone());
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        console.client_connected(ip);
+        assert_eq!(ring.connections(), 1);
+        let panicked = std::panic::catch_unwind({
+            let console = console.clone();
+            move || {
+                let _guard = ClientCountGuard {
+                    console,
+                    peer_ip: ip,
+                };
+                panic!("the socket handler blew up");
+            }
+        });
+        assert!(panicked.is_err(), "the test's own panic must have happened");
+        assert_eq!(
+            ring.connections(),
+            0,
+            "an unwind must not leave the count permanently high"
         );
     }
 
@@ -4878,7 +5098,11 @@ mod tests {
     /// it wraps a real `WebSocket` split half.
     #[tokio::test(start_paused = true)]
     async fn a_send_that_never_completes_is_abandoned_at_the_deadline() {
-        let stalled = with_send_deadline(std::future::pending::<Result<(), ()>>()).await;
+        let stalled = with_send_deadline(
+            std::time::Duration::from_secs(60),
+            std::future::pending::<Result<(), ()>>(),
+        )
+        .await;
         assert!(
             stalled.is_err(),
             "a send that never completes must give up rather than stranding the socket"
@@ -4890,10 +5114,45 @@ mod tests {
     /// latency to a healthy one.
     #[tokio::test(start_paused = true)]
     async fn the_send_deadline_passes_a_completed_send_through_unchanged() {
-        assert_eq!(with_send_deadline(std::future::ready(Ok(()))).await, Ok(()));
+        let deadline = std::time::Duration::from_secs(60);
         assert_eq!(
-            with_send_deadline(std::future::ready(Err(()))).await,
+            with_send_deadline(deadline, std::future::ready(Ok(()))).await,
+            Ok(())
+        );
+        assert_eq!(
+            with_send_deadline(deadline, std::future::ready(Err(()))).await,
             Err(())
+        );
+    }
+
+    /// THE DEADLINE IS THE CONFIGURED ONE, and a missing or zero value falls
+    /// back to the compiled default rather than removing the bound. It stopped
+    /// being a hardcoded ten seconds because a send completes when the bytes
+    /// ARRIVE: on a cellular link a ten second deadline measured throughput
+    /// against a whole scrollback replay and was exceeded deterministically,
+    /// leaving a terminal that could never attach at all.
+    #[test]
+    fn the_opening_send_deadline_is_read_live_and_never_unbounded() {
+        let limits = crate::engine_actor::LiveServerLimits::default();
+        assert_eq!(
+            pty_opening_send_timeout(&limits),
+            std::time::Duration::from_secs(
+                dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS as u64
+            ),
+            "an unseeded cell must fall back to the default, not to no bound"
+        );
+        limits.set_pty_send_timeout_seconds(0);
+        assert_eq!(
+            pty_opening_send_timeout(&limits),
+            std::time::Duration::from_secs(
+                dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS as u64
+            ),
+            "zero must not mean no bound: that is the one answer this cannot give"
+        );
+        limits.set_pty_send_timeout_seconds(180);
+        assert_eq!(
+            pty_opening_send_timeout(&limits),
+            std::time::Duration::from_secs(180)
         );
     }
 

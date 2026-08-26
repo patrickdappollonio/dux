@@ -205,6 +205,22 @@ const lastEpochByPty = new Map<string, number>()
 // reach this client). Exported primarily for that wiring and for test isolation.
 export function resetPtyOwnerEpochs(): void {
   lastEpochByPty.clear()
+  for (const cb of [...epochResetListeners]) cb()
+}
+
+// Listeners for that same reset. A restarted server restarts EVERY
+// process-global counter, connection ids included, so anything a client
+// remembers about the old run's identifiers is not merely stale but actively
+// wrong: an id from the previous run can be minted again for a different
+// connection. The epoch high-water marks are one such memory and a pane's set of
+// its own past connection ids is another, so they are retired on the one signal.
+const epochResetListeners = new Set<() => void>()
+
+export function onPtyOwnerEpochsReset(cb: () => void): () => void {
+  epochResetListeners.add(cb)
+  return () => {
+    epochResetListeners.delete(cb)
+  }
 }
 
 // The newest `pty.owner` epoch already applied for `ptyId`, or undefined when

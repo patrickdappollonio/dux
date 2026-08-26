@@ -618,12 +618,17 @@ describe("PtySocket", () => {
     const states: ConnState[] = []
     sock.onConn = (s) => states.push(s)
     sock.connect()
+    // A real cycle each time: open, drop, retry. The advance stays under
+    // `CONNECT_TIMEOUT_MS`, so nothing counted here is a socket abandoned for
+    // never opening.
     for (let i = 0; i < 20; i++) {
+      last().open()
       last().triggerClose()
-      vi.advanceTimersByTime(60000)
+      vi.advanceTimersByTime(10_000)
     }
     expect(states).not.toContain("failed")
     expect(FakeWS.instances.length).toBe(21)
+    sock.close()
   })
 
   it("stops without retrying when the server closes with the provider-unavailable code", () => {
@@ -826,5 +831,43 @@ describe("the one periodic frame", () => {
     ws.open()
     ws.onmessage?.({ data: JSON.stringify({ event: "beat" }) })
     expect(answers).toEqual([])
+  })
+})
+
+// THE GATE IS WIRED, AND IT PUSHES AS WELL AS BLOCKING.
+//
+// Nothing used to assert that `PtySocket` hands `serverValidated` to the base as
+// its `canRetry`: deleting that one property left the whole suite green while
+// every PTY socket in the app attached to servers it had not identified.
+describe("the run-identity retry gate", () => {
+  it("holds a dropped socket shut while the run has not been validated", () => {
+    vi.useFakeTimers()
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    clearServerValidated()
+    last().triggerClose()
+    // Ten minutes of retries and not one attach: the gate is what the base is
+    // consulting, and it says no.
+    vi.advanceTimersByTime(600000)
+    expect(FakeWS.instances).toHaveLength(1)
+    sock.close()
+  })
+
+  it("reattaches the moment the run IS validated, without waiting out the backoff", () => {
+    vi.useFakeTimers()
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    clearServerValidated()
+    last().triggerClose()
+    vi.advanceTimersByTime(600000)
+    expect(FakeWS.instances).toHaveLength(1)
+    // No timer advance at all. The gate opening is itself the signal to try; a
+    // socket left to notice on its own would sit out whatever gap its backoff
+    // had grown to after everything was already healthy.
+    noteServerValidated()
+    expect(FakeWS.instances).toHaveLength(2)
+    sock.close()
   })
 })

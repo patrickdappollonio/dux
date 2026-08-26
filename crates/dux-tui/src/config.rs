@@ -1130,14 +1130,32 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# How long the browser waits for an answer to that check before deciding\n\
                  # the connection is dead and reconnecting. Only time the page is actually\n\
-                 # on screen counts. Keep it comfortably larger than heartbeat_seconds: a\n\
-                 # slow mobile connection is not a dead one, and reconnecting for no reason\n\
+                 # on screen counts. Keep it comfortably larger than heartbeat_seconds; a\n\
+                 # value at or below it would reconnect over and over, so dux quietly uses\n\
+                 # twice heartbeat_seconds instead of obeying such a pair. A slow mobile\n\
+                 # connection is not a dead one, and reconnecting for no reason\n\
                  # costs you a redraw of the terminal. Too small and a bad signal causes\n\
                  # needless reconnects; too large and a genuinely dead connection lingers.\n\
                  # Default 30.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.heartbeat_deadline_seconds as usize),
+        },
+        ConfigEntry::Field {
+            key: "pty_send_timeout_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long dux waits for the first two things it sends a browser terminal\n\
+                 # (the handshake and the screen redraw) to actually arrive, before it\n\
+                 # gives up on that connection and lets the browser try again. This one is\n\
+                 # measured on the dux side, not in the browser. A send finishes when the\n\
+                 # bytes get there, so on a slow connection this is really a measure of\n\
+                 # speed, and the screen redraw can be your whole scrollback. Too small and\n\
+                 # a phone on a bad signal can never finish attaching and keeps retrying\n\
+                 # forever; too large and a genuinely dead connection is held open longer.\n\
+                 # Default 60.\n\
+                 # A config reload applies this to the next terminal connection.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.pty_send_timeout_seconds as usize),
         },
         ConfigEntry::Field {
             key: "tree_list_max_concurrency",
@@ -2433,6 +2451,7 @@ mod tests {
         assert!(rendered.contains("reconnect_backoff_cap_seconds = 10"));
         assert!(rendered.contains("heartbeat_seconds = 15"));
         assert!(rendered.contains("heartbeat_deadline_seconds = 30"));
+        assert!(rendered.contains("pty_send_timeout_seconds = 60"));
         assert!(rendered.contains("agent_tabs_max = 20"));
         assert!(rendered.contains("title = \"dux\""));
         // Assert the active key (not a commented-out line) so a regression that
@@ -2780,9 +2799,10 @@ name = "test"
         assert_eq!(parsed.server.shutdown_timeout_seconds, 30);
     }
 
-    /// The four browser-side reconnect timings survive the canonical template.
-    /// They only ever reach the browser through the bootstrap document, so a key
-    /// the renderer drops is invisible until a phone loses its socket.
+    /// The four browser-side reconnect timings, and the server-side send
+    /// deadline beside them, survive the canonical template. The four only ever
+    /// reach the browser through the bootstrap document, so a key the renderer
+    /// drops is invisible until a phone loses its socket.
     #[test]
     fn default_config_round_trips_the_reconnect_timings() {
         let mut config = Config::default();
@@ -2790,12 +2810,14 @@ name = "test"
         config.server.reconnect_backoff_cap_seconds = 42;
         config.server.heartbeat_seconds = 43;
         config.server.heartbeat_deadline_seconds = 44;
+        config.server.pty_send_timeout_seconds = 45;
         let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.server.replay_wait_seconds, 41);
         assert_eq!(parsed.server.reconnect_backoff_cap_seconds, 42);
         assert_eq!(parsed.server.heartbeat_seconds, 43);
         assert_eq!(parsed.server.heartbeat_deadline_seconds, 44);
+        assert_eq!(parsed.server.pty_send_timeout_seconds, 45);
     }
 
     #[test]

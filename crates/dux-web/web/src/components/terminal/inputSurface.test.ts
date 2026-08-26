@@ -12,6 +12,7 @@ import type { OwnershipVerdict } from "./channels"
 import type { LiveSettings, TerminalLiveSettings } from "./liveValues"
 import {
   focusTypingSurfaceIn,
+  nextTypingFocus,
   typingFocusAllowed,
   typingSurfaceHasFocusIn,
   useInputSurface,
@@ -343,5 +344,62 @@ describe("typingFocusAllowed", () => {
 
   it("refuses mid-IME-composition, which moving focus would destroy", () => {
     expect(typingFocusAllowed({ ...ready, composing: true })).toBe(false)
+  })
+})
+
+// ONCE PER ATTACH. `typingFocusAllowed` is a permission and not an occasion:
+// `replayApplied` goes false and back to true on every socket reopen, so acting
+// on the permission each time it turned true stole focus on every background
+// reconnect (desktop) and raised the soft keyboard unbidden (phone).
+describe("nextTypingFocus", () => {
+  const base = { allowed: true, isOwner: true, attach: "agent:a1:false" }
+
+  it("moves the keyboard the first time an attach is allowed", () => {
+    expect(nextTypingFocus({ ...base, focusedFor: null })).toEqual({
+      focus: true,
+      focusedFor: "agent:a1:false",
+    })
+  })
+
+  it("stays silent on a reconnect onto the same attach", () => {
+    expect(nextTypingFocus({ ...base, focusedFor: "agent:a1:false" })).toEqual({
+      focus: false,
+      focusedFor: "agent:a1:false",
+    })
+  })
+
+  it("moves again when the target changes", () => {
+    expect(
+      nextTypingFocus({ ...base, attach: "agent:a2:false", focusedFor: "agent:a1:false" }),
+    ).toEqual({ focus: true, focusedFor: "agent:a2:false" })
+  })
+
+  it("moves again when the compose bar becomes the typing surface", () => {
+    expect(
+      nextTypingFocus({ ...base, attach: "agent:a1:true", focusedFor: "agent:a1:false" }),
+    ).toEqual({ focus: true, focusedFor: "agent:a1:true" })
+  })
+
+  // Losing ownership forgets, so a take-over after a demotion still focuses.
+  it("forgets the attach when this pane stops owning the pty", () => {
+    expect(
+      nextTypingFocus({
+        ...base,
+        allowed: false,
+        isOwner: false,
+        focusedFor: "agent:a1:false",
+      }),
+    ).toEqual({ focus: false, focusedFor: null })
+  })
+
+  // A refusal is not a consumption. A move an IME composition blocked is still
+  // owed when the composition ends; recording it would cancel it permanently.
+  it("keeps the attach owed while a composition blocks the move", () => {
+    const held = nextTypingFocus({ ...base, allowed: false, focusedFor: null })
+    expect(held).toEqual({ focus: false, focusedFor: null })
+    expect(nextTypingFocus({ ...base, focusedFor: held.focusedFor })).toEqual({
+      focus: true,
+      focusedFor: "agent:a1:false",
+    })
   })
 })

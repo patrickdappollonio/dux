@@ -261,9 +261,13 @@ describe("EventsSocket", () => {
     const states: ConnState[] = []
     sock.onConn = (s) => states.push(s)
     sock.connect()
+    // A real cycle each time: open, drop, retry. The advance stays under
+    // `CONNECT_TIMEOUT_MS`, so nothing here is a socket abandoned for never
+    // opening.
     for (let i = 0; i < 20; i++) {
+      last().open()
       last().triggerClose()
-      vi.advanceTimersByTime(60000)
+      vi.advanceTimersByTime(10_000)
     }
     expect(states).not.toContain("failed")
     expect(FakeWS.instances.length).toBe(21)
