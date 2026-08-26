@@ -1991,6 +1991,7 @@ async fn handle_pty_socket(
                                 conn_id,
                                 user_agent.as_deref(),
                                 false,
+                                None,
                             ));
                             bus.emit(pty_owner_event(
                                 pty_id,
@@ -2036,6 +2037,7 @@ async fn handle_pty_socket(
                                 conn_id,
                                 user_agent.as_deref(),
                                 frame.takeover,
+                                expected_owner,
                             ));
                             bus.emit(pty_owner_event(
                                 pty_id,
@@ -2102,15 +2104,17 @@ async fn handle_pty_socket(
                         // holds the shared sink lock while it waits, so an
                         // unbounded one against a wedged peer wedges every other
                         // write on the socket behind it, which is precisely the
-                        // argument in `pty_opening_send_timeout`. It shares that
-                        // deadline rather than minting a second number.
+                        // argument in `pty_opening_send_timeout`. It does NOT
+                        // share that deadline, though: that one is a throughput
+                        // allowance for a whole scrollback replay, and this is
+                        // twenty-five bytes. See `PTY_BEAT_ECHO_TIMEOUT`.
                         //
                         // A frame with no `beat` is a page that predates the fold
                         // of the viewed ping into this message. Its `viewed` half
                         // is still honored above; there is simply nothing to echo.
                         if let Some(n) = frame.beat {
                             let _ = with_send_deadline(
-                                opening_send_deadline,
+                                PTY_BEAT_ECHO_TIMEOUT,
                                 send_text(&sink, pty_beat_frame_text(n)),
                             )
                             .await;
@@ -3311,6 +3315,28 @@ fn pty_opening_send_timeout(limits: &crate::engine_actor::LiveServerLimits) -> s
     };
     std::time::Duration::from_secs(seconds as u64)
 }
+
+/// The deadline for the BEAT ECHO, and the reason it is not the one above.
+///
+/// The two sends are measuring different things. An opening send is a whole
+/// scrollback replay, so its deadline is a THROUGHPUT allowance and has to be
+/// generous enough for a hundred thousand lines over a cellular link. The echo
+/// is roughly twenty-five bytes; nothing about a healthy link takes seconds to
+/// put those on the wire, so its deadline is a LIVENESS check and wants to be
+/// short.
+///
+/// It matters because this send holds the shared sink lock while it waits. On
+/// the generous deadline, one wedged peer parks every other write on that socket
+/// (a `size` event, the next replay) behind a beat answer the browser has long
+/// since stopped waiting for: the client's own answer deadline defaults to
+/// thirty seconds and it drops the socket when it passes. Waiting a minute to
+/// answer a question nobody is still asking is the worst of both.
+///
+/// A compile-time constant rather than a setting, deliberately: it is a bound on
+/// a fixed twenty-five byte write, so there is no link slow enough to make
+/// raising it the right answer, and the configurable knob beside it already
+/// covers the send whose size a user can actually change.
+const PTY_BEAT_ECHO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Bound one send by `deadline`, flattening "timed out" and "the send failed"
 /// into the one verdict the caller acts on: give up on this socket. Kept as a
@@ -5154,6 +5180,25 @@ mod tests {
             pty_opening_send_timeout(&limits),
             std::time::Duration::from_secs(180)
         );
+    }
+
+    /// THE BEAT ECHO HAS ITS OWN, SHORT BOUND. It used to share the opening
+    /// sends' configurable one, which is a throughput allowance sized for a
+    /// whole scrollback replay; spending it on a twenty-five byte echo parks
+    /// every other write on the socket behind the sink lock, long past the point
+    /// the browser's own answer deadline has dropped the connection.
+    #[test]
+    fn the_beat_echo_deadline_is_short_and_independent_of_the_replay_bound() {
+        let limits = crate::engine_actor::LiveServerLimits::default();
+        assert!(
+            PTY_BEAT_ECHO_TIMEOUT < pty_opening_send_timeout(&limits),
+            "a twenty-five byte echo must not wait as long as a whole replay"
+        );
+        // And a user who raises the replay allowance does not raise this with it.
+        limits.set_pty_send_timeout_seconds(600);
+        assert!(PTY_BEAT_ECHO_TIMEOUT < pty_opening_send_timeout(&limits));
+        assert!(PTY_BEAT_ECHO_TIMEOUT <= std::time::Duration::from_secs(5));
+        assert!(PTY_BEAT_ECHO_TIMEOUT > std::time::Duration::ZERO);
     }
 
     /// The grid-change event frame, the one pushed to every socket attached to a

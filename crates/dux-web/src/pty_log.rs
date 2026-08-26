@@ -59,16 +59,27 @@ fn device_label(device: Option<&str>) -> &str {
 }
 
 /// A pty changed hands: `conn_id` now owns input and sizing.
+///
+/// THREE WAYS TO WIN, and the line names which, because two of them are the same
+/// flag on the wire and nothing else in the log tells them apart. A press is a
+/// person taking a terminal from another device; a SELF-SUCCESSION is a blipped
+/// owner recognising its own dead connection in the handshake and taking its own
+/// pty back, which happens on every mobile drop and involves no user at all. The
+/// two are distinguished by `expected_owner`, which only a self-succession names
+/// (a press may take from anyone, so it names nobody).
 pub fn describe_claim_granted(
     pty_id: &str,
     conn_id: u64,
     device: Option<&str>,
     takeover: bool,
+    expected_owner: Option<u64>,
 ) -> String {
-    let how = if takeover {
-        "an explicit take-over"
-    } else {
-        "a plain claim of a pty nobody was driving"
+    let how = match (takeover, expected_owner) {
+        (true, Some(ghost)) => {
+            format!("a self-succession over its own dead connection {ghost}")
+        }
+        (true, None) => "an explicit take-over".to_string(),
+        (false, _) => "a plain claim of a pty nobody was driving".to_string(),
     };
     format!(
         "PTY {pty_id}: input and sizing ownership granted to connection {conn_id} \
@@ -134,14 +145,29 @@ mod tests {
     #[test]
     fn a_granted_claim_names_the_pty_the_connection_the_device_and_how_it_won() {
         assert_eq!(
-            describe_claim_granted("s1", 7, Some("Chrome UA"), true),
+            describe_claim_granted("s1", 7, Some("Chrome UA"), true, None),
             "PTY s1: input and sizing ownership granted to connection 7 (Chrome UA) \
              by an explicit take-over"
         );
         assert_eq!(
-            describe_claim_granted("term-2", 0, None, false),
+            describe_claim_granted("term-2", 0, None, false, None),
             "PTY term-2: input and sizing ownership granted to connection 0 \
              (no device label) by a plain claim of a pty nobody was driving"
+        );
+    }
+
+    /// A SELF-SUCCESSION IS NOT A PRESS, and the line has to say which. Both are
+    /// flagged take-overs on the wire, but one is a person deciding to take a
+    /// terminal from another device and the other is a blipped owner meeting its
+    /// own dead connection, which happens on every mobile drop. Reading a log
+    /// full of "an explicit take-over" and looking for the user who pressed the
+    /// button is a wasted support round trip.
+    #[test]
+    fn a_granted_claim_tells_a_self_succession_from_a_press() {
+        assert_eq!(
+            describe_claim_granted("s1", 7, Some("Chrome UA"), true, Some(4)),
+            "PTY s1: input and sizing ownership granted to connection 7 (Chrome UA) \
+             by a self-succession over its own dead connection 4"
         );
     }
 

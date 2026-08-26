@@ -692,6 +692,53 @@ mod tests {
         }
     }
 
+    /// THE HANDSHAKE'S OWNER AND THE RECORDED OWNER ARE ONE NUMBER, which is the
+    /// whole basis of self-succession: a returning pane recognises its own dead
+    /// connection in the `connected` frame and names it back as the predecessor
+    /// it expects to displace. If the id a socket is told and the id written down
+    /// at claim time could differ, every succession would name a ghost the server
+    /// has never heard of and be refused.
+    #[test]
+    fn the_owner_snapshot_reports_exactly_the_id_that_claimed_it() {
+        let owners = PtySizeOwners::default();
+        let pane = owners.next_conn_id();
+        let (out, _) = claim_resize(&owners, "p", pane, false);
+        assert!(out.apply);
+        let (owner, _epoch, _device) = owners.current_owner("p");
+        assert_eq!(
+            owner,
+            Some(pane),
+            "the handshake reports this field, so it must be the claimer's own id"
+        );
+
+        // And that is the value `expected_owner` is matched against: nothing else.
+        let successor = owners.next_conn_id();
+        let stranger = owners.next_conn_id();
+        let refused = owners.claim_for_resize("p", successor, true, Some(stranger), None, |_| {});
+        assert!(!refused.apply, "a succession naming anyone else is refused");
+        let granted = owners.claim_for_resize("p", successor, true, Some(pane), None, |_| {});
+        assert!(
+            granted.apply,
+            "a succession naming the recorded owner is granted"
+        );
+    }
+
+    /// EVERY CONNECTION BURNS AN ID, so the numbers one pane sees are not
+    /// consecutive and the gaps are not a bug. A second pane, another tab, the
+    /// terminal UI's own seat while it serves in the background, and any socket
+    /// that opened and closed without ever claiming all draw from the same
+    /// process-global counter. A pane holding 46 while the pty is owned by 45 is
+    /// therefore an ordinary sight, and it means the owner is somebody else's
+    /// connection unless 45 is an id this pane itself once held.
+    #[test]
+    fn every_connection_burns_an_id_so_one_pane_sees_gaps() {
+        let owners = PtySizeOwners::default();
+        let pane_first = owners.next_conn_id();
+        let _somebody_else = owners.next_conn_id();
+        let pane_second = owners.next_conn_id();
+        assert_eq!(pane_second, pane_first + 2);
+    }
+
     /// THE CLAIM TABLE: {unowned, owned-by-other, owned-by-self} x {plain,
     /// takeover}. This is the whole of "attaching never steals": the only cell
     /// that takes a pty away from a live owner is the one where the client said
