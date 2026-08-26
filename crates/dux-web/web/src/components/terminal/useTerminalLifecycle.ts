@@ -1200,6 +1200,7 @@ export function useTerminalLifecycle(
     // to be alive.
     const noteVisibility = () => {
       const nowVisible = document.visibilityState === "visible"
+      const returning = nowVisible && !prevVisibleRef.current
       visibleSinceRef.current = visibleSinceAfterTransition(
         prevVisibleRef.current,
         nowVisible,
@@ -1207,6 +1208,17 @@ export function useTerminalLifecycle(
         Date.now(),
       )
       prevVisibleRef.current = nowVisible
+      // THE BELT under the socket's own rule that a pty socket never opens
+      // hidden. If an open ever does land hidden, it asserts no size (a hidden
+      // tab is not the owner, and a resize frame is a claim), and `pty.onOpen`
+      // has already been and gone, so the pane would watch a pty nobody owns
+      // for as long as it stayed on screen. Asking again on the first visible
+      // moment of an open that has said nothing costs one forced re-assert and
+      // is a no-op in every other state: a watcher's send is gated on
+      // ownership, and an open that already sent its size never gets here.
+      if (returning && pty.isOpen && !resize.sizeSentSinceOpen()) {
+        resize.resyncToForeground()
+      }
     }
     document.addEventListener("visibilitychange", noteVisibility)
 

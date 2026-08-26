@@ -34,7 +34,15 @@ import type { ConnState } from "./types"
 // (bfcache restore, persisted or not), `focus`, and `online`. Each is a request
 // to attempt NOW and every one of them is idempotent, because a phone coming
 // back commonly fires three or four in the same tick and a `connect()` on a live
-// socket would tear down a working connection each time.
+// socket would tear down a working connection each time. None of them opens a
+// PARKING socket while the page is still hidden: several of them (Chromium's
+// `resume` above all) routinely arrive ahead of the page being on screen, and an
+// attach that lands hidden claims nothing and is never re-asked. See
+// `resumeNow`.
+//
+// AN OPEN IS NOT PROOF THE CONNECTION WORKS. It has to last, or carry a frame,
+// before the backoff is allowed to start again from the floor; see
+// `HEALTHY_SETTLE_MS`.
 export const RECONNECT_MIN_MS = 500
 
 /// How long a socket may sit in CONNECTING before it is abandoned and retried.
@@ -51,6 +59,23 @@ export const RECONNECT_MIN_MS = 500
 /// milliseconds on a working link and in a couple of seconds on a bad one) so a
 /// slow network can never trip it.
 export const CONNECT_TIMEOUT_MS = 30_000
+
+/// How long a socket must STAY open before the open counts as evidence that the
+/// connection works and the backoff may start again from the floor.
+///
+/// An open is a promise, not a proof. A server that accepts the handshake and
+/// drops the connection in the same breath (a proxy with nothing behind it, a
+/// server mid-restart, a captive portal) produced an open every time, and the
+/// backoff reset on every one of them: measured, the client retried at a flat
+/// ~551ms forever and the growth the backoff exists for never happened once.
+///
+/// A frame arriving is the better proof and it short-circuits this window; the
+/// timer is what covers a connection that is genuinely up and simply quiet,
+/// which is the ordinary state of an idle PTY.
+///
+/// A client-side CONSTANT for the same reason as the connect deadline: it is a
+/// floor under a platform behavior rather than a policy anybody would tune.
+export const HEALTHY_SETTLE_MS = 2_000
 
 /// The two behaviors a subclass chooses. Both default to the events socket's
 /// answer, so a socket that says nothing behaves exactly as that one does.
@@ -79,6 +104,9 @@ export abstract class ReconnectingSocket {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   // Armed while a socket is CONNECTING; see `CONNECT_TIMEOUT_MS`.
   private connectTimer: ReturnType<typeof setTimeout> | null = null
+  // Armed from an open until that open has earned the reset; see
+  // `HEALTHY_SETTLE_MS`.
+  private settleTimer: ReturnType<typeof setTimeout> | null = null
   protected closedByUser = false
   // The far end said "do not come back": a terminal close code, or a route this
   // client knows is gone. Distinct from `closedByUser`, and the one state no
@@ -165,8 +193,21 @@ export abstract class ReconnectingSocket {
     // Live or still connecting: there is nothing to resume, and tearing it down
     // is exactly the harm this method exists to avoid.
     if (this.ws !== null) return
-    this.closedByUser = false
     this.attachWakeSignals()
+    // A PARKING SOCKET NEVER OPENS HIDDEN, whichever signal asked. Chromium
+    // fires `resume` while `document.visibilityState` is still "hidden", and
+    // `pageshow` and `focus` can both land ahead of the page actually being on
+    // screen. An open that lands hidden is an attach nothing can finish: the
+    // pane deliberately asserts no size while hidden, because a resize frame is
+    // a claim, so the socket attaches as a watcher of a pty nobody owns and no
+    // later signal re-asks the question. The pane keeps its terminal and loses
+    // its keyboard, silently and for good.
+    //
+    // Deferring costs nothing and needs no bookkeeping: this is the same rule
+    // the parked retry path has always followed, and the visibility wake that
+    // ends the hidden period calls straight back in here.
+    if (this.parked()) return
+    this.closedByUser = false
     if (!this.policy.canRetry()) {
       // The gate is shut. Fall back to the ordinary polling retry rather than
       // opening: a return signal is not permission to attach to a server whose
@@ -228,6 +269,7 @@ export abstract class ReconnectingSocket {
     // shared state again.
     if (this.ws !== null) {
       const orphan = this.ws
+      this.clearSettleTimer()
       orphan.onopen = null
       orphan.onmessage = null
       orphan.onclose = null
@@ -247,9 +289,11 @@ export abstract class ReconnectingSocket {
       // open() already replaced must be inert.
       if (this.ws !== ws) return
       this.clearConnectTimer()
-      // A successful open means the connection is usable again, so the next drop
-      // starts a fresh retry schedule from the floor.
-      this.markHealthy()
+      // An open that LASTS means the connection is usable again, so the next
+      // drop starts a fresh retry schedule from the floor. One that does not is
+      // no evidence at all, and resetting on it pinned the retry gap at the
+      // floor forever; see `HEALTHY_SETTLE_MS`.
+      this.armHealthySettle()
       this.onSocketOpen()
       this.onConn("open")
       this.onOpen()
@@ -257,6 +301,9 @@ export abstract class ReconnectingSocket {
 
     ws.onmessage = (event) => {
       if (this.ws !== ws) return
+      // A frame crossed the connection: that is the proof the settle window is
+      // waiting for, so stop waiting.
+      this.markHealthy()
       this.handleMessage(event)
     }
 
@@ -266,6 +313,10 @@ export abstract class ReconnectingSocket {
       // silently dropping every later outbound frame.
       if (this.ws !== ws) return
       this.clearConnectTimer()
+      // This open never earned the reset. Retiring the timer here is what keeps
+      // the backoff growing across a flapping connection: left armed, it would
+      // fire during the very wait it is supposed to be lengthening.
+      this.clearSettleTimer()
       this.ws = null
       this.onConn("closed")
       if (this.closedByUser) return
@@ -354,6 +405,7 @@ export abstract class ReconnectingSocket {
       ws.onclose = null
       ws.onerror = null
       this.ws = null
+      this.clearSettleTimer()
       ws.close()
       this.onConn("closed")
       if (this.closedByUser || this.stopped) return
@@ -365,6 +417,23 @@ export abstract class ReconnectingSocket {
     if (this.connectTimer !== null) {
       clearTimeout(this.connectTimer)
       this.connectTimer = null
+    }
+  }
+
+  // Start the clock on the current open. `markHealthy` is what it eventually
+  // calls, so a frame arriving first simply retires it early.
+  private armHealthySettle(): void {
+    this.clearSettleTimer()
+    this.settleTimer = setTimeout(() => {
+      this.settleTimer = null
+      this.markHealthy()
+    }, HEALTHY_SETTLE_MS)
+  }
+
+  private clearSettleTimer(): void {
+    if (this.settleTimer !== null) {
+      clearTimeout(this.settleTimer)
+      this.settleTimer = null
     }
   }
 
@@ -434,6 +503,7 @@ export abstract class ReconnectingSocket {
     this.closedByUser = true
     this.clearRetryTimer()
     this.clearConnectTimer()
+    this.clearSettleTimer()
     this.ws?.close()
   }
 
@@ -453,6 +523,7 @@ export abstract class ReconnectingSocket {
   // this from `onopen` for sockets whose open proves usability; a subclass whose
   // open does not calls it directly from its own readiness signal instead.
   protected markHealthy(): void {
+    this.clearSettleTimer()
     this.reconnectDelay = RECONNECT_MIN_MS
   }
 

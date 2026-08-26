@@ -7,6 +7,7 @@ import {
 } from "./connectionTiming"
 import {
   CONNECT_TIMEOUT_MS,
+  HEALTHY_SETTLE_MS,
   RECONNECT_MIN_MS,
   ReconnectingSocket,
 } from "./reconnectingSocket"
@@ -174,7 +175,7 @@ describe("ReconnectingSocket", () => {
     expect(FakeWS.instances.length).toBe(4)
   })
 
-  it("resets the backoff to RECONNECT_MIN_MS after a successful open", () => {
+  it("resets the backoff to RECONNECT_MIN_MS after an open that stays open", () => {
     vi.useFakeTimers()
     const sock = new TestSocket("ws://x")
     sock.connect()
@@ -182,7 +183,10 @@ describe("ReconnectingSocket", () => {
     last().triggerClose()
     vi.advanceTimersByTime(RECONNECT_MIN_MS)
     expect(FakeWS.instances.length).toBe(2)
-    last().open() // a good open resets attempts + delay
+    last().open()
+    // An open is not evidence on its own: it has to LAST. Waiting out the
+    // settle window is what makes this one healthy and resets the delay.
+    vi.advanceTimersByTime(HEALTHY_SETTLE_MS)
     // The next drop is scheduled at MIN again (not the doubled value).
     last().triggerClose()
     vi.advanceTimersByTime(RECONNECT_MIN_MS - 1)
@@ -634,5 +638,164 @@ describe("the canRetry gate", () => {
     allowed = true
     vi.advanceTimersByTime(RECONNECT_MIN_MS)
     expect(FakeWS.instances).toHaveLength(2)
+  })
+})
+
+
+// AN OPEN IS A PROMISE, NOT A PROOF. The backoff used to reset on `onopen`
+// alone, which is the one thing a socket that opens and closes again in the
+// same breath is very good at doing. Measured against a server that accepted
+// the handshake and dropped the connection immediately, the client retried at a
+// flat ~551ms forever: every attempt "succeeded", every attempt refilled the
+// schedule, and the growth the backoff exists for never happened. An open now
+// counts as healthy once it has LASTED (`HEALTHY_SETTLE_MS`) or once a frame has
+// actually crossed it, whichever comes first.
+describe("the health settle window", () => {
+  it("keeps growing the backoff across opens that close immediately", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    publishConnectionTiming({ reconnect_backoff_cap_seconds: 10 })
+    const sock = new TestSocket("ws://x")
+    sock.connect()
+    // Note the last gap: the doubling has reached the configured ceiling, which
+    // is the whole point. A flat 500ms retry loop never gets there.
+    const delays = [500, 1000, 2000, 4000, 8000, 10_000]
+    let expected = 1
+    for (const delay of delays) {
+      last().open()
+      last().triggerClose()
+      vi.advanceTimersByTime(delay - 1)
+      expect(FakeWS.instances.length).toBe(expected)
+      vi.advanceTimersByTime(1)
+      expected++
+      expect(FakeWS.instances.length).toBe(expected)
+    }
+  })
+
+  it("counts an open that outlives the settle window as healthy", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    publishConnectionTiming({ reconnect_backoff_cap_seconds: 10 })
+    const sock = new TestSocket("ws://x")
+    sock.connect()
+    // Three flapping cycles, so the delay is well above the floor.
+    for (const delay of [500, 1000, 2000]) {
+      last().open()
+      last().triggerClose()
+      vi.advanceTimersByTime(delay)
+    }
+    // A connection that actually stays up for three seconds.
+    last().open()
+    vi.advanceTimersByTime(3000)
+    const before = FakeWS.instances.length
+    last().triggerClose()
+    vi.advanceTimersByTime(RECONNECT_MIN_MS - 1)
+    expect(FakeWS.instances.length).toBe(before)
+    vi.advanceTimersByTime(1)
+    expect(FakeWS.instances.length).toBe(before + 1)
+  })
+
+  it("counts the first frame as proof, without waiting out the window", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    publishConnectionTiming({ reconnect_backoff_cap_seconds: 10 })
+    const sock = new TestSocket("ws://x")
+    sock.connect()
+    for (const delay of [500, 1000, 2000]) {
+      last().open()
+      last().triggerClose()
+      vi.advanceTimersByTime(delay)
+    }
+    const ws = last()
+    ws.open()
+    ws.onmessage?.({ data: "a frame really crossed it" })
+    const before = FakeWS.instances.length
+    ws.triggerClose()
+    vi.advanceTimersByTime(RECONNECT_MIN_MS)
+    expect(FakeWS.instances.length).toBe(before + 1)
+  })
+
+  // The button is the user saying "try again, now", and it always has been a
+  // full reset of the bookkeeping. The settle window does not touch it.
+  it("still lets the Reconnect button reset a grown backoff outright", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    publishConnectionTiming({ reconnect_backoff_cap_seconds: 10 })
+    const sock = new TestSocket("ws://x")
+    sock.connect()
+    for (const delay of [500, 1000, 2000, 4000]) {
+      last().open()
+      last().triggerClose()
+      vi.advanceTimersByTime(delay)
+    }
+    sock.connect()
+    const before = FakeWS.instances.length
+    last().triggerClose()
+    vi.advanceTimersByTime(RECONNECT_MIN_MS - 1)
+    expect(FakeWS.instances.length).toBe(before)
+    vi.advanceTimersByTime(1)
+    expect(FakeWS.instances.length).toBe(before + 1)
+  })
+})
+
+// A PARKING SOCKET NEVER OPENS HIDDEN. `resume` (and `pageshow`, and a stray
+// `focus`) can fire while `document.visibilityState` is still "hidden", and an
+// open that lands hidden is an attach nothing can finish: the pane asserts no
+// size while hidden, precisely because a resize frame is a claim, so the socket
+// sits there as a watcher of a pty nobody owns and no later signal re-asks the
+// question. Deferring the reopen to the first visible moment is the same rule
+// the parked retry path has always followed.
+describe("a return that arrives while the page is still hidden", () => {
+  it("defers the reopen to the first visible moment, then opens exactly once", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    const sock = new TestSocket("ws://x", { parkWhileHidden: true })
+    sock.connect()
+    last().open()
+    // `freeze` parks and `pagehide` closes: the shape a frozen page returns
+    // from.
+    sock.park()
+    sock.close()
+    const before = FakeWS.instances.length
+    setVisibility("hidden")
+    // Chromium's `resume`, which fires BEFORE the page is visible again.
+    sock.resumeNow()
+    vi.advanceTimersByTime(600000)
+    expect(FakeWS.instances.length).toBe(before)
+    expect(vi.getTimerCount()).toBe(0)
+    // The page comes back: one open, not one per signal.
+    setVisibility("visible")
+    document.dispatchEvent(new Event("visibilitychange"))
+    window.dispatchEvent(new Event("focus"))
+    expect(FakeWS.instances.length).toBe(before + 1)
+  })
+
+  it("reopens immediately when the resume arrives already visible", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    const sock = new TestSocket("ws://x", { parkWhileHidden: true })
+    sock.connect()
+    last().open()
+    sock.park()
+    sock.close()
+    const before = FakeWS.instances.length
+    sock.resumeNow()
+    expect(FakeWS.instances.length).toBe(before + 1)
+  })
+
+  // The events socket is the one that must keep working in the background:
+  // attention indicators and OS notifications ride it precisely while the tab
+  // is hidden, so it does not park and it does not defer.
+  it("does not defer a socket that never parks", () => {
+    vi.useFakeTimers()
+    setVisibility("hidden")
+    const sock = new TestSocket("ws://x")
+    sock.connect()
+    last().open()
+    sock.close()
+    const before = FakeWS.instances.length
+    sock.resumeNow()
+    expect(FakeWS.instances.length).toBe(before + 1)
+    setVisibility("visible")
   })
 })

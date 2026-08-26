@@ -146,6 +146,11 @@ export type ResizeCoordinator = {
   /// it while this tab was away and the cached size would wrongly suppress the
   /// re-assert.
   resyncToForeground: () => void
+  /// Whether any resize frame has actually gone out since the current open.
+  /// The pane asks on its way back to the foreground: an open that landed while
+  /// the page was hidden asserted nothing, because a resize frame is a claim
+  /// and a hidden tab is not the owner, and nothing else re-asks the question.
+  sizeSentSinceOpen: () => boolean
   /// The gesture hold, the seam with the touch machine. `setHolding` mirrors
   /// "a touch scroll is in flight"; `flushHeld` releases whatever was held,
   /// refit first, exactly one fit.
@@ -216,6 +221,9 @@ export function createResizeCoordinator(
   let heldResizeSend: (() => void) | null = null
   // Mirrors "a touch scroll is in flight", written by the touch machine.
   let holding = false
+  // Whether any resize frame has crossed the wire since the current open; see
+  // the port of the same name.
+  let sizeSentSinceOpen = false
   // The PTY's own grid as the wire last reported it, or null while nothing
   // has. Recorded in BOTH modes (an owner is told its own applied grid too),
   // so a demotion has something to adopt immediately rather than waiting for
@@ -280,6 +288,11 @@ export function createResizeCoordinator(
   const sendOwned = (rows: number, cols: number): boolean => {
     if (!isOwner()) return false
     if (!sendResize(rows, cols)) return false
+    // A frame really went out on this open. Recorded even for a flagged one,
+    // whose GEOMETRY is deliberately not booked below: the question this
+    // answers is "has this open asked the size question at all", which a
+    // take-over request asks as loudly as a plain resize does.
+    sizeSentSinceOpen = true
     if (lastSendWasFlagged()) return true
     lastRows = rows
     lastCols = cols
@@ -484,6 +497,7 @@ export function createResizeCoordinator(
     },
     noteOpen(firstOpen) {
       initialResizeDone = false
+      sizeSentSinceOpen = false
       // A reconnect must NOT jiggle: an unchanged size would double-repaint the
       // agent on every mobile reconnect.
       firstFrameIsFirstOpen = firstOpen
@@ -509,6 +523,7 @@ export function createResizeCoordinator(
         })
       }, FOREGROUND_RESYNC_MS)
     },
+    sizeSentSinceOpen: () => sizeSentSinceOpen,
     setHolding(next) {
       holding = next
     },

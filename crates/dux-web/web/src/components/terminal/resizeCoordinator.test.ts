@@ -586,3 +586,42 @@ describe("the resize coordinator in VIEWER mode", () => {
     expect(sent).toEqual([{ rows: term.rows, cols: term.cols }])
   })
 })
+
+
+// THE QUESTION THE PANE ASKS ON ITS WAY BACK TO THE FOREGROUND. A pty socket
+// that opens while the page is hidden asserts no size, because a hidden tab is
+// not the owner and a resize frame is a claim; the open handler has already run
+// by the time the page is visible, so without this the pane would sit there
+// watching a pty nobody owns.
+describe("whether an open has asserted a size at all", () => {
+  it("is false from the open until a frame actually goes out", () => {
+    const { coord, sent } = setup()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    expect(coord.sizeSentSinceOpen()).toBe(false)
+    coord.firstFrameLanded()
+    expect(sent).toHaveLength(1)
+    expect(coord.sizeSentSinceOpen()).toBe(true)
+    // A reopen starts the question over.
+    coord.noteOpen(false)
+    expect(coord.sizeSentSinceOpen()).toBe(false)
+  })
+
+  it("stays false for a watcher, whose sends are gated on ownership", () => {
+    const { coord, sent } = setup({ owner: false })
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    coord.firstFrameLanded()
+    expect(sent).toEqual([])
+    expect(coord.sizeSentSinceOpen()).toBe(false)
+  })
+
+  it("stays false when the socket swallowed the frame", () => {
+    const { coord, setWire } = setup()
+    coord.start(document.createElement("div"))
+    setWire(false)
+    coord.noteOpen(false)
+    coord.firstFrameLanded()
+    expect(coord.sizeSentSinceOpen()).toBe(false)
+  })
+})

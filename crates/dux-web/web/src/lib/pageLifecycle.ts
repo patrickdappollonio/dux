@@ -21,7 +21,11 @@
 //               that survives it fires against a document that has been
 //               discarded, or hours late.
 //
-//   `resume`    REOPEN, plain (Chromium's other half of `freeze`).
+//   `resume`    REOPEN, plain (Chromium's other half of `freeze`). It fires
+//               while the page is still HIDDEN, which is why the reopen is a
+//               request rather than an act: a socket that parks defers it to
+//               the first visible moment (see `resumeNow`), because an attach
+//               that lands hidden claims nothing and is never re-asked.
 //
 // The mapping is a pure function so it can be read and tested as a table, and
 // the wiring below is the only place that touches the events.
