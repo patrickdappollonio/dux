@@ -150,12 +150,14 @@ no way to reach back into the app.
 
 In the terminal UI a click on a link opens it too, in the browser of the machine running
 dux, and the agent never sees that click. It is the release that opens: press and let go
-on the same link and it opens, drag off it and nothing does, so you can still sweep across
-a URL to select it. Hold `Ctrl` to send that click to an agent that is tracking the mouse;
-with no such agent there is nothing to send it to, so `Ctrl` and a click just opens the
-link like any other. Your own terminal's link gesture still works as it always did: dux
-holds the mouse, so in kitty that is `Shift` and a click, and on dux's side `Shift` is the
-select-text modifier and never opens anything.
+on the same link and it opens, and a sweep that ends anywhere else opens nothing. A sweep
+that ends still on the link counts as a click on it, so to SELECT a URL under an agent
+that is tracking the mouse, hold `Shift` and drag, which is the same force-a-selection
+gesture that works anywhere else in the pane. Hold `Ctrl` to send that click to an agent
+that is tracking the mouse; with no such agent there is nothing to send it to, so `Ctrl`
+and a click just opens the link like any other. Your own terminal's link gesture still
+works as it always did: dux holds the mouse, so in kitty that is `Shift` and a click, and
+on dux's side `Shift` is the select-text modifier and never opens anything.
 
 > [!IMPORTANT]
 > In the web terminal, dux is the **only** thing that opens a link. While the agent has

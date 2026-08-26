@@ -9400,8 +9400,15 @@ impl App {
     /// Drop any pending-press bookkeeping. Called wherever the press it belongs
     /// to can no longer be completed: the host lost focus, the terminal resized
     /// under the pointer, the surface went away.
+    ///
+    /// The repeat-open guard goes with it. That guard is a screen CELL and a
+    /// clock, which only mean "the same link, clicked twice" while the same
+    /// picture is still on screen: after a resize, a surface switch, or a trip
+    /// to another window, the same coordinates are a different agent's link,
+    /// and refusing to open it would be refusing a first click.
     pub(crate) fn retire_pending_link_click(&mut self) {
         self.pending_link_click = None;
+        self.last_link_open = None;
     }
 
     /// Answer one mouse event against a pending link press. Returns whether the
@@ -16541,6 +16548,94 @@ not_a_real_action = ["x"]
         nothing_opened(&rx);
     }
 
+    /// The same guard, cleared by the other retirements: a trip to another
+    /// window and back is not a double click, so the same link clicked again on
+    /// the user's return opens again.
+    #[test]
+    fn a_focus_trip_makes_the_same_cell_a_first_click_again() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        let rx = recording_opener(&mut app);
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
+
+        app.handle_terminal_event(ratatui::crossterm::event::Event::FocusLost);
+        assert!(app.last_link_open.is_none());
+        app.handle_terminal_event(ratatui::crossterm::event::Event::FocusGained);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+
+        assert_eq!(
+            opened_url(&rx),
+            "https://example.com/pr/1",
+            "clicking the link again after leaving the window is a first click"
+        );
+    }
+
+    /// The repeat-open guard is a screen cell, so it only means "the same link
+    /// twice" while the same picture is on screen. Switching surface retires it
+    /// with everything else stamped against that picture: the same coordinates
+    /// on the next agent are a different link, and a first click on it opens.
+    #[test]
+    fn the_same_cell_on_another_surface_is_a_first_click_again() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        let rx = recording_opener(&mut app);
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/first");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        assert_eq!(opened_url(&rx), "https://example.com/first");
+        assert!(
+            app.last_link_open.is_some(),
+            "test setup: the guard is armed on that cell"
+        );
+
+        // Another surface, with a link of its own under the very same point,
+        // clicked well inside the double-click window.
+        let terminal_id = "terminal-1".to_string();
+        app.engine.companion_terminals.insert(
+            terminal_id.clone(),
+            dux_core::model::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Standalone,
+                label: "shell".to_string(),
+                foreground_cmd: None,
+                client: PtyClient::spawn(
+                    "sh",
+                    &["-c".to_string(), "sleep 5".to_string()],
+                    std::path::Path::new("."),
+                    16,
+                    55,
+                    100,
+                )
+                .expect("spawn pty"),
+                sort_order: 0,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        app.session_surface = SessionSurface::Terminal;
+        app.active_terminal_id = Some(terminal_id);
+        app.refresh_snapshot_buf();
+        assert!(
+            app.last_link_open.is_none(),
+            "the guard belongs to the picture that just left the screen"
+        );
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/second");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+
+        assert_eq!(
+            opened_url(&rx),
+            "https://example.com/second",
+            "a first click on another agent's link must not be refused as a repeat"
+        );
+    }
+
     /// Opening a link is not a selection gesture: a highlight the user already
     /// completed is left exactly as it was.
     #[test]
@@ -16680,12 +16775,26 @@ not_a_real_action = ["x"]
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
+        // One completed click first, so the repeat-open guard is armed and the
+        // resize has both records to clear.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
+        assert!(
+            app.last_link_open.is_some(),
+            "test setup: the guard is armed"
+        );
+
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
         assert!(app.pending_link_click.is_some());
 
         app.handle_terminal_event(ratatui::crossterm::event::Event::Resize(120, 40));
 
         assert!(app.pending_link_click.is_none());
+        assert!(
+            app.last_link_open.is_none(),
+            "the repeat-open guard names a cell, which the reflow moved too"
+        );
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
         nothing_opened(&rx);
     }

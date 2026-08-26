@@ -6342,8 +6342,11 @@ impl App {
                 // a grid that is no longer the one on screen. Retired EAGERLY
                 // here rather than left to the release's own surface check, so
                 // switching away and back cannot hand the record a grid it
-                // happens to match again.
+                // happens to match again. The repeat-open guard is stamped
+                // against that same picture, so it goes too: the cell it names
+                // belongs to another agent's link now.
                 self.pending_link_click = None;
+                self.last_link_open = None;
             }
             let collect_links = self.engine.config.capabilities.hyperlinks;
             // A rebuild means the grid MOVED (output, a scroll, a resize). The
