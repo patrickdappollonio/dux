@@ -78,6 +78,70 @@ fn tab_pill_ordinal_cell(position: usize) -> String {
     format!(" {position} ")
 }
 
+/// What one tab pill's leading glyph slot says about that tab right now.
+///
+/// The slot is exactly one display column wide and its width never varies, so
+/// the strip's segment widths, truncation and scroll position are the same
+/// whatever a tab is doing (`every_tab_activity_glyph_is_one_display_column`
+/// pins every glyph that can land in it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabActivityGlyph {
+    /// Nothing to report: an idle tab, a dormant one with no PTY behind it, or
+    /// a flagged tab in the hidden half of its blink.
+    Blank,
+    /// This tab's provider is producing output: the shared braille spinner
+    /// frame for this instant, drawn in the pill's own title style.
+    Working(char),
+    /// This tab wants the user: the shared attention dot, drawn in the theme's
+    /// attention accent, exactly as the agent row draws it.
+    Attention,
+}
+
+/// Resolve a tab pill's glyph slot from that tab's snapshot.
+///
+/// The precedence copies `render_agent_row`: attention beats the working
+/// spinner, because a flagged tab may still be streaming the very prompt it
+/// wants answered. Typing is deliberately absent, matching the web strip, whose
+/// pills carry no typing cue either.
+///
+/// Pure so the state table is testable without a `TestBackend`, and allocation
+/// free so it can run once per pill per frame.
+fn tab_activity_glyph(
+    working: bool,
+    needs_attention: bool,
+    blink_on: bool,
+    spinner_idx: usize,
+) -> TabActivityGlyph {
+    if needs_attention {
+        // The hidden half of the blink is a BLANK rather than a fall-through to
+        // the spinner: a slot that alternated dot and spinner would read as two
+        // competing cues instead of one blinking one.
+        return if blink_on {
+            TabActivityGlyph::Attention
+        } else {
+            TabActivityGlyph::Blank
+        };
+    }
+    if working {
+        let frames = crate::theme::SPINNER_FRAMES;
+        return TabActivityGlyph::Working(frames[spinner_idx % frames.len()]);
+    }
+    TabActivityGlyph::Blank
+}
+
+/// One pill's worth of tab state, snapshotted under the engine's immutable
+/// borrow before the renderer takes the frame's buffer mutably.
+///
+/// One struct per pill rather than parallel vectors: the label and the two
+/// activity flags describe the same tab, and keeping them together means an
+/// index can never pair one tab's label with another's spinner.
+struct TabStripItem {
+    id: String,
+    label: String,
+    working: bool,
+    needs_attention: bool,
+}
+
 /// How an agent row's project tag should be rendered. Decided purely from the
 /// project the session points at, so both the full-width row's inline tag and
 /// the collapsed icon rail agree on when to surface a warning marker.
@@ -2529,6 +2593,31 @@ impl App {
         let labels: Vec<String> =
             tab_labels(&providers.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let seg_ordinal: Vec<String> = (1..=labels.len()).map(tab_pill_ordinal_cell).collect();
+        // Per-tab activity, snapshotted here so the `&mut buf` work below
+        // borrows nothing from the engine. Both predicates are keyed by TAB id,
+        // so each pill answers for itself and never for its siblings.
+        //
+        // The working flag carries the same Active guard `any_row_animating`
+        // uses to raise the run loop's poll cadence: a recently exited or
+        // detached tab whose PTY activity is still inside the streaming window
+        // would otherwise spin at the lazy cadence, which looks broken.
+        let session_active = matches!(session.status, crate::model::SessionStatus::Active);
+        let attention_on = self.engine.config.ui.attention_indicator;
+        let items: Vec<TabStripItem> = tab_ids
+            .iter()
+            .zip(labels)
+            .map(|(id, label)| TabStripItem {
+                working: session_active && self.engine.is_agent_streaming(id),
+                needs_attention: attention_on && self.engine.tab_needs_attention(id),
+                id: id.clone(),
+                label,
+            })
+            .collect();
+        // Animation phase is read once per frame, before the buffer borrow, so
+        // every pill in one frame agrees on the spinner frame and blink phase
+        // with each other and with the agent list.
+        let spinner_idx = self.spinner_frame_index();
+        let blink_on = self.attention_blink_on();
 
         let [strip_area, term_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -2542,29 +2631,23 @@ impl App {
         let strip_width = strip_area.width;
 
         // Label-cell text per tab (the content right of the ordinal segment's
-        // divider). All tabs are
-        // generic — no per-tab marker — except the focused tab, which is
-        // prefixed with the shared solid dot glyph so the active tab is
-        // unambiguous even without color (matches the "●" = active/present
-        // convention used by `session_dot`/`ATTENTION_GLYPH` elsewhere in the
-        // theme). Every tab, focused or not, reserves the same dot-width
-        // gutter: an unfocused tab renders spaces where the dot would go, so
-        // a tab's rendered width never depends on whether it is focused and
-        // the strip doesn't reflow/jitter as focus moves.
-        let tab_active_dot: &str = crate::theme::DOT_GLYPH;
-        let dot_gutter: String = " ".repeat(tab_active_dot.cell_width().max(1) as usize);
-        // The label is padded symmetrically: the right margin mirrors the
-        // left one (space + dot-width + space) so the text sits centered in
-        // its box instead of hugging the right border.
-        let mut seg_content: Vec<String> = labels
+        // divider). Every pill, focused or not, is laid out identically: a
+        // one-column ACTIVITY slot ahead of the label, mirrored by an equal
+        // gutter after it so the text sits centered rather than hugging the
+        // right border. The slot's content is written cell-by-cell after the
+        // label (it is a state cue with a style of its own), so the text here
+        // reserves it as a plain space and the pill's width never depends on
+        // what the tab is doing, nor on whether it is focused: the strip
+        // cannot reflow or jitter as focus moves or work starts.
+        //
+        // The active tab is marked by its highlight alone (focused border,
+        // focused title color, BOLD), which is why no marker is prefixed here.
+        const GLYPH_SLOT: &str = " ";
+        let mut seg_content: Vec<String> = items
             .iter()
-            .enumerate()
-            .map(|(i, l)| {
-                if tab_ids[i] == focused_id {
-                    format!(" {tab_active_dot} {l} {dot_gutter} ")
-                } else {
-                    format!(" {dot_gutter} {l} {dot_gutter} ")
-                }
+            .map(|item| {
+                let label = &item.label;
+                format!(" {GLYPH_SLOT} {label} {GLYPH_SLOT} ")
             })
             .collect();
         // Per segment: the ordinal cell, +2 for the box's border columns, +1
@@ -2585,7 +2668,7 @@ impl App {
             .collect();
 
         // Choose a start index so the focused tab is visible within `avail`.
-        let focused_idx = tab_ids.iter().position(|i| *i == focused_id).unwrap_or(0);
+        let focused_idx = items.iter().position(|i| i.id == focused_id).unwrap_or(0);
 
         // Tabs can be hidden to the LEFT as well as to the right: the
         // scroll-into-view choice below advances the start index to reach a
@@ -2617,7 +2700,7 @@ impl App {
             // Truncation applies to the LABEL cell only: the ordinal segment
             // always renders whole (it is the switch-key address). Reserve
             // the ordinal cell, the box's 2 border columns, the divider and
-            // the inter-box gap; fit the rest of the content (dot/gutter +
+            // the inter-box gap; fit the rest of the content (activity slot +
             // label + padding) into what remains.
             let budget = avail.saturating_sub(seg_ord_w[focused_idx] + 4);
             seg_content[focused_idx] = truncate_to_width(&seg_content[focused_idx], budget);
@@ -2640,8 +2723,8 @@ impl App {
         // Each tab is a miniature pane: the shared rounded border set with
         // the shared focused/unfocused border and title styles, so the strip
         // follows the exact bordered-and-rounded idiom of every other dux
-        // surface (`themed_block`). The focused tab additionally carries the
-        // active dot inside its label, so it stays unambiguous without color.
+        // surface (`themed_block`). The focused tab is told apart by that
+        // styling alone, BOLD included, so it stays unambiguous without color.
         let corners = border::ROUNDED;
         let (top_y, mid_y, bot_y) = (strip_area.y, strip_area.y + 1, strip_area.y + 2);
         // Leading truncation mark: same one-cell `…` in the same dim color as the
@@ -2664,7 +2747,7 @@ impl App {
                 }
                 break;
             }
-            let active = tab_ids[i] == focused_id;
+            let active = items[i].id == focused_id;
             let border_style = self.theme.border_style(active);
             let label_style = self.theme.title_style(active);
             // The pill is two cells behind one frame: the ordinal cell, a
@@ -2702,6 +2785,32 @@ impl App {
                 .set_symbol(ratatui::symbols::line::VERTICAL)
                 .set_style(border_style);
             buf.set_string(x + 2 + ord_w, mid_y, &seg_content[i], label_style);
+            // The activity slot: the label cell's second column, right after
+            // its leading pad. Painted as one cell rather than spliced into
+            // `seg_content` because the attention dot carries its own accent
+            // color while the spinner takes the pill's title style. A label
+            // cell squeezed below 2 columns by truncation has no slot to paint.
+            if label_w >= 2 {
+                let glyph_cell = &mut buf[(x + 2 + ord_w + 1, mid_y)];
+                match tab_activity_glyph(
+                    items[i].working,
+                    items[i].needs_attention,
+                    blink_on,
+                    spinner_idx,
+                ) {
+                    TabActivityGlyph::Blank => {
+                        glyph_cell.set_symbol(" ").set_style(label_style);
+                    }
+                    TabActivityGlyph::Working(frame) => {
+                        glyph_cell.set_char(frame).set_style(label_style);
+                    }
+                    TabActivityGlyph::Attention => {
+                        glyph_cell
+                            .set_symbol(crate::theme::ATTENTION_GLYPH)
+                            .set_style(Style::default().fg(self.theme.session_attention));
+                    }
+                }
+            }
             buf[(x + 2 + ord_w + label_w, mid_y)]
                 .set_symbol(corners.vertical_right)
                 .set_style(border_style);
@@ -2710,7 +2819,7 @@ impl App {
                 // The whole box (all 3 rows, borders included) is clickable;
                 // the trailing gap column is not.
                 self.agent_tab_regions.push((
-                    tab_ids[i].clone(),
+                    items[i].id.clone(),
                     Rect::new(x, top_y, seg_w[i].saturating_sub(1), 3),
                 ));
             }
@@ -12878,9 +12987,17 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        app.engine.sessions[0].status = crate::model::SessionStatus::Active;
         seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
         app.set_focused_tab(&session_id, "tab-2");
         app.fullscreen_overlay = FullscreenOverlay::Agent;
+        // A tab that is both working and flagged: with no strip there is
+        // nowhere for its activity glyphs to land either.
+        app.engine
+            .pty_activity
+            .insert("tab-2".to_string(), Instant::now());
+        app.engine.needs_attention.insert("tab-2".to_string());
+        app.start_time = Instant::now() - Duration::from_millis(800);
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -12898,6 +13015,20 @@ mod tests {
         assert_eq!(
             corner_count, 1,
             "fullscreen must draw only the agent pane's own box — no tab boxes"
+        );
+        let painted: String = (0..24)
+            .flat_map(|y| (0..80).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(
+            !painted.contains(crate::theme::ATTENTION_GLYPH),
+            "no strip means no attention dot in fullscreen"
+        );
+        assert!(
+            !painted
+                .chars()
+                .any(|c| crate::theme::SPINNER_FRAMES.contains(&c)),
+            "no strip means no tab spinner in fullscreen"
         );
     }
 
@@ -13108,8 +13239,8 @@ mod tests {
 
     /// Each tab renders as a miniature rounded pane: rounded corners on the
     /// border rows, the shared focused/unfocused border colors on the box,
-    /// and the shared title styles on the label. The focused tab additionally
-    /// carries the active-dot glyph so it stays unambiguous without color.
+    /// and the shared title styles on the label. The focused tab is told apart
+    /// by that styling alone.
     #[test]
     fn tab_strip_renders_rounded_boxes_with_focused_and_unfocused_styles() {
         use ratatui::Terminal;
@@ -13158,10 +13289,6 @@ mod tests {
             .collect();
         let labels: String = label_syms.concat();
         assert!(
-            labels.contains('●'),
-            "the focused tab must carry the active-dot glyph, got: {labels}"
-        );
-        assert!(
             labels.contains('│'),
             "the label row must carry the boxes' vertical borders, got: {labels}"
         );
@@ -13169,9 +13296,10 @@ mod tests {
         // left of the label, behind a full-height divider: session-slot
         // "codex" is position 1, the extra "claude" tab position 2. The label
         // cell keeps its symmetric padding (the right margin mirrors the
-        // left: space + dot-width + space).
+        // left: space + activity slot + space), and an idle tab's slot is
+        // blank whether or not it is the focused one.
         assert!(
-            labels.contains("│ 2 │ ● claude   │"),
+            labels.contains("│ 2 │   claude   │"),
             "the focused pill must carry its ordinal segment and padded label, got: {labels}"
         );
         assert!(
@@ -13215,15 +13343,13 @@ mod tests {
 
         // The focused box uses the shared focused border/title styles (the
         // mini-pane idiom of `themed_block`); the unfocused box the normal
-        // ones. "●" only exists in the focused tab; "o" only in the unfocused
-        // "codex" label, so each unambiguously identifies its box.
+        // ones. "l" only exists in the focused "claude" label; "o" only in the
+        // unfocused "codex" one, so each unambiguously identifies its box.
         let label_cells = strip_row_cells(&terminal, label_row);
-        let dot_cell = label_cells
-            .iter()
-            .find(|(sym, _, _)| sym == "●")
-            .expect("dot glyph must be rendered");
-        assert_eq!(
-            dot_cell.1, app.theme.title_focused,
+        assert!(
+            label_cells
+                .iter()
+                .any(|(sym, fg, _)| sym == "l" && *fg == app.theme.title_focused),
             "the focused tab's label must use the shared focused title color"
         );
         assert!(
@@ -13296,7 +13422,7 @@ mod tests {
         };
 
         let labels = render_labels(&mut app);
-        for expected in ["│ 1 │ ● codex", "│ 2 │   claude", "│ 3 │   opencode"] {
+        for expected in ["│ 1 │   codex", "│ 2 │   claude", "│ 3 │   opencode"] {
             assert!(
                 labels.contains(expected),
                 "each pill must carry its strip ordinal in its own segment; wanted \
@@ -13373,7 +13499,7 @@ mod tests {
     }
 
     /// Width/truncation math: the strip must never draw past the pane width,
-    /// even once the box borders and the active dot widen each tab beyond a
+    /// even once the box borders and the activity slot widen each tab beyond a
     /// bare label.
     #[test]
     fn tab_strip_width_math_stays_within_pane_with_many_tabs() {
@@ -13450,7 +13576,7 @@ mod tests {
 
         // The region must be wide enough to actually contain the rendered
         // label: its real display width (unicode-width, not char count) plus
-        // the leading separator column and the dot gutter/padding.
+        // the leading separator column and the activity slot/padding.
         let expected_min_width = "克劳德".cell_width() + 1;
         assert!(
             tab_region.width >= expected_min_width,
@@ -13461,7 +13587,7 @@ mod tests {
     }
 
     /// In a narrow pane with long labels, the focused tab must always be at
-    /// least partially visible (dot or truncated label rendered), regardless of
+    /// least partially visible (a truncated label rendered), regardless of
     /// which tab index is focused. An over-wide focused segment must not starve
     /// the scroll-into-view loop into walking `start` past `focused_idx`.
     #[test]
@@ -13631,12 +13757,396 @@ mod tests {
         );
     }
 
-    /// The active-tab dot must come from the one shared glyph
-    /// source in `theme.rs`, not a re-literaled `"●"` in render.rs.
+    /// The pill's activity slot is exactly ONE display column, and the strip's
+    /// width math depends on that: the glyph gutter is a literal single space,
+    /// so a two-column glyph would paint over the label's leading pad without
+    /// widening the segment. Pin every glyph that can land in the slot.
     #[test]
-    fn tab_active_dot_reuses_shared_theme_glyph() {
+    fn every_tab_activity_glyph_is_one_display_column() {
+        assert_eq!(
+            crate::theme::ATTENTION_GLYPH.cell_width(),
+            1,
+            "the attention dot must fit the pill's one-column slot"
+        );
         assert_eq!(crate::theme::ATTENTION_GLYPH, crate::theme::DOT_GLYPH);
-        assert_eq!(crate::theme::DOT_GLYPH, "●");
+        for frame in crate::theme::SPINNER_FRAMES {
+            assert_eq!(
+                frame.to_string().as_str().cell_width(),
+                1,
+                "spinner frame {frame:?} must fit the pill's one-column slot"
+            );
+        }
+    }
+
+    /// The slot's state table, checked without a frame. Attention beats the
+    /// working spinner (a flagged tab may still be streaming the prompt it
+    /// wants answered), the hidden half of the blink is a BLANK rather than a
+    /// fall-through to the spinner, and an idle tab says nothing at all.
+    #[test]
+    fn tab_activity_glyph_follows_the_agent_list_precedence() {
+        let spinner = crate::theme::SPINNER_FRAMES[3];
+
+        assert_eq!(
+            tab_activity_glyph(false, false, true, 3),
+            TabActivityGlyph::Blank,
+            "an idle tab's slot is blank"
+        );
+        assert_eq!(
+            tab_activity_glyph(true, false, true, 3),
+            TabActivityGlyph::Working(spinner),
+            "a working tab carries the shared spinner frame"
+        );
+        assert_eq!(
+            tab_activity_glyph(false, true, true, 3),
+            TabActivityGlyph::Attention,
+            "a flagged tab carries the attention dot"
+        );
+        assert_eq!(
+            tab_activity_glyph(true, true, true, 3),
+            TabActivityGlyph::Attention,
+            "attention beats the working spinner, as it does on the agent row"
+        );
+        assert_eq!(
+            tab_activity_glyph(false, true, false, 3),
+            TabActivityGlyph::Blank,
+            "the hidden half of the blink is blank"
+        );
+        assert_eq!(
+            tab_activity_glyph(true, true, false, 3),
+            TabActivityGlyph::Blank,
+            "a flagged AND working tab goes blank in the hidden blink phase; a slot \
+             that alternated dot and spinner would read as two cues"
+        );
+    }
+
+    /// The blink cadence the pill reads is the sidebar's own function, so the
+    /// two cues can never drift into two rhythms.
+    #[test]
+    fn the_pill_blink_reads_the_same_cadence_as_the_agent_row() {
+        for (elapsed, visible) in [
+            (0u128, true),
+            (199, true),
+            (200, false),
+            (399, false),
+            (400, true),
+            (600, false),
+            (799, false),
+            (800, true),
+            (1999, true),
+        ] {
+            let on = crate::app::attention_blink_phase(elapsed);
+            assert_eq!(on, visible, "blink phase at {elapsed}ms");
+            let expected = if visible {
+                TabActivityGlyph::Attention
+            } else {
+                TabActivityGlyph::Blank
+            };
+            assert_eq!(
+                tab_activity_glyph(false, true, on, 0),
+                expected,
+                "the pill must follow the sidebar's blink at {elapsed}ms"
+            );
+        }
+    }
+
+    /// A two-tab app whose session is Active (the guard the working cue needs),
+    /// with the app clock pinned so the blink phase and spinner frame are
+    /// deterministic.
+    fn tab_activity_app(elapsed_ms: u64) -> (App, String) {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.sessions[0].status = crate::model::SessionStatus::Active;
+        seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
+        app.start_time = Instant::now() - Duration::from_millis(elapsed_ms);
+        (app, session_id)
+    }
+
+    /// The column of a pill's one-cell activity slot: the box's left border,
+    /// the ordinal cell (` 1 `), the divider, then the label cell's leading pad.
+    fn tab_glyph_col(app: &App, tab_id: &str) -> u16 {
+        const ORD_W: u16 = 3;
+        let rect = app
+            .agent_tab_regions
+            .iter()
+            .find(|(id, _)| id == tab_id)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("no recorded region for {tab_id}"));
+        rect.x + 2 + ORD_W + 1
+    }
+
+    /// Render the strip and return the label row's cells as
+    /// `(symbol, fg, modifier)`.
+    fn tab_strip_label_row(app: &mut App, width: u16) -> Vec<(String, Color, Modifier)> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let area = Rect::new(0, 0, width, 24);
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                app.render_agent_tab_strip_if_needed(frame, area, true);
+            })
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        (area.x..area.x + width)
+            .map(|x| {
+                let cell = &buf[(x, area.y + 1)];
+                (cell.symbol().to_string(), cell.fg, cell.modifier)
+            })
+            .collect()
+    }
+
+    /// The slot is per TAB, not per session: stamping tab 2 leaves tab 1 blank,
+    /// and the reverse. An idle tab shows a space, a working one the shared
+    /// spinner frame for this instant, a flagged one the attention dot in the
+    /// attention accent.
+    #[test]
+    fn each_pill_carries_its_own_tabs_activity_glyph() {
+        // 800ms into the cycle: the blink holds visible for another 1.2s and
+        // the spinner frame has 80ms of life left, so the assertions below are
+        // not racing the clock.
+        let (mut app, session_id) = tab_activity_app(800);
+
+        // Idle: both slots blank.
+        let cells = tab_strip_label_row(&mut app, 80);
+        for tab in [session_id.as_str(), "tab-2"] {
+            let col = tab_glyph_col(&app, tab) as usize;
+            assert_eq!(
+                cells[col].0, " ",
+                "an idle pill's slot must be blank ({tab})"
+            );
+        }
+
+        // Only tab 2 works.
+        app.engine
+            .pty_activity
+            .insert("tab-2".to_string(), Instant::now());
+        let spinner = crate::theme::SPINNER_FRAMES[app.spinner_frame_index()].to_string();
+        let cells = tab_strip_label_row(&mut app, 80);
+        assert_eq!(
+            cells[tab_glyph_col(&app, "tab-2") as usize].0,
+            spinner,
+            "the working tab must carry the agent list's spinner frame"
+        );
+        assert_eq!(
+            cells[tab_glyph_col(&app, &session_id) as usize].0,
+            " ",
+            "its idle sibling must stay blank"
+        );
+
+        // Only tab 1 is flagged (and tab 2 keeps working).
+        app.engine.needs_attention.insert(session_id.clone());
+        let cells = tab_strip_label_row(&mut app, 80);
+        let flagged = &cells[tab_glyph_col(&app, &session_id) as usize];
+        assert_eq!(
+            flagged.0,
+            crate::theme::ATTENTION_GLYPH,
+            "the flagged tab must carry the attention dot"
+        );
+        assert_eq!(
+            flagged.1, app.theme.session_attention,
+            "the attention dot wears the theme's attention accent, like the agent row"
+        );
+        assert!(
+            cells[tab_glyph_col(&app, "tab-2") as usize]
+                .0
+                .chars()
+                .all(|c| crate::theme::SPINNER_FRAMES.contains(&c)),
+            "the still-working sibling keeps its spinner"
+        );
+    }
+
+    /// Precedence on screen, not just in the table: a tab that is both working
+    /// and flagged shows the dot while the blink is visible and a BLANK while it
+    /// is hidden, never the spinner.
+    #[test]
+    fn a_working_and_flagged_pill_never_falls_back_to_the_spinner() {
+        for (elapsed, expected) in [(800u64, crate::theme::ATTENTION_GLYPH), (650, " ")] {
+            let (mut app, _session_id) = tab_activity_app(elapsed);
+            app.engine
+                .pty_activity
+                .insert("tab-2".to_string(), Instant::now());
+            app.engine.needs_attention.insert("tab-2".to_string());
+
+            let cells = tab_strip_label_row(&mut app, 80);
+            assert_eq!(
+                cells[tab_glyph_col(&app, "tab-2") as usize].0,
+                expected,
+                "at {elapsed}ms into the blink cycle"
+            );
+        }
+    }
+
+    /// The `attention_indicator` preference gates the pill exactly as it gates
+    /// the agent row: no dot at all, and the working spinner still shows (the
+    /// setting turns off the attention cue, not every cue).
+    #[test]
+    fn the_pill_honors_the_attention_indicator_preference() {
+        let (mut app, _session_id) = tab_activity_app(800);
+        app.engine.config.ui.attention_indicator = false;
+        app.engine.needs_attention.insert("tab-2".to_string());
+
+        let cells = tab_strip_label_row(&mut app, 80);
+        assert_eq!(
+            cells[tab_glyph_col(&app, "tab-2") as usize].0,
+            " ",
+            "with the preference off a flagged pill shows nothing"
+        );
+
+        app.engine
+            .pty_activity
+            .insert("tab-2".to_string(), Instant::now());
+        let cells = tab_strip_label_row(&mut app, 80);
+        assert!(
+            cells[tab_glyph_col(&app, "tab-2") as usize]
+                .0
+                .chars()
+                .all(|c| crate::theme::SPINNER_FRAMES.contains(&c)),
+            "the working spinner is not gated by the attention preference"
+        );
+    }
+
+    /// The animation cadence is chosen by `any_row_animating`, which only counts
+    /// ACTIVE sessions. Snapshot the pill's working flag behind the same guard so
+    /// a detached or exited tab can never spin at the lazy poll cadence.
+    #[test]
+    fn a_detached_sessions_pill_does_not_spin() {
+        let (mut app, _session_id) = tab_activity_app(800);
+        app.engine.sessions[0].status = crate::model::SessionStatus::Detached;
+        app.engine
+            .pty_activity
+            .insert("tab-2".to_string(), Instant::now());
+
+        let cells = tab_strip_label_row(&mut app, 80);
+        assert_eq!(
+            cells[tab_glyph_col(&app, "tab-2") as usize].0,
+            " ",
+            "a non-Active session's pill must not animate, because the run loop \
+             would not be polling fast enough to animate it smoothly"
+        );
+        assert!(
+            !app.any_row_animating(),
+            "test setup: a detached session does not raise the animation cadence"
+        );
+    }
+
+    /// The active tab is its highlight alone: the old leading `●` is gone, so an
+    /// idle focused pill's slot is blank and no dot appears anywhere in the strip.
+    #[test]
+    fn the_focused_pill_carries_no_active_marker() {
+        let (mut app, session_id) = tab_activity_app(800);
+        app.set_focused_tab(&session_id, "tab-2");
+
+        let cells = tab_strip_label_row(&mut app, 80);
+        assert_eq!(
+            cells[tab_glyph_col(&app, "tab-2") as usize].0,
+            " ",
+            "an idle focused pill has nothing to say in its activity slot"
+        );
+        let row: String = cells.iter().map(|(sym, _, _)| sym.as_str()).collect();
+        assert!(
+            !row.contains(crate::theme::DOT_GLYPH),
+            "no pill may carry an active-tab dot any more: {row}"
+        );
+    }
+
+    /// Losing the dot must not lose the "unambiguous without color" property:
+    /// the focused pill's label stays BOLD (and in the focused title color)
+    /// while the unfocused one does not.
+    #[test]
+    fn the_focused_pill_stays_readable_without_color() {
+        let (mut app, session_id) = tab_activity_app(800);
+        app.set_focused_tab(&session_id, "tab-2");
+
+        let cells = tab_strip_label_row(&mut app, 80);
+        assert!(
+            cells.iter().any(|(sym, fg, m)| sym == "l"
+                && *fg == app.theme.title_focused
+                && m.contains(Modifier::BOLD)),
+            "the focused `claude` pill's label must be bold in the focused title color"
+        );
+        assert!(
+            cells.iter().any(|(sym, fg, m)| sym == "x"
+                && *fg == app.theme.title_normal
+                && !m.contains(Modifier::BOLD)),
+            "the unfocused `codex` pill's label must not be bold"
+        );
+    }
+
+    /// Activity never enters the width calculation: a pill's recorded region and
+    /// its neighbour's position are identical idle, working and flagged.
+    #[test]
+    fn a_pills_geometry_does_not_move_when_its_activity_changes() {
+        let mut geometry = Vec::new();
+        for state in 0..3 {
+            let (mut app, session_id) = tab_activity_app(800);
+            match state {
+                1 => {
+                    app.engine
+                        .pty_activity
+                        .insert("tab-2".to_string(), Instant::now());
+                }
+                2 => {
+                    app.engine.needs_attention.insert("tab-2".to_string());
+                }
+                _ => {}
+            }
+            let _ = tab_strip_label_row(&mut app, 80);
+            let mut regions: Vec<(String, Rect)> = app.agent_tab_regions.clone();
+            regions.sort_by(|a, b| a.0.cmp(&b.0));
+            assert!(
+                regions.iter().any(|(id, _)| *id == session_id),
+                "both pills must be recorded"
+            );
+            geometry.push(regions);
+        }
+        assert_eq!(
+            geometry[0], geometry[1],
+            "a working pill must occupy exactly the geometry an idle one did"
+        );
+        assert_eq!(
+            geometry[0], geometry[2],
+            "a flagged pill must occupy exactly the geometry an idle one did"
+        );
+    }
+
+    /// The same, in a strip too narrow to show every tab: a state change must not
+    /// move the scroll position, or the strip would jump as an agent starts work.
+    #[test]
+    fn activity_never_moves_a_narrow_strips_scroll_position() {
+        let mut positions = Vec::new();
+        for working in [false, true] {
+            let mut app = test_app(default_bindings());
+            let session_id = app.engine.sessions[0].id.clone();
+            app.engine.sessions[0].status = crate::model::SessionStatus::Active;
+            for i in 0..6 {
+                seed_render_tab(
+                    &mut app,
+                    &session_id,
+                    &format!("tab-{i}"),
+                    "codex",
+                    i as i64,
+                );
+            }
+            app.set_focused_tab(&session_id, "tab-5");
+            app.start_time = Instant::now() - Duration::from_millis(800);
+            if working {
+                for i in 0..6 {
+                    app.engine
+                        .pty_activity
+                        .insert(format!("tab-{i}"), Instant::now());
+                }
+                app.engine.needs_attention.insert("tab-3".to_string());
+            }
+            let _ = tab_strip_label_row(&mut app, 34);
+            let mut regions: Vec<(String, Rect)> = app.agent_tab_regions.clone();
+            regions.sort_by(|a, b| a.0.cmp(&b.0));
+            positions.push(regions);
+        }
+        assert_eq!(
+            positions[0], positions[1],
+            "activity must not change which tabs are visible or where they sit"
+        );
     }
 
     /// A tab's rendered width must not depend on whether it is focused. A dot

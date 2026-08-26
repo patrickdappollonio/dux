@@ -85,7 +85,9 @@ In the terminal UI, switching is keyboard-driven and every key is yours to rebin
 in-app help overlay shows your current bindings. The defaults are modifier chords, and
 chords stay dux's even while you type into the agent in the windowed pane, so you can
 hop tabs mid-sentence. Each pill carries its position number, so the switch-by-number
-keys have a visible address.
+keys have a visible address. A pill also reports what its own tab is up to, with the
+same cues the agent list uses: a spinner while that tab's provider is working, and a
+blinking dot when it wants you. The pill you are looking at is the highlighted one.
 
 > [!IMPORTANT]
 > Fullscreen gives every key to the agent verbatim and does not draw the strip at all.
