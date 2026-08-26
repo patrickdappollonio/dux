@@ -2010,6 +2010,29 @@ impl Engine {
     /// The reload-failed reaction is placed LAST in the returned `Multi` so
     /// its error status wins the surface's status line instead of being overwritten
     /// by a deferred save's success message.
+    /// Log a pull-request badge move for one session, if it moved.
+    ///
+    /// Raised here rather than in the sync worker because this is the point a
+    /// result survives every guard and becomes what the user sees; a result
+    /// dropped for a deleted, detached or pinned session logs its own reason at
+    /// debug instead. A session with no branch to name logs nothing.
+    fn log_pr_badge_change(
+        session: Option<&AgentSession>,
+        previous: Option<&crate::model::PrInfo>,
+        fresh: Option<&crate::model::PrInfo>,
+    ) {
+        if !crate::gh::pr_badge_changed(previous, fresh) {
+            return;
+        }
+        let Some(branch) = session
+            .and_then(|s| s.workspace.as_managed())
+            .map(|m| m.branch_name.as_str())
+        else {
+            return;
+        };
+        logger::info(&crate::gh::format_pr_change(branch, previous, fresh));
+    }
+
     fn process_config_reload_ready(&mut self, result: Result<Config, String>) -> EventReaction {
         let deferred = std::mem::take(&mut self.deferred_commands);
         let has_deferred = !deferred.is_empty();
@@ -2577,6 +2600,16 @@ impl Engine {
                             continue;
                         }
                     }
+                    // The badge is about to move (or not): say so, once, at the
+                    // one place a result actually reaches the user. The
+                    // comparison is against the LIVE badge rather than the
+                    // stored row, so a row whose state string this build cannot
+                    // decode cannot log the same change on every cycle.
+                    Self::log_pr_badge_change(
+                        self.sessions.iter().find(|s| s.id == session_id),
+                        self.pr_statuses.get(&session_id),
+                        maybe_pr.as_ref(),
+                    );
                     match maybe_pr {
                         Some(pr) => {
                             let state_str = match pr.state {
@@ -6363,6 +6396,7 @@ mod tests {
             rate: remaining.map(|remaining| crate::gh::RateLimitInfo {
                 remaining,
                 reset_at: Some(Utc::now() + chrono::Duration::seconds(120)),
+                cost: Some(1),
             }),
             hard_failed,
             rate_limited: false,

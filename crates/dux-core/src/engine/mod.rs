@@ -2938,16 +2938,27 @@ impl Engine {
     }
 
     /// Trigger a foreground PR check (agent brought to the foreground): the same
-    /// one-shot check as [`Self::spawn_pr_check_for_session`] but with the tighter
-    /// [`PR_FOREGROUND_DEBOUNCE`] window, so focusing an agent shows fresh data.
+    /// single-session check as [`Self::spawn_pr_check_for_session`] but with the
+    /// tighter [`PR_FOREGROUND_DEBOUNCE`] window, so focusing an agent shows
+    /// fresh data.
+    ///
+    /// It carries the FOCUS trigger, which is what keeps tabbing down a sidebar
+    /// of finished agents from spawning a `gh` process per agent passed: a
+    /// terminal pull request on an exited agent is answered from SQLite here and
+    /// re-queried on the deliberate triggers instead.
     pub fn spawn_foreground_pr_check(&mut self, session_id: &str) {
-        self.spawn_pr_check_for_session(session_id, PR_FOREGROUND_DEBOUNCE);
+        self.spawn_pr_check_for_session_with(
+            session_id,
+            PR_FOREGROUND_DEBOUNCE,
+            crate::gh::SyncTrigger::Focus,
+        );
     }
 
-    /// Trigger a one-shot PR check for a single session, unless it was checked
-    /// more recently than `min_interval` ago. Background triggers (refs watcher,
-    /// agent exit) pass [`PR_CHECK_MIN_INTERVAL`]; foreground focus passes the
-    /// tighter [`PR_FOREGROUND_DEBOUNCE`] via [`Self::spawn_foreground_pr_check`].
+    /// Trigger a single-session PR check for a deliberate event (a refs change,
+    /// an agent exit, the user asking), unless it was checked more recently than
+    /// `min_interval` ago. Those pass [`PR_CHECK_MIN_INTERVAL`]; foreground focus
+    /// goes through [`Self::spawn_foreground_pr_check`] instead, which carries
+    /// both the tighter [`PR_FOREGROUND_DEBOUNCE`] and its own sync trigger.
     ///
     /// The timestamp is recorded BEFORE the worker thread is spawned so a burst
     /// of triggers within a single event-loop tick — e.g. several callers each
@@ -3004,6 +3015,21 @@ impl Engine {
     }
 
     pub fn spawn_pr_check_for_session(&mut self, session_id: &str, min_interval: Duration) {
+        self.spawn_pr_check_for_session_with(
+            session_id,
+            min_interval,
+            crate::gh::SyncTrigger::OneShot,
+        );
+    }
+
+    /// [`Self::spawn_pr_check_for_session`] with the trigger named. Only the
+    /// foreground check passes anything but `OneShot`; see [`crate::gh::SyncTrigger`].
+    fn spawn_pr_check_for_session_with(
+        &mut self,
+        session_id: &str,
+        min_interval: Duration,
+        trigger: crate::gh::SyncTrigger,
+    ) {
         if !self.github_integration_enabled
             || !matches!(self.gh_status, crate::model::GhStatus::Available)
         {
@@ -3092,12 +3118,8 @@ impl Engine {
             },
             move |tx| {
                 let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let (result, signals) = crate::gh::check_pr_for_entry(
-                    &entry,
-                    &snapshot,
-                    &policy,
-                    crate::gh::SyncTrigger::OneShot,
-                );
+                let (result, signals) =
+                    crate::gh::check_pr_for_entry(&entry, &snapshot, &policy, trigger);
                 // Event-driven checks feed the shared backoff too, so a sustained
                 // failure arms the pause (and clears it on recovery) even when the
                 // blind poll is disabled.
