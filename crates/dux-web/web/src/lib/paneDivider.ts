@@ -42,24 +42,33 @@ export const DIVIDER_TARGET_MIN = { coarse: 20, fine: 10 } as const
 export const DIVIDER_HIT_SLOP =
   "after:absolute after:inset-y-0 after:left-1/2 after:w-[10px] after:-translate-x-1/2 pointer-coarse:after:w-[20px]"
 
-// WHICH ATTRIBUTE SAYS "a finger is on me right now". Read out of
-// react-resizable-panels 4.11.2: its Separator renders `data-separator` with
-// one of `inactive` / `hover` / `active` / `focus` / `disabled`, and sets
-// `active` for the whole of a drag. dux's own hook writes the same attribute
-// with the same two words on the sidebar's edge, so ONE class below lights
-// both.
+// WHICH ATTRIBUTE SAYS "a finger is on me right now". dux's own, on both
+// dividers, written by the two hooks in hooks/use-divider-drag.ts.
 //
-// This exists because `hover:` is not reachable with a finger: a held divider
-// looked identical to an idle one on a touch screen, and the only way to tell
-// whether the gesture had been acquired was to watch the pane move.
-export const DIVIDER_STATE_ATTR = "data-separator"
-export const DIVIDER_STATE_ACTIVE = "active"
-export const DIVIDER_STATE_INACTIVE = "inactive"
+// It is deliberately NOT react-resizable-panels' `data-separator`, which was
+// what lit the Changes divider before. Measured on a touch tablet against
+// 4.11.2: the library has no `pointercancel` listener, so a touch the browser
+// takes away leaves its separator latched at `data-separator="active"` for
+// good, and the held paint stayed lit with no finger anywhere near the glass.
+// The library's attribute is a report about the library's own gesture state;
+// what the paint needs is a report about the USER's, and dux is the only one
+// of the two that hears a cancelled pointer.
+//
+// The held paint exists because `hover:` is not reachable with a finger: a held
+// divider looked identical to an idle one on a touch screen, and the only way
+// to tell whether the gesture had been acquired was to watch the pane move.
+//
+// Always present, never removed: it is written `false` as soon as a divider is
+// wired up, so "is this element driven by dux's held paint at all" is a
+// question the parity test can ask of both dividers.
+export const DIVIDER_HELD_ATTR = "data-dux-held"
+export const DIVIDER_HELD_ON = "true"
+export const DIVIDER_HELD_OFF = "false"
 
 // The held tone. Deliberately the same `bg-ring` the hover rule paints, so the
 // two rules cannot disagree whichever order Tailwind emits them in: a mouse
 // hovering and a finger holding mean the same thing to the eye.
-export const DIVIDER_ACTIVE_PAINT = "data-[separator=active]:bg-ring"
+export const DIVIDER_ACTIVE_PAINT = "data-[dux-held=true]:bg-ring"
 
 // STACKING. A divider sits between two panes and is a sibling of both, so
 // whichever pane is painted later covers it: not just the hair-thin line, but
@@ -92,6 +101,11 @@ export const DIVIDER_CHROME =
   DIVIDER_ACTIVE_PAINT +
   " " +
   DIVIDER_STACKING +
+  // The focus ring is `focus-visible:` and nothing else: a press MOVES focus to
+  // the divider (both hooks do it, so a drag can be continued from the
+  // keyboard), and a ring painted for that press is a ring left standing under
+  // a finger that has already lifted. Both hooks focus with `focusVisible:
+  // false` for the same reason; see use-divider-drag.ts.
   " cursor-col-resize touch-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-hidden " +
   DIVIDER_HIT_SLOP
 
@@ -128,6 +142,42 @@ export function withinDividerBand(
   y: number,
 ): boolean {
   return x >= band.left && x <= band.right && y >= band.top && y <= band.bottom
+}
+
+// Whether a press belongs to a divider element, by the one rule both dividers
+// use.
+//
+// TWO WAYS TO QUALIFY, and both are needed.
+//
+// The BAND is the rect test above, which is what react-resizable-panels does:
+// a press inside the band belongs to the divider even when something else is
+// painted on top of it, and the band can be wider than the element without the
+// element having to grow.
+//
+// The TARGET is the browser's own verdict. A browser adjusts a touch point
+// before it dispatches: Chrome grows a finger's contact area into a rectangle
+// and picks the most plausible target inside it, which reaches about 20px on
+// either side of a thin control. So a press the browser has ALREADY decided
+// belongs to this divider can arrive with coordinates outside the divider's own
+// band, and the rect test alone would refuse a gesture the platform had handed
+// over. The strip between the two widths was dead: it neither resized nor
+// scrolled.
+//
+// The band still decides every press the browser gave to a NEIGHBOUR, which is
+// the case it exists for: something painted over the divider must not be able
+// to swallow the gesture.
+export function dividerPressHits(
+  el: HTMLElement | null,
+  event: { target: EventTarget | null; clientX: number; clientY: number },
+  minWidth: number,
+): boolean {
+  if (el === null) return false
+  const target = event.target
+  if (target === el || (target instanceof Node && el.contains(target))) {
+    return true
+  }
+  const band = dividerHitBand(el.getBoundingClientRect(), minWidth)
+  return withinDividerBand(band, event.clientX, event.clientY)
 }
 
 // The keyboard vocabulary of a vertical divider, copied from the library's own

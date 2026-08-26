@@ -65,8 +65,11 @@ const { ResizableHandle, ResizablePanel, ResizablePanelGroup } = await import(
 const {
   DIVIDER_ACTIVE_PAINT,
   DIVIDER_CHROME,
+  DIVIDER_DRAG_THRESHOLD_PX,
+  DIVIDER_HELD_ATTR,
+  DIVIDER_HELD_OFF,
+  DIVIDER_HELD_ON,
   DIVIDER_STACKING,
-  DIVIDER_STATE_ATTR,
   DIVIDER_TARGET_MIN,
 } = await import("@/lib/paneDivider")
 const { sidebarWidthToPx } = await import("@/lib/sidebarResize")
@@ -143,12 +146,28 @@ describe("the two workspace dividers", () => {
 
   // `hover:` is unreachable with a finger, so a held divider looked exactly
   // like an idle one on a touch screen. Both dividers publish the held state in
-  // the SAME attribute (react-resizable-panels' own `data-separator`), so one
-  // class lights both.
-  it("both paint a held state a finger can see", () => {
+  // the SAME attribute, and it is DUX'S attribute on both: the library's own
+  // `data-separator` never comes back off after a cancelled touch, so a paint
+  // keyed on it stayed lit with nothing on the glass.
+  it("both paint a held state a finger can see, from dux's own attribute", () => {
     for (const el of [sidebarDivider(), changesDivider()]) {
       expect(el.className.split(/\s+/)).toContain(DIVIDER_ACTIVE_PAINT)
-      expect(el.hasAttribute(DIVIDER_STATE_ATTR)).toBe(true)
+      expect(DIVIDER_ACTIVE_PAINT).toContain(DIVIDER_HELD_ATTR.slice("data-".length))
+      expect(el.getAttribute(DIVIDER_HELD_ATTR)).toBe(DIVIDER_HELD_OFF)
+    }
+  })
+
+  // A PRESS IS NOT A KEYBOARD ARRIVAL. Both hooks move focus to the divider on
+  // pointerdown so a drag can be carried on from the keyboard, and a ring
+  // painted for that press is a ring left standing beside the line under a
+  // finger that has already lifted. Nothing may paint on bare `:focus`.
+  it("both keep their focus ring for the keyboard only", () => {
+    for (const el of [sidebarDivider(), changesDivider()]) {
+      const tokens = el.className.split(/\s+/)
+      expect(tokens).toContain("focus-visible:ring-1")
+      expect(tokens).toContain("focus-visible:ring-ring")
+      expect(tokens).toContain("focus-visible:outline-hidden")
+      expect(tokens.filter((t) => t.startsWith("focus:"))).toEqual([])
     }
   })
 
@@ -283,6 +302,18 @@ describe("both dividers, driven by a finger", () => {
     })
   }
 
+  function cancel(clientX: number) {
+    act(() => {
+      fireEvent.pointerCancel(document, {
+        pointerId: 1,
+        pointerType: "touch",
+        clientX,
+        clientY: 300,
+        isPrimary: true,
+      })
+    })
+  }
+
   function release(clientX: number) {
     act(() => {
       fireEvent.pointerUp(document, {
@@ -354,19 +385,97 @@ describe("both dividers, driven by a finger", () => {
   // THE HELD STATE, driven rather than asserted from a class name. Both
   // dividers must say "active" in the same attribute for the shared class to
   // mean anything, and both must stop saying it when the finger lifts.
-  it("both report themselves active for the length of the gesture", () => {
+  it("both report themselves held for the length of the gesture", () => {
     for (const mount of [sidebarDivider, changesDivider]) {
       const handle = mount()
       handle.setPointerCapture = () => {}
-      expect(handle.getAttribute("data-separator")).not.toBe("active")
+      expect(handle.getAttribute(DIVIDER_HELD_ATTR)).toBe(DIVIDER_HELD_OFF)
       press(handle, EDGE_CENTRE)
-      expect(handle.getAttribute("data-separator"), mount.name).toBe("active")
+      expect(handle.getAttribute(DIVIDER_HELD_ATTR), mount.name).toBe(
+        DIVIDER_HELD_ON,
+      )
       move(EDGE_CENTRE + DRAG_BY)
-      expect(handle.getAttribute("data-separator")).toBe("active")
+      expect(handle.getAttribute(DIVIDER_HELD_ATTR)).toBe(DIVIDER_HELD_ON)
       release(EDGE_CENTRE + DRAG_BY)
-      expect(handle.getAttribute("data-separator")).not.toBe("active")
+      expect(handle.getAttribute(DIVIDER_HELD_ATTR)).toBe(DIVIDER_HELD_OFF)
       cleanup()
     }
+  })
+
+  // THE CANCELLED TOUCH, which is why the held paint is dux's attribute and not
+  // the library's. Measured on a touch tablet against react-resizable-panels
+  // 4.11.2: it has no `pointercancel` listener, so its separator stays at
+  // `data-separator="active"` for good once the browser takes a touch away, and
+  // the line stayed lit with no finger anywhere near it. Both dividers must go
+  // dark on a cancel, and the library's own attribute is deliberately not
+  // asserted here: it is allowed to stay wrong, it just may not be what paints.
+  it("both stop looking held when the browser takes the gesture away", () => {
+    for (const mount of [sidebarDivider, changesDivider]) {
+      const handle = mount()
+      handle.setPointerCapture = () => {}
+      press(handle, EDGE_CENTRE)
+      move(EDGE_CENTRE + DRAG_BY)
+      expect(handle.getAttribute(DIVIDER_HELD_ATTR)).toBe(DIVIDER_HELD_ON)
+      cancel(EDGE_CENTRE + DRAG_BY)
+      expect(handle.getAttribute(DIVIDER_HELD_ATTR), mount.name).toBe(
+        DIVIDER_HELD_OFF,
+      )
+      cleanup()
+    }
+  })
+
+  // Both hooks focus the divider on pointerdown, and both ask the browser not
+  // to treat that as a keyboard arrival. react-resizable-panels 4.11.2 passes
+  // `{ focusVisible: false, preventScroll: true }` on its separator; dux's hook
+  // passes the same, so a press cannot leave a focus ring on one divider and
+  // not the other.
+  it("both take focus without asking for a focus ring", () => {
+    for (const mount of [sidebarDivider, changesDivider]) {
+      const handle = mount()
+      handle.setPointerCapture = () => {}
+      const focus = vi.fn()
+      handle.focus = focus
+      press(handle, EDGE_CENTRE)
+      expect(focus, mount.name).toHaveBeenCalledWith(
+        expect.objectContaining({ focusVisible: false, preventScroll: true }),
+      )
+      release(EDGE_CENTRE)
+      cleanup()
+    }
+  })
+
+  // A TAP REMEMBERS NOTHING. Measured on a touch tablet: a no-move tap on the
+  // sidebar's edge wrote `dux:sidebar-width` (the width it already had, so
+  // nothing moved on screen), while the same tap on the Changes divider wrote
+  // nothing at all. Storage is the user's record of a width they chose; a tap
+  // is not a choice, and writing on one pins whatever the sidebar happened to
+  // be at.
+  it("the sidebar writes nothing for a press that went nowhere", () => {
+    localStorage.removeItem("dux:sidebar-width")
+    const handle = sidebarDivider()
+    handle.setPointerCapture = () => {}
+    press(handle, EDGE_CENTRE)
+    release(EDGE_CENTRE)
+    expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
+  })
+
+  // Jitter is not a drag either: a finger resting on glass wanders a pixel or
+  // two, and the shared threshold is what says when it has become a gesture.
+  it("the sidebar writes nothing for a press that only jittered", () => {
+    localStorage.removeItem("dux:sidebar-width")
+    const handle = sidebarDivider()
+    handle.setPointerCapture = () => {}
+    const jitter = DIVIDER_DRAG_THRESHOLD_PX - 1
+    press(handle, EDGE_CENTRE)
+    move(EDGE_CENTRE + jitter)
+    release(EDGE_CENTRE + jitter)
+    expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
+  })
+
+  // And a real drag still writes, so the guard above cannot be satisfied by
+  // never writing at all.
+  it("the sidebar still remembers a drag that travelled", () => {
+    expect(dragSidebar()).toBe(288 + DRAG_BY)
   })
 
   // THE DEAD STRIP. A browser adjusts a touch point before dispatching it:

@@ -739,7 +739,10 @@ describe("AppSidebar resize affordances", () => {
     pressEdge(handle, { clientX: SIDEBAR_EDGE_X - 4 })
     releaseEdge(SIDEBAR_EDGE_X - 4)
 
-    expect(localStorage.getItem("dux:sidebar-width")).toBe("18rem")
+    // Nothing is written at all. A press that went nowhere decides nothing,
+    // which includes deciding to remember the width it happened to find; what
+    // it must never do is write a width 4px narrower than that.
+    expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
   })
 
   it("acquires a press inside the band even when the element is covered", () => {

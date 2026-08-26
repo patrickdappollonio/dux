@@ -33,7 +33,11 @@ import { changesCountFor } from "@/lib/agentVitals"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import { partitionProjects } from "@/lib/projects"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
-import { DIVIDER_CHROME, dividerKeyAction } from "@/lib/paneDivider"
+import {
+  DIVIDER_CHROME,
+  DIVIDER_DRAG_THRESHOLD_PX,
+  dividerKeyAction,
+} from "@/lib/paneDivider"
 import { useDividerDrag } from "@/hooks/use-divider-drag"
 import {
   MAX_SIDEBAR_PX,
@@ -307,18 +311,44 @@ function SidebarDragEdge({
     return collapse
   }
 
+  // Whether the current gesture ever moved the sidebar at all, so a press that
+  // went nowhere can put back exactly what it found.
+  const draggedRef = useRef(false)
+
   const ref = useDividerDrag({
     onGrab: () => {
       grabbedPxRef.current = sidebarWidthToPx(widthRef.current)
+      draggedRef.current = false
     },
     // Live, unpersisted: the width follows the finger by the DELTA from the
     // press, so a press that landed off centre in the grab band does not
     // teleport the divider on the first move.
     onDrag: (deltaX) => {
+      draggedRef.current = true
       const { widthRem } = sidebarResizeRelease(grabbedPxRef.current + deltaX)
       setSidebarWidth(widthRem)
     },
-    onDrop: (deltaX) => commit(grabbedPxRef.current + deltaX),
+    // A PRESS THAT WENT NOWHERE DECIDES NOTHING, which includes deciding to
+    // remember the width it already had. Measured on a touch tablet: a tap on
+    // the sidebar's edge wrote `dux:sidebar-width` (the current value, so
+    // nothing moved on screen), while the same tap on the Changes divider wrote
+    // nothing at all. Storage is the user's record of a width they chose, and a
+    // tap is not a choice: writing on one makes a stray touch pin whatever the
+    // sidebar happened to be at, including a width that only came from a
+    // default the release would otherwise have gone on tracking.
+    //
+    // The threshold is the shared one, so both dividers agree on when a press
+    // has become a drag. Under it, whatever the live drag painted is put back
+    // unpersisted; nothing is written and the sidebar cannot collapse.
+    onDrop: (deltaX) => {
+      if (Math.abs(deltaX) < DIVIDER_DRAG_THRESHOLD_PX) {
+        if (draggedRef.current) {
+          setSidebarWidth(sidebarResizeRelease(grabbedPxRef.current).widthRem)
+        }
+        return
+      }
+      commit(grabbedPxRef.current + deltaX)
+    },
     // A cancelled gesture writes nothing and leaves the sidebar where the
     // finger left it, which is what the panel library's divider does too.
     onCancel: () => {},

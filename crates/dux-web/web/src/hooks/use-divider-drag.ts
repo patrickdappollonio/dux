@@ -1,13 +1,12 @@
 import * as React from "react"
 
 import {
-  DIVIDER_STATE_ACTIVE,
-  DIVIDER_STATE_ATTR,
-  DIVIDER_STATE_INACTIVE,
+  DIVIDER_HELD_ATTR,
+  DIVIDER_HELD_OFF,
+  DIVIDER_HELD_ON,
   DIVIDER_TARGET_MIN,
   dividerCursor,
-  dividerHitBand,
-  withinDividerBand,
+  dividerPressHits,
 } from "@/lib/paneDivider"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 
@@ -74,6 +73,79 @@ function claimCursor(owner: symbol, claimed: boolean) {
   syncCursorStyle()
 }
 
+// The held paint, written by dux on both dividers. Always present rather than
+// added and removed, so an element either takes part in the held paint or does
+// not, and a parity test can tell which. See DIVIDER_HELD_ATTR.
+function paintHeld(el: HTMLElement | null, held: boolean) {
+  el?.setAttribute(DIVIDER_HELD_ATTR, held ? DIVIDER_HELD_ON : DIVIDER_HELD_OFF)
+}
+
+/**
+ * Publish the held paint on a divider dux does NOT drive: the Changes pane's
+ * separator, which react-resizable-panels drags itself.
+ *
+ * WHY DUX WATCHES THE POINTER FOR A GESTURE IT DOES NOT OWN. 4.11.2 has no
+ * `pointercancel` listener, so a touch the browser takes away (a page pan it
+ * decided to claim, a call arriving, a palm) leaves its own `data-separator`
+ * latched at `active` with nothing on the glass, and a paint keyed on that
+ * attribute stays lit until the next press. This hook hears the cancel, so the
+ * held paint ends when the gesture does.
+ *
+ * It paints and nothing else: the drag, the layout and the persistence stay
+ * with the library and App.tsx. Acquisition is the shared rule
+ * (`dividerPressHits`) against the same grab band the library claims, so the
+ * two dividers light on exactly the same presses.
+ */
+export function useDividerHeld(): React.RefObject<HTMLDivElement | null> {
+  const ref = React.useRef<HTMLDivElement | null>(null)
+  const coarse = useIsCoarsePointer()
+
+  React.useEffect(() => {
+    const minWidth = coarse
+      ? DIVIDER_TARGET_MIN.coarse
+      : DIVIDER_TARGET_MIN.fine
+    let heldPointer: number | null = null
+
+    const onPointerDown = (event: PointerEvent) => {
+      // Deliberately NOT gated on `defaultPrevented`: the library's own
+      // document listener runs in the same capture phase and may already have
+      // claimed the press. This one only paints, so an already-handled press is
+      // exactly the press it wants.
+      if (heldPointer !== null) return
+      if (event.pointerType === "mouse" && event.button > 0) return
+      if (!dividerPressHits(ref.current, event, minWidth)) return
+      heldPointer = event.pointerId
+      paintHeld(ref.current, true)
+    }
+
+    const onPointerEnd = (event: PointerEvent) => {
+      if (heldPointer === null || event.pointerId !== heldPointer) return
+      heldPointer = null
+      paintHeld(ref.current, false)
+    }
+
+    const el = ref.current
+    paintHeld(el, false)
+    document.addEventListener("pointerdown", onPointerDown, true)
+    document.addEventListener("pointerup", onPointerEnd, true)
+    document.addEventListener("pointercancel", onPointerEnd, true)
+    // A capture lost without a pointerup ends the gesture too: the element goes
+    // away, or the browser hands the pointer to something else.
+    el?.addEventListener("lostpointercapture", onPointerEnd as EventListener)
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true)
+      document.removeEventListener("pointerup", onPointerEnd, true)
+      document.removeEventListener("pointercancel", onPointerEnd, true)
+      el?.removeEventListener(
+        "lostpointercapture",
+        onPointerEnd as EventListener,
+      )
+    }
+  }, [coarse])
+
+  return ref
+}
+
 /**
  * Wire an element up as a draggable divider. Returns the ref to put on it.
  */
@@ -100,45 +172,13 @@ export function useDividerDrag(
     let startX = 0
     let lastDeltaX = 0
 
-    const bandFor = () => {
-      const el = ref.current
-      if (!el) return null
-      return dividerHitBand(el.getBoundingClientRect(), minWidth)
-    }
+    // Which presses belong to this divider: the shared rule, so the two
+    // dividers cannot disagree about what counts as landing on one.
+    const hits = (event: PointerEvent | MouseEvent) =>
+      dividerPressHits(ref.current, event, minWidth)
 
-    const hits = (event: PointerEvent | MouseEvent) => {
-      const el = ref.current
-      if (el === null) return false
-      // THE PRESS THE BAND WOULD HAVE THROWN AWAY. A browser adjusts a touch
-      // point before it dispatches: Chrome grows a finger's contact area into a
-      // rectangle and picks the most plausible target inside it, which reaches
-      // about 20px on either side of a thin control. So a press the browser has
-      // ALREADY decided belongs to this divider can arrive with coordinates
-      // outside the divider's own band, and the rect test would refuse a
-      // gesture the platform had handed over. The strip between the two widths
-      // was dead: it neither resized nor scrolled.
-      //
-      // When the browser names the divider as the target, that verdict wins.
-      // The band still decides every press the browser gave to a NEIGHBOUR,
-      // which is the case it exists for (something painted over the divider
-      // must not be able to swallow the gesture).
-      const target = event.target
-      if (target === el || (target instanceof Node && el.contains(target))) {
-        return true
-      }
-      const band = bandFor()
-      return (
-        band !== null && withinDividerBand(band, event.clientX, event.clientY)
-      )
-    }
-
-    // The held state, in the attribute react-resizable-panels' own separator
-    // uses, so one shared class lights both dividers under a finger.
     const paintState = (active: boolean) => {
-      ref.current?.setAttribute(
-        DIVIDER_STATE_ATTR,
-        active ? DIVIDER_STATE_ACTIVE : DIVIDER_STATE_INACTIVE,
-      )
+      paintHeld(ref.current, active)
     }
 
     const release = () => {
@@ -166,7 +206,12 @@ export function useDividerDrag(
       lastDeltaX = 0
       handlersRef.current.onGrab?.()
       const el = ref.current
-      el?.focus({ preventScroll: true })
+      // `focusVisible: false`, exactly as react-resizable-panels 4.11.2 asks
+      // for it on its own separator. Focus still moves (a drag can be carried
+      // on from the keyboard), but a browser that honours the option is told
+      // not to treat a press as a keyboard arrival, so no focus ring is left
+      // painted beside the line once the finger lifts.
+      el?.focus({ preventScroll: true, focusVisible: false })
       el?.setPointerCapture?.(event.pointerId)
       claimCursor(owner, true)
       paintState(true)

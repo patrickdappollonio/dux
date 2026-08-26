@@ -3,6 +3,7 @@
 import * as ResizablePrimitive from "react-resizable-panels"
 
 import { DIVIDER_CHROME, DIVIDER_TARGET_MIN } from "@/lib/paneDivider"
+import { useDividerHeld } from "@/hooks/use-divider-drag"
 import { cn } from "@/lib/utils"
 
 function ResizablePanelGroup({
@@ -35,8 +36,15 @@ function ResizableHandle({
 }: ResizablePrimitive.SeparatorProps & {
   withHandle?: boolean
 }) {
+  // The held paint is dux's, not the library's. Its own `data-separator`
+  // attribute never comes back off after a cancelled touch (4.11.2 has no
+  // `pointercancel` listener), so the line stayed lit with no finger on the
+  // glass; this hook publishes `data-dux-held` on the same presses and drops it
+  // when the gesture ends however it ends. See lib/paneDivider.ts.
+  const heldRef = useDividerHeld()
   return (
     <ResizablePrimitive.Separator
+      elementRef={heldRef}
       data-slot="resizable-handle"
       className={cn(
         "relative flex w-px items-center justify-center bg-border ring-offset-background",

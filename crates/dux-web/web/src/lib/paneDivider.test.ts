@@ -19,6 +19,7 @@ import {
   dividerCursor,
   dividerHitBand,
   dividerKeyAction,
+  dividerPressHits,
   readStoredPanePercent,
   readStoredText,
   withinDividerBand,
@@ -54,6 +55,63 @@ describe("dividerHitBand", () => {
     const band = dividerHitBand(rect(200, 201), DIVIDER_TARGET_MIN.coarse)
     expect(band.top).toBe(0)
     expect(band.bottom).toBe(100)
+  })
+})
+
+// The one acquisition rule both dividers use, so a press that lands on one
+// lands on the other.
+describe("dividerPressHits", () => {
+  function divider(left: number, right: number): HTMLElement {
+    const el = document.createElement("div")
+    el.getBoundingClientRect = () =>
+      new DOMRect(left, 0, right - left, 100) as DOMRect
+    document.body.append(el)
+    return el
+  }
+
+  const press = (target: EventTarget | null, x: number, y = 50) => ({
+    target,
+    clientX: x,
+    clientY: y,
+  })
+
+  it("takes a press inside the grown band", () => {
+    const el = divider(200, 201)
+    expect(
+      dividerPressHits(el, press(document.body, 209), DIVIDER_TARGET_MIN.coarse),
+    ).toBe(true)
+  })
+
+  it("refuses a press outside the band that landed on something else", () => {
+    const el = divider(200, 201)
+    expect(
+      dividerPressHits(el, press(document.body, 260), DIVIDER_TARGET_MIN.coarse),
+    ).toBe(false)
+  })
+
+  // The browser adjusts a touch point before it dispatches, so a press it has
+  // already given to the divider can arrive with coordinates well outside the
+  // band. That verdict wins; the strip between the two widths used to be dead.
+  it("takes a press the browser has already given to the divider", () => {
+    const el = divider(200, 201)
+    expect(dividerPressHits(el, press(el, 260), DIVIDER_TARGET_MIN.coarse)).toBe(
+      true,
+    )
+  })
+
+  it("takes a press on something inside the divider", () => {
+    const el = divider(200, 201)
+    const child = document.createElement("span")
+    el.append(child)
+    expect(
+      dividerPressHits(el, press(child, 400), DIVIDER_TARGET_MIN.coarse),
+    ).toBe(true)
+  })
+
+  it("refuses everything when there is no divider yet", () => {
+    expect(
+      dividerPressHits(null, press(document.body, 200), DIVIDER_TARGET_MIN.fine),
+    ).toBe(false)
   })
 })
 
