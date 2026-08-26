@@ -581,15 +581,14 @@ fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
 /// The whole rule lives here, pure, because two very different code paths ask
 /// it: the windowed [`App::handle_mouse`] and the fullscreen raw-input path,
 /// which never passes through `handle_mouse` at all. A rule written twice is a
-/// rule that diverges.
+/// rule that diverges. It is the cross-language twin of the web's
+/// `linkPressAction`, and the two must be read together.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TerminalPressAction {
-    /// dux opens this address itself, and neither the press nor its release
-    /// reaches the child. dux is routinely driven from another machine through
-    /// the web, and a link opened by the child opens on the SERVER; on this
-    /// surface the reason is plainer still, since the child would have to be a
-    /// browser launcher of its own.
-    OpenLink(String),
+    /// dux has taken an interest in this press. The decision says what to
+    /// withhold from the child and whether the RELEASE may open the address;
+    /// nothing opens at press time.
+    Link(LinkPressDecision),
     /// The hatch: forward the press to a mouse-tracking child as a PLAIN,
     /// modifier-free click and open nothing. Ctrl here, matching the web
     /// (Cmd on a Mac, Ctrl elsewhere; the TUI has no Cmd to offer).
@@ -599,14 +598,35 @@ pub(crate) enum TerminalPressAction {
     Unclaimed,
 }
 
+/// The two genuinely different answers a link press produces. Collapsing them
+/// reintroduces the bug from either direction: a press dux swallows but will
+/// not act on still has to be swallowed (or the child gets a press with no
+/// release), and a press dux may act on is not always one it swallowed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LinkPressDecision {
+    /// The address under the pressed cell.
+    pub(crate) uri: String,
+    /// Withhold the press, the drag that follows it and the release from the
+    /// child. Only ever true while the child is tracking the mouse: with
+    /// tracking off nothing was going to be forwarded anyway, and swallowing
+    /// would cost the user the drag-selection that starts on a URL.
+    pub(crate) suppress: bool,
+    /// Eligible to open when the button comes back up; ask
+    /// [`link_release_opens`] then for the final answer.
+    pub(crate) open: bool,
+}
+
 /// Decide what a press means. `link_uri` is the address under the pressed cell
 /// (already resolved through the rendered snapshot, `None` when the cell
 /// carries no link or hyperlinks are off), and `child_wants_mouse` says whether
 /// the child has mouse reporting on.
 ///
-/// Shift is deliberately absent from the rule: it is the selection modifier on
-/// this surface and the host terminal's own link modifier while dux holds the
-/// mouse, so dux must neither open nor forward under it.
+/// Shift is deliberately absent from the rule on this surface, and this is the
+/// one place dux and the browser part company: Shift is the terminal UI's
+/// force-a-local-selection modifier and the host terminal's own link gesture
+/// while dux holds the mouse, so a Shift gesture must never end in a browser
+/// tab. The web lets it open with tracking off because there it is the ordinary
+/// browser modifier and xterm's own linkifier answers the mouseup.
 pub(crate) fn decide_terminal_press(
     kind: MouseEventKind,
     modifiers: KeyModifiers,
@@ -619,13 +639,52 @@ pub(crate) fn decide_terminal_press(
     let Some(uri) = link_uri else {
         return TerminalPressAction::Unclaimed;
     };
-    if modifiers.is_empty() {
-        return TerminalPressAction::OpenLink(uri.to_string());
+    if !child_wants_mouse {
+        // Nothing reaches a child that never asked for the mouse, so there is
+        // nothing to withhold: the press keeps its ordinary meaning (focus, or
+        // the start of a selection) and only the release can open. The hatch
+        // chord comes along, because with no app to hand the click to it has
+        // nothing to mean but the plain thing.
+        if !(modifiers.is_empty() || modifiers == KeyModifiers::CONTROL) {
+            return TerminalPressAction::Unclaimed;
+        }
+        return TerminalPressAction::Link(LinkPressDecision {
+            uri: uri.to_string(),
+            suppress: false,
+            open: true,
+        });
     }
-    if modifiers == KeyModifiers::CONTROL && child_wants_mouse {
+    if modifiers.is_empty() {
+        return TerminalPressAction::Link(LinkPressDecision {
+            uri: uri.to_string(),
+            suppress: true,
+            open: true,
+        });
+    }
+    if modifiers == KeyModifiers::CONTROL {
         return TerminalPressAction::ForwardPlainClick;
     }
     TerminalPressAction::Unclaimed
+}
+
+/// Whether a press dux took an interest in opens its address on release.
+///
+/// A press and a release in the same cell is a click. A gesture that travelled
+/// is a click only if it stayed on the link it started on, which is what makes
+/// press-on-a-link, release-on-a-word open nothing while a press that wanders
+/// along a long wrapped URL still opens it.
+pub(crate) fn link_release_opens(
+    travel_cells: u16,
+    release_uri: Option<&str>,
+    pressed_uri: &str,
+) -> bool {
+    // The browser measures this in pixels; a cell is the finest resolution the
+    // SGR wire reports, so here "the pointer did not travel" is exactly "the
+    // same cell". There is no smaller threshold to tune.
+    if travel_cells == 0 {
+        return true;
+    }
+    release_uri == Some(pressed_uri)
 }
 
 /// SGR button code for a pressed/released mouse button: 0 left, 1 middle,
@@ -3557,10 +3616,30 @@ impl App {
                             return Ok(true);
                         }
                     } else {
-                        // The withheld half of a link press dux already spent,
-                        // exactly as the windowed path withholds it.
-                        if self.consume_pending_link_click(&mouse_ev) {
+                        // The rest of a gesture dux took an interest in: the
+                        // release opens the address here, exactly as it does on
+                        // the windowed path, and a withheld drag or release
+                        // never reaches the child.
+                        if self.handle_pending_link_mouse(&mouse_ev) {
                             continue;
+                        }
+                        // The drag and release of a HATCH press. The raw bytes
+                        // carry the Ctrl bit the press was rebuilt without, so
+                        // the rest of the gesture is rebuilt too: a child that
+                        // was handed a plain press must not then be handed a
+                        // modified release.
+                        if self.center_mouse_forward.is_some() {
+                            match mouse_ev.kind {
+                                MouseEventKind::Drag(_) => {
+                                    self.continue_center_mouse_forward(&mouse_ev);
+                                    continue;
+                                }
+                                MouseEventKind::Up(_) => {
+                                    self.finish_center_mouse_forward(&mouse_ev);
+                                    continue;
+                                }
+                                _ => {}
+                            }
                         }
                         // If the click landed outside the fullscreen overlay,
                         // exit interactive mode instead of forwarding to the PTY.
@@ -3593,20 +3672,31 @@ impl App {
                             link.as_deref(),
                             child_wants_mouse,
                         ) {
-                            TerminalPressAction::OpenLink(uri) => {
-                                self.open_link_from_grid(uri);
-                                continue;
+                            TerminalPressAction::Link(decision) => {
+                                let suppress = decision.suppress;
+                                self.note_link_press(decision, &mouse_ev);
+                                if suppress {
+                                    continue;
+                                }
+                                // Not withheld: with no child tracking the
+                                // mouse the press keeps its ordinary meaning
+                                // below, which is where a drag-select over a
+                                // URL comes from.
                             }
                             TerminalPressAction::ForwardPlainClick => {
                                 // Rebuild the report from the button code alone:
                                 // the raw bytes carry the Ctrl bit, and the child
                                 // asked for a click, not for the hatch that let it
-                                // through. Scrolled back, the scroll vocabulary
-                                // owns the pane and nothing is forwarded, exactly
-                                // as for an unmodified press.
+                                // through. Arming the same forwarding record the
+                                // windowed path uses is what makes the drag and
+                                // the release rebuilt too. Scrolled back, the
+                                // scroll vocabulary owns the pane and nothing is
+                                // forwarded, exactly as for an unmodified press.
                                 if !is_scrolled_back {
+                                    let cb = sgr_button_code(MouseButton::Left);
+                                    self.center_mouse_forward = Some(cb);
                                     self.write_center_mouse_report(
-                                        sgr_button_code(MouseButton::Left),
+                                        cb,
                                         b'M',
                                         mouse_ev.column,
                                         mouse_ev.row,
@@ -9243,6 +9333,17 @@ impl App {
     /// column of a CJK link cell must find the cell that starts one column to
     /// its left.
     fn link_at_screen_point(&self, column: u16, row: u16) -> Option<&str> {
+        // THE SNAPSHOT MUST BE THIS PANE'S. `snapshot_buf` is a reusable buffer
+        // that keeps whatever was last painted into it, so a pane with no live
+        // child of its own (a dormant agent, one still launching, a surface
+        // switched to before the next render) is still showing the PREVIOUS
+        // agent's cells as far as this buffer is concerned. Opening a link out
+        // of them would open an address the user is not looking at.
+        let live = self.selected_terminal_surface_id();
+        if live.is_none() || self.last_snapshot_id != live {
+            return None;
+        }
+        self.selected_terminal_surface_client()?;
         let term_area = self.mouse_layout.agent_term?;
         let (col, row) = relative_point(term_area, column, row)?;
         let cell = self.snapshot_buf.cells.iter().find(|cell| {
@@ -9257,42 +9358,68 @@ impl App {
             .map(String::as_str)
     }
 
-    /// Open the address under a pressed cell and withhold the press (and the
-    /// release that follows it) from the child.
-    fn open_link_from_grid(&mut self, uri: String) {
-        self.focus = FocusPane::Center;
-        // A consumed click is not half of a double click: leaving the record
-        // standing would let the NEXT click in the pane read as the second of a
-        // pair and maximize the surface.
-        self.last_mouse_click = None;
+    /// Record a press dux took an interest in. Nothing opens here: the press
+    /// decides, the release acts.
+    fn note_link_press(&mut self, decision: LinkPressDecision, mouse: &MouseEvent) {
+        // The second click of a double click is the select-a-word gesture, not
+        // a second visit to the same page. Refused at press time, on the cell,
+        // so it holds for both surfaces and for a child that tracks the mouse
+        // (where the ordinary double-click bookkeeping never runs).
+        let repeat = self.last_link_open.is_some_and(|(at, column, row)| {
+            column == mouse.column && row == mouse.row && at.elapsed() <= DOUBLE_CLICK_THRESHOLD
+        });
+        if decision.suppress {
+            self.focus = FocusPane::Center;
+            // A withheld click is not half of a double click either: leaving
+            // the record standing would let the NEXT press in the pane read as
+            // the second of a pair and maximize the surface.
+            self.last_mouse_click = None;
+        }
         self.pending_link_click = Some(PendingLinkClick {
             // Only a left press can open a link, so that is the release to
             // withhold; the record still names it, because it is matched
             // against whatever button comes back up.
             button: MouseButton::Left,
             surface: self.selected_terminal_surface_id(),
+            uri: decision.uri,
+            suppress: decision.suppress,
+            open: decision.open && !repeat,
+            column: mouse.column,
+            row: mouse.row,
         });
+    }
+
+    /// Hand one address to the user's browser and remember where it came from,
+    /// so the tail of a multi-click gesture cannot open it again.
+    fn open_link_from_grid(&mut self, uri: String, column: u16, row: u16) {
+        self.last_link_open = Some((Instant::now(), column, row));
         let success = format!("Opened {uri} in your default browser.");
         self.open_url_in_browser(uri, success);
     }
 
-    /// Drop any withheld-release bookkeeping. Called wherever the press it
-    /// belongs to can no longer be completed: the host lost focus, the terminal
-    /// resized under the pointer, the surface went away.
+    /// Drop any pending-press bookkeeping. Called wherever the press it belongs
+    /// to can no longer be completed: the host lost focus, the terminal resized
+    /// under the pointer, the surface went away.
     pub(crate) fn retire_pending_link_click(&mut self) {
         self.pending_link_click = None;
     }
 
-    /// Answer one mouse event while a link press is being withheld. Returns
-    /// whether the event was swallowed.
+    /// Answer one mouse event against a pending link press. Returns whether the
+    /// event was swallowed (kept from the child AND from the ordinary arms).
     ///
-    /// The release of a consumed press must never reach the child, and neither
-    /// must the drag between them. A NEW press retires the record instead of
-    /// being swallowed, so a release that never arrived (the pointer left the
-    /// window, the host ate it) cannot strand the next click. A surface change
-    /// under the pending press retires it the same way, without any call site
-    /// having to remember to.
-    fn consume_pending_link_click(&mut self, mouse: &MouseEvent) -> bool {
+    /// The RELEASE is where an open happens, matching the web: a press and a
+    /// release in the same cell is a click, a gesture that travelled has to end
+    /// on the link it started on, and anything else opens nothing. While the
+    /// child tracks the mouse the whole gesture is withheld from it; with
+    /// tracking off nothing was going to be forwarded anyway, so the press and
+    /// drag pass through and become dux's own selection, which is how a user
+    /// still selects a URL to copy.
+    ///
+    /// A NEW press retires the record instead of being swallowed, so a release
+    /// that never arrived (the pointer left the window, the host ate it) cannot
+    /// strand the next click. A surface change under the pending press retires
+    /// it the same way.
+    fn handle_pending_link_mouse(&mut self, mouse: &MouseEvent) -> bool {
         let Some(pending) = self.pending_link_click.clone() else {
             return false;
         };
@@ -9303,9 +9430,20 @@ impl App {
         match mouse.kind {
             MouseEventKind::Up(button) if button == pending.button => {
                 self.pending_link_click = None;
-                true
+                let travel = mouse
+                    .column
+                    .abs_diff(pending.column)
+                    .max(mouse.row.abs_diff(pending.row));
+                let release_uri = self
+                    .link_at_screen_point(mouse.column, mouse.row)
+                    .map(str::to_string);
+                if pending.open && link_release_opens(travel, release_uri.as_deref(), &pending.uri)
+                {
+                    self.open_link_from_grid(pending.uri, mouse.column, mouse.row);
+                }
+                pending.suppress
             }
-            MouseEventKind::Drag(button) if button == pending.button => true,
+            MouseEventKind::Drag(button) if button == pending.button => pending.suppress,
             MouseEventKind::Down(_) => {
                 self.pending_link_click = None;
                 false
@@ -9315,8 +9453,8 @@ impl App {
     }
 
     /// A press over the WINDOWED agent grid, asked the link question first.
-    /// Returns whether the press was consumed (opened, or forwarded through the
-    /// hatch); `false` leaves every other click to today's behavior.
+    /// Returns whether the press was consumed; `false` leaves it to today's
+    /// behavior (focus, the double-click bookkeeping, a forward to the child).
     fn handle_center_link_press(&mut self, mouse: &MouseEvent) -> bool {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             || !matches!(self.center_mode, CenterMode::Agent)
@@ -9337,12 +9475,19 @@ impl App {
             link.as_deref(),
             child_wants_mouse,
         ) {
-            TerminalPressAction::OpenLink(uri) => {
-                self.open_link_from_grid(uri);
-                true
+            TerminalPressAction::Link(decision) => {
+                let suppress = decision.suppress;
+                self.note_link_press(decision, mouse);
+                suppress
             }
             TerminalPressAction::ForwardPlainClick => {
-                self.begin_center_mouse_forward_ignoring_modifiers(mouse)
+                // Claimed whether or not the forward gates let it through: the
+                // hatch means "this press is the app's", and a press the gates
+                // refuse (scrolled back, a modal owning the pane) must go
+                // nowhere rather than fall back to focus and the double-click
+                // bookkeeping, which is what the fullscreen path already does.
+                self.begin_center_mouse_forward_ignoring_modifiers(mouse);
+                true
             }
             TerminalPressAction::Unclaimed => false,
         }
@@ -9357,8 +9502,10 @@ impl App {
     /// handling) when any gate fails:
     /// - not windowed (fullscreen keeps its raw-input mouse path),
     /// - the center pane is not showing the agent surface,
-    /// - the click carries a modifier (Shift/Alt/Ctrl clicks stay dux's
-    ///   host-selection story, exactly as in a real terminal emulator),
+    /// - the click carries a modifier (Shift/Alt clicks stay dux's
+    ///   host-selection story, exactly as in a real terminal emulator; the one
+    ///   exception is the Ctrl hatch over a linked cell, which comes in
+    ///   through `begin_center_mouse_forward_ignoring_modifiers` instead),
     /// - the click lands outside the terminal content area,
     /// - the pane is scrolled back (the scroll vocabulary owns it),
     /// - a modal surface owns the pane (macro bar, resize mode), matching
@@ -9379,6 +9526,11 @@ impl App {
     /// (scrolled back, no mouse-tracking child, a modal surface owning the
     /// pane). The report itself is rebuilt from the button code alone in
     /// `write_center_mouse_report`, so no modifier bit ever reaches the child.
+    ///
+    /// A refused gate is NOT a fall-through: the caller claims the press
+    /// either way, so a hatch click on a scrolled-back pane does nothing at all
+    /// rather than focusing the pane and half-arming a double click. The
+    /// fullscreen path behaves the same, and the two are tested together.
     fn begin_center_mouse_forward_ignoring_modifiers(&mut self, mouse: &MouseEvent) -> bool {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             || !matches!(self.center_mode, CenterMode::Agent)
@@ -9811,11 +9963,11 @@ impl App {
             return false;
         }
 
-        // The release (and any drag) belonging to a press dux already spent on
-        // a link. Ordered before every arm below so nothing downstream can hand
-        // half a click to the child, and after the card, which owns its own
-        // area outright.
-        if self.consume_pending_link_click(&mouse) {
+        // The release (and any drag) belonging to a press dux took an interest
+        // in. This is where an open actually happens. Ordered before every arm
+        // below so nothing downstream can hand half a withheld click to the
+        // child, and after the card, which owns its own area outright.
+        if self.handle_pending_link_mouse(&mouse) {
             return false;
         }
 
@@ -10510,7 +10662,9 @@ mod tests {
 
     use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
-    use super::{TerminalPressAction, decide_terminal_press};
+    use super::{
+        LinkPressDecision, TerminalPressAction, decide_terminal_press, link_release_opens,
+    };
     use crate::app::ConfirmFocus;
     use crate::app::ResizeDragState;
     use crate::app::SelectionOrigin;
@@ -15994,29 +16148,39 @@ not_a_real_action = ["x"]
         rx
     }
 
-    /// Paint one cell of the rendered snapshot with an OSC 8 address on it, as
-    /// the emulator would after the child emitted a link. `columns` is how many
-    /// grid columns the glyph occupies, so a wide-glyph link can be tested
-    /// without a CJK font in the loop.
-    fn install_linked_cell(app: &mut App, row: u16, col: u16, symbol: &str, uri: &str) {
+    /// Paint cells of the rendered snapshot with an OSC 8 address on them, as
+    /// the emulator would after the child emitted a link, and stamp the buffer
+    /// as belonging to the surface on screen (which is what the hit test
+    /// requires before it will read a cell at all).
+    fn install_linked_cells(app: &mut App, uri: &str, cells: &[(u16, u16, &str)]) {
         app.snapshot_buf.rows = 16;
         app.snapshot_buf.cols = 55;
         app.snapshot_buf.links = vec![uri.to_string()];
-        app.snapshot_buf.cells = vec![crate::pty::SnapshotCell {
-            row,
-            col,
-            symbol: symbol.into(),
-            fg: crate::pty::CellColor::Reset,
-            bg: crate::pty::CellColor::Reset,
-            modifier: crate::pty::CellModifier::default(),
-            link: Some(0),
-        }];
+        app.snapshot_buf.cells = cells
+            .iter()
+            .map(|(row, col, symbol)| crate::pty::SnapshotCell {
+                row: *row,
+                col: *col,
+                symbol: (*symbol).into(),
+                fg: crate::pty::CellColor::Reset,
+                bg: crate::pty::CellColor::Reset,
+                modifier: crate::pty::CellModifier::default(),
+                link: Some(0),
+            })
+            .collect();
+        app.last_snapshot_id = app.selected_terminal_surface_id();
+    }
+
+    /// The common case: one linked cell at grid (4, 9), which the synthetic
+    /// layout puts under screen point (30, 5).
+    fn install_linked_cell(app: &mut App, row: u16, col: u16, symbol: &str, uri: &str) {
+        install_linked_cells(app, uri, &[(row, col, symbol)]);
     }
 
     /// Wait for the opener to be asked for one address, or say what happened.
     fn opened_url(rx: &std::sync::mpsc::Receiver<String>) -> String {
         rx.recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the opener must be asked for the address under the pressed cell")
+            .expect("the opener must be asked for the address the gesture landed on")
     }
 
     fn nothing_opened(rx: &std::sync::mpsc::Receiver<String>) {
@@ -16026,12 +16190,13 @@ not_a_real_action = ["x"]
         }
     }
 
-    /// A plain left press on a linked cell is dux's: the address opens on the
+    /// A plain click on a linked cell is dux's: the address opens on the
     /// machine running dux, and NEITHER the press nor its release reaches the
     /// child, even though the child has mouse reporting on and would otherwise
-    /// have been handed both.
+    /// have been handed both. The open happens on the RELEASE, matching the
+    /// web: a press alone is not yet a click.
     #[test]
-    fn windowed_plain_click_on_a_linked_cell_opens_it_and_the_child_sees_nothing() {
+    fn windowed_click_on_a_linked_cell_opens_it_and_the_child_sees_nothing() {
         let mut app = test_app(default_bindings());
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         let rx = recording_opener(&mut app);
@@ -16039,23 +16204,114 @@ not_a_real_action = ["x"]
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
-        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
+        assert!(
+            app.pending_link_click.is_some(),
+            "the press decides; the record is what carries that decision"
+        );
+        nothing_opened(&rx);
         assert_eq!(
             app.center_mouse_forward, None,
-            "an opened link arms no forwarding drag"
+            "a withheld press arms no forwarding drag"
         );
+
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
 
         std::thread::sleep(std::time::Duration::from_millis(300));
         let rendered = forwarded_echo(&app);
         assert!(
             !rendered.contains("[<"),
-            "neither half of a consumed link click may reach the child; got {rendered:?}"
+            "neither half of a withheld link click may reach the child; got {rendered:?}"
         );
         assert!(
             app.pending_link_click.is_none(),
-            "the release retires the withheld-click record"
+            "the release spends the record"
         );
+    }
+
+    /// A press on a link and a release somewhere else is a drag, not a click,
+    /// and opens nothing. Both halves are still withheld from the child: the
+    /// press already decided that.
+    #[test]
+    fn a_press_on_a_link_released_elsewhere_opens_nothing() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        let rx = recording_opener(&mut app);
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 40, 8));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 40, 8));
+
+        nothing_opened(&rx);
+        let rendered = forwarded_echo(&app);
+        assert!(
+            !rendered.contains("[<"),
+            "the whole withheld gesture stays away from the child; got {rendered:?}"
+        );
+    }
+
+    /// A gesture that travelled but stayed on the same link is still a click:
+    /// a long URL wraps across cells, and a few cells of drift along it must
+    /// not cost the user the open.
+    #[test]
+    fn a_gesture_that_stays_on_the_same_link_still_opens_it() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        let rx = recording_opener(&mut app);
+        install_linked_cells(
+            &mut app,
+            "https://example.com/a/very/long/address",
+            &[(4, 9, "P"), (4, 10, "R"), (4, 11, "1")],
+        );
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 32, 5));
+
+        assert_eq!(opened_url(&rx), "https://example.com/a/very/long/address");
+    }
+
+    /// With no child tracking the mouse there is nothing to withhold, so the
+    /// press keeps its ordinary meaning and a drag that starts on a link
+    /// becomes dux's own text selection. That is how a user still selects a URL
+    /// to copy, and the gesture opens nothing.
+    #[test]
+    fn a_drag_from_a_link_selects_and_opens_nothing_without_mouse_tracking() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "");
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        let rx = recording_opener(&mut app);
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
+
+        app.process_raw_input_bytes(b"\x1b[<0;31;6M")
+            .expect("the press is handled");
+        assert!(
+            app.pending_link_click
+                .as_ref()
+                .is_some_and(|pending| !pending.suppress),
+            "with tracking off the press is noted but never withheld"
+        );
+        assert!(
+            app.terminal_selection.is_some(),
+            "the press must still start dux's own selection"
+        );
+
+        app.process_raw_input_bytes(b"\x1b[<32;41;9M")
+            .expect("the drag is handled");
+        let dragged = app
+            .terminal_selection
+            .clone()
+            .expect("the drag must extend dux's own selection");
+        assert_ne!(
+            dragged.anchor, dragged.end,
+            "a drag that reached the selection covers more than the cell it started on"
+        );
+
+        app.process_raw_input_bytes(b"\x1b[<0;41;9m")
+            .expect("the release is handled");
+
+        nothing_opened(&rx);
     }
 
     /// The cell beside the link is an ordinary cell, and an ordinary click on a
@@ -16075,9 +16331,10 @@ not_a_real_action = ["x"]
         nothing_opened(&rx);
     }
 
-    /// THE HATCH. Ctrl+click on a linked cell gives the click to the app and
-    /// opens nothing, and the child sees a PLAIN press: the modifier is how the
-    /// user reached the app, not something the app asked about.
+    /// THE HATCH. Ctrl+click on a linked cell gives the click to a
+    /// mouse-tracking app and opens nothing, and the child sees a PLAIN press:
+    /// the modifier is how the user reached the app, not something the app
+    /// asked about.
     #[test]
     fn windowed_ctrl_click_on_a_linked_cell_forwards_a_plain_press_and_opens_nothing() {
         let mut app = test_app(default_bindings());
@@ -16101,6 +16358,75 @@ not_a_real_action = ["x"]
         assert!(app.pending_link_click.is_none());
     }
 
+    /// With no app tracking the mouse the hatch chord has nothing to hand the
+    /// click to, so it keeps its plain meaning and opens, exactly as the web's
+    /// `linkActivateAction` refuses the open only while tracking is on.
+    #[test]
+    fn ctrl_click_still_opens_when_no_child_is_tracking_the_mouse() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "");
+        let rx = recording_opener(&mut app);
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
+
+        let ctrl = |kind| MouseEvent {
+            kind,
+            column: 30,
+            row: 5,
+            modifiers: KeyModifiers::CONTROL,
+        };
+        app.handle_mouse(ctrl(MouseEventKind::Down(MouseButton::Left)));
+        app.handle_mouse(ctrl(MouseEventKind::Up(MouseButton::Left)));
+
+        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
+    }
+
+    /// The hatch on a scrolled-back pane forwards nothing (the scroll
+    /// vocabulary owns the pane), and it must not fall back to focusing the
+    /// pane either: two of them in a row would then read as a double click and
+    /// maximize the surface, which the fullscreen path never did.
+    #[test]
+    fn a_hatch_click_while_scrolled_back_does_nothing_at_all() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        let rx = recording_opener(&mut app);
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
+        let session_id = app.engine.sessions[0].id.clone();
+        app.scroll_mode.insert(session_id);
+        app.focus = FocusPane::Left;
+
+        let ctrl = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 30,
+            row: 5,
+            modifiers: KeyModifiers::CONTROL,
+        };
+        app.handle_mouse(ctrl);
+        app.handle_mouse(ctrl);
+
+        assert_eq!(app.center_mouse_forward, None);
+        assert_eq!(
+            app.focus,
+            FocusPane::Left,
+            "a refused hatch press does not fall back to focusing the pane"
+        );
+        assert!(
+            app.last_mouse_click.is_none(),
+            "and it records no click, so a second one cannot pair with it"
+        );
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "a refused hatch press is not half of a double click"
+        );
+        nothing_opened(&rx);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let rendered = forwarded_echo(&app);
+        assert!(
+            !rendered.contains("[<"),
+            "and nothing reaches the child either; got {rendered:?}"
+        );
+    }
+
     /// Shift is the selection modifier here and the host terminal's own link
     /// modifier while dux holds the mouse, so dux neither opens nor forwards.
     #[test]
@@ -16110,12 +16436,14 @@ not_a_real_action = ["x"]
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
+        let shift = |kind| MouseEvent {
+            kind,
             column: 30,
             row: 5,
             modifiers: KeyModifiers::SHIFT,
-        });
+        };
+        app.handle_mouse(shift(MouseEventKind::Down(MouseButton::Left)));
+        app.handle_mouse(shift(MouseEventKind::Up(MouseButton::Left)));
 
         nothing_opened(&rx);
         assert_eq!(app.center_mouse_forward, None);
@@ -16139,12 +16467,14 @@ not_a_real_action = ["x"]
 
         // Screen column 31 is grid column 10: the spacer half of the glyph.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 31, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 31, 5));
 
         assert_eq!(opened_url(&rx), "https://example.com/wide");
     }
 
     /// Scrolled back, the snapshot IS the scrolled view and its cells are
-    /// viewport-relative, so the link the user can see is the link that opens.
+    /// viewport-relative, so the link the user can see is the link that opens
+    /// and no scrollback offset is ever added to the lookup.
     #[test]
     fn a_link_in_scrollback_opens_from_the_row_the_user_can_see() {
         let mut app = test_app(default_bindings());
@@ -16153,40 +16483,62 @@ not_a_real_action = ["x"]
         let session_id = app.engine.sessions[0].id.clone();
         app.scroll_mode.insert(session_id);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/history");
+        // A snapshot taken well above the live edge resolves the same point to
+        // the same cell: adding the offset anywhere in the lookup moves it.
+        app.snapshot_buf.scrollback_offset = 120;
+        app.snapshot_buf.scrollback_total = 400;
+
+        assert_eq!(
+            app.link_at_screen_point(30, 5),
+            Some("https://example.com/history"),
+            "the row the user is looking at is the row that answers"
+        );
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
 
         assert_eq!(opened_url(&rx), "https://example.com/history");
     }
 
-    /// A consumed click is not half of a double click: the next press must not
-    /// pair with it and maximize the pane. Three presses in a row, the first
-    /// spent on a link, leave the pane windowed.
+    /// A spent click is not half of a double click: the next press must not
+    /// pair with it and maximize the pane.
     #[test]
-    fn a_consumed_link_click_cannot_become_half_of_a_double_click() {
+    fn a_withheld_link_click_cannot_become_half_of_a_double_click() {
         let mut app = test_app(default_bindings());
-        install_mouse_forward_child(&mut app, "");
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
-        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
 
-        // The second press lands on an unlinked cell, and the third rapidly
-        // after it: those two are the only pair on screen.
+        // Two ordinary presses on an unlinked cell: those two are the only pair
+        // on screen, and the first of them is a FIRST click.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 31, 5));
         assert_eq!(
             app.fullscreen_overlay,
             FullscreenOverlay::None,
-            "the press after a consumed link click is a FIRST click, not a second"
+            "the press after a spent link click is a first click, not a second"
         );
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 31, 5));
-        assert_eq!(
-            app.fullscreen_overlay,
-            FullscreenOverlay::Agent,
-            "two ordinary presses still make a double click"
-        );
+    }
+
+    /// Double-clicking a URL is how a terminal selects a word, not a request
+    /// for two browser tabs. The second click of the pair opens nothing.
+    #[test]
+    fn a_double_click_on_a_link_opens_it_once() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        let rx = recording_opener(&mut app);
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
+
+        for _ in 0..2 {
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        }
+
+        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
+        nothing_opened(&rx);
     }
 
     /// Opening a link is not a selection gesture: a highlight the user already
@@ -16194,7 +16546,7 @@ not_a_real_action = ["x"]
     #[test]
     fn opening_a_link_leaves_a_completed_selection_alone() {
         let mut app = test_app(default_bindings());
-        install_mouse_forward_child(&mut app, "");
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
         app.terminal_selection = Some(TerminalSelection {
@@ -16205,6 +16557,7 @@ not_a_real_action = ["x"]
         });
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
         assert_eq!(opened_url(&rx), "https://example.com/pr/1");
 
         assert!(
@@ -16213,7 +16566,37 @@ not_a_real_action = ["x"]
         );
     }
 
-    // -- The withheld-release lifecycle --
+    /// The buffer the hit test reads is a REUSED one: it holds whatever was
+    /// last painted into it. A pane with no live child of its own is showing
+    /// nothing of its own, so a click on it must find no link rather than the
+    /// previous agent's.
+    #[test]
+    fn a_pane_with_no_live_child_of_its_own_finds_no_link() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        let rx = recording_opener(&mut app);
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
+        assert!(
+            app.link_at_screen_point(30, 5).is_some(),
+            "test setup: the agent on screen does carry the link"
+        );
+
+        // A dormant surface: selected, with nothing running behind it, while
+        // the buffer still holds the previous agent's cells.
+        app.session_surface = SessionSurface::Terminal;
+        app.active_terminal_id = Some("terminal-dormant".to_string());
+
+        assert_eq!(
+            app.link_at_screen_point(30, 5),
+            None,
+            "the cells belong to a pane that is not the one being clicked"
+        );
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        nothing_opened(&rx);
+    }
+
+    // -- The pending-press lifecycle --
 
     /// A release that never arrives (the pointer left the window, the host ate
     /// it) must not strand the next click: a NEW press retires the record and
@@ -16226,7 +16609,6 @@ not_a_real_action = ["x"]
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
-        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
         assert!(app.pending_link_click.is_some());
 
         // No Up at all; the user presses again, on an ordinary cell.
@@ -16242,53 +16624,124 @@ not_a_real_action = ["x"]
             "and the new press must be handled normally"
         );
         wait_for_forwarded_echo(&app, "[<0;11;5M");
+        nothing_opened(&rx);
     }
 
-    /// Focus left the host window between press and release, so the release is
-    /// somebody else's. A late Up arriving afterwards is an ordinary release
-    /// again, not a swallowed one.
+    /// The host lost focus between press and release, so the release is
+    /// somebody else's window's. Driven through the real crossterm event the
+    /// run loop hands over, not through the retirement helper.
     #[test]
-    fn losing_focus_retires_a_withheld_release() {
+    fn a_host_focus_loss_retires_a_pending_press() {
         let mut app = test_app(default_bindings());
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
-        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
-
-        app.retire_pending_link_click();
-        app.terminal_focus.on_focus_lost();
-
-        assert!(app.pending_link_click.is_none());
-        assert!(
-            !app.consume_pending_link_click(&mouse(MouseEventKind::Up(MouseButton::Left), 30, 5)),
-            "a late release after focus loss is nobody's withheld half"
-        );
-    }
-
-    /// The surface moved out from under the press (another agent, another tab,
-    /// a terminal): the record cannot describe the new grid, so it retires
-    /// itself without any call site having to remember to.
-    #[test]
-    fn switching_surface_mid_press_retires_the_withheld_release() {
-        let mut app = test_app(default_bindings());
-        install_mouse_forward_child(&mut app, "\\033[?1000h");
-        let rx = recording_opener(&mut app);
-        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
-
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
-        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
         assert!(app.pending_link_click.is_some());
 
-        app.session_surface = SessionSurface::Terminal;
-        app.active_terminal_id = Some("terminal-1".to_string());
+        app.handle_terminal_event(ratatui::crossterm::event::Event::FocusLost);
 
-        assert!(
-            !app.consume_pending_link_click(&mouse(MouseEventKind::Up(MouseButton::Left), 30, 5)),
-            "the release belongs to a grid that is no longer on screen"
-        );
         assert!(app.pending_link_click.is_none());
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        nothing_opened(&rx);
+    }
+
+    /// The same through the raw focus-out report, which is the only focus
+    /// notice the interactive path ever sees.
+    #[test]
+    fn a_raw_focus_out_report_retires_a_pending_press() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        let rx = recording_opener(&mut app);
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
+
+        app.process_raw_input_bytes(b"\x1b[<0;31;6M")
+            .expect("the press is handled");
+        assert!(app.pending_link_click.is_some());
+
+        app.process_raw_input_bytes(b"\x1b[O")
+            .expect("the focus report is handled");
+
+        assert!(app.pending_link_click.is_none());
+        app.process_raw_input_bytes(b"\x1b[<0;31;6m")
+            .expect("the release is handled");
+        nothing_opened(&rx);
+    }
+
+    /// The host window resized under the press: the grid reflowed and the cell
+    /// the press was aimed at moved with it.
+    #[test]
+    fn a_host_resize_retires_a_pending_press() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        let rx = recording_opener(&mut app);
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        assert!(app.pending_link_click.is_some());
+
+        app.handle_terminal_event(ratatui::crossterm::event::Event::Resize(120, 40));
+
+        assert!(app.pending_link_click.is_none());
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        nothing_opened(&rx);
+    }
+
+    /// Switching surface retires the record where the SELECTION is retired,
+    /// eagerly: coming back to the original surface must not resurrect a press
+    /// that belongs to a view the user has since left and returned to.
+    #[test]
+    fn switching_surface_away_and_back_retires_a_pending_press() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        let rx = recording_opener(&mut app);
+        install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
+        let session_id = app.engine.sessions[0].id.clone();
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        assert!(app.pending_link_click.is_some());
+
+        // Away to a companion terminal with a child of its own, and back.
+        let terminal_id = "terminal-1".to_string();
+        app.engine.companion_terminals.insert(
+            terminal_id.clone(),
+            dux_core::model::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Session(session_id.clone()),
+                label: "shell".to_string(),
+                foreground_cmd: None,
+                client: PtyClient::spawn(
+                    "sh",
+                    &["-c".to_string(), "sleep 5".to_string()],
+                    std::path::Path::new("."),
+                    16,
+                    55,
+                    100,
+                )
+                .expect("spawn pty"),
+                sort_order: 0,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        app.session_surface = SessionSurface::Terminal;
+        app.active_terminal_id = Some(terminal_id);
+        app.refresh_snapshot_buf();
+        app.session_surface = SessionSurface::Agent;
+        app.refresh_snapshot_buf();
+
+        assert_eq!(
+            app.selected_terminal_surface_id().as_deref(),
+            Some(session_id.as_str()),
+            "test setup: the original surface is back on screen"
+        );
+        assert!(
+            app.pending_link_click.is_none(),
+            "the record went with the surface it was stamped against"
+        );
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        nothing_opened(&rx);
     }
 
     // -- The opener seam --
@@ -16325,11 +16778,22 @@ not_a_real_action = ["x"]
         );
     }
 
-    // -- The pure decision --
+    // -- The pure decisions --
 
     #[test]
     fn the_press_decision_covers_every_case_the_two_paths_ask_about() {
         let link = Some("https://example.com");
+        let withheld = TerminalPressAction::Link(LinkPressDecision {
+            uri: "https://example.com".to_string(),
+            suppress: true,
+            open: true,
+        });
+        let passed_through = TerminalPressAction::Link(LinkPressDecision {
+            uri: "https://example.com".to_string(),
+            suppress: false,
+            open: true,
+        });
+
         assert_eq!(
             decide_terminal_press(
                 MouseEventKind::Down(MouseButton::Left),
@@ -16337,8 +16801,8 @@ not_a_real_action = ["x"]
                 link,
                 true
             ),
-            TerminalPressAction::OpenLink("https://example.com".to_string()),
-            "a plain press on a link is dux's, mouse-tracking child or not"
+            withheld,
+            "a plain press on a link is dux's, and a tracking child sees none of it"
         );
         assert_eq!(
             decide_terminal_press(
@@ -16347,7 +16811,8 @@ not_a_real_action = ["x"]
                 link,
                 false
             ),
-            TerminalPressAction::OpenLink("https://example.com".to_string()),
+            passed_through,
+            "with tracking off there is nothing to withhold"
         );
         assert_eq!(
             decide_terminal_press(
@@ -16365,8 +16830,8 @@ not_a_real_action = ["x"]
                 link,
                 false
             ),
-            TerminalPressAction::Unclaimed,
-            "with no child asking for the mouse there is nothing to hand the click to"
+            passed_through,
+            "with no app to hand the click to, the hatch chord opens like a plain click"
         );
         assert_eq!(
             decide_terminal_press(
@@ -16376,7 +16841,17 @@ not_a_real_action = ["x"]
                 true
             ),
             TerminalPressAction::Unclaimed,
-            "Shift is the selection modifier and the host's own link modifier"
+            "Shift is the selection modifier and the host's own link gesture"
+        );
+        assert_eq!(
+            decide_terminal_press(
+                MouseEventKind::Down(MouseButton::Left),
+                KeyModifiers::SHIFT,
+                link,
+                false
+            ),
+            TerminalPressAction::Unclaimed,
+            "and it stays a selection with tracking off, where dux parts company with the web"
         );
         assert_eq!(
             decide_terminal_press(
@@ -16397,9 +16872,33 @@ not_a_real_action = ["x"]
             assert_eq!(
                 decide_terminal_press(kind, KeyModifiers::empty(), link, true),
                 TerminalPressAction::Unclaimed,
-                "only a left PRESS can open a link; {kind:?} must not"
+                "only a left PRESS can start a link gesture; {kind:?} must not"
             );
         }
+    }
+
+    #[test]
+    fn the_release_decision_is_a_click_or_a_drag_that_stayed_on_the_link() {
+        assert!(
+            link_release_opens(0, Some("https://example.com"), "https://example.com"),
+            "press and release in the same cell is a click"
+        );
+        assert!(
+            link_release_opens(0, None, "https://example.com"),
+            "a cell the pointer never left is a click even where the lookup answers nothing"
+        );
+        assert!(
+            link_release_opens(4, Some("https://example.com"), "https://example.com"),
+            "a gesture along the same link is still that link's click"
+        );
+        assert!(
+            !link_release_opens(4, Some("https://example.com/other"), "https://example.com"),
+            "a gesture that ended on a different link opens neither"
+        );
+        assert!(
+            !link_release_opens(1, None, "https://example.com"),
+            "a gesture that ended off the link is a drag"
+        );
     }
 
     /// The lookup reads the snapshot's own interned table, so a cell pointing
@@ -16409,12 +16908,13 @@ not_a_real_action = ["x"]
     #[test]
     fn the_link_lookup_follows_the_snapshots_own_table() {
         let mut app = test_app(default_bindings());
-        install_mouse_layout(&mut app);
+        install_mouse_forward_child(&mut app, "");
         app.snapshot_buf.rows = 16;
         app.snapshot_buf.cols = 55;
         app.snapshot_buf.links = (0..256)
             .map(|i| format!("https://example.com/{i}"))
             .collect();
+        app.last_snapshot_id = app.selected_terminal_surface_id();
         let cell = |col: u16, link: u16| crate::pty::SnapshotCell {
             row: 0,
             col,
@@ -16464,40 +16964,51 @@ not_a_real_action = ["x"]
         (app, rx)
     }
 
-    /// In fullscreen the same rule applies through the raw mouse path: a plain
-    /// press on a linked cell opens it and the child sees neither half.
+    /// In fullscreen the same rule applies through the raw mouse path: the
+    /// press withholds, the release opens, and the child sees neither half.
     #[test]
-    fn fullscreen_plain_click_on_a_linked_cell_opens_it_and_the_child_sees_nothing() {
+    fn fullscreen_click_on_a_linked_cell_opens_it_and_the_child_sees_nothing() {
         let (mut app, rx) = interactive_link_app();
 
         app.process_raw_input_bytes(&sgr_press(0, 31, 6))
             .expect("the press is handled");
-        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
+        nothing_opened(&rx);
         app.process_raw_input_bytes(b"\x1b[<0;31;6m")
             .expect("the release is handled");
+        assert_eq!(opened_url(&rx), "https://example.com/pr/1");
 
         std::thread::sleep(std::time::Duration::from_millis(300));
         let rendered = forwarded_echo(&app);
         assert!(
             !rendered.contains("[<"),
-            "neither half of a consumed link click may reach the child; got {rendered:?}"
+            "neither half of a withheld link click may reach the child; got {rendered:?}"
         );
     }
 
-    /// The hatch works in fullscreen too, and the raw bytes carry the Ctrl bit,
-    /// so the forwarded report is rebuilt rather than passed through.
+    /// The hatch works in fullscreen too, and the raw bytes carry the Ctrl bit
+    /// on every report of the gesture, so the press, the drag and the release
+    /// are all rebuilt rather than passed through.
     #[test]
-    fn fullscreen_ctrl_click_on_a_linked_cell_forwards_a_plain_press() {
+    fn fullscreen_ctrl_click_forwards_a_plain_press_drag_and_release() {
         let (mut app, rx) = interactive_link_app();
 
-        // cb 16 is a left press with Ctrl held.
+        // cb 16 is a left press with Ctrl held; cb 48 the drag that follows it.
         app.process_raw_input_bytes(&sgr_press(16, 31, 6))
             .expect("the press is handled");
+        wait_for_forwarded_echo(&app, "[<0;10;5M");
+        app.process_raw_input_bytes(&sgr_press(48, 33, 6))
+            .expect("the drag is handled");
+        app.process_raw_input_bytes(b"\x1b[<16;33;6m")
+            .expect("the release is handled");
 
-        let rendered = wait_for_forwarded_echo(&app, "[<0;10;5M");
+        let rendered = wait_for_forwarded_echo(&app, "[<0;12;5m");
         assert!(
-            !rendered.contains("[<16;"),
-            "the Ctrl bit must be stripped before the child sees the click; got {rendered:?}"
+            !rendered.contains("[<16;") && !rendered.contains("[<48;"),
+            "no part of the hatch gesture may carry its modifier bit to the child; got {rendered:?}"
+        );
+        assert_eq!(
+            app.center_mouse_forward, None,
+            "the release must disarm the forwarding record"
         );
         nothing_opened(&rx);
     }
@@ -16510,6 +17021,8 @@ not_a_real_action = ["x"]
         // cb 4 is a left press with Shift held.
         app.process_raw_input_bytes(&sgr_press(4, 31, 6))
             .expect("the press is handled");
+        app.process_raw_input_bytes(b"\x1b[<4;31;6m")
+            .expect("the release is handled");
 
         nothing_opened(&rx);
         std::thread::sleep(std::time::Duration::from_millis(300));

@@ -304,6 +304,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         last_snapshot_id: None,
         terminal_selection: None,
         pending_link_click: None,
+        last_link_open: None,
         url_opener: crate::app::default_url_opener(),
         startup_log_selection: None,
         pending_server_flip: None,

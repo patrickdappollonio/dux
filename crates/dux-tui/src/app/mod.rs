@@ -97,20 +97,28 @@ pub(crate) fn default_url_opener() -> UrlOpener {
     Arc::new(|url: &str| dux_core::browser::open_url(url))
 }
 
-/// A left press dux consumed to open an OSC 8 link, held so the matching
-/// release is withheld from the child too.
+/// A left press dux took an interest in because it landed on an OSC 8 link.
 ///
 /// One lifecycle shared by the windowed mouse path and the fullscreen raw-input
-/// path: the press decides, and the release must not arrive at the child on its
-/// own. It carries the surface it was armed on, so switching agent, tab or
-/// terminal retires it without any call site having to remember to; a new press
-/// and a lost focus retire it explicitly. Nothing ever waits forever for an Up
-/// that is not coming.
+/// path: the press DECIDES (what to withhold, and whether an open is still on
+/// the table) and the release ACTS. It carries the surface it was armed on, so
+/// a release that arrives after the pane changed under it is not mistaken for
+/// this one's; a new press, a lost focus, a resize and a surface switch retire
+/// it. Nothing ever waits forever for an Up that is not coming.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PendingLinkClick {
     pub(crate) button: MouseButton,
     /// The terminal surface that was selected when the press landed.
     pub(crate) surface: Option<String>,
+    /// The address under the pressed cell.
+    pub(crate) uri: String,
+    /// Withhold this gesture's press, drag and release from the child.
+    pub(crate) suppress: bool,
+    /// The release may still open the address (see `link_release_opens`).
+    pub(crate) open: bool,
+    /// Where the press landed, in screen coordinates, for the travel test.
+    pub(crate) column: u16,
+    pub(crate) row: u16,
 }
 
 pub struct App {
@@ -433,8 +441,13 @@ pub struct App {
     last_snapshot_id: Option<String>,
     /// Active text selection in the terminal viewport, if any.
     pub(crate) terminal_selection: Option<TerminalSelection>,
-    /// A press dux consumed to open a link, whose release must be withheld too.
+    /// A press dux took an interest in, awaiting the release that acts on it.
     pub(crate) pending_link_click: Option<PendingLinkClick>,
+    /// When and where the last link was opened, so the second click of a
+    /// double click (the select-a-word gesture over a URL) does not open the
+    /// same address a second time. The terminal UI's twin of the web's
+    /// `detail > 1` refusal.
+    pub(crate) last_link_open: Option<(Instant, u16, u16)>,
     /// How this surface opens an address in the user's browser. Injected in
     /// tests; [`default_url_opener`] everywhere else.
     pub(crate) url_opener: UrlOpener,
@@ -3503,6 +3516,7 @@ impl App {
             last_snapshot_id: None,
             terminal_selection: None,
             pending_link_click: None,
+            last_link_open: None,
             url_opener: default_url_opener(),
             startup_log_selection: None,
             pending_server_flip: None,
@@ -3819,36 +3833,7 @@ impl App {
                                     break;
                                 }
                             };
-                            match event {
-                                Event::Key(key) => {
-                                    should_exit = match self.handle_key(key) {
-                                        Ok(exit) => exit,
-                                        Err(err) => {
-                                            self.report_runtime_error(
-                                                "key handling failed",
-                                                err.as_ref(),
-                                            );
-                                            false
-                                        }
-                                    };
-                                }
-                                Event::Mouse(mouse) => {
-                                    should_exit = self.handle_mouse(mouse);
-                                }
-                                // The grid the press was aimed at is gone, and
-                                // so is the cell that carried its link.
-                                Event::Resize(_, _) => self.retire_pending_link_click(),
-                                Event::FocusGained => {
-                                    self.terminal_focus.on_focus_gained(Instant::now())
-                                }
-                                Event::FocusLost => {
-                                    // The release will land on whatever window
-                                    // took the focus, never here.
-                                    self.retire_pending_link_click();
-                                    self.terminal_focus.on_focus_lost();
-                                }
-                                Event::Paste(text) => self.handle_paste(&text),
-                            }
+                            should_exit = self.handle_terminal_event(event);
 
                             // Stop draining if exit was requested.
                             if should_exit {
@@ -4176,6 +4161,48 @@ impl App {
             .keys()
             .any(|id| self.engine.terminal_is_working(id));
         agents || terminals
+    }
+
+    /// Route one crossterm event to its handler. Returns whether the app should
+    /// exit.
+    ///
+    /// Extracted from the run loop so the events that are NOT keys or mouse
+    /// presses (a host resize, a focus change) are reachable from a test: each
+    /// of them retires state that a test can then assert on, and a retirement
+    /// that only exists inside an unreachable loop body is a retirement nobody
+    /// can prove.
+    pub(crate) fn handle_terminal_event(&mut self, event: Event) -> bool {
+        match event {
+            Event::Key(key) => match self.handle_key(key) {
+                Ok(exit) => exit,
+                Err(err) => {
+                    self.report_runtime_error("key handling failed", err.as_ref());
+                    false
+                }
+            },
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Resize(_, _) => {
+                // The grid the press was aimed at has reflowed, and so has the
+                // cell that carried its link.
+                self.retire_pending_link_click();
+                false
+            }
+            Event::FocusGained => {
+                self.terminal_focus.on_focus_gained(Instant::now());
+                false
+            }
+            Event::FocusLost => {
+                // The release will land on whatever window took the focus,
+                // never here.
+                self.retire_pending_link_click();
+                self.terminal_focus.on_focus_lost();
+                false
+            }
+            Event::Paste(text) => {
+                self.handle_paste(&text);
+                false
+            }
+        }
     }
 
     pub(crate) fn set_info(&mut self, message: impl Into<String>) {
@@ -6311,6 +6338,12 @@ impl App {
                 provider.mark_dirty();
                 self.last_snapshot_id = Some(client_id);
                 self.terminal_selection = None;
+                // The same reason the selection goes: both were stamped against
+                // a grid that is no longer the one on screen. Retired EAGERLY
+                // here rather than left to the release's own surface check, so
+                // switching away and back cannot hand the record a grid it
+                // happens to match again.
+                self.pending_link_click = None;
             }
             let collect_links = self.engine.config.capabilities.hyperlinks;
             // A rebuild means the grid MOVED (output, a scroll, a resize). The
