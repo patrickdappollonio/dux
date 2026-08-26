@@ -202,7 +202,11 @@ always something you press the button for. The one exception takes nothing from 
 the device that lost the keyboard to a blip gets it back when it returns, provided the
 server is still holding its old, dead session and nobody else has claimed the terminal in
 the meantime. If somebody has, you come back as a watcher with the card up, and one tap
-puts you back in the driver's seat. A page in the background stays a watcher until it is
+puts you back in the driver's seat. The same goes if your page cannot confirm it is
+talking to the very same dux it started against, because dux was restarted while you were
+away or the check could not get through: coming back automatically is only safe when the
+old session is provably still the one you left, so you land as a watcher and press the
+button. A page in the background stays a watcher until it is
 in front again. If your own connection has given up entirely, the card steps aside for the
 **Connection lost** notice and its **Reconnect** button.
 

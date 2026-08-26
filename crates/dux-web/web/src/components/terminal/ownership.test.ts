@@ -72,6 +72,10 @@ beforeEach(() => {
   ledger.length = 0
   resetPtyOwnerEpochs()
   setVisibility("visible")
+  // The run-identity fan-out is module state shared by every test in this file,
+  // and self-succession now depends on it. Start each test from the state a
+  // freshly loaded tab is in: the run is confirmed to be the one that served it.
+  noteServerRunProbe("same")
 })
 afterEach(() => {
   vi.restoreAllMocks()
@@ -756,14 +760,35 @@ describe("self-succession names the ghost it expects to displace", () => {
     expect(view.result.current.isOwner).toBe(true)
   })
 
-  // A probe that could not answer is not evidence of a change, and treating it
-  // as one would put the flaky-network return back on the card.
-  it("keeps its ghosts when the run-identity probe could not answer", () => {
+  // A PROBE THAT COULD NOT ANSWER REFUSES THE SUCCESSION, and this is the one
+  // place the ergonomics lose to the rule. An unknown answer is not evidence of
+  // a change, but it is not evidence of sameness either, and a restarted server
+  // mints its connection ids from zero again: another device's fresh id can
+  // equal one of this pane's stale ghosts, and succeeding on it would take a pty
+  // this pane never owned with no press at all. So the pane lands as a watcher
+  // and the user pays one tap.
+  it("refuses self-succession while the run identity is unconfirmed", () => {
     const { view } = setup()
     act(() => view.result.current.connId.write("conn-a"))
     act(() => view.result.current.connId.write(null))
     act(() => noteServerRunProbe("unknown"))
     act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+    expect(view.result.current.takeoverIntent.expectedOwner()).toBe(undefined)
+    expect(view.result.current.isOwner).toBe(false)
+  })
+
+  // And the succession comes back the moment the probe answers: the ghosts were
+  // never wrong, only unproven.
+  it("self-succeeds again once a probe confirms the run has not moved", () => {
+    const { view } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    act(() => noteServerRunProbe("unknown"))
+    act(() => noteServerRunProbe("same"))
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    expect(view.result.current.takeoverIntent.expectedOwner()).toBe("conn-a")
     expect(view.result.current.isOwner).toBe(true)
   })
 

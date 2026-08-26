@@ -533,6 +533,7 @@ pub struct LiveServerLimits {
     search_index_max_files: AtomicUsize,
     access_log: AtomicBool,
     pty_send_timeout_seconds: AtomicUsize,
+    heartbeat_deadline_seconds: AtomicUsize,
 }
 
 impl LiveServerLimits {
@@ -570,11 +571,27 @@ impl LiveServerLimits {
             .store(value, Ordering::Relaxed);
     }
 
+    /// How long a browser waits for the server's answer to one beat before it
+    /// treats the socket as half-open and reconnects
+    /// (`[server] heartbeat_deadline_seconds`). Nothing on the server times
+    /// itself by this; it is read so a send that ANSWERS a beat cannot outlive
+    /// the window the client is waiting in. `0` means "not seeded yet" and the
+    /// caller falls back to the compiled default.
+    pub fn heartbeat_deadline_seconds(&self) -> usize {
+        self.heartbeat_deadline_seconds.load(Ordering::Relaxed)
+    }
+
+    pub fn set_heartbeat_deadline_seconds(&self, value: usize) {
+        self.heartbeat_deadline_seconds
+            .store(value, Ordering::Relaxed);
+    }
+
     /// Adopt every value from a reloaded `[server]` section.
     pub fn store_from(&self, server: &dux_core::config::ServerConfig) {
         self.set_search_index_max_files(server.search_index_max_files);
         self.set_access_log(server.access_log);
         self.set_pty_send_timeout_seconds(server.pty_send_timeout_seconds as usize);
+        self.set_heartbeat_deadline_seconds(server.heartbeat_deadline_seconds as usize);
     }
 }
 

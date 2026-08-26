@@ -459,6 +459,21 @@ describe("the four wake signals", () => {
     expect(FakeWS.instances.length).toBe(before)
   })
 
+  // A DISPOSED SOCKET IS DEAD FOR GOOD. `close()` and a terminal close code are
+  // both recoverable by a deliberate `connect()` (the Reconnect button), and
+  // that is why `connect()` clears the stop flag. Disposal is not: the pane that
+  // owned this socket is gone, so reviving it would open a connection nothing is
+  // listening to and, for a PTY, launch a provider for a pane that unmounted.
+  it("refuses to reconnect once it has been disposed", () => {
+    const sock = new TestSocket("ws://x")
+    sock.connect()
+    last().open()
+    sock.dispose()
+    const before = FakeWS.instances.length
+    sock.connect()
+    expect(FakeWS.instances.length).toBe(before)
+  })
+
   it("is a no-op once the route is gone for good, where shouldReconnect said no", () => {
     vi.useFakeTimers()
     setVisibility("visible")

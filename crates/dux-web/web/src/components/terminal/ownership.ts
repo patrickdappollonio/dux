@@ -84,7 +84,11 @@ import {
   seedVerdictFromConnected,
   type HandshakeOwner,
 } from "@/lib/ptyOwnership"
-import { onServerRunChanged } from "@/lib/serverRun"
+import {
+  currentRunStamp,
+  onServerRunChanged,
+  runIdentityConfirmedAs,
+} from "@/lib/serverRun"
 import { noteAgentPtyOwnership } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
 
@@ -203,7 +207,11 @@ export function useTerminalOwnership(
   //
   // Pane-local and re-derived per handshake, so it is bounded by this pane's own
   // reconnect count and dies with the mount.
-  const heldConnIdsRef = useRef<Set<string>>(new Set())
+  //
+  // Each id is STAMPED with the server run it was learned under, because a
+  // restarted server mints ids from zero again and another device's fresh id can
+  // equal one of ours (see `serverRun.ts`).
+  const heldConnIdsRef = useRef<Map<string, number>>(new Map())
   // GHOSTS DO NOT SURVIVE A SERVER RESTART. Connection ids come from a
   // process-global counter that starts again at zero, so an id this pane held
   // against the previous run can be minted afresh for somebody else's
@@ -216,12 +224,23 @@ export function useTerminalOwnership(
   // drop takes BOTH sockets, so the events socket reconnects and clears this set
   // strictly before the pty handshake that names the ghost arrives, and the
   // returning driver lands on the take-over card. A reconnect is not a restart.
+  //
+  // The stamp on each id is the other half, and it is what makes an UNPROVEN
+  // answer safe: a ghost is only ever ACTED ON while the current run is
+  // confirmed to be the one it was learned under, so a probe that cannot answer
+  // costs the returning driver one tap rather than letting it succeed onto an id
+  // a restarted server may have handed to somebody else.
   useEffect(() => onServerRunChanged(() => heldConnIdsRef.current.clear()), [])
+  // May a handshake naming `id` be treated as this pane meeting its own ghost?
+  const ownGhostOfThisRun = (id: string): boolean => {
+    const stamp = heldConnIdsRef.current.get(id)
+    return stamp !== undefined && runIdentityConfirmedAs(stamp)
+  }
   const connId = useMemo<ConnectionIdentity>(
     () => ({
       read: () => myConnIdRef.current,
       write: (next) => {
-        if (next !== null) heldConnIdsRef.current.add(next)
+        if (next !== null) heldConnIdsRef.current.set(next, currentRunStamp())
         myConnIdRef.current = next
       },
     }),
@@ -487,6 +506,11 @@ export function useTerminalOwnership(
     // before the first, so a single-slot ghost would land the returning driver
     // as a watcher of itself.
     //
+    // AND THE RUN MUST BE CONFIRMED. A ghost is only ours while the server is
+    // still the run that minted it: a restart mints ids from zero again, so an
+    // unproven run identity means no succession at all and the returning driver
+    // pays one tap. See `ownGhostOfThisRun` and `serverRun.ts`.
+    //
     // The claim goes out as a take-over, and it NAMES THE GHOST it expects to
     // displace. The server refuses the transfer inside its own critical section
     // when anybody else holds the pty by then, so a frame delayed on a mobile
@@ -504,7 +528,7 @@ export function useTerminalOwnership(
       !superseded &&
       typeof owner === "string" &&
       owner !== myConnId &&
-      heldConnIdsRef.current.has(owner) &&
+      ownGhostOfThisRun(owner) &&
       isForeground()
     ) {
       takeoverIntent.arm(owner)

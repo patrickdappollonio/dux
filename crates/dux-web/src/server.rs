@@ -300,6 +300,14 @@ pub struct RouterParams {
     /// [`dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS`]; the serve paths
     /// override it from config via [`ServeParams::with_pty_send_timeout_seconds`].
     pub pty_send_timeout_seconds: u32,
+    /// How long a browser waits for the answer to one beat
+    /// (`[server] heartbeat_deadline_seconds`). Defaults to
+    /// [`dux_core::config::DEFAULT_HEARTBEAT_DEADLINE_SECONDS`]; the serve paths
+    /// override it from config via
+    /// [`RouterParams::with_heartbeat_deadline_seconds`]. The server does not
+    /// time itself by it; it bounds the send that ANSWERS a beat, which must not
+    /// outlive the window the client is waiting in.
+    pub heartbeat_deadline_seconds: u32,
     /// Cap on concurrent `/files/tree` directory listings
     /// (`[server] tree_list_max_concurrency`). Defaults to
     /// [`dux_core::config::DEFAULT_TREE_LIST_MAX_CONCURRENCY`]; the serve
@@ -386,6 +394,7 @@ impl RouterParams {
             max_websocket_tabs_per_agent: dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
             search_index_max_files: dux_core::config::DEFAULT_SEARCH_INDEX_MAX_FILES,
             pty_send_timeout_seconds: dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
+            heartbeat_deadline_seconds: dux_core::config::DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
             tree_list_max_concurrency: dux_core::config::DEFAULT_TREE_LIST_MAX_CONCURRENCY,
             release_notes_max_concurrency: dux_core::config::DEFAULT_RELEASE_NOTES_MAX_CONCURRENCY,
             file_drop_max_bytes: dux_core::config::DEFAULT_FILE_DROP_MAX_BYTES,
@@ -452,6 +461,14 @@ impl RouterParams {
     /// bounds the handshake and the scrollback replay.
     pub fn with_pty_send_timeout_seconds(mut self, seconds: u32) -> Self {
         self.pty_send_timeout_seconds = seconds;
+        self
+    }
+
+    /// Set the browser's beat-answer deadline from
+    /// `[server] heartbeat_deadline_seconds`. The serve paths call this so the
+    /// beat echo's own bound follows the window the client actually waits in.
+    pub fn with_heartbeat_deadline_seconds(mut self, seconds: u32) -> Self {
+        self.heartbeat_deadline_seconds = seconds;
         self
     }
 
@@ -687,6 +704,7 @@ pub fn build_app(
     live_limits.set_access_log(params.access_log);
     live_limits.set_search_index_max_files(params.search_index_max_files);
     live_limits.set_pty_send_timeout_seconds(params.pty_send_timeout_seconds as usize);
+    live_limits.set_heartbeat_deadline_seconds(params.heartbeat_deadline_seconds as usize);
     let state = AppState {
         engine,
         console: params.console,
@@ -2107,14 +2125,16 @@ async fn handle_pty_socket(
                         // argument in `pty_opening_send_timeout`. It does NOT
                         // share that deadline, though: that one is a throughput
                         // allowance for a whole scrollback replay, and this is
-                        // twenty-five bytes. See `PTY_BEAT_ECHO_TIMEOUT`.
+                        // twenty-five bytes, bounded by the shorter of a fixed
+                        // ceiling and the client's own answer deadline. See
+                        // `pty_beat_echo_timeout`.
                         //
                         // A frame with no `beat` is a page that predates the fold
                         // of the viewed ping into this message. Its `viewed` half
                         // is still honored above; there is simply nothing to echo.
                         if let Some(n) = frame.beat {
                             let _ = with_send_deadline(
-                                PTY_BEAT_ECHO_TIMEOUT,
+                                pty_beat_echo_timeout(&live_limits),
                                 send_text(&sink, pty_beat_frame_text(n)),
                             )
                             .await;
@@ -3332,11 +3352,37 @@ fn pty_opening_send_timeout(limits: &crate::engine_actor::LiveServerLimits) -> s
 /// thirty seconds and it drops the socket when it passes. Waiting a minute to
 /// answer a question nobody is still asking is the worst of both.
 ///
-/// A compile-time constant rather than a setting, deliberately: it is a bound on
-/// a fixed twenty-five byte write, so there is no link slow enough to make
-/// raising it the right answer, and the configurable knob beside it already
-/// covers the send whose size a user can actually change.
-const PTY_BEAT_ECHO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The CEILING is a compile-time constant rather than a setting, deliberately:
+/// it is a bound on a fixed twenty-five byte write, so there is no link slow
+/// enough to make raising it the right answer, and the configurable knob beside
+/// it already covers the send whose size a user can actually change.
+const PTY_BEAT_ECHO_CEILING: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The bound actually used, and why it is DERIVED rather than fixed.
+///
+/// `[server] heartbeat_deadline_seconds` is how long the browser waits for this
+/// exact answer before it declares the socket half-open and reconnects. A fixed
+/// ceiling can therefore be arbitrarily unrelated to it: a user who tightens the
+/// deadline to two seconds has said, in the one setting that speaks about this
+/// round trip, that an answer arriving later is worthless, and holding the
+/// shared sink lock past that point holds it for nobody. So the bound is
+/// `min(ceiling, deadline)`: never longer than the client's own patience, and
+/// never longer than a twenty-five byte write can honestly need.
+///
+/// A `0` deadline is "not seeded yet" (or a config that means it), so it falls
+/// back to the compiled default rather than collapsing the bound to nothing.
+fn pty_beat_echo_timeout(limits: &crate::engine_actor::LiveServerLimits) -> std::time::Duration {
+    let seconds = limits.heartbeat_deadline_seconds();
+    let seconds = if seconds == 0 {
+        dux_core::config::DEFAULT_HEARTBEAT_DEADLINE_SECONDS as usize
+    } else {
+        seconds
+    };
+    std::cmp::min(
+        PTY_BEAT_ECHO_CEILING,
+        std::time::Duration::from_secs(seconds as u64),
+    )
+}
 
 /// Bound one send by `deadline`, flattening "timed out" and "the send failed"
 /// into the one verdict the caller acts on: give up on this socket. Kept as a
@@ -5191,14 +5237,44 @@ mod tests {
     fn the_beat_echo_deadline_is_short_and_independent_of_the_replay_bound() {
         let limits = crate::engine_actor::LiveServerLimits::default();
         assert!(
-            PTY_BEAT_ECHO_TIMEOUT < pty_opening_send_timeout(&limits),
+            pty_beat_echo_timeout(&limits) < pty_opening_send_timeout(&limits),
             "a twenty-five byte echo must not wait as long as a whole replay"
         );
         // And a user who raises the replay allowance does not raise this with it.
         limits.set_pty_send_timeout_seconds(600);
-        assert!(PTY_BEAT_ECHO_TIMEOUT < pty_opening_send_timeout(&limits));
-        assert!(PTY_BEAT_ECHO_TIMEOUT <= std::time::Duration::from_secs(5));
-        assert!(PTY_BEAT_ECHO_TIMEOUT > std::time::Duration::ZERO);
+        assert!(pty_beat_echo_timeout(&limits) < pty_opening_send_timeout(&limits));
+        assert!(pty_beat_echo_timeout(&limits) <= PTY_BEAT_ECHO_CEILING);
+        assert!(pty_beat_echo_timeout(&limits) > std::time::Duration::ZERO);
+    }
+
+    /// AND IT IS DERIVED FROM THE WINDOW THE CLIENT IS ACTUALLY WAITING IN. A
+    /// user who tightens `heartbeat_deadline_seconds` below the ceiling has said
+    /// how long a browser waits for this exact answer; holding the sink lock
+    /// past that point is holding it for nobody.
+    #[test]
+    fn the_beat_echo_deadline_never_outlives_the_browsers_own_answer_deadline() {
+        let limits = crate::engine_actor::LiveServerLimits::default();
+        // Unseeded, so the compiled default deadline (30s) applies and the
+        // ceiling is what binds.
+        assert_eq!(pty_beat_echo_timeout(&limits), PTY_BEAT_ECHO_CEILING);
+        limits.set_heartbeat_deadline_seconds(2);
+        assert_eq!(
+            pty_beat_echo_timeout(&limits),
+            std::time::Duration::from_secs(2),
+            "a tightened client deadline must tighten the echo with it"
+        );
+        limits.set_heartbeat_deadline_seconds(600);
+        assert_eq!(
+            pty_beat_echo_timeout(&limits),
+            PTY_BEAT_ECHO_CEILING,
+            "a generous client deadline must not stretch a twenty-five byte write"
+        );
+        limits.set_heartbeat_deadline_seconds(0);
+        assert_eq!(
+            pty_beat_echo_timeout(&limits),
+            PTY_BEAT_ECHO_CEILING,
+            "zero is 'not seeded yet', never 'answer instantly or give up'"
+        );
     }
 
     /// The grid-change event frame, the one pushed to every socket attached to a

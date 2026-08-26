@@ -84,6 +84,13 @@ export abstract class ReconnectingSocket {
   // client knows is gone. Distinct from `closedByUser`, and the one state no
   // wake signal may revive.
   private stopped = false
+  // DISPOSED IS THE ONE STATE NOTHING REVIVES, `connect()` included. `stopped`
+  // is deliberately cleared by `connect()`, because a terminal close code is
+  // recoverable by the Reconnect button; disposal is not recoverable by
+  // anything, because the pane that owned this socket is gone. Reviving it would
+  // open a connection nothing reads and, for a PTY, launch a provider for a pane
+  // that unmounted.
+  private disposed = false
   private readonly policy: ReconnectPolicy
   private wakeAttached = false
 
@@ -116,6 +123,12 @@ export abstract class ReconnectingSocket {
   // grown delay or a give-up from a prior session. This is also the manual
   // "Reconnect" path and the take-over bounce.
   connect(): void {
+    if (this.disposed) {
+      // Debug rather than a warning: a late `connect()` on a disposed socket is
+      // an ordering artefact of an unmount, not a fault the user can act on.
+      console.debug("[dux] ignoring connect() on a disposed socket", this.url)
+      return
+    }
     this.closedByUser = false
     this.stopped = false
     this.reconnectDelay = RECONNECT_MIN_MS
@@ -429,6 +442,7 @@ export abstract class ReconnectingSocket {
   // plus the wake listeners, which is the difference between the two and the
   // whole reason both exist.
   dispose(): void {
+    this.disposed = true
     this.stopped = true
     this.detachWakeSignals()
     this.close()
