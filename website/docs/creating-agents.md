@@ -223,6 +223,9 @@ on GitHub itself:
 pr_poll_interval_seconds = 180
 ```
 
+When a branch name is reused, dux follows the newest pull request on it, preferring an
+open one.
+
 If your GitHub API quota runs low, or GitHub starts erroring, dux pauses PR checks until
 it recovers and tells you: a status line in the terminal UI, a toast in the browser.
 

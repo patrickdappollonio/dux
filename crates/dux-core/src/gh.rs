@@ -71,6 +71,13 @@ pub const RATE_LIMIT_BACKOFF_FLOOR: i64 = 100;
 /// under Linux's ~128 KiB per-argv-entry limit for the inlined `-f query=` arg.
 const MAX_ALIASES_PER_QUERY: usize = 100;
 
+/// How many of a branch's pull requests the discovery alias asks for. The
+/// connection answers ascending by number and the alias walks it from the newest
+/// end, so this is "the most recent N pull requests on this branch name". A
+/// branch reused a couple of times needs a handful; twenty is comfortably past
+/// that and still one page of one GraphQL point.
+const DISCOVERY_WINDOW: usize = 20;
+
 /// Hard wall-clock cap on a single `gh` invocation. A hung `gh` (stalled TCP,
 /// DNS hang, credential-helper prompt) must not park a worker thread: we bail
 /// fast and let the next cycle retry rather than block for long.
@@ -173,20 +180,27 @@ fn stored_pr_is_merged(known: Option<&StoredPr>) -> bool {
 /// Whether an EXITED agent's entry can be answered from SQLite with no `gh`
 /// call at all.
 ///
-/// MERGED is always free: nothing can change it. CLOSED is refreshable, because
-/// a closed pull request can be reopened and only a real call notices, but a
-/// wall of dormant sessions with closed pull requests must not tick the API
-/// every poll interval. So a closed row on an exited agent is skipped by the
-/// blind poll and refreshed by the one-shot triggers: boot, foreground focus,
-/// and a refs change. A closed row on a RUNNING agent refreshes like an open
-/// one, under either trigger.
+/// A terminal row (MERGED or CLOSED) on an exited agent is free on the blind
+/// poll: a wall of dormant sessions must not tick the API every interval. The
+/// one-shot triggers, boot, foreground focus and a refs change, still spend one
+/// discovery call on it, because a terminal row does not mean the BRANCH is
+/// finished. A closed pull request can be reopened, and a branch name reused
+/// after a merge carries a brand new pull request; discovery is the only thing
+/// that notices either, so a merged row that never asked again could never
+/// heal. A terminal row on a RUNNING agent refreshes like an open one, under
+/// either trigger.
 fn exited_entry_needs_no_network(known: Option<&StoredPr>, trigger: SyncTrigger) -> bool {
-    // Spelled as the rule reads: merged is always free, and terminal-but-not-
-    // merged is exactly closed, free only on the blind poll.
-    stored_pr_is_merged(known)
-        || (stored_pr_is_terminal(known)
-            && !stored_pr_is_merged(known)
-            && trigger == SyncTrigger::BlindPoll)
+    stored_pr_is_terminal(known) && trigger == SyncTrigger::BlindPoll
+}
+
+/// The same question for a PINNED session, which emits no discovery alias at
+/// all: its only call is a by-number refresh of the pull request the user named.
+/// So the reused-branch case above cannot arise here and a MERGED pin stays free
+/// under either trigger, while a CLOSED one, which can be reopened, is skipped
+/// by the blind poll and refreshed by the one-shot triggers.
+fn pinned_exited_entry_needs_no_network(known: &StoredPr, trigger: SyncTrigger) -> bool {
+    stored_pr_is_merged(Some(known))
+        || (stored_pr_is_terminal(Some(known)) && trigger == SyncTrigger::BlindPoll)
 }
 
 impl Planned {
@@ -262,15 +276,17 @@ impl Planned {
 /// no network call (terminal + exited → reconstruct from SQLite), and batches
 /// the rest into `gh api graphql` requests grouped by host.
 ///
-/// Per-session strategy (preserves the pre-batch semantics exactly):
+/// Per-session strategy:
 ///
 /// | Known PR state | Agent running? | Aliases                                   |
 /// |----------------|----------------|-------------------------------------------|
 /// | None           | any            | head-ref discovery                        |
 /// | OPEN           | any            | head-ref discovery **+** by-number refresh|
 /// | MERGED/CLOSED  | yes            | head-ref discovery (catches a follow-up PR)|
-/// | MERGED         | no             | **zero calls** - reconstruct from SQLite  |
-/// | CLOSED         | no             | zero calls on the blind poll, discovery on a one-shot |
+/// | MERGED/CLOSED  | no             | zero calls on the blind poll, discovery on a one-shot |
+///
+/// A PINNED session is the exception: it emits only the by-number refresh, so a
+/// merged pin on an exited agent costs zero calls under either trigger.
 fn run_entries(
     entries: &[PrSyncEntry],
     backoff: &BackoffSnapshot,
@@ -341,6 +357,8 @@ fn run_entries(
         });
     }
 
+    log_sync_cycle(entries, planned.len(), &results, trigger);
+
     (results, signals)
 }
 
@@ -410,9 +428,9 @@ fn plan_entries(
                 results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
                 continue;
             }
-            // Terminal pin + exited agent: zero network, like the unpinned rule,
-            // and with the same closed-is-refreshable narrowing.
-            if entry.agent_exited && exited_entry_needs_no_network(Some(&known), trigger) {
+            // Terminal pin + exited agent: zero network, under the pinned rule
+            // (no discovery alias exists, so a merged pin stays free).
+            if entry.agent_exited && pinned_exited_entry_needs_no_network(&known, trigger) {
                 results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
                 continue;
             }
@@ -1012,16 +1030,21 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
         for &pos in positions {
             let p = &planned[chunk[pos]];
             if p.emit_ref {
-                // Discovery asks for exactly ONE node, the newest-created pull
-                // request on the branch. That is what makes a reopen free to
-                // notice for the common case, and it carries an accepted limit:
-                // if a branch has both an older pull request and a newer one,
-                // reopening the OLDER one stays invisible, because the newer one
-                // is the only node this alias returns. Deliberate, and cheaper
-                // than paging every branch's history on every cycle.
+                // Discovery asks for a WINDOW of the branch's pull requests and
+                // picks among them in Rust (`select_discovered_pr`), rather than
+                // for one node in a chosen order.
+                //
+                // Measured against two real repositories: GitHub IGNORES
+                // `orderBy` on `associatedPullRequests`. The connection is
+                // ascending by number whatever is passed, so `first: 1` with any
+                // orderBy returns the OLDEST pull request on the branch, and a
+                // branch name reused after a merge reported the old pull request
+                // forever. `last` walks from the newest end, which is where the
+                // interesting nodes are; the window is small enough to stay
+                // cheap and wide enough to cover a heavily reused branch name.
                 let qname = graphql_string(&format!("refs/heads/{}", p.branch));
                 q.push_str(&format!(
-                    "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(first: 1, orderBy: {{field: CREATED_AT, direction: DESC}}) {{ nodes {{ number state title url }} }} }}\n",
+                    "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(last: {DISCOVERY_WINDOW}) {{ nodes {{ number state title url }} }} }}\n",
                     ref_alias(pos),
                 ));
             }
@@ -1071,13 +1094,20 @@ fn parse_chunk_response(
         let repo_obj = data
             .and_then(|d| d.get(repo_alias(pos_repo[pos]).as_str()))
             .filter(|v| !v.is_null());
+        // Every node in the discovery window is parsed; which one this session's
+        // badge should follow is decided by `select_discovered_pr`.
         let ref_pr = repo_obj
             .and_then(|r| r.get(ref_alias(pos).as_str()))
             .and_then(|rf| rf.get("associatedPullRequests"))
             .and_then(|a| a.get("nodes"))
             .and_then(|n| n.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|node| parse_pr_json_value(node, &p.host, &owner_repo));
+            .and_then(|arr| {
+                select_discovered_pr(
+                    arr.iter()
+                        .filter_map(|node| parse_pr_json_value(node, &p.host, &owner_repo))
+                        .collect(),
+                )
+            });
         let num_pr = if p.emit_num {
             repo_obj
                 .and_then(|r| r.get(num_alias(pos).as_str()))
@@ -1089,6 +1119,105 @@ fn parse_chunk_response(
         out.push((p.session_id.clone(), merge_pr_result(p, ref_pr, num_pr)));
     }
     (out, rate)
+}
+
+/// Log one sync cycle: a debug summary of what it did, plus one info line per
+/// session whose pull request changed. A successful cycle used to say nothing at
+/// all, so a wrong badge left no trace of where it came from.
+fn log_sync_cycle(
+    entries: &[PrSyncEntry],
+    asked: usize,
+    results: &[(String, Option<PrInfo>)],
+    trigger: SyncTrigger,
+) {
+    let answered = results.iter().filter(|(_, pr)| pr.is_some()).count();
+    let mut changed = 0usize;
+    for (session_id, pr) in results {
+        let Some(entry) = entries.iter().find(|e| &e.session_id == session_id) else {
+            continue;
+        };
+        if !pr_changed(entry.known_pr.as_ref(), pr.as_ref()) {
+            continue;
+        }
+        changed += 1;
+        logger::info(&format_pr_change(
+            &entry.branch_name,
+            entry.known_pr.as_ref(),
+            pr.as_ref(),
+        ));
+    }
+    logger::debug(&format_sync_cycle_summary(
+        trigger,
+        entries.len(),
+        asked,
+        answered,
+        changed,
+    ));
+}
+
+/// Whether this cycle's answer differs from what SQLite already held. Number and
+/// state are the whole badge, so a title or url edit is deliberately not a
+/// change worth a line in the log.
+fn pr_changed(known: Option<&StoredPr>, fresh: Option<&PrInfo>) -> bool {
+    let old = known.map(|k| (k.pr_number, k.state.to_ascii_lowercase()));
+    let new = fresh.map(|p| (p.number, pr_state_word(&p.state).to_string()));
+    old != new
+}
+
+/// One PR state as it reads in a log line.
+fn pr_state_word(state: &PrState) -> &'static str {
+    match state {
+        PrState::Open => "open",
+        PrState::Merged => "merged",
+        PrState::Closed => "closed",
+    }
+}
+
+/// The per-cycle debug summary. `sessions` is everything the cycle considered,
+/// `asked` the subset that needed a GitHub call at all (the rest were answered
+/// from SQLite or skipped by a host backoff), `answered` how many ended the
+/// cycle with a pull request, and `changed` how many differ from what was
+/// stored.
+fn format_sync_cycle_summary(
+    trigger: SyncTrigger,
+    sessions: usize,
+    asked: usize,
+    answered: usize,
+    changed: usize,
+) -> String {
+    let word = match trigger {
+        SyncTrigger::BlindPoll => "blind poll",
+        SyncTrigger::OneShot => "one-shot",
+    };
+    format!(
+        "PR sync ({word}): {sessions} sessions, {asked} asked, {answered} answered, {changed} changed"
+    )
+}
+
+/// The per-session info line, naming the branch and both sides of the move.
+fn format_pr_change(branch: &str, known: Option<&StoredPr>, fresh: Option<&PrInfo>) -> String {
+    let old = known
+        .map(|k| format!("#{} {}", k.pr_number, k.state.to_ascii_lowercase()))
+        .unwrap_or_else(|| "none".to_string());
+    let new = fresh
+        .map(|p| format!("#{} {}", p.number, pr_state_word(&p.state)))
+        .unwrap_or_else(|| "none".to_string());
+    format!("Pull request for branch {branch} changed: {old} -> {new}")
+}
+
+/// Pick the one pull request a branch's discovery window is about.
+///
+/// The window is whatever GitHub returned, and nothing about its order can be
+/// relied on (the `orderBy` argument on this connection is ignored, measured),
+/// so the choice is made here rather than by taking an element:
+///   - an OPEN pull request wins over a merged or closed one, whatever the
+///     numbers: it is the one somebody is working on right now
+///   - among pull requests in the same standing, the highest number wins, which
+///     is the most recent one on a branch name that has been reused
+fn select_discovered_pr(nodes: Vec<PrInfo>) -> Option<PrInfo> {
+    nodes
+        .into_iter()
+        .max_by_key(|pr| (pr.state == PrState::Open, pr.number))
 }
 
 /// Reconcile the head-ref discovery result and the by-number refresh into the
@@ -2382,7 +2511,12 @@ mod tests {
         assert!(q.contains("r0: repository(owner: \"octocat\", name: \"Hello-World\")"));
         // Branch with a slash must be JSON-escaped into a valid GraphQL string.
         assert!(q.contains("s0_ref: ref(qualifiedName: \"refs/heads/feat/x\")"));
-        assert!(q.contains("CREATED_AT"));
+        // A window taken from the NEWEST end, and no orderBy: GitHub ignores
+        // orderBy on this connection (measured), so asking for one ordered node
+        // returned the oldest pull request on the branch.
+        assert!(q.contains("associatedPullRequests(last: 20)"));
+        assert!(!q.contains("orderBy"));
+        assert!(!q.contains("CREATED_AT"));
         // No known PR → no by-number alias.
         assert!(!q.contains("s0_num"));
     }
@@ -2602,6 +2736,165 @@ mod tests {
         assert_eq!(pr.state, PrState::Merged);
     }
 
+    /// The discovery alias asks for a WINDOW of nodes, in the ascending order
+    /// GitHub actually returns them in. This wraps a list of them.
+    fn ref_nodes(nodes: &[(u64, &str)]) -> serde_json::Value {
+        serde_json::json!({
+            "associatedPullRequests": {
+                "nodes": nodes
+                    .iter()
+                    .map(|(n, st)| pr_node(*n, st))
+                    .collect::<Vec<_>>(),
+            }
+        })
+    }
+
+    fn selected(nodes: &[(u64, &str)]) -> PrInfo {
+        let parsed: Vec<PrInfo> = nodes
+            .iter()
+            .map(|(n, st)| {
+                parse_pr_json_value(&pr_node(*n, st), "github.com", "octocat/Hello-World")
+                    .expect("node parses")
+            })
+            .collect();
+        select_discovered_pr(parsed).expect("a node was selected")
+    }
+
+    #[test]
+    fn select_discovered_pr_takes_the_newest_of_two_terminal_pull_requests() {
+        // The reused-branch case: an old merged pull request and a newer one on
+        // the same branch name. The newer number is the live one.
+        let pr = selected(&[(7, "MERGED"), (47, "MERGED")]);
+        assert_eq!(pr.number, 47);
+    }
+
+    #[test]
+    fn select_discovered_pr_takes_the_newest_when_it_is_open() {
+        let pr = selected(&[(7, "MERGED"), (47, "OPEN")]);
+        assert_eq!(pr.number, 47);
+        assert_eq!(pr.state, PrState::Open);
+    }
+
+    #[test]
+    fn select_discovered_pr_prefers_an_open_pull_request_over_a_newer_closed_one() {
+        // Somebody opened #7, closed #47 without merging: the open one is the
+        // pull request this branch is actually about, older number or not.
+        let pr = selected(&[(7, "OPEN"), (47, "CLOSED")]);
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.state, PrState::Open);
+    }
+
+    #[test]
+    fn select_discovered_pr_is_empty_for_no_nodes() {
+        assert!(select_discovered_pr(Vec::new()).is_none());
+    }
+
+    #[test]
+    fn parse_chunk_response_follows_a_reused_branch_to_the_newest_pull_request() {
+        // Measured against real repositories: the connection comes back
+        // ascending by number, so the stored MERGED #7 sits FIRST and the live
+        // #47 last. Reading element zero reported the merged one forever.
+        let ps = vec![planned(
+            "s0",
+            "octocat",
+            "Hello-World",
+            "feat/x",
+            Some(stored(7, "MERGED")),
+        )];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        let data = serde_json::json!({
+            "r0": { "s0_ref": ref_nodes(&[(7, "MERGED"), (47, "OPEN")]) },
+        });
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let pr = results[0].1.as_ref().expect("a pull request");
+        assert_eq!(pr.number, 47);
+        assert_eq!(pr.state, PrState::Open);
+    }
+
+    #[test]
+    fn exited_entry_needs_no_network_re_queries_a_terminal_row_on_a_one_shot() {
+        for state in ["MERGED", "CLOSED"] {
+            let known = stored(7, state);
+            assert!(
+                exited_entry_needs_no_network(Some(&known), SyncTrigger::BlindPoll),
+                "the blind poll stays free for {state}"
+            );
+            assert!(
+                !exited_entry_needs_no_network(Some(&known), SyncTrigger::OneShot),
+                "a one-shot spends one discovery call on {state}, so a reused branch heals"
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_exited_entry_needs_no_network_keeps_a_merged_pin_free() {
+        // A pin emits no discovery alias, so there is nothing a merged pin's
+        // call could ever find. A closed pin can reopen, so a one-shot asks.
+        let merged = stored(7, "MERGED");
+        let closed = stored(7, "CLOSED");
+        for trigger in [SyncTrigger::BlindPoll, SyncTrigger::OneShot] {
+            assert!(pinned_exited_entry_needs_no_network(&merged, trigger));
+        }
+        assert!(pinned_exited_entry_needs_no_network(
+            &closed,
+            SyncTrigger::BlindPoll
+        ));
+        assert!(!pinned_exited_entry_needs_no_network(
+            &closed,
+            SyncTrigger::OneShot
+        ));
+    }
+
+    #[test]
+    fn format_sync_cycle_summary_names_the_trigger_and_the_counts() {
+        assert_eq!(
+            format_sync_cycle_summary(SyncTrigger::BlindPoll, 5, 3, 4, 1),
+            "PR sync (blind poll): 5 sessions, 3 asked, 4 answered, 1 changed"
+        );
+        assert_eq!(
+            format_sync_cycle_summary(SyncTrigger::OneShot, 1, 1, 0, 0),
+            "PR sync (one-shot): 1 sessions, 1 asked, 0 answered, 0 changed"
+        );
+    }
+
+    #[test]
+    fn format_pr_change_reads_as_old_to_new() {
+        let stored_merged = stored(7, "MERGED");
+        let fresh = parse_pr_json_value(&pr_node(47, "OPEN"), "github.com", "octocat/Hello-World")
+            .expect("node parses");
+        assert_eq!(
+            format_pr_change("feat/x", Some(&stored_merged), Some(&fresh)),
+            "Pull request for branch feat/x changed: #7 merged -> #47 open"
+        );
+        assert_eq!(
+            format_pr_change("feat/x", None, Some(&fresh)),
+            "Pull request for branch feat/x changed: none -> #47 open"
+        );
+        assert_eq!(
+            format_pr_change("feat/x", Some(&stored_merged), None),
+            "Pull request for branch feat/x changed: #7 merged -> none"
+        );
+    }
+
+    #[test]
+    fn pr_changed_ignores_a_repeat_of_the_same_pull_request() {
+        let stored_open = stored(47, "OPEN");
+        let same = parse_pr_json_value(&pr_node(47, "OPEN"), "github.com", "octocat/Hello-World")
+            .expect("node parses");
+        let merged =
+            parse_pr_json_value(&pr_node(47, "MERGED"), "github.com", "octocat/Hello-World")
+                .expect("node parses");
+        let newer = parse_pr_json_value(&pr_node(48, "OPEN"), "github.com", "octocat/Hello-World")
+            .expect("node parses");
+        assert!(!pr_changed(Some(&stored_open), Some(&same)));
+        assert!(pr_changed(Some(&stored_open), Some(&merged)));
+        assert!(pr_changed(Some(&stored_open), Some(&newer)));
+        assert!(!pr_changed(None, None));
+        assert!(pr_changed(None, Some(&same)));
+        assert!(pr_changed(Some(&stored_open), None));
+    }
+
     #[test]
     fn parse_chunk_response_closed_still_closed_keeps_stored() {
         // The counterpart to the reopen case: discovery confirming the pull
@@ -2694,10 +2987,11 @@ mod tests {
     }
 
     #[test]
-    fn run_entries_merged_exited_reconstructs_without_network_under_either_trigger() {
+    fn run_entries_merged_exited_reconstructs_without_network_on_the_blind_poll() {
         // A merged + exited session is reconstructed from SQLite with no gh call
-        // (the worktree path is bogus, so any git/gh access would fail). A merge
-        // is final, so this holds for a one-shot trigger too.
+        // on the poll (the worktree path is bogus, so any git/gh access would
+        // fail). A one-shot still spends one discovery call on it, because the
+        // branch name may have been reused for a brand new pull request.
         let entry = PrSyncEntry {
             session_id: "s0".to_string(),
             branch_name: "feat/done".to_string(),
@@ -2706,23 +3000,19 @@ mod tests {
             agent_exited: true,
             pinned: None,
         };
-        for trigger in [SyncTrigger::BlindPoll, SyncTrigger::OneShot] {
-            let (results, signals) = run_entries(
-                std::slice::from_ref(&entry),
-                &std::collections::HashMap::new(),
-                &legacy_policy(),
-                trigger,
-            );
-            // Zero-network (merged+exited) → no host was queried, so no signal.
-            assert!(
-                signals.is_empty(),
-                "no network call means no host signal ({trigger:?})"
-            );
-            assert_eq!(results.len(), 1);
-            let pr = results[0].1.as_ref().expect("reconstructed");
-            assert_eq!(pr.number, 42);
-            assert_eq!(pr.state, PrState::Merged);
-        }
+        let trigger = SyncTrigger::BlindPoll;
+        let (results, signals) = run_entries(
+            std::slice::from_ref(&entry),
+            &std::collections::HashMap::new(),
+            &legacy_policy(),
+            trigger,
+        );
+        // Zero-network on the poll → no host was queried, so no signal.
+        assert!(signals.is_empty(), "no network call means no host signal");
+        assert_eq!(results.len(), 1);
+        let pr = results[0].1.as_ref().expect("reconstructed");
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.state, PrState::Merged);
     }
 
     #[test]
