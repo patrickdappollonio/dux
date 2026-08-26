@@ -684,9 +684,10 @@ pub struct ServerConfig {
     /// `stop-background-server` palette commands, and this setting decides only
     /// whether it comes up serving at startup.
     ///
-    /// EXPERIMENTAL for now: the terminal UI does not yet take part in the PTY
-    /// ownership model, so the TUI and a browser can both believe they drive the
-    /// same agent's terminal geometry.
+    /// While it serves, the terminal UI is an ordinary participant in the same
+    /// one-driver-at-a-time model the browsers use: a terminal it does not drive
+    /// is covered by the take-over card until somebody presses that card's
+    /// button.
     pub serve_while_tui: bool,
     /// Maximum number of concurrent events (`/ws`) WebSocket connections. This is
     /// the status/changed-files event stream every browser tab opens. Once this

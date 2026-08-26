@@ -138,7 +138,8 @@ pub(crate) fn launch_claims_its_pty(kind: &dux_core::worker::AgentLaunchKind) ->
         // pass claims nothing either. Claiming here would hand this terminal
         // every auto-reopened agent in the workspace the moment it starts, and
         // ownership is sticky, so a browser would have to take each one back by
-        // hand. The first keystroke claims, as it does for any free pty.
+        // hand. Each of them wears the `Take control` card instead, and the
+        // press on it is what claims, exactly as it is for any other free pty.
         AgentLaunchKind::StartupAutoReopen => false,
         // A person asked for each of these: a create (including a fork, a pull
         // request and a standalone agent, which are all Create-kind), a
@@ -273,9 +274,10 @@ impl App {
     /// Claim `pty_id` because THIS surface just started the child behind it.
     ///
     /// A launch is a deliberate act by the person at this keyboard, so it claims
-    /// the pty exactly as their first keystroke would, and for the same reason:
-    /// otherwise an agent started here stays unowned, and a window resize before
-    /// the first keystroke never reaches its child.
+    /// the pty, which is what spares them the card over a terminal they just
+    /// started here: unclaimed, an agent launched from this keyboard would come
+    /// up asking to be taken control of, and no window resize would reach its
+    /// child until they had pressed the button.
     ///
     /// It never steals. A pty another device already drives is left alone, so a
     /// relaunch of a terminal a browser is driving does not quietly move the
@@ -324,10 +326,9 @@ impl App {
     ///
     /// It never CLAIMS on its own. An unowned pty is refused here exactly as an
     /// owned one is, because the caller is the render pass and drawing a pane is
-    /// not a decision to drive what is in it; the deliberate acts
-    /// ([`Self::may_type_into_pty`], [`Self::claim_launched_pty`] and the card's
-    /// button) are what take a free pty, and only a take-over armed by that
-    /// button takes one from another device.
+    /// not a decision to drive what is in it; the deliberate acts (the card's
+    /// button and [`Self::claim_launched_pty`]) are what take a free pty, and
+    /// only a take-over armed by that button takes one from another device.
     ///
     /// Returns whether the resize was granted, which is the caller's cue to
     /// record its dedupe. A refusal records nothing: the pane renders the
@@ -367,11 +368,11 @@ impl App {
         //
         // So a plain resize applies only for a pty this surface ALREADY drives,
         // or one an armed take-over is about to transfer. This surface's first
-        // claim of a free pty is a deliberate act instead: typing into it
-        // (`may_type_into_pty`), starting it from here (`claim_launched_pty`), or
-        // pressing the card's button. Each of those clears the resize dedupe, so
-        // the very next render sends this pane's geometry through the ordinary
-        // apply order below.
+        // claim of a free pty is a deliberate act instead: pressing the card's
+        // button, or starting the child from here (`claim_launched_pty`). Typing
+        // is not one of them and reaches nothing while the card is up. Both acts
+        // clear the resize dedupe, so the very next render sends this pane's
+        // geometry through the ordinary apply order below.
         if !takeover && !seat.owners.is_owner(pty_id, seat.conn_id) {
             self.log_refused_resize_once(&seat, pty_id, rows, cols);
             return false;
@@ -564,6 +565,13 @@ impl App {
             }
             // Nobody is losing anything here, so the sentence says what this
             // window gains rather than who it was taken from.
+            //
+            // The arm is still a FLAGGED claim, which matters in the one race
+            // this state has: a browser's plain attach can land between the
+            // press and the render that carries it, and the flag transfers the
+            // pty anyway rather than losing to it. That is parity, not a
+            // special power, because the web flags its own take-over claim for
+            // exactly the same reason.
             PtyTakeoverCard::Free => "Taking control of this terminal. Nobody was driving it, so \
                  typing here reaches it now and its size follows this window."
                 .to_string(),
@@ -1740,6 +1748,85 @@ mod tests {
         );
     }
 
+    /// SPACE PRESSES THE BUTTON ON THE RAW PATH TOO. It is the universal
+    /// activation convention rather than a binding, so it has no byte pattern to
+    /// look up and was missing here while the windowed path took it: the same
+    /// key answered on one pane and typed nothing on the other.
+    ///
+    /// Both card states, because a key that works over one and not the other is
+    /// the same divergence in miniature.
+    #[test]
+    fn space_presses_the_cards_button_on_the_raw_fullscreen_path() {
+        for driven_elsewhere in [false, true] {
+            let (mut app, _recorded, seat) = app_with_a_live_pty_running("sleep 5");
+            app.focus = FocusPane::Center;
+            app.input_target = InputTarget::Agent;
+            app.fullscreen_overlay = FullscreenOverlay::Agent;
+            if driven_elsewhere {
+                let browser = seat.owners.next_conn_id();
+                seat.owners.claim("session-1", browser).expect("claimed");
+            }
+
+            app.process_raw_input_bytes(b" ")
+                .expect("the key is handled");
+
+            assert_eq!(
+                app.pending_pty_takeover.as_deref(),
+                Some("session-1"),
+                "Space must press the card's button here as it does in the \
+                 windowed pane (driven elsewhere: {driven_elsewhere})"
+            );
+            assert!(
+                !app.engine.is_typing("session-1"),
+                "and it must never reach the child (driven elsewhere: \
+                 {driven_elsewhere})"
+            );
+        }
+    }
+
+    /// The control: with no card up, a space is an ordinary keystroke and rides
+    /// to the child untouched. Without this the rule above could be "Space never
+    /// reaches a terminal", which would break the space bar.
+    #[test]
+    fn space_reaches_the_child_when_this_surface_drives_the_pty() {
+        let (mut app, _recorded, _seat) = app_with_a_live_pty_running("sleep 5");
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.claim_launched_pty("session-1");
+
+        app.process_raw_input_bytes(b" ")
+            .expect("the key is handled");
+
+        assert_eq!(app.pending_pty_takeover, None);
+        assert!(
+            app.engine.is_typing("session-1"),
+            "a space typed into a terminal this surface drives is a space"
+        );
+    }
+
+    /// And a PASTED space is content, never the button. Pasted bytes skip
+    /// intercept matching entirely, which matters far more for a space than for
+    /// any chord: almost every paste contains one.
+    #[test]
+    fn a_space_inside_a_paste_presses_nothing() {
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
+        bytes.extend_from_slice(b"a b");
+        bytes.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
+        app.process_raw_input_bytes(&bytes)
+            .expect("the paste is handled");
+
+        assert_eq!(
+            app.pending_pty_takeover, None,
+            "a space in pasted text is content, never the card's key"
+        );
+    }
+
     /// AMENDMENT 8. The button is a click target like any other: pressing it and
     /// releasing inside it takes the terminal over, and a click anywhere else on
     /// the covered pane does not.
@@ -2291,9 +2378,9 @@ mod tests {
     }
 
     /// A launch this surface started IS a claim, and the frame after it sizes the
-    /// child. Without this half the fix would leave an agent started here unowned
-    /// until its first keystroke, and a window resize before that would never
-    /// reach the child.
+    /// child. Without this half an agent started here would come up under the
+    /// `Take control` card, and no window resize would reach its child until
+    /// somebody had pressed the button.
     #[test]
     fn a_launch_started_here_claims_its_pty_and_the_next_frame_sizes_the_child() {
         let (mut app, _recorded, seat) = app_with_a_live_pty();

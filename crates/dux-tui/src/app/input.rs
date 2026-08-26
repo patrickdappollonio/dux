@@ -2976,18 +2976,30 @@ impl App {
         // typing stamp is asserted directly at the tail.
         let mut normalized_paste_forwarded = false;
         // While this pty is not this surface's, no key reaches the child, so the
-        // take-over card is covering this pane and two keys become dux's here
+        // take-over card is covering this pane and its keys become dux's here
         // exactly as they are in the windowed pane: the palette chord, because a
         // way out of a covered pane has to work where the card shows, and the
-        // key that presses the card's button. The BYTES come from the bindings
-        // rather than a literal, or the card would name one key and answer
-        // another. While this surface drives the pty, both ride to the child
-        // untouched.
+        // two that press the card's button, the focus-agent binding and Space.
+        // The binding's BYTES come from the bindings rather than a literal, or
+        // the card would name one key and answer another. While this surface
+        // drives the pty, all of them ride to the child untouched.
         let (demoted_palette_patterns, demoted_takeover_patterns) =
             if self.focused_pty_is_covered_by_card() {
+                let mut takeover = self.bindings.byte_patterns_for(Action::FocusAgent);
+                // SPACE, the one literal here, and deliberately so: activating
+                // the focused control is a universal convention rather than a
+                // binding, so there is no pattern to look up for it. The
+                // windowed pane already answers it; without this line the same
+                // key pressed on the same card did nothing in fullscreen.
+                //
+                // Safe because a PASTED space never reaches this matching at
+                // all (`intercepts_allowed` is false inside a bracket paste),
+                // which matters more for a space than for any chord: almost
+                // every paste contains one.
+                takeover.push(b" ".to_vec());
                 (
                     self.bindings.byte_patterns_for(Action::OpenPalette),
-                    self.bindings.byte_patterns_for(Action::FocusAgent),
+                    takeover,
                 )
             } else {
                 (Vec::new(), Vec::new())
@@ -3103,9 +3115,10 @@ impl App {
 
         // THE OWNERSHIP GATE for this batch. While a background web server is
         // serving, this surface holds a seat in the PTY-ownership registry and
-        // another device can be the one driving the focused pty; a keystroke of
-        // ours is then dropped rather than written, and the hint bar says why. An
-        // uncontested first keystroke claims the pty, exactly as a browser's does.
+        // may write only to a pty it already drives; every other keystroke is
+        // dropped rather than written, whether another device is driving or
+        // nobody is, and the card over the pane plus the hint bar say why. A
+        // keystroke never claims: the card's button does.
         //
         // Asked ONCE per batch rather than per byte, and only when the batch
         // actually has something that could reach the child: a bare host focus

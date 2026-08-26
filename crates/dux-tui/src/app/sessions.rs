@@ -1545,8 +1545,9 @@ impl App {
         };
         // A terminal spawned from here is claimed straight away: its PTY already
         // exists (unlike an agent launch, which finishes on a worker), and
-        // starting it is as deliberate an act as typing into it. See
-        // `claim_launched_pty`.
+        // starting it is one of the two acts that claim, the other being the
+        // card's button. Without it a terminal opened at this keyboard would
+        // come up covered by that card. See `claim_launched_pty`.
         self.claim_launched_pty(&terminal_id);
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
@@ -1582,8 +1583,9 @@ impl App {
         };
         // A terminal spawned from here is claimed straight away: its PTY already
         // exists (unlike an agent launch, which finishes on a worker), and
-        // starting it is as deliberate an act as typing into it. See
-        // `claim_launched_pty`.
+        // starting it is one of the two acts that claim, the other being the
+        // card's button. Without it a terminal opened at this keyboard would
+        // come up covered by that card. See `claim_launched_pty`.
         self.claim_launched_pty(&terminal_id);
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
@@ -1621,8 +1623,9 @@ impl App {
             dux_core::home_path::shorten_home(&dux_core::home_path::standalone_terminal_dir());
         // A terminal spawned from here is claimed straight away: its PTY already
         // exists (unlike an agent launch, which finishes on a worker), and
-        // starting it is as deliberate an act as typing into it. See
-        // `claim_launched_pty`.
+        // starting it is one of the two acts that claim, the other being the
+        // card's button. Without it a terminal opened at this keyboard would
+        // come up covered by that card. See `claim_launched_pty`.
         self.claim_launched_pty(&terminal_id);
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
@@ -1732,8 +1735,9 @@ impl App {
         };
         // A terminal spawned from here is claimed straight away: its PTY already
         // exists (unlike an agent launch, which finishes on a worker), and
-        // starting it is as deliberate an act as typing into it. See
-        // `claim_launched_pty`.
+        // starting it is one of the two acts that claim, the other being the
+        // card's button. Without it a terminal opened at this keyboard would
+        // come up covered by that card. See `claim_launched_pty`.
         self.claim_launched_pty(&terminal_id);
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
