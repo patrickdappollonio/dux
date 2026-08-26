@@ -127,9 +127,31 @@ running until you explicitly kill or delete it (see
 > Opening a terminal is what starts the agent: it **launches or resumes** the provider if
 > it is not already running.
 
-The full scrollback comes back when you open it. If the connection blips, dux shows a
-quiet "Reconnecting…" overlay and keeps your buffer; only after several failed attempts
-does it fall back to a blocking "Connection lost" card with a Reconnect button.
+The full scrollback comes back when you open it, and the "Reconnecting…" cover stays up
+until that screen has actually been painted, not merely until the connection is back, so
+you never end up looking at an empty black pane wondering whether anything is happening.
+
+**dux keeps trying while the page is open, and reconnects the moment you come back.**
+There is no give-up count. A visible tab retries with a widening gap between attempts, up
+to `reconnect_backoff_cap_seconds` (10 seconds by default), for as long as you leave it
+open. A hidden tab stops trying altogether rather than burning your battery on a
+connection you are not looking at, and picks it straight back up when you switch back to
+it, unlock the phone, or the network returns. Your scrollback and anything half-typed in
+the compose box survive all of it.
+
+Two things can still stop the wait, and both offer you a **Reconnect** button rather than
+leaving you stuck. If the terminal's screen has not arrived within
+`replay_wait_seconds` (8 seconds by default) of the connection coming up, the cover says
+so and offers to try again. And if the connection is really gone, the blocking
+**Connection lost** card takes over.
+
+> [!NOTE]
+> A phone that switches from Wi-Fi to cellular can leave a connection that looks alive
+> but answers nothing. dux checks, from the browser, every `heartbeat_seconds`
+> (15 by default), and if the answer has not come back within
+> `heartbeat_deadline_seconds` (30 by default) it reconnects rather than leaving you
+> typing into a dead terminal. All four of those live under `[server]` in your config
+> file; see [Server mode](/docs/server-mode#the-server-config-keys).
 
 ### One writer, many watchers
 
@@ -151,9 +173,17 @@ one driving.
 to your screen, repaints it fresh, and hands you the keyboard. Nothing is lost; the other
 device becomes the watcher.
 
-Taking over reattaches, so it takes a moment and you will see "Reconnecting…". Behind the
-card, a watcher's terminal renders at the driver's true size with the text shrunk to fit,
-so the screen you take over is clean from the first frame.
+Taking over reattaches, so it takes a moment and you will see "Reconnecting…" until the
+screen is really there. Behind the card, a watcher's terminal renders at the driver's true
+size with the text shrunk to fit, so the screen you take over is clean from the first
+frame.
+
+> [!IMPORTANT]
+> **A take-over interrupted by a network drop is not retried; press Take over again.** The
+> reconnect that follows a dropped signal is a plain attach, on purpose, so a request you
+> made minutes ago on a train cannot surface later and yank the terminal out from under
+> whoever is using it now. The button always responds: if the attempt did not land,
+> pressing it again starts a fresh one.
 
 > [!IMPORTANT]
 > **Losing the keyboard is sticky.** Nothing passive gives a terminal back, so a watcher
@@ -162,10 +192,18 @@ so the screen you take over is clean from the first frame.
 > switching devices.
 
 If the driving device disconnects, every card switches to **Take control** rather
-than naming a browser that has gone. The one device that gets its terminal back on its own
-is the one that lost it to a blip: come back from a dropped connection while the server is
-still holding your old, dead session, and you carry on typing (a page in the background
-stays a watcher until it is in front again). If your own connection has given up entirely, the card steps aside for the
+than naming a browser that has gone. The card also keeps naming the device that had the
+keyboard even while your own connection is wobbling, so a flaky signal no longer turns
+"Open on Chrome on Linux" into a vague "Active on another device".
+
+**Reconnecting never takes the terminal from anybody.** Every automatic reconnect joins as
+a watcher unless nobody is driving; taking a terminal away from a device that holds it is
+always something you press the button for. The one exception takes nothing from anyone:
+the device that lost the keyboard to a blip gets it back when it returns, provided the
+server is still holding its old, dead session and nobody else has claimed the terminal in
+the meantime. If somebody has, you come back as a watcher with the card up, and one tap
+puts you back in the driver's seat. A page in the background stays a watcher until it is
+in front again. If your own connection has given up entirely, the card steps aside for the
 **Connection lost** notice and its **Reconnect** button.
 
 ### Clipboard: the classic terminal model

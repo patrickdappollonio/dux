@@ -289,6 +289,14 @@ Each row shows its documented default and, where `0` means something special lik
 auto-clear", that meaning too. Values are validated and clamped on save, and every
 connected browser refreshes once it is written.
 
+The four reconnect timings that decide how a browser rides out a bad network
+(`replay_wait_seconds`, `reconnect_backoff_cap_seconds`, `heartbeat_seconds` and
+`heartbeat_deadline_seconds`) are not in this panel either. They live under `[server]` in
+the config file, documented inline with everything else, and a config reload applies them
+to every open tab. See
+[the `[server]` config keys](/docs/server-mode#the-server-config-keys) for what each one
+does and its default.
+
 Settings that only affect the terminal UI, such as its theme or the diff viewer's tab
 width and line numbers, are not in this panel. Keybindings, provider commands, and project
 identity stay in the raw config file or their own dialogs. Use the cog menu's

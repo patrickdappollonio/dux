@@ -78,7 +78,9 @@ Anything held only in the page, an unsaved editor draft most of all, goes with i
 finish what you are typing first.
 
 A dropped Wi-Fi connection is not a restart: the tab reconnects in place and keeps
-everything it had open.
+everything it had open, for as long as you leave the page open. See
+[the browser terminals](/docs/web-workspace#the-browser-terminals) for exactly how long
+it keeps trying and what it does when your phone falls asleep.
 
 ### Flip a running TUI into the browser
 
@@ -267,6 +269,10 @@ The rest tune presentation and limits:
 | `file_drop_max_bytes` | `104857600` | Largest single file you can drag, or image you can paste, onto a terminal or agent pane in the browser (100 MiB). A bigger file is refused and nothing is written. `0` switches file drop and image paste off. |
 | `file_drop_max_concurrency` | `2` | How many dropped-file uploads are accepted at once. Bounds buffered upload memory, not just queued work. An upload beyond the limit waits up to 30 seconds for a slot, then is refused with a `503` rather than queueing indefinitely. `0` clamps to `1`. |
 | `search_index_max_files` | `50000` | Cap on the web editor's "Search files…" flat walk. `0` disables the cap. A config reload applies it. |
+| `replay_wait_seconds` | `8` | How long a browser waits for the terminal's screen to arrive after connecting before it stops waiting quietly and offers a Reconnect button. Counted in time the page is actually on screen, so a phone in your pocket does not burn through it. `0` disables the wait, leaving a slow screen covered indefinitely. A config reload applies it. |
+| `reconnect_backoff_cap_seconds` | `10` | The longest gap a browser leaves between automatic reconnect attempts. It starts at half a second and widens up to this. A visible tab never gives up; raise this to be gentler on a struggling server, lower it to come back faster. A config reload applies it. |
+| `heartbeat_seconds` | `15` | How often a visible browser tab checks its terminal connection is really alive. A Wi-Fi to cellular handoff can leave a connection that looks open and answers nothing, and this is what notices. A config reload applies it. |
+| `heartbeat_deadline_seconds` | `30` | How long the browser waits for the answer to that check before deciding the connection is dead and reconnecting. Counted in time the page is on screen. Must be comfortably larger than `heartbeat_seconds`, or a slow network reconnects you needlessly. A config reload applies it. |
 | `tree_list_max_concurrency` | `8` | How many editor directory listings run at once. `0` disables the bound. Read at startup. |
 | `release_notes_max_concurrency` | `2` | How many release-notes fetches run at once. `0` disables the bound. Read at startup. |
 
@@ -282,8 +288,11 @@ The rest tune presentation and limits:
 > and tells you it applies the next time you start `dux server`; the terminal app
 > stays quiet, because nothing it can start reads the setting.
 >
-> The two exceptions are `access_log` and `search_index_max_files`, which a reload
-> applies to a running server.
+> The exceptions are `access_log`, `search_index_max_files`, and the four reconnect
+> timings (`replay_wait_seconds`, `reconnect_backoff_cap_seconds`, `heartbeat_seconds`
+> and `heartbeat_deadline_seconds`), which a reload applies to a running server. The
+> four timings describe what the BROWSER does, so an open tab picks them up on the
+> next reload of its workspace document rather than needing a page refresh.
 
 `serve_while_tui` and `tailscale` are the two binding keys that are live switches: a
 config reload that flips either acts on it there and then, in both directions.
