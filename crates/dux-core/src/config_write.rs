@@ -517,6 +517,30 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_usize(
         doc,
         "server",
+        "replay_wait_seconds",
+        config.server.replay_wait_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "reconnect_backoff_cap_seconds",
+        config.server.reconnect_backoff_cap_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "heartbeat_seconds",
+        config.server.heartbeat_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "heartbeat_deadline_seconds",
+        config.server.heartbeat_deadline_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
         "tree_list_max_concurrency",
         config.server.tree_list_max_concurrency as usize,
     );
@@ -1743,6 +1767,87 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         let parsed: Config = toml::from_str(&saved).expect("patched file re-parses");
         assert_eq!(
             parsed.server.search_index_max_files, 4321,
+            "saved:\n{saved}"
+        );
+    }
+
+    /// The four browser-side reconnect timings render at their defaults, parse
+    /// back, and a user value survives a regenerate. They are read live by the
+    /// browser off the bootstrap document, so a wrong value is silent until
+    /// somebody's phone loses its socket.
+    #[test]
+    fn reconnect_timing_settings_default_and_round_trip() {
+        let rendered = render_config_plain(&Config::default());
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(
+            parsed.server.replay_wait_seconds,
+            crate::config::DEFAULT_REPLAY_WAIT_SECONDS
+        );
+        assert_eq!(
+            parsed.server.reconnect_backoff_cap_seconds,
+            crate::config::DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS
+        );
+        assert_eq!(
+            parsed.server.heartbeat_seconds,
+            crate::config::DEFAULT_HEARTBEAT_SECONDS
+        );
+        assert_eq!(
+            parsed.server.heartbeat_deadline_seconds,
+            crate::config::DEFAULT_HEARTBEAT_DEADLINE_SECONDS
+        );
+
+        let config = Config {
+            server: crate::config::ServerConfig {
+                replay_wait_seconds: 21,
+                reconnect_backoff_cap_seconds: 22,
+                heartbeat_seconds: 23,
+                heartbeat_deadline_seconds: 24,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let rendered = render_config_plain(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(parsed.server.replay_wait_seconds, 21);
+        assert_eq!(parsed.server.reconnect_backoff_cap_seconds, 22);
+        assert_eq!(parsed.server.heartbeat_seconds, 23);
+        assert_eq!(parsed.server.heartbeat_deadline_seconds, 24);
+    }
+
+    /// And a patch rewrites each of them in a file that already carries other
+    /// values, rather than leaving the seeded ones behind.
+    #[test]
+    fn reconnect_timing_user_values_survive_patch() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[server]\nreplay_wait_seconds = 1\nreconnect_backoff_cap_seconds = 2\n\
+             heartbeat_seconds = 3\nheartbeat_deadline_seconds = 4\n",
+        )
+        .expect("seed config");
+
+        let config = Config {
+            server: crate::config::ServerConfig {
+                replay_wait_seconds: 31,
+                reconnect_backoff_cap_seconds: 32,
+                heartbeat_seconds: 33,
+                heartbeat_deadline_seconds: 34,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
+        let saved = fs::read_to_string(&path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("patched file re-parses");
+        assert_eq!(parsed.server.replay_wait_seconds, 31, "saved:\n{saved}");
+        assert_eq!(
+            parsed.server.reconnect_backoff_cap_seconds, 32,
+            "saved:\n{saved}"
+        );
+        assert_eq!(parsed.server.heartbeat_seconds, 33, "saved:\n{saved}");
+        assert_eq!(
+            parsed.server.heartbeat_deadline_seconds, 34,
             "saved:\n{saved}"
         );
     }

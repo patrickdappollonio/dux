@@ -1086,6 +1086,60 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Usize(c.server.search_index_max_files),
         },
         ConfigEntry::Field {
+            key: "replay_wait_seconds",
+            comment: Some(CommentSource::Static(
+                "# How many seconds a terminal in the web UI waits for its screen to\n\
+                 # arrive after it connects, before it stops waiting and offers you a\n\
+                 # Reconnect button. Only time the page is actually on screen counts, so\n\
+                 # a tab left in the background does not use up the wait. Too small and a\n\
+                 # slow connection gets a Reconnect button it did not need; too large and\n\
+                 # a genuinely stuck terminal sits blank for longer before offering you a\n\
+                 # way out. Default 8.\n\
+                 # A config reload applies this to every open browser tab right away.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.replay_wait_seconds as usize),
+        },
+        ConfigEntry::Field {
+            key: "reconnect_backoff_cap_seconds",
+            comment: Some(CommentSource::Static(
+                "# The longest the web UI will wait between two automatic attempts to\n\
+                 # reconnect a dropped terminal. Each failed attempt waits a little longer\n\
+                 # than the last, up to this ceiling, so a phone that has been out of\n\
+                 # signal keeps retrying at a steady pace instead of drifting further and\n\
+                 # further apart. Too small and a server that is down gets hammered; too\n\
+                 # large and coming back into coverage takes a while to notice. Default 10.\n\
+                 # A config reload applies this to every open browser tab right away.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.reconnect_backoff_cap_seconds as usize),
+        },
+        ConfigEntry::Field {
+            key: "heartbeat_seconds",
+            comment: Some(CommentSource::Static(
+                "# How often a browser tab you are looking at checks that its terminal\n\
+                 # connection is really still alive. A connection can die silently when a\n\
+                 # phone moves between Wi-Fi and cellular: the page still believes it is\n\
+                 # connected and the terminal just stops updating. This check is what\n\
+                 # notices. Too small and you spend battery and data on it; too large and\n\
+                 # a dead terminal takes longer to come back. Default 15.\n\
+                 # A config reload applies this to every open browser tab right away.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.heartbeat_seconds as usize),
+        },
+        ConfigEntry::Field {
+            key: "heartbeat_deadline_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long the browser waits for an answer to that check before deciding\n\
+                 # the connection is dead and reconnecting. Only time the page is actually\n\
+                 # on screen counts. Keep it comfortably larger than heartbeat_seconds: a\n\
+                 # slow mobile connection is not a dead one, and reconnecting for no reason\n\
+                 # costs you a redraw of the terminal. Too small and a bad signal causes\n\
+                 # needless reconnects; too large and a genuinely dead connection lingers.\n\
+                 # Default 30.\n\
+                 # A config reload applies this to every open browser tab right away.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.heartbeat_deadline_seconds as usize),
+        },
+        ConfigEntry::Field {
             key: "tree_list_max_concurrency",
             comment: Some(CommentSource::Static(
                 "# Maximum number of /files/tree directory listings the web editor may run\n\
@@ -2375,6 +2429,10 @@ mod tests {
         assert!(rendered.contains("release_notes_max_concurrency = 2"));
         assert!(rendered.contains("file_drop_max_bytes = 104857600"));
         assert!(rendered.contains("file_drop_max_concurrency = 2"));
+        assert!(rendered.contains("replay_wait_seconds = 8"));
+        assert!(rendered.contains("reconnect_backoff_cap_seconds = 10"));
+        assert!(rendered.contains("heartbeat_seconds = 15"));
+        assert!(rendered.contains("heartbeat_deadline_seconds = 30"));
         assert!(rendered.contains("agent_tabs_max = 20"));
         assert!(rendered.contains("title = \"dux\""));
         // Assert the active key (not a commented-out line) so a regression that
@@ -2720,6 +2778,24 @@ name = "test"
         let parsed: Config = toml::from_str(&rendered).expect("rendered default parses");
         assert_eq!(parsed.shutdown_timeout_seconds, 30);
         assert_eq!(parsed.server.shutdown_timeout_seconds, 30);
+    }
+
+    /// The four browser-side reconnect timings survive the canonical template.
+    /// They only ever reach the browser through the bootstrap document, so a key
+    /// the renderer drops is invisible until a phone loses its socket.
+    #[test]
+    fn default_config_round_trips_the_reconnect_timings() {
+        let mut config = Config::default();
+        config.server.replay_wait_seconds = 41;
+        config.server.reconnect_backoff_cap_seconds = 42;
+        config.server.heartbeat_seconds = 43;
+        config.server.heartbeat_deadline_seconds = 44;
+        let rendered = render_config_default(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("config should parse");
+        assert_eq!(parsed.server.replay_wait_seconds, 41);
+        assert_eq!(parsed.server.reconnect_backoff_cap_seconds, 42);
+        assert_eq!(parsed.server.heartbeat_seconds, 43);
+        assert_eq!(parsed.server.heartbeat_deadline_seconds, 44);
     }
 
     #[test]

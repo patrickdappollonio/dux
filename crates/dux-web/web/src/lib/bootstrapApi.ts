@@ -238,6 +238,19 @@ export interface Bootstrap {
    * consumers treat an absent value as OFF: nothing is offered until dux has
    * said the feature exists. */
   file_drop_max_bytes?: number
+  /** Mirrors `config.server.replay_wait_seconds`: seconds of VISIBLE time a
+   * terminal pane waits for its screen after connecting, before offering
+   * Reconnect. */
+  replay_wait_seconds?: number
+  /** Mirrors `config.server.reconnect_backoff_cap_seconds`: the longest gap
+   * between two automatic reconnect attempts. */
+  reconnect_backoff_cap_seconds?: number
+  /** Mirrors `config.server.heartbeat_seconds`: how often a visible page checks
+   * its terminal connection is really alive. */
+  heartbeat_seconds?: number
+  /** Mirrors `config.server.heartbeat_deadline_seconds`: seconds of VISIBLE time
+   * to wait for that answer before forcing a plain reconnect. */
+  heartbeat_deadline_seconds?: number
 }
 
 /** One numbered getting-started step. The number is carried by the server, not

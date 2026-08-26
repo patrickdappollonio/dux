@@ -321,6 +321,26 @@ pub struct BootstrapView {
     /// the feature exists. Defaulting that window to on would advertise a drop
     /// target for a feature that may be switched off.
     pub file_drop_max_bytes: usize,
+    /// Mirrors `config.server.replay_wait_seconds`: how long, in seconds of
+    /// VISIBLE time, a terminal pane waits for its screen to arrive after its
+    /// connection opens before it offers Reconnect.
+    ///
+    /// One of four timings the browser's attach state machine needs and the
+    /// server never reads. They ride this document rather than a channel of
+    /// their own for the same reason every other config-derived value does: a
+    /// config reload refetches the bootstrap, so editing the file retimes every
+    /// open tab with no restart.
+    pub replay_wait_seconds: u32,
+    /// Mirrors `config.server.reconnect_backoff_cap_seconds`: the longest gap
+    /// the browser leaves between two automatic reconnect attempts.
+    pub reconnect_backoff_cap_seconds: u32,
+    /// Mirrors `config.server.heartbeat_seconds`: how often a visible page
+    /// checks that its terminal connection is really alive.
+    pub heartbeat_seconds: u32,
+    /// Mirrors `config.server.heartbeat_deadline_seconds`: how long, in seconds
+    /// of VISIBLE time, the page waits for that answer before forcing a plain
+    /// reconnect.
+    pub heartbeat_deadline_seconds: u32,
     /// Mirrors `config.server.tailscale` as its canonical tri-state name
     /// ("auto" | "yes" | "no"), so the Preferences row shows the saved mode. An
     /// unrecognized config value projects as "auto", which is what the serve
@@ -714,6 +734,22 @@ pub struct TerminalView {
     /// when the terminal has not emitted or received anything yet. Backs the
     /// shared "recently updated" display sort; mirror of [`SessionView::updated_at`].
     pub updated_at: String,
+    /// The connection id currently holding input+sizing ownership of this
+    /// terminal's PTY, or `None` when nobody drives it.
+    ///
+    /// The exact mirror of [`AgentTabView::input_owner`], for the same reason
+    /// and with the same wire shape: ownership lives in the web layer's
+    /// registry, not in the engine, so the engine projects `None` here and the
+    /// web layer's spine overlay stamps the real value. Published as a STRING
+    /// so it compares directly against the `owner` field of the `pty.owner`
+    /// handover frames and the PTY handshake, which is what a client matches
+    /// against its own PTY-socket ids.
+    ///
+    /// A terminal pane's take-over card reads it to tell a stale driver name
+    /// from a fresh one, which is why it is published at all: for a while it
+    /// deliberately was not, because nothing consumed it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_owner: Option<String>,
 }
 
 /// One provider tab of an agent, projected for the tab strip. `order == 0` is
@@ -1081,6 +1117,9 @@ impl Engine {
         TerminalView {
             id: id.to_string(),
             owner: t.owner.to_view(t.client.spawn_dir()),
+            // Always `None` here: PTY ownership lives in the web layer's
+            // registry, so the spine overlay stamps it. See the field's doc.
+            input_owner: None,
             label: t.label.clone(),
             has_output: t.client.has_output(),
             // A terminal is Working when it is streaming output OR a foreground app
@@ -1398,6 +1437,10 @@ impl Engine {
             disable_automated_welcome_screen: self.config.ui.disable_automated_welcome_screen,
             disable_release_notes: self.config.ui.disable_release_notes,
             file_drop_max_bytes: self.config.server.file_drop_max_bytes,
+            replay_wait_seconds: self.config.server.replay_wait_seconds,
+            reconnect_backoff_cap_seconds: self.config.server.reconnect_backoff_cap_seconds,
+            heartbeat_seconds: self.config.server.heartbeat_seconds,
+            heartbeat_deadline_seconds: self.config.server.heartbeat_deadline_seconds,
         }
     }
 }
@@ -1813,6 +1856,44 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         (engine, worktree)
+    }
+
+    /// A companion terminal publishes its PTY's input owner exactly the way an
+    /// agent tab does, and omits the key entirely when nobody drives it.
+    ///
+    /// The browser needs it so a terminal's take-over card can tell a stale
+    /// driver name from a fresh one. The engine cannot fill the field itself
+    /// (ownership lives in the web layer's registry), so the projection starts
+    /// it empty and the actor's overlay stamps it.
+    #[test]
+    fn a_terminal_view_carries_an_input_owner_that_is_omitted_while_unowned() {
+        let (mut engine, _worktree) = engine_with_spawnable_terminals();
+        let (id, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("spawn a terminal");
+
+        let mut spine = engine.spine();
+        let terminal = spine
+            .terminals
+            .iter_mut()
+            .find(|t| t.id == id)
+            .expect("the spawned terminal is projected");
+        assert_eq!(
+            terminal.input_owner, None,
+            "the engine projection must leave ownership to the web layer's overlay"
+        );
+        let json = serde_json::to_string(&terminal).expect("serialize");
+        assert!(
+            !json.contains("input_owner"),
+            "an undriven terminal must publish no owner at all (absent, not null): {json}"
+        );
+
+        terminal.input_owner = Some("42".to_string());
+        let json = serde_json::to_string(&terminal).expect("serialize");
+        assert!(
+            json.contains(r#""input_owner":"42""#),
+            "a driven terminal must publish the owning connection id: {json}"
+        );
     }
 
     #[test]
@@ -2933,12 +3014,54 @@ mod tests {
             "file_drop_max_bytes",
             "tailscale_mode",
             "tailscale_forced_no",
+            "replay_wait_seconds",
+            "reconnect_backoff_cap_seconds",
+            "heartbeat_seconds",
+            "heartbeat_deadline_seconds",
         ] {
             assert!(
                 json.contains(&format!("\"{field}\"")),
                 "bootstrap JSON must carry {field}: {json}"
             );
         }
+    }
+
+    /// The four reconnect timings are projected verbatim from `[server]`.
+    ///
+    /// Nothing in the server reads them: they exist for the BROWSER's attach
+    /// state machine, which can only learn them through this document. A config
+    /// reload refetches the bootstrap, so editing the file retimes every open
+    /// tab with no restart.
+    #[test]
+    fn bootstrap_projects_the_reconnect_timings_from_server_config() {
+        let (mut engine, _tmp) = test_engine();
+        let b = engine.bootstrap();
+        assert_eq!(
+            b.replay_wait_seconds,
+            crate::config::DEFAULT_REPLAY_WAIT_SECONDS
+        );
+        assert_eq!(
+            b.reconnect_backoff_cap_seconds,
+            crate::config::DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS
+        );
+        assert_eq!(
+            b.heartbeat_seconds,
+            crate::config::DEFAULT_HEARTBEAT_SECONDS
+        );
+        assert_eq!(
+            b.heartbeat_deadline_seconds,
+            crate::config::DEFAULT_HEARTBEAT_DEADLINE_SECONDS
+        );
+
+        engine.config.server.replay_wait_seconds = 3;
+        engine.config.server.reconnect_backoff_cap_seconds = 4;
+        engine.config.server.heartbeat_seconds = 5;
+        engine.config.server.heartbeat_deadline_seconds = 6;
+        let b = engine.bootstrap();
+        assert_eq!(b.replay_wait_seconds, 3);
+        assert_eq!(b.reconnect_backoff_cap_seconds, 4);
+        assert_eq!(b.heartbeat_seconds, 5);
+        assert_eq!(b.heartbeat_deadline_seconds, 6);
     }
 
     #[test]

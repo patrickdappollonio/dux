@@ -377,10 +377,14 @@ impl App {
             self.log_refused_resize_once(&seat, pty_id, rows, cols);
             return false;
         }
+        // No `expected_owner`: this surface's take-over is always a deliberate
+        // press of the card's button, never a delayed ghost succession, so
+        // there is no predecessor to compare against.
         let outcome = seat.owners.claim_for_resize(
             pty_id,
             seat.conn_id,
             takeover,
+            None,
             Some(TUI_DEVICE_LABEL),
             |_| {},
         );
@@ -893,7 +897,7 @@ mod tests {
         // The browser claims and ENQUEUES: its apply is still in the actor queue.
         let queued = seat
             .owners
-            .claim_for_resize("s1", browser, false, Some("Chrome"), |_| {})
+            .claim_for_resize("s1", browser, false, None, Some("Chrome"), |_| {})
             .seq
             .expect("the browser's claim applied");
 
@@ -1073,7 +1077,7 @@ mod tests {
             app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
         let browser = seat.owners.next_conn_id();
         seat.owners
-            .claim_for_resize("session-1", browser, false, device, |_| {})
+            .claim_for_resize("session-1", browser, false, None, device, |_| {})
             .epoch
             .expect("the browser claimed the pty");
         wait_for_child_output(&app);
@@ -1538,7 +1542,7 @@ mod tests {
 
         let browser = seat.owners.next_conn_id();
         seat.owners
-            .claim_for_resize("session-1", browser, true, Some("Chrome"), |_| {})
+            .claim_for_resize("session-1", browser, true, None, Some("Chrome"), |_| {})
             .epoch
             .expect("the browser takes the pty over mid-drag");
         app.process_raw_input_bytes(b"\x1b[<0;20;6m")
@@ -1586,7 +1590,7 @@ mod tests {
         app.focus = FocusPane::Center;
         let browser = seat.owners.next_conn_id();
         seat.owners
-            .claim_for_resize("session-1", browser, false, Some("Chrome"), |_| {})
+            .claim_for_resize("session-1", browser, false, None, Some("Chrome"), |_| {})
             .epoch
             .expect("the browser claimed the pty");
         (app, recorded, seat)
@@ -2078,7 +2082,14 @@ mod tests {
         let browser = seat.owners.next_conn_id();
         let browser_seq = seat
             .owners
-            .claim_for_resize("session-1", browser, false, Some(REAL_CHROME_UA), |_| {})
+            .claim_for_resize(
+                "session-1",
+                browser,
+                false,
+                None,
+                Some(REAL_CHROME_UA),
+                |_| {},
+            )
             .seq
             .expect("the browser claimed the pty");
         assert!(
@@ -2146,7 +2157,14 @@ mod tests {
         let (mut app, _recorded, seat) = app_with_a_live_pty();
         let browser = seat.owners.next_conn_id();
         seat.owners
-            .claim_for_resize("session-1", browser, false, Some(REAL_CHROME_UA), |_| {})
+            .claim_for_resize(
+                "session-1",
+                browser,
+                false,
+                None,
+                Some(REAL_CHROME_UA),
+                |_| {},
+            )
             .epoch
             .expect("the browser claimed the pty");
         app.last_pty_resize_target = Some("session-1".to_string());
@@ -2387,9 +2405,14 @@ mod tests {
             "looking at a terminal is not driving it"
         );
         let browser = seat.owners.next_conn_id();
-        let claim =
-            seat.owners
-                .claim_for_resize("session-1", browser, false, Some(REAL_CHROME_UA), |_| {});
+        let claim = seat.owners.claim_for_resize(
+            "session-1",
+            browser,
+            false,
+            None,
+            Some(REAL_CHROME_UA),
+            |_| {},
+        );
         assert!(
             claim.apply,
             "the browser that started the agent must be able to attach to it"
@@ -2408,7 +2431,14 @@ mod tests {
         let (mut app, _recorded, seat) = app_with_a_live_pty();
         let browser = seat.owners.next_conn_id();
         seat.owners
-            .claim_for_resize("session-1", browser, false, Some(REAL_CHROME_UA), |_| {})
+            .claim_for_resize(
+                "session-1",
+                browser,
+                false,
+                None,
+                Some(REAL_CHROME_UA),
+                |_| {},
+            )
             .epoch
             .expect("the browser attached first");
 

@@ -201,6 +201,32 @@ pub fn normalized_agent_tabs_max(configured: u16) -> u16 {
 /// a giant repo (e.g. a built `target/`) is acceptable. `0` disables the cap.
 pub const DEFAULT_SEARCH_INDEX_MAX_FILES: usize = 50_000;
 
+/// Default visible-time wait, in seconds, for a terminal pane's screen to
+/// arrive after its socket opens, before the pane stops waiting and offers
+/// Reconnect. Consumed by the BROWSER, which is the only side that can see
+/// whether the screen ever painted. Counted in visible time, so a backgrounded
+/// tab does not burn the budget while it is not being watched.
+pub const DEFAULT_REPLAY_WAIT_SECONDS: u32 = 8;
+
+/// Default ceiling, in seconds, on the gap between the browser's automatic
+/// reconnect attempts. The backoff grows towards this and then stays there, so
+/// a phone that has been out of signal for an hour still retries about every
+/// ten seconds rather than once an hour.
+pub const DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS: u32 = 10;
+
+/// Default interval, in seconds, at which a visible page asks its terminal
+/// connection to prove it is really alive. The WebSocket-level ping the server
+/// sends is send-only with no deadline, so it cannot detect the half-open
+/// socket a Wi-Fi to cellular handoff leaves behind; this is the
+/// application-level beat that can.
+pub const DEFAULT_HEARTBEAT_SECONDS: u32 = 15;
+
+/// Default visible-time wait, in seconds, for the answer to that beat before
+/// the browser gives up on the socket and forces a plain reconnect. Generous
+/// relative to the interval on purpose: a slow mobile radio is not a dead
+/// socket, and a needless reconnect costs a replay.
+pub const DEFAULT_HEARTBEAT_DEADLINE_SECONDS: u32 = 30;
+
 /// Default cap on concurrent `/files/tree` directory listings (see
 /// [`crate::git::list_dir`]). Each listing does one blocking `read_dir` off
 /// the async reactor; this bounds how many can run at once so a burst of tree
@@ -799,6 +825,36 @@ pub struct ServerConfig {
     /// than disabling the bound: a zero-permit semaphore would stall every drop
     /// forever. Read at startup, so changing it needs a server restart.
     pub file_drop_max_concurrency: u32,
+    /// How long, in seconds of VISIBLE time, a web terminal pane waits for its
+    /// screen to arrive after its connection opens, before it stops waiting and
+    /// offers a Reconnect button. Default 8.
+    ///
+    /// Read by the browser off the bootstrap document; nothing on the server
+    /// side consumes it, and a config reload retimes every open tab with no
+    /// restart.
+    pub replay_wait_seconds: u32,
+    /// The longest gap, in seconds, the web UI leaves between two automatic
+    /// reconnect attempts on a dropped connection. Default 10.
+    ///
+    /// The delay grows after each failure and stops growing here, so a device
+    /// that has been out of coverage for a long time still reconnects promptly
+    /// once it is back. Browser-side, hot-reloadable, like its three siblings.
+    pub reconnect_backoff_cap_seconds: u32,
+    /// How often, in seconds, a visible page checks that its terminal
+    /// connection is really alive. Default 15.
+    ///
+    /// A socket that has silently half-died (the classic Wi-Fi to cellular
+    /// handoff) still looks connected to the browser, so the page asks the
+    /// server to answer and treats silence as a dead connection.
+    /// Browser-side, hot-reloadable.
+    pub heartbeat_seconds: u32,
+    /// How long, in seconds of VISIBLE time, the page waits for that answer
+    /// before forcing a plain reconnect. Default 30.
+    ///
+    /// Deliberately several times the interval: a slow radio is not a dead
+    /// socket, and reconnecting needlessly costs a screen replay.
+    /// Browser-side, hot-reloadable.
+    pub heartbeat_deadline_seconds: u32,
 }
 
 impl ServerConfig {
@@ -838,6 +894,14 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
 /// that changes it hands the new mode to the running serve, which stops or
 /// starts the watcher, binds or drops the leg, and moves the Host guard's
 /// Tailscale-literal rule with it. Warning about a restart there would be false.
+///
+/// The four browser-side reconnect timings (`replay_wait_seconds`,
+/// `reconnect_backoff_cap_seconds`, `heartbeat_seconds`,
+/// `heartbeat_deadline_seconds`) are deliberately ABSENT for the same reason
+/// `access_log` and `search_index_max_files` are: nothing on the server reads
+/// them. They ride the bootstrap document, which every client refetches on a
+/// config reload, so a change retimes every open tab live and warning about a
+/// restart there would be false.
 ///
 /// All five WebSocket caps are also startup-bound: the three per-class
 /// connection-cap semaphores (`max_websocket_events_connections`,
@@ -1855,6 +1919,10 @@ impl Default for ServerConfig {
             release_notes_max_concurrency: DEFAULT_RELEASE_NOTES_MAX_CONCURRENCY,
             file_drop_max_bytes: DEFAULT_FILE_DROP_MAX_BYTES,
             file_drop_max_concurrency: DEFAULT_FILE_DROP_MAX_CONCURRENCY,
+            replay_wait_seconds: DEFAULT_REPLAY_WAIT_SECONDS,
+            reconnect_backoff_cap_seconds: DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS,
+            heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
+            heartbeat_deadline_seconds: DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
         }
     }
 }

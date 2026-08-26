@@ -43,6 +43,7 @@ pub mod host_guard;
 pub(crate) mod ownership_publish;
 pub mod project_actions;
 pub mod project_reads;
+pub mod pty_log;
 /// The PTY input-ownership registry, re-exported from `dux-core`: a rule two
 /// surfaces obey belongs in the crate both can see, and the re-export keeps
 /// every call site and test in this crate on the path it already uses.

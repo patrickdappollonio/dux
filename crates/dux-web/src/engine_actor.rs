@@ -2786,6 +2786,11 @@ fn owned_spine(engine: &Engine, owners: &PtySizeOwners) -> dux_core::viewmodel::
         for session in &mut spine.sessions {
             overlay_session_input_owners(session, &map);
         }
+        // A companion terminal's pty id IS its terminal id and the spine carries
+        // terminals in one flat collection, so publishing their ownership is one
+        // more loop over the same snapshot. See
+        // [`overlay_session_input_owners`] for the cost this accepts.
+        overlay_terminal_input_owners(&mut spine.terminals, &map);
     }
     spine
 }
@@ -2793,11 +2798,15 @@ fn owned_spine(engine: &Engine, owners: &PtySizeOwners) -> dux_core::viewmodel::
 /// The pure half of the overlay: stamp `input_owner` onto every tab of ONE
 /// session whose PTY id appears in the owner map. Tab ids are the PTY ids (the
 /// session id for the session-slot tab), so this is a direct per-tab lookup.
-/// Companion terminal ownership is deliberately NOT published: a terminal
-/// driven elsewhere says nothing about the agent, and no surface consumes it
-/// today. Shared by [`owned_spine`] and the `Spine`/`Session` request arms in
+/// Companion terminal ownership IS published now, by
+/// [`overlay_terminal_input_owners`]: a terminal pane's take-over card consumes
+/// it to tell a stale driver name from a fresh one. Shared by [`owned_spine`] and the `Spine`/`Session` request arms in
 /// [`handle_request`], so every web-served read of a session agrees about who
 /// owns its tabs.
+///
+/// Companion terminals are overlaid separately, by
+/// [`overlay_terminal_input_owners`], because they live in the spine's own flat
+/// collection rather than under a session.
 fn overlay_session_input_owners(
     session: &mut dux_core::viewmodel::SessionView,
     owners: &std::collections::HashMap<String, u64>,
@@ -2808,6 +2817,27 @@ fn overlay_session_input_owners(
             // frames' `owner` field, which is what the client compares its own
             // PTY-socket ids against.
             tab.input_owner = Some(conn_id.to_string());
+        }
+    }
+}
+
+/// The terminal half of the overlay: stamp `input_owner` onto every terminal
+/// whose PTY id appears in the owner map. A companion terminal's PTY id is its
+/// terminal id, so this is the same direct lookup the tab loop does, over the
+/// spine's one flat terminal collection.
+///
+/// THE COST, accepted deliberately: an ownership flip on a terminal now moves
+/// the spine fingerprint and fires `sessions.changed`, exactly as it already
+/// does for an agent tab. It buys the browser the one fact it cannot derive,
+/// which device is driving a terminal, so a terminal pane's take-over card can
+/// tell a stale driver name from a fresh one.
+fn overlay_terminal_input_owners(
+    terminals: &mut [dux_core::viewmodel::TerminalView],
+    owners: &std::collections::HashMap<String, u64>,
+) {
+    for terminal in terminals {
+        if let Some(conn_id) = owners.get(&terminal.id) {
+            terminal.input_owner = Some(conn_id.to_string());
         }
     }
 }
@@ -4937,6 +4967,7 @@ mod tests {
         dux_core::viewmodel::TerminalView {
             id: id.to_string(),
             owner,
+            input_owner: None,
             label: "Terminal 1".to_string(),
             has_output: false,
             working: false,
@@ -5455,6 +5486,57 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// The SAME published-ownership chain, for a companion terminal.
+    ///
+    /// Terminal PTY ids are terminal ids and the spine carries terminals in one
+    /// flat collection, so the overlay is one more loop over the same snapshot.
+    /// The browser consumes it so a terminal pane's take-over card can name the
+    /// device driving it rather than guessing from a stale value. The accepted
+    /// cost, asserted here: an ownership flip on a terminal now moves the spine
+    /// fingerprint and fires `sessions.changed`, exactly as it already did for
+    /// an agent tab.
+    #[test]
+    fn a_terminal_ownership_flip_publishes_the_owner_and_fires_sessions_changed() {
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (terminal_id, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("create companion terminal");
+
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        let (tx, mut rx) = broadcast::channel::<SpineChange>(64);
+        let (workspace_tx, _workspace_rx) = watch::channel(None);
+        let mut check = SpineCheck::new(&engine, &owners, &workspace_tx);
+        assert!(
+            !check.doc.json.contains("input_owner"),
+            "an undriven terminal must publish no owner at all"
+        );
+
+        owners.claim(&terminal_id, 42);
+        check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(SpineChange::Sessions),
+            "a terminal ownership claim must fire sessions.changed, the accepted \
+             cost of publishing the field"
+        );
+        assert!(
+            check.doc.json.contains(r#""input_owner":"42""#),
+            "the served spine must carry the terminal's owning connection id: {}",
+            check.doc.json
+        );
+
+        owners.release(&terminal_id, 42);
+        check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
+        assert!(
+            !check.doc.json.contains("input_owner"),
+            "a disconnect must clear the terminal's published owner"
+        );
     }
 
     #[test]

@@ -1315,6 +1315,153 @@ async fn a_second_pty_connection_is_replayed_scrollback_and_claims_only_by_takin
     );
 }
 
+/// THE DELAYED GHOST SUCCESSION, over two real sockets.
+///
+/// The one press-less re-claim the design keeps is a returning owner succeeding
+/// its own dead connection, and it rides an ordinary flagged resize. On a mobile
+/// network that frame can arrive seconds late, by which time another device may
+/// legitimately own the pty. `expected_owner` is what stops it becoming a steal:
+/// the server transfers only when the named predecessor still holds the pty.
+///
+/// Asserted the same way the take-over test above asserts ownership: by whether
+/// the sender's stdin echoes back. A refused claim forwards nothing.
+#[tokio::test]
+async fn a_flagged_resize_naming_a_stale_expected_owner_does_not_steal_the_pty() {
+    let (addr, _tmp) = boot().await;
+    let url = format!("ws://{addr}/ws/sessions/s1/pty");
+
+    // A attaches and claims by sizing; its `connected` handshake tells it the
+    // connection id it is about to become the ghost of.
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect the first pty socket");
+    let hello_a = next_event_frame(&mut ws_a, "connected", Duration::from_secs(8))
+        .await
+        .expect("the first handshake");
+    let ghost_id = hello_a["id"]
+        .as_str()
+        .expect("the handshake names this connection")
+        .to_string();
+    ws_a.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+    let echoed =
+        accumulate_until(&mut ws_a, "dux-ghost-owner-marker", Duration::from_secs(1)).await;
+    assert!(
+        !String::from_utf8_lossy(&echoed).contains("dux-ghost-owner-marker"),
+        "nothing has typed that marker yet"
+    );
+
+    // A's socket dies, and B claims the freed pty with a plain resize.
+    drop(ws_a);
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect the second pty socket");
+    let _ = next_event_frame(&mut ws_b, "connected", Duration::from_secs(8))
+        .await
+        .expect("the second handshake");
+    // Retry the plain claim until the server has reaped A's socket: until then
+    // the pty is still owned by the ghost and B's plain resize is refused, which
+    // is the correct behaviour and merely a matter of timing here.
+    let mut b_owns = false;
+    for attempt in 0..40 {
+        ws_b.send(Message::Text(r#"{"rows":30,"cols":100}"#.into()))
+            .await
+            .unwrap();
+        ws_b.send(Message::Binary(
+            format!("dux-owner-b-marker-{attempt}\n")
+                .into_bytes()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let needle = format!("dux-owner-b-marker-{attempt}");
+        let seen = accumulate_until(&mut ws_b, &needle, Duration::from_millis(500)).await;
+        if String::from_utf8_lossy(&seen).contains(&needle) {
+            b_owns = true;
+            break;
+        }
+    }
+    assert!(
+        b_owns,
+        "the second connection must claim the pty once the first one is reaped"
+    );
+
+    // A comes back on a fresh socket and its ghost succession finally lands,
+    // naming the dead connection it believes still owns the pty. B owns it now,
+    // so the claim must be refused whole and A's stdin must still be dropped.
+    let (mut ws_c, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect the returning owner's socket");
+    let _ = next_event_frame(&mut ws_c, "connected", Duration::from_secs(8))
+        .await
+        .expect("the returning owner's handshake");
+    ws_c.send(Message::Text(
+        format!(r#"{{"rows":24,"cols":80,"takeover":true,"expected_owner":"{ghost_id}"}}"#).into(),
+    ))
+    .await
+    .unwrap();
+    ws_c.send(Message::Binary(b"dux-stale-ghost-marker\n".to_vec().into()))
+        .await
+        .unwrap();
+    let stolen =
+        accumulate_until(&mut ws_c, "dux-stale-ghost-marker", Duration::from_secs(2)).await;
+    assert!(
+        !String::from_utf8_lossy(&stolen).contains("dux-stale-ghost-marker"),
+        "a flagged resize naming a predecessor that no longer owns the pty stole \
+         input ownership; only a pressed take-over may do that"
+    );
+
+    // And the PRESSED take-over, which names no expectation, still wins.
+    ws_c.send(Message::Text(
+        r#"{"rows":24,"cols":80,"takeover":true}"#.into(),
+    ))
+    .await
+    .unwrap();
+    ws_c.send(Message::Binary(b"dux-pressed-marker\n".to_vec().into()))
+        .await
+        .unwrap();
+    let after = accumulate_until(&mut ws_c, "dux-pressed-marker", Duration::from_secs(8)).await;
+    assert!(
+        String::from_utf8_lossy(&after).contains("dux-pressed-marker"),
+        "a pressed take-over carries no expectation and must still claim; got {} bytes",
+        after.len()
+    );
+}
+
+/// The periodic frame the browser sends is ANSWERED, which is what lets it
+/// measure a round trip and force a plain reconnect when a socket has silently
+/// half-died. The answer echoes the client's own number, so an answer to a stale
+/// beat cannot be counted as an answer to the current one.
+#[tokio::test]
+async fn a_beat_frame_is_answered_with_the_same_number() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/pty"))
+        .await
+        .expect("connect the pty socket");
+    let _ = next_event_frame(&mut ws, "connected", Duration::from_secs(8))
+        .await
+        .expect("the handshake");
+
+    // A WATCHER's beat: `viewed` false, and it must still be answered.
+    ws.send(Message::Text(r#"{"beat":41,"viewed":false}"#.into()))
+        .await
+        .unwrap();
+    let answer = next_event_frame(&mut ws, "beat", Duration::from_secs(8))
+        .await
+        .expect("a watcher's beat must be answered too");
+    assert_eq!(answer["n"].as_u64(), Some(41));
+
+    // And the owner's, carrying the viewed half.
+    ws.send(Message::Text(r#"{"beat":42,"viewed":true}"#.into()))
+        .await
+        .unwrap();
+    let answer = next_event_frame(&mut ws, "beat", Duration::from_secs(8))
+        .await
+        .expect("the owner's beat must be answered");
+    assert_eq!(answer["n"].as_u64(), Some(42));
+}
+
 /// Read the next Text frame that carries the given `event` value, or `None` if
 /// none arrives inside `within`. Binary frames (the scrollback replay and live
 /// PTY output) and pings are skipped, as is any Text frame of another kind.
