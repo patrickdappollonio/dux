@@ -19199,6 +19199,11 @@ mod tests {
     /// A maximized agent surface covers the banner's lane. It is not drawn
     /// behind the overlay and no rect is published, so a press at that row can
     /// never open the pull request the user cannot see.
+    ///
+    /// This test is where that decision lives: the mouse path has no case of
+    /// its own for it, because "no rect" is the whole mechanism, and a mouse
+    /// test that set the rect to `None` by hand would only be asserting its own
+    /// setup.
     #[test]
     fn a_maximized_pane_leaves_no_banner_rect_behind_it() {
         let mut app = test_app(default_bindings());

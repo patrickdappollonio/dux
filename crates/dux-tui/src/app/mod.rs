@@ -443,6 +443,18 @@ pub struct App {
     pub(crate) terminal_selection: Option<TerminalSelection>,
     /// A press dux took an interest in, awaiting the release that acts on it.
     pub(crate) pending_link_click: Option<PendingLinkClick>,
+    /// A left press on the pull-request banner's band, waiting for its release.
+    ///
+    /// The band the press claimed, so a release only opens while that same band
+    /// is still the one on screen: the lane can move (the position setting), go
+    /// away (the pane starts taking input, a surface is maximized) or belong to
+    /// another agent by the time the button comes up.
+    ///
+    /// Deliberately NOT a second lifecycle: this rides the link lane's
+    /// retirement triggers through [`App::retire_pending_link_click`], so a
+    /// resize, a lost focus or a surface change drops it exactly where it drops
+    /// a withheld link press.
+    pub(crate) pending_pr_banner_press: Option<Rect>,
     /// When and where the last link was opened, so the second click of a
     /// double click (the select-a-word gesture over a URL) does not open the
     /// same address a second time. The terminal UI's twin of the web's
@@ -3526,6 +3538,7 @@ impl App {
             last_snapshot_id: None,
             terminal_selection: None,
             pending_link_click: None,
+            pending_pr_banner_press: None,
             last_link_open: None,
             url_opener: default_url_opener(),
             startup_log_selection: None,
@@ -4599,7 +4612,10 @@ impl App {
             "copy-path" => self.copy_selected_path(),
             "open-worktree" => self.open_selected_worktree_in_default_editor(),
             "open-worktree-with" => self.open_worktree_editor_picker(),
-            "open-current-pr" => self.open_current_pr_in_browser(),
+            "open-current-pr" => {
+                self.open_current_pr_in_browser();
+                Ok(())
+            }
             "attach-pull-request" => self.open_attach_pull_request_prompt(),
             "detach-pull-request" => self.detach_pull_request(),
             "resume-pull-request-autodetection" => self.resume_pull_request_autodetection(),

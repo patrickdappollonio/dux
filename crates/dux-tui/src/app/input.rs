@@ -1445,7 +1445,7 @@ impl App {
                 Action::RenameSession if !in_diff => self.open_rename_session()?,
                 Action::OpenAgentInfo if !in_diff => self.open_agent_info()?,
                 Action::OpenCurrentPullRequest if !in_diff && self.current_pr_info().is_some() => {
-                    self.open_current_pr_in_browser()?
+                    self.open_current_pr_in_browser()
                 }
                 Action::ReconnectAgent if !in_diff => {
                     // Delegate to the shared focused-tab logic: enter interactive
@@ -9409,6 +9409,50 @@ impl App {
     pub(crate) fn retire_pending_link_click(&mut self) {
         self.pending_link_click = None;
         self.last_link_open = None;
+        // The banner's press waits for the same release this record does, and
+        // is stranded by exactly the same events, so it retires here rather
+        // than growing a lifecycle of its own.
+        self.pending_pr_banner_press = None;
+    }
+
+    /// Answer one mouse event against a pending press on the pull-request
+    /// banner. Returns whether the event was consumed.
+    ///
+    /// The RELEASE opens, like the link lane beside it and like the web banner
+    /// it mirrors, which is an anchor: a browser opens an anchor when the
+    /// button comes up on it, and a press that slides off the strip opens
+    /// nothing. (The plan said the press opens; parity with the web's anchor
+    /// is the release, and this is the same press-decides, release-acts idiom
+    /// the link click already established.)
+    ///
+    /// The band the press claimed has to still be the band on screen: a lane
+    /// that moved, went away or now belongs to another agent is not the control
+    /// the gesture began on.
+    fn handle_pending_pr_banner_mouse(&mut self, mouse: &MouseEvent) -> bool {
+        let Some(pressed) = self.pending_pr_banner_press else {
+            return false;
+        };
+        match mouse.kind {
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.pending_pr_banner_press = None;
+                if self.mouse_layout.pr_banner == Some(pressed)
+                    && contains_point(pressed, mouse.column, mouse.row)
+                {
+                    self.open_current_pr_in_browser();
+                }
+                true
+            }
+            // The drag belongs to the gesture: it is how a user slides off the
+            // band to cancel, and it must not start anything else on the way.
+            MouseEventKind::Drag(MouseButton::Left) => true,
+            // A new press, or the wrong button coming up, means the release
+            // this record waited for is never arriving.
+            MouseEventKind::Down(_) | MouseEventKind::Up(_) => {
+                self.pending_pr_banner_press = None;
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Answer one mouse event against a pending link press. Returns whether the
@@ -9978,6 +10022,12 @@ impl App {
             return false;
         }
 
+        // The banner's own release, beside the link lane's for the same reason:
+        // the gesture was armed before any of the arms below existed for it.
+        if self.handle_pending_pr_banner_mouse(&mouse) {
+            return false;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if windowed && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
@@ -9994,22 +10044,30 @@ impl App {
                 // The pull-request banner, beside the tab strip because it is
                 // the same kind of thing: dux's own chrome in a lane of its
                 // own, outside the pane, which the child never painted. So
-                // there is no modifier rule and nothing to forward: every left
-                // press on the coloured band opens the pull request, the way
-                // the web banner is one link across the whole strip. The
-                // rect exists only while the band is on screen, which is what
+                // there is no modifier rule and nothing to forward: any left
+                // press on the coloured band arms the gesture, whatever
+                // modifiers the host let through, the way the web banner is one
+                // link across the whole strip.
+                //
+                // The press only ARMS it. The plan's decision said a press
+                // opens; the web banner is an anchor, and a browser opens an
+                // anchor on the release, so parity is press-decides,
+                // release-acts, which is also the idiom the link click beside
+                // this one already uses. `handle_pending_pr_banner_mouse` is
+                // where an open actually happens.
+                //
+                // The rect exists only while the band is painted, which is what
                 // keeps a maximized surface (whose overlay covers the lane)
                 // from having a click target hidden behind it.
-                if self
-                    .mouse_layout
-                    .pr_banner
-                    .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row))
+                if windowed
+                    && let Some(band) = self.mouse_layout.pr_banner
+                    && contains_point(band, mouse.column, mouse.row)
                 {
                     // A consumed press is not half of a double click: leaving
                     // the record standing would let a pane click either side of
                     // this one read as a pair and maximize the surface.
                     self.last_mouse_click = None;
-                    let _ = self.open_current_pr_in_browser();
+                    self.pending_pr_banner_press = Some(band);
                     return false;
                 }
 
@@ -16955,12 +17013,18 @@ not_a_real_action = ["x"]
         message
     }
 
-    /// A left press anywhere on the coloured band opens the pull request, the
-    /// way the web banner is one link across the whole strip. The press is
+    /// Press and release on the band, the gesture that opens it.
+    fn click_band(app: &mut App, column: u16, row: u16) {
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, row));
+    }
+
+    /// A left click anywhere on the coloured band opens the pull request, the
+    /// way the web banner is one link across the whole strip. The gesture is
     /// dux's own chrome: no focus moves, and a mouse-tracking child sees
     /// nothing of it.
     #[test]
-    fn a_left_press_on_the_pr_banner_opens_the_pull_request() {
+    fn a_left_click_on_the_pr_banner_opens_the_pull_request() {
         let mut app = test_app(default_bindings());
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         let rx = recording_opener(&mut app);
@@ -16968,6 +17032,12 @@ not_a_real_action = ["x"]
         app.focus = FocusPane::Left;
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 19));
+        nothing_opened(&rx);
+        assert!(
+            app.pending_pr_banner_press.is_some(),
+            "the press arms the gesture; the release is what opens"
+        );
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 19));
 
         assert_eq!(opened_url(&rx), url);
         assert_eq!(app.focus, FocusPane::Left, "the press moves no focus");
@@ -16997,7 +17067,7 @@ not_a_real_action = ["x"]
         let url = install_pr_banner(&mut app);
         app.url_opener = Arc::new(|_url: &str| Err(anyhow::anyhow!("no such file or directory")));
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 19));
+        click_band(&mut app, 30, 19);
 
         let message = wait_for_status(&mut app, "Could not open");
         assert!(
@@ -17017,7 +17087,7 @@ not_a_real_action = ["x"]
         install_pr_banner(&mut app);
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 19));
+        click_band(&mut app, 30, 19);
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
 
         assert!(
@@ -17037,28 +17107,27 @@ not_a_real_action = ["x"]
         let rx = recording_opener(&mut app);
         app.focus = FocusPane::Left;
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 19));
+        click_band(&mut app, 30, 19);
 
         assert_eq!(app.focus, FocusPane::Center, "the pane took the press");
         nothing_opened(&rx);
     }
 
-    /// While the surface is maximized the banner is behind the overlay, so the
-    /// render pass publishes no rect and a press at that row opens nothing.
+    /// A press that slides off the band before the button comes up opens
+    /// nothing, the way letting go beside a link in a browser does.
     #[test]
-    fn a_press_where_the_banner_would_be_opens_nothing_while_maximized() {
+    fn a_press_that_slides_off_the_band_opens_nothing() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         let rx = recording_opener(&mut app);
         install_pr_banner(&mut app);
-        // What the render pass does under a fullscreen overlay: no band, no
-        // rect. Asserted against the real renderer in `render.rs`.
-        app.mouse_layout.pr_banner = None;
-        app.fullscreen_overlay = FullscreenOverlay::Agent;
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 19));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 30, 12));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 12));
 
         nothing_opened(&rx);
+        assert!(app.pending_pr_banner_press.is_none(), "the record is spent");
     }
 
     // -- The pure decisions --

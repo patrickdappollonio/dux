@@ -1596,6 +1596,75 @@ mod tests {
         (app, recorded, seat)
     }
 
+    /// The pull-request banner lives in its own lane OUTSIDE the pane, so the
+    /// card covering the grid leaves it clickable, exactly as the web's does.
+    /// The card owns its own area and nothing beyond it.
+    #[test]
+    fn the_pr_banner_stays_clickable_under_the_take_over_card() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        app.url_opener = std::sync::Arc::new(move |url: &str| {
+            let _ = tx
+                .lock()
+                .expect("the recording opener's channel")
+                .send(url.to_string());
+            Ok(())
+        });
+        app.engine.pr_statuses.insert(
+            "session-1".to_string(),
+            crate::model::PrInfo {
+                number: 42,
+                state: crate::model::PrState::Open,
+                title: "Teach the banner to open its pull request".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "owner/repo".to_string(),
+                url: "https://github.com/owner/repo/pull/42".to_string(),
+            },
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        assert!(
+            app.focused_pty_is_covered_by_card(),
+            "test setup: the card is between this surface and the child"
+        );
+        let band = app
+            .mouse_layout
+            .pr_banner
+            .expect("the banner is painted beside the covered pane");
+        let column = band.x + band.width / 2;
+        let press = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row: band.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let release = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..press
+        };
+        app.handle_mouse(press);
+        app.handle_mouse(release);
+
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the click under the card still opens the pull request"),
+            "https://github.com/owner/repo/pull/42"
+        );
+        assert_eq!(
+            app.pending_pty_takeover, None,
+            "and it asks for the terminal no more than the web banner does"
+        );
+    }
+
     /// AMENDMENT 5. The FocusAgent binding presses the button, and so does Space:
     /// activating the focused control is the universal convention and the card
     /// has exactly one control.

@@ -3733,10 +3733,14 @@ impl App {
         self.current_pr_info().map(|pr| pr.url.as_str())
     }
 
-    pub(crate) fn open_current_pr_in_browser(&mut self) -> Result<()> {
+    /// Infallible on purpose: every outcome it can have, including "there is
+    /// no pull request to open" and a launcher that will not start, is a status
+    /// line rather than an error for a caller to handle. That keeps the mouse
+    /// path from having to discard a `Result` it could do nothing with.
+    pub(crate) fn open_current_pr_in_browser(&mut self) {
         let Some(pr) = self.current_pr_info().cloned() else {
             self.set_error("No pull request is known for the selected agent yet.");
-            return Ok(());
+            return;
         };
 
         let url = self.current_pr_url().unwrap_or(pr.url.as_str()).to_string();
@@ -3747,7 +3751,6 @@ impl App {
                 pr.owner_repo, pr.number
             ),
         );
-        Ok(())
     }
 
     /// `attach-pull-request`: open the reference field for the selected agent.
@@ -4510,6 +4513,7 @@ mod tests {
             last_snapshot_id: None,
             terminal_selection: None,
             pending_link_click: None,
+            pending_pr_banner_press: None,
             last_link_open: None,
             url_opener: default_url_opener(),
             startup_log_selection: None,

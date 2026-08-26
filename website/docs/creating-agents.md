@@ -230,8 +230,9 @@ Above or below the agent's terminal, a one-line banner carries the pull request'
 its state and its title, on both surfaces. Clicking the banner opens that pull request in
 your browser, wherever you click it. In the terminal UI the `open-current-pr` command does
 the same from the keyboard, and it is the way in while an agent pane is maximized, since
-the maximized surface covers the banner. Which side of the terminal the banner sits on is
-the `pr_banner_position` setting under `[ui]`.
+the maximized surface covers the banner (it also steps aside while you are typing into the
+pane, where the same command is the way in). Which side of the terminal the banner sits
+on is the `pr_banner_position` setting under `[ui]`.
 
 ## Creating an agent from an existing worktree
 
