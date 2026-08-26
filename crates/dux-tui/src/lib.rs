@@ -34,7 +34,7 @@ pub use config::install_canonical_renderer;
 // Domain modules now live in dux-core. Re-export them at the crate root so
 // existing `crate::<mod>::…` paths across the binary keep resolving unchanged.
 pub(crate) use dux_core::{
-    browser, editor, git, io_retry, lockfile, logger, model, pty, startup, statusline, storage,
+    editor, git, io_retry, lockfile, logger, model, pty, startup, statusline, storage,
 };
 
 use std::path::Path;

@@ -84,6 +84,35 @@ const HOST_FORWARD_MAX_PER_TICK: usize = 32 * 1024;
 /// broken stdout logs at most once per interval instead of every tick.
 const HOST_FORWARD_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How dux hands one address to the user's browser.
+///
+/// A seam rather than a direct call, for one reason: every surface that opens a
+/// URL (the pull-request key, the release-notes screen, a click on a linked cell
+/// in an agent's grid) must be testable without a browser window opening on the
+/// developer's desktop. Production always holds [`default_url_opener`].
+pub(crate) type UrlOpener = Arc<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
+
+/// The production opener: the platform's URL launcher, spawned detached.
+pub(crate) fn default_url_opener() -> UrlOpener {
+    Arc::new(|url: &str| dux_core::browser::open_url(url))
+}
+
+/// A left press dux consumed to open an OSC 8 link, held so the matching
+/// release is withheld from the child too.
+///
+/// One lifecycle shared by the windowed mouse path and the fullscreen raw-input
+/// path: the press decides, and the release must not arrive at the child on its
+/// own. It carries the surface it was armed on, so switching agent, tab or
+/// terminal retires it without any call site having to remember to; a new press
+/// and a lost focus retire it explicitly. Nothing ever waits forever for an Up
+/// that is not coming.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingLinkClick {
+    pub(crate) button: MouseButton,
+    /// The terminal surface that was selected when the press landed.
+    pub(crate) surface: Option<String>,
+}
+
 pub struct App {
     pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,
@@ -404,6 +433,11 @@ pub struct App {
     last_snapshot_id: Option<String>,
     /// Active text selection in the terminal viewport, if any.
     pub(crate) terminal_selection: Option<TerminalSelection>,
+    /// A press dux consumed to open a link, whose release must be withheld too.
+    pub(crate) pending_link_click: Option<PendingLinkClick>,
+    /// How this surface opens an address in the user's browser. Injected in
+    /// tests; [`default_url_opener`] everywhere else.
+    pub(crate) url_opener: UrlOpener,
     /// Active text selection in the startup command log output pane, if any.
     pub(crate) startup_log_selection: Option<TerminalSelection>,
     /// When set, the run loop exits with [`RunExit::FlipToServer`], handing the
@@ -3468,6 +3502,8 @@ impl App {
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            pending_link_click: None,
+            url_opener: default_url_opener(),
             startup_log_selection: None,
             pending_server_flip: None,
             companion: None,
@@ -3633,10 +3669,15 @@ impl App {
 
                 // Check SIGWINCH — needed when bypassing crossterm's event
                 // reader (which would otherwise deliver Resize events).
-                if self.sigwinch_flag.swap(false, Ordering::Relaxed)
-                    && let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
-                {
-                    self.report_runtime_error("terminal resize failed", &err);
+                if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
+                    // The interactive path never sees a crossterm Resize, so
+                    // this is where a reflowed grid retires a withheld press
+                    // there: the cell it was aimed at has moved.
+                    self.retire_pending_link_click();
+                    if let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
+                    {
+                        self.report_runtime_error("terminal resize failed", &err);
+                    }
                 }
 
                 if self.force_redraw {
@@ -3794,11 +3835,18 @@ impl App {
                                 Event::Mouse(mouse) => {
                                     should_exit = self.handle_mouse(mouse);
                                 }
-                                Event::Resize(_, _) => {}
+                                // The grid the press was aimed at is gone, and
+                                // so is the cell that carried its link.
+                                Event::Resize(_, _) => self.retire_pending_link_click(),
                                 Event::FocusGained => {
                                     self.terminal_focus.on_focus_gained(Instant::now())
                                 }
-                                Event::FocusLost => self.terminal_focus.on_focus_lost(),
+                                Event::FocusLost => {
+                                    // The release will land on whatever window
+                                    // took the focus, never here.
+                                    self.retire_pending_link_click();
+                                    self.terminal_focus.on_focus_lost();
+                                }
                                 Event::Paste(text) => self.handle_paste(&text),
                             }
 
@@ -4133,6 +4181,37 @@ impl App {
     pub(crate) fn set_info(&mut self, message: impl Into<String>) {
         self.status
             .set(Instant::now(), None, StatusTone::Info, message);
+    }
+
+    /// Open one address in the user's browser, off the interface thread.
+    ///
+    /// The launcher is another process and may take a moment (or a lock, or a
+    /// D-Bus round trip) to answer, so it never runs on the run loop: this is a
+    /// keyed busy that the worker's outcome replaces with `success` or with a
+    /// failure that names the address, so a user whose launcher is missing can
+    /// still copy it. Every caller in the TUI goes through here, so the seam
+    /// stays the one place a test can watch.
+    pub(crate) fn open_url_in_browser(
+        &mut self,
+        url: impl Into<String>,
+        success: impl Into<String>,
+    ) {
+        let url = url.into();
+        let success = success.into();
+        let opener = Arc::clone(&self.url_opener);
+        let failed_url = url.clone();
+        let op = dux_core::engine::status_op(format!("Opening {url} in your default browser..."))
+            .on_success(move |_: &()| dux_core::engine::Final::info(success))
+            .on_failure(move |error: &String| {
+                dux_core::engine::Final::error(format!(
+                    "Could not open {failed_url} in your default browser: {error}. Copy the \
+                     address and open it by hand."
+                ))
+            });
+        let reaction = self
+            .engine
+            .spawn_status_op(op, move || opener(&url).map_err(|err| format!("{err:#}")));
+        self.apply_reaction(reaction);
     }
 
     /// Set an anonymous (unkeyed) `Busy` status. Every production busy now rides a

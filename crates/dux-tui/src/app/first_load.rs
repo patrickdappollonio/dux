@@ -1033,13 +1033,10 @@ impl App {
                     self.set_error(format!("Could not open the project browser: {err:#}"));
                 }
             }
-            FirstLoadAction::OpenUrl(url) => match dux_core::browser::open_url(&url) {
-                Ok(()) => self.set_info(format!("Opened {url} in your default browser.")),
-                Err(err) => self.set_error(format!(
-                    "Could not open {url} in your default browser: {err:#}. Copy the address and \
-                     open it by hand."
-                )),
-            },
+            FirstLoadAction::OpenUrl(url) => {
+                let success = format!("Opened {url} in your default browser.");
+                self.open_url_in_browser(url, success);
+            }
             FirstLoadAction::Dismiss => {
                 self.set_info("Closed the release notes. Run show-release-notes to reopen them.");
             }

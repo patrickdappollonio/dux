@@ -148,6 +148,12 @@ as real clickable links in the terminal UI (as long as your host terminal suppor
 and in the web terminal. The web opens only `http` and `https` links, in a fresh tab with
 no way to reach back into the app.
 
+In the terminal UI a plain click on a link opens it too, in the browser of the machine
+running dux, and the agent never sees that click. Hold `Ctrl` to send the click to the
+agent instead and open nothing. Your own terminal's link gesture still works as it always
+did: dux holds the mouse, so in kitty that is `Shift` and a click, and `Shift` never opens
+anything on dux's side either.
+
 > [!IMPORTANT]
 > In the web terminal, dux is the **only** thing that opens a link. While the agent has
 > mouse reporting on, a click on a link is not passed through to it, because the agent
@@ -195,6 +201,7 @@ terminal_identity = "none"       # inherit dux's own environment, present nothin
 passthrough = false              # TUI: forward nothing to the host terminal
                                  # web: never mirror OSC 52 clipboard writes
 clipboard_passthrough = "off"    # both surfaces: never mirror OSC 52 clipboard writes
-hyperlinks = false               # both surfaces: render OSC 8 links as inert text
+hyperlinks = false               # both surfaces: render OSC 8 links as inert text,
+                                 # with nothing left for a click to open
 web_notifications = false        # web: no browser desktop notifications
 ```

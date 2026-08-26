@@ -1,5 +1,4 @@
 use super::*;
-use crate::browser;
 use crate::editor;
 use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome, WorktreeRemoval};
 
@@ -3741,11 +3740,13 @@ impl App {
         };
 
         let url = self.current_pr_url().unwrap_or(pr.url.as_str()).to_string();
-        browser::open_url(&url)?;
-        self.set_info(format!(
-            "Opened PR {}#{} in the default browser.",
-            pr.owner_repo, pr.number
-        ));
+        self.open_url_in_browser(
+            url,
+            format!(
+                "Opened PR {}#{} in your default browser.",
+                pr.owner_repo, pr.number
+            ),
+        );
         Ok(())
     }
 
@@ -4508,6 +4509,8 @@ mod tests {
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            pending_link_click: None,
+            url_opener: default_url_opener(),
             startup_log_selection: None,
             pending_server_flip: None,
             companion: None,

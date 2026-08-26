@@ -303,6 +303,8 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         snapshot_buf: crate::pty::TerminalSnapshot::empty(),
         last_snapshot_id: None,
         terminal_selection: None,
+        pending_link_click: None,
+        url_opener: crate::app::default_url_opener(),
         startup_log_selection: None,
         pending_server_flip: None,
         companion: None,

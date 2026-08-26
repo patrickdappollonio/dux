@@ -1878,6 +1878,51 @@ mod tests {
         );
     }
 
+    /// The card covers the grid, so there is no readable link under it to
+    /// click: a press on a cell that carries one is swallowed with everything
+    /// else the card covers, and dux opens nothing.
+    #[test]
+    fn a_press_on_a_linked_cell_under_the_card_opens_nothing() {
+        use ratatui::layout::Rect;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
+        app.snapshot_buf.rows = 20;
+        app.snapshot_buf.cols = 80;
+        app.snapshot_buf.links = vec!["https://example.com/pr/1".to_string()];
+        app.snapshot_buf.cells = vec![crate::pty::SnapshotCell {
+            row: 5,
+            col: 5,
+            symbol: "P".into(),
+            fg: crate::pty::CellColor::Reset,
+            bg: crate::pty::CellColor::Reset,
+            modifier: crate::pty::CellModifier::default(),
+            link: Some(0),
+        }];
+        let opens = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&opens);
+        app.url_opener = std::sync::Arc::new(move |_url: &str| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        });
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(
+            opens.load(Ordering::Relaxed),
+            0,
+            "the card owns every click over the area it covers"
+        );
+        assert!(app.pending_link_click.is_none());
+    }
+
     /// Dragging off the button before releasing cancels the click, which is the
     /// universal convention every other button in dux already follows.
     #[test]

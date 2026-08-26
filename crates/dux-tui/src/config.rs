@@ -790,7 +790,10 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# Render OSC 8 hyperlinks as clickable, on both surfaces: in the TUI\n\
                  # (when your host terminal supports them) and in the web terminal\n\
-                 # (http/https only). Set false to render links as plain, inert text.",
+                 # (http/https only). A plain click on a link opens it in the browser\n\
+                 # of the machine running dux; hold Ctrl to send that click to the\n\
+                 # agent instead. Set false to render links as plain, inert text, which\n\
+                 # also means there is no link left to click.",
             )),
             value_fn: |c| FieldValue::Bool(c.capabilities.hyperlinks),
         },
