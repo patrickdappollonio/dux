@@ -177,7 +177,7 @@ impl App {
             .unwrap_or_else(|| session_id.to_string());
         self.set_focused_tab(session_id, &target);
         if self.session_surface == SessionSurface::Agent {
-            self.clear_pruned_agent_input();
+            self.reset_raw_input_state();
             self.fullscreen_overlay = FullscreenOverlay::None;
             if pty.agent_detached {
                 self.focus = FocusPane::Left;
@@ -193,17 +193,8 @@ impl App {
             && self.session_surface == SessionSurface::Agent
             && was_focused_tab
         {
-            self.clear_pruned_agent_input();
+            self.reset_raw_input_state();
         }
-    }
-
-    fn clear_pruned_agent_input(&mut self) {
-        self.input_target = InputTarget::None;
-        self.terminal_selection = None;
-        self.in_bracket_paste = false;
-        self.raw_input_buf.clear();
-        self.raw_input_parser.clear();
-        self.loading_input_buf.clear();
     }
 
     fn apply_selected_agent_exit(&mut self, pruned: &[PrunedPty]) {

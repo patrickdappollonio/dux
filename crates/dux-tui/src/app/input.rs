@@ -2945,7 +2945,7 @@ impl App {
         Ok(false)
     }
 
-    fn reset_raw_input_state(&mut self) {
+    pub(super) fn reset_raw_input_state(&mut self) {
         self.input_target = InputTarget::None;
         self.terminal_selection = None;
         self.in_bracket_paste = false;
