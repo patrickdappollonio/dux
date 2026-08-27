@@ -16,6 +16,7 @@ import {
   EXPLORER_MIN_SIZE_PX,
 } from "@/lib/editorLayout"
 import { agentRoot, rootKey } from "@/lib/editorRoot"
+import { OPEN_IN_EDITORS } from "@/lib/editors"
 
 // What this file exists for, and it is one property.
 //
@@ -1180,6 +1181,24 @@ describe("the header's two open controls are told apart by their icons", () => {
     expect(local.querySelector("svg.lucide-external-link")).toBeNull()
     expect(newTab.querySelector("svg.lucide-external-link")).toBeTruthy()
     expect(newTab.querySelector("svg.lucide-laptop")).toBeNull()
+  })
+
+  it("offers the same local editors in the desktop and mobile menus", async () => {
+    await mountWithTab(PATH)
+
+    fireEvent.click(screen.getByText("Open local editor").closest("button")!)
+    for (const editor of OPEN_IN_EDITORS) {
+      expect(await screen.findByRole("menuitem", { name: editor.label })).toBeTruthy()
+    }
+
+    fireEvent.keyDown(document, { key: "Escape" })
+    fireEvent.click(screen.getByRole("button", { name: "More editor actions" }))
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Open local editor" }),
+    )
+    for (const editor of OPEN_IN_EDITORS) {
+      expect(await screen.findByRole("menuitem", { name: editor.label })).toBeTruthy()
+    }
   })
 })
 
