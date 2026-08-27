@@ -18,40 +18,6 @@ struct ErrorDialogLayout {
     total_rows: u16,
 }
 
-struct BrowseProjectsFooterKeys {
-    confirm: String,
-    close: String,
-    search: String,
-    open: String,
-    goto: String,
-    exit_path: String,
-}
-
-struct AgentTerminalContext {
-    active_surface: SessionSurface,
-    terminal_status: CompanionTerminalStatus,
-    is_input: bool,
-    receives_keys: bool,
-    session_id: Option<String>,
-    focused_tab: Option<String>,
-    provider_name: Option<String>,
-    session_active: bool,
-}
-
-struct TerminalSidebarRow {
-    id: String,
-    display_title: Option<String>,
-    owner_name: String,
-    standalone: bool,
-}
-
-struct SidebarListGeometry {
-    search_area: Option<Rect>,
-    content: Rect,
-    body: Rect,
-    top_pad_y: Option<u16>,
-}
-
 /// The index of the first tab the strip draws, chosen so the focused tab is
 /// visible within `avail` display columns.
 ///
@@ -181,16 +147,6 @@ struct TabStripItem {
     /// `session_attention`, so a focused working pill and a flagged one would
     /// render the same color and the attention dot would lose its exclusivity.
     glyph_tone: Color,
-}
-
-#[derive(Clone, Copy)]
-struct AgentRowCues {
-    needs_attention: bool,
-    /// Animation is Active-only; the static state word still uses the ungated flag.
-    attention_cue: bool,
-    working: bool,
-    typing: bool,
-    deleting: bool,
 }
 
 /// How an agent row's project tag should be rendered. Decided purely from the

@@ -121,6 +121,110 @@ pub(crate) struct PendingLinkClick {
     pub(crate) row: u16,
 }
 
+enum RawSeqAction {
+    Intercept(Action, bool, Vec<u8>),
+    Mouse(MouseEvent, Vec<u8>),
+    Forward(Vec<u8>),
+}
+
+#[derive(Default)]
+struct DemotedInputPatterns {
+    palette: Vec<Vec<u8>>,
+    takeover: Vec<Vec<u8>>,
+}
+
+struct RawInputPlan {
+    actions: Vec<RawSeqAction>,
+    normalized_paste_forwarded: bool,
+}
+
+struct RawInputDispatch {
+    forward_batch: Vec<u8>,
+    is_scrolled_back: bool,
+    may_write_pty: bool,
+    needs_selection_clear: bool,
+    forwarded: input::ForwardedInput,
+}
+
+enum RawInputFlow {
+    Continue,
+    Return(bool),
+}
+
+enum KeyRoute {
+    Continue,
+    Return(bool),
+}
+
+struct BrowseProjectsFooterKeys {
+    confirm: String,
+    close: String,
+    search: String,
+    open: String,
+    goto: String,
+    exit_path: String,
+}
+
+struct AgentTerminalContext {
+    active_surface: SessionSurface,
+    terminal_status: CompanionTerminalStatus,
+    is_input: bool,
+    receives_keys: bool,
+    session_id: Option<String>,
+    focused_tab: Option<String>,
+    provider_name: Option<String>,
+    session_active: bool,
+}
+
+struct TerminalSidebarRow {
+    id: String,
+    display_title: Option<String>,
+    owner_name: String,
+    standalone: bool,
+}
+
+struct SidebarListGeometry {
+    search_area: Option<Rect>,
+    content: Rect,
+    body: Rect,
+    top_pad_y: Option<u16>,
+}
+
+#[derive(Clone, Copy)]
+struct AgentRowCues {
+    needs_attention: bool,
+    /// Animation is Active-only; the static state word still uses the ungated flag.
+    attention_cue: bool,
+    working: bool,
+    typing: bool,
+    deleting: bool,
+}
+
+struct PrReferenceResolutionAnswer {
+    raw_input: String,
+    repository: String,
+    result: Result<dux_core::pr_reference::ReferenceResolution, String>,
+    status_op_id: Option<String>,
+}
+
+struct ChangedFilesAnswer {
+    worktree: PathBuf,
+    error: Option<String>,
+}
+
+struct DrainedEventMetadata {
+    pr_lookup_completion: Option<(String, bool)>,
+    checkout_inspect_completion: Option<String>,
+    reference_resolution: Option<PrReferenceResolutionAnswer>,
+    changed_files_answer: Option<ChangedFilesAnswer>,
+}
+
+struct PruneViewContext {
+    selected_session: Option<String>,
+    focused_tab: Option<String>,
+    tab_providers: HashMap<String, String>,
+}
+
 pub struct App {
     pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,

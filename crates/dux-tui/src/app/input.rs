@@ -438,7 +438,7 @@ pub(super) fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
 /// The classification itself lives in `dux_core::pty`, so this cannot drift
 /// from what the web decides about the same bytes.
 #[derive(Default)]
-struct ForwardedInput {
+pub(super) struct ForwardedInput {
     typing: bool,
     /// The longest suppression window any pointer report in this batch asked
     /// for, or `None` if there were none (or only motion, which asks for
@@ -466,41 +466,6 @@ impl ForwardedInput {
     fn any(&self) -> bool {
         self.typing || self.pointer_window.is_some()
     }
-}
-
-enum RawSeqAction {
-    Intercept(Action, bool, Vec<u8>),
-    Mouse(MouseEvent, Vec<u8>),
-    Forward(Vec<u8>),
-}
-
-#[derive(Default)]
-struct DemotedInputPatterns {
-    palette: Vec<Vec<u8>>,
-    takeover: Vec<Vec<u8>>,
-}
-
-struct RawInputPlan {
-    actions: Vec<RawSeqAction>,
-    normalized_paste_forwarded: bool,
-}
-
-struct RawInputDispatch {
-    forward_batch: Vec<u8>,
-    is_scrolled_back: bool,
-    may_write_pty: bool,
-    needs_selection_clear: bool,
-    forwarded: ForwardedInput,
-}
-
-enum RawInputFlow {
-    Continue,
-    Return(bool),
-}
-
-enum KeyRoute {
-    Continue,
-    Return(bool),
 }
 
 impl RawInputDispatch {

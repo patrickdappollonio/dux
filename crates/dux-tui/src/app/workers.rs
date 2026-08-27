@@ -9,31 +9,6 @@ use dux_core::engine::{
 
 use super::*;
 
-struct PrReferenceResolutionAnswer {
-    raw_input: String,
-    repository: String,
-    result: Result<dux_core::pr_reference::ReferenceResolution, String>,
-    status_op_id: Option<String>,
-}
-
-struct ChangedFilesAnswer {
-    worktree: PathBuf,
-    error: Option<String>,
-}
-
-struct DrainedEventMetadata {
-    pr_lookup_completion: Option<(String, bool)>,
-    checkout_inspect_completion: Option<String>,
-    reference_resolution: Option<PrReferenceResolutionAnswer>,
-    changed_files_answer: Option<ChangedFilesAnswer>,
-}
-
-struct PruneViewContext {
-    selected_session: Option<String>,
-    focused_tab: Option<String>,
-    tab_providers: std::collections::HashMap<String, String>,
-}
-
 impl PruneViewContext {
     fn capture(app: &App) -> Self {
         let selected_session = app.selected_session().map(|session| session.id.clone());
