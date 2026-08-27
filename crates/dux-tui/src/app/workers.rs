@@ -4,43 +4,68 @@ use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView,
     DoDeleteSessionView, EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome,
-    ProjectPersistenceView, PrunedPtyKind, StatusUpdate, WorktreeRemoval,
+    ProjectPersistenceView, PrunedPty, PrunedPtyKind, StatusUpdate, WorktreeRemoval,
 };
 
 use super::*;
 
-impl App {
-    pub(crate) fn drain_events(&mut self) {
-        // The release-notes worker's PAYLOAD rides its own channel (the keyed
-        // busy→final status rides the engine channel below as a
-        // `StatusOpCompleted`), so fold it in on the same tick.
-        self.drain_notes_fetch();
-        while let Ok(event) = self.engine.worker_rx.try_recv() {
-            // A PR-lookup completion carries back the opaque id of the keyed busy
-            // its dispatch opened. Capture it (and whether the lookup succeeded)
-            // before `process_worker_event` consumes the event, so we can DISMISS
-            // that busy once the downstream final is in place: success opens the
-            // name prompt (its `set_info` is the visible final), failure produced
-            // the engine's error `Status` — in both cases the keyed busy only
-            // needs clearing so it never strands to the busy timeout.
-            let pr_lookup_completion = match &event {
+struct PrReferenceResolutionAnswer {
+    raw_input: String,
+    repository: String,
+    result: Result<dux_core::pr_reference::ReferenceResolution, String>,
+    status_op_id: Option<String>,
+}
+
+struct ChangedFilesAnswer {
+    worktree: PathBuf,
+    error: Option<String>,
+}
+
+struct DrainedEventMetadata {
+    pr_lookup_completion: Option<(String, bool)>,
+    checkout_inspect_completion: Option<String>,
+    reference_resolution: Option<PrReferenceResolutionAnswer>,
+    changed_files_answer: Option<ChangedFilesAnswer>,
+}
+
+struct PruneViewContext {
+    selected_session: Option<String>,
+    focused_tab: Option<String>,
+    tab_providers: std::collections::HashMap<String, String>,
+}
+
+impl PruneViewContext {
+    fn capture(app: &App) -> Self {
+        let selected_session = app.selected_session().map(|session| session.id.clone());
+        let focused_tab = selected_session
+            .as_ref()
+            .map(|session_id| app.focused_tab_id(session_id));
+        let tab_providers = app
+            .engine
+            .agent_tabs
+            .iter()
+            .map(|(id, tab)| (id.clone(), tab.provider.as_str().to_string()))
+            .collect();
+        Self {
+            selected_session,
+            focused_tab,
+            tab_providers,
+        }
+    }
+}
+
+impl DrainedEventMetadata {
+    fn capture(event: &WorkerEvent) -> Self {
+        Self {
+            pr_lookup_completion: match event {
                 WorkerEvent::PullRequestResolved {
                     status_op_id: Some(id),
                     result,
                     purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 } => Some((id.clone(), result.is_ok())),
                 _ => None,
-            };
-            // The three checkout / branch-inspection completions carry back the
-            // opaque id of the keyed busy their dispatch opened (see
-            // `pending_checkout_inspect_ops`). Capture it before the event is
-            // consumed so we can DISMISS that busy once the visible final is in
-            // place. The op resolves to a clear in every terminal case — EXCEPT the
-            // checkout-default inspection's Known case, which chains into worker 2
-            // (`DispatchProjectDefaultBranchCheckout`): that handler keeps the same
-            // op alive across the chain, so we skip resolution here when the
-            // reaction is the chain handoff.
-            let checkout_inspect_completion = match &event {
+            },
+            checkout_inspect_completion: match event {
                 WorkerEvent::NonDefaultBranchCheckoutCompleted {
                     status_op_id: Some(id),
                     ..
@@ -58,387 +83,65 @@ impl App {
                     ..
                 } => Some(id.clone()),
                 _ => None,
-            };
-            // The reference-resolution answer is the SURFACE's to act on (the
-            // engine deliberately returns nothing for it), so take it off the
-            // event before it is consumed. It carries the same keyed-busy id as
-            // a lookup, and it dismisses that busy the same way.
-            let reference_resolution = match &event {
+            },
+            reference_resolution: match event {
                 WorkerEvent::PullRequestReferenceResolved {
                     raw_input,
                     repository,
                     result,
                     status_op_id,
-                } => Some((
-                    raw_input.clone(),
-                    repository.clone(),
-                    result.clone(),
-                    status_op_id.clone(),
-                )),
+                } => Some(PrReferenceResolutionAnswer {
+                    raw_input: raw_input.clone(),
+                    repository: repository.clone(),
+                    result: result.clone(),
+                    status_op_id: status_op_id.clone(),
+                }),
                 _ => None,
-            };
-            // A changed-files answer may be the one the `refresh-changes`
-            // command is waiting on. Take the worktree it was computed for and
-            // git's error (if any) off the event before it is consumed, so the
-            // command's keyed busy can be resolved once the engine has applied
-            // the lists.
-            let changed_files_answer = match &event {
-                WorkerEvent::ChangedFilesReady { outcome, worktree } => {
-                    Some((worktree.clone(), outcome.as_ref().err().cloned()))
-                }
-                _ => None,
-            };
-            // A launch this surface armed for an ownership claim is DISARMED
-            // here when it failed, before the event is consumed. Tab ids are
-            // stable across relaunches, so an arm left behind would fire on the
-            // next launch of that same tab, and that one may well be a launch a
-            // browser asked for.
-            match &event {
-                WorkerEvent::AgentLaunchFailed(data) => {
-                    self.tui_launched_ptys.remove(&data.request.tab_id);
-                    if matches!(data.request.kind, AgentLaunchKind::Create { .. }) {
-                        self.create_agent_started_here = false;
-                    }
-                }
-                WorkerEvent::CreateAgentFailed { .. } => {
-                    self.create_agent_started_here = false;
-                }
-                _ => {}
-            }
-            let reaction = self.engine.process_worker_event(event);
-            let chains_forward = matches!(
-                reaction,
-                EventReaction::DispatchProjectDefaultBranchCheckout { .. }
-            );
-            // Decide ownership BEFORE the companion runs, and route against that
-            // snapshot afterwards. The companion's fanout drives the web's own
-            // follow-ups, and those REMOVE the pending-op entry they were routed
-            // by, so a verdict read after the fanout answers "the drainer owns
-            // this" about work the web has already done: a browser's PR create
-            // would pop a name prompt here as well, and both add-project
-            // hand-offs would run twice. A snapshot cannot be flipped by the
-            // fanout's own cleanup.
-            let routing = self.companion_routing();
-            // Lend the engine to the background web server for this reaction
-            // BEFORE applying it. `apply_reaction` consumes the reaction and
-            // `EventReaction` is not `Clone`, so a companion that ran afterwards
-            // would have nothing to look at. A no-op when nothing is serving.
-            self.notify_companion(&reaction);
-            self.apply_routed_reaction(reaction, &routing);
-            if let Some((worktree, error)) = changed_files_answer {
-                self.apply_changed_files_refresh_outcome(&worktree, error);
-            }
-            if let Some((raw_input, repository, result, status_op_id)) = reference_resolution {
-                // The generation guard. `pending_pr_reference_op` names the ONE
-                // resolution this screen is still waiting for, and a reply that
-                // is not it belongs to a screen the user has left: they
-                // cancelled, retargeted at a project, or typed a different
-                // reference, and acting on this answer would create an agent
-                // from a reference they replaced and close the dialog they are
-                // looking at. Checking only that a pull-request modal is open
-                // does not catch that, because the open one may be a different
-                // question.
-                let current = self.pending_pr_reference_op.as_deref() == status_op_id.as_deref()
-                    && status_op_id.is_some();
-                if current {
-                    self.pending_pr_reference_op = None;
-                    if let Err(err) =
-                        self.apply_pull_request_reference_resolution(raw_input, repository, result)
-                    {
-                        self.set_error(format!("{err:#}"));
-                    }
-                }
-                // The busy is dismissed either way: even a superseded reply's
-                // spinner has to come off, and `invalidate_pull_request_resolution`
-                // has usually taken it already, in which case this is a no-op.
-                // The visible final is whatever the branch above produced (the
-                // lookup's own busy, or the picker's message).
-                if let Some(id) = status_op_id
-                    && let Some(op) = self.pending_pr_lookup_ops.remove(&id)
-                {
-                    self.apply_reaction(
-                        op.resolve(&PrLookupFinalOutcome::HandedOff).into_reaction(),
-                    );
-                }
-            }
-            if let Some((id, succeeded)) = pr_lookup_completion
-                && let Some(op) = self.pending_pr_lookup_ops.remove(&id)
-            {
-                let outcome = if succeeded {
-                    PrLookupFinalOutcome::HandedOff
-                } else {
-                    PrLookupFinalOutcome::Failed
-                };
-                self.apply_reaction(op.resolve(&outcome).into_reaction());
-            }
-            if let Some(id) = checkout_inspect_completion
-                && !chains_forward
-                && let Some(op) = self.pending_checkout_inspect_ops.remove(&id)
-            {
-                self.apply_reaction(op.resolve(&TuiCheckoutInspectOutcome::Done).into_reaction());
-            }
-        }
-        // Resume-fallback sweep (both detection windows: a `--continue` that
-        // came up empty, and a resume that hung past its timeout), BEFORE exit
-        // detection so a retried candidate's provider is already gone from
-        // `providers` and never enters the `exited` set below. The DECISION and
-        // the retry are core-owned (`Engine::sweep_resume_fallbacks`, shared with
-        // the web server's actor loop); the TUI only applies the launch
-        // reactions each retry produced.
-        let sweep_size = self.pty_size_for_launch();
-        for reaction in self.engine.sweep_resume_fallbacks(sweep_size) {
-            // Routed through the seam like any other drained reaction: a retry for
-            // an agent a BROWSER launched has a pending web launch op waiting on
-            // it, and the actor loop's own sweep drives the same follow-up. The
-            // ownership snapshot is taken per reaction and for the same reason as
-            // in the drain above.
-            let routing = self.companion_routing();
-            self.notify_companion(&reaction);
-            self.apply_routed_reaction(reaction, &routing);
-        }
-        // Reap PTYs that an individual delete/close SIGTERMed and that have now
-        // exited or passed their grace deadline (force-killed + dropped) — the
-        // non-blocking background half of graceful close. For a reaped agent whose
-        // delete also removes its worktree, dispatch that removal now, only after
-        // the agent's process is actually gone.
-        for removal in self.engine.reap_terminating_ptys() {
-            let _busy = self.engine.dispatch_deferred_worktree_removal(removal);
-        }
-        // Snapshot the pre-teardown state the post-prune UI reactions need but
-        // that `prune_exited_ptys` mutates or removes: the selected session and
-        // its focused tab (for `was_focused_tab`), and each extra tab's provider
-        // (for the "Tab (provider) exited" copy, which must survive even when a
-        // clean-exit close deletes the row before we read it).
-        let selected_before = self.selected_session().map(|s| s.id.clone());
-        let focused_tab_before = selected_before.as_ref().map(|sid| self.focused_tab_id(sid));
-        let tab_providers: std::collections::HashMap<String, String> = self
-            .engine
-            .agent_tabs
-            .iter()
-            .map(|(id, tab)| (id.clone(), tab.provider.as_str().to_string()))
-            .collect();
-
-        // Core owns the exit teardown: reap exited agent tabs and companion
-        // terminals, clear their runtime maps, detach agents whose last tab is
-        // gone, close clean-exit extra-tab rows, and fire the session-slot PR
-        // re-check, the SAME `prune_exited_ptys` the web actor consumes, so the
-        // teardown does not fork per surface. The sweep above already pulled
-        // every retried resume candidate out of `providers`, so a retried
-        // candidate never appears in the result. Each pruned agent carries the
-        // reaped exit-success plus the minimal-output excerpt this surface folds
-        // into its exit-status message (both consumed once at reap, so they ride
-        // out on the value rather than a second read).
-        let pruned = self.engine.prune_exited_ptys();
-        let any_agent_pruned = pruned.iter().any(|p| p.kind == PrunedPtyKind::Agent);
-        // The results this surface's sweeps produced, carried to the companion at
-        // the end of the drain. The prune list is cloned because this surface goes
-        // on to consume it below, and the web layer needs the same rows to build
-        // the exit and close notices a browser would otherwise never see. Only
-        // while serving: nothing is listening otherwise and the clone is not free.
-        let mut maintenance = dux_core::background_serve::DrainedMaintenance {
-            pruned: if self.background_server_is_serving() {
-                pruned.clone()
-            } else {
-                Vec::new()
             },
-            foregrounds_changed: false,
-        };
-
-        // Per-tab UI reactions for each pruned agent tab. Core already tore the
-        // tab down; this only surfaces the scoped message and moves focus off a
-        // vanished tab. `rebuild_left_items` runs once after the loop, only when
-        // a tab_closed removed a row (matching the pre-convergence behavior,
-        // which rebuilt only on a row close).
-        let mut rebuild_needed = false;
-        for pty in pruned.iter().filter(|p| p.kind == PrunedPtyKind::Agent) {
-            // Exhaustive over the owner kinds so a future one has to say whether
-            // it surfaces a tab-exit message here, rather than falling into the
-            // orphan branch unnoticed.
-            let session_id = match pty.owner.as_ref().map(TerminalOwner::as_ref) {
-                Some(TerminalOwnerRef::Session(sid)) => sid,
-                // A project-owned, standalone or orphan tab has no session to
-                // surface on.
-                Some(TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone) | None => {
-                    continue;
-                }
-            };
-            let is_main = pty.id == *session_id;
-            let was_focused_tab = selected_before.as_deref() == Some(session_id)
-                && focused_tab_before.as_deref() == Some(pty.id.as_str());
-            // The provider descriptor for the "Tab (provider) exited" copy, only
-            // for an extra tab (the session-slot tab shows the workspace exit
-            // message below, not a tab-scoped one).
-            let support_provider =
-                (!is_main).then(|| tab_providers.get(&pty.id).cloned().unwrap_or_default());
-            if pty.tab_closed {
-                if let Some(provider) = &support_provider {
-                    self.set_info(format!("Tab ({provider}) exited cleanly and was closed."));
-                }
-                if was_focused_tab {
-                    // Land on a live sibling; with none left, this falls back to
-                    // the (now dormant) session-slot tab.
-                    let target = self
-                        .engine
-                        .first_live_tab(session_id)
-                        .unwrap_or_else(|| session_id.to_string());
-                    self.set_focused_tab(session_id, &target);
-                    if self.session_surface == SessionSurface::Agent {
-                        // The surface under the user just vanished: drop
-                        // interactive input and the fullscreen overlay. With no
-                        // live sibling the agent detached, so land in the list
-                        // exactly like a single agent's clean exit does.
-                        self.input_target = InputTarget::None;
-                        self.fullscreen_overlay = FullscreenOverlay::None;
-                        self.terminal_selection = None;
-                        self.in_bracket_paste = false;
-                        self.raw_input_buf.clear();
-                        self.raw_input_parser.clear();
-                        self.loading_input_buf.clear();
-                        if pty.agent_detached {
-                            self.focus = FocusPane::Left;
-                        }
-                    }
-                }
-                rebuild_needed = true;
-            } else {
-                if let Some(provider) = &support_provider {
-                    self.set_info(format!("Tab ({provider}) exited."));
-                }
-                // If the user was interactive ON this tab when its CLI exited,
-                // drop interactive input right now. Leaving `input_target` on
-                // Agent keeps the raw-input path engaged against the pruned
-                // provider for another tick and then surfaces a misleading
-                // "Agent disconnected." error — and until that tick, every escape
-                // key is swallowed by the passthrough. The fullscreen overlay
-                // deliberately stays up: the dormant-tab relaunch screen is the
-                // desired post-crash view, and Esc/Tab/Ctrl-g/a click outside all
-                // dismiss it from here.
-                if self.input_target == InputTarget::Agent
-                    && self.session_surface == SessionSurface::Agent
-                    && was_focused_tab
-                {
-                    self.input_target = InputTarget::None;
-                    self.terminal_selection = None;
-                    self.in_bracket_paste = false;
-                    self.raw_input_buf.clear();
-                    self.raw_input_parser.clear();
-                    self.loading_input_buf.clear();
-                }
-            }
+            changed_files_answer: match event {
+                WorkerEvent::ChangedFilesReady { outcome, worktree } => Some(ChangedFilesAnswer {
+                    worktree: worktree.clone(),
+                    error: outcome.as_ref().err().cloned(),
+                }),
+                _ => None,
+            },
         }
-        if rebuild_needed {
-            self.rebuild_left_items();
-        }
+    }
+}
 
-        if any_agent_pruned {
-            // If the currently-viewed session's OWN agent (its session-slot tab)
-            // just exited, surface the workspace exit message and leave
-            // interactive mode. (A resume-fallback retry already removed its
-            // provider before the prune, so a retried session never appears.)
-            if let Some(current_id) = self.selected_session().map(|s| s.id.clone())
-                && let Some(pty) = pruned.iter().find(|p| {
-                    p.kind == PrunedPtyKind::Agent
-                        && p.id == current_id
-                        // Exhaustive: a project-owned or orphan prune is not this
-                        // agent's own exit, and a future owner kind must say so
-                        // here rather than being read as one.
-                        && match p.owner.as_ref().map(TerminalOwner::as_ref) {
-                            Some(TerminalOwnerRef::Session(sid)) => sid == current_id,
-                            Some(
-                                TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone,
-                            )
-                            | None => false,
-                        }
-                })
-                // Don't bounce out of the pane if a live extra tab is focused:
-                // the session-slot provider exited, but the user is driving an
-                // extra tab.
-                && {
-                    let focused = self.focused_tab_id(&current_id);
-                    focused == current_id || !self.engine.providers.contains_key(&focused)
-                }
-            {
-                let key = self.bindings.label_for(Action::ReconnectAgent);
-                if self.session_surface == SessionSurface::Agent {
-                    if pty.is_minimal
-                        && !pty.output_excerpt.trim().is_empty()
-                        && let Some(current) = self.selected_session()
-                    {
-                        let branch = current.display_label();
-                        let provider = self
-                            .engine
-                            .running_provider_for(current)
-                            .as_str()
-                            .to_string();
-                        logger::error(&format!(
-                            "Agent CLI process for agent \"{branch}\" ({provider}) exited. Full captured output:\n{}",
-                            pty.output_excerpt
-                        ));
-                    }
-                    let status = agent_exit_status_message(
-                        pty.exit_success,
-                        pty.is_minimal,
-                        &pty.output_excerpt,
-                        &key,
-                    );
-                    self.input_target = InputTarget::None;
-                    self.fullscreen_overlay = FullscreenOverlay::None;
-                    self.focus = FocusPane::Left;
-                    if pty.exit_success == Some(false) {
-                        self.set_error(status);
-                    } else {
-                        self.set_info(status);
-                    }
-                } else {
-                    self.set_info(format!(
-                        "Agent CLI process exited. Companion terminal is still available; press \"{key}\" to relaunch the agent."
-                    ));
-                }
-            }
-            // The PR re-check for an exited session-slot tab fires inside
-            // `prune_exited_ptys` (the shared exit trigger both surfaces get);
-            // the TUI must not fire its own.
-        }
-
-        // Companion-terminal UI reactions (core already removed the terminals and
-        // cleared their runtime maps).
-        let exited_terminal_ids: Vec<String> = pruned
-            .iter()
-            .filter(|p| p.kind == PrunedPtyKind::Terminal)
-            .map(|p| p.id.clone())
-            .collect();
-        if !exited_terminal_ids.is_empty() {
-            // If the active terminal just exited, close the overlay.
-            if let Some(active_id) = self.active_terminal_id.clone()
-                && exited_terminal_ids.contains(&active_id)
-            {
-                self.active_terminal_id = None;
-                if self.input_target == InputTarget::Terminal {
-                    self.input_target = InputTarget::None;
-                }
-                self.fullscreen_overlay = FullscreenOverlay::None;
-                self.session_surface = SessionSurface::Agent;
-                self.set_info("Terminal exited. Press the terminal key to launch a new one.");
-            }
-            self.clamp_terminal_cursor();
-            // An exited project terminal can change the sidebar grouping (its
-            // project may now be agent-less and sink below the separator).
-            self.rebuild_left_items();
-        }
-
-        // Refresh companion-terminal foreground commands. The engine throttles
-        // this by wall-clock (~2s), so calling it on every ~100ms tick keeps the
-        // cadence without coupling the refresh to the tick count. The answer is
-        // kept: a changed `foreground_cmd` is spine state, and the web layer's own
-        // maintenance would have opened its change gate for it.
-        maintenance.foregrounds_changed = self.engine.refresh_terminal_foregrounds();
-
-        // Hand the companion what these sweeps produced, since this surface is the
-        // process's only runner of them while the background server is on.
+impl App {
+    pub(crate) fn drain_events(&mut self) {
+        // The release-notes worker's PAYLOAD rides its own channel (the keyed
+        // busy→final status rides the engine channel below as a
+        // `StatusOpCompleted`), so fold it in on the same tick.
+        self.drain_notes_fetch();
+        self.drain_worker_events();
+        self.apply_resume_fallback_sweep();
+        self.dispatch_reaped_worktree_removals();
+        let maintenance = self.apply_pruned_pty_events();
         self.note_companion_maintenance(&maintenance);
+        self.refresh_resource_monitor_if_due();
+        self.engine.sync_has_active_processes();
+    }
 
-        // Spawn a background worker to refresh resource monitor stats when
-        // the overlay is open and enough wall-clock time has elapsed (~2s).
+    fn apply_pruned_pty_events(&mut self) -> dux_core::background_serve::DrainedMaintenance {
+        let context = PruneViewContext::capture(self);
+        let pruned = self.engine.prune_exited_ptys();
+        let reported_prunes = if self.background_server_is_serving() {
+            pruned.clone()
+        } else {
+            Vec::new()
+        };
+        self.apply_pruned_agent_tabs(&pruned, &context);
+        self.apply_selected_agent_exit(&pruned);
+        self.apply_pruned_terminals(&pruned);
+        dux_core::background_serve::DrainedMaintenance {
+            pruned: reported_prunes,
+            foregrounds_changed: self.engine.refresh_terminal_foregrounds(),
+        }
+    }
+
+    fn refresh_resource_monitor_if_due(&mut self) {
         if let PromptState::ResourceMonitor {
             ref last_refresh, ..
         } = self.prompt
@@ -446,11 +149,269 @@ impl App {
         {
             self.engine.spawn_resource_stats_worker();
         }
+    }
 
-        // Keep the poller's interval flag in sync with whether any runtime PTY is
-        // alive. The rule itself lives in the engine so the web loop keeps the
-        // flag by exactly the same definition.
-        self.engine.sync_has_active_processes();
+    fn apply_pruned_agent_tabs(&mut self, pruned: &[PrunedPty], context: &PruneViewContext) {
+        let mut rebuild_needed = false;
+        for pty in pruned.iter().filter(|pty| pty.kind == PrunedPtyKind::Agent) {
+            rebuild_needed |= self.apply_pruned_agent_tab(pty, context);
+        }
+        if rebuild_needed {
+            self.rebuild_left_items();
+        }
+    }
+
+    fn apply_pruned_agent_tab(&mut self, pty: &PrunedPty, context: &PruneViewContext) -> bool {
+        let Some(session_id) = session_owner_id(pty) else {
+            return false;
+        };
+        let was_focused_tab = context.selected_session.as_deref() == Some(session_id)
+            && context.focused_tab.as_deref() == Some(pty.id.as_str());
+        let support_provider = (pty.id != session_id).then(|| {
+            context
+                .tab_providers
+                .get(&pty.id)
+                .cloned()
+                .unwrap_or_default()
+        });
+        if pty.tab_closed {
+            self.apply_closed_agent_tab(pty, session_id, support_provider, was_focused_tab);
+            true
+        } else {
+            self.apply_exited_agent_tab(support_provider, was_focused_tab);
+            false
+        }
+    }
+
+    fn apply_closed_agent_tab(
+        &mut self,
+        pty: &PrunedPty,
+        session_id: &str,
+        support_provider: Option<String>,
+        was_focused_tab: bool,
+    ) {
+        if let Some(provider) = support_provider {
+            self.set_info(format!("Tab ({provider}) exited cleanly and was closed."));
+        }
+        if !was_focused_tab {
+            return;
+        }
+        let target = self
+            .engine
+            .first_live_tab(session_id)
+            .unwrap_or_else(|| session_id.to_string());
+        self.set_focused_tab(session_id, &target);
+        if self.session_surface == SessionSurface::Agent {
+            self.clear_pruned_agent_input();
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            if pty.agent_detached {
+                self.focus = FocusPane::Left;
+            }
+        }
+    }
+
+    fn apply_exited_agent_tab(&mut self, support_provider: Option<String>, was_focused_tab: bool) {
+        if let Some(provider) = support_provider {
+            self.set_info(format!("Tab ({provider}) exited."));
+        }
+        if self.input_target == InputTarget::Agent
+            && self.session_surface == SessionSurface::Agent
+            && was_focused_tab
+        {
+            self.clear_pruned_agent_input();
+        }
+    }
+
+    fn clear_pruned_agent_input(&mut self) {
+        self.input_target = InputTarget::None;
+        self.terminal_selection = None;
+        self.in_bracket_paste = false;
+        self.raw_input_buf.clear();
+        self.raw_input_parser.clear();
+        self.loading_input_buf.clear();
+    }
+
+    fn apply_selected_agent_exit(&mut self, pruned: &[PrunedPty]) {
+        let Some(current_id) = self.selected_session().map(|session| session.id.clone()) else {
+            return;
+        };
+        let Some(pty) = pruned
+            .iter()
+            .find(|pty| is_session_slot_prune(pty, &current_id))
+        else {
+            return;
+        };
+        let focused = self.focused_tab_id(&current_id);
+        if focused != current_id && self.engine.providers.contains_key(&focused) {
+            return;
+        }
+        self.apply_selected_agent_exit_status(pty);
+    }
+
+    fn apply_selected_agent_exit_status(&mut self, pty: &PrunedPty) {
+        let key = self.bindings.label_for(Action::ReconnectAgent);
+        if self.session_surface != SessionSurface::Agent {
+            self.set_info(format!(
+                "Agent CLI process exited. Companion terminal is still available; press \"{key}\" to relaunch the agent."
+            ));
+            return;
+        }
+        self.log_minimal_agent_exit(pty);
+        let status =
+            agent_exit_status_message(pty.exit_success, pty.is_minimal, &pty.output_excerpt, &key);
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.focus = FocusPane::Left;
+        if pty.exit_success == Some(false) {
+            self.set_error(status);
+        } else {
+            self.set_info(status);
+        }
+    }
+
+    fn log_minimal_agent_exit(&self, pty: &PrunedPty) {
+        if !pty.is_minimal || pty.output_excerpt.trim().is_empty() {
+            return;
+        }
+        if let Some(current) = self.selected_session() {
+            let branch = current.display_label();
+            let provider = self
+                .engine
+                .running_provider_for(current)
+                .as_str()
+                .to_string();
+            logger::error(&format!(
+                "Agent CLI process for agent \"{branch}\" ({provider}) exited. Full captured output:\n{}",
+                pty.output_excerpt
+            ));
+        }
+    }
+
+    fn apply_pruned_terminals(&mut self, pruned: &[PrunedPty]) {
+        let exited_terminal_ids: Vec<&str> = pruned
+            .iter()
+            .filter(|pty| pty.kind == PrunedPtyKind::Terminal)
+            .map(|pty| pty.id.as_str())
+            .collect();
+        if exited_terminal_ids.is_empty() {
+            return;
+        }
+        if let Some(active_id) = self.active_terminal_id.as_deref()
+            && exited_terminal_ids.contains(&active_id)
+        {
+            self.active_terminal_id = None;
+            if self.input_target == InputTarget::Terminal {
+                self.input_target = InputTarget::None;
+            }
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            self.session_surface = SessionSurface::Agent;
+            self.set_info("Terminal exited. Press the terminal key to launch a new one.");
+        }
+        self.clamp_terminal_cursor();
+        self.rebuild_left_items();
+    }
+
+    fn drain_worker_events(&mut self) {
+        while let Ok(event) = self.engine.worker_rx.try_recv() {
+            let metadata = DrainedEventMetadata::capture(&event);
+            self.disarm_tui_launch_for_failed_event(&event);
+            let reaction = self.engine.process_worker_event(event);
+            let chains_forward = matches!(
+                reaction,
+                EventReaction::DispatchProjectDefaultBranchCheckout { .. }
+            );
+            let routing = self.companion_routing();
+            self.notify_companion(&reaction);
+            self.apply_routed_reaction(reaction, &routing);
+            self.apply_drained_event_metadata(metadata, chains_forward);
+        }
+    }
+
+    fn apply_resume_fallback_sweep(&mut self) {
+        let sweep_size = self.pty_size_for_launch();
+        for reaction in self.engine.sweep_resume_fallbacks(sweep_size) {
+            let routing = self.companion_routing();
+            self.notify_companion(&reaction);
+            self.apply_routed_reaction(reaction, &routing);
+        }
+    }
+
+    fn dispatch_reaped_worktree_removals(&mut self) {
+        for removal in self.engine.reap_terminating_ptys() {
+            let _busy = self.engine.dispatch_deferred_worktree_removal(removal);
+        }
+    }
+
+    fn disarm_tui_launch_for_failed_event(&mut self, event: &WorkerEvent) {
+        match event {
+            WorkerEvent::AgentLaunchFailed(data) => {
+                self.tui_launched_ptys.remove(&data.request.tab_id);
+                if matches!(data.request.kind, AgentLaunchKind::Create { .. }) {
+                    self.create_agent_started_here = false;
+                }
+            }
+            WorkerEvent::CreateAgentFailed { .. } => {
+                self.create_agent_started_here = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_drained_event_metadata(
+        &mut self,
+        metadata: DrainedEventMetadata,
+        chains_forward: bool,
+    ) {
+        if let Some(answer) = metadata.changed_files_answer {
+            self.apply_changed_files_refresh_outcome(&answer.worktree, answer.error);
+        }
+        if let Some(answer) = metadata.reference_resolution {
+            self.apply_pr_reference_resolution_answer(answer);
+        }
+        if let Some(completion) = metadata.pr_lookup_completion {
+            self.resolve_pr_lookup_completion(completion);
+        }
+        if let Some(id) = metadata.checkout_inspect_completion {
+            self.resolve_checkout_inspect_completion(id, chains_forward);
+        }
+    }
+
+    fn apply_pr_reference_resolution_answer(&mut self, answer: PrReferenceResolutionAnswer) {
+        let current = self.pending_pr_reference_op.as_deref() == answer.status_op_id.as_deref()
+            && answer.status_op_id.is_some();
+        if current {
+            self.pending_pr_reference_op = None;
+            if let Err(error) = self.apply_pull_request_reference_resolution(
+                answer.raw_input,
+                answer.repository,
+                answer.result,
+            ) {
+                self.set_error(format!("{error:#}"));
+            }
+        }
+        if let Some(id) = answer.status_op_id
+            && let Some(op) = self.pending_pr_lookup_ops.remove(&id)
+        {
+            self.apply_reaction(op.resolve(&PrLookupFinalOutcome::HandedOff).into_reaction());
+        }
+    }
+
+    fn resolve_pr_lookup_completion(&mut self, completion: (String, bool)) {
+        let (id, succeeded) = completion;
+        if let Some(op) = self.pending_pr_lookup_ops.remove(&id) {
+            let outcome = if succeeded {
+                PrLookupFinalOutcome::HandedOff
+            } else {
+                PrLookupFinalOutcome::Failed
+            };
+            self.apply_reaction(op.resolve(&outcome).into_reaction());
+        }
+    }
+
+    fn resolve_checkout_inspect_completion(&mut self, id: String, chains_forward: bool) {
+        if !chains_forward && let Some(op) = self.pending_checkout_inspect_ops.remove(&id) {
+            self.apply_reaction(op.resolve(&TuiCheckoutInspectOutcome::Done).into_reaction());
+        }
     }
 
     /// Apply a reaction this surface minted itself, or one nothing else has had a
@@ -1684,6 +1645,19 @@ impl App {
             }
         }
     }
+}
+
+fn session_owner_id(pty: &PrunedPty) -> Option<&str> {
+    match pty.owner.as_ref().map(TerminalOwner::as_ref) {
+        Some(TerminalOwnerRef::Session(session_id)) => Some(session_id),
+        Some(TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone) | None => None,
+    }
+}
+
+fn is_session_slot_prune(pty: &PrunedPty, session_id: &str) -> bool {
+    pty.kind == PrunedPtyKind::Agent
+        && pty.id == session_id
+        && session_owner_id(pty) == Some(session_id)
 }
 
 fn project_display_name(path: &str, name: &str) -> String {
