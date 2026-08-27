@@ -4189,6 +4189,43 @@ describe("TerminalPane faithful-view overflow and live preference flips", () => 
     })
   })
 
+  it("applies live font preferences without fitting a faithful watcher", () => {
+    const mounted = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    const pty = last()
+    act(() => pty.onOpen())
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    act(() => pty.onConnected("conn-self", "conn-other"))
+    setBox(host(), 2000, 2000)
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    const fitsBefore = FitStub.fits
+
+    mockState = {
+      ...mockState,
+      bootstrap: {
+        ...(mockState.bootstrap as unknown as Record<string, unknown>),
+        terminal_font_family: "Iosevka",
+        terminal_font_size: 20,
+      },
+    } as unknown as DuxState
+    mounted.rerender(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+
+    expect(String(term().options.fontFamily)).toMatch(
+      /^Iosevka, "Dux Mono Symbols", /,
+    )
+    expect(term().options.fontSize).toBe(20)
+    expect({ rows: term().rows, cols: term().cols }).toEqual({
+      rows: 40,
+      cols: 120,
+    })
+    expect(FitStub.fits).toBe(fitsBefore)
+  })
+
   it("paces the touch scrollback off the rendered screen, not the host-sized container", () => {
     // The letterboxed watcher: the container stays host-sized while the grid
     // renders smaller inside it. A row is what the FINGER sees, so the cadence
