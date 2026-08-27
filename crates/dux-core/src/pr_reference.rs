@@ -161,16 +161,8 @@ pub fn parse_typed_reference(raw: &str) -> Result<TypedReference, String> {
         return Err(UNPARSEABLE.to_string());
     }
 
-    // A number on its own, with or without the `#`. It names no repository,
-    // which is a fact the caller has to deal with rather than an error here:
-    // with a project already chosen it is exactly what the user meant.
-    let digits = input.strip_prefix('#').unwrap_or(input);
-    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-        return Ok(TypedReference {
-            host: None,
-            owner_repo: None,
-            number: Some(parse_number(digits)?),
-        });
+    if let Some(reference) = parse_bare_number_reference(input) {
+        return reference;
     }
 
     let Parts {
@@ -182,18 +174,30 @@ pub fn parse_typed_reference(raw: &str) -> Result<TypedReference, String> {
         Form::Schemeless => parse_schemeless_form(input)?,
     };
 
-    if segments.len() < 2 {
-        return Err(UNPARSEABLE.to_string());
+    let (owner, repo) = repository_components(&segments)?;
+    let number = number_from_reference_parts(&segments, fragment.as_deref())?;
+
+    Ok(TypedReference {
+        host,
+        owner_repo: Some(format!("{owner}/{repo}")),
+        number,
+    })
+}
+
+fn parse_bare_number_reference(input: &str) -> Option<Result<TypedReference, String>> {
+    let digits = input.strip_prefix('#').unwrap_or(input);
+    if digits.is_empty() || !digits.chars().all(|character| character.is_ascii_digit()) {
+        return None;
     }
-    // A `.` or a `..` anywhere in the path is refused outright. In the URL
-    // forms none can survive, because the `url` crate has already resolved them
-    // the way a browser would. The forms dux parses by hand (scp-like, and a
-    // bare `owner/repo`) are NOT urls and nothing resolves them, so a dot
-    // segment there would either become a repository NAME (`acme/..`) or sit in
-    // a discarded trailing route while a server would have resolved it into a
-    // different repository (`acme/widget/../gadget`). Both name something other
-    // than what the text says, which is the one thing this parser must never do.
-    if segments.iter().any(|part| part == "." || part == "..") {
+    Some(parse_number(digits).map(|number| TypedReference {
+        host: None,
+        owner_repo: None,
+        number: Some(number),
+    }))
+}
+
+fn repository_components(segments: &[String]) -> Result<(&str, &str), String> {
+    if segments.len() < 2 || segments.iter().any(|part| part == "." || part == "..") {
         return Err(UNPARSEABLE.to_string());
     }
     let owner = segments[0].as_str();
@@ -201,36 +205,26 @@ pub fn parse_typed_reference(raw: &str) -> Result<TypedReference, String> {
     if !is_repository_component(owner) || !is_repository_component(repo) {
         return Err(UNPARSEABLE.to_string());
     }
+    Ok((owner, repo))
+}
 
-    // Everything after `owner/repo` is a browser route and is discarded, with
-    // one exception: `pull/<n>` is the route that carries the number, and
-    // `/files`, `/commits/<sha>` and the rest hang off it harmlessly.
-    let mut number = None;
+fn number_from_reference_parts(
+    segments: &[String],
+    fragment: Option<&str>,
+) -> Result<Option<u64>, String> {
     if segments.len() >= 4
-        && (segments[2] == "pull" || segments[2] == "pulls")
-        && let Ok(parsed) = segments[3].parse::<u64>()
+        && matches!(segments[2].as_str(), "pull" | "pulls")
+        && let Ok(number) = segments[3].parse::<u64>()
     {
-        number = Some(parsed);
+        return Ok(Some(number));
     }
-    // A fragment of nothing but digits is the `owner/repo#123` spelling, and
-    // that spelling is the WHOLE path: `owner/repo/issues#123` is a browser
-    // route with an anchor on it, so reading its `123` as a pull request number
-    // would invent a pull request nobody named. A number already read from the
-    // path wins over a fragment either way.
-    if number.is_none()
-        && segments.len() == 2
-        && let Some(fragment) = fragment.as_deref()
-        && !fragment.is_empty()
-        && fragment.chars().all(|c| c.is_ascii_digit())
-    {
-        number = Some(parse_number(fragment)?);
+    let Some(fragment) = fragment.filter(|_| segments.len() == 2) else {
+        return Ok(None);
+    };
+    if fragment.is_empty() || !fragment.chars().all(|character| character.is_ascii_digit()) {
+        return Ok(None);
     }
-
-    Ok(TypedReference {
-        host,
-        owner_repo: Some(format!("{owner}/{repo}")),
-        number,
-    })
+    parse_number(fragment).map(Some)
 }
 
 fn parse_number(digits: &str) -> Result<u64, String> {
