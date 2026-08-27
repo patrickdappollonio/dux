@@ -1847,6 +1847,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn persistence_failure_without_pending_status_uses_action_specific_message() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+
+        app.apply_project_persistence_outcome(ProjectPersistenceOutcome {
+            action: ProjectPersistenceAction::UpdateEnv {
+                project_id: "project-1".to_string(),
+                project_name: "demo".to_string(),
+                env: std::collections::BTreeMap::new(),
+            },
+            view: ProjectPersistenceView::PersistenceFailed {
+                error: "database unavailable".to_string(),
+            },
+            status_op_id: None,
+        });
+
+        assert_eq!(
+            app.status.message(),
+            "Could not save environment variables for project \"demo\": database unavailable"
+        );
+    }
+
     /// Shared scaffolding for the focused-extra-tab exit tests: an extra tab
     /// of the selected session whose CLI exits with `code`, with the user
     /// interactive + fullscreen ON that tab, ticked through `drain_events`.
