@@ -245,7 +245,7 @@ Each one suppresses only the *automatic* appearance. `disable_release_notes` add
 
 ### Command Palette
 
-Press the palette key and you get fuzzy-searchable access to every action in dux, including features that don't have dedicated keybindings. Sort agents, toggle UI elements, open the resource monitor, rename sessions, edit macros, and more. If you forget a keybinding, just open the palette.
+Press the palette key and you get searchable access to every action in dux, including features that don't have dedicated keybindings. Sort agents, toggle UI elements, open the resource monitor, rename sessions, edit macros, and more. If you forget a keybinding, just open the palette. Type the words in any order and only as much of each as you like: exact phrase matches come first, and anything looser the words still reach is listed below an "Other matches" divider.
 
 ### Server Mode
 
