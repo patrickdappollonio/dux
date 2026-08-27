@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use dux_core::statusline::StatusScope;
+use dux_core::wire::WireCommandOutcome;
 
 use crate::engine_actor::EngineHandle;
 
@@ -222,6 +223,27 @@ pub fn unknown_session() -> Response {
     (StatusCode::NOT_FOUND, "unknown session").into_response()
 }
 
+/// Whether a wire outcome is a soft refusal returned through an error status.
+pub(crate) fn outcome_is_error(outcome: &WireCommandOutcome) -> bool {
+    outcome
+        .status
+        .as_ref()
+        .is_some_and(|status| status.tone == "error")
+}
+
+/// Map a delete command's accepted, soft-refused, and hard-error outcomes.
+pub(crate) fn delete_wire_response(result: Result<WireCommandOutcome, String>) -> Response {
+    match result {
+        Ok(outcome) => match outcome.status {
+            Some(status) if status.tone == "error" => {
+                (StatusCode::CONFLICT, status.message).into_response()
+            }
+            _ => StatusCode::NO_CONTENT.into_response(),
+        },
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
+}
+
 /// A boxed error arm for helpers and extractors whose failure is a ready-made
 /// axum [`Response`]. `Response` is a large type, and the stable clippy that
 /// newly reached CI fires `result_large_err` on any `Result` carrying it in the
@@ -242,22 +264,31 @@ impl IntoResponse for RouteRejection {
     }
 }
 
-/// Whether `provider` is in the engine's configured provider list (the same source
-/// as the bootstrap document's `available_providers`). Returns `None` when the
-/// engine is unavailable, so a caller can distinguish "not configured" (`Some(false)`)
-/// from "can't tell right now" (`None`).
-///
-/// Used by the session/project PATCH handlers to reject a bad provider UP FRONT,
-/// before any sub-command is dispatched. A PATCH applies its fields as independent
-/// wire sub-commands with no rollback, so validating the provider (the only field
-/// the engine cross-checks against config) before the rename/auto-reopen/etc.
-/// sub-commands run keeps a forged or stale provider from partially applying after
-/// an earlier field already committed.
-pub async fn provider_is_configured(engine: &EngineHandle, provider: &str) -> Option<bool> {
-    engine
+pub(crate) async fn require_configured_provider(
+    engine: &EngineHandle,
+    provider: &str,
+) -> Result<(), RouteRejection> {
+    match engine
         .bootstrap()
         .await
-        .map(|b| b.available_providers.iter().any(|p| p == provider))
+        .map(|bootstrap| bootstrap.available_providers.iter().any(|p| p == provider))
+    {
+        Some(true) => Ok(()),
+        Some(false) => Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Provider \"{provider}\" is not configured. Pick one of the configured providers."
+            ),
+        )
+            .into_response()
+            .into()),
+        None => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the engine is unavailable; retry shortly",
+        )
+            .into_response()
+            .into()),
+    }
 }
 
 /// Read the optional `Idempotency-Key` request header, trimmed and non-empty.

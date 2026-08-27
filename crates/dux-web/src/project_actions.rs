@@ -36,11 +36,10 @@ use serde::{Deserialize, Serialize};
 use dux_core::wire::WireCommand;
 
 use crate::rest_common::{
-    CREATE_AWAIT_TIMEOUT, await_new_project, id_within_bound, idempotency_key,
-    provider_is_configured, scope_from_headers,
+    CREATE_AWAIT_TIMEOUT, await_new_project, delete_wire_response, id_within_bound,
+    idempotency_key, require_configured_provider, scope_from_headers,
 };
 use crate::server::AppState;
-use crate::session_actions::outcome_is_error;
 
 /// The project-action routes. The literal `/reorder` segment is registered
 /// alongside `:id`; axum's matcher prefers static segments over `:id`. (The
@@ -205,26 +204,12 @@ async fn remove_project(
     } else {
         WireCommand::RemoveProject { project_id: id }
     };
-    match state
-        .engine
-        .apply_wire_scoped(command, scope_from_headers(&headers, &state.connections))
-        .await
-    {
-        // An `Ok` error-toned status means the delete was REFUSED, not performed
-        // (a tab is still launching, or an async worktree removal is in flight).
-        // Report 409 with the message rather than a misleading 204 "deleted".
-        Ok(outcome) => {
-            if outcome_is_error(&outcome) {
-                let msg = outcome
-                    .status
-                    .map(|s| s.message)
-                    .unwrap_or_else(|| "project delete refused".to_string());
-                return (StatusCode::CONFLICT, msg).into_response();
-            }
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-    }
+    delete_wire_response(
+        state
+            .engine
+            .apply_wire_scoped(command, scope_from_headers(&headers, &state.connections))
+            .await,
+    )
 }
 
 // ── Patch (settings) ─────────────────────────────────────────────────────────
@@ -258,31 +243,12 @@ async fn patch_project(
     }
     let scope = scope_from_headers(&headers, &state.connections);
 
-    // Validate a provider SET up front, before dispatching any sub-command, so a bad
-    // provider can never partially apply after auto-reopen/startup-command/env have
-    // already committed (the PATCH dispatches each field as an independent wire
-    // sub-command with no rollback). `provider` is tri-state: `Some(None)` clears it
-    // (no validation needed); only `Some(Some(_))` sets a value to check. The engine
-    // re-validates authoritatively. NOTE: the remaining fields stay non-atomic — a
-    // later sub-command failing leaves earlier ones committed. That residual
-    // non-atomicity across the independent fields is accepted: there is no engine
-    // atomic-batch command, and the provider is the only field validated against the
-    // configured list (the realistic failure mode), so guarding it up front removes
-    // the partial-commit hazard that actually occurs in practice.
-    if let Some(Some(provider)) = body.provider.as_ref() {
-        match provider_is_configured(&state.engine, provider).await {
-            Some(true) => {}
-            Some(false) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "Provider \"{provider}\" is not configured. Pick one of the configured providers."
-                    ),
-                )
-                    .into_response();
-            }
-            None => return engine_unavailable(),
-        }
+    // Validate a provider before the independently applied fields so an invalid
+    // value cannot leave earlier fields partially committed.
+    if let Some(Some(provider)) = body.provider.as_ref()
+        && let Err(rejection) = require_configured_provider(&state.engine, provider).await
+    {
+        return rejection.into_response();
     }
 
     if let Some(provider) = body.provider

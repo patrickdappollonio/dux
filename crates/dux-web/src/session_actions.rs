@@ -61,12 +61,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use dux_core::wire::{WireCommand, WireCommandOutcome};
+use dux_core::wire::WireCommand;
 
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
     CREATE_AWAIT_TIMEOUT, FROM_PR_CREATE_AWAIT_TIMEOUT, await_new_session, await_session_for_op,
-    id_within_bound, idempotency_key, provider_is_configured, scope_from_headers, unknown_session,
+    delete_wire_response, id_within_bound, idempotency_key, outcome_is_error,
+    require_configured_provider, scope_from_headers, unknown_session,
 };
 use crate::server::AppState;
 
@@ -421,32 +422,18 @@ async fn delete_session(
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp.into_response();
     }
-    match state
-        .engine
-        .apply_wire_scoped(
-            WireCommand::DeleteSession {
-                session_id: id,
-                delete_worktree: q.delete_worktree,
-            },
-            scope_from_headers(&headers, &state.connections),
-        )
-        .await
-    {
-        // An `Ok` error-toned status means the delete was REFUSED, not performed
-        // (a tab is still launching, or an async delete is already in flight) —
-        // report 409 with the message rather than a misleading 204 "deleted".
-        Ok(outcome) => {
-            if outcome_is_error(&outcome) {
-                let msg = outcome
-                    .status
-                    .map(|s| s.message)
-                    .unwrap_or_else(|| "delete refused".to_string());
-                return (StatusCode::CONFLICT, msg).into_response();
-            }
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-    }
+    delete_wire_response(
+        state
+            .engine
+            .apply_wire_scoped(
+                WireCommand::DeleteSession {
+                    session_id: id,
+                    delete_worktree: q.delete_worktree,
+                },
+                scope_from_headers(&headers, &state.connections),
+            )
+            .await,
+    )
 }
 
 // ── Patch (rename / provider / auto-reopen) ──────────────────────────────────
@@ -488,29 +475,12 @@ async fn patch_session(
     }
     let scope = scope_from_headers(&headers, &state.connections);
 
-    // Validate a provider change UP FRONT, before dispatching any sub-command, so a
-    // bad provider can never partially apply after the rename/auto-reopen already
-    // committed (the PATCH dispatches its fields as independent wire sub-commands
-    // with no rollback). The engine re-validates authoritatively; this is the
-    // blast-radius guard. NOTE: the remaining fields (title, auto_reopen) are still
-    // applied as separate sub-commands, so a failure in a later one leaves an
-    // earlier one committed. That residual non-atomicity across the independent
-    // fields is accepted: there is no engine atomic-batch command, and the provider
-    // is the only field cross-validated against config (the realistic failure here).
-    if let Some(provider) = body.provider.as_deref() {
-        match provider_is_configured(&state.engine, provider).await {
-            Some(true) => {}
-            Some(false) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "Provider \"{provider}\" is not configured. Pick one of the configured providers."
-                    ),
-                )
-                    .into_response();
-            }
-            None => return engine_unavailable(),
-        }
+    // Validate a provider before the independently applied fields so an invalid
+    // value cannot leave earlier fields partially committed.
+    if let Some(provider) = body.provider.as_deref()
+        && let Err(rejection) = require_configured_provider(&state.engine, provider).await
+    {
+        return rejection.into_response();
     }
 
     if let Some(title) = body.title
@@ -889,17 +859,6 @@ fn engine_unavailable() -> Response {
         "the engine is unavailable; retry shortly",
     )
         .into_response()
-}
-
-/// Whether a wire outcome carried an error-toned status (a soft refusal returned
-/// as `Ok`, e.g. the create in-flight guard). Shared with `project_actions` so
-/// the project delete's refusal maps to 409 the same way a session delete's does.
-pub(crate) fn outcome_is_error(outcome: &WireCommandOutcome) -> bool {
-    outcome
-        .status
-        .as_ref()
-        .map(|s| s.tone == "error")
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
