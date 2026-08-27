@@ -1044,129 +1044,43 @@ eventsSocket.subscribe(["sessions", "projects", "config"])
 // does, so the registration is never retired.
 registerPageLifecycle(eventsSocket)
 
-// A `session.changes` event invalidates one session's changed files. Refetch
-// when it is the selected session AND (the slice is in error — always re-fetch
-// to self-heal, since the error path has no usable rev) OR the event's rev is at
-// least the applied rev. Lag catch-up arrives as the same event, so this one
-// handler covers it.
-eventsSocket.onEvent = (ev: EventsServerMessage) => {
-  // The per-connection id, delivered as the FIRST `/ws/events` frame (and re-sent
-  // on every reconnect). Record it so the REST clients can stamp it as
-  // `X-Connection-Id` and the server scopes their status toasts back to us.
-  if (ev.event === "connected") {
-    if (typeof ev.id === "string") setConnectionId(ev.id)
-    return
+function clearFailedTabLaunch(event: EventsServerMessage): void {
+  if (event.tone !== "warning" || !event.key?.startsWith("tab-launch-")) return
+  const tabId = event.key.slice("tab-launch-".length)
+  if (!state.startedDormantTabs.includes(tabId)) return
+  setState({
+    startedDormantTabs: state.startedDormantTabs.filter((id) => id !== tabId),
+  })
+}
+
+function handleStatusEvent(event: EventsServerMessage): void {
+  if (event.tone === "error") setState({ ...clearPendingClientIntent() })
+  clearFailedTabLaunch(event)
+  if (!statusToastAllowed(event.scope, state.standaloneEditor)) return
+  showStatusToast(
+    event.key,
+    event.tone ?? "info",
+    event.message ?? "",
+    event.sticky ?? false,
+  )
+}
+
+function applyPushedWorkspace(event: EventsServerMessage): void {
+  try {
+    applyWorkspace(
+      normalizeWorkspace(event.workspace as RawWorkspace),
+      loadWorkspaceSeq,
+    )
+    serverPushesWorkspace = true
+  } catch (error) {
+    console.warn("[dux] pushed workspace document rejected", error)
   }
-  // Engine status toasts. The server already
-  // scope-filtered per connection; the client reads `scope` for one further,
-  // surface-level decision: the standalone editor tab renders only statuses
-  // addressed to its own connection and drops the workspace broadcasts
-  // (`statusToastAllowed`). That gate is on the RENDERING only. An error-toned
-  // async status also voids any in-flight create-focus (the create likely failed)
-  // and unwinds any optimistic reorder overlay.
-  if (ev.event === "status") {
-    if (ev.tone === "error") setState({ ...clearPendingClientIntent() })
-    // A `tab-launch-<tabId>` keyed status carries BOTH outcomes of an extra-tab
-    // launch: a `warning` on failure and an `info` on success (both keyed the same
-    // so neither is clobbered by an unrelated toast). Only the FAILURE clears that
-    // tab's "explicitly started" latch — so `isExtraTabDormant` goes true again,
-    // the dormant retry card returns, and the pane stops auto-reconnecting the
-    // failing launch. The SUCCESS path must NOT touch the latch here: the latch is
-    // cleared race-free by `applyWorkspace` in the same tick it flips `has_live_process`
-    // true, and stripping it early (before the spine refetch lands) would briefly
-    // re-mark the tab dormant, unmounting the just-launched pane and flashing the
-    // "Start session" card back until the spine catches up.
-    if (ev.tone === "warning" && ev.key?.startsWith("tab-launch-")) {
-      const tabId = ev.key.slice("tab-launch-".length)
-      if (state.startedDormantTabs.includes(tabId)) {
-        setState({
-          startedDormantTabs: state.startedDormantTabs.filter(
-            (id) => id !== tabId,
-          ),
-        })
-      }
-    }
-    // Only the toast is surface-gated. The state above applies on every
-    // surface: it is invisible in the editor tab either way, and forking store
-    // state per surface would be a new bug class for no rendering difference.
-    if (statusToastAllowed(ev.scope, state.standaloneEditor)) {
-      showStatusToast(ev.key, ev.tone ?? "info", ev.message ?? "", ev.sticky ?? false)
-    }
-    return
-  }
-  // Dismiss the toast whose id matches the cleared key (anonymous slot when null).
-  if (ev.event === "status_cleared") {
-    // The toast is going now, so any guard armed for it is moot.
-    dismissNotification(ev.key ?? ANON_TOAST_ID)
-    return
-  }
-  // A `config.changed` event invalidates the bootstrap document (the server's
-  // config was edited/reloaded). Re-GET it so providers, macros, UI flags, etc.
-  // reflect the new config without a reconnect. The `config` coarse topic is
-  // subscribed at module load, so this fires for every client.
-  if (ev.event === "config.changed") {
-    loadBootstrap()
-    return
-  }
-  // A `workspace` event CARRIES the whole workspace document. The server holds
-  // it pre-serialized and every connected tab needs the same bytes, so it is
-  // pushed once per change instead of each tab answering a ping with its own
-  // full GET. It flows through the same normalization and the same apply as a
-  // fetched document, so nothing downstream can tell the two apart.
-  if (ev.event === "workspace") {
-    try {
-      applyWorkspace(
-        normalizeWorkspace(ev.workspace as RawWorkspace),
-        loadWorkspaceSeq,
-      )
-      // Only now: a frame dux could not process at all leaves the ping-refetch
-      // path armed, so one bad server build cannot freeze the sidebar behind a
-      // console warning. A frame that was understood and then DISCARDED as
-      // stale still counts, because it proves the server pushes.
-      serverPushesWorkspace = true
-    } catch (err) {
-      console.warn("[dux] pushed workspace document rejected", err)
-    }
-    return
-  }
-  // A `projects.changed` / `sessions.changed` event says the workspace document
-  // changed without saying how (a project/session was added, removed, reordered,
-  // renamed, changed status, etc.). Re-GET it so the sidebar, session lists, and
-  // selection logic reflect the new state. The `projects`/`sessions` coarse
-  // topics are subscribed at module load, so this fires for every client.
-  //
-  // Against a server that pushes the document, these pings are redundant: the
-  // change already arrived with its value. They keep firing (they are what an
-  // older page needs, and what lag recovery uses), so once a push has landed
-  // this client stops answering them, and the N-tabs-N-GETs traffic goes away.
-  if (ev.event === "projects.changed" || ev.event === "sessions.changed") {
-    if (!serverPushesWorkspace) loadWorkspace()
-    return
-  }
-  // A `pty.owner` event means a connection claimed (took over, or first-claimed an
-  // unowned) PTY's sizing+input, OR that the owner disconnected and nobody holds
-  // it, in which case `owner` is ABSENT. Fan it out to the mounted terminal view
-  // for that pty id along with the claimer's connection id (`owner`); the view
-  // compares that against its own PTY-socket connection id to decide definitively
-  // whether it is the owner (stays interactive), has been taken over (read-only
-  // placeholder), or may pick up a freed pty. A missing owner reads as "not us"
-  // for every client, which is exactly right: nobody is driving.
-  // The id is the pty id (session id for an agent, terminal id for a companion).
-  // Delivered on the coarse `sessions` topic, subscribed at module load.
-  if (ev.event === "pty.owner") {
-    // Pass the ownership epoch so the fan-out can ignore an out-of-order (older)
-    // handover and converge on the latest claim regardless of arrival order.
-    if (typeof ev.id === "string")
-      notifyPtyOwner(ev.id, ev.owner, ev.epoch, ev.device)
-    return
-  }
-  if (ev.event !== "session.changes") return
-  const id = ev.id
+}
+
+function handleSessionChanges(event: EventsServerMessage): void {
+  const id = event.id
   if (id === undefined || id !== state.selectedSessionId) return
-  // A missing `rev` (the server's Lagged catch-up for a cold session carries
-  // none) is a force-refetch: we can't compare it, so we must NOT let
-  // `undefined >= rev` short-circuit to false and skip the refetch.
-  const rev = ev.rev
+  const rev = event.rev
   if (
     state.changes.phase === "error" ||
     rev === undefined ||
@@ -1175,6 +1089,40 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
     loadChanges(id)
   }
 }
+
+function routeEvent(event: EventsServerMessage): void {
+  switch (event.event) {
+    case "connected":
+      if (typeof event.id === "string") setConnectionId(event.id)
+      return
+    case "status":
+      handleStatusEvent(event)
+      return
+    case "status_cleared":
+      dismissNotification(event.key ?? ANON_TOAST_ID)
+      return
+    case "config.changed":
+      loadBootstrap()
+      return
+    case "workspace":
+      applyPushedWorkspace(event)
+      return
+    case "projects.changed":
+    case "sessions.changed":
+      if (!serverPushesWorkspace) loadWorkspace()
+      return
+    case "pty.owner":
+      if (typeof event.id === "string") {
+        notifyPtyOwner(event.id, event.owner, event.epoch, event.device)
+      }
+      return
+    case "session.changes":
+      handleSessionChanges(event)
+      return
+  }
+}
+
+eventsSocket.onEvent = routeEvent
 
 // The `boot()` driver kicks off the very first bootstrap+spine load alongside
 // `eventsSocket.connect()`, so the first `onOpen` that follows must NOT re-fetch
@@ -1488,7 +1436,10 @@ function loadBootstrap(): void {
     })
 }
 
-function reconcileConfirmedOverride<T>(override: T | null, configured: T): T | null {
+function reconcileConfirmedOverride<T>(
+  override: T | null,
+  configured: unknown,
+): T | null {
   return override !== null && override === configured ? null : override
 }
 
@@ -1522,12 +1473,7 @@ function applyBootstrap(b: Bootstrap): void {
       state.mobileAccessoryBarOverride,
       b.mobile_accessory_bar ?? true,
     ),
-    // Same reconcile as changesPaneOverride: drop the optimistic sort override once
-    // the refetched config confirms it, so config.ui.agent_sort is the single truth.
-    agentSort:
-      state.agentSort !== null && state.agentSort === b.agent_sort
-        ? null
-        : state.agentSort,
+    agentSort: reconcileConfirmedOverride(state.agentSort, b.agent_sort),
   })
   // Reflect the configured instance name and favicon in the browser tab, plus the
   // live attention count/dot. Guarded inside `refreshAttentionChrome` because the
