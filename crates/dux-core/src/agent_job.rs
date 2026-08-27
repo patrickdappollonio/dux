@@ -1367,6 +1367,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fork_without_a_name_fails_before_creating_a_worktree() {
+        let repo = init_test_repo();
+        let source = fork_source_session(repo.path());
+        let run = drive_create_job_run(
+            repo.path(),
+            CreateAgentRequest::ForkSession {
+                project: test_project(repo.path()),
+                source_session: Box::new(source),
+                source_label: "source".into(),
+                custom_name: None,
+            },
+        );
+
+        assert!(run.session.is_none());
+        assert_eq!(
+            run.failure.as_deref(),
+            Some("Forking an agent requires choosing a name first.")
+        );
+        assert!(run.progress.is_empty());
+    }
+
+    #[test]
+    fn new_project_without_commits_fails_with_initial_commit_guidance() {
+        let repo = tempfile::tempdir().unwrap();
+        git_in(repo.path(), &["init", "-b", "main"]);
+        let run = drive_create_job_run(
+            repo.path(),
+            CreateAgentRequest::NewProject {
+                project: test_project(repo.path()),
+                custom_name: Some("agent".into()),
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+            },
+        );
+
+        assert!(run.session.is_none());
+        assert!(
+            run.failure
+                .as_deref()
+                .is_some_and(|message| message.contains("has no commits yet"))
+        );
+    }
+
     /// THE RECORD-ONLY ROLLBACK PIN. A standalone create that fails must leave
     /// the user's folder exactly as it found it: nothing removed, nothing
     /// added, not even the hidden housekeeping dux writes elsewhere.
