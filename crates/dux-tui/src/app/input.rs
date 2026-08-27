@@ -4082,6 +4082,74 @@ impl App {
         Some(false)
     }
 
+    fn close_kill_running_prompt(&mut self) {
+        let should_close = match &mut self.prompt {
+            PromptState::KillRunning(prompt) => {
+                if prompt.list.exit_search_clearing_filter() {
+                    Self::clamp_kill_running_prompt(prompt);
+                    false
+                } else {
+                    true
+                }
+            }
+            _ => false,
+        };
+        if should_close {
+            self.prompt = PromptState::None;
+            self.set_info("Closed Kill Running. No agents or terminals were killed.");
+        }
+    }
+
+    fn move_kill_running_selection(&mut self, down: bool) {
+        let PromptState::KillRunning(prompt) = &mut self.prompt else {
+            return;
+        };
+        if !matches!(prompt.focus, KillRunningFocus::List) {
+            return;
+        }
+        if down {
+            let count = Self::visible_kill_running_indices(prompt).len();
+            prompt.list.move_down(count);
+        } else {
+            prompt.list.move_up();
+        }
+    }
+
+    fn move_kill_running_focus(&mut self, forward: bool) {
+        let PromptState::KillRunning(prompt) = &mut self.prompt else {
+            return;
+        };
+        prompt.focus = match prompt.focus {
+            KillRunningFocus::List => Self::next_kill_running_footer_action(prompt, None, forward),
+            KillRunningFocus::Footer(action) => {
+                Self::next_kill_running_footer_action(prompt, Some(action), forward)
+            }
+        };
+    }
+
+    fn confirm_kill_running_prompt(&mut self) -> Result<()> {
+        let focus = match &self.prompt {
+            PromptState::KillRunning(prompt) => prompt.focus,
+            _ => return Ok(()),
+        };
+        match focus {
+            KillRunningFocus::List => self.toggle_hovered_kill_running_selection(),
+            KillRunningFocus::Footer(action) => {
+                self.execute_kill_running_footer_action(action)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_kill_running_search_key(&mut self, key: KeyEvent) {
+        if let PromptState::KillRunning(prompt) = &mut self.prompt {
+            if prompt.list.filter.handle_key(key) {
+                prompt.list.selected = 0;
+            }
+            Self::clamp_kill_running_prompt(prompt);
+        }
+    }
+
     fn handle_kill_running_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
         if !matches!(self.prompt, PromptState::KillRunning(..)) {
             return Ok(None);
@@ -4105,18 +4173,7 @@ impl App {
 
         match action {
             Some(Action::CloseOverlay) => {
-                let mut closed = false;
-                if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                    if prompt.list.exit_search_clearing_filter() {
-                        Self::clamp_kill_running_prompt(prompt);
-                    } else {
-                        closed = true;
-                    }
-                }
-                if closed {
-                    self.prompt = PromptState::None;
-                    self.set_info("Closed Kill Running. No agents or terminals were killed.");
-                }
+                self.close_kill_running_prompt();
             }
             Some(Action::SearchToggle) if !is_searching => {
                 if let PromptState::KillRunning(prompt) = &mut self.prompt {
@@ -4125,43 +4182,16 @@ impl App {
                 }
             }
             Some(Action::MoveDown) => {
-                if let PromptState::KillRunning(prompt) = &mut self.prompt
-                    && matches!(prompt.focus, KillRunningFocus::List)
-                {
-                    let count = Self::visible_kill_running_indices(prompt).len();
-                    prompt.list.move_down(count);
-                }
+                self.move_kill_running_selection(true);
             }
             Some(Action::MoveUp) => {
-                if let PromptState::KillRunning(prompt) = &mut self.prompt
-                    && matches!(prompt.focus, KillRunningFocus::List)
-                {
-                    prompt.list.move_up();
-                }
+                self.move_kill_running_selection(false);
             }
             Some(Action::FocusNext) => {
-                if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                    prompt.focus = match prompt.focus {
-                        KillRunningFocus::List => {
-                            Self::next_kill_running_footer_action(prompt, None, true)
-                        }
-                        KillRunningFocus::Footer(action) => {
-                            Self::next_kill_running_footer_action(prompt, Some(action), true)
-                        }
-                    };
-                }
+                self.move_kill_running_focus(true);
             }
             Some(Action::FocusPrev) => {
-                if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                    prompt.focus = match prompt.focus {
-                        KillRunningFocus::List => {
-                            Self::next_kill_running_footer_action(prompt, None, false)
-                        }
-                        KillRunningFocus::Footer(action) => {
-                            Self::next_kill_running_footer_action(prompt, Some(action), false)
-                        }
-                    };
-                }
+                self.move_kill_running_focus(false);
             }
             Some(Action::ToggleMarked) => {
                 self.toggle_hovered_kill_running_selection();
@@ -4169,23 +4199,11 @@ impl App {
             Some(Action::Confirm) => {
                 // Confirm marks the highlighted row without leaving search, or
                 // activates the focused footer action.
-                let focus = match &self.prompt {
-                    PromptState::KillRunning(prompt) => prompt.focus,
-                    _ => KillRunningFocus::List,
-                };
-                match focus {
-                    KillRunningFocus::List => self.toggle_hovered_kill_running_selection(),
-                    KillRunningFocus::Footer(action) => {
-                        self.execute_kill_running_footer_action(action)?;
-                    }
-                }
+                self.confirm_kill_running_prompt()?;
             }
             _ => {
-                if is_searching && let PromptState::KillRunning(prompt) = &mut self.prompt {
-                    if prompt.list.filter.handle_key(key) {
-                        prompt.list.selected = 0;
-                    }
-                    Self::clamp_kill_running_prompt(prompt);
+                if is_searching {
+                    self.handle_kill_running_search_key(key);
                 }
             }
         }
@@ -4193,97 +4211,197 @@ impl App {
         Ok(Some(false))
     }
 
-    fn handle_project_browser_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
-        if !matches!(self.prompt, PromptState::BrowseProjects { .. }) {
-            return None;
+    fn reset_project_browser_path_editor(&mut self) {
+        if let PromptState::BrowseProjects {
+            editing_path,
+            path_input,
+            tab_completions,
+            tab_index,
+            ..
+        } = &mut self.prompt
+        {
+            *editing_path = false;
+            path_input.clear();
+            tab_completions.clear();
+            *tab_index = 0;
         }
+    }
 
-        let is_editing_path = matches!(
-            self.prompt,
-            PromptState::BrowseProjects {
-                editing_path: true,
-                ..
+    fn handle_project_browser_completion_key(
+        key: KeyEvent,
+        path_input: &mut TextInput,
+        tab_completions: &mut Vec<String>,
+        tab_index: &mut usize,
+    ) -> bool {
+        if tab_completions.is_empty() {
+            *tab_completions = Self::path_editor_completion_candidates(&path_input.text);
+            *tab_index = 0;
+        } else if key.code == KeyCode::Up || is_reverse_tab(key) {
+            if *tab_index == 0 {
+                *tab_index = tab_completions.len().saturating_sub(1);
+            } else {
+                *tab_index -= 1;
             }
-        );
-        let is_searching = matches!(
-            self.prompt,
-            PromptState::BrowseProjects {
-                searching: true,
-                ..
-            }
-        );
+        } else if key.code == KeyCode::Down {
+            *tab_index = (*tab_index + 1) % tab_completions.len();
+        }
+        if key.code == KeyCode::Tab
+            && !is_reverse_tab(key)
+            && let Some(completion) = tab_completions.get(*tab_index)
+        {
+            path_input.set_text(completion.clone());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn handle_project_browser_path_editor_key(&mut self, key: KeyEvent) {
         let is_plain_char =
             matches!(key.code, KeyCode::Char(_)) && !key.modifiers.contains(KeyModifiers::CONTROL);
+        let action = if is_plain_char {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::Browser)
+        };
+        if matches!(action, Some(Action::ExitPathEditorOnProjectAdd)) || key.code == KeyCode::Esc {
+            self.reset_project_browser_path_editor();
+            return;
+        }
+
+        let mut add_path = None;
+        let mut refresh_completions = false;
+        if let PromptState::BrowseProjects {
+            path_input,
+            tab_completions,
+            tab_index,
+            ..
+        } = &mut self.prompt
+        {
+            match key.code {
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
+                    refresh_completions = Self::handle_project_browser_completion_key(
+                        key,
+                        path_input,
+                        tab_completions,
+                        tab_index,
+                    );
+                }
+                KeyCode::Enter => add_path = Some(path_input.text.trim().to_string()),
+                _ => refresh_completions = path_input.handle_key(key),
+            }
+        }
+        if refresh_completions {
+            self.refresh_path_editor_completions();
+        }
+        if let Some(path) = add_path {
+            self.add_project_from_browser_path(path);
+        }
+    }
+
+    fn close_project_browser_prompt(&mut self) {
+        if let PromptState::BrowseProjects {
+            searching,
+            filter,
+            selected,
+            ..
+        } = &mut self.prompt
+        {
+            if exit_search_clearing_filter(searching, filter) {
+                *selected = 0;
+            } else {
+                self.prompt = PromptState::None;
+            }
+        }
+    }
+
+    fn move_project_browser_selection(&mut self, down: bool) {
+        let PromptState::BrowseProjects {
+            entries,
+            selected,
+            filter,
+            ..
+        } = &mut self.prompt
+        else {
+            return;
+        };
+        if !down {
+            *selected = selected.saturating_sub(1);
+            return;
+        }
+        let filtered_len = if filter.is_empty() {
+            entries.len()
+        } else {
+            let needle = filter.text.to_lowercase();
+            entries
+                .iter()
+                .filter(|entry| entry.label.to_lowercase().contains(&needle))
+                .count()
+        };
+        if *selected + 1 < filtered_len {
+            *selected += 1;
+        }
+    }
+
+    fn begin_project_browser_path_editor(&mut self) {
+        if let PromptState::BrowseProjects {
+            current_dir,
+            editing_path,
+            path_input,
+            ..
+        } = &mut self.prompt
+        {
+            *editing_path = true;
+            let mut path = current_dir.to_string_lossy().to_string();
+            if !path.ends_with('/') {
+                path.push('/');
+            }
+            path_input.set_text(path);
+        }
+        self.refresh_path_editor_completions();
+    }
+
+    fn add_project_browser_current_directory(&mut self) {
+        let Some((purpose, path)) = (match &self.prompt {
+            PromptState::BrowseProjects {
+                purpose,
+                current_dir,
+                ..
+            } => Some((*purpose, current_dir.to_string_lossy().to_string())),
+            _ => None,
+        }) else {
+            return;
+        };
+        match purpose {
+            BrowsePurpose::AddProject => self.add_project_from_browser_path(path),
+            BrowsePurpose::StandaloneAgent => self.create_standalone_agent_in(path),
+        }
+    }
+
+    fn handle_project_browser_search_key(&mut self, key: KeyEvent) {
+        if let PromptState::BrowseProjects {
+            filter, selected, ..
+        } = &mut self.prompt
+            && filter.handle_key(key)
+        {
+            *selected = 0;
+        }
+    }
+
+    fn handle_project_browser_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::BrowseProjects {
+            editing_path,
+            searching,
+            ..
+        } = &self.prompt
+        else {
+            return None;
+        };
+        let is_editing_path = *editing_path;
+        let is_searching = *searching;
 
         if is_editing_path {
-            let path_editor_action = if is_plain_char {
-                None
-            } else {
-                self.bindings.lookup(&key, BindingScope::Browser)
-            };
-            let mut add_path: Option<String> = None;
-            let mut refresh_completions = false;
-            if let PromptState::BrowseProjects {
-                editing_path,
-                path_input,
-                tab_completions,
-                tab_index,
-                ..
-            } = &mut self.prompt
-            {
-                match path_editor_action {
-                    Some(Action::ExitPathEditorOnProjectAdd) => {
-                        *editing_path = false;
-                        path_input.clear();
-                        tab_completions.clear();
-                        *tab_index = 0;
-                    }
-                    _ => match key.code {
-                        KeyCode::Esc => {
-                            *editing_path = false;
-                            path_input.clear();
-                            tab_completions.clear();
-                            *tab_index = 0;
-                        }
-                        KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
-                            if tab_completions.is_empty() {
-                                *tab_completions =
-                                    Self::path_editor_completion_candidates(&path_input.text);
-                                *tab_index = 0;
-                            } else if key.code == KeyCode::Up || is_reverse_tab(key) {
-                                if *tab_index == 0 {
-                                    *tab_index = tab_completions.len().saturating_sub(1);
-                                } else {
-                                    *tab_index -= 1;
-                                }
-                            } else if key.code == KeyCode::Down {
-                                *tab_index = (*tab_index + 1) % tab_completions.len();
-                            }
-                            if key.code == KeyCode::Tab
-                                && !is_reverse_tab(key)
-                                && let Some(completion) = tab_completions.get(*tab_index)
-                            {
-                                path_input.set_text(completion.clone());
-                                refresh_completions = true;
-                            }
-                        }
-                        KeyCode::Enter => {
-                            add_path = Some(path_input.text.trim().to_string());
-                        }
-                        _ => {
-                            if path_input.handle_key(key) {
-                                refresh_completions = true;
-                            }
-                        }
-                    },
-                }
-            }
-            if refresh_completions {
-                self.refresh_path_editor_completions();
-            }
-            if let Some(path) = add_path {
-                self.add_project_from_browser_path(path);
-            }
+            self.handle_project_browser_path_editor_key(key);
             return Some(false);
         }
 
@@ -4295,19 +4413,7 @@ impl App {
 
         match action {
             Some(Action::CloseOverlay) => {
-                if let PromptState::BrowseProjects {
-                    searching,
-                    filter,
-                    selected,
-                    ..
-                } = &mut self.prompt
-                {
-                    if exit_search_clearing_filter(searching, filter) {
-                        *selected = 0;
-                    } else {
-                        self.prompt = PromptState::None;
-                    }
-                }
+                self.close_project_browser_prompt();
             }
             Some(Action::SearchToggle) if !is_searching => {
                 if let PromptState::BrowseProjects {
@@ -4319,50 +4425,13 @@ impl App {
                 }
             }
             Some(Action::MoveDown) => {
-                if let PromptState::BrowseProjects {
-                    entries,
-                    selected,
-                    filter,
-                    ..
-                } = &mut self.prompt
-                {
-                    let filtered_len = if filter.is_empty() {
-                        entries.len()
-                    } else {
-                        let needle = filter.text.to_lowercase();
-                        entries
-                            .iter()
-                            .filter(|entry| entry.label.to_lowercase().contains(&needle))
-                            .count()
-                    };
-                    if *selected + 1 < filtered_len {
-                        *selected += 1;
-                    }
-                }
+                self.move_project_browser_selection(true);
             }
             Some(Action::MoveUp) => {
-                if let PromptState::BrowseProjects { selected, .. } = &mut self.prompt
-                    && *selected > 0
-                {
-                    *selected -= 1;
-                }
+                self.move_project_browser_selection(false);
             }
             Some(Action::GoToPath) if !is_searching => {
-                if let PromptState::BrowseProjects {
-                    current_dir,
-                    editing_path,
-                    path_input,
-                    ..
-                } = &mut self.prompt
-                {
-                    *editing_path = true;
-                    let mut path = current_dir.to_string_lossy().to_string();
-                    if !path.ends_with('/') {
-                        path.push('/');
-                    }
-                    path_input.set_text(path);
-                }
-                self.refresh_path_editor_completions();
+                self.begin_project_browser_path_editor();
             }
             // Search suppresses the keys that belong to its caret before this
             // confirm action is resolved.
@@ -4370,31 +4439,11 @@ impl App {
                 self.open_selected_browser_entry();
             }
             Some(Action::AddCurrentDir) if !is_searching => {
-                if let PromptState::BrowseProjects {
-                    purpose,
-                    current_dir,
-                    ..
-                } = &self.prompt
-                {
-                    let path = current_dir.to_string_lossy().to_string();
-                    match purpose {
-                        BrowsePurpose::AddProject => {
-                            self.add_project_from_browser_path(path);
-                        }
-                        BrowsePurpose::StandaloneAgent => {
-                            self.create_standalone_agent_in(path);
-                        }
-                    }
-                }
+                self.add_project_browser_current_directory();
             }
             _ => {
-                if is_searching
-                    && let PromptState::BrowseProjects {
-                        filter, selected, ..
-                    } = &mut self.prompt
-                    && filter.handle_key(key)
-                {
-                    *selected = 0;
+                if is_searching {
+                    self.handle_project_browser_search_key(key);
                 }
             }
         }
@@ -4402,8 +4451,112 @@ impl App {
         Some(false)
     }
 
-    fn handle_startup_logs_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+    fn handle_startup_logs_search_key(&mut self, key: KeyEvent, action: Option<Action>) -> bool {
         let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
+            return false;
+        };
+        let mut select_after_filter = None;
+        let handled = match action {
+            Some(Action::CloseOverlay) => {
+                // Clearing the query restores the full list while its
+                // absolute entry selection remains valid.
+                exit_search_clearing_filter(&mut prompt.searching, &mut prompt.filter);
+                true
+            }
+            Some(Action::SearchToggle) => {
+                prompt.searching = false;
+                true
+            }
+            _ => {
+                let before = prompt.filter.text.clone();
+                if prompt.filter.handle_key(key) {
+                    if prompt.filter.text != before {
+                        select_after_filter = Self::startup_command_log_filtered_indices(prompt)
+                            .first()
+                            .copied();
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        if let Some(index) = select_after_filter {
+            self.select_startup_command_log(index);
+        }
+        handled
+    }
+
+    fn move_startup_command_log_selection(&mut self, down: bool) {
+        let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
+            return;
+        };
+        let visible = Self::startup_command_log_filtered_indices(prompt);
+        let visual = Self::startup_command_log_selected_visual_index(prompt, &visible).unwrap_or(0);
+        let next = if down {
+            visible.get(visual + 1).copied()
+        } else if visual > 0 {
+            visible.get(visual - 1).copied()
+        } else {
+            None
+        };
+        if let Some(selected) = next {
+            self.select_startup_command_log(selected);
+        }
+    }
+
+    fn close_startup_command_logs(&mut self) {
+        self.prompt = PromptState::None;
+        self.startup_log_selection = None;
+    }
+
+    fn apply_startup_logs_action(
+        &mut self,
+        action: Option<Action>,
+        key: KeyEvent,
+        body: Option<Rect>,
+        page: i16,
+    ) {
+        let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
+            return;
+        };
+        if !prompt.searching
+            && key.code == KeyCode::Char(' ')
+            && prompt.focus == StartupCommandLogFocus::Close
+        {
+            self.close_startup_command_logs();
+            return;
+        }
+        match action {
+            Some(Action::CloseOverlay) => self.close_startup_command_logs(),
+            Some(Action::ToggleSelection) => {
+                prompt.focus = next_focus(
+                    &StartupCommandLogFocus::RING,
+                    prompt.focus,
+                    !focus_move_is_reverse(key),
+                );
+            }
+            Some(Action::SearchToggle) => prompt.searching = true,
+            Some(Action::MoveDown) => self.move_startup_command_log_selection(true),
+            Some(Action::MoveUp) => self.move_startup_command_log_selection(false),
+            Some(Action::ScrollPageDown) => scroll_startup_command_log(prompt, body, page),
+            Some(Action::ScrollPageUp) => scroll_startup_command_log(prompt, body, -page),
+            Some(Action::ScrollLineDown) => scroll_startup_command_log(prompt, body, 1),
+            Some(Action::ScrollLineUp) => scroll_startup_command_log(prompt, body, -1),
+            Some(Action::OpenEntry | Action::Confirm) => match prompt.focus {
+                StartupCommandLogFocus::List => self.promote_startup_command_log_to_fullscreen(),
+                StartupCommandLogFocus::Close => self.close_startup_command_logs(),
+            },
+            Some(Action::OpenStartupCommandLogFile) => self.open_selected_startup_command_log(),
+            Some(Action::OpenStartupCommandLogFolder) => {
+                self.open_selected_startup_command_log_folder();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_startup_logs_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::StartupCommandLogs(prompt) = &self.prompt else {
             return None;
         };
 
@@ -4412,6 +4565,7 @@ impl App {
         let center_action = self.bindings.lookup(&key, BindingScope::Center);
         let help_action = self.bindings.lookup(&key, BindingScope::Help);
         let startup_logs_action = self.bindings.lookup(&key, BindingScope::StartupCommandLogs);
+        let searching = prompt.searching;
         let body = match self.overlay_layout.active {
             OverlayMouseLayout::StartupCommandLogs { body, .. } if body.height > 0 => Some(body),
             _ => None,
@@ -4420,126 +4574,975 @@ impl App {
 
         // Search owns text and caret keys; unconsumed navigation continues
         // through the picker ladder below against the filtered entries.
-        if prompt.searching {
-            let mut select_after_filter = None;
-            let mut handled = true;
-            match startup_logs_action.or(dialog_action) {
-                Some(Action::CloseOverlay) => {
-                    // Clearing the query restores the full list while its
-                    // absolute entry selection remains valid.
-                    exit_search_clearing_filter(&mut prompt.searching, &mut prompt.filter);
-                }
-                Some(Action::SearchToggle) => {
-                    prompt.searching = false;
-                }
-                _ => {
-                    let before = prompt.filter.text.clone();
-                    if prompt.filter.handle_key(key) {
-                        if prompt.filter.text != before {
-                            select_after_filter =
-                                Self::startup_command_log_filtered_indices(prompt)
-                                    .first()
-                                    .copied();
-                        }
-                    } else {
-                        handled = false;
-                    }
-                }
-            }
-            if let Some(index) = select_after_filter {
-                self.select_startup_command_log(index);
-            }
-            if handled {
-                return Some(false);
-            }
+        if searching
+            && self.handle_startup_logs_search_key(key, startup_logs_action.or(dialog_action))
+        {
+            return Some(false);
         }
 
-        let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
-            return Some(false);
+        self.apply_startup_logs_action(
+            startup_logs_action
+                .or(palette_action)
+                .or(dialog_action)
+                .or(center_action)
+                .or(help_action),
+            key,
+            body,
+            page,
+        );
+
+        Some(false)
+    }
+
+    fn handle_pick_editor_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::PickEditor {
+            editors, selected, ..
+        } = &mut self.prompt
+        else {
+            return None;
         };
-        // Space activates the focused Close button. With the list focused it
-        // remains available to the Center scope's scrolling action.
-        if !prompt.searching
-            && key.code == KeyCode::Char(' ')
-            && prompt.focus == StartupCommandLogFocus::Close
-        {
-            self.prompt = PromptState::None;
-            self.startup_log_selection = None;
-            return Some(false);
+        match self.bindings.lookup(&key, BindingScope::Palette) {
+            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+            Some(Action::MoveDown) if *selected + 1 < editors.len() => *selected += 1,
+            Some(Action::MoveUp) if *selected > 0 => *selected -= 1,
+            Some(Action::Confirm) => self.open_selected_pick_editor(),
+            _ => {}
         }
-        match startup_logs_action
-            .or(palette_action)
-            .or(dialog_action)
-            .or(center_action)
-            .or(help_action)
-        {
-            Some(Action::CloseOverlay) => {
-                self.prompt = PromptState::None;
-                self.startup_log_selection = None;
-            }
-            // Focus movement resolves through dialog bindings; search has
-            // already consumed horizontal caret movement when active.
-            Some(Action::ToggleSelection) => {
-                prompt.focus = next_focus(
-                    &StartupCommandLogFocus::RING,
-                    prompt.focus,
-                    !focus_move_is_reverse(key),
-                );
-            }
-            Some(Action::SearchToggle) => {
-                prompt.searching = true;
-            }
+        Some(false)
+    }
+
+    fn handle_manage_worktrees_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ManageWorktrees(prompt) = &mut self.prompt else {
+            return None;
+        };
+        // Selection skips rows that cannot be removed.
+        match self.bindings.lookup(&key, BindingScope::Palette) {
+            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
             Some(Action::MoveDown) => {
-                let visible = Self::startup_command_log_filtered_indices(prompt);
-                let visual =
-                    Self::startup_command_log_selected_visual_index(prompt, &visible).unwrap_or(0);
-                if let Some(selected) = visible.get(visual + 1).copied() {
-                    self.select_startup_command_log(selected);
+                let removable = removable_worktree_indices(&prompt.entries);
+                if let Some(current) = prompt.selected
+                    && let Some(position) = removable.iter().position(|idx| *idx == current)
+                    && let Some(next) = removable.get(position + 1)
+                {
+                    prompt.selected = Some(*next);
+                } else if prompt.selected.is_none() {
+                    prompt.selected = removable.into_iter().next();
                 }
             }
             Some(Action::MoveUp) => {
-                let visible = Self::startup_command_log_filtered_indices(prompt);
-                let visual =
-                    Self::startup_command_log_selected_visual_index(prompt, &visible).unwrap_or(0);
-                if visual > 0
-                    && let Some(selected) = visible.get(visual - 1).copied()
+                let removable = removable_worktree_indices(&prompt.entries);
+                if let Some(current) = prompt.selected
+                    && let Some(position) = removable.iter().position(|idx| *idx == current)
+                    && position > 0
                 {
-                    self.select_startup_command_log(selected);
+                    prompt.selected = Some(removable[position - 1]);
+                } else if prompt.selected.is_none() {
+                    prompt.selected = removable.into_iter().next();
                 }
             }
-            Some(Action::ScrollPageDown) => {
-                scroll_startup_command_log(prompt, body, page);
-            }
-            Some(Action::ScrollPageUp) => {
-                scroll_startup_command_log(prompt, body, -page);
-            }
-            Some(Action::ScrollLineDown) => {
-                scroll_startup_command_log(prompt, body, 1);
-            }
-            Some(Action::ScrollLineUp) => {
-                scroll_startup_command_log(prompt, body, -1);
-            }
-            // Confirm promotes the selected run while the list has focus, or
-            // activates Close when the footer has focus.
-            Some(Action::OpenEntry | Action::Confirm) => match prompt.focus {
-                StartupCommandLogFocus::List => {
-                    self.promote_startup_command_log_to_fullscreen();
+            Some(Action::Confirm) => {
+                if let Err(err) = self.confirm_delete_selected_worktree() {
+                    self.set_error(format!("{err:#}"));
                 }
-                StartupCommandLogFocus::Close => {
-                    self.prompt = PromptState::None;
-                    self.startup_log_selection = None;
-                }
-            },
-            Some(Action::OpenStartupCommandLogFile) => {
-                self.open_selected_startup_command_log();
-            }
-            Some(Action::OpenStartupCommandLogFolder) => {
-                self.open_selected_startup_command_log_folder();
             }
             _ => {}
         }
-
         Some(false)
+    }
+
+    fn handle_pick_project_worktree_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+        let PromptState::PickProjectWorktree(prompt) = &mut self.prompt else {
+            return Ok(None);
+        };
+        match self.bindings.lookup(&key, BindingScope::Palette) {
+            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+            Some(Action::MoveDown) => {
+                let selectable = selectable_project_worktree_indices(&prompt.entries);
+                if let Some(current) = prompt.selected
+                    && let Some(position) = selectable.iter().position(|idx| *idx == current)
+                    && let Some(next) = selectable.get(position + 1)
+                {
+                    prompt.selected = Some(*next);
+                } else if prompt.selected.is_none() {
+                    prompt.selected = selectable.into_iter().next();
+                }
+            }
+            Some(Action::MoveUp) => {
+                let selectable = selectable_project_worktree_indices(&prompt.entries);
+                if let Some(current) = prompt.selected
+                    && let Some(position) = selectable.iter().position(|idx| *idx == current)
+                    && position > 0
+                {
+                    prompt.selected = Some(selectable[position - 1]);
+                } else if prompt.selected.is_none() {
+                    prompt.selected = selectable.into_iter().next();
+                }
+            }
+            Some(Action::Confirm) => self.open_selected_project_worktree_agent_prompt()?,
+            _ => {}
+        }
+        Ok(Some(false))
+    }
+
+    fn handle_set_tailscale_mode_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::SetTailscaleMode(prompt) = &mut self.prompt else {
+            return None;
+        };
+        let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
+        let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match palette_action.or(dialog_action) {
+            Some(Action::CloseOverlay) => {
+                self.prompt = PromptState::None;
+                self.set_info(
+                    "Left the Tailscale mode as it was; config.toml is untouched.".to_string(),
+                );
+            }
+            Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                prompt.selected += 1;
+            }
+            Some(Action::MoveUp) if prompt.selected > 0 => prompt.selected -= 1,
+            Some(Action::Confirm) => self.apply_set_tailscale_mode(),
+            _ => {}
+        }
+        Some(false)
+    }
+
+    fn handle_change_theme_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+        let PromptState::ChangeTheme(prompt) = &mut self.prompt else {
+            return Ok(None);
+        };
+        let action = self
+            .bindings
+            .lookup(&key, BindingScope::Palette)
+            .or_else(|| self.bindings.lookup(&key, BindingScope::Dialog));
+        if matches!(action, Some(Action::CloseOverlay)) {
+            self.cancel_change_theme();
+            return Ok(Some(false));
+        }
+        let moved = match action {
+            Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                prompt.selected += 1;
+                true
+            }
+            Some(Action::MoveUp) if prompt.selected > 0 => {
+                prompt.selected -= 1;
+                true
+            }
+            Some(Action::Confirm) => {
+                self.apply_change_theme()?;
+                false
+            }
+            _ => false,
+        };
+        if moved {
+            self.preview_change_theme_selection();
+        }
+        Ok(Some(false))
+    }
+
+    fn handle_pick_project_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+        let PromptState::PickProject { list, .. } = &self.prompt else {
+            return Ok(None);
+        };
+        let searching = list.searching;
+        let action = if binding_lookup_is_suppressed(key, searching) {
+            None
+        } else {
+            self.bindings
+                .lookup(&key, BindingScope::ProjectChooser)
+                .or_else(|| self.bindings.lookup(&key, BindingScope::Palette))
+        };
+        let mut do_confirm = false;
+        let mut go_standalone = false;
+        if let PromptState::PickProject {
+            entries,
+            list,
+            intent,
+            ..
+        } = &mut self.prompt
+        {
+            let visible_len = list.visible_indices(entries, pick_project_matches).len();
+            match action {
+                Some(Action::CloseOverlay) => {
+                    if !list.exit_search_clearing_filter() {
+                        self.prompt = PromptState::None;
+                    }
+                }
+                Some(Action::SearchToggle) if !searching => list.begin_search(),
+                Some(Action::Confirm) => do_confirm = true,
+                Some(Action::NewStandaloneAgent) if *intent == ProjectChooserIntent::NewAgent => {
+                    go_standalone = true;
+                }
+                Some(Action::MoveDown) => list.move_down(visible_len),
+                Some(Action::MoveUp) => list.move_up(),
+                _ if searching && list.filter.handle_key(key) => {
+                    let new_len = list.visible_indices(entries, pick_project_matches).len();
+                    list.clamp_selected(new_len);
+                }
+                _ => {}
+            }
+        }
+        if do_confirm {
+            self.confirm_project_chooser_selection()?;
+        }
+        if go_standalone {
+            self.open_standalone_agent_browser()?;
+        }
+        Ok(Some(false))
+    }
+
+    fn handle_config_reload_failed_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if !matches!(self.prompt, PromptState::ConfigReloadFailed { .. }) {
+            return None;
+        }
+        if self.scroll_error_dialog_for(&key) {
+            return Some(false);
+        }
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        if matches!(action, Some(Action::CloseOverlay)) {
+            return Some(self.resolve_config_reload_failed(false));
+        }
+        let PromptState::ConfigReloadFailed {
+            recover_old_config,
+            focus,
+            ..
+        } = &mut self.prompt
+        else {
+            return Some(false);
+        };
+        if matches!(action, Some(Action::ToggleSelection)) {
+            let ring = [
+                (ConfigReloadFailedFocus::Close, true),
+                (ConfigReloadFailedFocus::Apply, true),
+                (ConfigReloadFailedFocus::Checkbox, true),
+            ];
+            *focus = next_focus(&ring, *focus, !focus_move_is_reverse(key));
+            return Some(false);
+        }
+        if matches!(action, Some(Action::Confirm)) || key.code == KeyCode::Char(' ') {
+            match *focus {
+                ConfigReloadFailedFocus::Checkbox => *recover_old_config = !*recover_old_config,
+                ConfigReloadFailedFocus::Close => {
+                    return Some(self.resolve_config_reload_failed(false));
+                }
+                ConfigReloadFailedFocus::Apply => {
+                    return Some(self.resolve_config_reload_failed(true));
+                }
+            }
+        }
+        Some(false)
+    }
+
+    fn handle_add_project_failed_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if !matches!(self.prompt, PromptState::AddProjectFailed { .. }) {
+            return None;
+        }
+        if self.scroll_error_dialog_for(&key) {
+            return Some(false);
+        }
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        if matches!(action, Some(Action::Confirm | Action::CloseOverlay))
+            || key.code == KeyCode::Char(' ')
+        {
+            self.resolve_add_project_failed();
+        }
+        Some(false)
+    }
+
+    fn handle_first_load_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if !matches!(self.prompt, PromptState::FirstLoad(_)) {
+            return None;
+        }
+        match self.bindings.lookup(&key, BindingScope::Dialog) {
+            Some(Action::CloseOverlay) => {
+                self.close_top_overlay();
+                return Some(false);
+            }
+            Some(Action::Confirm) => return Some(self.activate_first_load_button()),
+            Some(Action::ToggleSelection) => {
+                if let PromptState::FirstLoad(prompt) = &mut self.prompt {
+                    prompt.focus = prompt.focus.toggled();
+                }
+                return Some(false);
+            }
+            _ => {}
+        }
+        if key.code == KeyCode::Char(' ') {
+            return Some(self.activate_first_load_button());
+        }
+        if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::Quit) {
+            if key.modifiers.is_empty() {
+                self.close_top_overlay();
+                return Some(false);
+            }
+            self.dismiss_first_load_prompt();
+            return Some(self.begin_quit());
+        }
+        if let Some(action) = self.bindings.lookup(&key, BindingScope::Help) {
+            let page = self.first_load_page();
+            match action {
+                Action::MoveDown => self.scroll_first_load(1),
+                Action::MoveUp => self.scroll_first_load(-1),
+                Action::ScrollPageDown => self.scroll_first_load(page),
+                Action::ScrollPageUp => self.scroll_first_load(-page),
+                Action::ScrollToBottom => self.scroll_first_load(i32::from(u16::MAX)),
+                Action::ScrollToTop => self.scroll_first_load(-i32::from(u16::MAX)),
+                _ => {}
+            }
+        }
+        Some(false)
+    }
+
+    fn handle_agent_info_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if !matches!(self.prompt, PromptState::AgentInfo(_)) {
+            return None;
+        }
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        if matches!(action, Some(Action::Confirm | Action::CloseOverlay))
+            || key.code == KeyCode::Char(' ')
+        {
+            self.prompt = PromptState::None;
+        }
+        Some(false)
+    }
+
+    fn handle_confirm_kill_running_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmKillRunning(prompt) = &mut self.prompt else {
+            return None;
+        };
+        let confirm = prompt.focus.is_confirm();
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match action {
+            Some(Action::CloseOverlay) => {
+                let previous = prompt.previous.clone();
+                self.prompt = PromptState::KillRunning(previous);
+                self.set_info(
+                    "Kill cancelled. Your running agents and companion terminals are unchanged.",
+                );
+            }
+            Some(Action::ToggleSelection) => prompt.focus = prompt.focus.toggled(),
+            Some(Action::Confirm) => {
+                return Some(self.resolve_confirm_kill_running(confirm));
+            }
+            _ if key.code == KeyCode::Char(' ') => {
+                return Some(self.resolve_confirm_kill_running(confirm));
+            }
+            _ => {}
+        }
+        Some(false)
+    }
+
+    fn handle_confirm_delete_agent_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmDeleteAgent {
+            focus,
+            delete_worktree,
+            target,
+            ..
+        } = &mut self.prompt
+        else {
+            return None;
+        };
+        let ring = [
+            (DeleteAgentFocus::Cancel, true),
+            (DeleteAgentFocus::Delete, true),
+            (
+                DeleteAgentFocus::Checkbox,
+                target.offers_worktree_checkbox(),
+            ),
+        ];
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        if matches!(action, Some(Action::CloseOverlay)) {
+            self.prompt = PromptState::None;
+            return Some(false);
+        }
+        if matches!(action, Some(Action::ToggleSelection)) {
+            *focus = next_focus(&ring, *focus, !focus_move_is_reverse(key));
+            return Some(false);
+        }
+        if matches!(action, Some(Action::Confirm)) || key.code == KeyCode::Char(' ') {
+            match *focus {
+                DeleteAgentFocus::Checkbox => *delete_worktree = !*delete_worktree,
+                DeleteAgentFocus::Cancel => {
+                    return Some(self.resolve_confirm_delete_agent(false));
+                }
+                DeleteAgentFocus::Delete => {
+                    return Some(self.resolve_confirm_delete_agent(true));
+                }
+            }
+        }
+        Some(false)
+    }
+
+    fn handle_confirm_delete_terminal_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmDeleteTerminal { focus, .. } = &mut self.prompt else {
+            return None;
+        };
+        let confirm = focus.is_confirm();
+        match self.bindings.lookup(&key, BindingScope::Dialog) {
+            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+            Some(Action::ToggleSelection) => *focus = focus.toggled(),
+            Some(Action::Confirm) => {
+                return Some(self.resolve_confirm_delete_terminal(confirm));
+            }
+            _ if key.code == KeyCode::Char(' ') => {
+                return Some(self.resolve_confirm_delete_terminal(confirm));
+            }
+            _ => {}
+        }
+        Some(false)
+    }
+
+    fn handle_confirm_close_tab_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmCloseTab { focus, .. } = &mut self.prompt else {
+            return None;
+        };
+        let confirm = focus.is_confirm();
+        match self.bindings.lookup(&key, BindingScope::Dialog) {
+            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+            Some(Action::ToggleSelection) => *focus = focus.toggled(),
+            Some(Action::Confirm) => {
+                return Some(self.resolve_confirm_close_tab(confirm));
+            }
+            _ if key.code == KeyCode::Char(' ') => {
+                return Some(self.resolve_confirm_close_tab(confirm));
+            }
+            _ => {}
+        }
+        Some(false)
+    }
+
+    fn handle_confirm_quit_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmQuit { focus, .. } = &mut self.prompt else {
+            return None;
+        };
+        let confirm = focus.is_confirm();
+        match self.bindings.lookup(&key, BindingScope::Dialog) {
+            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+            Some(Action::ToggleSelection) => *focus = focus.toggled(),
+            Some(Action::Confirm) => return Some(self.resolve_confirm_quit(confirm)),
+            _ if key.code == KeyCode::Char(' ') => {
+                return Some(self.resolve_confirm_quit(confirm));
+            }
+            _ => {}
+        }
+        Some(false)
+    }
+
+    fn handle_confirm_discard_file_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmDiscardFile { focus, .. } = &mut self.prompt else {
+            return None;
+        };
+        let confirm = focus.is_confirm();
+        match self.bindings.lookup(&key, BindingScope::Dialog) {
+            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+            Some(Action::ToggleSelection) => *focus = focus.toggled(),
+            Some(Action::Confirm) => {
+                return Some(self.resolve_confirm_discard_file(confirm));
+            }
+            _ if key.code == KeyCode::Char(' ') => {
+                return Some(self.resolve_confirm_discard_file(confirm));
+            }
+            _ => {}
+        }
+        Some(false)
+    }
+
+    fn handle_confirm_initial_commit_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmCreateInitialCommit { focus, .. } = &mut self.prompt else {
+            return None;
+        };
+        let confirm = focus.is_confirm();
+        match self.bindings.lookup(&key, BindingScope::Dialog) {
+            Some(Action::CloseOverlay) => {
+                self.resolve_confirm_create_initial_commit(false);
+            }
+            Some(Action::ToggleSelection) => *focus = focus.toggled(),
+            Some(Action::Confirm) => {
+                self.resolve_confirm_create_initial_commit(confirm);
+            }
+            _ if key.code == KeyCode::Char(' ') => {
+                self.resolve_confirm_create_initial_commit(confirm);
+            }
+            _ => {}
+        }
+        Some(false)
+    }
+
+    fn handle_confirm_init_repo_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmInitRepo { focus, .. } = &mut self.prompt else {
+            return None;
+        };
+        let confirm = focus.is_confirm();
+        match self.bindings.lookup(&key, BindingScope::Dialog) {
+            Some(Action::CloseOverlay) => {
+                self.resolve_confirm_init_repo(false);
+            }
+            Some(Action::ToggleSelection) => *focus = focus.toggled(),
+            Some(Action::Confirm) => {
+                self.resolve_confirm_init_repo(confirm);
+            }
+            _ if key.code == KeyCode::Char(' ') => {
+                self.resolve_confirm_init_repo(confirm);
+            }
+            _ => {}
+        }
+        Some(false)
+    }
+
+    fn next_non_default_branch_focus(
+        focus: ConfirmNonDefaultBranchFocus,
+        has_checkbox: bool,
+        reverse: bool,
+    ) -> ConfirmNonDefaultBranchFocus {
+        match (focus, has_checkbox, reverse) {
+            (ConfirmNonDefaultBranchFocus::Cancel, true, false) => {
+                ConfirmNonDefaultBranchFocus::Add
+            }
+            (ConfirmNonDefaultBranchFocus::Add, true, false) => {
+                ConfirmNonDefaultBranchFocus::Checkbox
+            }
+            (ConfirmNonDefaultBranchFocus::Checkbox, _, false) => {
+                ConfirmNonDefaultBranchFocus::Cancel
+            }
+            (ConfirmNonDefaultBranchFocus::Cancel, true, true) => {
+                ConfirmNonDefaultBranchFocus::Checkbox
+            }
+            (ConfirmNonDefaultBranchFocus::Add, true, true) => ConfirmNonDefaultBranchFocus::Cancel,
+            (ConfirmNonDefaultBranchFocus::Checkbox, _, true) => ConfirmNonDefaultBranchFocus::Add,
+            (ConfirmNonDefaultBranchFocus::Cancel, false, _) => ConfirmNonDefaultBranchFocus::Add,
+            (ConfirmNonDefaultBranchFocus::Add, false, _) => ConfirmNonDefaultBranchFocus::Cancel,
+        }
+    }
+
+    fn handle_confirm_non_default_branch_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmNonDefaultBranch {
+            action,
+            focus,
+            kind,
+            checkout_default,
+            ..
+        } = &mut self.prompt
+        else {
+            return None;
+        };
+        let has_checkbox =
+            matches!(kind, BranchWarningKind::Known { .. }) && action.allows_add_anyway();
+        let binding = self.bindings.lookup(&key, BindingScope::Dialog);
+        if matches!(binding, Some(Action::CloseOverlay)) {
+            self.prompt = PromptState::None;
+            return Some(false);
+        }
+        if matches!(binding, Some(Action::ToggleSelection)) {
+            *focus = Self::next_non_default_branch_focus(
+                *focus,
+                has_checkbox,
+                focus_move_is_reverse(key),
+            );
+            return Some(false);
+        }
+        if matches!(binding, Some(Action::Confirm)) || key.code == KeyCode::Char(' ') {
+            match *focus {
+                ConfirmNonDefaultBranchFocus::Checkbox => {
+                    *checkout_default = !*checkout_default;
+                }
+                ConfirmNonDefaultBranchFocus::Cancel => self.prompt = PromptState::None,
+                ConfirmNonDefaultBranchFocus::Add => {
+                    return Some(self.resolve_confirm_non_default_branch());
+                }
+            }
+        }
+        Some(false)
+    }
+
+    fn handle_confirm_use_existing_branch_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmUseExistingBranch { focus, .. } = &mut self.prompt else {
+            return None;
+        };
+        let confirm = focus.is_confirm();
+        match self.bindings.lookup(&key, BindingScope::Dialog) {
+            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+            Some(Action::ToggleSelection) => *focus = focus.toggled(),
+            Some(Action::Confirm) => {
+                return Some(self.resolve_confirm_use_existing_branch(confirm));
+            }
+            _ if key.code == KeyCode::Char(' ') => {
+                return Some(self.resolve_confirm_use_existing_branch(confirm));
+            }
+            _ => {}
+        }
+        Some(false)
+    }
+
+    fn handle_confirm_delete_worktree_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmDeleteWorktree(prompt) = &mut self.prompt else {
+            return None;
+        };
+        let ring = [
+            (DeleteWorktreeFocus::Cancel, true),
+            (DeleteWorktreeFocus::Delete, true),
+            (DeleteWorktreeFocus::Checkbox, prompt.has_branch_checkbox()),
+        ];
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        if matches!(action, Some(Action::CloseOverlay)) {
+            let previous = prompt.previous.clone();
+            self.prompt = PromptState::ManageWorktrees(previous);
+            return Some(false);
+        }
+        if matches!(action, Some(Action::ToggleSelection)) {
+            prompt.focus = next_focus(&ring, prompt.focus, !focus_move_is_reverse(key));
+            return Some(false);
+        }
+        if matches!(action, Some(Action::Confirm)) || key.code == KeyCode::Char(' ') {
+            match prompt.focus {
+                DeleteWorktreeFocus::Checkbox => {
+                    prompt.delete_branch = !prompt.delete_branch;
+                }
+                DeleteWorktreeFocus::Cancel => {
+                    return Some(self.resolve_confirm_delete_worktree(false));
+                }
+                DeleteWorktreeFocus::Delete => {
+                    return Some(self.resolve_confirm_delete_worktree(true));
+                }
+            }
+        }
+        Some(false)
+    }
+
+    fn handle_confirmation_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if let Some(exit) = self.handle_confirm_delete_worktree_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_kill_running_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_delete_agent_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_delete_terminal_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_close_tab_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_quit_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_discard_file_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_initial_commit_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_init_repo_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_non_default_branch_prompt_key(key) {
+            return Some(exit);
+        }
+        self.handle_confirm_use_existing_branch_prompt_key(key)
+    }
+
+    fn handle_pull_request_input_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+        let PromptState::PullRequestInput { focus, .. } = &self.prompt else {
+            return Ok(None);
+        };
+        let field_focused = *focus == PullRequestInputFocus::Input;
+        let action = if binding_lookup_is_suppressed(key, field_focused) {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::Dialog)
+        };
+        match modal_key_step(action, key, field_focused) {
+            ModalKeyStep::Close => {
+                self.prompt = PromptState::None;
+                self.pending_pr_reference = None;
+                self.invalidate_pull_request_resolution();
+            }
+            ModalKeyStep::Confirm if field_focused => self.confirm_pull_request_input()?,
+            ModalKeyStep::Confirm => {
+                self.open_pull_request_project_picker()?;
+            }
+            ModalKeyStep::ActivateFocus if !field_focused => {
+                self.open_pull_request_project_picker()?;
+            }
+            ModalKeyStep::ActivateFocus => {}
+            ModalKeyStep::MoveFocus(forward) => self.focus_next_pull_request_control(forward),
+            ModalKeyStep::FallThroughToField => {
+                if field_focused
+                    && let PromptState::PullRequestInput { input, .. } = &mut self.prompt
+                {
+                    input.handle_key(key);
+                }
+            }
+        }
+        Ok(Some(false))
+    }
+
+    fn handle_attach_pull_request_input_prompt_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<Option<bool>> {
+        if !matches!(self.prompt, PromptState::AttachPullRequestInput { .. }) {
+            return Ok(None);
+        }
+        let action = if binding_lookup_is_suppressed(key, true) {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::Dialog)
+        };
+        match modal_key_step(action, key, true) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::Confirm => self.confirm_attach_pull_request_input()?,
+            ModalKeyStep::MoveFocus(_) | ModalKeyStep::ActivateFocus => {}
+            ModalKeyStep::FallThroughToField => {
+                if let PromptState::AttachPullRequestInput { input, .. } = &mut self.prompt {
+                    input.handle_key(key);
+                }
+            }
+        }
+        Ok(Some(false))
+    }
+
+    fn handle_rename_session_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::RenameSession { focus, .. } = &self.prompt else {
+            return None;
+        };
+        let checkbox_focused = *focus == RenameSessionFocus::RenameBranchCheckbox;
+        let action = if binding_lookup_is_suppressed(key, !checkbox_focused) {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::Dialog)
+        };
+        match modal_key_step(action, key, !checkbox_focused) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::Confirm => {
+                let PromptState::RenameSession {
+                    session_id,
+                    input,
+                    rename_branch,
+                    ..
+                } = &self.prompt
+                else {
+                    unreachable!()
+                };
+                let id = session_id.clone();
+                let new_name = input.text.clone();
+                let also_rename_branch = *rename_branch;
+                self.prompt = PromptState::None;
+                self.apply_rename_session(&id, new_name, also_rename_branch);
+            }
+            ModalKeyStep::MoveFocus(forward) => self.focus_next_rename_session_control(forward),
+            ModalKeyStep::ActivateFocus if checkbox_focused => {
+                self.toggle_rename_session_branch();
+            }
+            ModalKeyStep::ActivateFocus => {}
+            ModalKeyStep::FallThroughToField => {
+                if !checkbox_focused
+                    && let PromptState::RenameSession { input, .. } = &mut self.prompt
+                {
+                    input.handle_key(key);
+                }
+            }
+        }
+        Some(false)
+    }
+
+    fn create_agent_request_message(request: &CreateAgentRequest, name: &str) -> String {
+        match request {
+            CreateAgentRequest::NewProject { project, .. } => format!(
+                "Creating a new agent worktree \"{name}\" for project \"{}\" and launching a fresh session...",
+                project.name
+            ),
+            CreateAgentRequest::PullRequest {
+                project, number, ..
+            } => format!(
+                "Creating a new agent worktree \"{name}\" from PR #{number} for project \"{}\" and launching a fresh session...",
+                project.name
+            ),
+            CreateAgentRequest::Standalone { folder, .. } => format!(
+                "Creating a standalone agent \"{name}\" in \"{}\"...",
+                dux_core::home_path::shorten_home(folder)
+            ),
+            CreateAgentRequest::ForkSession { source_label, .. } => format!(
+                "Forking agent \"{source_label}\" as \"{name}\" by cloning its current worktree contents into a fresh session...",
+            ),
+            CreateAgentRequest::ExistingManagedWorktree {
+                project,
+                worktree_path,
+                ..
+            } => format!(
+                "Starting agent \"{name}\" in existing worktree {} for project \"{}\"...",
+                worktree_path.display(),
+                project.name
+            ),
+            CreateAgentRequest::ForkExternalWorktree {
+                project,
+                source_label,
+                ..
+            } => format!(
+                "Copying external worktree \"{source_label}\" into a managed worktree \"{name}\" for project \"{}\"...",
+                project.name
+            ),
+        }
+    }
+
+    fn confirm_name_new_agent_prompt(&mut self) -> Result<()> {
+        let name = match &self.prompt {
+            PromptState::NameNewAgent { input, .. } => input.text.trim().to_string(),
+            _ => return Ok(()),
+        };
+        if name.is_empty() {
+            self.set_error("Agent name cannot be empty.");
+            self.prompt = PromptState::None;
+            return Ok(());
+        }
+        if !git::is_valid_agent_name(&name) {
+            self.set_error(
+                "Agent name may only contain letters, digits, dashes, underscores, or slashes. \
+                 It cannot start with \"-\" or \"/\", end with \"/\", or contain \"//\".",
+            );
+            return Ok(());
+        }
+
+        let old_prompt = std::mem::replace(&mut self.prompt, PromptState::None);
+        let PromptState::NameNewAgent {
+            mut request,
+            copy_changes,
+            ..
+        } = old_prompt
+        else {
+            unreachable!()
+        };
+        if let CreateAgentRequest::NewProject {
+            copy_uncommitted_changes,
+            ..
+        } = &mut request
+        {
+            *copy_uncommitted_changes = copy_changes;
+        }
+
+        if let CreateAgentRequest::NewProject { project, .. } = &request {
+            let repo_path = std::path::PathBuf::from(&project.path);
+            if let git::CreateAgentBranchPlan::ExistingBranch { location } =
+                git::create_agent_branch_preflight(&repo_path, &name)
+            {
+                set_create_agent_request_custom_name(&mut request, name.clone());
+                self.prompt = PromptState::ConfirmUseExistingBranch {
+                    request,
+                    branch_name: name,
+                    location,
+                    focus: ConfirmFocus::Cancel,
+                };
+                return Ok(());
+            }
+        }
+
+        let message = Self::create_agent_request_message(&request, &name);
+        set_create_agent_request_custom_name(&mut request, name);
+        self.dispatch_create_agent_request(request, message)
+    }
+
+    fn handle_name_new_agent_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+        let PromptState::NameNewAgent { focus, .. } = &self.prompt else {
+            return Ok(None);
+        };
+        let checkbox_focused = matches!(
+            focus,
+            NameNewAgentFocus::RandomizedNameCheckbox | NameNewAgentFocus::CopyChangesCheckbox
+        );
+        let action = if !checkbox_focused && text_field_owns_key(key) {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::Dialog)
+        };
+        match action {
+            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+            Some(Action::ToggleSelection) => {
+                self.focus_next_name_new_agent_control(!focus_move_is_reverse(key));
+            }
+            Some(Action::Confirm) => self.confirm_name_new_agent_prompt()?,
+            _ if checkbox_focused && key.code == KeyCode::Char(' ') => {
+                self.toggle_focused_name_new_agent_checkbox();
+            }
+            _ if !checkbox_focused => {
+                if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
+                    input.handle_key(key);
+                }
+            }
+            _ => {}
+        }
+        Ok(Some(false))
+    }
+
+    fn handle_form_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+        if matches!(self.prompt, PromptState::EditMacros { .. }) {
+            self.handle_edit_macros_key(key)?;
+            return Ok(Some(false));
+        }
+        if let Some(exit) = self.handle_pull_request_input_prompt_key(key)? {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_attach_pull_request_input_prompt_key(key)? {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_name_new_agent_prompt_key(key)? {
+            return Ok(Some(exit));
+        }
+        Ok(self.handle_rename_session_prompt_key(key))
+    }
+
+    fn handle_monitoring_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if let Some(exit) = self.handle_resource_monitor_prompt_key(key) {
+            return Some(exit);
+        }
+        self.handle_debug_input_prompt_key(key)
+    }
+
+    fn handle_picker_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+        if let Some(exit) = self.handle_command_palette_prompt_key(key) {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_kill_running_prompt_key(key)? {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_project_browser_prompt_key(key) {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_pick_editor_prompt_key(key) {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_manage_worktrees_prompt_key(key) {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_pick_project_worktree_prompt_key(key)? {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_pick_project_prompt_key(key)? {
+            return Ok(Some(exit));
+        }
+        if let Some(which) = provider_picker_kind(&self.prompt) {
+            return Ok(Some(self.handle_provider_picker_key(key, which)?));
+        }
+        if let Some(exit) = self.handle_set_tailscale_mode_prompt_key(key) {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_change_theme_prompt_key(key)? {
+            return Ok(Some(exit));
+        }
+        Ok(self.handle_startup_logs_prompt_key(key))
+    }
+
+    fn handle_notice_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if let Some(exit) = self.handle_config_reload_failed_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_add_project_failed_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_first_load_prompt_key(key) {
+            return Some(exit);
+        }
+        self.handle_agent_info_prompt_key(key)
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -4547,1091 +5550,28 @@ impl App {
         // firing an action after the user has switched to the keyboard.
         self.pressed_button = None;
 
-        if let Some(should_exit) = self.handle_resource_monitor_prompt_key(key) {
+        if let Some(should_exit) = self.handle_monitoring_prompt_key(key) {
             return Ok(should_exit);
         }
 
-        if let Some(should_exit) = self.handle_debug_input_prompt_key(key) {
+        if let Some(should_exit) = self.handle_picker_prompt_key(key)? {
             return Ok(should_exit);
-        }
-
-        if let Some(should_exit) = self.handle_command_palette_prompt_key(key) {
-            return Ok(should_exit);
-        }
-
-        if let Some(should_exit) = self.handle_kill_running_prompt_key(key)? {
-            return Ok(should_exit);
-        }
-
-        if let Some(should_exit) = self.handle_project_browser_prompt_key(key) {
-            return Ok(should_exit);
-        }
-
-        if let PromptState::PickEditor {
-            editors, selected, ..
-        } = &mut self.prompt
-        {
-            match self.bindings.lookup(&key, BindingScope::Palette) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::MoveDown) if *selected + 1 < editors.len() => {
-                    *selected += 1;
-                }
-                Some(Action::MoveUp) if *selected > 0 => {
-                    *selected -= 1;
-                }
-                Some(Action::Confirm) => {
-                    self.open_selected_pick_editor();
-                }
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ManageWorktrees(prompt) = &mut self.prompt {
-            // A Picker: the vertical keys move the SELECTION over removable
-            // rows only, and the confirm key acts on it by opening the removal
-            // confirmation.
-            match self.bindings.lookup(&key, BindingScope::Palette) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::MoveDown) => {
-                    let removable = removable_worktree_indices(&prompt.entries);
-                    if let Some(current) = prompt.selected
-                        && let Some(position) = removable.iter().position(|idx| *idx == current)
-                        && let Some(next) = removable.get(position + 1)
-                    {
-                        prompt.selected = Some(*next);
-                    } else if prompt.selected.is_none() {
-                        prompt.selected = removable.into_iter().next();
-                    }
-                }
-                Some(Action::MoveUp) => {
-                    let removable = removable_worktree_indices(&prompt.entries);
-                    if let Some(current) = prompt.selected
-                        && let Some(position) = removable.iter().position(|idx| *idx == current)
-                        && position > 0
-                    {
-                        prompt.selected = Some(removable[position - 1]);
-                    } else if prompt.selected.is_none() {
-                        prompt.selected = removable.into_iter().next();
-                    }
-                }
-                Some(Action::Confirm) => {
-                    if let Err(err) = self.confirm_delete_selected_worktree() {
-                        self.set_error(format!("{err:#}"));
-                    }
-                }
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ConfirmDeleteWorktree(prompt) = &mut self.prompt {
-            // The checkbox is a CONDITIONAL stop: a detached worktree has no
-            // branch to keep or delete, so the ring is Cancel <-> Delete.
-            let ring = [
-                (DeleteWorktreeFocus::Cancel, true),
-                (DeleteWorktreeFocus::Delete, true),
-                (DeleteWorktreeFocus::Checkbox, prompt.has_branch_checkbox()),
-            ];
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => {
-                    // Esc abandons the removal, and puts back the list it came
-                    // from rather than closing the manager outright.
-                    let previous = prompt.previous.clone();
-                    self.prompt = PromptState::ManageWorktrees(previous);
-                }
-                Some(Action::ToggleSelection) => {
-                    prompt.focus = next_focus(&ring, prompt.focus, !focus_move_is_reverse(key));
-                }
-                Some(Action::Confirm) => match prompt.focus {
-                    DeleteWorktreeFocus::Checkbox => {
-                        prompt.delete_branch = !prompt.delete_branch;
-                    }
-                    DeleteWorktreeFocus::Cancel => {
-                        return Ok(self.resolve_confirm_delete_worktree(false));
-                    }
-                    DeleteWorktreeFocus::Delete => {
-                        return Ok(self.resolve_confirm_delete_worktree(true));
-                    }
-                },
-                // Space activates the focused element, the universal
-                // convention.
-                _ if key.code == KeyCode::Char(' ') => match prompt.focus {
-                    DeleteWorktreeFocus::Checkbox => {
-                        prompt.delete_branch = !prompt.delete_branch;
-                    }
-                    DeleteWorktreeFocus::Cancel => {
-                        return Ok(self.resolve_confirm_delete_worktree(false));
-                    }
-                    DeleteWorktreeFocus::Delete => {
-                        return Ok(self.resolve_confirm_delete_worktree(true));
-                    }
-                },
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt {
-            match self.bindings.lookup(&key, BindingScope::Palette) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::MoveDown) => {
-                    let selectable = selectable_project_worktree_indices(&prompt.entries);
-                    if let Some(current) = prompt.selected
-                        && let Some(position) = selectable.iter().position(|idx| *idx == current)
-                        && let Some(next) = selectable.get(position + 1)
-                    {
-                        prompt.selected = Some(*next);
-                    } else if prompt.selected.is_none() {
-                        prompt.selected = selectable.into_iter().next();
-                    }
-                }
-                Some(Action::MoveUp) => {
-                    let selectable = selectable_project_worktree_indices(&prompt.entries);
-                    if let Some(current) = prompt.selected
-                        && let Some(position) = selectable.iter().position(|idx| *idx == current)
-                        && position > 0
-                    {
-                        prompt.selected = Some(selectable[position - 1]);
-                    } else if prompt.selected.is_none() {
-                        prompt.selected = selectable.into_iter().next();
-                    }
-                }
-                Some(Action::Confirm) => {
-                    self.open_selected_project_worktree_agent_prompt()?;
-                }
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if matches!(self.prompt, PromptState::PickProject { .. }) {
-            let searching = matches!(
-                self.prompt,
-                PromptState::PickProject {
-                    list: SearchableList {
-                        searching: true,
-                        ..
-                    },
-                    ..
-                }
-            );
-            // Typing and the caret keys belong to the search row while it has
-            // the keystrokes; everything else still reaches the bindings, which
-            // is what keeps the vertical keys walking the FILTERED results.
-            let action = if binding_lookup_is_suppressed(key, searching) {
-                None
-            } else {
-                // The chooser's own scope first, then the shared picker
-                // vocabulary: the standalone-agent key belongs to this modal
-                // alone, and putting it in `Palette` would arm it inside every
-                // other picker.
-                self.bindings
-                    .lookup(&key, BindingScope::ProjectChooser)
-                    .or_else(|| self.bindings.lookup(&key, BindingScope::Palette))
-            };
-            // Confirm-while-picking and the standalone jump are the branches
-            // that need `self`; handle them after releasing the prompt borrow
-            // so the borrow checker is happy.
-            let mut do_confirm = false;
-            let mut go_standalone = false;
-            if let PromptState::PickProject {
-                entries,
-                list,
-                intent,
-                ..
-            } = &mut self.prompt
-            {
-                let vis_len = list.visible_indices(entries, pick_project_matches).len();
-                match action {
-                    Some(Action::CloseOverlay) => {
-                        if !list.exit_search_clearing_filter() {
-                            self.prompt = PromptState::None;
-                        }
-                    }
-                    Some(Action::SearchToggle) if !searching => list.begin_search(),
-                    Some(Action::Confirm) => do_confirm = true,
-                    // Only the NEW-AGENT chooser. The same modal also asks
-                    // which project to manage, which one a pull request is in,
-                    // and which one to open a terminal in; "start a standalone
-                    // agent instead" is an answer to the first question and to
-                    // no other, so the key is inert (and unadvertised) there.
-                    // Whatever row is highlighted: a standalone agent belongs
-                    // to no project, so there is nothing here to carry over.
-                    Some(Action::NewStandaloneAgent)
-                        if *intent == ProjectChooserIntent::NewAgent =>
-                    {
-                        go_standalone = true
-                    }
-                    Some(Action::MoveDown) => list.move_down(vis_len),
-                    Some(Action::MoveUp) => list.move_up(),
-                    _ => {
-                        if searching && list.filter.handle_key(key) {
-                            // The filter changed; keep the selection in range.
-                            let new_len = list.visible_indices(entries, pick_project_matches).len();
-                            list.clamp_selected(new_len);
-                        }
-                    }
-                }
-            }
-            if do_confirm {
-                self.confirm_project_chooser_selection()?;
-            }
-            if go_standalone {
-                // Replaces the chooser: `open_folder_browser` sets the prompt.
-                self.open_standalone_agent_browser()?;
-            }
-            return Ok(false);
-        }
-
-        // The three provider pickers are rows and nothing else: no Cancel, no
-        // Apply, so no focus concept and no Tab. The close key cancels and the
-        // confirm key picks, which is what their footers say. They were three
-        // byte-for-byte identical handlers differing only in which `apply_*`
-        // the confirm key reached; they are ONE handler now, so a change to
-        // the picker vocabulary cannot land on two of the three.
-        if let Some(which) = provider_picker_kind(&self.prompt) {
-            return self.handle_provider_picker_key(key, which);
-        }
-
-        if let PromptState::SetTailscaleMode(prompt) = &mut self.prompt {
-            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
-            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
-            match palette_action.or(dialog_action) {
-                Some(Action::CloseOverlay) => {
-                    // Escape never saves: nothing is written and nothing moves.
-                    self.prompt = PromptState::None;
-                    self.set_info(
-                        "Left the Tailscale mode as it was; config.toml is untouched.".to_string(),
-                    );
-                }
-                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
-                    prompt.selected += 1;
-                }
-                Some(Action::MoveUp) if prompt.selected > 0 => {
-                    prompt.selected -= 1;
-                }
-                Some(Action::Confirm) => self.apply_set_tailscale_mode(),
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ChangeTheme(prompt) = &mut self.prompt {
-            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
-            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
-
-            if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
-                self.cancel_change_theme();
-                return Ok(false);
-            }
-
-            let mut moved = false;
-            match palette_action.or(dialog_action) {
-                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
-                    prompt.selected += 1;
-                    moved = true;
-                }
-                Some(Action::MoveUp) if prompt.selected > 0 => {
-                    prompt.selected -= 1;
-                    moved = true;
-                }
-                Some(Action::Confirm) => {
-                    self.apply_change_theme()?;
-                }
-                _ => {}
-            }
-            if moved {
-                self.preview_change_theme_selection();
-            }
-            return Ok(false);
         }
 
         if let Some(focus) = configure_focus(&self.prompt) {
             return self.handle_configure_modal_key(key, focus);
         }
 
-        if let Some(should_exit) = self.handle_startup_logs_prompt_key(key) {
+        if let Some(should_exit) = self.handle_notice_prompt_key(key) {
             return Ok(should_exit);
         }
 
-        if matches!(self.prompt, PromptState::ConfigReloadFailed { .. }) {
-            // The validation error can be far longer than the dialog, so the
-            // Help scope's scroll vocabulary (j/k/arrows/PgUp/PgDn/Home/End)
-            // reaches the rest of it. Checked BEFORE the Dialog scope below,
-            // which owns Space (the checkbox) and Tab (focus). Up/Down are free
-            // here: focus moves with Tab/Left/Right.
-            if self.scroll_error_dialog_for(&key) {
-                return Ok(false);
-            }
+        if let Some(should_exit) = self.handle_confirmation_prompt_key(key) {
+            return Ok(should_exit);
         }
 
-        if let PromptState::ConfigReloadFailed {
-            recover_old_config,
-            focus,
-            ..
-        } = &mut self.prompt
-        {
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                // Esc takes the same path as the Close BUTTON rather than
-                // blanking the prompt itself, so the two dismissal routes
-                // cannot drift (and so the outside-click engine, which calls
-                // the same resolve, is honestly at parity with Esc).
-                Some(Action::CloseOverlay) => {
-                    return Ok(self.resolve_config_reload_failed(false));
-                }
-                Some(Action::ToggleSelection) => {
-                    // The one shared ring, walked in whichever direction the
-                    // key means. This modal used to have no reverse at all.
-                    let ring = [
-                        (ConfigReloadFailedFocus::Close, true),
-                        (ConfigReloadFailedFocus::Apply, true),
-                        (ConfigReloadFailedFocus::Checkbox, true),
-                    ];
-                    *focus = next_focus(&ring, *focus, !focus_move_is_reverse(key));
-                }
-                Some(Action::Confirm) => match *focus {
-                    ConfigReloadFailedFocus::Checkbox => {
-                        *recover_old_config = !*recover_old_config;
-                    }
-                    ConfigReloadFailedFocus::Close => {
-                        return Ok(self.resolve_config_reload_failed(false));
-                    }
-                    ConfigReloadFailedFocus::Apply => {
-                        return Ok(self.resolve_config_reload_failed(true));
-                    }
-                },
-                _ if key.code == KeyCode::Char(' ') => match *focus {
-                    ConfigReloadFailedFocus::Checkbox => {
-                        *recover_old_config = !*recover_old_config;
-                    }
-                    ConfigReloadFailedFocus::Close => {
-                        return Ok(self.resolve_config_reload_failed(false));
-                    }
-                    ConfigReloadFailedFocus::Apply => {
-                        return Ok(self.resolve_config_reload_failed(true));
-                    }
-                },
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if matches!(self.prompt, PromptState::AddProjectFailed { .. }) {
-            // Scroll first (see the config-reload dialog above): the failure
-            // message may not fit, and none of its scroll keys collide with the
-            // dialog's own Enter/Esc/Space dismissal.
-            if self.scroll_error_dialog_for(&key) {
-                return Ok(false);
-            }
-            let action = self.bindings.lookup(&key, BindingScope::Dialog);
-            let is_space = key.code == KeyCode::Char(' ');
-            if matches!(action, Some(Action::Confirm | Action::CloseOverlay)) || is_space {
-                self.resolve_add_project_failed();
-            }
-            return Ok(false);
-        }
-
-        if matches!(self.prompt, PromptState::FirstLoad(_)) {
-            // Dialog scope first: Esc closes, Enter activates, and
-            // ToggleSelection (Tab / Shift-Tab / h / l / Left / Right) moves
-            // between the two buttons.
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => {
-                    self.close_top_overlay();
-                    return Ok(false);
-                }
-                Some(Action::Confirm) => {
-                    return Ok(self.activate_first_load_button());
-                }
-                Some(Action::ToggleSelection) => {
-                    if let PromptState::FirstLoad(prompt) = &mut self.prompt {
-                        prompt.focus = prompt.focus.toggled();
-                    }
-                    return Ok(false);
-                }
-                _ => {}
-            }
-            // Space activates the focused button — the universal dialog
-            // convention, hardcoded rather than bound (see CLAUDE.md). It is
-            // therefore NOT available as a scroll key here, unlike the help
-            // overlay.
-            if key.code == KeyCode::Char(' ') {
-                return Ok(self.activate_first_load_button());
-            }
-            // `q` DISMISSES this modal; it deliberately does NOT scroll to the
-            // bottom the way it does in the help overlay. This is the first screen
-            // a brand-new user ever sees, `q` is the single most likely "get me out
-            // of this unfamiliar thing" keypress, and rewarding it with a silent
-            // jump to the bottom of the prose is a bad first impression. `End`
-            // keeps scroll-to-bottom, so nothing is lost.
-            //
-            // Resolved through the Global-scope Quit binding rather than a
-            // hardcoded 'q' so a user who rebound quit gets their key here too,
-            // but ONLY for a modifier-free binding. `Ctrl-c` must keep quitting
-            // dux: it is a process-level convention, not a UI gesture — people
-            // press it to leave the PROGRAM, not to close the thing in front of
-            // them — and swallowing the first press to dismiss a modal reads as
-            // dux refusing to exit, which is worst for exactly the brand-new user
-            // this screen exists for. `q` and `Esc` are already generous coverage
-            // for dismissal. Do not widen this to modifier-carrying bindings.
-            if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::Quit) {
-                if key.modifiers.is_empty() {
-                    self.close_top_overlay();
-                    return Ok(false);
-                }
-                // The quit path replaces or closes this screen either way, so
-                // stamp it first — otherwise a cancelled ConfirmQuit would leave
-                // the user with the screen gone AND due to see it again next
-                // launch.
-                self.dismiss_first_load_prompt();
-                return Ok(self.begin_quit());
-            }
-            // This is a non-interactive overlay, so the line-scroll keys scroll
-            // unconditionally. They reuse the Help scope's scroll vocabulary
-            // (j/k/arrows/PgUp/PgDn/Home/End) so they stay rebindable and
-            // consistent with the app's other scrollable overlay — minus `q`,
-            // handled above.
-            if let Some(action) = self.bindings.lookup(&key, BindingScope::Help) {
-                let page = self.first_load_page();
-                match action {
-                    Action::MoveDown => self.scroll_first_load(1),
-                    Action::MoveUp => self.scroll_first_load(-1),
-                    Action::ScrollPageDown => self.scroll_first_load(page),
-                    Action::ScrollPageUp => self.scroll_first_load(-page),
-                    Action::ScrollToBottom => self.scroll_first_load(i32::from(u16::MAX)),
-                    Action::ScrollToTop => self.scroll_first_load(-i32::from(u16::MAX)),
-                    _ => {}
-                }
-            }
-            return Ok(false);
-        }
-
-        if matches!(self.prompt, PromptState::AgentInfo(_)) {
-            // Read-only modal: Enter, Esc, or Space (the focused Close button) all
-            // dismiss it. Routed through PromptState so Esc behaves uniformly.
-            let action = self.bindings.lookup(&key, BindingScope::Dialog);
-            let is_space = key.code == KeyCode::Char(' ');
-            if matches!(action, Some(Action::Confirm | Action::CloseOverlay)) || is_space {
-                self.prompt = PromptState::None;
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ConfirmKillRunning(confirm_prompt) = &mut self.prompt {
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => {
-                    let previous = confirm_prompt.previous.clone();
-                    self.prompt = PromptState::KillRunning(previous);
-                    self.set_info(
-                        "Kill cancelled. Your running agents and companion terminals are unchanged.",
-                    );
-                }
-                Some(Action::ToggleSelection) => {
-                    confirm_prompt.focus = confirm_prompt.focus.toggled();
-                }
-                Some(Action::Confirm) => {
-                    let confirm = confirm_prompt.focus.is_confirm();
-                    return Ok(self.resolve_confirm_kill_running(confirm));
-                }
-                _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = confirm_prompt.focus.is_confirm();
-                    return Ok(self.resolve_confirm_kill_running(confirm));
-                }
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ConfirmDeleteAgent {
-            focus,
-            delete_worktree,
-            target,
-            ..
-        } = &mut self.prompt
-        {
-            // The checkbox is a CONDITIONAL stop: absent when the worktree is
-            // shared (it is preserved whatever the user ticks) and absent for a
-            // standalone agent (there is no worktree to remove at all). One
-            // answer for all three of the renderer, this ring, and the click
-            // handler.
-            let shared = !target.offers_worktree_checkbox();
-            // Declared focus order, with the checkbox as a CONDITIONAL stop,
-            // exactly the case `next_focus` exists for. Reproduces the previous
-            // hand-written cycle arm for arm, including the recovery walk when
-            // focus is somehow stranded on the hidden checkbox.
-            let ring = [
-                (DeleteAgentFocus::Cancel, true),
-                (DeleteAgentFocus::Delete, true),
-                (DeleteAgentFocus::Checkbox, !shared),
-            ];
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::ToggleSelection) => {
-                    // `focus_move_is_reverse`, not `is_reverse_tab`: the
-                    // movement action carries no direction, so the KEY supplies
-                    // one, and the horizontal reverse key means reverse here
-                    // exactly as it does in every migrated modal. Gating on
-                    // reverse-tab alone let the horizontal reverse key fall
-                    // through and walk FORWARD in this three-stop ring.
-                    *focus = next_focus(&ring, *focus, !focus_move_is_reverse(key));
-                }
-                Some(Action::Confirm) => match *focus {
-                    DeleteAgentFocus::Checkbox => {
-                        *delete_worktree = !*delete_worktree;
-                    }
-                    DeleteAgentFocus::Cancel => {
-                        return Ok(self.resolve_confirm_delete_agent(false));
-                    }
-                    DeleteAgentFocus::Delete => {
-                        return Ok(self.resolve_confirm_delete_agent(true));
-                    }
-                },
-                // Space activates the focused element — toggles the checkbox
-                // when focused there, otherwise activates the current button.
-                _ if key.code == KeyCode::Char(' ') => match *focus {
-                    DeleteAgentFocus::Checkbox => {
-                        *delete_worktree = !*delete_worktree;
-                    }
-                    DeleteAgentFocus::Cancel => {
-                        return Ok(self.resolve_confirm_delete_agent(false));
-                    }
-                    DeleteAgentFocus::Delete => {
-                        return Ok(self.resolve_confirm_delete_agent(true));
-                    }
-                },
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ConfirmDeleteTerminal { focus, .. } = &mut self.prompt {
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::ToggleSelection) => {
-                    *focus = focus.toggled();
-                }
-                Some(Action::Confirm) => {
-                    let confirm = focus.is_confirm();
-                    return Ok(self.resolve_confirm_delete_terminal(confirm));
-                }
-                _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = focus.is_confirm();
-                    return Ok(self.resolve_confirm_delete_terminal(confirm));
-                }
-                _ => {}
-            }
-        }
-
-        if let PromptState::ConfirmCloseTab { focus, .. } = &mut self.prompt {
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::ToggleSelection) => {
-                    *focus = focus.toggled();
-                }
-                Some(Action::Confirm) => {
-                    let confirm = focus.is_confirm();
-                    return Ok(self.resolve_confirm_close_tab(confirm));
-                }
-                _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = focus.is_confirm();
-                    return Ok(self.resolve_confirm_close_tab(confirm));
-                }
-                _ => {}
-            }
-        }
-
-        if let PromptState::ConfirmQuit { focus, .. } = &mut self.prompt {
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::ToggleSelection) => {
-                    *focus = focus.toggled();
-                }
-                Some(Action::Confirm) => {
-                    let confirm = focus.is_confirm();
-                    return Ok(self.resolve_confirm_quit(confirm));
-                }
-                _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = focus.is_confirm();
-                    return Ok(self.resolve_confirm_quit(confirm));
-                }
-                _ => {}
-            }
-        }
-
-        if let PromptState::ConfirmDiscardFile { focus, .. } = &mut self.prompt {
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::ToggleSelection) => {
-                    *focus = focus.toggled();
-                }
-                Some(Action::Confirm) => {
-                    let confirm = focus.is_confirm();
-                    return Ok(self.resolve_confirm_discard_file(confirm));
-                }
-                _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = focus.is_confirm();
-                    return Ok(self.resolve_confirm_discard_file(confirm));
-                }
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ConfirmCreateInitialCommit { focus, .. } = &mut self.prompt {
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => {
-                    self.resolve_confirm_create_initial_commit(false);
-                }
-                Some(Action::ToggleSelection) => {
-                    *focus = focus.toggled();
-                }
-                Some(Action::Confirm) => {
-                    let confirm = focus.is_confirm();
-                    self.resolve_confirm_create_initial_commit(confirm);
-                }
-                _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = focus.is_confirm();
-                    self.resolve_confirm_create_initial_commit(confirm);
-                }
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ConfirmInitRepo { focus, .. } = &mut self.prompt {
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => {
-                    self.resolve_confirm_init_repo(false);
-                }
-                Some(Action::ToggleSelection) => {
-                    *focus = focus.toggled();
-                }
-                Some(Action::Confirm) => {
-                    let confirm = focus.is_confirm();
-                    self.resolve_confirm_init_repo(confirm);
-                }
-                // Space activates the focused button (dialog tenet).
-                _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = focus.is_confirm();
-                    self.resolve_confirm_init_repo(confirm);
-                }
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ConfirmNonDefaultBranch {
-            action,
-            focus,
-            kind,
-            checkout_default,
-            ..
-        } = &mut self.prompt
-        {
-            // Checkbox is only reachable in the confident (Known) path.
-            // Heuristic warnings and create-agent prompts have no checkbox,
-            // so focus cycles Cancel ↔ Add.
-            let has_checkbox =
-                matches!(kind, BranchWarningKind::Known { .. }) && action.allows_add_anyway();
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::ToggleSelection) => {
-                    let reverse = focus_move_is_reverse(key);
-                    *focus = match (*focus, has_checkbox, reverse) {
-                        (ConfirmNonDefaultBranchFocus::Cancel, true, false) => {
-                            ConfirmNonDefaultBranchFocus::Add
-                        }
-                        (ConfirmNonDefaultBranchFocus::Add, true, false) => {
-                            ConfirmNonDefaultBranchFocus::Checkbox
-                        }
-                        (ConfirmNonDefaultBranchFocus::Checkbox, _, false) => {
-                            ConfirmNonDefaultBranchFocus::Cancel
-                        }
-                        (ConfirmNonDefaultBranchFocus::Cancel, true, true) => {
-                            ConfirmNonDefaultBranchFocus::Checkbox
-                        }
-                        (ConfirmNonDefaultBranchFocus::Add, true, true) => {
-                            ConfirmNonDefaultBranchFocus::Cancel
-                        }
-                        (ConfirmNonDefaultBranchFocus::Checkbox, _, true) => {
-                            ConfirmNonDefaultBranchFocus::Add
-                        }
-                        (ConfirmNonDefaultBranchFocus::Cancel, false, _) => {
-                            ConfirmNonDefaultBranchFocus::Add
-                        }
-                        (ConfirmNonDefaultBranchFocus::Add, false, _) => {
-                            ConfirmNonDefaultBranchFocus::Cancel
-                        }
-                    };
-                }
-                Some(Action::Confirm) => match *focus {
-                    ConfirmNonDefaultBranchFocus::Checkbox => {
-                        *checkout_default = !*checkout_default;
-                    }
-                    ConfirmNonDefaultBranchFocus::Cancel => {
-                        self.prompt = PromptState::None;
-                    }
-                    ConfirmNonDefaultBranchFocus::Add => {
-                        return Ok(self.resolve_confirm_non_default_branch());
-                    }
-                },
-                // Space activates the focused element — toggles the checkbox
-                // when focused there, otherwise activates the current button.
-                _ if key.code == KeyCode::Char(' ') => match *focus {
-                    ConfirmNonDefaultBranchFocus::Checkbox => {
-                        *checkout_default = !*checkout_default;
-                    }
-                    ConfirmNonDefaultBranchFocus::Cancel => {
-                        self.prompt = PromptState::None;
-                    }
-                    ConfirmNonDefaultBranchFocus::Add => {
-                        return Ok(self.resolve_confirm_non_default_branch());
-                    }
-                },
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ConfirmUseExistingBranch { focus, .. } = &mut self.prompt {
-            match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::ToggleSelection) => {
-                    *focus = focus.toggled();
-                }
-                Some(Action::Confirm) => {
-                    let confirm = focus.is_confirm();
-                    return Ok(self.resolve_confirm_use_existing_branch(confirm));
-                }
-                _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = focus.is_confirm();
-                    return Ok(self.resolve_confirm_use_existing_branch(confirm));
-                }
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if matches!(self.prompt, PromptState::EditMacros { .. }) {
-            self.handle_edit_macros_key(key)?;
-            return Ok(false);
-        }
-
-        if matches!(self.prompt, PromptState::PullRequestInput { .. }) {
-            let field_focused = matches!(
-                self.prompt,
-                PromptState::PullRequestInput {
-                    focus: PullRequestInputFocus::Input,
-                    ..
-                }
-            );
-            // Same rule as the rename modal: while the single-line field has
-            // focus, plain characters and the horizontal arrows belong to the
-            // caret and never reach the binding lookup. Once focus is on the
-            // secondary action the field owns nothing and every key navigates.
-            let action = if binding_lookup_is_suppressed(key, field_focused) {
-                None
-            } else {
-                self.bindings.lookup(&key, BindingScope::Dialog)
-            };
-
-            match modal_key_step(action, key, field_focused) {
-                ModalKeyStep::Close => {
-                    self.prompt = PromptState::None;
-                    self.pending_pr_reference = None;
-                    // Closing the modal retires the resolution it was waiting
-                    // for. Nothing can recall a reply already in flight, so it
-                    // has to land on nothing when it arrives.
-                    self.invalidate_pull_request_resolution();
-                }
-                ModalKeyStep::Confirm => {
-                    if field_focused {
-                        self.confirm_pull_request_input()?;
-                    } else {
-                        self.open_pull_request_project_picker()?;
-                    }
-                }
-                ModalKeyStep::MoveFocus(forward) => {
-                    self.focus_next_pull_request_control(forward);
-                }
-                ModalKeyStep::ActivateFocus => {
-                    // Space, with focus off the field: the secondary action is
-                    // the only other control.
-                    if !field_focused {
-                        self.open_pull_request_project_picker()?;
-                    }
-                }
-                ModalKeyStep::FallThroughToField => {
-                    if field_focused
-                        && let PromptState::PullRequestInput { input, .. } = &mut self.prompt
-                    {
-                        input.handle_key(key);
-                    }
-                }
-            }
-            return Ok(false);
-        }
-
-        if matches!(self.prompt, PromptState::AttachPullRequestInput { .. }) {
-            // The field is the modal's ONLY control (no focus enum, per the
-            // movement-keys tenet), so it is always focused: plain characters
-            // and the horizontal arrows always belong to the caret and never
-            // reach the binding lookup.
-            let action = if binding_lookup_is_suppressed(key, true) {
-                None
-            } else {
-                self.bindings.lookup(&key, BindingScope::Dialog)
-            };
-            match modal_key_step(action, key, true) {
-                ModalKeyStep::Close => {
-                    self.prompt = PromptState::None;
-                }
-                ModalKeyStep::Confirm => {
-                    self.confirm_attach_pull_request_input()?;
-                }
-                // One control: there is nowhere for focus to move, and Space
-                // (ActivateFocus) cannot fire while a field has focus.
-                ModalKeyStep::MoveFocus(_) | ModalKeyStep::ActivateFocus => {}
-                ModalKeyStep::FallThroughToField => {
-                    if let PromptState::AttachPullRequestInput { input, .. } = &mut self.prompt {
-                        input.handle_key(key);
-                    }
-                }
-            }
-            return Ok(false);
-        }
-
-        if matches!(self.prompt, PromptState::NameNewAgent { .. }) {
-            let checkbox_focused = matches!(
-                self.prompt,
-                PromptState::NameNewAgent {
-                    focus: NameNewAgentFocus::RandomizedNameCheckbox
-                        | NameNewAgentFocus::CopyChangesCheckbox,
-                    ..
-                }
-            );
-            // Plain characters type; horizontal arrows move the caret. Both
-            // belong to the text field, so neither consults the bindings while
-            // the field has focus. Once focus is on a checkbox the field owns
-            // nothing, so every key reaches the bindings and the movement keys
-            // navigate. The footer hint is derived from this same predicate, so
-            // it can only ever name a key that still reaches the bindings here.
-            let action = if !checkbox_focused && text_field_owns_key(key) {
-                None
-            } else {
-                self.bindings.lookup(&key, BindingScope::Dialog)
-            };
-
-            match action {
-                Some(Action::CloseOverlay) => {
-                    self.prompt = PromptState::None;
-                }
-                Some(Action::ToggleSelection) => {
-                    self.focus_next_name_new_agent_control(!focus_move_is_reverse(key));
-                }
-                Some(Action::Confirm) => {
-                    // Extract the name from the input before taking ownership.
-                    let name = if let PromptState::NameNewAgent { input, .. } = &self.prompt {
-                        input.text.trim().to_string()
-                    } else {
-                        unreachable!()
-                    };
-                    if name.is_empty() {
-                        self.set_error("Agent name cannot be empty.");
-                        self.prompt = PromptState::None;
-                        return Ok(false);
-                    }
-                    if !git::is_valid_agent_name(&name) {
-                        self.set_error(
-                            "Agent name may only contain letters, digits, dashes, underscores, \
-                             or slashes. It cannot start with \"-\" or \"/\", end with \"/\", \
-                             or contain \"//\".",
-                        );
-                        return Ok(false);
-                    }
-                    // Take ownership of the prompt to extract the request.
-                    let old_prompt = std::mem::replace(&mut self.prompt, PromptState::None);
-                    let PromptState::NameNewAgent {
-                        mut request,
-                        copy_changes,
-                        ..
-                    } = old_prompt
-                    else {
-                        unreachable!()
-                    };
-                    // The per-agent checkbox decides the copy for fresh project
-                    // agents; the other flows have fixed copy semantics.
-                    if let CreateAgentRequest::NewProject {
-                        copy_uncommitted_changes,
-                        ..
-                    } = &mut request
-                    {
-                        *copy_uncommitted_changes = copy_changes;
-                    }
-
-                    // For fresh project agents, check whether the branch already
-                    // exists locally or on the remote before creating a new one,
-                    // via the single-source `git::create_agent_branch_preflight`
-                    // (shared with the web's create route). PR-based agents
-                    // intentionally skip this prompt because the PR head branch is
-                    // expected to exist upstream.
-                    if let CreateAgentRequest::NewProject { project, .. } = &request {
-                        let repo_path = std::path::PathBuf::from(&project.path);
-                        if let git::CreateAgentBranchPlan::ExistingBranch { location } =
-                            git::create_agent_branch_preflight(&repo_path, &name)
-                        {
-                            set_create_agent_request_custom_name(&mut request, name.clone());
-                            self.prompt = PromptState::ConfirmUseExistingBranch {
-                                request,
-                                branch_name: name,
-                                location,
-                                focus: ConfirmFocus::Cancel,
-                            };
-                            return Ok(false);
-                        }
-                    }
-
-                    let msg = match &request {
-                        CreateAgentRequest::NewProject { project, .. } => {
-                            format!(
-                                "Creating a new agent worktree \"{name}\" for project \"{}\" and launching a fresh session...",
-                                project.name
-                            )
-                        }
-                        CreateAgentRequest::PullRequest {
-                            project, number, ..
-                        } => {
-                            format!(
-                                "Creating a new agent worktree \"{name}\" from PR #{number} for project \"{}\" and launching a fresh session...",
-                                project.name
-                            )
-                        }
-                        // A standalone create never reaches the name prompt:
-                        // it takes its name from the folder browser flow, which
-                        // resolves the title before dispatching.
-                        CreateAgentRequest::Standalone { folder, .. } => {
-                            format!(
-                                "Creating a standalone agent \"{name}\" in \"{}\"...",
-                                dux_core::home_path::shorten_home(folder)
-                            )
-                        }
-                        CreateAgentRequest::ForkSession { source_label, .. } => {
-                            format!(
-                                "Forking agent \"{source_label}\" as \"{name}\" by cloning its current worktree contents into a fresh session...",
-                            )
-                        }
-                        CreateAgentRequest::ExistingManagedWorktree {
-                            project,
-                            worktree_path,
-                            ..
-                        } => {
-                            format!(
-                                "Starting agent \"{name}\" in existing worktree {} for project \"{}\"...",
-                                worktree_path.display(),
-                                project.name
-                            )
-                        }
-                        CreateAgentRequest::ForkExternalWorktree {
-                            project,
-                            source_label,
-                            ..
-                        } => {
-                            format!(
-                                "Copying external worktree \"{source_label}\" into a managed worktree \"{name}\" for project \"{}\"...",
-                                project.name
-                            )
-                        }
-                    };
-                    set_create_agent_request_custom_name(&mut request, name);
-                    self.dispatch_create_agent_request(request, msg)?;
-                }
-                _ => {
-                    if checkbox_focused {
-                        // A focused checkbox is the only control accepting
-                        // input, and Space is the only key it takes. Every
-                        // other key is dropped rather than routed to the name
-                        // field: the field draws no caret while focus sits on
-                        // a checkbox, so editing it here would be invisible.
-                        if key.code == KeyCode::Char(' ') {
-                            self.toggle_focused_name_new_agent_checkbox();
-                        }
-                    } else if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
-                        input.handle_key(key);
-                    }
-                }
-            }
-            return Ok(false);
-        }
-
-        if matches!(self.prompt, PromptState::RenameSession { .. }) {
-            let checkbox_focused = matches!(
-                self.prompt,
-                PromptState::RenameSession {
-                    focus: RenameSessionFocus::RenameBranchCheckbox,
-                    ..
-                }
-            );
-            // Plain characters type; horizontal arrows move the caret. Both
-            // belong to the text field, so neither consults the bindings while
-            // the field has focus. Once focus is on the checkbox the field owns
-            // nothing, so every key reaches the bindings and the movement keys
-            // navigate. The footer hint is derived from this same predicate, so
-            // it can only ever name a key that still reaches the bindings here.
-            let action = if binding_lookup_is_suppressed(key, !checkbox_focused) {
-                None
-            } else {
-                self.bindings.lookup(&key, BindingScope::Dialog)
-            };
-
-            // The shared ladder: close, move focus, confirm, activate the
-            // focused control, then fall through to the field. `Confirm` and
-            // `ActivateFocus` are separate rungs precisely because this modal
-            // needs them to differ, Enter submits the rename even while the
-            // checkbox has focus, while Space toggles the box.
-            match modal_key_step(action, key, !checkbox_focused) {
-                ModalKeyStep::Close => {
-                    self.prompt = PromptState::None;
-                }
-                ModalKeyStep::Confirm => {
-                    let PromptState::RenameSession {
-                        session_id,
-                        input,
-                        rename_branch,
-                        ..
-                    } = &self.prompt
-                    else {
-                        unreachable!()
-                    };
-                    let id = session_id.clone();
-                    let new_name = input.text.clone();
-                    let also_rename_branch = *rename_branch;
-                    self.prompt = PromptState::None;
-                    self.apply_rename_session(&id, new_name, also_rename_branch);
-                }
-                ModalKeyStep::MoveFocus(forward) => {
-                    self.focus_next_rename_session_control(forward);
-                }
-                ModalKeyStep::ActivateFocus => {
-                    // Space, with focus off the text field. The checkbox is the
-                    // only non-field control here.
-                    if checkbox_focused {
-                        self.toggle_rename_session_branch();
-                    }
-                }
-                ModalKeyStep::FallThroughToField => {
-                    // A focused checkbox takes nothing but Space (handled
-                    // above). Every other key is dropped rather than routed to
-                    // the name field: the field draws no caret while focus sits
-                    // on the checkbox, so editing it here would be invisible.
-                    if !checkbox_focused
-                        && let PromptState::RenameSession { input, .. } = &mut self.prompt
-                    {
-                        input.handle_key(key);
-                    }
-                }
-            }
-            return Ok(false);
+        if let Some(should_exit) = self.handle_form_prompt_key(key)? {
+            return Ok(should_exit);
         }
 
         Ok(false)
@@ -11401,6 +11341,81 @@ not_a_real_action = ["x"]
             }),
             copy_checkbox: None,
         };
+    }
+
+    #[test]
+    fn prompt_family_keyboard_routes_preserve_each_modal_domain() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmQuit {
+            agent_count: 1,
+            terminal_count: 0,
+            focus: ConfirmFocus::Cancel,
+        };
+        tap(&mut app, KeyCode::Tab);
+        assert!(matches!(
+            app.prompt,
+            PromptState::ConfirmQuit {
+                focus: ConfirmFocus::Confirm,
+                ..
+            }
+        ));
+
+        let mut app = browse_projects_app();
+        if let PromptState::BrowseProjects {
+            editing_path,
+            path_input,
+            tab_completions,
+            tab_index,
+            ..
+        } = &mut app.prompt
+        {
+            *editing_path = true;
+            path_input.set_text("/tmp/demo".to_string());
+            tab_completions.push("/tmp/demo-one".to_string());
+            *tab_index = 1;
+        }
+        tap(&mut app, KeyCode::Esc);
+        let PromptState::BrowseProjects {
+            editing_path,
+            path_input,
+            tab_completions,
+            tab_index,
+            ..
+        } = &app.prompt
+        else {
+            panic!("expected project browser");
+        };
+        assert!(!editing_path);
+        assert!(path_input.is_empty());
+        assert!(tab_completions.is_empty());
+        assert_eq!(*tab_index, 0);
+
+        let mut app = test_app(default_bindings());
+        let mut prompt = startup_command_logs_prompt();
+        prompt.focus = StartupCommandLogFocus::Close;
+        app.prompt = PromptState::StartupCommandLogs(prompt);
+        tap(&mut app, KeyCode::Char(' '));
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(app.startup_log_selection.is_none());
+    }
+
+    #[test]
+    fn kill_running_footer_navigation_does_not_change_marked_rows() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::KillRunning(kill_running_search_prompt());
+        let before = match &app.prompt {
+            PromptState::KillRunning(prompt) => prompt.selected_ids.clone(),
+            _ => unreachable!(),
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .expect("move focus to footer");
+
+        let PromptState::KillRunning(prompt) = &app.prompt else {
+            panic!("expected kill-running prompt");
+        };
+        assert!(matches!(prompt.focus, KillRunningFocus::Footer(_)));
+        assert_eq!(prompt.selected_ids, before);
     }
 
     fn clipboard_ok(_: &str) -> anyhow::Result<()> {
