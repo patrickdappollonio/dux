@@ -244,6 +244,25 @@ describe("bootstrap slice", () => {
     })
   })
 
+  it("retires the optimistic agent sort only after config confirms it", async () => {
+    bootstrapBody = makeBootstrap({ agent_sort: "active" })
+    const mod = await loadStore()
+    mod.setAgentSort("manual")
+    expect(mod.getSnapshot().agentSort).toBe("manual")
+
+    mod.eventsSocket.onEvent({ event: "config.changed" })
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().bootstrap?.agent_sort).toBe("active")
+    })
+    expect(mod.getSnapshot().agentSort).toBe("manual")
+
+    bootstrapBody = makeBootstrap({ agent_sort: "manual" })
+    mod.eventsSocket.onEvent({ event: "config.changed" })
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().agentSort).toBeNull()
+    })
+  })
+
   // Scoped `document` stub: the file-wide beforeEach stays document-free so the
   // `typeof document` guard in applyBootstrap is still exercised as "absent" for
   // every other test. The sentinel title (not "dux") proves applyBootstrap wrote
