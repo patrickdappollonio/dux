@@ -5514,28 +5514,8 @@ export function openChangesScreen(): void {
   syncUrl()
 }
 
-// The destination one level UP from where the app is: the changes screen sits on
-// top of the agent it belongs to, everything else sits on top of home. This is
-// what the mobile shell's chevrons and the not-found screen's way out call, and
-// it is emphatically NOT the browser's Back.
-//
-// Up must name a destination, because a relative step has no floor. A deep-link
-// boot pushes nothing, so on that first screen dux's own entry IS the bottom of
-// the stack and stepping back walks out of the application onto whatever page
-// preceded it, which is the bug this whole model exists to remove.
-//
-// Up from a REAL screen PUSHES, because it is ordinary navigation to a different
-// position and the browser is supposed to accumulate those: Back then alternates
-// meaningfully between where you were and where you went. A replace here quietly
-// grows the stack by one entry per trip (going in pushes, coming out overwrites
-// the top), so Back does nothing visible for many presses before it does
-// anything at all.
-//
-// Leaving the NOT-FOUND screen is the one exception, and it replaces. That is
-// not navigation between two positions, it is a CORRECTION of a bad URL, and a
-// corrected URL is not a position worth keeping: pushing there would put the
-// dead end exactly one Back away, so the user's way out would bounce them
-// straight back onto it.
+// Navigate to the parent route rather than stepping browser history. Real route
+// changes push; correcting a not-found URL replaces so Back cannot reopen it.
 export function navigateUp(): void {
   const urlMode = state.routeNotFound ? ("replace" as const) : undefined
   // Belt and braces for the standalone shell: with no editor state left there

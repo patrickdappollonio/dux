@@ -112,14 +112,7 @@ export function assembleFlatTerminals(
   return out
 }
 
-// A terminal's colored state word. TWIN of the core-owned
-// `dux_core::row_state::terminal_row_state` (the DECISION); pinned by shared
-// vectors (`flatTerminals.test.ts` mirrors `row_state.rs`). Only the three states
-// a terminal can have (no detached/exited/attention): typing outranks running
-// outranks idle. The busy word is "Running" (a terminal runs a process; agents
-// say "Working"), but the colors reuse the exact tokens the agent word uses so the
-// two never drift: the soft-violet typing token, the active-green busy color,
-// muted for idle.
+// Mirrors core terminal-row precedence: typing, then running, then idle.
 export function terminalStateWord(terminal: TerminalView): StateWord {
   if (terminal.typing) return { label: "Typing", className: "text-dux-typing" }
   if (terminal.working) return { label: "Running", className: "text-green-500" }
@@ -157,35 +150,9 @@ function compareTerminalName(a: TerminalView, b: TerminalView): number {
   return ka.length - kb.length
 }
 
-// Order the flat Terminals section for display by the shared sort mode, mirroring
-// `sortMainSessions`/`sortedSessionIds` for agents but over the flat terminal list.
-// The caller passes the list ALREADY in the global base `sort_order` order (the
-// component sorts the assembled list by `sort_order` and applies any optimistic
-// drag overlay first), exactly as the agent list relies on `spine.sessions` already
-// arriving in `sort_order` order. That is why "manual" is verbatim here rather than
-// re-sorting by `sort_order` as the TUI's `terminal_items` does (the TUI reads from
-// an unordered HashMap, so it must sort the base itself; the semantic COMPARATORS
-// are what stay in lockstep). That base order is the stable starting order every
-// branch builds on:
-//   - manual  → the base order verbatim (the drag order).
-//   - active  → working-or-typing terminals float to the top (a stable float, not
-//               a re-sort), each group keeping base order. Default. Terminals have
-//               no needs-attention.
-//   - updated → newest `updated_at` first (Rust `Reverse(updated_at)`).
-//   - created → newest `created_at` first (Rust `Reverse(created_at)`).
-//   - name / name_desc → by the DISPLAYED label (WYSIWYG), A to Z / Z to A.
-//
-// `Array.prototype.sort` is spec-stable, so equal keys keep base order, matching
-// the TUI's stable `sort_by_key`. These comparators are kept in LOCKSTEP with the
-// TUI `terminal_items` in `crates/dux-tui/src/app/mod.rs` (duplicated per surface
-// by necessity). A copy is sorted so the caller's array is untouched.
-// The terminal drag baseline, the twin of `displayedSessionOrder` in
-// flatList.ts: the COMPLETE flat terminal id list in the order the shared sort
-// mode displays it, so a drop made from a computed mode persists what the user
-// was looking at (never the hidden base order, and never a search-filtered
-// subset; the persisted order is total). Manual needs no special case here:
-// `sortFlatTerminals` already returns the base order verbatim for it, which is
-// exactly how manual terminal drags always computed their move.
+// Return the complete displayed order used as the terminal drag baseline. The
+// input is already in manual order; computed modes use stable sorting so equal
+// keys retain that base order. Comparators mirror the TUI terminal list.
 export function displayedTerminalOrder(
   items: FlatTerminal[],
   key: FlatSortKey,

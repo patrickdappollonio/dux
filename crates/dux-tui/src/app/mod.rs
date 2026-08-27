@@ -2758,10 +2758,8 @@ pub(crate) struct OverlayMouseLayoutState {
     ///   editor paints its popup and THEN its nested delete-confirm paints a
     ///   smaller rect, so `frame` ends up as the modal actually on top.
     ///
-    /// A [`Cell`] rather than a plain field because the recording happens from
-    /// `&self`: `render_prompt` matches on `&self.prompt` and paints from
-    /// inside those arms, so a `&mut self` chokepoint is not expressible there
-    /// (measured: 30 borrow-checker errors across the render arms).
+    /// A [`Cell`] permits last-write-wins recording through the renderer's
+    /// shared reference while preserving the fail-closed `Option`.
     pub(crate) frame: Cell<Option<Rect>>,
 }
 

@@ -7,29 +7,10 @@ import type { EventsClientMessage, EventsServerMessage } from "./types"
 // watching many sessions never loses its tail of subscriptions on reconnect.
 const MAX_EVENT_TOPICS_PER_FRAME = 64
 
-// EventsSocket wraps the `/ws/events` channel, the ONLY JSON socket (PTY bytes
-// ride their own per-PTY sockets in `lib/ptySocket.ts`). It (a) maintains the
-// full set of topics this client is interested in, (b) forwards every server
-// frame (resource-change events plus the
-// `connected`/`status`/`status_cleared` control frames) to a consumer
-// callback, and (c) re-emits its connection
-// state so the store can drive the indicator + auth recovery.
-//
-// The client sends `{ "subscribe": [...] }` / `{ "unsubscribe": [...] }`; the
-// server pushes `{ "event": "session.changes", "id": "<id>", "rev": <n> }` and
-// friends. The whole subscription set is re-sent on every (re)open so a dropped
-// connection loses no interest. After re-subscribing, `onOpen` lets the store
-// re-fetch the restored topics (a missed event during the outage is recovered
-// that way).
-//
-// The connection lifecycle (capped-exponential backoff that retries
-// INDEFINITELY, `failed` reserved for a terminal close code rather than for a
-// spent attempt budget, `connect()`/`close()`, `ConnState` emission, and the
-// orphan/identity guards) lives in the shared `ReconnectingSocket` base. This
-// class only adds the events-channel specifics: the interest set and its chunked
-// resend, and text-frame parsing. It is also the one socket that does NOT park
-// while the page is hidden, deliberately: attention indicators and OS
-// notifications ride it precisely then.
+// JSON events channel. It tracks subscriptions, resends them in bounded chunks
+// after every open, parses resource/control frames, and exposes connection state.
+// It stays active while hidden so attention events can reach notifications;
+// reconnect timing and lifecycle live in `ReconnectingSocket`.
 export class EventsSocket extends ReconnectingSocket {
   // The complete, authoritative interest set. Coarse topics (sessions/projects/
   // config) plus the per-screen fine topics (session:<id>:changes) all live

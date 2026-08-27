@@ -228,8 +228,7 @@ mod tests {
         assert_eq!(short_device_label("\u{1b}\u{7}\r\n"), None);
     }
 
-    /// THE BUG THIS EXISTS FOR. A real `User-Agent` is far longer than the line
-    /// it is rendered on, so every recognized shape must come back SHORT.
+    /// Every recognized user-agent shape fits the device-label line.
     #[test]
     fn every_recognized_shape_fits_the_line_it_is_rendered_on() {
         for raw in [

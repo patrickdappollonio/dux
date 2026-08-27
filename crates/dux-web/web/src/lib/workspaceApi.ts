@@ -10,12 +10,6 @@
 // A non-2xx is thrown as a `WorkspaceFetchError` carrying the HTTP status so the
 // caller can branch.
 //
-// The URL, this module, and the fetch are named for the workspace; the in-code
-// TYPE is still `Spine`, matching the server's `SpineView`. The wire and the
-// route are the user-facing halves and they were renamed; renaming the internal
-// types on both sides would be churn without user value, so the two languages
-// keep the same internal word deliberately rather than by omission.
-
 import type { AgentWorkspaceWire } from "@/lib/agentWorkspace"
 import type {
   AgentTabView,

@@ -1,72 +1,19 @@
 import { reconnectBackoffCapMs } from "./connectionTiming"
 import type { ConnState } from "./types"
 
-// The single home for the frontend's WebSocket reconnect behavior. Both the
-// `/ws/events` JSON spine socket (`EventsSocket`) and every per-PTY byte socket
-// (`PtySocket`) extend this base so the lifecycle lives in exactly one place and
-// can never drift between the two connections.
-//
-// RECONNECTING IS INDEFINITE. Retry with exponential backoff from
-// `RECONNECT_MIN_MS`, doubling to a CONFIGURABLE ceiling
-// (`[server] reconnect_backoff_cap_seconds`) and then staying there, forever,
-// while the page is visible. There is no attempt budget and no give-up state.
-//
-// `failed` is therefore reserved for a TERMINAL close code, decided by
-// `shouldReconnect`: a provider that will not launch, a deleted tab's route that
-// will 404 forever. Those are facts about the far end, not about the network.
-//
-// A HIDDEN PAGE PARKS, but only where parking is the right answer. It is a
-// POLICY the subclass chooses, and it is PTY-ONLY: attention indicators and OS
-// notifications ride the events socket precisely while the tab is in the
-// background, so that socket keeps retrying at the cap while hidden. A parked
-// socket schedules nothing and burns no timers, which is also the only honest
-// thing to do on a platform that would throttle or freeze the timer anyway.
-//
-// FOUR WAKE SIGNALS unpark it: `visibilitychange` to visible, `pageshow`
-// (bfcache restore, persisted or not), `focus`, and `online`. Each is a request
-// to attempt NOW and every one of them is idempotent, because a phone coming
-// back commonly fires three or four in the same tick and a `connect()` on a live
-// socket would tear down a working connection each time. None of them opens a
-// PARKING socket while the page is still hidden: several of them (Chromium's
-// `resume` above all) routinely arrive ahead of the page being on screen, and an
-// attach that lands hidden claims nothing and is never re-asked. See
-// `resumeNow`.
-//
-// AN OPEN IS NOT PROOF THE CONNECTION WORKS. It has to last, or carry a frame,
-// before the backoff is allowed to start again from the floor; see
-// `HEALTHY_SETTLE_MS`.
+// Shared reconnect lifecycle for events and PTY sockets. Network failures retry
+// indefinitely with capped exponential backoff; terminal close codes enter the
+// `failed` state. Subclasses decide whether hidden pages park. Visibility,
+// pageshow, focus, and online signals wake idempotently, and a connection resets
+// its backoff only after receiving a frame or remaining open through the healthy
+// settle window.
 export const RECONNECT_MIN_MS = 500
 
-/// How long a socket may sit in CONNECTING before it is abandoned and retried.
-///
-/// A socket that never opens and never errors is the one state nothing else here
-/// can rescue: `resumeNow` returns early while `this.ws` is non-null, precisely
-/// so a wake signal cannot tear down a connection that is working, so all four
-/// wake signals are inert against it and the retry timer is not armed. That is a
-/// pane covered forever on a page whose user is pressing every button they have.
-///
-/// A client-side CONSTANT rather than a config key, deliberately. It is not a
-/// policy anybody would want to tune: it is a floor under a platform behavior,
-/// and it is set far above any healthy WebSocket handshake (which completes in
-/// milliseconds on a working link and in a couple of seconds on a bad one) so a
-/// slow network can never trip it.
+/// Maximum time a socket may remain in CONNECTING before it is retried.
 export const CONNECT_TIMEOUT_MS = 30_000
 
 /// How long a socket must STAY open before the open counts as evidence that the
-/// connection works and the backoff may start again from the floor.
-///
-/// An open is a promise, not a proof. A server that accepts the handshake and
-/// drops the connection in the same breath (a proxy with nothing behind it, a
-/// server mid-restart, a captive portal) produced an open every time, and the
-/// backoff reset on every one of them: measured, the client retried at a flat
-/// ~551ms forever and the growth the backoff exists for never happened once.
-///
-/// A frame arriving is the better proof and it short-circuits this window; the
-/// timer is what covers a connection that is genuinely up and simply quiet,
-/// which is the ordinary state of an idle PTY.
-///
-/// A client-side CONSTANT for the same reason as the connect deadline: it is a
-/// floor under a platform behavior rather than a policy anybody would tune.
+/// connection works. Receiving a frame proves health immediately.
 export const HEALTHY_SETTLE_MS = 2_000
 
 /// The two behaviors a subclass chooses. Both default to the events socket's

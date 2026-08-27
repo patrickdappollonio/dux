@@ -14,11 +14,6 @@
 //! two surfaces are independent: there is no projection and no cross-language
 //! pin holding them together.
 //!
-//! This table therefore carries no per-surface metadata. It previously had a
-//! `PaletteSurface` enum marking rows as Tui/Web/Both, which existed only to
-//! feed a web projection; that projection is gone, and the enum's own doc
-//! comment had already rotted (it claimed no row used `Web` while three did).
-//!
 //! When you add a command here, decide explicitly whether it also warrants an
 //! entry in the web app menu (see CLAUDE.md); nothing will fail if you skip
 //! it. Many commands here are inherently per-project, per-session, or

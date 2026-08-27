@@ -1,53 +1,8 @@
-// THE ATTACH-AND-REPLAY MACHINE.
-//
-// Every (re)open of the PTY socket is answered by the server with a fresh
-// repaint: the whole scrollback, as the first Binary frame. This machine owns
-// what happens to that frame and to everything that races it.
-//
-// On a RECONNECT xterm still holds the buffer from before the drop, so writing
-// the replay on top would stack a second copy of history (duplicated, garbled
-// output). It resets xterm before that first reconnect frame so the replay
-// rebuilds the buffer cleanly. The very FIRST open starts from an empty buffer
-// (a fresh terminal), so it needs no reset; only opens after the first do.
-//
-// `reset()` clears every private MODE too (mouse tracking, bracketed paste,
-// cursor visibility, autowrap, application cursor keys), and the child emitted
-// those once at its own startup and never repeats them, so nothing on the live
-// stream puts them back. The repaint therefore carries an explicit mode-restore
-// tail from the server (`dux_core::pty::mode_restore_sequence`). Do NOT try to
-// infer modes here from what the replay draws. Without that tail a reconnect
-// landed on a full-screen agent with `mouseTrackingMode === "none"`, and the
-// touch-scroll forward path (gated on exactly that) returned before it read the
-// finger delta, so a finger drag did nothing at all until a hard refresh.
-//
-// On mobile the socket reconnects constantly, so TWO defensive guards keep a
-// replay from ever stacking (Mechanism A):
-//
-//  1. IDEMPOTENCY BY GENERATION. The `connected` frame tags each replay with a
-//     monotonic generation. This records the last generation applied and DROPS
-//     any replay whose generation it has already applied: a duplicate replay,
-//     or a late blob from a torn-down forwarder, becomes a no-op instead of a
-//     second copy of history. An untagged replay (an older server) always
-//     applies.
-//
-//  2. DRAIN-GATING. Before resetting and replaying it lets the PREVIOUS
-//     connection's xterm write queue fully drain (the empty-write callback
-//     fires only once queued writes have parsed), so a stale queued byte cannot
-//     land after `reset()` and among the replay. Because that callback is
-//     async, bytes arriving during the drain window are HELD and written in
-//     order after the reset, so nothing is reordered or written ahead of the
-//     fresh replay.
-//
-// It also owns the REPLAY FOCUS-REPORT WINDOW. Parsing a replay's mode-restore
-// tail makes xterm volunteer a focus report of its own (measured: DECSET 1004
-// makes `CoreBrowserTerminal` immediately answer through `onData`), which is
-// the viewer answering for state dux-core already owns; those reports are
-// dropped for the duration of the write rather than typed at the child. It is a
-// COUNTER, not a flag, so overlapping replay writes cannot close the window
-// early, and it is bounded by the write CALLBACK, never a timer: xterm says
-// exactly when it has finished parsing the chunk. On the reconnect drain path
-// only the FIRST held chunk (the replay itself) gets the window; anything after
-// it is live output that raced in.
+// Applies the first binary replay for each PTY attach. Reconnects drain pending
+// xterm writes, reset the buffer, and then apply the replay plus its server-owned
+// mode-restore tail. Replay generations prevent duplicate application; bytes
+// arriving during a drain remain ordered behind the replay. A callback-scoped
+// counter suppresses focus reports emitted while xterm parses replayed modes.
 import type { Terminal } from "@xterm/xterm"
 
 import {

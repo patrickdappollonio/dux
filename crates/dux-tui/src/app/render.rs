@@ -15980,16 +15980,8 @@ mod tests {
         );
     }
 
-    /// The other half of removing that clear: prove it was protecting nothing.
-    ///
-    /// Its comment claimed it stopped stale cells lingering in ratatui's diff
-    /// buffer across a scroll, and a review suggested it was also scrubbing the
-    /// spacer cells wide characters leave behind (the snapshot skips
-    /// `WIDE_CHAR_SPACER`, so the painting loop never touches them). This walks
-    /// the pane cell by cell after scrolling a grid that holds wide CJK glyphs
-    /// and asserts the buffer says exactly what the current snapshot says:
-    /// every snapshot cell present, every uncovered position blank. A leftover
-    /// glyph from the previous frame, in a spacer or anywhere else, fails here.
+    /// Scrolling a grid with wide glyphs leaves every uncovered cell blank and
+    /// every painted cell equal to the current snapshot.
     #[test]
     fn scrolling_the_agent_pane_leaves_no_stale_cells_without_a_clear() {
         use ratatui::Terminal;

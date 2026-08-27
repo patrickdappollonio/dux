@@ -1,69 +1,9 @@
-// THE RESIZE COORDINATOR.
-//
-// Sizing has two halves with very different costs:
-//  - LOCAL refits (`fit.fit()`) are cheap in CPU terms.
-//  - PTY resizes are expensive: each one is a SIGWINCH that makes the child TUI
-//    fully redraw. Sending them per-frame during a drag is the resize jitter.
-//    So the send is DEBOUNCED (one resize with the final dimensions once the
-//    drag settles) and deduplicated, since ResizeObserver also fires an initial
-//    callback on observe.
-//
-// The ResizeObserver parks its refit for the debounce window and releases it
-// with the send. Last geometry wins, and the canvas may letterbox briefly rather
-// than letting the local grid run ahead of the child during a drag.
-//
-// THE INVARIANT, and the reason this is a machine rather than a handful of
-// closures: NO CALL SITE TOUCHES `fit.fit()` OR `sendResize` EXCEPT THROUGH
-// THIS. It is precisely the rule whose absence caused the repeated-lines bug on
-// phones. The local refit and the child's notification are ONE ATOMIC PAIR, and
-// a touch gesture holds both or neither, because (measured, xterm 6.0.0)
-// `Buffer.resize` sets `scrollBottom = newRows - 1` unconditionally and
-// `scrollTop = 0`, over the normal AND the alt buffer, so every `fit.fit()`
-// that changes the grid silently resets DECSTBM on both. Refitting mid-gesture
-// hands a region-relative, mouse-tracking pager a viewer whose margins are gone
-// while the child still paints for the old geometry, and its repaint stamps one
-// line per forwarded wheel notch.
-//
-// It owns, in one place: the fit, the debounce, the dedupe, the first-frame
-// plan (jiggle or single resize, including the jiggle's held continuation), the
-// foreground re-assert, and the gesture hold.
-//
-// TWO MODES, and the second one is the point of the whole viewer-geometry arc.
-// In OWNER mode everything above applies: the grid follows this container and
-// the child is told about it. In VIEWER mode the coordinator NEVER fits to the
-// container and NEVER sends; it re-grids this terminal to the PTY's own rows
-// and columns instead, so a watcher's emulator is geometry-identical to the
-// driver's and the live view is faithful rather than wrapped and clamped. The
-// mode is not a latch to be switched and it has no preference behind it any
-// more: it is exactly `!isOwner()`, read live at every decision point, so it
-// can never drift from who actually drives the pty. (`ui.watcher_view` bought
-// the pre-faithful fit-my-window behavior back for one unreleased arc; it is
-// gone, because the full-pane take-over card covers the only difference a
-// watcher could ever have seen between the two.) Promotion needs nothing new
-// here (a take-over bounces the socket, whose first frame fits and sends, and
-// so does a blipped owner's self-succession, which is a take-over against its
-// own ghost), and demotion needs nothing but the next `applyViewerGrid`.
-//
-// The presentation half of the faithful view, shrinking the FONT until the
-// adopted grid fits the window, is not here: it is the pane's, over the pure
-// arithmetic in `lib/viewerFit.ts`. This module owns the grid; nothing else
-// re-grids a viewer.
-//
-// Take-over bounces the socket, and its claim rides the reconnect's ordinary
-// first-frame resize through this coordinator. The lifecycle-owned `sendResize`
-// reads and clears that intent; this machine does not know the flag exists.
-//
-// The one exception to "no other call site fits" is the font-driven refit in
-// the pane's relayout. Late bundled-font refits receive `refitForFonts` from
-// here because only this machine knows whether to fit the container or recompute
-// a viewer's shrink. The relayout re-grids the
-// terminal without asking, and it is pre-existing and deliberate, because the
-// metrics have moved and the canvas would otherwise be wrong. It is safe for
-// the PTY half of the pair for the reason A4 exists: the grid change reaches
-// the child through xterm's own `onResize`, which this machine subscribes to
-// and debounces. It is NOT covered by the gesture hold, which is accepted: a
-// font landing mid-touch-scroll is not a reachable sequence in the way a
-// keyboard collapse is.
+// Coordinates local xterm fits with remote PTY resizes. Owner mode debounces and
+// deduplicates the fit/send pair; viewer mode adopts the driver's reported grid
+// without sending. Gesture holds suspend both halves so the local grid cannot
+// diverge from the child. First-frame, foreground, take-over, and font-driven
+// resizes all pass through this ownership gate; the pane separately scales a
+// viewer's font to fit the adopted grid.
 import type { Terminal } from "@xterm/xterm"
 import type { FitAddon } from "@xterm/addon-fit"
 

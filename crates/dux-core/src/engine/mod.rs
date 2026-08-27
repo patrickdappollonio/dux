@@ -3943,13 +3943,7 @@ impl Engine {
 
     /// Where an agent lives, as a phrase a status line can drop into a
     /// sentence: `project "web"` for a managed agent, `folder "~/notes"` for a
-    /// standalone one (shortened against the server's home directory, because
-    /// the browser may not be on the server's machine).
-    ///
-    /// Every status message that used to say "in project \"{}\"" goes through
-    /// this, because a standalone agent has no project and the old phrasing
-    /// resolved to "in project \"unknown\"", which is not a true sentence about
-    /// an agent that never had one.
+    /// standalone one. Folder paths are shortened against the server's home.
     pub fn session_location_phrase(&self, session: &AgentSession) -> String {
         match &session.workspace {
             crate::model::AgentWorkspace::Managed(_) => {

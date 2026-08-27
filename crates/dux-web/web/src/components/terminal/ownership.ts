@@ -1,76 +1,14 @@
-// THE OWNERSHIP MACHINE.
+// A shared PTY has one driver. Plain attaches never steal; take-over arms an
+// intent and reconnects so the claim rides a fresh attach and replay.
 //
-// A PTY is shared across every connected device, but only ONE of them drives
-// its size and may type into it; the others render a read-only take-over
-// placeholder, so two people cannot fight over one prompt.
+//   OWNER     input and resize writes are enabled.
+//   OBSERVER  another connection (or none while backgrounded) owns the PTY.
+//   CLAIMING  a take-over reconnect is waiting to send its flagged first resize.
+//   LOST      a terminal socket failure suppresses the stale local verdict.
 //
-// TWO RULES SIT UNDER EVERYTHING HERE, and they are the whole shape of this
-// file:
-//
-//   ATTACHING NEVER STEALS. A plain resize claims only an UNOWNED pty
-//   server-side. Opening a phone onto an agent your desktop is driving makes you
-//   a watcher, and staying a watcher is the correct answer until you say
-//   otherwise. Ownership therefore does NOT follow focus: a desktop that was
-//   taken over stays a watcher when refocused, and one tap gets it back. That is
-//   the deliberate cost of killing the silent steal and the SIGWINCH ping-pong
-//   that came with it.
-//
-//   TAKE-OVER IS A FRESH ATTACH. The button does not write a claim down the live
-//   socket; it arms an intent and BOUNCES the socket. The reconnect drives the
-//   existing replay machinery (fresh `connected` frame and generation, buffer
-//   reset, server repaint, mode restore), so taking over structurally cannot
-//   inherit the polluted viewer-era scrollback that a wide-owner/narrow-viewer
-//   pair writes into this client's buffer. Ownership lags the reconnect by one
-//   replay parse, because the claim rides the first resize frame of the new
-//   connection.
-//
-// FOUR STATES, and every one of them is somewhere in this file:
-//
-//   OWNER         this client drives the PTY. Typing surfaces render, input is
-//                 forwarded, resizes go out.
-//   OBSERVER      another device drives it, OR nobody does and this pane is
-//                 backgrounded. The take-over card is up (with copy that says
-//                 which), every write path returns early, and no resize is sent.
-//   CLAIMING      a take-over is armed and the socket is bouncing. The verdict
-//                 already reads "mine" so the first resize of the new connection
-//                 passes the owner gate and carries the flag.
-//   LOST          this socket spent its reconnect budget. The pane still knows
-//                 what it believed, but it stops publishing that belief,
-//                 because a stale "mine" from a dead connection would override
-//                 the server's own field forever on a surface that cannot type.
-//
-// SEVEN TRANSITION SITES, and there are no others:
-//
-//   1. the INITIAL guess: foreground, held only until the handshake answers.
-//   2. a `pty.owner` HANDOVER: a definitive id comparison, never a timing or
-//      echo heuristic, which inverts when two devices claim in the same
-//      instant and the broadcast order flips, leaving BOTH on the
-//      placeholder. A missing id on either side reads as "not us".
-//   3. TAKE-OVER: arm the intent, flip the verdict optimistically, bounce the
-//      socket. Idempotent while the bounce is in flight.
-//   4. the `connected` HANDSHAKE re-seeding the verdict from the server's own
-//      answer (`seedVerdictFromConnected`, called by the lifecycle). This is
-//      what stops a foregrounded arrival wedging itself as a phantom owner now
-//      that a refused claim emits nothing. It is also where SELF-SUCCESSION
-//      lives: a handshake naming this pane's own previous, dead connection id
-//      is a blipped owner meeting its own ghost, and a foregrounded page takes
-//      its pty back with a flagged claim.
-//   5. an OWNER-CLEARED `pty.owner` (the driver disconnected): every client
-//      demotes and the card re-titles itself to "Running in the background".
-//      NOBODY
-//      CLAIMS. Losing ownership is sticky until a deliberate act, and sitting
-//      on an open card is not one.
-//   6. the socket's CONN STATE: `failed` is the hard stop that means LOST; any
-//      retry or reopen clears it.
-//   7. the EVENTS SOCKET going away, which drops the other device's NAME (never
-//      the verdict): `pty.owner` is delivered live-only with no replay, so
-//      across an outage the name goes stale while the generic copy is never
-//      wrong.
-//
-// The verdict is published through a CHANNEL rather than read off state,
-// because an in-flight keystroke has to be gated by the new answer at once,
-// before the re-render that shows it lands. Writing the channel flips the
-// synchronous read and the rendered state together, so they cannot diverge.
+// Handshakes and `pty.owner` events are authoritative. Losing ownership remains
+// sticky until an explicit take-over or confirmed self-succession. The verdict
+// channel updates synchronous write gates and React state together.
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { deviceLabel } from "@/lib/deviceLabel"

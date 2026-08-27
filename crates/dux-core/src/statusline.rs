@@ -1205,9 +1205,7 @@ mod tests {
 
     #[test]
     fn emit_policy_purges_every_tone_of_final_once_the_window_lapses() {
-        // The reported bug: an hour-old error re-raised on every page load. The
-        // window closes on info, warning and error alike, because "is this still
-        // worth replaying" does not depend on tone.
+        // Replay expiry applies equally to info, warning, and error finals.
         let t0 = Instant::now();
         for tone in [StatusTone::Info, StatusTone::Warning, StatusTone::Error] {
             let mut c = KeyedStatusController::emitting_finals();

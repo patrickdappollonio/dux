@@ -123,30 +123,9 @@ pub const fn ui_build_warning(state: UiBuildState) -> Option<&'static str> {
     }
 }
 
-/// Operator-facing warning for a binary that CLAIMS a real frontend build but
-/// carries next to nothing.
-///
-/// The build state is stamped by build.rs and says only "a frontend build ran
-/// during this compilation". It cannot say anything about what rust-embed then
-/// baked in, because those are two different steps reading two different things.
-/// When they disagree the user's symptom is a 404 at the root with no explanation
-/// anywhere, which is the reported bug this guard exists to convert into an
-/// explicit failure. It is also the only mitigation that reaches somebody who ran
-/// `cargo build` and never ran the test suite.
-///
-/// What it does NOT have to cover is a MISSING staging directory: rust-embed
-/// fails to compile on that, loudly, naming the folder (measured). The case left
-/// is a staging directory that exists and is empty or nearly so, which compiles
-/// happily and embeds nothing. That was measured as well, by emptying
-/// `$OUT_DIR/ui` and rebuilding, and this warning is what fired.
-/// The wording carries a second audience on purpose. The two repair steps below
-/// are things only somebody with the source tree can do, and the artifact check
-/// that would otherwise catch this (`.github/scripts/smoke_archive.sh`) runs in
-/// the RELEASE workflow only, so an empty embed merged through a pull request
-/// reaches a build nobody grepped. Whoever installed that from a release archive
-/// has no checkout to touch and no cargo to clean, and needs to be told this is a
-/// packaging bug rather than left running commands that cannot apply. The notice
-/// page in build.rs says the same thing for the same reason.
+/// Warning for a build stamped as complete whose embedded asset set is empty or
+/// nearly empty. It gives source builders repair steps and tells binary-package
+/// users to report a packaging error.
 pub const UI_EMPTY_EMBED_WARNING: &str = "This binary reports a real frontend build, but almost no web assets are embedded \
      in it, so server mode will answer 404 for the web UI. The build script and \
      rust-embed disagreed about what to bake in. Building from source? Run `touch \

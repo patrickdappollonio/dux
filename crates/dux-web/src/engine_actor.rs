@@ -369,13 +369,8 @@ const TICK: Duration = Duration::from_millis(50);
 /// no mutation, no streaming transition, and no backstop does ZERO work.
 const SPINE_CHECK_TICK_INTERVAL: u64 = 5;
 
-/// Slow self-healing backstop: every ~40 ticks (~2s) the spine check runs the
-/// fingerprint compare UNCONDITIONALLY, regardless of the change signals. This is
-/// defense-in-depth, NOT a claim that the version bumps are exhaustive: if a
-/// future loop-level spine mutator is added without a matching version bump (the
-/// adversarial review found the spine has several loop mutators, not the two the
-/// original design assumed), its change is still picked up within ~2s instead of
-/// being lost until an unrelated change happens to fire the gate.
+/// Every ~40 ticks (~2s), run an unconditional spine fingerprint comparison so
+/// mutations that do not bump `mutation_version` are still published.
 const SPINE_BACKSTOP_TICK_INTERVAL: u32 = 40;
 
 /// Per-iteration control for [`run_engine_loop`]. Checked once at the top of
