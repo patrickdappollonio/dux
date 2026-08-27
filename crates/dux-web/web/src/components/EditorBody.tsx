@@ -35,7 +35,6 @@ import { fileApi } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import {
   changeSignalFor,
-  emptyBuffer,
   isBufferStale,
   pruneByIds,
   pruneSetByIds,
@@ -105,6 +104,7 @@ import type { ReloadFileTarget } from "@/components/ConfirmReloadFileDialog"
 import { EditorIcon } from "@/components/EditorIcon"
 import { FileDiskBanner } from "@/components/FileDiskBanner"
 import { SaveConflictDialog } from "@/components/SaveConflictDialog"
+import { useEditorDiffReads } from "@/components/useEditorDiffReads"
 import { useEditorFileReads } from "@/components/useEditorFileReads"
 import {
   createEditorDiskBannerActions,
@@ -697,9 +697,6 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // A later diff request for a tab invalidates any earlier response.
-  const diffRequestTokenRef = useRef<Map<string, number>>(new Map())
-
   const { loadFileBuffer, reloadFileInPlace } = useEditorFileReads({
     root,
     tabs,
@@ -727,109 +724,23 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     reloadFileInPlace,
   })
 
-  // Fetch and store a tab's diff cache for `path`. Extracted for the same
-  // reason as `loadFileBuffer` above; also a plain function for the same
-  // compiler-derived-lint-rule reason.
-  //
-  // The settle-time base: the tab's cached buffer may still carry a PREVIOUS
-  // file's path (a preview-replace reuses the tab id and swaps the path; diff
-  // mode has no synchronous seed the way `loadFileBuffer` does). A result for
-  // `path` must then land on a FRESH buffer for `path`, not be dropped on the
-  // stale one: dropping it left `diffLoadedPath` forever behind the tab's
-  // path, nothing re-triggered the load effect, and the pane sat on the
-  // spinner permanently (the Changes-pane "click a second file" bug). The
-  // stale buffer's file fields are deliberately NOT carried over — they
-  // describe the old file. When the buffer already belongs to `path` it is
-  // kept, so a draft loaded in file mode survives a diff load.
-  //
-  // `tabsRef` guards the one remaining race: a valid-token result whose
-  // `path` the tab has ALREADY moved off (the path changed after this fetch
-  // started, before the load effect fired the replacement request and bumped
-  // the token). Installing a buffer for the abandoned path would strand the
-  // tab again, so that result is dropped; the new path's own load effect is
-  // what recovers.
-  function diffResultBase(
-    prev: Map<string, TabBuffer>,
-    tabId: string,
-    path: string,
-  ): TabBuffer | null {
-    const cur = prev.get(tabId) ?? emptyBuffer(path)
-    if (cur.path === path) return cur
-    const tabPathNow = tabsRef.current.find((t) => t.id === tabId)?.path
-    return tabPathNow === path ? emptyBuffer(path) : null
-  }
-
-  function loadDiffBuffer(tabId: string, path: string): void {
-    const token = (diffRequestTokenRef.current.get(tabId) ?? 0) + 1
-    diffRequestTokenRef.current.set(tabId, token)
-    fileApi
-      .diff(root, path)
-      .then((d) => {
-        if (diffRequestTokenRef.current.get(tabId) !== token) return
-        setBuffers((prev) => {
-          const base = diffResultBase(prev, tabId, path)
-          if (base === null) return prev
-          const next = new Map(prev)
-          next.set(tabId, {
-            ...base,
-            diff: d,
-            diffLoadedPath: path,
-            diffLoadedSignal: openFileSignalRef.current,
-            diffError: null,
-          })
-          return next
-        })
-      })
-      .catch((e) => {
-        if (diffRequestTokenRef.current.get(tabId) !== token) return
-        setBuffers((prev) => {
-          const base = diffResultBase(prev, tabId, path)
-          if (base === null) return prev
-          const next = new Map(prev)
-          next.set(tabId, {
-            ...base,
-            diffError: e instanceof Error ? e.message : "could not load diff",
-          })
-          return next
-        })
-      })
-  }
-
-  // Load the active tab's diff lazily: only in diff mode, only when the cache
-  // doesn't already hold the tab's current path. Refetches on a tab switch and
-  // on manual reload (which clears diffLoadedPath); does NOT refetch on a
-  // change-signal tick, that lights the reload button instead.
-  useEffect(() => {
-    if (!activeTab || activeTab.mode !== "diff") return
-    if (
-      activeBuffer &&
-      !isBufferStale(activeBuffer, activeTab.path) &&
-      activeBuffer.diffLoadedPath === activeTab.path
-    )
-      return
-    loadDiffBuffer(activeTab.id, activeTab.path)
-    // See the loadFileBuffer effect above for why `loadDiffBuffer` is omitted.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    activeTab?.mode,
-    activeTab?.id,
-    activeTab?.path,
-    activeBuffer?.path,
-    activeBuffer?.diffLoadedPath,
-  ])
+  const { loadDiffBuffer, refreshDiff } = useEditorDiffReads({
+    root,
+    tabs,
+    activeTab,
+    activeBuffer,
+    tabsRef,
+    loadedSignalRef: openFileSignalRef,
+    setBuffers,
+  })
 
   // Monaco model disposal: dispose a path's model once no tab holds it open
   // anymore. Diffs by the SET OF OPEN PATHS (not tab ids), see the
   // `prevOpenPathsRef` comment above for why that's required for a
   // preview-replace's OLD path to get disposed too.
   //
-  // This same tick also prunes every tab-id-keyed cache down to the live tab
-  // set: the `buffers` Map, the file/diff request-token maps, and the
-  // markdown-preview-open Set otherwise keep a closed tab's entry forever
-  // (unbounded for a long-lived overlay session that opens/closes many
-  // files). `pruneByIds` returns the same reference when there's nothing to
-  // drop, so this is a no-op setState on every tab-list change that isn't a
-  // close.
+  // This tick also prunes the component-owned buffer and preview caches. The
+  // file and diff hooks prune their request tokens against the same tab list.
   useEffect(() => {
     const currentPaths = new Set(tabs.map((t) => t.path))
     const mon = monacoRef.current
@@ -861,7 +772,6 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     // end in `tabs` losing the entry. `pruneLanguageOverrides` returns the same
     // map when nothing is stale, so this is a no-op setState otherwise.
     setLanguageOverrides((prev) => pruneLanguageOverrides(prev, currentPaths))
-    diffRequestTokenRef.current = pruneByIds(diffRequestTokenRef.current, liveIds)
   }, [tabs])
 
   // Dispose every retained model when the overlay body unmounts (overlay
@@ -957,20 +867,6 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       return
     }
     setReloadTarget({ tabId, path })
-  }
-
-  // Reload the diff for the active tab: the "file changed underneath you"
-  // reload button. Dropping diffLoadedPath makes the diff-load effect refetch.
-  function refreshDiff(): void {
-    if (!activeTab) return
-    const tabId = activeTab.id
-    setBuffers((prev) => {
-      const cur = prev.get(tabId)
-      if (!cur) return prev
-      const next = new Map(prev)
-      next.set(tabId, { ...cur, diffLoadedPath: null })
-      return next
-    })
   }
 
   // Open the current file in a locally-installed GUI editor (server-side spawn).
