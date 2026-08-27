@@ -4997,6 +4997,138 @@ impl App {
         };
     }
 
+    fn render_change_theme_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::ChangeTheme(prompt) = &self.prompt else {
+            return;
+        };
+        self.render_dim_overlay(frame);
+        let area = centered_rect(60, 60, frame.area());
+        self.clear_overlay_area(frame, area);
+
+        let move_down = self.bindings.label_for(Action::MoveDown);
+        let move_up = self.bindings.label_for(Action::MoveUp);
+        let confirm_key = self.bindings.label_for(Action::Confirm);
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let mut bottom_spans = vec![Span::raw(" ")];
+        bottom_spans.extend(self.theme.key_badge_default(&move_down));
+        bottom_spans.push(Span::styled(
+            " down  ",
+            Style::default().fg(self.theme.hint_desc_fg),
+        ));
+        bottom_spans.extend(self.theme.key_badge_default(&move_up));
+        bottom_spans.push(Span::styled(
+            " up  ",
+            Style::default().fg(self.theme.hint_desc_fg),
+        ));
+        bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+        bottom_spans.push(Span::styled(
+            " apply  ",
+            Style::default().fg(self.theme.hint_desc_fg),
+        ));
+        bottom_spans.extend(self.theme.key_badge_default(&close_key));
+        bottom_spans.push(Span::styled(
+            " cancel",
+            Style::default().fg(self.theme.hint_desc_fg),
+        ));
+
+        let [details_area, list_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(4), Constraint::Min(6)])
+            .areas(area);
+        let detail_lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    " Current theme: ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ),
+                Span::styled(
+                    prompt.current.clone(),
+                    Style::default()
+                        .fg(self.theme.text_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![Span::styled(
+                " Selecting a theme applies it instantly and saves it to config.toml.",
+                Style::default().fg(self.theme.hint_desc_fg),
+            )]),
+        ];
+        Paragraph::new(detail_lines)
+            .block(
+                self.themed_overlay_block("Change Theme")
+                    .title_bottom(Line::from(bottom_spans)),
+            )
+            .render(details_area, frame.buffer_mut());
+
+        let id_col = prompt
+            .options
+            .iter()
+            .map(|option| option.id.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(8);
+        let items = prompt
+            .options
+            .iter()
+            .map(|option| {
+                let source_label = match option.source {
+                    crate::theme::ThemeSource::Bundled => "bundled",
+                    crate::theme::ThemeSource::Opaline => "opaline",
+                    crate::theme::ThemeSource::User => "user",
+                };
+                let suffix = if option.id == prompt.current {
+                    format!("  {source_label} · current")
+                } else {
+                    format!("  {source_label}")
+                };
+                let id_padded = format!("{:width$}", option.id, width = id_col);
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        id_padded,
+                        Style::default()
+                            .fg(self.theme.help_section_header_fg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {}", option.display_name),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ),
+                    Span::styled(suffix, Style::default().fg(self.theme.hint_dim_desc_fg)),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let mut state = ListState::default().with_selected(Some(
+            prompt.selected.min(prompt.options.len().saturating_sub(1)),
+        ));
+        let list_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_style(Style::default().fg(self.theme.overlay_border))
+            .style(Style::default().bg(self.theme.overlay_bg));
+        let list_inner = list_block.inner(list_area);
+        StatefulWidget::render(
+            List::new(items)
+                .block(list_block)
+                .highlight_style(self.theme.selection_style()),
+            list_area,
+            frame.buffer_mut(),
+            &mut state,
+        );
+        render_scroll_marker(
+            frame,
+            list_area,
+            list_inner,
+            state.offset(),
+            list_inner.height as usize,
+            prompt.options.len(),
+            self.theme.hint_key_fg,
+        );
+        self.overlay_layout.active = OverlayMouseLayout::ChangeTheme {
+            list: list_inner,
+            items: prompt.options.len(),
+            offset: state.offset(),
+        };
+    }
+
     fn render_prompt(&mut self, frame: &mut Frame) {
         // The standalone delete dialog is rendered ahead of the main match,
         // with its content copied out first, because it needs `&mut self` for
@@ -5668,145 +5800,7 @@ impl App {
                 };
             }
             PromptState::SetTailscaleMode(_) => self.render_set_tailscale_mode_prompt(frame),
-            PromptState::ChangeTheme(prompt) => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(60, 60, frame.area());
-                self.clear_overlay_area(frame, area);
-
-                let move_down = self.bindings.label_for(Action::MoveDown);
-                let move_up = self.bindings.label_for(Action::MoveUp);
-                let confirm_key = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
-
-                let mut bottom_spans = vec![Span::raw(" ")];
-                bottom_spans.extend(self.theme.key_badge_default(&move_down));
-                bottom_spans.push(Span::styled(
-                    " down  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&move_up));
-                bottom_spans.push(Span::styled(
-                    " up  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                bottom_spans.push(Span::styled(
-                    " apply  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                bottom_spans.push(Span::styled(
-                    " cancel",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-
-                let [details_area, list_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(4), Constraint::Min(6)])
-                    .areas(area);
-
-                let detail_lines = vec![
-                    Line::from(vec![
-                        Span::styled(
-                            " Current theme: ",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ),
-                        Span::styled(
-                            prompt.current.clone(),
-                            Style::default()
-                                .fg(self.theme.text_fg)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(vec![Span::styled(
-                        " Selecting a theme applies it instantly and saves it to config.toml.",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )]),
-                ];
-                Paragraph::new(detail_lines)
-                    .block(
-                        self.themed_overlay_block("Change Theme")
-                            .title_bottom(Line::from(bottom_spans)),
-                    )
-                    .render(details_area, frame.buffer_mut());
-
-                let id_col = prompt
-                    .options
-                    .iter()
-                    .map(|option| option.id.chars().count())
-                    .max()
-                    .unwrap_or(0)
-                    .max(8);
-                let items = prompt
-                    .options
-                    .iter()
-                    .map(|option| {
-                        let source_label = match option.source {
-                            crate::theme::ThemeSource::Bundled => "bundled",
-                            crate::theme::ThemeSource::Opaline => "opaline",
-                            crate::theme::ThemeSource::User => "user",
-                        };
-                        let is_current = option.id == prompt.current;
-                        let suffix = if is_current {
-                            format!("  {source_label} · current")
-                        } else {
-                            format!("  {source_label}")
-                        };
-                        let id_padded = format!("{:width$}", option.id, width = id_col);
-                        ListItem::new(Line::from(vec![
-                            Span::styled(
-                                id_padded,
-                                Style::default()
-                                    .fg(self.theme.help_section_header_fg)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                format!("  {}", option.display_name),
-                                Style::default().fg(self.theme.hint_desc_fg),
-                            ),
-                            Span::styled(suffix, Style::default().fg(self.theme.hint_dim_desc_fg)),
-                        ]))
-                    })
-                    .collect::<Vec<_>>();
-                let mut state = ListState::default().with_selected(Some(
-                    prompt.selected.min(prompt.options.len().saturating_sub(1)),
-                ));
-                let list_block = Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border))
-                    .style(Style::default().bg(self.theme.overlay_bg));
-                let list_inner = list_block.inner(list_area);
-                StatefulWidget::render(
-                    List::new(items)
-                        .block(list_block)
-                        .highlight_style(self.theme.selection_style()),
-                    list_area,
-                    frame.buffer_mut(),
-                    &mut state,
-                );
-
-                // Scroll marker in the list block's right border column (the
-                // block carries LEFT|RIGHT|BOTTOM, so that column exists). This
-                // is an ITEM-offset surface: a `ListState` offset counts whole
-                // items and never clips the top one, and every theme row is a
-                // single line, so items and rows agree. `state.offset()` is read
-                // AFTER the render, which is what scrolls it to the selection.
-                render_scroll_marker(
-                    frame,
-                    list_area,
-                    list_inner,
-                    state.offset(),
-                    list_inner.height as usize,
-                    prompt.options.len(),
-                    self.theme.hint_key_fg,
-                );
-
-                self.overlay_layout.active = OverlayMouseLayout::ChangeTheme {
-                    list: list_inner,
-                    items: prompt.options.len(),
-                    offset: state.offset(),
-                };
-            }
+            PromptState::ChangeTheme(_) => self.render_change_theme_prompt(frame),
             PromptState::ConfigureStartupCommand {
                 project_name,
                 input,
