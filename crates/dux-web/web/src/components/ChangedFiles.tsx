@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, type ReactElement } from "react"
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -78,9 +78,10 @@ import {
   toggleChangesPane,
   useDux,
 } from "@/lib/store"
+import type { ChangesSlice } from "@/lib/store"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
-import type { ChangedFileView } from "@/lib/types"
+import type { ChangedFileView, SessionView } from "@/lib/types"
 import { agentRoot } from "@/lib/editorRoot"
 
 const fileCount = (n: number) => `${n} file${n === 1 ? "" : "s"}`
@@ -408,6 +409,346 @@ function FileGroup({
   )
 }
 
+interface ChangesHeaderProps {
+  sessionId: string
+  stagedCount: number
+  branchGit: boolean
+  isMobile: boolean
+}
+
+function ChangesHeader({
+  sessionId,
+  stagedCount,
+  branchGit,
+  isMobile,
+}: ChangesHeaderProps) {
+  const runGit = (operation: "push" | "pull") => {
+    git[operation](sessionId).catch((error) =>
+      notifyError(
+        error instanceof Error ? error.message : `${operation} failed`,
+      ),
+    )
+  }
+
+  return (
+    <CardHeader className="flex items-center justify-between gap-2 border-b">
+      <CardTitle>Changes</CardTitle>
+      <CardAction className="self-center">
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                size="icon"
+                variant="outline"
+                aria-label="Changes actions"
+                className="max-md:size-11"
+              />
+            }
+          >
+            <EllipsisVertical />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onClick={() => openCommit(sessionId)}
+              disabled={stagedCount === 0}
+            >
+              <GitCommitVertical />
+              Commit…
+            </DropdownMenuItem>
+            {branchGit ? (
+              <>
+                <DropdownMenuItem onClick={() => runGit("push")}>
+                  <ArrowUpFromLine />
+                  Push
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => runGit("pull")}>
+                  <ArrowDownToLine />
+                  Pull
+                </DropdownMenuItem>
+              </>
+            ) : null}
+            <DropdownMenuItem
+              onClick={() => {
+                void forceRefreshChanges().catch((error) =>
+                  notifyError(
+                    error instanceof Error ? error.message : "refresh failed",
+                  ),
+                )
+              }}
+            >
+              <RefreshCw />
+              Refresh changes
+            </DropdownMenuItem>
+            {!isMobile ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => toggleChangesPane()}>
+                  <PanelRightClose />
+                  Hide Changes pane
+                </DropdownMenuItem>
+              </>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </CardAction>
+    </CardHeader>
+  )
+}
+
+interface BulkToolbarProps {
+  selected: ChangedFileSelection
+  busy: "stage" | "unstage" | "discard" | null
+  visibleCount: number
+  allVisibleChecked: boolean
+  onRunBulk: (verb: "stage" | "unstage") => void
+  onDiscard: () => void
+  onToggleVisible: () => void
+  onClear: () => void
+}
+
+function BusyGlyph({ busy }: { busy: boolean }) {
+  return busy ? <Loader2 className="motion-safe:animate-spin" /> : null
+}
+
+function BulkToolbar({
+  selected,
+  busy,
+  visibleCount,
+  allVisibleChecked,
+  onRunBulk,
+  onDiscard,
+  onToggleVisible,
+  onClear,
+}: BulkToolbarProps) {
+  return (
+    <div
+      role="toolbar"
+      aria-label="Actions for the selected files"
+      className="flex flex-wrap items-center gap-2 border-b p-2"
+    >
+      {selected.unstaged.size > 0 ? (
+        <Button
+          variant="outline"
+          className={BULK_CONTROL}
+          disabled={busy !== null}
+          aria-busy={busy === "stage"}
+          onClick={() => onRunBulk("stage")}
+        >
+          <BusyGlyph busy={busy === "stage"} />
+          {busy !== "stage" ? <Plus /> : null}
+          Stage {selected.unstaged.size}
+        </Button>
+      ) : null}
+      {selected.staged.size > 0 ? (
+        <Button
+          variant="outline"
+          className={BULK_CONTROL}
+          disabled={busy !== null}
+          aria-busy={busy === "unstage"}
+          onClick={() => onRunBulk("unstage")}
+        >
+          <BusyGlyph busy={busy === "unstage"} />
+          {busy !== "unstage" ? <Minus /> : null}
+          Unstage {selected.staged.size}
+        </Button>
+      ) : null}
+      {selected.unstaged.size > 0 ? (
+        <Button
+          variant="outline"
+          className={BULK_CONTROL}
+          disabled={busy !== null}
+          aria-busy={busy === "discard"}
+          onClick={onDiscard}
+        >
+          <BusyGlyph busy={busy === "discard"} />
+          {busy !== "discard" ? <Undo2 /> : null}
+          Discard {selected.unstaged.size}…
+        </Button>
+      ) : null}
+      {visibleCount > 0 ? (
+        <Button
+          variant="outline"
+          className={BULK_CONTROL}
+          onClick={onToggleVisible}
+        >
+          {allVisibleChecked ? <Square /> : <SquareCheck />}
+          {allVisibleChecked ? "Select none" : "Select all"}
+        </Button>
+      ) : null}
+      <Button variant="outline" className={BULK_CONTROL} onClick={onClear}>
+        Clear
+      </Button>
+    </div>
+  )
+}
+
+interface ChangesListProps {
+  changed: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
+  filtered: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
+  selected: ChangedFileSelection
+  sessionId: string
+  query: string
+  filtering: boolean
+  branchGit: boolean
+  onToggle: (section: "staged" | "unstaged", path: string) => void
+}
+
+function ChangesList({
+  changed,
+  filtered,
+  selected,
+  sessionId,
+  query,
+  filtering,
+  branchGit,
+  onToggle,
+}: ChangesListProps) {
+  const hasChanges = changed.staged.length > 0 || changed.unstaged.length > 0
+  const hasMatches = filtered.staged.length > 0 || filtered.unstaged.length > 0
+  const openDiff = (path: string) =>
+    openEditor(agentRoot(sessionId), path, "diff")
+
+  return (
+    <ScrollArea className="min-h-0 flex-1">
+      <div className="flex flex-col gap-1 p-3">
+        {!hasChanges ? (
+          <Empty className="border-0 py-6">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <Check />
+              </EmptyMedia>
+              <EmptyTitle>No changes</EmptyTitle>
+              <EmptyDescription>
+                {branchGit ? "This worktree is clean." : "This folder is clean."}
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : null}
+        {hasChanges && filtering && !hasMatches ? (
+          <Empty className="border-0 py-6">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <Search />
+              </EmptyMedia>
+              <EmptyTitle>No matching files</EmptyTitle>
+              <EmptyDescription>
+                No changed file matches “{query.trim()}”.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : null}
+        <FileGroup
+          heading="Staged"
+          files={filtered.staged}
+          total={changed.staged.length}
+          filtering={filtering}
+          action="unstage"
+          sessionId={sessionId}
+          selected={selected.staged}
+          onToggleSelected={(path) => onToggle("staged", path)}
+          onOpenDiff={openDiff}
+        />
+        {filtered.staged.length > 0 && filtered.unstaged.length > 0 ? (
+          <Separator className="my-1" />
+        ) : null}
+        <FileGroup
+          heading="Unstaged"
+          files={filtered.unstaged}
+          total={changed.unstaged.length}
+          filtering={filtering}
+          action="stage"
+          sessionId={sessionId}
+          selected={selected.unstaged}
+          onToggleSelected={(path) => onToggle("unstaged", path)}
+          onOpenDiff={openDiff}
+        />
+      </div>
+    </ScrollArea>
+  )
+}
+
+function unavailableChangesScreen(
+  sessionId: string | null,
+  session: SessionView | undefined,
+  changes: ChangesSlice,
+): ReactElement | null {
+  if (!sessionId) {
+    return (
+      <Empty className="h-full border-0">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <MousePointerClick />
+          </EmptyMedia>
+          <EmptyTitle>No session selected</EmptyTitle>
+          <EmptyDescription>Select a session to see its changes.</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+
+  const quietReason = session ? changesQuietReason(session.workspace) : null
+  if (quietReason) {
+    const folder = session ? folderWorkspace(session.workspace) : null
+    return (
+      <Empty className="h-full border-0">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <FolderOpen />
+          </EmptyMedia>
+          <EmptyTitle>No changes to show</EmptyTitle>
+          <EmptyDescription>{quietReason}</EmptyDescription>
+          {folder ? (
+            <EmptyDescription className="font-mono break-all">
+              {folder.folder_label}
+            </EmptyDescription>
+          ) : null}
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+
+  const slice = changes.sessionId === sessionId ? changes : null
+  const phase = slice?.phase ?? "loading"
+  if (phase === "loading" || phase === "idle") {
+    return (
+      <Empty className="h-full border-0">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <Loader2 className="animate-spin" />
+          </EmptyMedia>
+          <EmptyTitle>Loading changes…</EmptyTitle>
+          <EmptyDescription>Fetching this session's changes.</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+  if (phase !== "error") return null
+
+  return (
+    <Empty className="h-full border-0">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <TriangleAlert />
+        </EmptyMedia>
+        <EmptyTitle>Couldn't load changes</EmptyTitle>
+        <EmptyDescription>
+          {slice?.error ?? "The changed files couldn't be loaded."}
+        </EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <Button
+          variant="outline"
+          onClick={() => refreshChanges()}
+          className="max-md:min-h-11"
+        >
+          <RefreshCw />
+          Refresh
+        </Button>
+      </EmptyContent>
+    </Empty>
+  )
+}
+
 export function ChangedFiles() {
   const { changes, selectedSessionId, spine } = useDux()
   // The hide-pane action is desktop-only: the mobile hub reaches Changes through
@@ -437,126 +778,27 @@ export function ChangedFiles() {
   const [busy, setBusy] = useState<"stage" | "unstage" | "discard" | null>(null)
   const [discarding, setDiscarding] = useState(false)
 
-  // No session selected — muted empty state.
-  if (!selectedSessionId) {
-    return (
-      <Empty className="h-full border-0">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <MousePointerClick />
-          </EmptyMedia>
-          <EmptyTitle>No session selected</EmptyTitle>
-          <EmptyDescription>Select a session to see its changes.</EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    )
-  }
-
-  // A STANDALONE agent whose folder is not a repository: quiet, and honest
-  // about which quiet this is. The sentence is the SERVER's (it is the one that
-  // consulted git, and the terminal UI says the same thing), so the two
-  // surfaces cannot describe the same folder differently.
-  //
-  // Checked before the slice below, because the answer is already known: the
-  // server never runs git in such a folder and stores an empty-but-successful
-  // result for it, so waiting on the fetch phase would only trade this sentence
-  // for a spinner and then for a bare "No changes". Running git there would
-  // report "the repository is busy" once per poll, a lie about a folder that
-  // simply has no repository.
   const selectedSession = spine?.sessions.find(
-    (s) => s.id === selectedSessionId,
+    (session) => session.id === selectedSessionId,
   )
-  const quietReason = selectedSession
-    ? changesQuietReason(selectedSession.workspace)
-    : null
-  // Whether this agent has a branch dux manages, which is what Push and Pull
-  // act on. Defaults to true with no session resolved, so nothing disappears
-  // from an ordinary agent's panel while the spine is still loading.
+  const unavailable = unavailableChangesScreen(
+    selectedSessionId,
+    selectedSession,
+    changes,
+  )
+  if (unavailable) return unavailable
+  if (!selectedSessionId) return null
+
   const branchGit = selectedSession
     ? supportsBranchGit(selectedSession.workspace)
     : true
-  if (quietReason) {
-    const folder = selectedSession
-      ? folderWorkspace(selectedSession.workspace)
-      : null
-    return (
-      <Empty className="h-full border-0">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <FolderOpen />
-          </EmptyMedia>
-          <EmptyTitle>No changes to show</EmptyTitle>
-          <EmptyDescription>{quietReason}</EmptyDescription>
-          {folder ? (
-            <EmptyDescription className="font-mono break-all">
-              {folder.folder_label}
-            </EmptyDescription>
-          ) : null}
-        </EmptyHeader>
-      </Empty>
-    )
-  }
-
-  // Read the changed-files slice only when it belongs to THIS client's selection
-  // (the slice tracks one session at a time). The slice's phase replaces the old
-  // global-watch readiness check: a real request is in flight, an error
-  // self-heals on the next event, and there is no cross-client clobber.
   const slice = changes.sessionId === selectedSessionId ? changes : null
-  const phase = slice?.phase ?? "loading"
-
-  // Loading window: a fetch is in flight (or the slice hasn't caught up to the
-  // just-changed selection). Show a spinner, never another session's files.
-  if (phase === "loading" || phase === "idle") {
-    return (
-      <Empty className="h-full border-0">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <Loader2 className="animate-spin" />
-          </EmptyMedia>
-          <EmptyTitle>Loading changes…</EmptyTitle>
-          <EmptyDescription>Fetching this session's changes.</EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    )
-  }
-
-  // The fetch failed (git lock/rebase 409, a server error, or the network). Show
-  // an explicit error with a Refresh affordance. The poller's recovery event
-  // also self-heals this without a click.
-  if (phase === "error") {
-    return (
-      <Empty className="h-full border-0">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <TriangleAlert />
-          </EmptyMedia>
-          <EmptyTitle>Couldn't load changes</EmptyTitle>
-          <EmptyDescription>
-            {slice?.error ?? "The changed files couldn't be loaded."}
-          </EmptyDescription>
-        </EmptyHeader>
-        <EmptyContent>
-          <Button
-            variant="outline"
-            onClick={() => refreshChanges()}
-            className="max-md:min-h-11"
-          >
-            <RefreshCw />
-            Refresh
-          </Button>
-        </EmptyContent>
-      </Empty>
-    )
-  }
-
   const changed = { staged: slice?.staged ?? [], unstaged: slice?.unstaged ?? [] }
   const hasChanges = changed.staged.length > 0 || changed.unstaged.length > 0
 
   const filtering = query.trim() !== ""
   const filteredStaged = filterChangedFiles(changed.staged, query)
   const filteredUnstaged = filterChangedFiles(changed.unstaged, query)
-  const hasMatches = filteredStaged.length > 0 || filteredUnstaged.length > 0
-  const showSeparator = filteredStaged.length > 0 && filteredUnstaged.length > 0
 
   // The honest selection: a path that left its section is no longer checked.
   // Derived at render, so a refresh keeps it truthful with no effect.
@@ -700,279 +942,55 @@ export function ChangedFiles() {
 
   return (
     <>
-      {/* Main card filling the pane */}
       <Card className="h-full rounded-none border-0 ring-0">
-        {/* The git actions collapse into a single "Actions" menu so the header
-            never overflows when the pane is narrow (e.g. on a tablet). */}
-        <CardHeader className="flex items-center justify-between gap-2 border-b">
-          <CardTitle>Changes</CardTitle>
-          <CardAction className="self-center">
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <Button
-                    size="icon"
-                    variant="outline"
-                    aria-label="Changes actions"
-                    className="max-md:size-11"
-                  />
-                }
-              >
-                <EllipsisVertical />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  onClick={() => openCommit(selectedSessionId)}
-                  disabled={changed.staged.length === 0}
-                >
-                  <GitCommitVertical />
-                  Commit…
-                </DropdownMenuItem>
-                {/* Push and Pull publish a BRANCH, which a standalone agent
-                    does not have even when its folder is a real repository.
-                    Absent rather than offered and refused on click, the same
-                    rule the agent row's menu follows. Committing IS offered:
-                    that is folder work, and the server allows it. */}
-                {branchGit && (
-                  <>
-                    <DropdownMenuItem
-                      onClick={() => {
-                        if (!selectedSessionId) return
-                        git
-                          .push(selectedSessionId)
-                          .catch((e) =>
-                            notifyError(e instanceof Error ? e.message : "push failed")
-                          )
-                      }}
-                    >
-                      <ArrowUpFromLine />
-                      Push
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={() => {
-                        if (!selectedSessionId) return
-                        git
-                          .pull(selectedSessionId)
-                          .catch((e) =>
-                            notifyError(e instanceof Error ? e.message : "pull failed")
-                          )
-                      }}
-                    >
-                      <ArrowDownToLine />
-                      Pull
-                    </DropdownMenuItem>
-                  </>
-                )}
-                {/* Ask git again NOW. dux has no file watcher: it drops its
-                    cached answer when one of its own git or editor routes
-                    changes a file, or a dropped file lands in the worktree, and
-                    anything else (a file the user changed from a terminal, an
-                    agent writing in its worktree) only appears on the next poll. Deliberately `forceRefreshChanges`
-                    and not the store's `refreshChanges`: that one only re-GETs,
-                    and the server would answer from the same cache, so the item
-                    would look like it worked and change nothing. No trailing
-                    ellipsis: it opens nothing and needs no confirmation. The
-                    store reports both the failure and the counts it found. */}
-                <DropdownMenuItem
-                  onClick={() => {
-                    void forceRefreshChanges().catch((e) =>
-                      notifyError(
-                        e instanceof Error ? e.message : "refresh failed"
-                      )
-                    )
-                  }}
-                >
-                  <RefreshCw />
-                  Refresh changes
-                </DropdownMenuItem>
-                {/* Hide the Changes pane entirely (desktop only), mirroring the
-                    TUI's remove-git-pane command. The persisted default lives in
-                    config.ui.show_changes_pane, which Preferences also sets. */}
-                {!isMobile ? (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={() => toggleChangesPane()}>
-                      <PanelRightClose />
-                      Hide Changes pane
-                    </DropdownMenuItem>
-                  </>
-                ) : null}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </CardAction>
-        </CardHeader>
-
+        <ChangesHeader
+          sessionId={sessionId}
+          stagedCount={changed.staged.length}
+          branchGit={branchGit}
+          isMobile={isMobile}
+        />
         <CardContent className="flex min-h-0 flex-1 flex-col p-0">
-          {/* Compact case-insensitive search over both lists. Only shown when
-              there are changes to filter. Sized ≥44px tall for touch. */}
-          {hasChanges && (
+          {hasChanges ? (
             <div className="border-b p-2">
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   type="search"
                   value={query}
-                  onChange={(e) => setQuery(e.target.value)}
+                  onChange={(event) => setQuery(event.target.value)}
                   placeholder="Filter changed files…"
                   aria-label="Filter changed files"
                   className="h-9 pl-8 max-md:h-11"
                 />
               </div>
             </div>
-          )}
-
-          {/* Bulk bar: present only while something is checked, one height
-              token, one variant. The verbs carry their count because the count
-              is data. It holds no ellipsis of its own: the header's is the
-              pane's one surface-scoped menu. */}
-          {anySelected && (
-            <div
-              role="toolbar"
-              aria-label="Actions for the selected files"
-              className="flex flex-wrap items-center gap-2 border-b p-2"
-            >
-              {selected.unstaged.size > 0 && (
-                <Button
-                  variant="outline"
-                  className={BULK_CONTROL}
-                  disabled={busy !== null}
-                  aria-busy={busy === "stage"}
-                  onClick={() => void runBulk("stage")}
-                >
-                  {busy === "stage" ? (
-                    <Loader2 className="motion-safe:animate-spin" />
-                  ) : (
-                    <Plus />
-                  )}
-                  Stage {selected.unstaged.size}
-                </Button>
-              )}
-              {selected.staged.size > 0 && (
-                <Button
-                  variant="outline"
-                  className={BULK_CONTROL}
-                  disabled={busy !== null}
-                  aria-busy={busy === "unstage"}
-                  onClick={() => void runBulk("unstage")}
-                >
-                  {busy === "unstage" ? (
-                    <Loader2 className="motion-safe:animate-spin" />
-                  ) : (
-                    <Minus />
-                  )}
-                  Unstage {selected.staged.size}
-                </Button>
-              )}
-              {selected.unstaged.size > 0 && (
-                <Button
-                  variant="outline"
-                  className={BULK_CONTROL}
-                  disabled={busy !== null}
-                  aria-busy={busy === "discard"}
-                  onClick={() => setDiscarding(true)}
-                >
-                  {busy === "discard" ? (
-                    <Loader2 className="motion-safe:animate-spin" />
-                  ) : (
-                    <Undo2 />
-                  )}
-                  Discard {selected.unstaged.size}…
-                </Button>
-              )}
-              {/* Select all / Select none. Absent rather than disabled when
-                  the filter leaves nothing on screen: there is no universe for
-                  it to name. Deliberately NOT disabled while a verb is in
-                  flight: it is a selection control, and ticking stays possible
-                  throughout, exactly like the row checkboxes. */}
-              {visibleCount > 0 && (
-                <Button
-                  variant="outline"
-                  className={BULK_CONTROL}
-                  onClick={toggleVisible}
-                >
-                  {allVisibleChecked ? <Square /> : <SquareCheck />}
-                  {allVisibleChecked ? "Select none" : "Select all"}
-                </Button>
-              )}
-              {/* Clear empties the WHOLE selection, the rows the filter hides
-                  included; Select none above only lets go of what is on
-                  screen. */}
-              <Button
-                variant="outline"
-                className={BULK_CONTROL}
-                onClick={() =>
-                  writeSelection({ staged: new Set(), unstaged: new Set() })
-                }
-              >
-                Clear
-              </Button>
-            </div>
-          )}
-
-          <ScrollArea className="min-h-0 flex-1">
-            <div className="flex flex-col gap-1 p-3">
-              {!hasChanges && (
-                <Empty className="border-0 py-6">
-                  <EmptyHeader>
-                    <EmptyMedia variant="icon">
-                      <Check />
-                    </EmptyMedia>
-                    <EmptyTitle>No changes</EmptyTitle>
-                    <EmptyDescription>
-                      {branchGit
-                        ? "This worktree is clean."
-                        : "This folder is clean."}
-                    </EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              )}
-
-              {hasChanges && filtering && !hasMatches && (
-                <Empty className="border-0 py-6">
-                  <EmptyHeader>
-                    <EmptyMedia variant="icon">
-                      <Search />
-                    </EmptyMedia>
-                    <EmptyTitle>No matching files</EmptyTitle>
-                    <EmptyDescription>
-                      No changed file matches “{query.trim()}”.
-                    </EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              )}
-
-              <FileGroup
-                heading="Staged"
-                files={filteredStaged}
-                total={changed.staged.length}
-                filtering={filtering}
-                action="unstage"
-                sessionId={selectedSessionId}
-                selected={selected.staged}
-                onToggleSelected={(path) => toggleOne("staged", path)}
-                onOpenDiff={(path) => openEditor(agentRoot(selectedSessionId), path, "diff")}
-              />
-
-              {showSeparator && <Separator className="my-1" />}
-
-              <FileGroup
-                heading="Unstaged"
-                files={filteredUnstaged}
-                total={changed.unstaged.length}
-                filtering={filtering}
-                action="stage"
-                sessionId={selectedSessionId}
-                selected={selected.unstaged}
-                onToggleSelected={(path) => toggleOne("unstaged", path)}
-                onOpenDiff={(path) => openEditor(agentRoot(selectedSessionId), path, "diff")}
-              />
-            </div>
-          </ScrollArea>
+          ) : null}
+          {anySelected ? (
+            <BulkToolbar
+              selected={selected}
+              busy={busy}
+              visibleCount={visibleCount}
+              allVisibleChecked={allVisibleChecked}
+              onRunBulk={(verb) => void runBulk(verb)}
+              onDiscard={() => setDiscarding(true)}
+              onToggleVisible={toggleVisible}
+              onClear={() =>
+                writeSelection({ staged: new Set(), unstaged: new Set() })
+              }
+            />
+          ) : null}
+          <ChangesList
+            changed={changed}
+            filtered={{ staged: filteredStaged, unstaged: filteredUnstaged }}
+            selected={selected}
+            sessionId={sessionId}
+            query={query}
+            filtering={filtering}
+            branchGit={branchGit}
+            onToggle={toggleOne}
+          />
         </CardContent>
       </Card>
-
-      {/* The selection is local state, so this confirm takes its target as a
-          prop rather than through the store, unlike the single-file one. */}
       <ConfirmDiscardFilesDialog
         open={discarding}
         paths={[...selected.unstaged]}
