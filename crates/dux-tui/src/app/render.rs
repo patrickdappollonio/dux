@@ -3262,7 +3262,11 @@ impl App {
 
         // Ratatui cannot detect damage to the physical terminal outside its
         // previous-frame buffer, so resend the vulnerable focused edge.
-        if focused && area.width > 0 && area.height > 2 {
+        if focused
+            && self.session_surface == SessionSurface::Agent
+            && area.width > 0
+            && area.height > 2
+        {
             let x = area.right() - 1;
             for y in area.y + 1..area.bottom() - 1 {
                 frame.buffer_mut()[(x, y)].set_diff_option(CellDiffOption::AlwaysUpdate);
@@ -3534,6 +3538,7 @@ impl App {
                         .bg(to_ratatui_color(cell.bg))
                         .add_modifier(to_ratatui_modifier(cell.modifier));
                     let ratatui_cell = &mut buf[(x, y)];
+                    let symbol = visible_terminal_symbol(&cell.symbol, cell.col, term_area.width);
                     // When this cell carries an OSC 8 hyperlink and links are
                     // enabled, wrap its symbol in a self-contained OSC 8 open/close
                     // pair. Per-cell (open + close on every linked cell) is
@@ -3549,7 +3554,7 @@ impl App {
                         .then_some(cell.link)
                         .flatten()
                         .and_then(|idx| self.snapshot_buf.links.get(idx as usize));
-                    if let Some(uri) = link_uri {
+                    if let Some(uri) = link_uri.filter(|_| symbol == cell.symbol.as_str()) {
                         // The OSC 8 open/close bytes are non-printing, but ratatui's
                         // buffer diff derives a cell's on-screen width from its
                         // symbol string. Those escape bytes are NOT zero-width to
@@ -3558,14 +3563,14 @@ impl App {
                         // diff. Force the REAL display width of the underlying glyph
                         // (1, or 2 for a wide CJK/emoji cell) so diffing stays
                         // correct.
-                        let width = cell.symbol.as_str().cell_width().max(1);
+                        let width = symbol.cell_width().max(1);
                         let forced =
                             std::num::NonZeroU16::new(width).expect("cell width is at least 1");
                         ratatui_cell
-                            .set_symbol(&osc8_wrap_symbol(&cell.symbol, uri))
+                            .set_symbol(&osc8_wrap_symbol(symbol, uri))
                             .set_diff_option(CellDiffOption::ForcedWidth(forced));
                     } else {
-                        ratatui_cell.set_symbol(&cell.symbol);
+                        ratatui_cell.set_symbol(symbol);
                     }
                     ratatui_cell.set_style(style);
 
@@ -11589,6 +11594,15 @@ fn osc8_wrap_symbol(symbol: &str, uri: &str) -> String {
     format!("\x1b]8;id={id};{uri}\x1b\\{symbol}\x1b]8;;\x1b\\")
 }
 
+fn visible_terminal_symbol(symbol: &str, col: u16, viewport_width: u16) -> &str {
+    let width = symbol.cell_width().max(1) as usize;
+    if usize::from(col) + width <= usize::from(viewport_width) {
+        symbol
+    } else {
+        " "
+    }
+}
+
 /// Set a single cell in the buffer, bounds-checked.
 fn set_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, symbol: &str, style: Style) {
     let area = buf.area();
@@ -13017,6 +13031,35 @@ mod tests {
         assert!(
             xs.contains(&1) && xs.contains(&2),
             "cells after an OSC 8 link must stay in the diff: {xs:?}"
+        );
+    }
+
+    #[test]
+    fn clipped_wide_terminal_glyph_keeps_the_following_border_in_diff() {
+        use ratatui::buffer::{Buffer, CellDiffOption};
+
+        let area = Rect::new(0, 0, 3, 1);
+        let prev = Buffer::empty(area);
+
+        let mut unbounded = Buffer::empty(area);
+        unbounded[(1, 0)].set_symbol("界");
+        unbounded[(2, 0)]
+            .set_symbol("│")
+            .set_diff_option(CellDiffOption::AlwaysUpdate);
+        assert!(
+            !prev.diff(&unbounded).iter().any(|(x, _, _)| *x == 2),
+            "test premise: Ratatui skips a border after a width-two glyph"
+        );
+
+        let mut clipped = Buffer::empty(area);
+        clipped[(1, 0)].set_symbol(visible_terminal_symbol("界", 1, 2));
+        clipped[(2, 0)]
+            .set_symbol("│")
+            .set_diff_option(CellDiffOption::AlwaysUpdate);
+        assert_eq!(clipped[(1, 0)].symbol(), " ");
+        assert!(
+            prev.diff(&clipped).iter().any(|(x, _, _)| *x == 2),
+            "clipping the partial glyph must leave the border eligible for repaint"
         );
     }
 
@@ -17460,10 +17503,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        for (focus, expected) in [
-            (FocusPane::Center, CellDiffOption::AlwaysUpdate),
-            (FocusPane::Left, CellDiffOption::None),
-        ] {
+        for focus in [FocusPane::Center, FocusPane::Left] {
             let mut app = test_app(default_bindings());
             app.focus = focus;
             let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
@@ -17473,14 +17513,60 @@ mod tests {
 
             let term_area = app.mouse_layout.agent_term.expect("agent terminal area");
             let x = term_area.right();
-            for y in term_area.y..term_area.bottom() {
-                assert_eq!(
-                    terminal.backend().buffer()[(x, y)].diff_option,
-                    expected,
-                    "unexpected diff policy at ({x}, {y}) for {focus:?}"
-                );
-            }
+            let expected: Vec<_> = if focus == FocusPane::Center {
+                (term_area.y..term_area.bottom() + 2)
+                    .map(|y| (x, y))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let buffer = terminal.backend().buffer();
+            let actual: Vec<_> = (buffer.area.y..buffer.area.bottom())
+                .flat_map(|y| (buffer.area.x..buffer.area.right()).map(move |x| (x, y)))
+                .filter(|&position| buffer[position].diff_option == CellDiffOption::AlwaysUpdate)
+                .collect();
+            assert_eq!(actual, expected, "unexpected repaint scope for {focus:?}");
         }
+    }
+
+    #[test]
+    fn companion_terminal_never_uses_the_agent_border_repaint_policy() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.session_surface = SessionSurface::Terminal;
+        let mut inline = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        inline
+            .draw(|frame| {
+                app.render_agent_terminal(frame, Rect::new(2, 2, 96, 26), " Terminal ", true);
+            })
+            .expect("render inline terminal");
+        assert!(
+            inline
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .all(|cell| cell.diff_option != CellDiffOption::AlwaysUpdate),
+            "an inline companion terminal inherited the agent repaint policy"
+        );
+
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .all(|cell| cell.diff_option != CellDiffOption::AlwaysUpdate),
+            "a fullscreen companion terminal inherited the agent repaint policy"
+        );
     }
 
     #[test]
@@ -17488,8 +17574,27 @@ mod tests {
         use ratatui::Terminal;
 
         let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let args = vec![
+            "-c".to_string(),
+            "stty -echo; printf BEFORE; IFS= read -r line; printf '\rAFTER '; sleep 30".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id.clone(), client);
         app.focus = FocusPane::Center;
         let mut terminal = Terminal::new(RecordingBackend::new(160, 40)).expect("terminal");
+        for _ in 0..200 {
+            let snapshot = app.engine.providers[&session_id].snapshot();
+            if snapshot
+                .cells
+                .iter()
+                .any(|cell| cell.symbol.as_str() == "B")
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         terminal
             .draw(|frame| app.render(frame))
             .expect("initial frame");
@@ -17509,6 +17614,20 @@ mod tests {
             "Help did not isolate itself from the workspace"
         );
 
+        app.engine.providers[&session_id]
+            .write_bytes(b"continue\n")
+            .expect("write to agent");
+        for _ in 0..200 {
+            let snapshot = app.engine.providers[&session_id].snapshot();
+            if snapshot
+                .cells
+                .iter()
+                .any(|cell| cell.symbol.as_str() == "A")
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         app.help_scroll = None;
         terminal.backend_mut().physical[border].set_symbol(" ");
         terminal
@@ -17518,6 +17637,28 @@ mod tests {
             terminal.backend().physical[border].symbol(),
             "│",
             "closing Help did not restore the damaged agent border"
+        );
+        let draw = terminal.backend().draws.last().expect("frame after Help");
+        let content_index = draw
+            .iter()
+            .position(|(x, y, cell)| {
+                *x >= term_area.x
+                    && *x < term_area.right()
+                    && *y >= term_area.y
+                    && *y < term_area.bottom()
+                    && cell.symbol() == "A"
+            })
+            .expect("the changed agent transcript was not drawn after Help");
+        let content_row = draw[content_index].1;
+        let border_index = draw
+            .iter()
+            .position(|(x, y, cell)| {
+                (*x, *y) == (term_area.right(), content_row) && cell.symbol() == "│"
+            })
+            .expect("the border beside the changed transcript was not drawn");
+        assert!(
+            content_index < border_index,
+            "the terminal content must be emitted before its healing right border"
         );
     }
 
