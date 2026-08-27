@@ -25,6 +25,13 @@ import {
   insideRepoCopy,
   noCommitsCopy,
 } from "@/lib/addProjectWarning"
+import type {
+  AddProjectPrimaryAction,
+  BranchWarningCopy,
+  InitRepoCopy,
+  InsideRepoCopy,
+  NoCommitsCopy,
+} from "@/lib/addProjectWarning"
 import { browseApi } from "@/lib/browseApi"
 import {
   addProject,
@@ -36,6 +43,7 @@ import {
   inspectProjectPath,
   useDux,
 } from "@/lib/store"
+import type { DuxState } from "@/lib/store"
 import type { DirEntryView } from "@/lib/types"
 
 // The inline "New folder" affordance in the dialog header: a ghost button that
@@ -162,6 +170,236 @@ function PathField({ value }: { value: string }) {
   )
 }
 
+interface InspectionMessagesProps {
+  init: InitRepoCopy | null
+  blocked: InsideRepoCopy | null
+  noCommits: NoCommitsCopy | null
+  branch: BranchWarningCopy | null
+  checkoutDefault: boolean
+  setCheckoutDefault: (checked: boolean) => void
+}
+
+function InspectionMessages({
+  init,
+  blocked,
+  noCommits,
+  branch,
+  checkoutDefault,
+  setCheckoutDefault,
+}: InspectionMessagesProps) {
+  return (
+    <>
+      {init ? (
+        <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
+            <div className="grid gap-1 text-sm">
+              <span>{init.message}</span>
+              <span className="text-xs text-muted-foreground">{init.note}</span>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {blocked ? (
+        <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
+          <div className="flex items-start gap-2">
+            <Ban className="mt-0.5 size-4 shrink-0 text-amber-500" />
+            <span className="text-sm">{blocked.message}</span>
+          </div>
+        </div>
+      ) : null}
+      {noCommits ? (
+        <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
+            <div className="grid gap-1 text-sm">
+              <span>{noCommits.message}</span>
+              <span className="text-xs text-muted-foreground">
+                {noCommits.note}
+              </span>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {branch ? (
+        <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
+            <div className="grid gap-1 text-sm">
+              <span>{branch.message}</span>
+              <span className="text-amber-500">{branch.worktreeNote}</span>
+              {branch.heuristicNote ? (
+                <span className="text-xs text-muted-foreground">
+                  {branch.heuristicNote}
+                </span>
+              ) : null}
+            </div>
+          </div>
+          {branch.canCheckoutDefault && branch.defaultBranch ? (
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={checkoutDefault}
+                onCheckedChange={(checked) =>
+                  setCheckoutDefault(checked === true)
+                }
+              />
+              Check out &ldquo;{branch.defaultBranch}&rdquo; before adding
+            </label>
+          ) : null}
+        </div>
+      ) : null}
+    </>
+  )
+}
+
+interface SelectionDetailsProps extends InspectionMessagesProps {
+  selected: string
+  name: string
+  inspecting: boolean
+  setName: (name: string) => void
+}
+
+function SelectionDetails({
+  selected,
+  name,
+  inspecting,
+  setName,
+  ...messages
+}: SelectionDetailsProps) {
+  return (
+    <div className="flex flex-col gap-2">
+      <Input
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        placeholder="Project name (optional)"
+      />
+      <PathField value={selected} />
+      {inspecting ? (
+        <span className="flex items-center gap-2 text-xs text-muted-foreground">
+          <GlyphSpinner className="text-muted-foreground" />
+          Checking the folder…
+        </span>
+      ) : null}
+      <InspectionMessages {...messages} />
+    </div>
+  )
+}
+
+interface AddProjectFooterProps {
+  selected: string | null
+  inspecting: boolean
+  inspected: boolean
+  primary: AddProjectPrimaryAction
+  hasBranchWarning: boolean
+  onAdd: () => void
+}
+
+function AddProjectFooter({
+  selected,
+  inspecting,
+  inspected,
+  primary,
+  hasBranchWarning,
+  onAdd,
+}: AddProjectFooterProps) {
+  return (
+    <DialogFooter>
+      <Button variant="outline" onClick={closeAddProject}>
+        Cancel
+      </Button>
+      <Button
+        disabled={
+          !selected || inspecting || !inspected || primary.action === "blocked"
+        }
+        variant={hasBranchWarning ? "destructive" : "default"}
+        onClick={onAdd}
+      >
+        {primary.label}
+      </Button>
+    </DialogFooter>
+  )
+}
+
+type ProjectInspection = NonNullable<DuxState["projectPathInspection"]>
+
+function currentInspection(
+  selected: string | null,
+  candidate: DuxState["projectPathInspection"],
+): ProjectInspection | null {
+  if (!selected || candidate?.path !== selected) return null
+  return candidate
+}
+
+function inspectionKind(inspection: ProjectInspection | null) {
+  if (!inspection || inspection.error) return "repo" as const
+  return inspection.kind
+}
+
+function requiresInitialCommit(
+  inspection: ProjectInspection | null,
+): boolean {
+  if (
+    !inspection ||
+    inspection.error ||
+    inspection.loading ||
+    inspection.hasCommits
+  ) {
+    return false
+  }
+  return inspection.kind !== "plain" && inspection.kind !== "repo_subdir"
+}
+
+function inspectionBranch(
+  inspection: ProjectInspection | null,
+  needsInitialCommit: boolean,
+): BranchWarningCopy | null {
+  if (
+    needsInitialCommit ||
+    !inspection ||
+    inspection.error ||
+    !inspection.warning ||
+    !inspection.currentBranch
+  ) {
+    return null
+  }
+  return branchWarningCopy(inspection.warning, inspection.currentBranch)
+}
+
+function inspectionState(
+  selected: string | null,
+  candidate: DuxState["projectPathInspection"],
+  checkoutDefault: boolean,
+) {
+  const inspection = currentInspection(selected, candidate)
+  const kind = inspectionKind(inspection)
+  const needsInitialCommit = requiresInitialCommit(inspection)
+  const branch = inspectionBranch(inspection, needsInitialCommit)
+  const willCheckout = Boolean(branch?.canCheckoutDefault && checkoutDefault)
+  const primary = addProjectPrimaryAction({
+    kind,
+    hasCommits: !needsInitialCommit,
+    willCheckout,
+    hasBranchWarning: Boolean(branch),
+  })
+  const resolved = Boolean(inspection && !inspection.loading)
+
+  return {
+    inspection,
+    inspecting: inspection?.loading ?? false,
+    primary,
+    branch,
+    init:
+      resolved && primary.action === "init-repo"
+        ? initRepoCopy(inspection?.gitignoreCandidates ?? [])
+        : null,
+    blocked:
+      resolved && primary.action === "blocked"
+        ? insideRepoCopy(inspection?.repoRoot ?? null)
+        : null,
+    noCommits: needsInitialCommit ? noCommitsCopy() : null,
+  }
+}
+
 // A monospace name chip with a leading folder glyph. Shared by the pinned
 // "Use this folder" row and the "Up to <folder>" parent row so the two folder
 // names render identically and cannot drift.
@@ -182,51 +420,15 @@ function AddProjectBrowser() {
   // TUI defaults it on too); ignored on the heuristic path (no checkbox there).
   const [checkoutDefault, setCheckoutDefault] = useState(true)
 
-  // The resolved inspection for the CURRENT selection only. A reply for a stale
-  // path is already discarded in the store, but guard here too so the warning
-  // step never renders for a different target than the one selected. This also
-  // covers the pinned "Use this folder" row, whose target is `browsePath`.
-  const inspection =
-    selected && projectPathInspection?.path === selected
-      ? projectPathInspection
-      : null
-  const inspecting = inspection?.loading ?? false
-  const kind = inspection && !inspection.error ? inspection.kind : "repo"
-  // A resolved inspection of an unborn repo (fresh `git init`, no commits)
-  // takes precedence over any branch warning: there is no default branch to
-  // check out, and after the initial commit the current branch simply becomes
-  // the leading branch. We only offer it once inspection confirms it.
-  const needsInitialCommit =
-    !!inspection &&
-    !inspection.error &&
-    !inspection.loading &&
-    !inspection.hasCommits &&
-    kind !== "plain" &&
-    kind !== "repo_subdir"
-  const warning = inspection && !inspection.error ? inspection.warning : null
-  const copy =
-    !needsInitialCommit && warning && inspection?.currentBranch
-      ? branchWarningCopy(warning, inspection.currentBranch)
-      : null
-  // Only offer the checkbox when the server confidently knows the default.
-  const offerCheckout = copy?.canCheckoutDefault ?? false
-  const willCheckout = offerCheckout && checkoutDefault
-  const noCommits = needsInitialCommit ? noCommitsCopy() : null
-  const primary = addProjectPrimaryAction({
-    kind,
-    hasCommits: !needsInitialCommit,
-    willCheckout,
-    hasBranchWarning: !!copy,
-  })
-  const resolved = !!inspection && !inspection.loading
-  const initCopy =
-    resolved && primary.action === "init-repo"
-      ? initRepoCopy(inspection?.gitignoreCandidates ?? [])
-      : null
-  const blockedCopy =
-    resolved && primary.action === "blocked"
-      ? insideRepoCopy(inspection?.repoRoot ?? null)
-      : null
+  const {
+    inspection,
+    inspecting,
+    primary,
+    branch,
+    init,
+    blocked,
+    noCommits,
+  } = inspectionState(selected, projectPathInspection, checkoutDefault)
 
   function selectTarget(path: string) {
     setSelected(path)
@@ -264,7 +466,6 @@ function AddProjectBrowser() {
     closeAddProject()
   }
 
-  const confirmLabel = primary.label
   const usingThisFolder = selected === browsePath
 
   return (
@@ -294,104 +495,28 @@ function AddProjectBrowser() {
       />
 
       {selected ? (
-        <div className="flex flex-col gap-2">
-          <Input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Project name (optional)"
-          />
-          <PathField value={selected} />
-          {inspecting ? (
-            <span className="flex items-center gap-2 text-xs text-muted-foreground">
-              <GlyphSpinner className="text-muted-foreground" />
-              Checking the folder…
-            </span>
-          ) : null}
-          {initCopy ? (
-            /* Init panel: this panel plus the explicit "Initialize Repository
-               & Add" label IS the confirmation; no extra dialog, because the
-               action is non-destructive (append-only no-follow seed, empty
-               commit, git init in a folder the server confirmed is not a
-               repo), consistent with the initial-commit rung's shipped
-               confirm-by-labeled-button. */
-            <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
-                <div className="grid gap-1 text-sm">
-                  <span>{initCopy.message}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {initCopy.note}
-                  </span>
-                </div>
-              </div>
-            </div>
-          ) : null}
-          {blockedCopy ? (
-            <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
-              <div className="flex items-start gap-2">
-                <Ban className="mt-0.5 size-4 shrink-0 text-amber-500" />
-                <span className="text-sm">{blockedCopy.message}</span>
-              </div>
-            </div>
-          ) : null}
-          {noCommits ? (
-            <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
-                <div className="grid gap-1 text-sm">
-                  <span>{noCommits.message}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {noCommits.note}
-                  </span>
-                </div>
-              </div>
-            </div>
-          ) : null}
-          {copy ? (
-            <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
-                <div className="grid gap-1 text-sm">
-                  <span>{copy.message}</span>
-                  <span className="text-amber-500">{copy.worktreeNote}</span>
-                  {copy.heuristicNote ? (
-                    <span className="text-xs text-muted-foreground">
-                      {copy.heuristicNote}
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-              {offerCheckout && copy.defaultBranch ? (
-                <label className="flex items-center gap-2 text-sm">
-                  <Checkbox
-                    checked={checkoutDefault}
-                    onCheckedChange={(c) => setCheckoutDefault(c === true)}
-                  />
-                  Check out &ldquo;{copy.defaultBranch}&rdquo; before adding
-                </label>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
+        <SelectionDetails
+          selected={selected}
+          name={name}
+          inspecting={inspecting}
+          setName={setName}
+          init={init}
+          blocked={blocked}
+          noCommits={noCommits}
+          branch={branch}
+          checkoutDefault={checkoutDefault}
+          setCheckoutDefault={setCheckoutDefault}
+        />
       ) : null}
 
-      <DialogFooter>
-        <Button variant="outline" onClick={closeAddProject}>
-          Cancel
-        </Button>
-        <Button
-          disabled={
-            !selected ||
-            inspecting ||
-            !inspection ||
-            primary.action === "blocked"
-          }
-          variant={copy ? "destructive" : "default"}
-          onClick={handleAdd}
-        >
-          {confirmLabel}
-        </Button>
-      </DialogFooter>
+      <AddProjectFooter
+        selected={selected}
+        inspecting={inspecting}
+        inspected={!!inspection}
+        primary={primary}
+        hasBranchWarning={!!branch}
+        onAdd={handleAdd}
+      />
     </DialogContent>
   )
 }
