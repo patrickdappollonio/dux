@@ -155,7 +155,7 @@ import {
 } from "@/lib/store"
 import { useAttachCapability } from "@/lib/attachRegistry"
 import { terminalForeground, terminalTitle } from "@/lib/terminals"
-import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
+import type { DuxState, SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import { matchOwner } from "@/lib/terminalOwner"
 import type { SessionView, TerminalView } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -293,50 +293,16 @@ export function AgentActionsMenu({
           <DropdownMenuSeparator />
         </>
       ) : null}
-      <DropdownMenuSub>
-        <DropdownMenuSubTrigger disabled={atTabCap || addingTab || activeElsewhere}>
-          <Plus />
-          {/* min-w-0 + truncate so a long agent name cannot blow the menu
-              wide open; the full name is in the row/tooltip already. */}
-          <span className="min-w-0 truncate">
-            New agent tab for &quot;{agentName}&quot;…
-          </span>
-        </DropdownMenuSubTrigger>
-        <DropdownMenuSubContent>
-          {providers.map((p) => {
-            const isDefault = p === defaultProvider
-            return (
-              <DropdownMenuItem key={p} onClick={() => addTab(session.id, p)}>
-                {isDefault ? <Check /> : <Bot />}
-                {p}
-                {isDefault ? (
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    default
-                  </span>
-                ) : null}
-              </DropdownMenuItem>
-            )
-          })}
-        </DropdownMenuSubContent>
-      </DropdownMenuSub>
-      {/* Project actions live here (and in the New-agent picker) now that the
-          flat list has no project header. A standalone agent belongs to no
-          project, so the whole submenu is ABSENT for it: with an empty id its
-          only surviving entry was "Remove project…", opening a destructive
-          dialog whose confirm could not do anything. */}
-      {projectId !== null && (
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <Folder />
-            <span className="min-w-0 truncate">
-              {projectName ? <>Project &quot;{projectName}&quot;…</> : <>Project…</>}
-            </span>
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            <ProjectMenuItems id={projectId} />
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-      )}
+      <AgentTabSubmenu
+        sessionId={session.id}
+        agentName={agentName}
+        providers={providers}
+        defaultProvider={defaultProvider}
+        atTabCap={atTabCap}
+        addingTab={addingTab}
+        activeElsewhere={activeElsewhere}
+      />
+      <AgentProjectSubmenu projectId={projectId} projectName={projectName} />
       <DropdownMenuSeparator />
       <DropdownMenuItem
         disabled={activeElsewhere}
@@ -362,95 +328,15 @@ export function AgentActionsMenu({
         <Pencil />
         Rename agent…
       </DropdownMenuItem>
-      {/* ABSENT, not disabled, for a standalone agent, and the same for every
-          branch-identity entry below. A disabled row promises the thing exists
-          and is unavailable right now; these features do not exist for an
-          agent with no branch at all, so there is nothing for the user to wait
-          for. Forking in particular copies a managed worktree onto a new
-          branch, and there is neither. */}
-      {branchGit && (
-        <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
-          <GitFork />
-          Fork agent…
-        </DropdownMenuItem>
-      )}
-      <DropdownMenuItem
-        disabled={activeElsewhere}
-        onClick={() => openChangeProvider(session.id)}
-      >
-        <Cpu />
-        Change agent provider…
-      </DropdownMenuItem>
-      {/* GitHub-gated, like the project menu's from-PR item: without a usable
-          gh there is nothing to attach. The label flips on the OVERRIDE (a
-          manually attached PR), not on mere PR presence, because attaching
-          over an autodetected badge is still a first manual attach. */}
-      {branchGit && ghAvailable && (
-        <DropdownMenuItem
-          disabled={activeElsewhere}
-          onClick={() => openAttachPullRequest(session.id)}
-        >
-          <GitPullRequest />
-          {prOverridden
-            ? "Change attached pull request…"
-            : "Attach pull request…"}
-        </DropdownMenuItem>
-      )}
-      {/* No confirm and no ellipsis: detaching destroys nothing and there are
-          two ways back (attach one by hand, or the resume entry below). */}
-      {branchGit && prAssociated && (
-        <DropdownMenuItem
-          disabled={activeElsewhere}
-          onClick={() => detachPullRequest(session.id)}
-        >
-          <Unlink />
-          Detach pull request
-        </DropdownMenuItem>
-      )}
-      {/* The way back out of a detach, so the agent is never locked out of PR
-          tracking. Same shape as the detach it undoes: icon, no ellipsis (it
-          opens no dialog), no confirm, and no gh gate. */}
-      {branchGit && prSuppressed && (
-        <DropdownMenuItem
-          disabled={activeElsewhere}
-          onClick={() => resumePullRequestAutodetection(session.id)}
-        >
-          <Radar />
-          Resume PR autodetection
-        </DropdownMenuItem>
-      )}
-      <DropdownMenuItem onClick={() => openAgentInfo(session.id)}>
-        <Info />
-        Agent info…
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      {/* A startup command provisions a worktree for a project. A standalone
-          agent has neither, so the three startup-command entries are absent
-          rather than offered and refused. */}
-      {branchGit && (
-        <DropdownMenuItem onClick={() => openAgentStartupCommand(session.id)}>
-          <SquareChevronRight />
-          Configure startup command…
-        </DropdownMenuItem>
-      )}
-      {branchGit && (
-        <DropdownMenuItem onClick={() => openAgentEnv(session.id)}>
-          <Variable />
-          Configure environment variables…
-        </DropdownMenuItem>
-      )}
-      {branchGit && (
-        <DropdownMenuItem onClick={() => rerunStartupCommand(session.id)}>
-          <Play />
-          Rerun startup command
-        </DropdownMenuItem>
-      )}
-      {branchGit && (
-        <DropdownMenuItem onClick={() => openStartupLogs(session.id)}>
-          <ScrollText />
-          Startup command logs…
-        </DropdownMenuItem>
-      )}
+      <AgentIdentityAndSetupItems
+        sessionId={session.id}
+        branchGit={branchGit}
+        ghAvailable={ghAvailable}
+        prOverridden={prOverridden}
+        prAssociated={prAssociated}
+        prSuppressed={prSuppressed}
+        activeElsewhere={activeElsewhere}
+      />
       <DropdownMenuSeparator />
       {/* Two editor entries, named to distinguish their surfaces. The in-app
           overlay cannot open on a phone (EditorOverlay is desktop-only), so
@@ -502,6 +388,169 @@ export function AgentActionsMenu({
         Delete agent…
       </DropdownMenuItem>
     </DropdownMenuGroup>
+  )
+}
+
+function AgentTabSubmenu({
+  sessionId,
+  agentName,
+  providers,
+  defaultProvider,
+  atTabCap,
+  addingTab,
+  activeElsewhere,
+}: {
+  sessionId: string
+  agentName: string
+  providers: string[]
+  defaultProvider: string
+  atTabCap: boolean
+  addingTab: boolean
+  activeElsewhere: boolean
+}) {
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger
+        disabled={atTabCap || addingTab || activeElsewhere}
+      >
+        <Plus />
+        <span className="min-w-0 truncate">
+          New agent tab for &quot;{agentName}&quot;…
+        </span>
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent>
+        {providers.map((provider) => {
+          const isDefault = provider === defaultProvider
+          return (
+            <DropdownMenuItem
+              key={provider}
+              onClick={() => addTab(sessionId, provider)}
+            >
+              {isDefault ? <Check /> : <Bot />}
+              {provider}
+              {isDefault ? (
+                <span className="ml-auto text-xs text-muted-foreground">
+                  default
+                </span>
+              ) : null}
+            </DropdownMenuItem>
+          )
+        })}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  )
+}
+
+function AgentProjectSubmenu({
+  projectId,
+  projectName,
+}: {
+  projectId: string | null
+  projectName?: string
+}) {
+  if (projectId === null) return null
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger>
+        <Folder />
+        <span className="min-w-0 truncate">
+          {projectName ? <>Project &quot;{projectName}&quot;…</> : <>Project…</>}
+        </span>
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent>
+        <ProjectMenuItems id={projectId} />
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  )
+}
+
+function AgentIdentityAndSetupItems({
+  sessionId,
+  branchGit,
+  ghAvailable,
+  prOverridden,
+  prAssociated,
+  prSuppressed,
+  activeElsewhere,
+}: {
+  sessionId: string
+  branchGit: boolean
+  ghAvailable: boolean
+  prOverridden: boolean
+  prAssociated: boolean
+  prSuppressed: boolean
+  activeElsewhere: boolean
+}) {
+  return (
+    <>
+      {branchGit ? (
+        <DropdownMenuItem onClick={() => openForkAgent(sessionId)}>
+          <GitFork />
+          Fork agent…
+        </DropdownMenuItem>
+      ) : null}
+      <DropdownMenuItem
+        disabled={activeElsewhere}
+        onClick={() => openChangeProvider(sessionId)}
+      >
+        <Cpu />
+        Change agent provider…
+      </DropdownMenuItem>
+      {branchGit && ghAvailable ? (
+        <DropdownMenuItem
+          disabled={activeElsewhere}
+          onClick={() => openAttachPullRequest(sessionId)}
+        >
+          <GitPullRequest />
+          {prOverridden
+            ? "Change attached pull request…"
+            : "Attach pull request…"}
+        </DropdownMenuItem>
+      ) : null}
+      {branchGit && prAssociated ? (
+        <DropdownMenuItem
+          disabled={activeElsewhere}
+          onClick={() => detachPullRequest(sessionId)}
+        >
+          <Unlink />
+          Detach pull request
+        </DropdownMenuItem>
+      ) : null}
+      {branchGit && prSuppressed ? (
+        <DropdownMenuItem
+          disabled={activeElsewhere}
+          onClick={() => resumePullRequestAutodetection(sessionId)}
+        >
+          <Radar />
+          Resume PR autodetection
+        </DropdownMenuItem>
+      ) : null}
+      <DropdownMenuItem onClick={() => openAgentInfo(sessionId)}>
+        <Info />
+        Agent info…
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      {branchGit ? (
+        <>
+          <DropdownMenuItem onClick={() => openAgentStartupCommand(sessionId)}>
+            <SquareChevronRight />
+            Configure startup command…
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => openAgentEnv(sessionId)}>
+            <Variable />
+            Configure environment variables…
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => rerunStartupCommand(sessionId)}>
+            <Play />
+            Rerun startup command
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => openStartupLogs(sessionId)}>
+            <ScrollText />
+            Startup command logs…
+          </DropdownMenuItem>
+        </>
+      ) : null}
+    </>
   )
 }
 
@@ -1361,11 +1410,7 @@ function SortControl() {
   )
 }
 
-// The shared flat list: header controls (New agent, search, sort) over one
-// active-first, cross-project list with a collapsible Quiet tail. Rendered inside
-// the desktop sidebar's expanded content and the mobile hub alike.
-export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
-  const dux = useDux()
+function flatAgentListModel(dux: DuxState) {
   const {
     spine,
     selectedTarget,
@@ -1375,56 +1420,40 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   } = dux
   const agentSort = agentSortValue(dux)
   const agentSearch = rawAgentSearch ?? ""
-
   const rawSessions = spine?.sessions ?? []
   const rawProjects = spine?.projects ?? []
-  // Every terminal, of every owner, straight off the spine. It arrives flat and
-  // owner-tagged, so there is nothing to stitch together here.
   const rawTerminals = spine?.terminals ?? []
-  // partitionProjects still supplies the per-session project name, the project
-  // terminals, and the project id sets. Ordering, however, is now a single GLOBAL
-  // flat list (agents are independent of project grouping).
   const { withAgents, withoutAgents, projectName } = partitionProjects(
     spine?.sidebar,
     rawProjects,
     rawSessions,
   )
-
-  // Flat model: agents are one global list ordered by the server's `sort_order`
-  // (spine.sessions already arrives in that order). The optimistic drag overlay,
-  // when present, names every session in the just-dropped order.
   const coreSessions: SessionView[] = pendingAgentOrder
     ? reorderById(rawSessions, pendingAgentOrder)
     : rawSessions
-
-  // Split into main (active) and quiet (dormant), then order the main list by the
-  // chosen sort. Search filters both, and the project terminals, by name/branch/
-  // provider/owner.
   const { main, quiet } = partitionQuiet(coreSessions)
   const sortedMain = sortMainSessions(main, agentSort)
-  // The quiet tail is recency-ordered in "active" mode (verbatim otherwise),
-  // matching the TUI and the drag baseline in `displayedSessionOrder`.
   const sortedQuiet = sortQuietTail(quiet, agentSort)
-
   const query = agentSearch
-  const visibleMain = sortedMain.filter((s) =>
-    matchesSessionQuery(s, agentSearchLocation(s, projectName), query),
+  const visibleMain = sortedMain.filter((session) =>
+    matchesSessionQuery(
+      session,
+      agentSearchLocation(session, projectName),
+      query,
+    ),
   )
-  const visibleQuiet = sortedQuiet.filter((s) =>
-    matchesSessionQuery(s, agentSearchLocation(s, projectName), query),
+  const visibleQuiet = sortedQuiet.filter((session) =>
+    matchesSessionQuery(
+      session,
+      agentSearchLocation(session, projectName),
+      query,
+    ),
   )
-
-  // The flat Terminals section: EVERY terminal, companion (session-owned) and
-  // project-owned alike, in one list at the bottom, each carrying its owner label.
-  // Ordering mirrors the agent list: a GLOBAL base order (every terminal sorted by
-  // its `sort_order`, since a drag restamps `sort_order` across all owners), then
-  // the optimistic drag overlay, then the shared active sort mode applied on top.
   const orderedProjects = [...withAgents, ...withoutAgents]
-    .map((id) => rawProjects.find((p) => p.id === id))
-    .filter((p): p is (typeof rawProjects)[number] => p !== undefined)
-  // Assemble (owner-grouped, for the owner labels) then re-sort into the global
-  // `sort_order` base (the terminal twin of `spine.sessions` already being in
-  // global order for agents).
+    .map((id) => rawProjects.find((project) => project.id === id))
+    .filter((project): project is (typeof rawProjects)[number] =>
+      project !== undefined
+    )
   const assembledTerminals = assembleFlatTerminals(
     rawTerminals,
     coreSessions,
@@ -1433,23 +1462,77 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   )
   const baseTerminals = assembledTerminals
     .slice()
-    .sort((a, b) => a.terminal.sort_order - b.terminal.sort_order)
-  // The optimistic overlay reorders the base by terminal id (reusing `reorderById`,
-  // which keys off `.id`, via a thin `{ id, ft }` wrapper). This is the terminal
-  // twin of `coreSessions = reorderById(rawSessions, pendingAgentOrder)`.
+    .sort((left, right) =>
+      left.terminal.sort_order - right.terminal.sort_order
+    )
   const overlaidTerminals: FlatTerminal[] = pendingTerminalOrder
     ? reorderById(
-        baseTerminals.map((ft) => ({ id: ft.terminal.id, ft })),
+        baseTerminals.map((terminal) => ({
+          id: terminal.terminal.id,
+          terminal,
+        })),
         pendingTerminalOrder,
-      ).map((w) => w.ft)
+      ).map((wrapped) => wrapped.terminal)
     : baseTerminals
-  // Apply the shared sort mode (manual is verbatim, so the overlay survives it),
-  // then the search filter (after the sort, matching the agent pipeline).
-  const flatTerminals = sortFlatTerminals(overlaidTerminals, agentSort).filter((ft) =>
-    matchesTerminalQuery(ft.terminal, ft.ownerLabel, ft.projectName, query),
+  const flatTerminals = sortFlatTerminals(overlaidTerminals, agentSort).filter(
+    (terminal) =>
+      matchesTerminalQuery(
+        terminal.terminal,
+        terminal.ownerLabel,
+        terminal.projectName,
+        query,
+      ),
   )
+  const emptyVerbIsAddProject =
+    launcherVerb(spine ? rawProjects.length : null) === "add-project"
+  const nothing =
+    coreSessions.length === 0 &&
+    flatTerminals.length === 0 &&
+    quiet.length === 0
+  const nothingMatches =
+    query.trim() !== "" &&
+    visibleMain.length === 0 &&
+    visibleQuiet.length === 0 &&
+    flatTerminals.length === 0
 
-  const manual = agentSort === "manual"
+  return {
+    selectedTarget,
+    agentSort,
+    agentSearch,
+    coreSessions,
+    projectName,
+    main,
+    visibleMain,
+    visibleQuiet,
+    overlaidTerminals,
+    flatTerminals,
+    query,
+    manual: agentSort === "manual",
+    emptyVerbIsAddProject,
+    nothing,
+    nothingMatches,
+  }
+}
+
+export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
+  const dux = useDux()
+  const {
+    selectedTarget,
+    agentSort,
+    agentSearch,
+    coreSessions,
+    projectName,
+    main,
+    visibleMain,
+    visibleQuiet,
+    overlaidTerminals,
+    flatTerminals,
+    query,
+    manual,
+    emptyVerbIsAddProject,
+    nothing,
+    nothingMatches,
+  } = flatAgentListModel(dux)
   // Mouse drags on a 6px pull (a click stays a select); touch drags on a
   // HOLD, or it fights the list's scroll gesture on phones. Why this is two
   // sensors rather than one PointerSensor, and the values themselves, live
@@ -1499,22 +1582,6 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
     if (!manual) setAgentSort("manual")
     reorderAgents(next)
   }
-
-  // The empty state's hero button says the same thing the launcher corner's
-  // verb says, through the same helper: with no project on the spine, "New
-  // agent" would open a picker with nothing to pick.
-  const emptyVerbIsAddProject =
-    launcherVerb(spine ? rawProjects.length : null) === "add-project"
-
-  const nothing =
-    coreSessions.length === 0 &&
-    flatTerminals.length === 0 &&
-    quiet.length === 0
-  const nothingMatches =
-    query.trim() !== "" &&
-    visibleMain.length === 0 &&
-    visibleQuiet.length === 0 &&
-    flatTerminals.length === 0
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
