@@ -27,20 +27,7 @@ import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 
 import { inactiveCursorStyle } from "@/lib/composebar"
-import { copyTermSelection } from "@/lib/termClipboard"
-import { dragScrollLines, dragWheelReport } from "@/lib/viewport"
 import { isApplePlatform } from "@/lib/platform"
-import { copyOnSelectAction } from "@/lib/termkeys"
-import {
-  dispatchMouseReplay,
-  tapReplaySteps,
-  wheelReplaySteps,
-} from "@/lib/termmouse"
-import {
-  activateLinkAtPoint,
-  linkifierElement,
-  terminalTapAction,
-} from "@/lib/termlink"
 import { handleTabGone, noteOwnPtyConnection } from "@/lib/store"
 import { isTabGone } from "@/lib/agentTabs"
 import {
@@ -75,19 +62,15 @@ import type {
 } from "./channels"
 import type { HandshakeOwner } from "@/lib/ptyOwnership"
 import {
-  mouseCaptureHintShown,
-} from "./pageSessionHints"
-import {
   WHEEL_SCROLL_SENSITIVITY,
   xtermScrollbarWidth,
 } from "./constants"
 import { createResizeCoordinator } from "./resizeCoordinator"
 import { createAttachReplay } from "./attachReplay"
 import { plainBounce } from "./plainBounce"
-import { createSelectionDrag } from "./selectionDrag"
-import { createTouchGesture } from "./touchGesture"
 import { createLinkPress } from "./linkPress"
 import { registerTerminalInputWiring } from "./inputWiring"
+import { registerTerminalTouchWiring } from "./touchWiring"
 
 /// The streamed target: an agent tab, or a companion terminal of either owner.
 /// `id` is the FOCUSED TAB id for an agent (the session-slot tab's equals
@@ -537,256 +520,16 @@ export function useTerminalLifecycle(
     // entirely under the force-local-selection modifier.
     links.attach(container)
 
-    // TOUCH OVER THE TERMINAL, mapped to the natural mobile model. xterm's text
-    // layer sits over its scrollable viewport, so a finger drag on the output
-    // never reaches the native scroll (only the slim scrollbar does); dux
-    // bridges that by translating a vertical drag into xterm's own
-    // `scrollLines()`, the same scrollback the accessory bar's PgUp/PgDn keys
-    // move through.
-    //
-    // The normal buffer has xterm scrollback, so a drag scrolls it locally. The
-    // ALT-SCREEN (a full-screen TUI like Claude's renderer) has NO xterm
-    // scrollback: the app keeps its own history that never reaches xterm. When
-    // such an app has mouse tracking on AND this client owns the PTY, the drag
-    // is forwarded to it as replayed wheel events, so it scrolls its own
-    // history just as a desktop mouse wheel would. If it has no mouse tracking
-    // (or this is a read-only viewer), there is nothing to forward to, so the
-    // drag does nothing and the arrow row is the way to move.
-    //
-    // WHICH gesture this is belongs entirely to `createTouchGesture`; what
-    // follows are its clients.
-    // THE SELECTION-DRAG MACHINE, fed by the gesture machine below: it is told
-    // to begin (a long press fired), to extend (the finger moved) and to end.
-    // The painted highlight deliberately outlives the gesture; see the module
-    // for the arithmetic, the edge auto-scroll timer and the
-    // deliberately-unguarded scrollback-trim limit.
-    const selection = createSelectionDrag(term)
-    const forwardWheelNow = () =>
-      term.buffer.active.type !== "normal" &&
-      ownership.read() &&
-      term.modes.mouseTrackingMode !== "none"
-    const gesture = createTouchGesture({
-      // On the alt-screen dux can only act if the app takes mouse input and we
-      // own the PTY; otherwise leave the touch alone.
-      scrollAllowed: () => {
-        // A below-floor faithful watcher overflows the host on purpose, and
-        // the host is the scroller. While it can actually scroll vertically,
-        // leave the vertical drag to the browser (the same answer the
-        // no-forward alt-screen case below gets): intercepting it would move
-        // xterm's scrollback while the grid's rows below the fold stayed
-        // unreachable by touch. Width-only overflow keeps the interception,
-        // because the host has nothing vertical to scroll there. Owner mode
-        // and every non-overflow state never set the flag, so this gate reads
-        // as false everywhere else and the behavior is exactly the old one.
-        if (
-          live.current.viewerOverflow &&
-          host.scrollHeight > host.clientHeight
-        ) {
-          return false
-        }
-        return term.buffer.active.type === "normal" || forwardWheelNow()
-      },
-      onGestureReset: () => {
-        selection.end()
-        resize.setHolding(false)
-      },
-      onGestureFinished: () => resize.flushHeld(),
-      onLongPress: (touch) => selection.begin(touch),
-      onSelectMove: (touch) => selection.extend(touch),
-      onScrollStart: () => {
-        // The gesture now holds the resize pair; the lift releases it.
-        resize.setHolding(true)
-        // Reading gesture: get the keyboard out of the way (see `onScroll`).
-        // Whichever surface holds it (xterm's hidden textarea or the compose
-        // bar's) must let go, or the keyboard stays up over the scrollback.
-        term.textarea?.blur()
-        composeInputRef.current?.blur()
-      },
-      onScrollMove: (accumPx, touch) => {
-        // The row the FINGER sees: the rendered screen's height over the grid.
-        // In the faithful view the grid can be smaller than the host-sized
-        // container (the letterboxed watcher), and dividing the container by
-        // the grid's rows overestimates the row, so the scroll ran ahead of
-        // the finger. Owner and legacy paths are unchanged in value: there
-        // the screen fills the container. When the screen is unmeasurable (a
-        // pane mid-mount) the old container formula is the fallback, and
-        // `dragScrollLines` has its own floor below that.
-        const screen = term.element?.querySelector(".xterm-screen")
-        const screenHeight =
-          screen instanceof HTMLElement && screen.clientHeight > 0
-            ? screen.clientHeight
-            : container.clientHeight
-        const rowHeight = screenHeight / term.rows
-        const { scrollLines, remainderPx } = dragScrollLines(accumPx, rowHeight)
-        if (scrollLines === 0) return accumPx
-        if (forwardWheelNow()) {
-          // Forward to the full-screen app as wheel events at the finger's cell
-          // (most apps ignore the position, but dux sends a real in-bounds
-          // one). Capped to at most ONE wheel notch per touch-move
-          // (`dragWheelReport`): `dragScrollLines` can return a many-row
-          // magnitude on a fast flick, and forwarding it whole would emit that
-          // many reports as a dense burst in a single frame. A mouse-tracking
-          // alt-screen app survives the desktop wheel's
-          // one-report-per-discrete-event cadence but not that burst: it
-          // corrupts the app's scrollback-pager repaint, and because an
-          // alt-screen has no client scrollback and nothing reconnects, the
-          // duplicated lines persist. One notch per move reproduces the desktop
-          // 1:1 cadence while still tracking the finger across moves.
-          //
-          // The report itself is produced by xterm, not by dux: the wheel event
-          // a real mouse would have delivered is replayed at the finger's point
-          // and xterm resolves the cell and applies the encoding the app
-          // actually negotiated (see `lib/termmouse.ts`). The bytes come back
-          // out through `onData`/`onBinary` above.
-          const { notch } = dragWheelReport(accumPx, rowHeight)
-          dispatchMouseReplay(
-            term.element,
-            wheelReplaySteps(notch),
-            touch.clientX,
-            touch.clientY,
-          )
-        } else {
-          term.scrollLines(scrollLines)
-        }
-        return remainderPx
-      },
-      // THE LIFT. A long-press SELECTION copies and returns; it is deliberately
-      // not a tap, so it never reaches the redirect and never raises the
-      // keyboard over the text the user has just selected. A SCROLL is
-      // untouched. Only a TAP reaches the redirect below.
-      //
-      // Tap-to-focus redirect for the compose bar: xterm grabs focus from a
-      // `mousedown` listener on its element (`ev.preventDefault(); this.focus()`,
-      // see CoreBrowserTerminal), and on touch that mousedown is the SYNTHETIC
-      // one the browser dispatches after `touchend`. So when the compose bar is
-      // up and this client owns the input, a plain TAP `preventDefault`s the
-      // touchend (suppressing the synthetic mouse events, so xterm never
-      // focuses its hidden textarea) and focuses the compose textarea instead:
-      // the soft keyboard always opens into the buffer.
-      //
-      // Swallowing those synthetic mouse events also swallows the CLICK a
-      // mouse-tracking app would have received through xterm's mouse pipeline,
-      // and full-screen TUIs (menus, buttons) are driven by exactly that click.
-      // So when the app has mouse tracking on, the tap is forwarded as a
-      // replayed press and release at the tapped cell. This restores the
-      // BEHAVIOR the app saw before the redirect existed, not a byte-exact
-      // replay of the browser's event pipeline; apps consume the click, not the
-      // DOM events.
-      //
-      // Swallowing them ALSO swallows the only thing that can follow an OSC 8
-      // hyperlink: xterm's Linkifier resolves the link from `mousemove` and
-      // activates it from `mouseup`. So a tap on a link used to do nothing but
-      // raise the keyboard. Before deciding the tap is ordinary, the link
-      // machine replays that sequence straight at the Linkifier's element; a
-      // hit opens through the same one opener, and `terminalTapAction` then
-      // says what the rest of the tap does. A tap that HIT a link forwards no
-      // click at all, matching the desktop's capture-phase intercept.
-      //
-      // Preference off / desktop / non-owner: taps reach xterm untouched.
-      onLift: (outcome, e) => {
-        if (outcome.wasSelecting) {
-          // CANCEL the lift. The browser dispatches its compatibility mouse
-          // events after an UNCANCELLED touchend, and all three of them are
-          // wrong here: xterm focuses its hidden textarea from that `mousedown`
-          // (raising the soft keyboard over the text just selected), xterm's own
-          // `_handleSingleClick` resets `selectionStartLength` and wipes the
-          // highlight the copy was for, and over a mouse-tracking app the click
-          // is forwarded into the TUI, which is the one thing "selects locally,
-          // forwards nothing" is supposed to guarantee. A DRAG is incidentally
-          // protected because `onTouchMove` cancels; a bare press-and-lift, the
-          // primary gesture, is not, and Chrome's own long-press threshold sits
-          // above ours, so a press held between the two reads as a selection here
-          // and an ordinary tap to the browser.
-          e.preventDefault()
-          // Copy on LIFT, the touch half of copy-on-select, through the same
-          // decision function and the same `ui.copy_on_select` preference as the
-          // mouse path. Inside the touchend handler on purpose: that is the user
-          // gesture, so `copyToClipboard`'s synchronous execCommand fallback is
-          // still permitted over the plain-HTTP origins dux is routinely served
-          // on (a Tailscale address).
-          //
-          // Only the "copy" answer is acted on. The other one, the hold-Shift
-          // hint for a mouse the app has captured, is meaningless here: the long
-          // press just selected locally without any modifier at all.
-          const action = copyOnSelectAction({
-            copyOnSelect: live.current.copyOnSelect,
-            selection: term.getSelection(),
-            dragged: true,
-            mouseTrackingMode: term.modes.mouseTrackingMode,
-            hintShown: mouseCaptureHintShown(),
-            // A finger held still for 400ms is deliberate by construction, so it
-            // is exempt from the mouse's one-character misclick floor: a `y`, a
-            // flag letter or a digit is an ordinary thing to want out of a
-            // terminal, and refusing it highlighted the character and copied
-            // nothing.
-            gesture: "long-press",
-          })
-          // No refocus: the selection is the result the user wanted, and pulling
-          // focus back to a typing surface would throw the soft keyboard over it.
-          if (action === "copy") copyTermSelection(term, () => {})
-          return
-        }
-        if (!outcome.wasTap) return
-        // The next tap clears the selection, the way tapping elsewhere dismisses
-        // one on any touch platform. Before the redirect's own early returns,
-        // because it must happen with the compose bar off or this client not
-        // owning the input, neither of which stops a finger selecting text.
-        if (term.hasSelection()) term.clearSelection()
-        if (!live.current.composeActive || !ownership.read()) return
-        const compose = composeInputRef.current
-        if (!compose) return
-        e.preventDefault()
-        const touch = e.changedTouches[0]
-        // Runs inside the touchend handler, so the window.open a hit produces is
-        // still inside the user gesture and is not treated as a popup.
-        const linkActivated = touch
-          ? activateLinkAtPoint(
-              linkifierElement(term.element),
-              touch.clientX,
-              touch.clientY,
-              links.activations,
-            )
-          : false
-        const { forwardClick, focusCompose } = terminalTapAction({
-          linkActivated,
-          mouseTracking: term.modes.mouseTrackingMode !== "none",
-        })
-        if (touch && forwardClick) {
-          // Replay the press/release the swallowed synthetic mouse events would
-          // have been, at xterm's own mouse-report element, so xterm resolves the
-          // cell (its `getMouseReportCoords`, which measures the screen element
-          // and its padding against the MEASURED cell size) and applies the
-          // protocol and encoding the app negotiated. dux used to compute the
-          // cell with a parallel arithmetic and hand-encode SGR unconditionally,
-          // which was wrong for every app that enabled a tracking mode without
-          // DECSET 1006. See `lib/termmouse.ts`.
-          //
-          // xterm's own mousedown handler grabs focus for its hidden textarea
-          // (`focus({preventScroll: true})`), which is exactly what this redirect
-          // exists to prevent, so focus is put back immediately below, onto the
-          // compose box.
-          //
-          // The other branch of that restore is now UNREACHABLE, and deliberately
-          // kept as the general rule rather than trimmed to today's single caller:
-          // a tap that opened a link no longer forwards anything (see
-          // `terminalTapAction`), so there is no xterm focus grab left to undo on
-          // that path. Focus ends up in the same place either way.
-          const focusedBefore = document.activeElement
-          dispatchMouseReplay(
-            term.element,
-            tapReplaySteps(),
-            touch.clientX,
-            touch.clientY,
-          )
-          if (!focusCompose && focusedBefore instanceof HTMLElement) {
-            focusedBefore.focus()
-          }
-        }
-        if (focusCompose) compose.focus()
-      },
+    const touchWiring = registerTerminalTouchWiring({
+      term,
+      host,
+      container,
+      composeInputRef,
+      live,
+      ownership,
+      resize,
+      links,
     })
-    gesture.attach(container)
-
 
     // THE SIZING PLUMBING, all of it, is the resize coordinator's: it
     // subscribes to xterm's own resize event (the ONE place geometry reaches
@@ -1037,7 +780,7 @@ export function useTerminalLifecycle(
       unsubscribeRunProbe()
       links.dispose()
       inputWiring.dispose()
-      gesture.dispose()
+      touchWiring.dispose()
       document.removeEventListener("visibilitychange", noteVisibility)
       localGridSub.dispose()
       // DISPOSE this target's PTY socket, never merely close it: the pane is
