@@ -3,6 +3,7 @@ use super::components::{
     button_state_for, button_width_for, modal_hint_line, render_scroll_marker, shared_button_width,
     wrap_styled_lines,
 };
+use super::pty_ownership::PtyTakeoverCard;
 use super::*;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
 use ratatui::buffer::{CellDiffOption, CellWidth};
@@ -24,6 +25,17 @@ struct BrowseProjectsFooterKeys {
     open: String,
     goto: String,
     exit_path: String,
+}
+
+struct AgentTerminalContext {
+    active_surface: SessionSurface,
+    terminal_status: CompanionTerminalStatus,
+    is_input: bool,
+    receives_keys: bool,
+    session_id: Option<String>,
+    focused_tab: Option<String>,
+    provider_name: Option<String>,
+    session_active: bool,
 }
 
 /// The index of the first tab the strip draws, chosen so the focused tab is
@@ -320,6 +332,13 @@ fn search_highlight_spans(
 /// geometry that `paint_framed_row_selection` relies on) can never drift apart.
 fn framed_row_item(line1: Line<'static>, line2: Line<'static>) -> ListItem<'static> {
     ListItem::new(vec![line1, line2, Line::from("")])
+}
+
+fn owned_spans(spans: Vec<Span<'_>>) -> Vec<Span<'static>> {
+    spans
+        .into_iter()
+        .map(|span| Span::styled(span.content.into_owned(), span.style))
+        .collect()
 }
 
 /// ASCII art logo displayed in the agent pane when no content is active.
@@ -3276,6 +3295,465 @@ impl App {
         // click can only ever land on a button that is on screen right now.
         self.mouse_layout.takeover_button = Some(area);
     }
+
+    fn agent_terminal_context(&self) -> AgentTerminalContext {
+        let active_surface = self.session_surface;
+        let terminal_status = self.selected_companion_terminal_status();
+        let is_input = matches!(
+            (self.input_target, active_surface),
+            (InputTarget::Agent, SessionSurface::Agent)
+                | (InputTarget::Terminal, SessionSurface::Terminal)
+        );
+        let session_id = self.selected_session().map(|session| session.id.clone());
+        let focused_tab = session_id.as_ref().map(|id| self.focused_tab_id(id));
+        let provider_name = match active_surface {
+            SessionSurface::Agent => self
+                .selected_session()
+                .map(|session| self.focused_tab_provider(session).as_str().to_owned()),
+            SessionSurface::Terminal => Some(
+                self.engine
+                    .config
+                    .terminal
+                    .command
+                    .rsplit(std::path::MAIN_SEPARATOR)
+                    .next()
+                    .unwrap_or(self.engine.config.terminal.command.as_str())
+                    .to_string(),
+            ),
+        };
+        let session_active = match active_surface {
+            SessionSurface::Agent => focused_tab
+                .as_ref()
+                .is_some_and(|id| self.engine.providers.contains_key(id)),
+            SessionSurface::Terminal => terminal_status.is_running(),
+        };
+        AgentTerminalContext {
+            active_surface,
+            terminal_status,
+            is_input,
+            receives_keys: is_input || self.center_typeable(),
+            session_id,
+            focused_tab,
+            provider_name,
+            session_active,
+        }
+    }
+
+    fn resize_agent_terminal(&mut self, term_area: Rect) {
+        let new_size = (term_area.height, term_area.width);
+        let resize_target = self.selected_terminal_surface_id();
+        let target_changed = self.last_pty_resize_target != resize_target;
+        let should_resize =
+            (new_size != self.last_pty_size || target_changed) && new_size.0 > 0 && new_size.1 > 0;
+        let resize_granted = should_resize
+            && match resize_target.as_deref() {
+                Some(pty_id) => {
+                    let pty_id = pty_id.to_string();
+                    self.resize_pty_if_permitted(&pty_id, new_size.0, new_size.1)
+                }
+                None => true,
+            };
+        self.expire_stale_pty_takeover(resize_target.as_deref());
+        if should_resize && resize_granted {
+            self.last_pty_size = new_size;
+            self.last_pty_resize_target = resize_target;
+        }
+    }
+
+    fn prepare_terminal_takeover(&mut self) -> Option<PtyTakeoverCard> {
+        let card = self.focused_pty_takeover_card();
+        if card.is_some() && self.scroll_mode_active() {
+            self.reset_pty_scrollback();
+        }
+        card
+    }
+
+    fn render_terminal_client_content(
+        &mut self,
+        frame: &mut Frame,
+        term_area: Rect,
+        provider_name: Option<&str>,
+        active_surface: SessionSurface,
+        receives_keys: bool,
+        card_up: bool,
+    ) -> (bool, usize) {
+        let Some(provider) = self.selected_terminal_surface_client() else {
+            return (false, 0);
+        };
+        if !provider.has_output() {
+            self.render_terminal_loading(frame, term_area, provider_name, active_surface);
+            return (true, 0);
+        }
+        let is_alt_screen = provider.is_alt_screen();
+        let scrollback_offset =
+            self.render_terminal_grid(frame, term_area, receives_keys, card_up, is_alt_screen);
+        (true, scrollback_offset)
+    }
+
+    fn render_terminal_loading(
+        &self,
+        frame: &mut Frame,
+        term_area: Rect,
+        provider_name: Option<&str>,
+        active_surface: SessionSurface,
+    ) {
+        let spinner = crate::theme::SPINNER_FRAMES[self.spinner_frame_index()];
+        let (label_spans, label_len) = match provider_name {
+            Some(name) => {
+                let prefix = match active_surface {
+                    SessionSurface::Agent => "Starting ",
+                    SessionSurface::Terminal => "Launching ",
+                };
+                (
+                    vec![
+                        Span::styled(prefix, Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(name.to_owned(), Style::default().fg(self.theme.branch_fg)),
+                        Span::styled("...", Style::default().fg(self.theme.hint_desc_fg)),
+                    ],
+                    prefix.len() + name.len() + 3,
+                )
+            }
+            None => {
+                let text = match active_surface {
+                    SessionSurface::Agent => "Starting agent...",
+                    SessionSurface::Terminal => "Launching terminal...",
+                };
+                (
+                    vec![Span::styled(
+                        text,
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )],
+                    text.len(),
+                )
+            }
+        };
+        let card_width = (label_len as u16 + 10).min(term_area.width);
+        let card_height = 5;
+        if term_area.width < card_width || term_area.height < card_height {
+            return;
+        }
+        let card_area = Rect::new(
+            term_area.x + (term_area.width - card_width) / 2,
+            term_area.y + (term_area.height - card_height) / 2,
+            card_width,
+            card_height,
+        );
+        let card_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(self.theme.border_normal));
+        let card_inner = card_block.inner(card_area);
+        card_block.render(card_area, frame.buffer_mut());
+        let mut spans = vec![Span::styled(
+            format!("{spinner} "),
+            Style::default()
+                .fg(self.theme.hint_key_fg)
+                .add_modifier(Modifier::BOLD),
+        )];
+        spans.extend(label_spans);
+        Paragraph::new(Line::from(spans))
+            .alignment(ratatui::layout::Alignment::Center)
+            .render(
+                Rect::new(
+                    card_inner.x,
+                    card_inner.y + card_inner.height / 2,
+                    card_inner.width,
+                    1,
+                ),
+                frame.buffer_mut(),
+            );
+    }
+
+    fn render_terminal_grid(
+        &mut self,
+        frame: &mut Frame,
+        term_area: Rect,
+        receives_keys: bool,
+        card_up: bool,
+        is_alt_screen: bool,
+    ) -> usize {
+        self.refresh_snapshot_buf();
+        self.drop_drifted_selection();
+        let scrollback_offset = self.snapshot_buf.scrollback_offset;
+        let selection_origin = self.snapshot_selection_origin();
+        self.paint_terminal_cells(frame, term_area, selection_origin);
+        self.render_terminal_caret(frame, term_area, receives_keys, card_up);
+        self.render_terminal_scrollback_indicator(frame, term_area, is_alt_screen);
+        scrollback_offset
+    }
+
+    fn paint_terminal_cells(
+        &self,
+        frame: &mut Frame,
+        term_area: Rect,
+        selection_origin: SelectionOrigin,
+    ) {
+        let buf = frame.buffer_mut();
+        for cell in &self.snapshot_buf.cells {
+            if cell.row >= self.snapshot_buf.rows
+                || cell.col >= self.snapshot_buf.cols
+                || cell.row >= term_area.height
+                || cell.col >= term_area.width
+            {
+                continue;
+            }
+            let ratatui_cell = &mut buf[(term_area.x + cell.col, term_area.y + cell.row)];
+            let style = Style::default()
+                .fg(to_ratatui_color(cell.fg))
+                .bg(to_ratatui_color(cell.bg))
+                .add_modifier(to_ratatui_modifier(cell.modifier));
+            let link_uri = self
+                .engine
+                .config
+                .capabilities
+                .hyperlinks
+                .then_some(cell.link)
+                .flatten()
+                .and_then(|index| self.snapshot_buf.links.get(index as usize));
+            if let Some(uri) = link_uri {
+                let width = cell.symbol.as_str().cell_width().max(1);
+                let forced = std::num::NonZeroU16::new(width).expect("cell width is at least 1");
+                ratatui_cell
+                    .set_symbol(&osc8_wrap_symbol(&cell.symbol, uri))
+                    .set_diff_option(CellDiffOption::ForcedWidth(forced));
+            } else {
+                ratatui_cell.set_symbol(&cell.symbol);
+            }
+            ratatui_cell.set_style(style);
+            if let Some(selection) = &self.terminal_selection
+                && selection.anchor != selection.end
+                && selection.contains_live(cell.row, cell.col, selection_origin)
+            {
+                ratatui_cell.set_style(self.theme.selection_style());
+            }
+        }
+    }
+
+    fn render_terminal_caret(
+        &self,
+        frame: &mut Frame,
+        term_area: Rect,
+        receives_keys: bool,
+        card_up: bool,
+    ) {
+        if !receives_keys || card_up {
+            return;
+        }
+        let Some(cursor) = self.snapshot_buf.cursor else {
+            return;
+        };
+        if cursor.row >= self.snapshot_buf.rows || cursor.col >= self.snapshot_buf.cols {
+            return;
+        }
+        let cx = term_area.x + cursor.col;
+        let cy = term_area.y + cursor.row;
+        if cx < term_area.x + term_area.width && cy < term_area.y + term_area.height {
+            frame.set_cursor_position((cx, cy));
+        }
+    }
+
+    fn render_terminal_scrollback_indicator(
+        &self,
+        frame: &mut Frame,
+        term_area: Rect,
+        is_alt_screen: bool,
+    ) {
+        if is_alt_screen {
+            return;
+        }
+        let Some(label) = scrollback_indicator_label(self.snapshot_buf.scrollback_offset) else {
+            return;
+        };
+        let badge_width = label.len() as u16;
+        if term_area.height == 0 || badge_width > term_area.width {
+            return;
+        }
+        Paragraph::new(label)
+            .style(
+                Style::default()
+                    .fg(self.theme.scroll_indicator_fg)
+                    .bg(self.theme.scroll_indicator_bg),
+            )
+            .render(
+                Rect::new(
+                    term_area.x + term_area.width - badge_width,
+                    term_area.y,
+                    badge_width,
+                    1,
+                ),
+                frame.buffer_mut(),
+            );
+    }
+
+    fn render_terminal_empty_state(
+        &mut self,
+        frame: &mut Frame,
+        term_area: Rect,
+        context: &AgentTerminalContext,
+    ) {
+        let dormant_support = matches!(
+            (&context.session_id, &context.focused_tab),
+            (Some(session_id), Some(tab_id)) if tab_id != session_id
+        );
+        match context.active_surface {
+            SessionSurface::Agent if dormant_support => {
+                self.welcome_logo_visible = false;
+                self.render_dormant_support_tab(frame, term_area);
+            }
+            SessionSurface::Agent => self.render_ascii_logo(frame, term_area),
+            SessionSurface::Terminal => {
+                self.welcome_logo_visible = false;
+                self.render_terminal_placeholder(
+                    frame,
+                    term_area,
+                    context.terminal_status,
+                    context.provider_name.as_deref(),
+                );
+            }
+        }
+    }
+
+    fn render_agent_terminal_hint(
+        &self,
+        frame: &mut Frame,
+        hint_area: Rect,
+        context: &AgentTerminalContext,
+        card_up: bool,
+        scrollback_offset: usize,
+    ) {
+        if hint_area.height == 0 {
+            return;
+        }
+        let hint_line =
+            self.agent_terminal_hint_line(context, hint_area.width, card_up, scrollback_offset);
+        Paragraph::new(hint_line)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(self.theme.border_normal)),
+            )
+            .render(hint_area, frame.buffer_mut());
+    }
+
+    fn agent_terminal_hint_line(
+        &self,
+        context: &AgentTerminalContext,
+        width: u16,
+        card_up: bool,
+        scrollback_offset: usize,
+    ) -> Line<'static> {
+        if context.is_input && self.scroll_mode_active() {
+            self.scroll_mode_cue_line()
+        } else if card_up {
+            self.takeover_hint_line(width)
+        } else if context.is_input {
+            self.interactive_terminal_hint_line(scrollback_offset)
+        } else if scrollback_offset > 0 {
+            self.scrolled_terminal_hint_line(scrollback_offset)
+        } else if self.center_typeable() {
+            self.typeable_hint_line(context.active_surface, width)
+        } else {
+            self.inactive_terminal_hint_line(context)
+        }
+    }
+
+    fn interactive_terminal_hint_line(&self, scrollback_offset: usize) -> Line<'static> {
+        let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
+        let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
+        let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+        let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
+        let macro_key = self.bindings.label_for(Action::OpenMacroBar);
+        let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        let mut spans = Vec::new();
+        spans.extend(owned_spans(self.theme.dim_key_badge_default(&exit_key)));
+        spans.push(Span::styled(" minimize  ", desc_style));
+        spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_up)));
+        spans.push(Span::styled(" up  ", desc_style));
+        spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_down)));
+        if scrollback_offset > 0 {
+            spans.push(Span::styled(" down  ", desc_style));
+            spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_line)));
+            spans.push(Span::styled(" down one line", desc_style));
+        } else {
+            spans.push(Span::styled(" down", desc_style));
+        }
+        if !self.filtered_macros("").is_empty() && !macro_key.is_empty() {
+            spans.push(Span::styled(" ", desc_style));
+            spans.extend(owned_spans(self.theme.dim_key_badge_default(&macro_key)));
+            spans.push(Span::styled(" macros.", desc_style));
+        }
+        Line::from(spans)
+    }
+
+    fn scrolled_terminal_hint_line(&self, scrollback_offset: usize) -> Line<'static> {
+        let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
+        let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+        let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
+        let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
+        let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        let prefix = if self.center_typeable() {
+            format!("Scrolled back {scrollback_offset} lines. Typing is paused. ")
+        } else {
+            format!("Scrolled back {scrollback_offset} lines. ")
+        };
+        let mut spans = vec![Span::styled(
+            prefix,
+            Style::default().fg(self.theme.hint_key_fg),
+        )];
+        spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_down)));
+        spans.push(Span::styled(" down, ", desc_style));
+        spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_up)));
+        spans.push(Span::styled(" up, ", desc_style));
+        spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_line)));
+        spans.push(Span::styled(" one line, ", desc_style));
+        spans.extend(owned_spans(self.theme.dim_key_badge_default(&live_edge)));
+        spans.push(Span::styled(" live edge.", desc_style));
+        Line::from(spans)
+    }
+
+    fn inactive_terminal_hint_line(&self, context: &AgentTerminalContext) -> Line<'static> {
+        let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        if matches!(context.active_surface, SessionSurface::Terminal) {
+            let text = match context.terminal_status {
+                CompanionTerminalStatus::Running => {
+                    "Companion terminal is running. Hidden terminals stay alive in this worktree."
+                }
+                CompanionTerminalStatus::Exited => {
+                    "Companion terminal exited. Relaunch it explicitly to start a fresh shell."
+                }
+                CompanionTerminalStatus::NotLaunched => {
+                    "Companion terminal is not launched yet. Launch it explicitly when needed."
+                }
+            };
+            return Line::from(Span::styled(text, desc_style));
+        }
+        let focus_agent = self.bindings.labels_for(Action::FocusAgent);
+        if context.session_active {
+            let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+            let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
+            let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
+            let mut spans = owned_spans(self.theme.dim_key_badge_default(&focus_agent));
+            spans.push(Span::styled(" focus and type. ", desc_style));
+            spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_up)));
+            spans.push(Span::styled(" ", desc_style));
+            spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_down)));
+            spans.push(Span::styled(" to scroll. ", desc_style));
+            spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_line)));
+            spans.push(Span::styled(" one line.", desc_style));
+            return Line::from(spans);
+        }
+        if context.session_id.is_some() {
+            let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
+            let mut spans = vec![Span::styled("Agent CLI exited. Press ", desc_style)];
+            spans.extend(owned_spans(self.theme.dim_key_badge_default(&reconnect)));
+            spans.push(Span::styled(" or ", desc_style));
+            spans.extend(owned_spans(self.theme.dim_key_badge_default(&focus_agent)));
+            spans.push(Span::styled(" to launch it again.", desc_style));
+            return Line::from(spans);
+        }
+        Line::from(Span::styled("No agent selected.", desc_style))
+    }
+
     fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
         let outer_block = self.themed_block(title, focused);
         let inner = outer_block.inner(area);
@@ -3298,23 +3776,16 @@ impl App {
             return;
         }
 
-        let active_surface = self.session_surface;
-        let terminal_status = self.selected_companion_terminal_status();
-        let is_input = matches!(
-            (self.input_target, active_surface),
-            (InputTarget::Agent, SessionSurface::Agent)
-                | (InputTarget::Terminal, SessionSurface::Terminal)
-        );
+        let context = self.agent_terminal_context();
+        let active_surface = context.active_surface;
+        let receives_keys = context.receives_keys;
+        let session_provider_name = context.provider_name.as_deref();
         // The hardware caret follows KEYS, not just fullscreen-interactive
         // mode: the minimized typeable pane receives keystrokes too, and the
         // caret is both the "your keys land here" cue and what anchors IME
         // composition popups. While scrolled back the cursor cell maps out of
         // the viewport (the bounds check below skips it), so the caret
         // vanishes there on both regimes without extra gating.
-        let receives_keys = is_input || self.center_typeable();
-        let mut scrollback_offset: usize = 0;
-        let mut rendered_content = false;
-
         // Reserve 2 lines at the bottom for the hint bar (top border + text).
         let hint_height = 2;
         let [term_area, hint_area] = Layout::default()
@@ -3323,393 +3794,29 @@ impl App {
             .areas(inner);
         self.mouse_layout.agent_term = Some(term_area);
 
-        // Get the selected session's PTY screen. Resolve the FOCUSED tab so the
-        // caption/liveness reflect the visible tab, not just the Main provider.
-        let session_id = self.selected_session().map(|s| s.id.clone());
-        let focused_tab = session_id.as_ref().map(|id| self.focused_tab_id(id));
-        let session_provider_name = match active_surface {
-            SessionSurface::Agent => self
-                .selected_session()
-                .map(|s| self.focused_tab_provider(s).as_str().to_owned()),
-            SessionSurface::Terminal => Some(
-                self.engine
-                    .config
-                    .terminal
-                    .command
-                    .rsplit(std::path::MAIN_SEPARATOR)
-                    .next()
-                    .unwrap_or(self.engine.config.terminal.command.as_str())
-                    .to_string(),
-            ),
-        };
-        let session_active = match active_surface {
-            SessionSurface::Agent => focused_tab
-                .as_ref()
-                .map(|id| self.engine.providers.contains_key(id))
-                .unwrap_or(false),
-            SessionSurface::Terminal => terminal_status.is_running(),
-        };
-        let new_size = (term_area.height, term_area.width);
-        // Keyed by target, so a switch to a different PTY always sends once even
-        // when the pane happens to measure the same. See `last_pty_resize_target`.
-        let resize_target = self.selected_terminal_surface_id();
-        let target_changed = self.last_pty_resize_target != resize_target;
-        let should_resize =
-            (new_size != self.last_pty_size || target_changed) && new_size.0 > 0 && new_size.1 > 0;
-        // THE SIZING QUESTION, which is deliberately NOT a claim. One PTY has one
-        // authoritative grid, the driver's, so while a background web server is
-        // serving this pane may re-grid the child only when it is already the one
-        // driving. Neither refusal is a failure, and they are different facts:
-        //
-        //   - ANOTHER DEVICE drives it, so the take-over card over this pane
-        //     names that device; the geometry on screen is its.
-        //   - NOBODY drives it yet, so the card asks for the press that would
-        //     claim it. Drawing a pane is not a decision to drive what is in it
-        //     (a browser may be a heartbeat away from attaching to an agent it
-        //     just started), so the child keeps whatever grid it has until that
-        //     button is pressed, which is what sends this pane's geometry.
-        //
-        // Either way this pane renders the child's real grid, clipped when it is
-        // larger than the pane, which it already does safely. A GRANTED resize
-        // publishes its grid through the seam, so web watchers adopt it.
-        //
-        // Asked only when a resize would actually be sent, and asked BEFORE the
-        // dedupe state is written: an armed take-over is spent inside this call.
-        let resize_granted = should_resize
-            && match resize_target.as_deref() {
-                Some(pty_id) => {
-                    let pty_id = pty_id.to_string();
-                    self.resize_pty_if_permitted(&pty_id, new_size.0, new_size.1)
-                }
-                // Nothing running under the cursor: there is no child to size and
-                // no ownership question to ask.
-                None => true,
-            };
-        // An armed take-over has to be spent or dropped by the FIRST render after
-        // it was armed, so it cannot fire later on a pane the user has moved away
-        // from. `resize_pty_if_permitted` spends it; this drops it on the frames where no
-        // resize is sent at all.
-        self.expire_stale_pty_takeover(resize_target.as_deref());
-        // Recorded only for a resize that was GRANTED. Recording a refused one
-        // was the trap: the pane remembers having sent a geometry it never sent,
-        // so when this surface later gets the pty back at the same pane size,
-        // nothing is sent and the child keeps the other device's grid for good.
-        if should_resize && resize_granted {
-            self.last_pty_size = new_size;
-            self.last_pty_resize_target = resize_target;
-        }
+        self.resize_agent_terminal(term_area);
 
         // THE TAKE-OVER CARD's one question, asked of the live registry and
         // asked AFTER the sizing claim above, because that is where an armed
         // take-over is SPENT: a claim granted in this very pass means the card
         // is already gone by the time the pane is painted, rather than lingering
         // for one frame over a terminal that is this device's again.
-        let takeover_card = self.focused_pty_takeover_card();
+        let takeover_card = self.prepare_terminal_takeover();
         let card_up = takeover_card.is_some();
-        if card_up && self.scroll_mode_active() {
-            // Scroll mode is a way of reading the pane the card now covers, so
-            // it ends with it, and quietly: `reconcile_scroll_mode`'s message
-            // exists because the mode can die with nothing on screen to say so,
-            // and here the card IS what says so.
-            //
-            // Through the same snap the live-edge key uses: the offset must go
-            // home with the mode, or the pane sits parked on old history with
-            // no cue saying so, and the next keystroke types into a frozen view.
-            self.reset_pty_scrollback();
-        }
 
-        if let Some(provider) = self.selected_terminal_surface_client() {
-            rendered_content = true;
-            // The resize itself belongs to `resize_pty_if_permitted`, which owns the whole
-            // sizing decision: the claim, the apply order, the child, and the grid
-            // announcement that follows a resize which really happened.
-
-            if !provider.has_output() {
-                // Show a centered loading card until the PTY produces output.
-                let idx = self.spinner_frame_index();
-                let spinner = crate::theme::SPINNER_FRAMES[idx];
-                let (label_spans, label_len) = match session_provider_name.as_deref() {
-                    Some(name) => {
-                        let prefix = match active_surface {
-                            SessionSurface::Agent => "Starting ",
-                            SessionSurface::Terminal => "Launching ",
-                        };
-                        let text_len = prefix.len() + name.len() + "...".len();
-                        let spans = vec![
-                            Span::styled(prefix, Style::default().fg(self.theme.hint_desc_fg)),
-                            Span::styled(
-                                name.to_owned(),
-                                Style::default().fg(self.theme.branch_fg),
-                            ),
-                            Span::styled("...", Style::default().fg(self.theme.hint_desc_fg)),
-                        ];
-                        (spans, text_len)
-                    }
-                    None => {
-                        let text = match active_surface {
-                            SessionSurface::Agent => "Starting agent...",
-                            SessionSurface::Terminal => "Launching terminal...",
-                        };
-                        let spans = vec![Span::styled(
-                            text,
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        )];
-                        (spans, text.len())
-                    }
-                };
-
-                // Card dimensions: border + padding + content + padding + border.
-                // +2 for spinner + space prefix.
-                let content_w = label_len as u16 + 2;
-                let card_w = (content_w + 2 + 6).min(term_area.width); // 2 borders + 6 padding
-                let card_h: u16 = 5; // top border, blank, spinner, blank, bottom border
-
-                if term_area.width >= card_w && term_area.height >= card_h {
-                    let cx = term_area.x + (term_area.width - card_w) / 2;
-                    let cy = term_area.y + (term_area.height - card_h) / 2;
-                    let card_area = Rect::new(cx, cy, card_w, card_h);
-
-                    let card_block = Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(ratatui::widgets::BorderType::Rounded)
-                        .border_style(Style::default().fg(self.theme.border_normal));
-                    let card_inner = card_block.inner(card_area);
-                    card_block.render(card_area, frame.buffer_mut());
-
-                    // Render spinner + label centered inside the card.
-                    let mut spans = vec![Span::styled(
-                        format!("{spinner} "),
-                        Style::default()
-                            .fg(self.theme.hint_key_fg)
-                            .add_modifier(Modifier::BOLD),
-                    )];
-                    spans.extend(label_spans);
-                    let line = Line::from(spans);
-                    Paragraph::new(line)
-                        .alignment(ratatui::layout::Alignment::Center)
-                        .render(
-                            Rect::new(
-                                card_inner.x,
-                                card_inner.y + card_inner.height / 2,
-                                card_inner.width,
-                                1,
-                            ),
-                            frame.buffer_mut(),
-                        );
-                }
-            } else {
-                // Capture alt-screen state before mutable borrows — we need
-                // it below (after `refresh_snapshot_buf` takes &mut self) to
-                // decide whether the scrollback indicator applies.
-                let is_alt_screen = provider.is_alt_screen();
-
-                // Render the current terminal viewport into the ratatui
-                // buffer, reusing the pre-allocated snapshot buffer to
-                // avoid per-frame heap allocation.
-                self.refresh_snapshot_buf();
-                // A selection stamped against a full history ring cannot be
-                // translated once the grid moves, so retire it here rather than
-                // painting the highlight over whatever text has taken its rows.
-                self.drop_drifted_selection();
-                scrollback_offset = self.snapshot_buf.scrollback_offset;
-
-                // Deliberately NO `Clear.render(term_area, ..)` here.
-                // `Terminal::swap_buffers` (measured against ratatui 0.30)
-                // calls `reset()` on the buffer the
-                // next frame draws into, and `Clear` is exactly `Cell::reset()`
-                // per cell, so a clear is redundant, and harmful: a reset cell's
-                // background is `Color::Reset` (the host default), the loop
-                // below skips `WIDE_CHAR_SPACER` cells and anything outside the
-                // child's grid, and those skipped cells rely on the frame-wide
-                // `app_bg` fill that runs before this. A clear strips the theme
-                // colour off exactly those cells; while scrolled back the offset
-                // moves on nearly every frame, so the pane visibly flickers.
-                // Pinned by
-                // `agent_pane_background_survives_a_scrollback_offset_change`.
-                //
-                // Wide-character spacers need no clear either: a skipped cell is
-                // already blank from the frame reset, and `Buffer::diff` widens
-                // its invalidation window by `max(current, previous)` symbol
-                // width, so a wide glyph replaced by a narrow one still repaints
-                // its trailing cell.
-
-                // Read once, from the same snapshot the cells below come from,
-                // so every cell in this frame is translated against one scroll
-                // state rather than a re-read that could move mid-loop.
-                let selection_now = self.snapshot_selection_origin();
-
-                let buf = frame.buffer_mut();
-                for cell in &self.snapshot_buf.cells {
-                    if cell.row >= self.snapshot_buf.rows
-                        || cell.col >= self.snapshot_buf.cols
-                        || cell.row >= term_area.height
-                        || cell.col >= term_area.width
-                    {
-                        continue;
-                    }
-                    let x = term_area.x + cell.col;
-                    let y = term_area.y + cell.row;
-                    // The child's colors render verbatim in every mode. The
-                    // pane used to desaturate when not interactive (dim
-                    // foreground, grayscaled background) as a read-only cue;
-                    // that cue is now the caret and the hint bar, so the CLI's
-                    // own palette always shows end-to-end.
-                    let style = Style::default()
-                        .fg(to_ratatui_color(cell.fg))
-                        .bg(to_ratatui_color(cell.bg))
-                        .add_modifier(to_ratatui_modifier(cell.modifier));
-                    let ratatui_cell = &mut buf[(x, y)];
-                    let symbol = visible_terminal_symbol(&cell.symbol, cell.col, term_area.width);
-                    // When this cell carries an OSC 8 hyperlink and links are
-                    // enabled, wrap its symbol in a self-contained OSC 8 open/close
-                    // pair. Per-cell (open + close on every linked cell) is
-                    // deliberate: ratatui may repaint any subset of cells in any
-                    // order, so a self-contained cell can never leak an unclosed
-                    // link; a shared `id` lets a host merge adjacent cells into one
-                    // link.
-                    let link_uri = self
-                        .engine
-                        .config
-                        .capabilities
-                        .hyperlinks
-                        .then_some(cell.link)
-                        .flatten()
-                        .and_then(|idx| self.snapshot_buf.links.get(idx as usize));
-                    if let Some(uri) = link_uri.filter(|_| symbol == cell.symbol.as_str()) {
-                        // The OSC 8 open/close bytes are non-printing, but ratatui's
-                        // buffer diff derives a cell's on-screen width from its
-                        // symbol string. Those escape bytes are NOT zero-width to
-                        // unicode-width, so without an override ratatui miscounts the
-                        // cell's width and drops the cells that follow it from the
-                        // diff. Force the REAL display width of the underlying glyph
-                        // (1, or 2 for a wide CJK/emoji cell) so diffing stays
-                        // correct.
-                        let width = symbol.cell_width().max(1);
-                        let forced =
-                            std::num::NonZeroU16::new(width).expect("cell width is at least 1");
-                        ratatui_cell
-                            .set_symbol(&osc8_wrap_symbol(symbol, uri))
-                            .set_diff_option(CellDiffOption::ForcedWidth(forced));
-                    } else {
-                        ratatui_cell.set_symbol(symbol);
-                    }
-                    ratatui_cell.set_style(style);
-
-                    // Overlay selection highlight if this cell is selected.
-                    // `contains_live`, not `contains`: the selection's rows are
-                    // viewport rows from the frame the drag started in, and the
-                    // grid has moved since if the user scrolled or the child
-                    // wrote. Testing the raw row would leave the highlight
-                    // pinned to screen coordinates while its text slid away.
-                    if let Some(sel) = &self.terminal_selection
-                        && sel.anchor != sel.end
-                        && sel.contains_live(cell.row, cell.col, selection_now)
-                    {
-                        ratatui_cell.set_style(self.theme.selection_style());
-                    }
-                }
-
-                // Render the caret whenever this pane receives keys, and never
-                // while the take-over card covers them. The caret IS the host's
-                // hardware cursor, which is both the "your keys land here" cue
-                // and the anchor an IME hangs its composition popup on; parking
-                // it under a card that is refusing every key points both at a
-                // pane that cannot answer.
-                if receives_keys
-                    && !card_up
-                    && let Some(cursor) = self.snapshot_buf.cursor
-                    && cursor.row < self.snapshot_buf.rows
-                    && cursor.col < self.snapshot_buf.cols
-                {
-                    let cx = term_area.x + cursor.col;
-                    let cy = term_area.y + cursor.row;
-                    if cx < term_area.x + term_area.width && cy < term_area.y + term_area.height {
-                        // Do NOT pre-paint the cursor cell into a block here.
-                        // We move the real hardware cursor onto this cell below
-                        // (`set_cursor_position`), and that hardware cursor IS
-                        // the visible block on every host terminal. Painting the
-                        // cell to *look* like a cursor as well caused it to
-                        // vanish under Alacritty: Alacritty draws its block
-                        // cursor by INVERTING the cell's colors, and inverting a
-                        // cell we had already styled as a cursor (input_cursor_fg
-                        // on prompt_cursor) cancelled back to an invisible caret.
-                        // Terminals that draw a fixed-color cursor block stayed
-                        // visible, which is why this only reproduced in Alacritty
-                        // (issue: invisible caret in Alacritty host). Leaving the
-                        // underlying glyph/colors untouched gives every terminal
-                        // a normal cell to invert, so the hardware block shows.
-                        //
-                        // Move the real terminal cursor onto the embedded PTY
-                        // cursor cell. IME composition popups (e.g. a Korean
-                        // IME) are drawn by the terminal/OS at the hardware
-                        // cursor; without this the composing character appears
-                        // at the terminal origin instead of the agent prompt
-                        // (issue #258). `set_cursor_position` preserves that
-                        // alignment — it still lands exactly on the cursor cell.
-                        //
-                        // This must stay the last use of `buf` in this block:
-                        // `set_cursor_position` reborrows `frame`, which is only
-                        // valid because the `buf = frame.buffer_mut()` borrow
-                        // above has ended. Do not add `buf[...]` accesses below.
-                        frame.set_cursor_position((cx, cy));
-                    }
-                }
-
-                // Suppress the scrollback indicator when the child is using
-                // the alternate screen buffer — the alt grid has no history,
-                // so the label would be misleading even if it somehow rendered.
-                if !is_alt_screen
-                    && let Some(label) =
-                        scrollback_indicator_label(self.snapshot_buf.scrollback_offset)
-                {
-                    let badge_width = label.len() as u16;
-                    if term_area.height > 0 && badge_width <= term_area.width {
-                        Paragraph::new(label)
-                            .style(
-                                Style::default()
-                                    .fg(self.theme.scroll_indicator_fg)
-                                    .bg(self.theme.scroll_indicator_bg),
-                            )
-                            .render(
-                                Rect::new(
-                                    term_area.x + term_area.width - badge_width,
-                                    term_area.y,
-                                    badge_width,
-                                    1,
-                                ),
-                                frame.buffer_mut(),
-                            );
-                    }
-                }
-            }
-        }
+        let (rendered_content, scrollback_offset) = self.render_terminal_client_content(
+            frame,
+            term_area,
+            session_provider_name,
+            active_surface,
+            receives_keys,
+            card_up,
+        );
 
         if rendered_content {
             self.welcome_logo_visible = false;
         } else {
-            // A focused extra tab with no live process is "dormant" (e.g. after
-            // a restart): show a provider-agnostic can't-resume message instead of
-            // the welcome logo, with the launch key to start it fresh.
-            let dormant_support = matches!(
-                (&session_id, &focused_tab),
-                (Some(sid), Some(fid)) if fid != sid
-            );
-            match active_surface {
-                SessionSurface::Agent if dormant_support => {
-                    self.welcome_logo_visible = false;
-                    self.render_dormant_support_tab(frame, term_area);
-                }
-                SessionSurface::Agent => self.render_ascii_logo(frame, term_area),
-                SessionSurface::Terminal => {
-                    self.welcome_logo_visible = false;
-                    self.render_terminal_placeholder(
-                        frame,
-                        term_area,
-                        terminal_status,
-                        session_provider_name.as_deref(),
-                    );
-                }
-            }
+            self.render_terminal_empty_state(frame, term_area, &context);
         }
 
         // THE CARD, painted last over the grid and only over the grid: the tab
@@ -3729,135 +3836,7 @@ impl App {
             return;
         }
 
-        // Hint bar with top border.
-        if hint_area.height > 0 {
-            // Pre-compute all key labels so they outlive the Span borrows.
-            let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
-            let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
-            let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
-            let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
-            let focus_agent = self.bindings.labels_for(Action::FocusAgent);
-            let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
-
-            let macro_key = self.bindings.label_for(Action::OpenMacroBar);
-            let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
-            let hint_line = if is_input && self.scroll_mode_active() {
-                // Scroll mode swallows every non-scroll key (see
-                // `process_raw_input_bytes`), so while it is on, this line says
-                // so instead of listing the usual keys. Without it the only
-                // signal is a pane that happens not to be moving, which stops
-                // being a signal the moment the pane is live again.
-                self.scroll_mode_cue_line()
-            } else if card_up {
-                // Ordered BEFORE every hint that names a key aimed at the child:
-                // while the card is up, none of those keys reach it. The width
-                // the line really has is this pane's, not the window's. Scroll
-                // mode cannot still be on above it: the card ends it.
-                self.takeover_hint_line(hint_area.width)
-            } else if is_input {
-                // Fullscreen interactive: keys go to the child verbatim, so
-                // the line names the way back plus the scroll keys.
-                let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-                let mut spans: Vec<Span> = Vec::new();
-                spans.extend(self.theme.dim_key_badge_default(&exit_key));
-                spans.push(Span::styled(" minimize  ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-                spans.push(Span::styled(" up  ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-                if scrollback_offset > 0 {
-                    spans.push(Span::styled(" down  ", desc_style));
-                    spans.extend(self.theme.dim_key_badge_default(&scroll_line));
-                    spans.push(Span::styled(" down one line", desc_style));
-                } else {
-                    spans.push(Span::styled(" down", desc_style));
-                }
-                if !self.filtered_macros("").is_empty() && !macro_key.is_empty() {
-                    spans.push(Span::styled(" ", desc_style));
-                    spans.extend(self.theme.dim_key_badge_default(&macro_key));
-                    spans.push(Span::styled(" macros.", desc_style));
-                }
-                Line::from(spans)
-            } else if scrollback_offset > 0 {
-                // Scrolled back: the scroll vocabulary owns the pane. In a
-                // typeable pane that also means typing is paused, and the line
-                // must say so: the keys silently stop reaching the agent
-                // otherwise, and the live-edge key is the way back.
-                let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-                let mut spans: Vec<Span> = Vec::new();
-                let prefix = if self.center_typeable() {
-                    format!("Scrolled back {scrollback_offset} lines. Typing is paused. ")
-                } else {
-                    format!("Scrolled back {scrollback_offset} lines. ")
-                };
-                spans.push(Span::styled(
-                    prefix,
-                    Style::default().fg(self.theme.hint_key_fg),
-                ));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-                spans.push(Span::styled(" down, ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-                spans.push(Span::styled(" up, ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_line));
-                spans.push(Span::styled(" one line, ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&live_edge));
-                spans.push(Span::styled(" live edge.", desc_style));
-                Line::from(spans)
-            } else if self.center_typeable() {
-                self.typeable_hint_line(active_surface, hint_area.width)
-            } else {
-                let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-                let mut spans: Vec<Span> = Vec::new();
-                if matches!(active_surface, SessionSurface::Terminal) {
-                    match terminal_status {
-                        CompanionTerminalStatus::Running => {
-                            spans.push(Span::styled(
-                                "Companion terminal is running. Hidden terminals stay alive in this worktree.",
-                                desc_style,
-                            ));
-                        }
-                        CompanionTerminalStatus::Exited => {
-                            spans.push(Span::styled(
-                                "Companion terminal exited. Relaunch it explicitly to start a fresh shell.",
-                                desc_style,
-                            ));
-                        }
-                        CompanionTerminalStatus::NotLaunched => {
-                            spans.push(Span::styled(
-                                "Companion terminal is not launched yet. Launch it explicitly when needed.",
-                                desc_style,
-                            ));
-                        }
-                    }
-                } else if session_active {
-                    // A live agent whose pane is NOT focused: the activate key
-                    // focuses the pane, and from there typing reaches the agent.
-                    spans.extend(self.theme.dim_key_badge_default(&focus_agent));
-                    spans.push(Span::styled(" focus and type. ", desc_style));
-                    spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-                    spans.push(Span::styled(" ", desc_style));
-                    spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-                    spans.push(Span::styled(" to scroll. ", desc_style));
-                    spans.extend(self.theme.dim_key_badge_default(&scroll_line));
-                    spans.push(Span::styled(" one line.", desc_style));
-                } else if session_id.is_some() {
-                    spans.push(Span::styled("Agent CLI exited. Press ", desc_style));
-                    spans.extend(self.theme.dim_key_badge_default(&reconnect));
-                    spans.push(Span::styled(" or ", desc_style));
-                    spans.extend(self.theme.dim_key_badge_default(&focus_agent));
-                    spans.push(Span::styled(" to launch it again.", desc_style));
-                } else {
-                    spans.push(Span::styled("No agent selected.", desc_style));
-                }
-                Line::from(spans)
-            };
-            Paragraph::new(hint_line)
-                .block(
-                    Block::default()
-                        .borders(Borders::TOP)
-                        .border_style(Style::default().fg(self.theme.border_normal)),
-                )
-                .render(hint_area, frame.buffer_mut());
-        }
+        self.render_agent_terminal_hint(frame, hint_area, &context, card_up, scrollback_offset);
     }
 
     fn render_files(&mut self, frame: &mut Frame, area: Rect) {
