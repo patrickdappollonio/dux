@@ -2031,6 +2031,83 @@ mod tests {
         );
     }
 
+    #[test]
+    fn nested_multi_reactions_apply_status_leaves_in_order() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+
+        app.apply_reaction(EventReaction::Multi(vec![
+            EventReaction::Status(StatusUpdate::info("first")),
+            EventReaction::Multi(vec![EventReaction::Status(StatusUpdate::warning("last"))]),
+        ]));
+
+        let (tone, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(tone, StatusTone::Warning);
+        assert_eq!(message, "last");
+    }
+
+    #[test]
+    fn browser_entries_update_only_the_matching_open_directory() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let root = PathBuf::from(&app.engine.projects[0].path);
+        let entry = BrowserEntry {
+            path: root.join("child"),
+            label: "child/".to_string(),
+            is_git_repo: false,
+            is_parent: false,
+        };
+        app.prompt = PromptState::BrowseProjects {
+            purpose: BrowsePurpose::AddProject,
+            current_dir: root.clone(),
+            entries: Vec::new(),
+            loading: true,
+            selected: 7,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: false,
+            path_input: TextInput::new(),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+
+        app.apply_reaction(EventReaction::BrowserEntriesArrived {
+            dir: root.join("stale"),
+            entries: vec![entry.clone()],
+        });
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                entries,
+                loading,
+                selected,
+                ..
+            } => {
+                assert!(entries.is_empty());
+                assert!(*loading);
+                assert_eq!(*selected, 7);
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+
+        app.apply_reaction(EventReaction::BrowserEntriesArrived {
+            dir: root,
+            entries: vec![entry],
+        });
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                entries,
+                loading,
+                selected,
+                ..
+            } => {
+                assert_eq!(entries.len(), 1);
+                assert!(!loading);
+                assert_eq!(*selected, 0);
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+    }
+
     /// The create launch final (success / startup-error / persist-fail / launch-
     /// fail) is now resolved ENGINE-SIDE against the shared `pending_create_ops`
     /// op and arrives as a sibling keyed `Status` in the same `Multi` as the launch
