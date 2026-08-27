@@ -2033,6 +2033,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn create_failure_disarms_the_tui_origin_before_the_event_is_processed() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.create_agent_started_here = true;
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::CreateAgentFailed {
+                status_op_id: "missing-op".to_string(),
+                message: "creation failed".to_string(),
+            })
+            .expect("send create failure");
+
+        app.drain_events();
+
+        assert!(!app.create_agent_started_here);
+    }
+
     /// `EventReaction::ClearStatus` (the `Final::Clear` outcome of a StatusOp)
     /// must remove the keyed entry with no replacement.
     #[test]
