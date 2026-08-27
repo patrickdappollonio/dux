@@ -89,6 +89,23 @@ describe("flattenLazy", () => {
     ])
   })
 
+  it("keeps a nested error placeholder beside later siblings at its own depth", () => {
+    const dirs = new Map<string, DirState>([
+      ["", { status: "loaded", entries: [dir("src"), file("README.md")] }],
+      ["src", { status: "loaded", entries: [dir("src/app"), file("src/lib.rs")] }],
+      ["src/app", { status: "error", message: "denied" }],
+    ])
+    const rows = flattenLazy(dirs, new Set(["src", "src/app"]))
+
+    expect(rows.map((row) => [row.path, row.depth, row.kind])).toEqual([
+      ["src", 0, "entry"],
+      ["src/app", 1, "entry"],
+      ["src/app/__error__", 2, "error"],
+      ["src/lib.rs", 1, "entry"],
+      ["README.md", 0, "entry"],
+    ])
+  })
+
   it("keeps non-expandable entries as plain rows", () => {
     const escape: DirEntry = {
       name: "escape",

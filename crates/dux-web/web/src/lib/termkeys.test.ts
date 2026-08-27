@@ -419,6 +419,14 @@ describe("classifyClipboardKey", () => {
     )
   })
 
+  it("also copies on Ctrl-Shift-Insert", () => {
+    expect(
+      classifyClipboardKey(
+        ev({ ctrlKey: true, shiftKey: true, code: "Insert", keyCode: 45 }),
+      ),
+    ).toBe("copy")
+  })
+
   it("pastes on Ctrl-v (non-mac)", () => {
     expect(classifyClipboardKey(ev({ ctrlKey: true, code: "KeyV", keyCode: 86 }))).toBe(
       "paste",
