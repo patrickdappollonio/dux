@@ -28,6 +28,10 @@ Underneath sit the same three steps: add a project, create an agent, launch. Two
 buttons close it out, one opening the project picker so you can add your first project
 right there, the other opening [getdux.app](https://getdux.app).
 
+Here is the whole thing on a fresh install, rubber duck included:
+
+![The dux welcome screen in the terminal UI: a rubber duck drawn in braille dots on the left, the orientation text on the right explaining projects, agents and providers, and an Add a project button next to a link to getdux.app along the bottom.](/screens/tui-welcome-screen.png)
+
 ## What's new after an update
 
 When dux starts and you are running a version whose screen you have not seen, you get a
