@@ -359,6 +359,40 @@ export interface ClipboardKeyEvent {
   isMac: boolean
 }
 
+function matchesPhysicalKey(
+  event: ClipboardKeyEvent,
+  code: string,
+  keyCode: number,
+): boolean {
+  return event.code === code || (event.code === "" && event.keyCode === keyCode)
+}
+
+function clipboardModifierGate(
+  event: ClipboardKeyEvent,
+): ClipboardKeyAction | null {
+  if (event.metaKey) return "passthrough"
+  if (
+    event.isMac &&
+    event.ctrlKey &&
+    !event.shiftKey &&
+    !event.altKey
+  ) {
+    return "passthrough"
+  }
+  if (event.altKey) return "passthrough"
+  return null
+}
+
+function controlClipboardAction(
+  event: ClipboardKeyEvent,
+): ClipboardKeyAction {
+  if (!event.ctrlKey) return "passthrough"
+  if (matchesPhysicalKey(event, "Insert", 45)) return "copy"
+  if (matchesPhysicalKey(event, "KeyV", 86)) return "paste"
+  if (event.shiftKey && matchesPhysicalKey(event, "KeyC", 67)) return "copy"
+  return "passthrough"
+}
+
 /**
  * Classifies a keydown into a clipboard action for the web terminal.
  *
@@ -371,33 +405,7 @@ export interface ClipboardKeyEvent {
  * empty) so it works across keyboard layouts. See `ClipboardKeyEvent`.
  */
 export function classifyClipboardKey(ev: ClipboardKeyEvent): ClipboardKeyAction {
-  // Cmd combos (mac) are left entirely to the browser's native copy/paste.
-  if (ev.metaKey) return "passthrough"
-
-  const matches = (code: string, keyCode: number): boolean =>
-    ev.code === code || (ev.code === "" && ev.keyCode === keyCode)
-  const isV = matches("KeyV", 86)
-  const isC = matches("KeyC", 67)
-  const isInsert = matches("Insert", 45)
-
-  // On macOS, Cmd already drives the clipboard, so a lone Control modifier must
-  // keep reaching the app (vim visual-block, readline verbatim-insert, SIGINT).
-  // The Ctrl-Shift aliases below still apply because they also carry Shift.
-  if (ev.isMac && ev.ctrlKey && !ev.shiftKey && !ev.altKey) return "passthrough"
-
-  // Alt as a third level (AltGr / Meta) is never a clipboard chord.
-  if (ev.altKey) return "passthrough"
-
-  if (ev.ctrlKey && ev.shiftKey && isC) return "copy"
-  if (ev.ctrlKey && ev.shiftKey && isV) return "paste"
-  if (ev.ctrlKey && !ev.shiftKey && isV) return "paste"
-  // Ctrl-c without Shift stays SIGINT (`\x03`) — explicit for intent.
-  if (ev.ctrlKey && !ev.shiftKey && isC) return "passthrough"
-  if (ev.ctrlKey && isInsert) return "copy"
-
-  // Shift-Insert (browser/OS default paste, source-dependent) and everything
-  // else is left to xterm / the browser.
-  return "passthrough"
+  return clipboardModifierGate(ev) ?? controlClipboardAction(ev)
 }
 
 /**

@@ -87,6 +87,72 @@ export function descendantDirPaths(
   return [...dirs.keys()].filter((k) => k.startsWith(prefix))
 }
 
+function entryState(
+  entry: DirEntry,
+  expanded: boolean,
+  childState: DirState | undefined,
+): TreeRow["state"] {
+  if (!entry.is_dir) return "idle"
+  if (childState?.status === "error") return "error"
+  if (expanded && childState?.status !== "loaded") return "loading"
+  return "idle"
+}
+
+function entryRow(
+  entry: DirEntry,
+  depth: number,
+  expanded: boolean,
+  childState: DirState | undefined,
+): TreeRow {
+  return {
+    path: entry.path,
+    name: entry.name,
+    depth,
+    isDir: entry.is_dir,
+    expandable: entry.expandable,
+    isSymlink: entry.is_symlink,
+    state: entryState(entry, expanded, childState),
+    kind: "entry",
+    empty:
+      entry.is_dir &&
+      childState?.status === "loaded" &&
+      childState.entries.length === 0,
+  }
+}
+
+function placeholderRow(
+  path: string,
+  depth: number,
+  state: "loading" | "error",
+): TreeRow {
+  return {
+    path: `${path}/__${state}__`,
+    name: "",
+    depth,
+    isDir: false,
+    expandable: false,
+    isSymlink: false,
+    state,
+    kind: state,
+    empty: false,
+  }
+}
+
+function expandedChildRows(
+  dirs: Map<string, DirState>,
+  expanded: Set<string>,
+  entry: DirEntry,
+  childState: DirState | undefined,
+  depth: number,
+): TreeRow[] {
+  if (!entry.is_dir || !expanded.has(entry.path)) return []
+  if (childState?.status === "loaded") {
+    return flattenLazy(dirs, expanded, entry.path, depth + 1)
+  }
+  const state = childState?.status === "error" ? "error" : "loading"
+  return [placeholderRow(entry.path, depth + 1, state)]
+}
+
 /// Flatten the loaded tree into render rows honoring the `expanded` set. Only
 /// descends into dirs that are BOTH expanded AND loaded; an expanded-but-not-
 /// yet-loaded dir contributes a single synthetic "loading" placeholder row, an
@@ -104,56 +170,10 @@ export function flattenLazy(
   for (const entry of state.entries) {
     const isExpanded = entry.is_dir && expanded.has(entry.path)
     const childState = dirs.get(entry.path)
-    const rowState: TreeRow["state"] = !entry.is_dir
-      ? "idle"
-      : childState?.status === "error"
-        ? "error"
-        : isExpanded && (!childState || childState.status === "loading")
-          ? "loading"
-          : "idle"
-    rows.push({
-      path: entry.path,
-      name: entry.name,
-      depth,
-      isDir: entry.is_dir,
-      expandable: entry.expandable,
-      isSymlink: entry.is_symlink,
-      state: rowState,
-      kind: "entry",
-      empty:
-        entry.is_dir &&
-        childState?.status === "loaded" &&
-        childState.entries.length === 0,
-    })
-    if (!isExpanded) continue
-    if (childState?.status === "loaded") {
-      rows.push(...flattenLazy(dirs, expanded, entry.path, depth + 1))
-    } else if (childState?.status === "error") {
-      rows.push({
-        path: `${entry.path}/__error__`,
-        name: "",
-        depth: depth + 1,
-        isDir: false,
-        expandable: false,
-        isSymlink: false,
-        state: "error",
-        kind: "error",
-        empty: false,
-      })
-    } else {
-      // Absent or loading → one synthetic placeholder row.
-      rows.push({
-        path: `${entry.path}/__loading__`,
-        name: "",
-        depth: depth + 1,
-        isDir: false,
-        expandable: false,
-        isSymlink: false,
-        state: "loading",
-        kind: "loading",
-        empty: false,
-      })
-    }
+    rows.push(entryRow(entry, depth, isExpanded, childState))
+    rows.push(
+      ...expandedChildRows(dirs, expanded, entry, childState, depth),
+    )
   }
   return rows
 }
