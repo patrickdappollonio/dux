@@ -17303,7 +17303,7 @@ mod tests {
         (app, buf)
     }
 
-    fn help_isolation_ring(area: Rect, frame: Rect) -> Vec<(u16, u16)> {
+    fn isolation_ring(area: Rect, frame: Rect) -> Vec<(u16, u16)> {
         let mut ring = Vec::new();
         if area.y > frame.y {
             for x in area.x.saturating_sub(1)..=(area.right().min(frame.right() - 1)) {
@@ -17334,7 +17334,7 @@ mod tests {
             let frame = Rect::new(0, 0, width, height);
             let (area, _, _) = help_rects(frame);
             let (app, buf) = help_frame((width, height), 0);
-            let ring = help_isolation_ring(area, frame);
+            let ring = isolation_ring(area, frame);
 
             let occupied: Vec<_> = ring
                 .iter()
@@ -17521,7 +17521,7 @@ mod tests {
         let help_area = app.overlay_layout.frame.get().expect("Help area");
         let frame = terminal.backend().physical.area;
         assert!(
-            help_isolation_ring(help_area, frame)
+            isolation_ring(help_area, frame)
                 .iter()
                 .all(|&position| terminal.backend().physical[position].symbol() == " "),
             "Help did not isolate itself from the workspace"
@@ -17612,6 +17612,52 @@ mod tests {
             .expect("render frame");
         let buf = terminal.backend().buffer().clone();
         (app, buf)
+    }
+
+    #[test]
+    fn command_palette_has_a_dim_blank_gap_from_the_workspace() {
+        let frame = Rect::new(0, 0, 100, 30);
+        let (app, buf) = palette_frame((frame.width, frame.height), "", 0);
+        let area = app.overlay_layout.frame.get().expect("palette area");
+        let ring = isolation_ring(area, frame);
+
+        assert!(
+            ring.iter().all(|&position| buf[position].symbol() == " "),
+            "the palette is not isolated from workspace chrome"
+        );
+        assert!(
+            ring.iter()
+                .all(|&position| buf[position].bg == app.theme.overlay_dim_bg),
+            "the palette gap does not use the dim background"
+        );
+    }
+
+    #[test]
+    fn fullscreen_agent_has_a_dim_blank_gap_from_the_workspace() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let frame = Rect::new(0, 0, 100, 30);
+        let area = centered_rect(96, 94, frame);
+        let mut app = test_app(default_bindings());
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        let mut terminal =
+            Terminal::new(TestBackend::new(frame.width, frame.height)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let ring = isolation_ring(area, frame);
+
+        assert!(
+            ring.iter().all(|&position| buf[position].symbol() == " "),
+            "the fullscreen agent is not isolated from workspace chrome"
+        );
+        assert!(
+            ring.iter()
+                .all(|&position| buf[position].bg == app.theme.overlay_dim_bg),
+            "the fullscreen gap does not use the dim background"
+        );
     }
 
     /// The palette list's inner rect and the border column beside it, taken from
