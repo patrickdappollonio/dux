@@ -12,7 +12,7 @@
 // client. A non-2xx is thrown as a typed `ProjectsApiError` carrying the HTTP
 // status + the parsed server message; the caller surfaces it as a sonner toast.
 
-import { getConnectionId } from "./connection"
+import { createJsonRequest } from "./jsonRequest"
 import type { DeleteWorktreeReply } from "./worktreeDelete"
 import type {
   BranchWarningView,
@@ -45,46 +45,9 @@ export interface PatchProjectBody {
   env?: Record<string, string>
 }
 
-async function request<T>(
-  method: string,
-  path: string,
-  body?: unknown,
-): Promise<T> {
-  const headers: Record<string, string> = {}
-  // Every projects endpoint reads the connection id to scope its toasts back to
-  // this client. Omitted only while the `connected` frame has not set it yet.
-  const id = getConnectionId()
-  if (id) headers["x-connection-id"] = id
-  let payload: string | undefined
-  if (body !== undefined) {
-    headers["content-type"] = "application/json"
-    payload = JSON.stringify(body)
-  }
-  let resp: Response
-  try {
-    resp = await fetch(path, {
-      method,
-      credentials: "same-origin",
-      headers,
-      body: payload,
-    })
-  } catch {
-    throw new ProjectsApiError("Could not reach the server.", 0)
-  }
-  if (!resp.ok) {
-    const detail = (await resp.text().catch(() => "")).trim()
-    throw new ProjectsApiError(detail || `request failed (${resp.status})`, resp.status)
-  }
-  // 204 No Content (delete) and empty bodies have nothing to parse.
-  if (resp.status === 204) return undefined as T
-  const text = await resp.text().catch(() => "")
-  if (!text) return undefined as T
-  try {
-    return JSON.parse(text) as T
-  } catch {
-    return undefined as T
-  }
-}
+const request = createJsonRequest(
+  (message, status) => new ProjectsApiError(message, status),
+)
 
 export const projectsApi = {
   create: (body: {
