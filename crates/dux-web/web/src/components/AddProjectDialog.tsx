@@ -6,7 +6,7 @@ import {
 } from "lucide-react"
 import { notifyError } from "@/lib/notify"
 
-import { BrailleSpinner } from "@/components/BrailleSpinner"
+import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { FolderBrowseList } from "@/components/FolderBrowseList"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -303,7 +303,7 @@ function AddProjectBrowser() {
           <PathField value={selected} />
           {inspecting ? (
             <span className="flex items-center gap-2 text-xs text-muted-foreground">
-              <BrailleSpinner className="text-muted-foreground" />
+              <GlyphSpinner className="text-muted-foreground" />
               Checking the folder…
             </span>
           ) : null}

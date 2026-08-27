@@ -1,4 +1,4 @@
-import { BrailleSpinner } from "@/components/BrailleSpinner"
+import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -79,7 +79,7 @@ function StartupLogsBody({
         </div>
       ) : !hasLogs && startupLogsLoading ? (
         <div className="flex h-64 items-center justify-center">
-          <BrailleSpinner className="text-lg text-muted-foreground" />
+          <GlyphSpinner className="text-lg text-muted-foreground" />
         </div>
       ) : !hasLogs ? (
         <div className="flex h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground">
@@ -118,7 +118,7 @@ function StartupLogsBody({
               </pre>
               {startupLogsLoading ? (
                 <div className="absolute inset-0 flex items-center justify-center bg-background/60">
-                  <BrailleSpinner className="text-lg text-muted-foreground" />
+                  <GlyphSpinner className="text-lg text-muted-foreground" />
                 </div>
               ) : null}
             </div>

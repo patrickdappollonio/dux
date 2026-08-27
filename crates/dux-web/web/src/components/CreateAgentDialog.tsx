@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
+import { GlyphSpinner } from "@/components/GlyphSpinner"
 import {
   Dialog,
   DialogContent,
@@ -205,9 +206,7 @@ export function CreateAgentDialog() {
             autoFocus={!isPr}
           />
           {generating && (
-            <span className="absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-muted-foreground">
-              ⠋
-            </span>
+            <GlyphSpinner className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           )}
         </div>
         <p className="text-xs text-muted-foreground">

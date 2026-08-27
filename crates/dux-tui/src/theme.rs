@@ -10,9 +10,9 @@ use ratatui::text::Span;
 use crate::config::DuxPaths;
 use dux_core::theme::DEFAULT_THEME_NAME;
 
-/// Braille dot-pattern frames for spinner animations. Shared by the loading
-/// card, status line, and left-pane streaming indicator.
-pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+/// Broken-circle frames for spinner animations. Shared by the loading card,
+/// status line, and left-pane streaming indicator.
+pub const SPINNER_FRAMES: &[char] = &['◜', '◠', '◝', '◞', '◡', '◟'];
 
 /// The single shared solid-dot glyph used everywhere dux needs a round dot:
 /// the attention indicator, status dots, and the tab strip's active-tab
@@ -30,7 +30,7 @@ pub const ATTENTION_GLYPH: &str = DOT_GLYPH;
 /// Glyph shown (in the `session_typing` color) on an agent or terminal row while
 /// the user is actively typing into that PTY. A slim left-half block reads as a
 /// text caret, visually distinct from the round status/attention dots and the
-/// braille spinner, so "Typing" never gets confused with "Working" or "Needs
+/// arc spinner, so "Typing" never gets confused with "Working" or "Needs
 /// you". Themed via `Theme::session_typing`, never a hardcoded color.
 pub const TYPING_GLYPH: &str = "▍";
 

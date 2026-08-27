@@ -1,6 +1,6 @@
 import { CornerLeftUp, Folder, FolderGit2, FolderOpen } from "lucide-react"
 
-import { BrailleSpinner } from "@/components/BrailleSpinner"
+import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { baseName } from "@/lib/paths"
@@ -54,7 +54,7 @@ export function FolderBrowseList({
     <ScrollArea className="h-[50vh] rounded-md border md:h-80">
       {loading ? (
         <div className="flex h-[50vh] items-center justify-center md:h-80">
-          <BrailleSpinner className="text-lg text-muted-foreground" />
+          <GlyphSpinner className="text-lg text-muted-foreground" />
         </div>
       ) : (
         <div className="flex flex-col">

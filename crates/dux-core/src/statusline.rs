@@ -109,11 +109,11 @@ impl StatusTone {
     }
 }
 
-/// Braille spinner frames, shared between the TUI render path and the keyed
+/// Broken-circle spinner frames, shared between the TUI render path and the keyed
 /// controller's `most_recent()` result.
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAMES: &[&str] = &["◜", "◠", "◝", "◞", "◡", "◟"];
 
-/// Return the braille spinner frame appropriate for the given wall-clock
+/// Return the arc spinner frame appropriate for the given wall-clock
 /// `since` instant (advances every 100 ms). Used by the TUI's `render_footer`
 /// when displaying a `Busy` status from the keyed controller.
 pub fn spinner_frame_for(since: Instant) -> &'static str {
@@ -976,9 +976,9 @@ mod tests {
         c.set(t0, None, StatusTone::Busy, "Pulling\u{2026}");
         let (tone, text) = c.most_recent_tui().expect("should have a status");
         assert_eq!(tone, StatusTone::Busy);
-        // The spinner is one braille char followed by a space and the message.
+        // The spinner is one arc glyph followed by a space and the message.
         assert!(
-            text.starts_with(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']),
+            text.starts_with(['◜', '◠', '◝', '◞', '◡', '◟']),
             "expected spinner prefix, got: {text:?}"
         );
         assert!(

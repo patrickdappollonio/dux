@@ -24,7 +24,7 @@ animates while an agent works):
 
 ```text
 Agents (4) ────────────────────────────────
-  ⠹ auth-refactor                      ⎇#42
+  ◝ auth-refactor                      ⎇#42
   ※ dux · Working
 
   ▍ docs-pass
@@ -38,7 +38,7 @@ Agents (4) ───────────────────────
   ※ dux · Detached
 
 Terminals (3) ─────────────────────────────
-  ⠹ cargo
+  ◝ cargo
   ↳ auth-refactor@dux · Running
 
   ● Terminal

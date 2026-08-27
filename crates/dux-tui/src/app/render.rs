@@ -89,7 +89,7 @@ enum TabActivityGlyph {
     /// Nothing to report: an idle tab, a dormant one with no PTY behind it, or
     /// a flagged tab in the hidden half of its blink.
     Blank,
-    /// This tab's provider is producing output: the shared braille spinner
+    /// This tab's provider is producing output: the shared arc spinner
     /// frame for this instant, drawn in the pill's own title style.
     Working(char),
     /// This tab wants the user: the shared attention dot, drawn in the theme's
@@ -12199,7 +12199,7 @@ mod tests {
             &theme,
             false,
             false,
-            '⠋',
+            '◜',
             None,
             "my-branch",
             false,
@@ -12231,7 +12231,7 @@ mod tests {
             &theme,
             false,
             true,
-            '⠙',
+            '◠',
             Some("cargo test"),
             "proj",
             false,
@@ -12241,7 +12241,7 @@ mod tests {
         );
         assert!(line_text(&working0).contains("cargo test"));
         assert!(!line_text(&working0).contains("zsh"));
-        assert!(line_text(&working0).contains('⠙'));
+        assert!(line_text(&working0).contains('◠'));
         assert_eq!(working0.spans[0].style.fg, Some(theme.session_active));
         // The shimmer splits the label into per-character spans (glyph + chars).
         assert!(
@@ -12256,7 +12256,7 @@ mod tests {
             &theme,
             true,
             true,
-            '⠹',
+            '◝',
             Some("vim"),
             "proj",
             false,
@@ -12278,7 +12278,7 @@ mod tests {
     fn a_standalone_terminal_row_wears_the_standalone_star_in_the_identity_tone() {
         let theme = crate::theme::Theme::default_dark();
         let (_, line2) = terminal_row_lines(
-            &theme, false, false, '⠋', None, "~/notes", true, 40, 0, None,
+            &theme, false, false, '◜', None, "~/notes", true, 40, 0, None,
         );
         let marker = &line2.spans[0];
         assert_eq!(

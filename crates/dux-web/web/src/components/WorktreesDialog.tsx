@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react"
 import { Ellipsis, FileWarning, FolderGit2, Trash2 } from "lucide-react"
 
-import { BrailleSpinner } from "@/components/BrailleSpinner"
+import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -290,7 +290,7 @@ function WorktreesBody({ projectId }: { projectId: string }) {
       <ScrollArea className="h-[40vh] rounded-md border md:h-64">
         {attachWorktreeLoading ? (
           <div className="flex h-[40vh] items-center justify-center md:h-64">
-            <BrailleSpinner className="text-lg text-muted-foreground" />
+            <GlyphSpinner className="text-lg text-muted-foreground" />
           </div>
         ) : adoptable.length === 0 && attached.length === 0 ? (
           <div className="flex h-[40vh] items-center justify-center px-6 text-center text-sm text-muted-foreground md:h-64">

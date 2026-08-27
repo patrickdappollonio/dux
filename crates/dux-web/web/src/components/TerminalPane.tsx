@@ -60,7 +60,7 @@ import { attachCover } from "@/lib/attachCover"
 import { replayWaitMs } from "@/lib/connectionTiming"
 import { createVisibleClock, type VisibleClock } from "@/lib/visibleClock"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
-import { BrailleSpinner } from "@/components/BrailleSpinner"
+import { GlyphSpinner } from "@/components/GlyphSpinner"
 import {
   useTerminalLiveSettings,
   type TerminalLiveSettings,
@@ -1210,7 +1210,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         // Non-blocking (pointer-events-none) so it never steals input.
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-card-foreground">
-            <BrailleSpinner className="text-primary" />
+            <GlyphSpinner className="text-primary" />
             <span className="text-sm text-muted-foreground">
               {cover.wording === "reconnecting"
                 ? "Reconnecting…"
