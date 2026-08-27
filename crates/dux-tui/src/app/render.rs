@@ -183,6 +183,16 @@ struct TabStripItem {
     glyph_tone: Color,
 }
 
+#[derive(Clone, Copy)]
+struct AgentRowCues {
+    needs_attention: bool,
+    /// Animation is Active-only; the static state word still uses the ungated flag.
+    attention_cue: bool,
+    working: bool,
+    typing: bool,
+    deleting: bool,
+}
+
 /// How an agent row's project tag should be rendered. Decided purely from the
 /// project the session points at, so both the full-width row's inline tag and
 /// the collapsed icon rail agree on when to surface a warning marker.
@@ -1355,70 +1365,128 @@ impl App {
         }
     }
 
+    fn agent_row_cues(&self, session: &AgentSession) -> AgentRowCues {
+        let active = matches!(session.status, crate::model::SessionStatus::Active);
+        let needs_attention = self.engine.config.ui.attention_indicator
+            && self.engine.session_needs_attention(&session.id);
+        AgentRowCues {
+            needs_attention,
+            attention_cue: needs_attention && active,
+            working: active && self.engine.session_is_streaming(&session.id),
+            typing: active && self.engine.session_is_typing(&session.id),
+            deleting: self.engine.pending_deletions.contains(&session.id),
+        }
+    }
+
+    fn agent_row_glyph(&self, cues: AgentRowCues, steady_dot: &str) -> String {
+        if cues.attention_cue {
+            return if self.attention_blink_on() {
+                crate::theme::ATTENTION_GLYPH
+            } else {
+                " "
+            }
+            .to_string();
+        }
+        if cues.typing {
+            return crate::theme::TYPING_GLYPH.to_string();
+        }
+        if cues.working {
+            return crate::theme::SPINNER_FRAMES[self.spinner_frame_index()].to_string();
+        }
+        steady_dot.to_string()
+    }
+
+    fn agent_row_colors(
+        &self,
+        status: crate::model::SessionStatus,
+        cues: AgentRowCues,
+        steady_color: Color,
+    ) -> (Color, Color) {
+        let base_color = if cues.deleting {
+            self.theme.session_deleting
+        } else if matches!(status, crate::model::SessionStatus::Active) {
+            self.theme.session_active
+        } else {
+            self.theme.session_exited
+        };
+        let glyph_color = if cues.deleting {
+            self.theme.session_deleting
+        } else if cues.attention_cue {
+            self.theme.session_attention
+        } else {
+            steady_color
+        };
+        (base_color, glyph_color)
+    }
+
+    fn agent_row_owner_spans(
+        &self,
+        session: &AgentSession,
+        project: Option<&Project>,
+        muted: Color,
+    ) -> (Span<'static>, Option<Span<'static>>) {
+        match agent_row_owner_tag(session, project) {
+            AgentRowOwnerTag::Project(ProjectTagKind::Healthy, project_name) => (
+                Span::styled("  ※ ", Style::default().fg(muted)),
+                Some(Span::styled(project_name, Style::default().fg(muted))),
+            ),
+            AgentRowOwnerTag::Project(ProjectTagKind::PathMissing, project_name) => {
+                let color = self.theme.project_missing_fg;
+                (
+                    Span::styled("  ⚠ ", Style::default().fg(color)),
+                    Some(Span::styled(project_name, Style::default().fg(color))),
+                )
+            }
+            AgentRowOwnerTag::Project(ProjectTagKind::Orphan, _) => (
+                Span::styled(
+                    "  ⚠ removed project",
+                    Style::default().fg(self.theme.project_missing_fg),
+                ),
+                None,
+            ),
+            AgentRowOwnerTag::Folder { label } => {
+                let color = self.theme.standalone_location_fg;
+                (
+                    Span::styled(
+                        format!("  {} ", crate::theme::STANDALONE_GLYPH),
+                        Style::default().fg(color),
+                    ),
+                    Some(Span::styled(label, Style::default().fg(color))),
+                )
+            }
+        }
+    }
+
+    fn agent_row_state_color(&self, word: &str, deleting: bool, steady_color: Color) -> Color {
+        if deleting {
+            return self.theme.session_deleting;
+        }
+        match word {
+            "Needs you" => self.theme.session_attention,
+            "Typing" => self.theme.session_typing,
+            "Working" => self.theme.session_working,
+            "Detached" => steady_color,
+            _ => self.theme.provider_label_fg,
+        }
+    }
+
     /// Build the two-line flat agent row, mirroring the web sidebar row:
     /// line one is the status glyph + name + PR badge; line two is the dim
     /// `project · state word · branch (when it diverges from the name) · tabs`.
     /// The working spinner and attention pulse stay on the line-one glyph.
     fn render_agent_row(&self, session: &AgentSession, text_width: u16) -> ListItem<'static> {
         let label = session.display_label();
-        // Attention wins over the working spinner (a flagged agent may still be
-        // streaming its permission prompt). Both cues are rolled up across the
-        // agent's tabs. The attention glyph blinks on wall-clock time.
-        let needs_attention = self.engine.config.ui.attention_indicator
-            && self.engine.session_needs_attention(&session.id);
-        // The blinking GLYPH additionally requires an Active session, because
-        // `any_row_animating` only raises the poll cadence for one: on a
-        // detached or exited agent the blink would freeze wherever the last
-        // lazy redraw left it. The line-two state word below keeps the ungated
-        // flag, since it is static text and its ladder is shared with the web.
-        let attention_cue =
-            needs_attention && matches!(session.status, crate::model::SessionStatus::Active);
-        let working = matches!(session.status, crate::model::SessionStatus::Active)
-            && self.engine.session_is_streaming(&session.id);
-        // Typing is an Active-only cue and takes precedence over the working
-        // spinner (typing suppresses streaming in the engine anyway), but sits
-        // below attention. Rolled up across all of the agent's tabs.
-        let typing = matches!(session.status, crate::model::SessionStatus::Active)
-            && self.engine.session_is_typing(&session.id);
+        let cues = self.agent_row_cues(session);
+        let AgentRowCues {
+            needs_attention,
+            working,
+            typing,
+            deleting,
+            ..
+        } = cues;
         let (steady_dot, steady_color) = self.theme.session_dot(&session.status);
-        // The line-one glyph SHAPE encodes the state (attention blink, typing
-        // caret, working spinner, else the steady dot); its COLOR does not, so
-        // identity stays stable. Only attention keeps an accent so the "act now"
-        // cue still pops. The live-state color lives on the state word (line two).
-        let dot = if attention_cue {
-            if self.attention_blink_on() {
-                crate::theme::ATTENTION_GLYPH
-            } else {
-                " "
-            }
-            .to_string()
-        } else if typing {
-            crate::theme::TYPING_GLYPH.to_string()
-        } else if working {
-            crate::theme::SPINNER_FRAMES[self.spinner_frame_index()].to_string()
-        } else {
-            steady_dot.to_string()
-        };
-        // A background delete dims and italicizes the whole row.
-        let deleting = self.engine.pending_deletions.contains(&session.id);
-        // Identity color for the NAME: neutral for a live agent, dimmed for
-        // detached/exited, never the typing/working color. The GLYPH keeps the
-        // lifecycle color (steady_color: neutral active, amber detached, muted
-        // exited) plus the attention accent.
-        let base_color = if deleting {
-            self.theme.session_deleting
-        } else if matches!(session.status, crate::model::SessionStatus::Active) {
-            self.theme.session_active
-        } else {
-            self.theme.session_exited
-        };
-        let glyph_color = if deleting {
-            self.theme.session_deleting
-        } else if attention_cue {
-            self.theme.session_attention
-        } else {
-            steady_color
-        };
+        let dot = self.agent_row_glyph(cues, steady_dot);
+        let (base_color, glyph_color) = self.agent_row_colors(session.status, cues, steady_color);
         let italic = |style: Style| {
             if deleting {
                 style.add_modifier(Modifier::ITALIC)
@@ -1501,42 +1569,9 @@ impl App {
         // The standalone terminal row wears the same star; owned terminal rows
         // keep their return arrow, where it means "owned by". Same indent,
         // same column.
-        let missing_fg = self.theme.project_missing_fg;
-        let standalone_fg = self.theme.standalone_location_fg;
-        let (marker, name_span): (Span<'static>, Option<Span<'static>>) =
-            match agent_row_owner_tag(session, found) {
-                AgentRowOwnerTag::Project(ProjectTagKind::Healthy, project_name) => (
-                    Span::styled("  ※ ", Style::default().fg(muted)),
-                    Some(Span::styled(project_name, Style::default().fg(muted))),
-                ),
-                AgentRowOwnerTag::Project(ProjectTagKind::PathMissing, project_name) => (
-                    Span::styled("  ⚠ ", Style::default().fg(missing_fg)),
-                    Some(Span::styled(project_name, Style::default().fg(missing_fg))),
-                ),
-                AgentRowOwnerTag::Project(ProjectTagKind::Orphan, _) => (
-                    Span::styled("  ⚠ removed project", Style::default().fg(missing_fg)),
-                    None,
-                ),
-                AgentRowOwnerTag::Folder { label } => (
-                    Span::styled(
-                        format!("  {} ", crate::theme::STANDALONE_GLYPH),
-                        Style::default().fg(standalone_fg),
-                    ),
-                    Some(Span::styled(label, Style::default().fg(standalone_fg))),
-                ),
-            };
+        let (marker, name_span) = self.agent_row_owner_spans(session, found, muted);
         let word = agent_state_word(session.status, working, typing, needs_attention);
-        let word_color = if deleting {
-            self.theme.session_deleting
-        } else {
-            match word {
-                "Needs you" => self.theme.session_attention,
-                "Typing" => self.theme.session_typing,
-                "Working" => self.theme.session_working,
-                "Detached" => steady_color,
-                _ => self.theme.provider_label_fg,
-            }
-        };
+        let word_color = self.agent_row_state_color(word, deleting, steady_color);
         // Show the branch only when it differs from the displayed name (i.e. a
         // title is set), so it is not repeated as the name on line one, and
         // never at all for an agent that has no branch.
@@ -4277,11 +4312,30 @@ impl App {
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
+        let hints = self.footer_hints_for(self.footer_hint_context());
+        let [hints_area, status_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .areas(area);
+
+        let hint_spans = self.footer_hint_spans(&hints, hints_area.width as usize);
+        Paragraph::new(Line::from(hint_spans))
+            .style(Style::default().bg(self.theme.hint_bar_bg))
+            .render(hints_area, frame.buffer_mut());
+
+        let (status_line, status_bg) = self.footer_status_line(status_area);
+        Paragraph::new(status_line)
+            .style(Style::default().bg(status_bg))
+            .wrap(Wrap { trim: false })
+            .render(status_area, frame.buffer_mut());
+    }
+
+    fn footer_hint_context(&self) -> HintContext {
         let is_on_project = !matches!(
             self.left_items().get(self.selected_left),
             Some(LeftItem::Session(_))
         );
-        let ctx = match self.focus {
+        match self.focus {
             FocusPane::Left if self.left_section == LeftSection::Terminals => {
                 HintContext::LeftTerminal
             }
@@ -4289,27 +4343,24 @@ impl App {
             FocusPane::Left => HintContext::LeftSession,
             FocusPane::Center => HintContext::Center,
             FocusPane::Files => HintContext::Files,
-        };
-        let hints = self.footer_hints_for(ctx);
-        let [hints_area, status_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(1)])
-            .areas(area);
-        let max_w = hints_area.width as usize;
-        let ellipsis = "…";
-        let ellipsis_w = 1;
+        }
+    }
 
-        let mut hint_spans: Vec<Span> = Vec::new();
+    fn footer_hint_spans<'a>(
+        &self,
+        hints: &'a [(String, &'static str)],
+        max_w: usize,
+    ) -> Vec<Span<'a>> {
+        let mut hint_spans = Vec::new();
         let bar_bg = self.theme.hint_bar_bg;
         let mut used = 0usize;
         for (i, (key, desc)) in hints.iter().enumerate() {
-            // width of this hint: separator + <key> + space + desc
-            let sep = if i > 0 { 1 } else { 0 };
-            let hint_w = sep + key.len() + 2 + 1 + desc.len();
-            if used + hint_w > max_w {
-                if used + ellipsis_w <= max_w {
+            let separator_width = usize::from(i > 0);
+            let hint_width = separator_width + key.len() + 3 + desc.len();
+            if used + hint_width > max_w {
+                if used < max_w {
                     hint_spans.push(Span::styled(
-                        ellipsis,
+                        "…",
                         Style::default().fg(self.theme.hint_desc_fg).bg(bar_bg),
                     ));
                 }
@@ -4323,29 +4374,22 @@ impl App {
                 format!(" {desc}"),
                 Style::default().fg(self.theme.hint_desc_fg).bg(bar_bg),
             ));
-            used += hint_w;
+            used += hint_width;
         }
+        hint_spans
+    }
 
-        Paragraph::new(Line::from(hint_spans))
-            .style(Style::default().bg(self.theme.hint_bar_bg))
-            .render(hints_area, frame.buffer_mut());
-
+    fn footer_status_line(&self, status_area: Rect) -> (Line<'static>, Color) {
         let (tone, status_text) = self
             .status
             .most_recent_tui()
             .unwrap_or((StatusTone::Info, String::new()));
         let (dot, dot_color) = self.theme.status_dot(tone);
-        let msg_color = match tone {
-            StatusTone::Info => self.theme.status_info_fg,
-            StatusTone::Busy => self.theme.status_busy_fg,
-            StatusTone::Warning => self.theme.warning_fg,
-            StatusTone::Error => self.theme.status_error_fg,
-        };
-        let status_bg = match tone {
-            StatusTone::Info => self.theme.status_info_bg,
-            StatusTone::Busy => self.theme.status_busy_bg,
-            StatusTone::Warning => self.theme.status_info_bg,
-            StatusTone::Error => self.theme.status_error_bg,
+        let (msg_color, status_bg) = match tone {
+            StatusTone::Info => (self.theme.status_info_fg, self.theme.status_info_bg),
+            StatusTone::Busy => (self.theme.status_busy_fg, self.theme.status_busy_bg),
+            StatusTone::Warning => (self.theme.warning_fg, self.theme.status_info_bg),
+            StatusTone::Error => (self.theme.status_error_fg, self.theme.status_error_bg),
         };
         let prefix = format!(" {dot} ");
         let prefix_w = prefix.chars().count();
@@ -4356,10 +4400,7 @@ impl App {
             Span::styled(prefix, Style::default().fg(dot_color).bg(status_bg)),
             Span::styled(truncated, Style::default().fg(msg_color).bg(status_bg)),
         ]);
-        Paragraph::new(status_line)
-            .style(Style::default().bg(status_bg))
-            .wrap(Wrap { trim: false })
-            .render(status_area, frame.buffer_mut());
+        (status_line, status_bg)
     }
 
     pub(crate) fn footer_hints_for(&self, ctx: HintContext) -> Vec<(String, &'static str)> {
@@ -9997,29 +10038,53 @@ impl App {
             }
         }
 
-        // ── Surface selector ──────────────────────────────────────────────
-        let selector_focused = focus == MacroEditFocus::Surface;
+        let surface_options =
+            self.render_macro_surface_selector(frame, surface_area, state, label_style);
+
+        // ── Cancel / Save ─────────────────────────────────────────────────
+        // Cancel discards typing, so the two targets are separated by more than
+        // the usual gap and by a blank row above (the misclick-safety tenet).
+        let (cancel_button, save_button) =
+            self.render_macro_editor_buttons(frame, buttons_area, focus);
+
+        // ── Hints. Every key is resolved through the bindings. ────────────
+        let hints = self.macro_editor_hints(focus, engaged);
+        Paragraph::new(modal_hint_line(&self.theme, &hints)).render(hint_area, frame.buffer_mut());
+
+        self.overlay_layout.active = OverlayMouseLayout::EditMacros {
+            name_input: name_inner,
+            text_input: text_inner,
+            surface_options,
+            cancel_button,
+            save_button,
+        };
+    }
+
+    fn render_macro_surface_selector(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &MacroEditState,
+        label_style: Style,
+    ) -> [Rect; 3] {
         let options = [
             (MacroSurface::Agent, "Agent"),
             (MacroSurface::Terminal, "Terminal"),
             (MacroSurface::Both, "Both"),
         ];
-        const SURFACE_PREFIX: &str = " Surface:  ";
-        const SURFACE_GAP: &str = "    ";
-        let mut radio_spans: Vec<Span> = vec![Span::styled(SURFACE_PREFIX, label_style)];
-        let mut surface_options = [Rect::default(); 3];
-        let mut cursor_x = surface_area.x + SURFACE_PREFIX.chars().count() as u16;
-        for (i, (variant, label)) in options.iter().enumerate() {
-            if i > 0 {
-                radio_spans.push(Span::raw(SURFACE_GAP));
-                cursor_x += SURFACE_GAP.chars().count() as u16;
+        const PREFIX: &str = " Surface:  ";
+        const GAP: &str = "    ";
+        let mut spans = vec![Span::styled(PREFIX, label_style)];
+        let mut option_areas = [Rect::default(); 3];
+        let mut cursor_x = area.x + PREFIX.chars().count() as u16;
+        for (index, (variant, label)) in options.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw(GAP));
+                cursor_x += GAP.chars().count() as u16;
             }
             let selected = *variant == state.surface;
             let bullet = if selected { "● " } else { "○ " };
-            // Focus wins over selection: the focused GROUP is what the user is
-            // about to act on, and it uses the same `button_active_fg` the
-            // focused checkbox marker does.
-            let style = if selector_focused {
+            let style = if state.focus == MacroEditFocus::Surface {
                 Style::default()
                     .fg(self.theme.button_active_fg)
                     .add_modifier(Modifier::BOLD)
@@ -10028,31 +10093,36 @@ impl App {
             } else {
                 Style::default().fg(self.theme.hint_desc_fg)
             };
-            radio_spans.push(Span::styled(bullet, style));
-            radio_spans.push(Span::styled(*label, style));
+            spans.push(Span::styled(bullet, style));
+            spans.push(Span::styled(*label, style));
             let width = (bullet.chars().count() + label.chars().count()) as u16;
-            surface_options[i] = Rect::new(cursor_x, surface_area.y, width, 1);
+            option_areas[index] = Rect::new(cursor_x, area.y, width, 1);
             cursor_x += width;
         }
-        Paragraph::new(Line::from(radio_spans)).render(surface_area, frame.buffer_mut());
+        Paragraph::new(Line::from(spans)).render(area, frame.buffer_mut());
+        option_areas
+    }
 
-        // ── Cancel / Save ─────────────────────────────────────────────────
-        // Cancel discards typing, so the two targets are separated by more than
-        // the usual gap and by a blank row above (the misclick-safety tenet).
-        let btn_width = 16u16;
+    fn render_macro_editor_buttons(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        focus: MacroEditFocus,
+    ) -> (Rect, Rect) {
+        let button_width = 16u16;
         let gap = 6u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
+        let total = button_width * 2 + gap;
+        let left_offset = area.width.saturating_sub(total) / 2;
         let cancel_button = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
+            x: area.x + left_offset,
+            y: area.y,
+            width: button_width,
             height: 3,
         };
         let save_button = Rect {
-            x: cancel_button.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
+            x: cancel_button.x + button_width + gap,
+            y: area.y,
+            width: button_width,
             height: 3,
         };
 
@@ -10074,55 +10144,41 @@ impl App {
                 true,
             ))
             .render(frame, save_button, &self.theme);
+        (cancel_button, save_button)
+    }
 
-        // ── Hints. Every key is resolved through the bindings. ────────────
-        let hints: Vec<Hint> = if focus == MacroEditFocus::Text && engaged {
-            vec![
+    fn macro_editor_hints(&self, focus: MacroEditFocus, engaged: bool) -> Vec<Hint> {
+        if focus == MacroEditFocus::Text && engaged {
+            return vec![
                 Hint::key(
                     self.bindings.labels_for(Action::ExitCommitInput),
                     "stop editing",
                 ),
                 Hint::key(self.bindings.label_for(Action::ClearTextField), "clear"),
-            ]
-        } else {
-            let mut hints = vec![Hint::maybe_key(
-                self.bindings
-                    .label_for_text_field_dialog(Action::ToggleSelection),
-                "move focus",
-            )];
-            if focus == MacroEditFocus::Text {
-                hints.push(Hint::key(
-                    self.bindings.label_for(Action::EngageCommitInput),
-                    "edit text",
-                ));
-            }
-            if !matches!(focus, MacroEditFocus::Name | MacroEditFocus::Text) {
-                // Space is CONTENT in both kinds of text field: typed into the
-                // single-line name, and swallowed by the unengaged body. The
-                // segment therefore only appears on the selector and the two
-                // buttons, where Space really does act.
-                hints.push(Hint::plain("Space act on focus"));
-            }
-            // The clear key answers on the focused body here too, but the
-            // editor's footer is already at the popup's 64-cell inner width
-            // with the four hints above, so naming a fifth would truncate the
-            // line. The help overlay stays the authoritative reference; a
-            // footer may be incomplete, it may never be WRONG.
-            hints.push(Hint::key(
-                self.bindings.label_for(Action::CloseOverlay),
-                "cancel",
-            ));
-            hints
-        };
-        Paragraph::new(modal_hint_line(&self.theme, &hints)).render(hint_area, frame.buffer_mut());
+            ];
+        }
 
-        self.overlay_layout.active = OverlayMouseLayout::EditMacros {
-            name_input: name_inner,
-            text_input: text_inner,
-            surface_options,
-            cancel_button,
-            save_button,
-        };
+        let mut hints = vec![Hint::maybe_key(
+            self.bindings
+                .label_for_text_field_dialog(Action::ToggleSelection),
+            "move focus",
+        )];
+        if focus == MacroEditFocus::Text {
+            hints.push(Hint::key(
+                self.bindings.label_for(Action::EngageCommitInput),
+                "edit text",
+            ));
+        }
+        if !matches!(focus, MacroEditFocus::Name | MacroEditFocus::Text) {
+            // Space is content in both text fields and an action only on the
+            // selector and buttons.
+            hints.push(Hint::plain("Space act on focus"));
+        }
+        hints.push(Hint::key(
+            self.bindings.label_for(Action::CloseOverlay),
+            "cancel",
+        ));
+        hints
     }
 
     /// Draw one modal text field's border and return its inner area.
