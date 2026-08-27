@@ -3712,6 +3712,22 @@ describe("TerminalPane long-press text selection", () => {
     expect(lift(at(6, 0))).toBe(false)
   })
 
+  it("retires the touch gesture when the pane unmounts", () => {
+    const mounted = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    const detachedContainer = container()
+    const detachedTerm = term()
+    mounted.unmount()
+
+    fireEvent.touchStart(detachedContainer, { touches: [at(6, 0)] })
+    act(() => {
+      vi.advanceTimersByTime(LONG_PRESS_MS)
+    })
+
+    expect(detachedTerm.selection).toBeNull()
+  })
+
   it("selects the word under the finger on a long press", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     press(at(6, 0))
