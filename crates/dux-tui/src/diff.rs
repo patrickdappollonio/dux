@@ -585,6 +585,47 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_file_returns_the_quiet_message_without_a_gutter() {
+        let dir = setup_text_repo("same.txt", "unchanged\n", "unchanged\n");
+        let output = diff_file(
+            dir.path(),
+            "same.txt",
+            &AppTheme::default_dark(),
+            &SyntaxCache::new(),
+            true,
+            4,
+        )
+        .unwrap();
+
+        assert_eq!(output.lines, vec![Line::from("No changes.")]);
+        assert_eq!(output.gutter_width, 0);
+    }
+
+    #[test]
+    fn deleted_text_file_keeps_the_old_side_and_line_number_gutter() {
+        let dir = setup_text_repo("gone.txt", "first\nsecond\n", "");
+        let output = diff_file(
+            dir.path(),
+            "gone.txt",
+            &AppTheme::default_dark(),
+            &SyntaxCache::new(),
+            true,
+            4,
+        )
+        .unwrap();
+        let rendered = output
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("-first")));
+        assert!(rendered.iter().any(|line| line.contains("-second")));
+        assert!(rendered.iter().any(|line| line.contains('│')));
+        assert!(output.gutter_width > 0);
+    }
+
+    #[test]
     fn line_numbers_appear_when_enabled() {
         let dir = setup_text_repo("hello.txt", "aaa\nbbb\nccc\n", "aaa\nbbb\nXXX\nccc\n");
         let cache = SyntaxCache::new();
