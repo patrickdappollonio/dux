@@ -29,3 +29,8 @@ public/dux-screenshot.svg
 
 # generated at build time from raster images by scripts/generate-webp.mjs
 public/**/*.webp
+
+# tui-shot capture sidecars; only the PNG is committed
+public/screens/*.ansi
+public/screens/*.txt
+public/screens/*.json
