@@ -3121,6 +3121,82 @@ fn poll_attention_transitions(
     }
 }
 
+fn handle_pty_write(engine: &mut Engine, id: String, bytes: Vec<u8>) {
+    let wrote = pty_for(engine, &id).is_some_and(|client| client.write_bytes(&bytes).is_ok());
+    if wrote && (engine.providers.contains_key(&id) || engine.companion_terminals.contains_key(&id))
+    {
+        engine.note_pty_write(&id, &bytes);
+    }
+}
+
+fn handle_pty_resize(
+    engine: &Engine,
+    input_owners: &PtySizeOwners,
+    id: String,
+    rows: u16,
+    cols: u16,
+    seq: u64,
+) {
+    let client = pty_for(engine, &id);
+    let had_client = client.is_some();
+    let outcome = input_owners.apply_grid_in_order(
+        &id,
+        seq,
+        rows,
+        cols,
+        |rows, cols| {
+            if let Some(client) = client {
+                let _ = client.resize(rows, cols);
+            }
+        },
+        |rows, cols| {
+            if had_client {
+                dux_core::logger::debug(&format!(
+                    "PTY resize seq {seq} for pty {id} was overtaken mid-apply, so the \
+                     newer {rows}x{cols} is being re-applied"
+                ));
+            }
+        },
+    );
+    if matches!(outcome, dux_core::pty_owners::GridApplyOutcome::Dropped) {
+        dux_core::logger::debug(&format!(
+            "PTY resize seq {seq} for pty {id} dropped: a newer claim's geometry has \
+             already reached the child"
+        ));
+    }
+}
+
+fn handle_apply_wire_request(
+    engine: &mut Engine,
+    cmd: WireCommand,
+    reply: oneshot::Sender<Result<WireCommandOutcome, String>>,
+    origin: StatusScope,
+    status_tx: &mut StatusEmitter,
+    config_reload_tx: &broadcast::Sender<()>,
+    config_disk_ahead: &mut bool,
+) {
+    let mutates_config = cmd.mutates_config_static();
+    if mutates_config && *config_disk_ahead {
+        let reloaded = dux_core::config::load_config(&engine.paths);
+        let _ = engine.apply_reloaded_config(reloaded);
+        *config_disk_ahead = false;
+    }
+
+    engine.current_origin = origin;
+    let result = engine.apply_wire(cmd).map_err(|e| e.to_string());
+    engine.current_origin = StatusScope::All;
+
+    if result.is_ok() && mutates_config {
+        let _ = config_reload_tx.send(());
+    }
+    if let Ok(outcome) = &result
+        && let Some(status) = &outcome.status
+    {
+        let _ = status_tx.send(status.clone());
+    }
+    let _ = reply.send(result);
+}
+
 fn handle_request(
     engine: &mut Engine,
     req: EngineRequest,
@@ -3140,56 +3216,15 @@ fn handle_request(
 ) {
     match req {
         EngineRequest::ApplyWire(cmd, reply, origin) => {
-            // A config-static mutation (macros / global env / Changes-pane flag /
-            // preference toggles) saves (eager or lazy) and adopts the change in
-            // place — there is no disk reload
-            // to drive the usual `config.changed` signal, so we fire it ourselves
-            // below once the command succeeds. Capture this BEFORE `cmd` is moved
-            // into `apply_wire`.
-            let mutates_config = cmd.mutates_config_static();
-            // Reconcile before a config-static mutation if a raw "Save" left disk
-            // ahead of memory. These mutations persist via a WHOLESALE toml_edit
-            // patch (`apply_patches` rewrites every key from `engine.config`), so
-            // applying one against the stale in-memory config would clobber the
-            // user's just-saved raw edits. Re-read disk and adopt it first so the
-            // patch carries the saved edits forward; the `config.changed` emitted
-            // after a successful mutation then reflects the combined state. The
-            // raw-save flushed pending writes before writing, so nothing in memory
-            // is lost by reloading here.
-            if mutates_config && *config_disk_ahead {
-                let reloaded = dux_core::config::load_config(&engine.paths);
-                let _ = engine.apply_reloaded_config(reloaded);
-                *config_disk_ahead = false;
-            }
-            // Tag every status this command mints with the originating
-            // connection. The engine reads `current_origin` at each mint site
-            // (the synchronous outcome, deferred busies/finals, worker busies);
-            // reset to `All` after so a later spontaneous status still broadcasts.
-            engine.current_origin = origin;
-            let res = engine.apply_wire(cmd).map_err(|e| e.to_string());
-            engine.current_origin = StatusScope::All;
-            // On a successful config-static mutation, signal the web layer's
-            // forwarder so it emits `config.changed` and every `config`-subscribed
-            // client refetches `/api/v1/bootstrap`. Fire-and-forget: an `Err` only
-            // means no forwarder is listening (e.g. the TUI flip), which is fine.
-            if res.is_ok() && mutates_config {
-                let _ = config_reload_tx.send(());
-            }
-            // ALSO route the synchronous command-result status through the shared
-            // controller — broadcast to EVERY client and auto-cleared on the same
-            // policy as engine statuses — instead of leaving it only on the
-            // requesting client's status line, where it never cleared (and could
-            // be wiped early by an unrelated status's expiry). The reply still
-            // carries the status for the requester's instant ack (and the Err path
-            // it needs to revert an optimistic reorder); the requester then sets
-            // the same value from both the reply and the broadcast, which is a
-            // harmless idempotent set.
-            if let Ok(outcome) = &res
-                && let Some(status) = &outcome.status
-            {
-                let _ = status_tx.send(status.clone());
-            }
-            let _ = reply.send(res);
+            handle_apply_wire_request(
+                engine,
+                cmd,
+                reply,
+                origin,
+                status_tx,
+                config_reload_tx,
+                config_disk_ahead,
+            );
         }
         EngineRequest::EmitStatus(status) => {
             let _ = status_tx.send(status);
@@ -3227,62 +3262,10 @@ fn handle_request(
         // Shutdown is handled inline in the loop (it must stop the thread).
         EngineRequest::Shutdown(_) => unreachable!("Shutdown handled in the loop"),
         EngineRequest::WritePty(id, bytes) => {
-            let wrote =
-                pty_for(engine, &id).is_some_and(|client| client.write_bytes(&bytes).is_ok());
-            // Record what actually reached a PTY (agent tab or companion
-            // terminal) so output the USER caused isn't read as the PTY
-            // working. The engine classifies the bytes and picks the window:
-            // keystrokes stamp the typing window, a forwarded MOUSE report
-            // stamps the pointer window (scrolling is not typing, but the
-            // repaint it provokes is not the agent working either), and an
-            // empty frame or a focus report stamps nothing. How long a pointer
-            // report suppresses depends on the gesture: a wheel notch arms the
-            // long window, a click a much shorter one, and mere motion arms
-            // nothing. Tab and terminal ids are disjoint and both key those
-            // maps, so one call covers both. Treating every write as either
-            // typing or nothing was the bug: it dropped the wheel entirely, so
-            // scrolling an alt-screen agent showed it Working for as long as
-            // the user scrolled.
-            if wrote
-                && (engine.providers.contains_key(&id)
-                    || engine.companion_terminals.contains_key(&id))
-            {
-                engine.note_pty_write(&id, &bytes);
-            }
+            handle_pty_write(engine, id, bytes);
         }
         EngineRequest::ResizePty(id, rows, cols, seq) => {
-            // The core helper owns the accept/apply/heal sequence shared with
-            // the terminal UI. The callback still runs without the ownership
-            // lock held, preserving the terminal-lock ordering documented on it.
-            let client = pty_for(engine, &id);
-            let had_client = client.is_some();
-            match input_owners.apply_grid_in_order(
-                &id,
-                seq,
-                rows,
-                cols,
-                |rows, cols| {
-                    if let Some(client) = client {
-                        let _ = client.resize(rows, cols);
-                    }
-                },
-                |rows, cols| {
-                    if had_client {
-                        dux_core::logger::debug(&format!(
-                            "PTY resize seq {seq} for pty {id} was overtaken mid-apply, so the \
-                             newer {rows}x{cols} is being re-applied"
-                        ));
-                    }
-                },
-            ) {
-                dux_core::pty_owners::GridApplyOutcome::Dropped => {
-                    dux_core::logger::debug(&format!(
-                        "PTY resize seq {seq} for pty {id} dropped: a newer claim's geometry has \
-                         already reached the child"
-                    ));
-                }
-                dux_core::pty_owners::GridApplyOutcome::Applied { .. } => {}
-            }
+            handle_pty_resize(engine, input_owners, id, rows, cols, seq);
         }
         EngineRequest::PtyGridSize(id, reply) => {
             let _ = reply.send(pty_for(engine, &id).and_then(|client| client.grid_size()));
