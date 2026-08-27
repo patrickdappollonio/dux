@@ -498,6 +498,11 @@ enum RawInputFlow {
     Return(bool),
 }
 
+enum KeyRoute {
+    Continue,
+    Return(bool),
+}
+
 impl RawInputDispatch {
     fn new(is_scrolled_back: bool, may_write_pty: bool) -> Self {
         Self {
@@ -889,25 +894,46 @@ impl App {
         true
     }
 
-    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        // Prompts take precedence over every other input target so modal text
-        // fields can safely capture keystrokes even when other modes were
-        // previously active.
+    fn handle_help_key(&mut self, key: KeyEvent) -> bool {
+        let Some(scroll) = self.help_scroll.as_mut() else {
+            return false;
+        };
+        let max_help = self
+            .last_help_lines
+            .saturating_sub(self.last_help_height.max(1));
+        if let Some(action) = self.bindings.lookup(&key, BindingScope::Help) {
+            match action {
+                Action::MoveDown => *scroll = (*scroll + 1).min(max_help),
+                Action::MoveUp => *scroll = scroll.saturating_sub(1),
+                Action::ScrollPageDown => {
+                    let page = self.last_help_height.max(1);
+                    *scroll = (*scroll + page).min(max_help);
+                }
+                Action::ScrollPageUp => {
+                    let page = self.last_help_height.max(1);
+                    *scroll = scroll.saturating_sub(page);
+                }
+                Action::ScrollToBottom => *scroll = max_help,
+                Action::ScrollToTop => *scroll = 0,
+                _ => {}
+            }
+        } else if key.code == KeyCode::Char(' ') {
+            *scroll = (*scroll + 1).min(max_help);
+        }
+        true
+    }
+
+    fn route_key_before_bindings(&mut self, key: KeyEvent) -> Result<KeyRoute> {
         if !matches!(self.prompt, PromptState::None) {
-            return self.handle_prompt_key(key);
+            return self.handle_prompt_key(key).map(KeyRoute::Return);
         }
         if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
             self.handle_startup_log_viewer_key(key);
-            return Ok(false);
+            return Ok(KeyRoute::Return(false));
         }
-        // Macro bar consumes all keys when open.
         if self.macro_bar.is_some() {
-            return self.handle_macro_bar_key(key);
+            return self.handle_macro_bar_key(key).map(KeyRoute::Return);
         }
-        // Interactive mode is handled at the event-loop level via raw stdin
-        // passthrough (poll_and_forward_raw_input). When the input target is
-        // Agent or Terminal, crossterm's event reader is not called, so
-        // handle_key is never reached for those modes.
         debug_assert!(
             !matches!(
                 self.input_target,
@@ -918,297 +944,228 @@ impl App {
         if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
             && self.close_top_overlay()
         {
-            return Ok(false);
+            return Ok(KeyRoute::Return(false));
         }
-        // While the agent-list filter is open and the Left pane holds focus, route
-        // keys to the filter first so query characters type into it and never fire
-        // a hotkey. Editing/navigation keys are consumed here; anything else (Tab,
-        // the palette chord, etc.) falls through to normal handling. Esc is already
-        // handled just above via `close_top_overlay`, keeping filter dismissal
-        // uniform with how prompts are dismissed.
-        //
-        // EITHER section, deliberately. The filter prunes the terminal list too,
-        // so the terminals are part of the result set; gating this on the agents
-        // section meant the query stopped being editable the moment the cursor
-        // stepped down into a terminal it had just found.
         if self.agent_filter.is_some()
             && self.focus == FocusPane::Left
             && self.handle_agent_filter_key(key)?
         {
-            return Ok(false);
+            return Ok(KeyRoute::Return(false));
         }
         if key.code == KeyCode::Esc
             && self.focus == FocusPane::Files
             && (self.files_search_active || self.has_files_search())
         {
             self.handle_files_key(key)?;
-            return Ok(false);
+            return Ok(KeyRoute::Return(false));
         }
-        if let Some(ref mut scroll) = self.help_scroll {
-            // Help overlay is open — consume all keys, only scroll keys do anything.
-            let max_help = self
-                .last_help_lines
-                .saturating_sub(self.last_help_height.max(1));
-            if let Some(action) = self.bindings.lookup(&key, BindingScope::Help) {
-                match action {
-                    Action::MoveDown => *scroll = (*scroll + 1).min(max_help),
-                    Action::MoveUp => *scroll = scroll.saturating_sub(1),
-                    Action::ScrollPageDown => {
-                        let page = self.last_help_height.max(1);
-                        *scroll = (*scroll + page).min(max_help);
-                    }
-                    Action::ScrollPageUp => {
-                        let page = self.last_help_height.max(1);
-                        *scroll = scroll.saturating_sub(page);
-                    }
-                    Action::ScrollToBottom => *scroll = max_help,
-                    Action::ScrollToTop => *scroll = 0,
-                    _ => {}
-                }
-            } else if key.code == KeyCode::Char(' ') {
-                // Space scrolls down one line in the help overlay (not bound
-                // via MoveDown to avoid conflicting with ToggleProject/StageUnstage
-                // in other scopes).
-                *scroll = (*scroll + 1).min(max_help);
-            }
-            return Ok(false);
+        if self.handle_help_key(key) {
+            return Ok(KeyRoute::Return(false));
         }
-        // When typing a commit message, route all keys to the commit input
-        // handler so that q, ?, [ etc. are typed instead of triggering
-        // global shortcuts.
         if self.input_target == InputTarget::CommitMessage {
             self.handle_commit_input_key(key)?;
-            return Ok(false);
+            return Ok(KeyRoute::Return(false));
         }
         if self.input_target == InputTarget::StartupCommand {
             self.handle_startup_command_input_key(key)?;
-            return Ok(false);
+            return Ok(KeyRoute::Return(false));
         }
-        // Minimized typing: chords belong to dux, typing belongs to the agent.
-        // While the center pane is typeable and at the live edge, typing-owned
-        // keys skip the Global and Center binding lookups entirely and are
-        // encoded straight to the focused surface's PTY. Scrolled back, the
-        // ladder runs as today so the scroll bindings win (and the encoder
-        // fall-through in `handle_center_key` suppresses what falls through,
-        // mirroring the raw path's scroll-mode suppression). Every modal
-        // surface (prompt, help, macro bar, filters, resize mode) is either
-        // handled above this point or excluded by `center_typeable` itself.
-        //
-        // The rule for a scrolled-back pane is that a key the option handed to
-        // the agent is SUPPRESSED there, like every other typed key: Tab and
-        // Shift-Tab are dropped rather than being let down to the Global
-        // ladder, where FocusNext would move the focus out from under a frozen
-        // view. That is the one place they differ from the keys the ladder is
-        // for (the scroll bindings), which keep working scrolled back.
+        Ok(KeyRoute::Continue)
+    }
+
+    fn takeover_card_owns_center_key(&self) -> bool {
+        self.focus == FocusPane::Center
+            && !self.resize_mode
+            && matches!(self.center_mode, CenterMode::Agent)
+            && self.focused_pty_is_covered_by_card()
+    }
+
+    fn handle_takeover_card_key(&mut self, key: KeyEvent, typing_owns_key: bool) -> bool {
+        let presses_button = self.bindings.lookup(&key, BindingScope::Center)
+            == Some(Action::FocusAgent)
+            || (key.code == KeyCode::Char(' ') && key.modifiers.is_empty());
+        if presses_button {
+            self.take_over_focused_pty();
+            return true;
+        }
+        typing_owns_key && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+    }
+
+    fn route_minimized_center_key(&mut self, key: KeyEvent) -> bool {
         let typing_owns_key = crate::keybindings::center_typing_owns_key(
             &key,
             self.engine.config.ui.tab_reaches_agent,
         );
-        // THE TAKE-OVER CARD owns the center pane's keyboard while it covers it,
-        // and it is asked BEFORE the typing bypass below, because every key that
-        // bypass would hand to the agent is a key this surface is not allowed to
-        // write. The card offers one gesture, so two keys press its button: the
-        // binding that focuses an agent (the key already in the user's hands for
-        // "act on the pane in front of me") and Space, which activates the
-        // focused control in every dialog dux has.
-        //
-        // Tab and Shift-Tab ALWAYS fall through to the pane ladder here, even
-        // with `tab_reaches_agent` on: that option hands them to an agent this
-        // keyboard cannot reach, so keeping them would trap the user on a pane
-        // they cannot use. Every other typing-owned key is swallowed (it goes
-        // nowhere today either, dropped at the ownership gate), and every dux
-        // chord falls through to the ladders below exactly as it does anywhere
-        // else.
-        //
-        // Resize mode is excluded for the same reason `center_typeable` excludes
-        // it: it is a dux mode the user turned on themselves, its keys are the
-        // arrows, and its ladder runs BELOW this rung. Every other exclusion
-        // `center_typeable` makes is already handled above this point.
-        let card_owns_center = self.focus == FocusPane::Center
-            && !self.resize_mode
-            && matches!(self.center_mode, CenterMode::Agent)
-            && self.focused_pty_is_covered_by_card();
-        if card_owns_center {
-            let presses_the_button = self.bindings.lookup(&key, BindingScope::Center)
-                == Some(Action::FocusAgent)
-                || (key.code == KeyCode::Char(' ') && key.modifiers.is_empty());
-            if presses_the_button {
-                self.take_over_focused_pty();
-                return Ok(false);
-            }
-            if typing_owns_key && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
-                return Ok(false);
-            }
+        let card_owns_center = self.takeover_card_owns_center_key();
+        if card_owns_center && self.handle_takeover_card_key(key, typing_owns_key) {
+            return true;
         }
         if !card_owns_center && self.center_typeable() && typing_owns_key {
             if !self.scroll_mode_active() {
                 self.forward_typing_key_to_center(&key);
-                return Ok(false);
+                return true;
             }
             if self.engine.config.ui.tab_reaches_agent
                 && matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
             {
-                return Ok(false);
+                return true;
             }
         }
-        // Check if a Global binding should defer to a pane-scoped binding.
-        // For example, `q` is Quit globally but ScrollToBottom in Center — if
-        // the focused pane has a binding for this key, skip the global handler
-        // and let the pane handler run instead.
-        let defer_global = if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::Quit)
-        {
-            let pane_scope = match self.focus {
-                FocusPane::Center => Some(BindingScope::Center),
-                FocusPane::Files => Some(BindingScope::Files),
-                _ => None,
-            };
-            pane_scope.is_some_and(|scope| self.bindings.lookup(&key, scope).is_some())
-        } else {
-            false
-        };
+        false
+    }
 
-        if !defer_global && let Some(action) = self.bindings.lookup(&key, BindingScope::Global) {
-            match action {
-                Action::Quit => return Ok(self.begin_quit()),
-                Action::ToggleHelp => {
-                    self.help_scroll = if self.help_scroll.is_some() {
-                        None
-                    } else {
-                        Some(0)
-                    };
+    fn should_defer_global_key(&self, key: &KeyEvent) -> bool {
+        if self.bindings.lookup(key, BindingScope::Global) != Some(Action::Quit) {
+            return false;
+        }
+        let pane_scope = match self.focus {
+            FocusPane::Center => Some(BindingScope::Center),
+            FocusPane::Files => Some(BindingScope::Files),
+            _ => None,
+        };
+        pane_scope.is_some_and(|scope| self.bindings.lookup(key, scope).is_some())
+    }
+
+    fn focus_next_pane(&mut self) {
+        let has_staged = !self.engine.staged_files.is_empty();
+        if self.focus == FocusPane::Left
+            && self.left_section == LeftSection::Projects
+            && self.has_terminal_items()
+        {
+            self.left_section = LeftSection::Terminals;
+            self.clamp_terminal_cursor();
+        } else if self.focus == FocusPane::Left && self.left_section == LeftSection::Terminals {
+            self.left_section = LeftSection::Projects;
+            self.focus = self.focus.next();
+        } else if self.focus == FocusPane::Files {
+            match self.right_section.next(has_staged) {
+                Some(next) => {
+                    self.right_section = next;
+                    self.clamp_files_cursor();
                 }
-                Action::ForceRedraw => {
-                    self.force_redraw = true;
-                    self.set_info("Interface redrawn. All screen contents have been repainted.");
+                None => {
+                    self.focus = self.focus.next();
+                    self.left_section = LeftSection::Projects;
                 }
-                Action::OpenPalette => self.open_command_palette(),
-                Action::FocusNext => {
-                    let has_staged = !self.engine.staged_files.is_empty();
-                    if self.focus == FocusPane::Left
-                        && self.left_section == LeftSection::Projects
-                        && self.has_terminal_items()
-                    {
-                        self.left_section = LeftSection::Terminals;
-                        self.clamp_terminal_cursor();
-                    } else if self.focus == FocusPane::Left
-                        && self.left_section == LeftSection::Terminals
-                    {
-                        self.left_section = LeftSection::Projects;
-                        self.focus = self.focus.next();
-                    } else if self.focus == FocusPane::Files {
-                        match self.right_section.next(has_staged) {
-                            Some(next) => {
-                                self.right_section = next;
-                                self.clamp_files_cursor();
-                            }
-                            None => {
-                                self.focus = self.focus.next();
-                                self.left_section = LeftSection::Projects;
-                            }
-                        }
-                    } else {
-                        self.focus = self.focus.next();
-                        if self.focus == FocusPane::Files && self.right_hidden {
-                            self.focus = self.focus.next();
-                        }
-                        if self.focus == FocusPane::Files {
-                            self.right_section = RightSection::first();
-                            self.clamp_files_cursor();
-                        } else if self.focus == FocusPane::Left {
-                            self.left_section = LeftSection::Projects;
-                        }
-                    }
-                    self.input_target = InputTarget::None;
-                    self.fullscreen_overlay = FullscreenOverlay::None;
-                }
-                Action::FocusPrev => {
-                    let has_staged = !self.engine.staged_files.is_empty();
-                    if self.focus == FocusPane::Left && self.left_section == LeftSection::Terminals
-                    {
-                        self.left_section = LeftSection::Projects;
-                    } else if self.focus == FocusPane::Left
-                        && self.left_section == LeftSection::Projects
-                    {
-                        self.focus = self.focus.previous();
-                        if self.focus == FocusPane::Files && self.right_hidden {
-                            self.focus = self.focus.previous();
-                        }
-                        if self.focus == FocusPane::Files {
-                            self.right_section = RightSection::last(has_staged);
-                            self.clamp_files_cursor();
-                        }
-                    } else if self.focus == FocusPane::Files {
-                        match self.right_section.previous() {
-                            Some(prev) => {
-                                self.right_section = prev;
-                                self.clamp_files_cursor();
-                            }
-                            None => {
-                                self.focus = self.focus.previous();
-                            }
-                        }
-                    } else {
-                        self.focus = self.focus.previous();
-                        if self.focus == FocusPane::Files && self.right_hidden {
-                            self.focus = self.focus.previous();
-                        }
-                        if self.focus == FocusPane::Files {
-                            self.right_section = RightSection::last(has_staged);
-                            self.clamp_files_cursor();
-                        } else if self.focus == FocusPane::Left {
-                            if self.has_terminal_items() {
-                                self.left_section = LeftSection::Terminals;
-                                self.clamp_terminal_cursor();
-                            } else {
-                                self.left_section = LeftSection::Projects;
-                            }
-                        }
-                    }
-                    self.input_target = InputTarget::None;
-                    self.fullscreen_overlay = FullscreenOverlay::None;
-                }
-                Action::ToggleSidebar => {
-                    self.left_collapsed = !self.left_collapsed;
-                }
-                Action::ToggleGitPane => {
-                    self.right_collapsed = !self.right_collapsed;
-                    if self.right_collapsed && self.focus == FocusPane::Files {
-                        self.focus = FocusPane::Center;
-                    }
-                }
-                Action::RemoveGitPane => self.toggle_git_pane_removed(),
-                Action::ToggleResizeMode => {
-                    self.resize_mode = !self.resize_mode;
-                    if self.resize_mode {
-                        let grow = self.bindings.labels_for(Action::ResizeGrow);
-                        let shrink = self.bindings.labels_for(Action::ResizeShrink);
-                        self.set_info(format!(
-                            "Resize mode on: {shrink}/{grow} resize side panes."
-                        ));
-                    } else {
-                        self.persist_pane_widths();
-                        let key = self.bindings.label_for(Action::ToggleResizeMode);
-                        self.set_info(format!(
-                            "Resize mode off. Pane widths saved. Press {key} to re-enter."
-                        ));
-                    }
-                }
-                // Nothing closed: the early `close_top_overlay` at the top of
-                // this function already consumed the close key when there was
-                // an overlay to dismiss, and when the close key is typing-owned
-                // (Esc, the default) the minimized-typing bypass above already
-                // forwarded it to a typeable agent before this lookup ran. So
-                // this arm only fires for a CloseOverlay rebound to a chord dux
-                // does not otherwise own: forward it to the typeable agent so
-                // the keystroke is not silently eaten; anywhere else it falls
-                // to the catch-all and is consumed as before.
-                Action::CloseOverlay if self.center_typeable() && !self.scroll_mode_active() => {
-                    self.forward_typing_key_to_center(&key);
-                }
-                _ => {}
             }
+        } else {
+            self.focus = self.focus.next();
+            if self.focus == FocusPane::Files && self.right_hidden {
+                self.focus = self.focus.next();
+            }
+            if self.focus == FocusPane::Files {
+                self.right_section = RightSection::first();
+                self.clamp_files_cursor();
+            } else if self.focus == FocusPane::Left {
+                self.left_section = LeftSection::Projects;
+            }
+        }
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+    }
+
+    fn focus_previous_pane(&mut self) {
+        let has_staged = !self.engine.staged_files.is_empty();
+        if self.focus == FocusPane::Left && self.left_section == LeftSection::Terminals {
+            self.left_section = LeftSection::Projects;
+        } else if self.focus == FocusPane::Left && self.left_section == LeftSection::Projects {
+            self.focus = self.focus.previous();
+            if self.focus == FocusPane::Files && self.right_hidden {
+                self.focus = self.focus.previous();
+            }
+            if self.focus == FocusPane::Files {
+                self.right_section = RightSection::last(has_staged);
+                self.clamp_files_cursor();
+            }
+        } else if self.focus == FocusPane::Files {
+            match self.right_section.previous() {
+                Some(previous) => {
+                    self.right_section = previous;
+                    self.clamp_files_cursor();
+                }
+                None => self.focus = self.focus.previous(),
+            }
+        } else {
+            self.focus = self.focus.previous();
+            if self.focus == FocusPane::Files && self.right_hidden {
+                self.focus = self.focus.previous();
+            }
+            if self.focus == FocusPane::Files {
+                self.right_section = RightSection::last(has_staged);
+                self.clamp_files_cursor();
+            } else if self.focus == FocusPane::Left {
+                if self.has_terminal_items() {
+                    self.left_section = LeftSection::Terminals;
+                    self.clamp_terminal_cursor();
+                } else {
+                    self.left_section = LeftSection::Projects;
+                }
+            }
+        }
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+    }
+
+    fn toggle_resize_mode(&mut self) {
+        self.resize_mode = !self.resize_mode;
+        if self.resize_mode {
+            let grow = self.bindings.labels_for(Action::ResizeGrow);
+            let shrink = self.bindings.labels_for(Action::ResizeShrink);
+            self.set_info(format!(
+                "Resize mode on: {shrink}/{grow} resize side panes."
+            ));
+        } else {
+            self.persist_pane_widths();
+            let key = self.bindings.label_for(Action::ToggleResizeMode);
+            self.set_info(format!(
+                "Resize mode off. Pane widths saved. Press {key} to re-enter."
+            ));
+        }
+    }
+
+    fn handle_global_action(&mut self, action: Action, key: KeyEvent) -> bool {
+        match action {
+            Action::Quit => return self.begin_quit(),
+            Action::ToggleHelp => {
+                self.help_scroll = self.help_scroll.is_none().then_some(0);
+            }
+            Action::ForceRedraw => {
+                self.force_redraw = true;
+                self.set_info("Interface redrawn. All screen contents have been repainted.");
+            }
+            Action::OpenPalette => self.open_command_palette(),
+            Action::FocusNext => self.focus_next_pane(),
+            Action::FocusPrev => self.focus_previous_pane(),
+            Action::ToggleSidebar => self.left_collapsed = !self.left_collapsed,
+            Action::ToggleGitPane => {
+                self.right_collapsed = !self.right_collapsed;
+                if self.right_collapsed && self.focus == FocusPane::Files {
+                    self.focus = FocusPane::Center;
+                }
+            }
+            Action::RemoveGitPane => self.toggle_git_pane_removed(),
+            Action::ToggleResizeMode => self.toggle_resize_mode(),
+            Action::CloseOverlay if self.center_typeable() && !self.scroll_mode_active() => {
+                self.forward_typing_key_to_center(&key);
+            }
+            _ => {}
+        }
+        false
+    }
+
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match self.route_key_before_bindings(key)? {
+            KeyRoute::Continue => {}
+            KeyRoute::Return(should_exit) => return Ok(should_exit),
+        }
+        if self.route_minimized_center_key(key) {
             return Ok(false);
-        } // !defer_global
+        }
+
+        let defer_global = self.should_defer_global_key(&key);
+        if !defer_global && let Some(action) = self.bindings.lookup(&key, BindingScope::Global) {
+            return Ok(self.handle_global_action(action, key));
+        }
         if self.resize_mode {
             self.handle_resize_key(key);
             return Ok(false);
@@ -1221,7 +1178,6 @@ impl App {
         }
         Ok(false)
     }
-
     /// Move the agents-section selection to `index` and run the side effects
     /// every agent-row move shares: drop any project-chooser context, close the
     /// diff overlay, and refresh the right pane for the newly selected agent.
