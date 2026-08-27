@@ -4290,12 +4290,11 @@ impl App {
         &mut self,
         message: impl Into<String>,
     ) -> dux_core::statusline::Generation {
-        self.status
+        let generation = self
+            .status
             .set(Instant::now(), None, StatusTone::Warning, message);
         self.status.pin();
-        self.status
-            .anon_generation()
-            .expect("the warning just written is on the anonymous slot")
+        generation
     }
 
     pub(crate) fn set_error(&mut self, message: impl Into<String>) {

@@ -620,27 +620,33 @@ impl KeyedStatusController {
         out
     }
 
+    /// Select the most-recently-set open status. Sequence numbers break ties
+    /// between entries written at the same instant.
+    fn most_recent_entry(&self) -> Option<&KeyedStatus> {
+        let anon_ref = self.anon.as_ref();
+        let keyed_ref = self.entries.values().max_by_key(|e| (e.since, e.seq));
+
+        match (anon_ref, keyed_ref) {
+            (None, None) => None,
+            (Some(a), None) => Some(a),
+            (None, Some(k)) => Some(k),
+            (Some(a), Some(k)) => {
+                if (a.since, a.seq) >= (k.since, k.seq) {
+                    Some(a)
+                } else {
+                    Some(k)
+                }
+            }
+        }
+    }
+
     /// The single line the TUI shows: the most-recently-set open status (keyed
     /// or anonymous), or `None` when nothing is open.
     ///
     /// When two entries share the same `since` timestamp the one with the
     /// higher sequence number wins (the later `set` call).
     pub fn most_recent(&self) -> Option<KeyedWireStatus> {
-        let anon_ref = self.anon.as_ref();
-        let keyed_ref = self.entries.values().max_by_key(|e| (e.since, e.seq));
-
-        let winner = match (anon_ref, keyed_ref) {
-            (None, None) => return None,
-            (Some(a), None) => a,
-            (None, Some(k)) => k,
-            (Some(a), Some(k)) => {
-                if (a.since, a.seq) >= (k.since, k.seq) {
-                    a
-                } else {
-                    k
-                }
-            }
-        };
+        let winner = self.most_recent_entry()?;
 
         Some(KeyedWireStatus {
             key: winner.key.clone(),
@@ -666,21 +672,7 @@ impl KeyedStatusController {
     /// entry's `since` instant so the animation stays wall-clock based.
     /// Returns `None` when no status is open.
     pub fn most_recent_tui(&self) -> Option<(StatusTone, String)> {
-        let anon_ref = self.anon.as_ref();
-        let keyed_ref = self.entries.values().max_by_key(|e| (e.since, e.seq));
-
-        let winner = match (anon_ref, keyed_ref) {
-            (None, None) => return None,
-            (Some(a), None) => a,
-            (None, Some(k)) => k,
-            (Some(a), Some(k)) => {
-                if (a.since, a.seq) >= (k.since, k.seq) {
-                    a
-                } else {
-                    k
-                }
-            }
-        };
+        let winner = self.most_recent_entry()?;
 
         let text = match winner.tone {
             StatusTone::Busy => {
@@ -715,21 +707,9 @@ impl KeyedStatusController {
     /// spinner prefix, or an empty string when nothing is open. Mirrors the
     /// previous `StatusLine::message()` API.
     pub fn message(&self) -> String {
-        let anon_ref = self.anon.as_ref();
-        let keyed_ref = self.entries.values().max_by_key(|e| (e.since, e.seq));
-        let winner = match (anon_ref, keyed_ref) {
-            (None, None) => return String::new(),
-            (Some(a), None) => a,
-            (None, Some(k)) => k,
-            (Some(a), Some(k)) => {
-                if (a.since, a.seq) >= (k.since, k.seq) {
-                    a
-                } else {
-                    k
-                }
-            }
-        };
-        winner.message.clone()
+        self.most_recent_entry()
+            .map(|winner| winner.message.clone())
+            .unwrap_or_default()
     }
 
     /// Whether no status is currently open. Mirrors the previous

@@ -78,7 +78,6 @@ import {
   toggleChangesPane,
   useDux,
 } from "@/lib/store"
-import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 import type { ChangedFileView } from "@/lib/types"
@@ -101,12 +100,11 @@ const BULK_CONTROL = "h-9 max-md:h-11"
 // instead of opening the diff, which is the one direction that trade can go
 // wrong, and the neighbour it can be missed onto is the row's own read-only
 // diff click.
-const STATUS_SLOT_MOUSE = "size-5"
+const STATUS_SLOT = "size-5 pointer-coarse:size-11"
 // Touch: the slot IS the selection control, since a finger cannot hover, so it
-// carries the 40px floor on BOTH axes. Its only neighbours are the row's path
+// carries the 44px floor on BOTH axes. Its only neighbours are the row's path
 // and the row itself, whose click opens a read-only diff: a stray tap there
 // costs nothing and is undone by closing the diff.
-const STATUS_SLOT_TOUCH = "size-11"
 
 interface StatusSlotProps {
   status: string
@@ -127,7 +125,6 @@ interface StatusSlotProps {
 // than on the marker: hovering the slot reveals the checkbox and shows the
 // status at the same time.
 function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProps) {
-  const coarse = useIsCoarsePointer()
   const { label } = fileStatusMeta(status)
   // Same duration and easing as the row's trailing ellipsis wrapper, so the two
   // things a hover reveals on this row arrive together rather than at two
@@ -154,7 +151,7 @@ function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProp
       <div
         className={cn(
           "relative flex shrink-0 items-center justify-center",
-          coarse ? STATUS_SLOT_TOUCH : STATUS_SLOT_MOUSE,
+          STATUS_SLOT,
         )}
         onClick={(e) => e.stopPropagation()}
       >
@@ -183,7 +180,7 @@ function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProp
             // is 14px inside the 16px bordered box, so 15px a side makes 44px
             // (measured; 14px left a 1px inert ring). On a mouse it is
             // suppressed so it cannot reach past the slot into the path.
-            coarse ? "after:-inset-[15px]" : "after:hidden",
+            "after:hidden pointer-coarse:after:block pointer-coarse:after:-inset-[15px]",
           )}
         />
       </div>

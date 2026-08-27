@@ -5,6 +5,7 @@ import type { ReactNode } from "react"
 import type { PanelImperativeHandle, PanelProps } from "react-resizable-panels"
 
 import type { DuxState } from "@/lib/store"
+import { stubMatchMedia, type MatchMediaStub } from "@/test/matchMedia"
 
 // What DesktopShell hands react-resizable-panels, and what it does with what
 // the library hands back. The panes themselves are stubbed: TerminalArea drags
@@ -76,6 +77,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
   }
 })
 
+let bootMedia: MatchMediaStub | null = null
+
 function installBootStubs() {
   const mem = new Map<string, string>()
   vi.stubGlobal("localStorage", {
@@ -88,14 +91,8 @@ function installBootStubs() {
     "fetch",
     vi.fn(() => Promise.reject(new Error("offline test"))),
   )
-  vi.stubGlobal(
-    "matchMedia",
-    vi.fn(() => ({
-      matches: false,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    })),
-  )
+  bootMedia?.restore()
+  bootMedia = stubMatchMedia()
 }
 installBootStubs()
 const { DesktopShell, CHANGES_PANE_HEAL_FRAMES } = await import("./App")
@@ -226,6 +223,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
+  bootMedia?.restore()
+  bootMedia = null
   vi.unstubAllGlobals()
 })
 
@@ -386,6 +385,32 @@ describe("DesktopShell drag-collapse", () => {
     // Refusing the write alone would leave a zero-width pane whose preference
     // still says visible, which is the original stranding bug. The split goes
     // back to where it was.
+    expect(nextChangesHandle!.resized).toEqual(["26%"])
+  })
+
+  it("restores a late zero report after a moved gesture is cancelled", () => {
+    mockState = stateWith(true)
+    nextChangesHandle = fakeHandle(26)
+    render(<DesktopShell />)
+    const onResize = panel("changes-pane")!.onResize!
+
+    act(() => {
+      pointer("pointerdown", 300)
+      pointer("pointermove", 340)
+      pointer("pointercancel", 340)
+    })
+    // react-resizable-panels can publish this after pointercancel, when its
+    // stale pointerleave handling drives the pane to zero.
+    act(() => {
+      onResize({ asPercentage: 0, inPixels: 0 }, "changes-pane", {
+        asPercentage: 26,
+        inPixels: 400,
+      })
+    })
+    flushScheduled()
+
+    expect(collapseFromDrag).not.toHaveBeenCalled()
+    expect(localStorage.getItem(SPLIT_KEY)).toBeNull()
     expect(nextChangesHandle!.resized).toEqual(["26%"])
   })
 

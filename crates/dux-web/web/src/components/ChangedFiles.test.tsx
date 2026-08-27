@@ -12,7 +12,7 @@ import {
 import type * as React from "react"
 
 import type { ChangesSlice, DuxState } from "@/lib/store"
-import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
+import { stubMatchMedia, type MatchMediaStub } from "@/test/matchMedia"
 
 // The Changes pane's "Refresh changes" item has exactly one job that a reader
 // cannot see by looking at it: it must take the FORCING path. The store's
@@ -98,6 +98,8 @@ vi.mock("@/lib/notify", async (importOriginal) => {
 // the pane renders a base-ui ScrollArea whose viewport probes APIs jsdom does
 // not implement. `matches: false` plus jsdom's 1024px width put this on the
 // desktop layout.
+let bootMedia: MatchMediaStub | null = null
+
 function installBootStubs() {
   const mem = new Map<string, string>()
   vi.stubGlobal("localStorage", {
@@ -110,19 +112,8 @@ function installBootStubs() {
     "fetch",
     vi.fn(() => Promise.reject(new Error("offline test"))),
   )
-  vi.stubGlobal(
-    "matchMedia",
-    vi.fn((query: string) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-      dispatchEvent: () => false,
-    })),
-  )
+  bootMedia?.restore()
+  bootMedia = stubMatchMedia()
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -175,6 +166,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  bootMedia?.restore()
+  bootMedia = null
   vi.unstubAllGlobals()
 })
 
@@ -548,6 +541,7 @@ describe("the changes pane's multi-select", () => {
     const box = screen.getByLabelText("Select a.ts")
     expect(box.className).toContain("after:hidden")
     expect(box.parentElement!.className).toContain("size-5")
+    expect(box.parentElement!.className).toContain("pointer-coarse:size-11")
   })
 
   // The reveal is keyed on KEYBOARD focus of the checkbox, never focus-within
@@ -629,17 +623,8 @@ describe("the changes pane's multi-select", () => {
 })
 
 describe("the changes pane's selection on a touch screen", () => {
-  let media: MatchMediaStub | null = null
-
   beforeEach(() => {
     mockState = withFiles([], [["a.ts", "M"], ["b.ts", "??"]])
-    // After installBootStubs, whose blanket matchMedia answers false.
-    media = stubCoarsePointer()
-  })
-
-  afterEach(() => {
-    media?.restore()
-    media = null
   })
 
   // A finger cannot hover, so the slot itself is the tap target. jsdom has no
@@ -666,15 +651,15 @@ describe("the changes pane's selection on a touch screen", () => {
     expect(openEditor).not.toHaveBeenCalled()
   })
 
-  // The 40px floor on BOTH axes, and the checkbox halo grown to fill it rather
+  // The 44px floor on BOTH axes, and the checkbox halo grown to fill it rather
   // than suppressed the way the desktop one is. Class pins: the geometry they
   // stand for is measured in the preview container.
-  it("gives the slot the touch floor on both axes with a halo to match", () => {
+  it("gives coarse pointers a larger slot and halo without a React media subscription", () => {
     render(<ChangedFiles />)
     const box = screen.getByLabelText("Select a.ts")
-    expect(box.parentElement!.className).toContain("size-11")
-    expect(box.className).toContain("after:-inset-[15px]")
-    expect(box.className).not.toContain("after:hidden")
+    expect(box.parentElement!.className).toContain("pointer-coarse:size-11")
+    expect(box.className).toContain("pointer-coarse:after:-inset-[15px]")
+    expect(box.className).toContain("pointer-coarse:after:block")
   })
 })
 

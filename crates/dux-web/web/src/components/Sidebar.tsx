@@ -55,7 +55,7 @@ import {
   SIDEBAR_INITIAL_WIDTH,
   useDux,
 } from "@/lib/store"
-import type { SelectedTarget } from "@/lib/store"
+import type { ChangesSlice, SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import type { SessionView } from "@/lib/types"
 import { sessionLabel } from "@/lib/agentWorkspace"
@@ -67,10 +67,12 @@ import { sessionLabel } from "@/lib/agentWorkspace"
 function CollapsedAgentIcon({
   session,
   projectName,
+  changesCount,
   selected,
 }: {
   session: SessionView
   projectName: string
+  changesCount: number | null
   selected: boolean
 }) {
   const label = sessionLabel(session)
@@ -80,9 +82,6 @@ function CollapsedAgentIcon({
     session.needs_attention,
     session.typing,
   )
-  const { changes } = useDux()
-  const changesCount = changesCountFor(changes, session.id)
-
   return (
     <SidebarMenuItem>
       <SimpleTooltip
@@ -134,6 +133,7 @@ function CollapsedAgentRail({
   grouped,
   standalone,
   projectName,
+  changes,
   selectedTarget,
 }: {
   projectIds: string[]
@@ -144,6 +144,7 @@ function CollapsedAgentRail({
    * without expanding the sidebar. */
   standalone: SessionView[]
   projectName: (id: string) => string
+  changes: ChangesSlice
   selectedTarget: SelectedTarget | null
 }) {
   const entries = [
@@ -175,6 +176,7 @@ function CollapsedAgentRail({
               key={session.id}
               session={session}
               projectName={projectLabel}
+              changesCount={changesCountFor(changes, session.id)}
               selected={
                 selectedTarget?.kind === "agent" &&
                 selectedTarget.sessionId === session.id
@@ -408,6 +410,7 @@ export function AppSidebar() {
     selectedTarget,
     pendingSessionOrder,
     pendingProjectOrder,
+    changes,
   } = useDux()
   const rawSessions = spine?.sessions ?? []
   const rawProjects = spine?.projects ?? []
@@ -502,6 +505,7 @@ export function AppSidebar() {
           grouped={grouped}
           standalone={standaloneSessions}
           projectName={projectName}
+          changes={changes}
           selectedTarget={selectedTarget}
         />
       </SidebarContent>

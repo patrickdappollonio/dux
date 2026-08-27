@@ -1520,6 +1520,18 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::Terminal;
     }
 
+    /// Claim and focus a terminal whose PTY was just created synchronously.
+    /// Keep this ordering aligned with ownership presentation: claiming before
+    /// opening the surface prevents the newly launched terminal from briefly
+    /// appearing behind the takeover card.
+    fn activate_new_terminal(&mut self, terminal_id: String) {
+        self.claim_launched_pty(&terminal_id);
+        self.active_terminal_id = Some(terminal_id);
+        self.terminal_return_to_list = true;
+        self.show_companion_terminal_surface();
+        self.input_target = InputTarget::Terminal;
+    }
+
     /// Always spawns a new companion terminal for the selected session.
     pub(crate) fn show_companion_terminal(&mut self) -> Result<()> {
         let Some(session) = self.selected_session().cloned() else {
@@ -1542,16 +1554,7 @@ impl App {
                 return Ok(());
             }
         };
-        // A terminal spawned from here is claimed straight away: its PTY already
-        // exists (unlike an agent launch, which finishes on a worker), and
-        // starting it is one of the two acts that claim, the other being the
-        // card's button. Without it a terminal opened at this keyboard would
-        // come up covered by that card. See `claim_launched_pty`.
-        self.claim_launched_pty(&terminal_id);
-        self.active_terminal_id = Some(terminal_id);
-        self.terminal_return_to_list = true;
-        self.show_companion_terminal_surface();
-        self.input_target = InputTarget::Terminal;
+        self.activate_new_terminal(terminal_id);
         self.set_info(format!(
             "Launched terminal for agent \"{}\".",
             session.display_label()
@@ -1580,16 +1583,7 @@ impl App {
                 return Ok(());
             }
         };
-        // A terminal spawned from here is claimed straight away: its PTY already
-        // exists (unlike an agent launch, which finishes on a worker), and
-        // starting it is one of the two acts that claim, the other being the
-        // card's button. Without it a terminal opened at this keyboard would
-        // come up covered by that card. See `claim_launched_pty`.
-        self.claim_launched_pty(&terminal_id);
-        self.active_terminal_id = Some(terminal_id);
-        self.terminal_return_to_list = true;
-        self.show_companion_terminal_surface();
-        self.input_target = InputTarget::Terminal;
+        self.activate_new_terminal(terminal_id);
         // A project terminal keeps its project above the "no agents" separator,
         // so the sidebar grouping may have changed.
         self.rebuild_left_items();
@@ -1620,16 +1614,7 @@ impl App {
         };
         let where_it_is =
             dux_core::home_path::shorten_home(&dux_core::home_path::standalone_terminal_dir());
-        // A terminal spawned from here is claimed straight away: its PTY already
-        // exists (unlike an agent launch, which finishes on a worker), and
-        // starting it is one of the two acts that claim, the other being the
-        // card's button. Without it a terminal opened at this keyboard would
-        // come up covered by that card. See `claim_launched_pty`.
-        self.claim_launched_pty(&terminal_id);
-        self.active_terminal_id = Some(terminal_id);
-        self.terminal_return_to_list = true;
-        self.show_companion_terminal_surface();
-        self.input_target = InputTarget::Terminal;
+        self.activate_new_terminal(terminal_id);
         // The lifetime, stated truthfully: dux's own shutdown closes every
         // terminal, so "nothing closes it but you" was an overstatement. What is
         // actually special about this kind is that no OTHER event does: removing
@@ -1732,16 +1717,7 @@ impl App {
                 return Ok(());
             }
         };
-        // A terminal spawned from here is claimed straight away: its PTY already
-        // exists (unlike an agent launch, which finishes on a worker), and
-        // starting it is one of the two acts that claim, the other being the
-        // card's button. Without it a terminal opened at this keyboard would
-        // come up covered by that card. See `claim_launched_pty`.
-        self.claim_launched_pty(&terminal_id);
-        self.active_terminal_id = Some(terminal_id);
-        self.terminal_return_to_list = true;
-        self.show_companion_terminal_surface();
-        self.input_target = InputTarget::Terminal;
+        self.activate_new_terminal(terminal_id);
         self.set_info(format!(
             "Launched new terminal for agent \"{}\".",
             session.display_label()

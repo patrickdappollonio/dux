@@ -5,6 +5,7 @@ import type { ReactNode } from "react"
 
 import { SidebarProvider } from "@/components/ui/sidebar"
 import type { DuxState } from "@/lib/store"
+import { stubMatchMedia, type MatchMediaStub } from "@/test/matchMedia"
 
 // Control exactly what the store hands the component: override only `useDux`
 // (keeping every other real store export intact) so the brand-block wiring
@@ -50,6 +51,8 @@ vi.mock("@/components/SimpleTooltip", () => ({
 // bootstrap fetch + reconnect timers). jsdom doesn't expose localStorage/fetch as bare
 // globals, so stub them BEFORE the component (and the store behind it) loads, and
 // keep the boot off the network so these render tests stay hermetic.
+let bootMedia: MatchMediaStub | null = null
+
 function installBootStubs() {
   const mem = new Map<string, string>()
   vi.stubGlobal("localStorage", {
@@ -63,19 +66,8 @@ function installBootStubs() {
     vi.fn(() => Promise.reject(new Error("offline test"))),
   )
   // jsdom does not implement matchMedia, which the sidebar's responsive hook uses.
-  vi.stubGlobal(
-    "matchMedia",
-    vi.fn((query: string) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-      dispatchEvent: () => false,
-    })),
-  )
+  bootMedia?.restore()
+  bootMedia = stubMatchMedia()
 }
 installBootStubs()
 const { AppSidebar } = await import("./Sidebar")
@@ -210,6 +202,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  bootMedia?.restore()
+  bootMedia = null
   vi.unstubAllGlobals()
 })
 
@@ -1395,6 +1389,53 @@ function makeTwoProjectSpine(): DuxState["spine"] {
 }
 
 describe("AppSidebar collapsed icon rail", () => {
+  it("refreshes a rail tooltip's changes count from the parent store snapshot", () => {
+    const spine = makeTwoProjectSpine()
+    mockState = makeState({
+      spine,
+      changes: {
+        sessionId: "s1",
+        phase: "loaded",
+        rev: 1,
+        staged: [{ path: "a.txt" }],
+        unstaged: [],
+        error: null,
+      },
+    })
+    const view = render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    let firstTooltip = screen
+      .getByTestId("collapsed-agent-rail")
+      .querySelectorAll('[data-testid="tooltip-content"]')[0]
+    expect(firstTooltip.textContent).toContain("1 file")
+
+    mockState = makeState({
+      spine,
+      changes: {
+        sessionId: "s1",
+        phase: "loaded",
+        rev: 2,
+        staged: [{ path: "a.txt" }],
+        unstaged: [{ path: "b.txt" }],
+        error: null,
+      },
+    })
+    view.rerender(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    firstTooltip = screen
+      .getByTestId("collapsed-agent-rail")
+      .querySelectorAll('[data-testid="tooltip-content"]')[0]
+    expect(firstTooltip.textContent).toContain("2 files")
+  })
+
   it("renders one agent icon per session across projects instead of project folders", () => {
     mockState = makeState({
       spine: makeTwoProjectSpine(),

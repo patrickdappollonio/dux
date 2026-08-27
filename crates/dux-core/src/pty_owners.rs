@@ -102,6 +102,22 @@ pub struct AppliedGrid {
     pub cols: u16,
 }
 
+/// Result of applying a stamped PTY grid through the shared cross-surface
+/// ordering gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GridApplyOutcome<T> {
+    /// A newer grid already reached the child, so the supplied apply callback
+    /// was not called.
+    Dropped,
+    /// This grid was accepted and applied. `superseding_grid` names the newer
+    /// geometry that was re-applied when this call was overtaken while its
+    /// callback was touching the child.
+    Applied {
+        result: T,
+        superseding_grid: Option<(u16, u16)>,
+    },
+}
+
 /// Tracks which connection currently owns sizing+input for each PTY, keyed by
 /// pty id (the tab id for an agent PTY, which is the session id for the
 /// session-slot tab, and the terminal id for a companion). Shared between every
@@ -513,9 +529,9 @@ impl PtySizeOwners {
     /// its geometry. Nothing corrects that afterwards: the owner has no reason to
     /// resend a size it never changed.
     ///
-    /// So each apply site offers its seq here immediately before touching the
-    /// child, and a seq that is not strictly newer than the last one that landed
-    /// is dropped. Two apply sites, one order, decided in one place.
+    /// So [`Self::apply_grid_in_order`] offers each seq here immediately before
+    /// touching the child, and a seq that is not strictly newer than the last one
+    /// that landed is dropped. Two apply sites, one order, decided in one place.
     ///
     /// Dropping is the right answer rather than a loss: a dropped resize is by
     /// definition superseded by one that already landed, and the viewer whose
@@ -541,10 +557,10 @@ impl PtySizeOwners {
     /// So the interleaving is real: A accepts seq 2, B accepts seq 3 and resizes
     /// the child first, then A's `TIOCSWINSZ` lands and the child is left at A's
     /// geometry with B recorded as the newest apply. The geometry recorded beside
-    /// the seq is what closes it. An apply site asks [`Self::superseding_grid`]
-    /// straight after resizing, and a site that was overtaken re-applies the
-    /// WINNER's geometry, which converges: the winner's own re-check finds
-    /// itself newest and stops.
+    /// the seq is what closes it. [`Self::apply_grid_in_order`] asks
+    /// [`Self::superseding_grid`] straight after resizing, and a site that was
+    /// overtaken re-applies the WINNER's geometry, which converges: the winner's
+    /// own re-check finds itself newest and stops.
     ///
     /// `rows` and `cols` are the geometry this apply is about to put on the
     /// child, recorded here so a later loser can find it.
@@ -571,6 +587,39 @@ impl PtySizeOwners {
         let owners = self.owners.lock().unwrap();
         let landed = owners.applied.get(pty_id)?;
         (landed.seq > seq).then_some((landed.rows, landed.cols))
+    }
+
+    /// Apply a stamped grid in the one order shared by every surface.
+    ///
+    /// The callback runs without the ownership lock held. If another surface
+    /// accepts a newer grid while the callback is applying this one, the
+    /// `before_heal` runs first (for caller-specific diagnostics), then the
+    /// apply callback is invoked once more with the winner's geometry so the
+    /// child converges on the newest accepted grid.
+    pub fn apply_grid_in_order<T>(
+        &self,
+        pty_id: &str,
+        seq: u64,
+        rows: u16,
+        cols: u16,
+        mut apply: impl FnMut(u16, u16) -> T,
+        mut before_heal: impl FnMut(u16, u16),
+    ) -> GridApplyOutcome<T> {
+        if !self.accept_grid_apply(pty_id, seq, rows, cols) {
+            return GridApplyOutcome::Dropped;
+        }
+
+        let result = apply(rows, cols);
+        let superseding_grid = self.superseding_grid(pty_id, seq);
+        if let Some((winner_rows, winner_cols)) = superseding_grid {
+            before_heal(winner_rows, winner_cols);
+            let _ = apply(winner_rows, winner_cols);
+        }
+
+        GridApplyOutcome::Applied {
+            result,
+            superseding_grid,
+        }
     }
 
     /// The per-pty STAMPED grid sequence as of now: the seq the last granted
@@ -972,6 +1021,73 @@ mod tests {
         // broadcasts are filtered per pty.
         let other = claim_resize(&owners, "q", conn, false).0.seq.unwrap();
         assert!(owners.accept_grid_apply("q", other, 24, 80));
+    }
+
+    #[test]
+    fn the_shared_apply_sequence_drops_stale_work_without_calling_the_child() {
+        let owners = PtySizeOwners::default();
+        let browser = owners.next_conn_id();
+        let tui = owners.next_conn_id();
+        let stale = claim_resize(&owners, "p", browser, false).0.seq.unwrap();
+        let newest = claim_resize(&owners, "p", tui, true).0.seq.unwrap();
+
+        assert!(owners.accept_grid_apply("p", newest, 30, 100));
+        let calls = std::cell::Cell::new(0);
+        let outcome = owners.apply_grid_in_order(
+            "p",
+            stale,
+            24,
+            80,
+            |_, _| calls.set(calls.get() + 1),
+            |_, _| {},
+        );
+
+        assert_eq!(outcome, GridApplyOutcome::Dropped);
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn the_shared_apply_sequence_heals_a_mid_apply_supersession() {
+        let owners = PtySizeOwners::default();
+        let browser = owners.next_conn_id();
+        let tui = owners.next_conn_id();
+        let older = claim_resize(&owners, "p", browser, false).0.seq.unwrap();
+        let newer = claim_resize(&owners, "p", tui, true).0.seq.unwrap();
+        let child = std::cell::Cell::new((0, 0));
+        let calls = std::cell::Cell::new(0);
+
+        let healed = std::cell::Cell::new(None);
+        let outcome = owners.apply_grid_in_order(
+            "p",
+            older,
+            24,
+            80,
+            |rows, cols| {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call == 0 {
+                    assert!(owners.accept_grid_apply("p", newer, 50, 150));
+                    child.set((50, 150));
+                    // The older syscall returns after the winner and temporarily
+                    // leaves the child at the losing geometry.
+                    child.set((rows, cols));
+                } else {
+                    child.set((rows, cols));
+                }
+            },
+            |rows, cols| healed.set(Some((rows, cols))),
+        );
+
+        assert_eq!(
+            outcome,
+            GridApplyOutcome::Applied {
+                result: (),
+                superseding_grid: Some((50, 150)),
+            }
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(healed.get(), Some((50, 150)));
+        assert_eq!(child.get(), (50, 150));
     }
 
     /// THE HANDSHAKE'S SEED. A PTY socket that opens while a resize is stamped

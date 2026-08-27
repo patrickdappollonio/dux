@@ -2200,8 +2200,8 @@ pub(crate) fn pty_owner_event(
 /// The OWNER-CLEARED `pty.owner`: same event, no `owner` field, emitted when the
 /// driving connection disconnects and its ownership is released. Every client
 /// reads a missing owner as "not me" (see `isOwnerAfterHandover`), so all of them
-/// converge on "nobody is driving"; a mounted, foregrounded viewer then claims
-/// the freed pty and a backgrounded one switches its card's copy.
+/// converge on "nobody is driving" and show the free-PTY card until a deliberate
+/// claim or a fresh attach resize takes control.
 ///
 /// It exists because ownership stopped following focus. Before that, a departed
 /// owner was corrected by the next device that happened to attach or alt-tab,

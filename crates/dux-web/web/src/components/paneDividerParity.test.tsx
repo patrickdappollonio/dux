@@ -5,10 +5,11 @@
 // a layout group); the right one is react-resizable-panels'. They drifted once,
 // and a finger could move one and not the other. This file is what makes that
 // drift a failing test rather than a bug report from a tablet.
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import { stubMatchMedia } from "@/test/matchMedia"
 
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
@@ -43,19 +44,10 @@ vi.stubGlobal(
 // "(pointer:coarse)"; the library also memoizes its answer for the life of the
 // module, which is why this is stubbed once for the whole file rather than
 // flipped per test.
-vi.stubGlobal(
-  "matchMedia",
-  vi.fn((query: string) => ({
-    matches: query.includes("coarse"),
-    media: query,
-    onchange: null,
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    addListener: () => {},
-    removeListener: () => {},
-    dispatchEvent: () => false,
-  })),
-)
+const media = stubMatchMedia({
+  "(pointer: coarse)": true,
+  "(pointer:coarse)": true,
+})
 
 const { SidebarProvider } = await import("@/components/ui/sidebar")
 const { AppSidebar } = await import("./Sidebar")
@@ -84,6 +76,7 @@ const mockState = {
 } as unknown as DuxState
 
 afterEach(cleanup)
+afterAll(() => media.restore())
 
 function sidebarDivider(): HTMLElement {
   const { container } = render(

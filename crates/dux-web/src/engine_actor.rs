@@ -3251,36 +3251,37 @@ fn handle_request(
             }
         }
         EngineRequest::ResizePty(id, rows, cols, seq) => {
-            // The one apply order. This resize was stamped when its claim was
-            // granted and has been sitting in the queue since; a claim granted
-            // afterwards may already have put its own geometry on the child
-            // (the terminal UI applies the moment it claims), and letting this
-            // one land now would size the pty for a connection that no longer
-            // owns it. See `PtySizeOwners::accept_grid_apply`.
-            if input_owners.accept_grid_apply(&id, seq, rows, cols) {
-                if let Some(client) = pty_for(engine, &id) {
-                    let _ = client.resize(rows, cols);
-                    // The accept and the resize above are two critical sections,
-                    // deliberately: holding the owners lock across the child's
-                    // terminal lock was measured and rejected (see
-                    // `accept_grid_apply`). So a newer apply can have overtaken
-                    // this one while it sat inside TIOCSWINSZ, leaving the child
-                    // sized for a device that no longer drives it. Ask, and
-                    // re-apply the winner's geometry if so; the winner's own
-                    // check finds itself newest, so this converges.
-                    if let Some((rows, cols)) = input_owners.superseding_grid(&id, seq) {
+            // The core helper owns the accept/apply/heal sequence shared with
+            // the terminal UI. The callback still runs without the ownership
+            // lock held, preserving the terminal-lock ordering documented on it.
+            let client = pty_for(engine, &id);
+            let had_client = client.is_some();
+            match input_owners.apply_grid_in_order(
+                &id,
+                seq,
+                rows,
+                cols,
+                |rows, cols| {
+                    if let Some(client) = client {
+                        let _ = client.resize(rows, cols);
+                    }
+                },
+                |rows, cols| {
+                    if had_client {
                         dux_core::logger::debug(&format!(
                             "PTY resize seq {seq} for pty {id} was overtaken mid-apply, so the \
                              newer {rows}x{cols} is being re-applied"
                         ));
-                        let _ = client.resize(rows, cols);
                     }
+                },
+            ) {
+                dux_core::pty_owners::GridApplyOutcome::Dropped => {
+                    dux_core::logger::debug(&format!(
+                        "PTY resize seq {seq} for pty {id} dropped: a newer claim's geometry has \
+                         already reached the child"
+                    ));
                 }
-            } else {
-                dux_core::logger::debug(&format!(
-                    "PTY resize seq {seq} for pty {id} dropped: a newer claim's geometry has \
-                     already reached the child"
-                ));
+                dux_core::pty_owners::GridApplyOutcome::Applied { .. } => {}
             }
         }
         EngineRequest::PtyGridSize(id, reply) => {

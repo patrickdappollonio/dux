@@ -407,43 +407,38 @@ impl App {
         self.last_refused_pty_resize = None;
         // The one apply order. This surface applies immediately while a browser's
         // resize waits in the engine actor's queue, so a resize stamped before
-        // this one can still be sitting there; offering the seq here is what stops
-        // it landing afterwards, and what stops THIS resize landing if the roles
-        // are reversed.
+        // this one can still be sitting there. The core helper owns the complete
+        // accept/apply/heal sequence shared with the actor.
         let seq = outcome.seq.unwrap_or_default();
-        if !seat.owners.accept_grid_apply(pty_id, seq, rows, cols) {
-            // Same diagnostic weight the engine actor gives its own dropped
-            // apply: expected traffic under a genuine race, not an error.
-            dux_core::logger::debug(&format!(
-                "resize of pty {pty_id} at seq {seq} dropped: a newer claim's geometry has \
-                 already reached the child"
-            ));
-            self.publish_ownership(&events);
-            return false;
-        }
-        // THE RESIZE ITSELF, done here rather than left to the caller, so the
-        // grid announcement below can be made only about a resize that actually
-        // happened: a provider that vanished between the claim and the apply
-        // would otherwise have its geometry announced to every watcher, and they
-        // would adopt a grid no child is drawing for.
-        let resized = match self.pty_client_for(pty_id) {
-            Some(client) => {
-                let resized = client.resize(rows, cols).is_ok();
-                // The accept above and this resize are two critical sections (see
-                // `accept_grid_apply`), so a newer apply can have overtaken this
-                // one in between. Re-apply the winner's geometry if so; its own
-                // check finds itself newest, so this converges rather than
-                // ping-ponging.
-                if let Some((rows, cols)) = seat.owners.superseding_grid(pty_id, seq) {
+        let client = self.pty_client_for(pty_id);
+        let had_client = client.is_some();
+        let apply = seat.owners.apply_grid_in_order(
+            pty_id,
+            seq,
+            rows,
+            cols,
+            |rows, cols| client.is_some_and(|client| client.resize(rows, cols).is_ok()),
+            |rows, cols| {
+                if had_client {
                     dux_core::logger::debug(&format!(
                         "resize of pty {pty_id} at seq {seq} was overtaken mid-apply, so the \
                          newer {rows}x{cols} is being re-applied"
                     ));
-                    let _ = client.resize(rows, cols);
                 }
-                resized
+            },
+        );
+        let resized = match apply {
+            dux_core::pty_owners::GridApplyOutcome::Dropped => {
+                // Same diagnostic weight the engine actor gives its own dropped
+                // apply: expected traffic under a genuine race, not an error.
+                dux_core::logger::debug(&format!(
+                    "resize of pty {pty_id} at seq {seq} dropped: a newer claim's geometry has \
+                     already reached the child"
+                ));
+                self.publish_ownership(&events);
+                return false;
             }
-            None => false,
+            dux_core::pty_owners::GridApplyOutcome::Applied { result, .. } => result,
         };
         if resized {
             events.push(PtyOwnershipEvent::GridApplied {

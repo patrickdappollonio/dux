@@ -809,26 +809,21 @@ pub struct AgentTabView {
     ///
     /// Retired with the process by [`crate::engine::Engine::clear_tab_runtime`].
     pub drop_paste: Option<DropPasteView>,
-    /// The id of the WEB connection that currently owns input for this tab's
-    /// PTY, or `None` when nobody does (nobody has claimed it, the owner
-    /// disconnected, or no web server is running at all).
+    /// The ownership-registry participant id that currently owns input for this
+    /// tab's PTY, or `None` when nobody does.
     ///
-    /// The ENGINE never fills this field. Input ownership is a web-layer
-    /// concept — browser connections take and hand over the right to type,
-    /// arbitrated in `dux-web`'s per-PTY-socket registry, and the TUI has no
-    /// counterpart — so `tab_view` always projects `None` and the web layer
-    /// overlays the registry onto every view it serves: the `/spine` document
+    /// The ENGINE never fills this field. The shared registry lives in
+    /// [`crate::pty_owners`], and the serving layer overlays its live snapshot
+    /// onto every view it serves: the `/spine` document
     /// (overlaid before fingerprinting, so an ownership flip fires
     /// `sessions.changed` like any other spine change) and the
     /// projects/sessions list and single-session REST reads (overlaid in their
     /// request arms). A `SessionView` obtained from the engine DIRECTLY (the
     /// TUI, or a dux-core test) always has `None` here.
     ///
-    /// The value is the owning PTY-socket connection id (the same id space as
-    /// the `pty.owner` handover frames' `owner` field, a per-socket counter
-    /// stringified), NOT the events-socket `X-Connection-Id` UUID: ownership
-    /// is recorded per PTY socket, and the server holds no mapping from a PTY
-    /// socket to the events socket of the same browser tab. Publishing the
+    /// The value is the owning registry connection id, stringified: either a
+    /// PTY socket's id or the background-serving TUI's seat. It is NOT the
+    /// events-socket `X-Connection-Id` UUID. Publishing the
     /// identity rather than a per-client "elsewhere" boolean keeps the spine
     /// one shared document: each client compares the id against its own live
     /// PTY-socket ids and decides "owned, and not by me" locally, which is how
