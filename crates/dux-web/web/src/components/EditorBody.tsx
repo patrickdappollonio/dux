@@ -60,6 +60,7 @@ import {
   type EditorRoot,
 } from "@/lib/editorRoot"
 import { hasDirtyUnderPath, shouldPromoteOnEdit } from "@/lib/editorTabs"
+import type { EditorTab } from "@/lib/editorTabs"
 import {
   joinName,
   parentDir,
@@ -158,6 +159,7 @@ import {
   openEditorCloseTab,
   standaloneEditorHash,
   useDux,
+  type ChangesSlice,
 } from "@/lib/store"
 
 // Monaco is multiple MB; keep both surfaces off the main bundle by loading them
@@ -238,7 +240,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   const [buffers, setBuffers] = useState<Map<string, TabBuffer>>(() =>
     loadRootDrafts(key),
   )
-  const activeBuffer = activeTab ? buffers.get(activeTab.id) : undefined
+  const activeBuffer = bufferForTab(buffers, activeTab)
 
   // Mirror every buffer change into the draft cache. The cache outlives this
   // component; the store prunes it when tabs close and clears it on session
@@ -417,8 +419,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // has since expanded, and it cannot, because a defaultLayout only applies
   // at mount.
   const isMobile = useIsMobile()
-  const startExplorerCollapsed =
-    (standalone && isMobile) || (storedExplorer?.collapsed ?? false)
+  const startExplorerCollapsed = shouldStartExplorerCollapsed(
+    standalone,
+    isMobile,
+    storedExplorer?.collapsed,
+  )
   // What the group actually mounts with: undefined in the ordinary case, so
   // the explorer panel's own PIXEL defaultSize decides its width, or a true
   // 0%/100% collapse when this open starts collapsed. Structural on purpose:
@@ -477,24 +482,19 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // they render a read-only pane from /raw instead, and the buffer-derived
   // toolbar controls (Save, the preview toggle) do not render for them. SVG
   // is deliberately NOT an image tab: it opens in Monaco as editable text.
-  const isImageTab = activeTab !== null && isImagePreviewPath(activeTab.path)
+  const isImageTab = tabIsImage(activeTab)
   // Which draft-accurate preview this tab's TEXT can offer: "markdown"
   // (react-markdown) or "svg" (a Blob URL over the current draft), null when
   // the Preview toggle should not render at all.
-  const activePreviewKind =
-    activeTab !== null ? previewKind(activeTab.path) : null
-  const fileReady =
-    activeTab !== null &&
-    activeBuffer !== undefined &&
-    !isBufferStale(activeBuffer, activeTab.path) &&
-    activeBuffer.loadedPath === activeTab.path
-  const binary = fileReady ? (activeBuffer?.binary ?? false) : false
-  const readOnly = fileReady ? (activeBuffer?.readOnly ?? false) : false
+  const activePreviewKind = tabPreviewKind(activeTab)
+  const fileReady = bufferIsFileReady(activeTab, activeBuffer)
+  const binary = readyBufferFlag(fileReady, activeBuffer?.binary)
+  const readOnly = readyBufferFlag(fileReady, activeBuffer?.readOnly)
   // File-mode readiness for the preview toggle: a loaded, non-binary buffer.
   // The toggle itself is available in BOTH modes; its diff-mode half needs
   // `diffReady`, declared further down, so `canPreview` lives beside it (one
   // source of truth for both the toggle button and the render).
-  const filePreviewReady = fileReady && !binary
+  const filePreviewReady = previewableFileIsReady(fileReady, binary)
   // "Open editor" spawns a GUI editor on the SERVER, so it only helps when the
   // server is the user's own machine. Enable for local-access URLs; for remote
   // URLs keep the control but disable it with an explanatory tooltip.
@@ -504,7 +504,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // has no language to pick) and only once the registry has been read: an
   // empty list would give a control whose menu is empty and whose trigger
   // always reads "Plain text".
-  const languageTabPath = activeTab !== null && !isImageTab ? activeTab.path : null
+  const languageTabPath = languagePath(activeTab, isImageTab)
   useEffect(() => {
     if (languageTabPath === null) return
     let cancelled = false
@@ -534,7 +534,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     languageTabPath,
     registeredLanguages,
   )
-  const showLanguagePicker = languageTabPath !== null && languageChoices.length > 0
+  const showLanguagePicker = hasLanguageChoices(languageTabPath, languageChoices)
   // Follow a renamed or moved file, so a correction the user just made is not
   // silently reverted, and so the old key is not left behind for whatever file
   // lands on that path next. Mirrors `editorTabs.renameTabPaths`, directory
@@ -555,7 +555,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // TERMINAL root has no session, so it never gets a slice: no diff mode, no
   // changed-file decorations from the broadcast, and freshness rides window
   // focus and tab activation instead.
-  const slice = changes.sessionId === rootSessionId(root) ? changes : null
+  const slice = changesForRoot(changes, root)
 
   // Mark the tree's changed files from the slice. Stores the raw git status code
   // per path; FileStatusIcon maps it to an icon + label.
@@ -608,33 +608,32 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // active tab's CURRENT path. While ready, a change-signal differing from the
   // one captured at load means the file changed underneath, surface a reload
   // button (diffStale).
-  const diffReady =
-    activeTab !== null &&
-    activeBuffer !== undefined &&
-    !isBufferStale(activeBuffer, activeTab.path) &&
-    activeBuffer.diffLoadedPath === activeTab.path
-  const diffStale =
-    diffReady && openFileSignal !== (activeBuffer?.diffLoadedSignal ?? "")
+  const diffReady = bufferIsDiffReady(activeTab, activeBuffer)
+  const diffStale = diffBufferIsStale(diffReady, openFileSignal, activeBuffer)
   // Diff-mode readiness for the preview: the diff is loaded for the tab's
   // current path and neither side is binary (the `fileReady && !binary`
   // equivalent for a tab whose only content is the diff cache).
-  const diffPreviewReady = diffReady && !(activeBuffer?.diff?.binary ?? false)
-  const canPreview =
-    activePreviewKind !== null &&
-    (activeTab?.mode === "diff" ? diffPreviewReady : filePreviewReady)
-  const showPreview =
-    activeTab !== null && previewOpenTabIds.has(activeTab.id) && canPreview
+  const diffPreviewReady = previewableDiffIsReady(diffReady, activeBuffer)
+  const canPreview = previewIsAvailable(
+    activePreviewKind,
+    activeTab,
+    diffPreviewReady,
+    filePreviewReady,
+  )
+  const showPreview = previewIsOpen(activeTab, previewOpenTabIds, canPreview)
   // What the preview renders: always the END STATE of the file. In file mode
   // that is the draft. In diff mode the tab may have no file buffer at all,
   // so the unsaved draft wins only when one actually exists (buffer loaded
   // AND the tab is dirty); otherwise the diff's MODIFIED side (the file as on
   // disk) is exactly what file-mode preview would show.
-  const previewContent =
-    activeTab?.mode === "diff" && !(fileReady && dirty)
-      ? (activeBuffer?.diff?.modified ?? "")
-      : (activeBuffer?.draft ?? "")
+  const previewContent = contentForPreview(
+    activeTab,
+    activeBuffer,
+    fileReady,
+    dirty,
+  )
   // This tab's save is in flight.
-  const isSaving = savingTabId !== null && savingTabId === activeTab?.id
+  const isSaving = tabIsSaving(savingTabId, activeTab)
 
   // The one preview pane both content arms share (file mode and diff mode),
   // rendering `previewContent` (the file's end state, see its derivation
@@ -1374,9 +1373,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     )
   }
 
-  return (
-    <>
-      {/* Header: open file path, view toggle, dirty indicator, actions.
+  function renderHeader(): React.ReactNode {
+    return (
+      <>
+        {/* Header: open file path, view toggle, dirty indicator, actions.
           min-h-12.75 (51px) floors the row at its tallest control, the
           File/Diff segmented group, an h-7 (28px) button inside p-0.5 (4px)
           + border (2px) = 34px, plus the row's py-2 (16px) and its own
@@ -1747,9 +1747,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           </Button>
         )}
       </div>
+      </>
+    )
+  }
 
-      {/* Tab strip, only renders once the session has at least one tab. */}
-      <EditorTabsStrip root={root} />
+  function renderWorkspace(): React.ReactNode {
+    return (
+      <>
+        {/* Tab strip, only renders once the session has at least one tab. */}
+        <EditorTabsStrip root={root} />
 
       {/* Body: worktree file tree (left, a collapsible resizable panel) +
           Monaco editor/diff (right). The outer div mirrors DesktopShell's
@@ -1943,165 +1949,38 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   />
                 )}
               <div className="relative min-h-0 flex-1">
-              {activeTab === null ? (
-                <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
-                  Select a file from the tree to view or edit it.
-                </div>
-              ) : isImageTab ? (
-                // Sits ABOVE the diff arm AND the buffer-gated chain on
-                // purpose. Above the buffer chain: an image tab has no
-                // buffer, so `fileReady` never turns true and those arms
-                // would park it on the spinner forever. Above the diff arm:
-                // the store coerces image opens to file mode, but if a
-                // diff-mode image tab reaches here anyway the picture must
-                // win over the binary-diff refusal (defense in depth). Keyed
-                // by path so a failed load resets when the tab
-                // preview-replaces onto another file.
-                <ImagePreviewPane
-                  key={activeTab.path}
-                  src={fileApi.rawUrl(root, activeTab.path)}
-                  path={activeTab.path}
+                <EditorContentPane
+                  root={root}
+                  tab={activeTab}
+                  buffer={activeBuffer}
+                  image={isImageTab}
+                  fileReady={fileReady}
+                  binary={binary}
+                  diffReady={diffReady}
+                  preview={showPreview}
+                  language={activeLanguageOverride}
+                  renderPreview={renderPreviewPane}
+                  onRetryFile={loadFileBuffer}
+                  onRetryDiff={loadDiffBuffer}
+                  onDraftChange={handleDraftChange}
+                  onSave={save}
+                  onMonacoReady={(monaco) => {
+                    monacoRef.current = monaco
+                  }}
                 />
-              ) : activeTab.mode === "diff" ? (
-                // Read-only Monaco diff (HEAD vs working copy).
-                activeBuffer?.diffError && !isBufferStale(activeBuffer, activeTab.path) ? (
-                  <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
-                    {activeBuffer.diffError}
-                    {/* Manual retry, mirroring the file-mode error arm below: a
-                        settled diff error is never auto-retried (the load
-                        effect's deps don't move once diffError is set), so
-                        without this the only ways back are switching tabs or
-                        reopening the editor. */}
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => loadDiffBuffer(activeTab.id, activeTab.path)}
-                    >
-                      <RotateCw />
-                      Retry
-                    </Button>
-                  </div>
-                ) : !diffReady ? (
-                  <div className="flex h-full items-center justify-center text-muted-foreground">
-                    <Loader2 className="size-5 motion-safe:animate-spin" />
-                  </div>
-                ) : activeBuffer?.diff?.binary ? (
-                  <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
-                    This file is binary and can&rsquo;t be diffed here.
-                  </div>
-                ) : showPreview ? (
-                  // Same preview as file mode, rendering the file's END
-                  // STATE (the draft when one exists, else the diff's
-                  // modified side). Toggling off returns here, to the diff:
-                  // previewing never changes the tab's mode.
-                  renderPreviewPane(activeTab.path)
-                ) : (
-                  // An ALL-DELETE diff (a deleted or truncated-to-empty file)
-                  // gets the `dux-diff-all-delete` marker class, which scopes
-                  // the three-layer suppression of Monaco's phantom trailing
-                  // "1 +" inserted line (an empty modified model still has one
-                  // line, and monaco 0.55.1's diff computer reports a real
-                  // insertion for it — original [1,N) → modified [1,2) — for
-                  // every original shape). Layer one is CSS (index.css under
-                  // this marker): the insertion DECORATIONS are plain DOM, so
-                  // scoped rules blank them — but Monaco ships its own
-                  // `.monaco-editor .insert-sign { display: flex !important }`,
-                  // so the sign rule must match that specificity to win the
-                  // !important tie. Layer two is options (allDeleteDiffOptions
-                  // via the `allDelete` prop): the current-line highlight
-                  // borders the now-blank row, and the overview ruler is a
-                  // CANVAS whose green speck no CSS can reach. Layer three is
-                  // the line-number rule, scoped to `.editor.modified`: the
-                  // deleted rows' numbers are ordinary .line-numbers in the
-                  // sibling original editor's margin and must survive, while
-                  // the modified editor's sole line number in an all-delete
-                  // diff is the phantom row's. The original side's text is
-                  // never touched.
-                  <div
-                    className={
-                      activeBuffer?.diff && isAllDeleteDiff(activeBuffer.diff)
-                        ? "dux-diff-all-delete h-full"
-                        : "h-full"
-                    }
-                  >
-                    <ChunkBoundary>
-                      <Suspense
-                        fallback={
-                          <div className="flex h-full items-center justify-center text-muted-foreground">
-                            <Loader2 className="size-5 motion-safe:animate-spin" />
-                          </div>
-                        }
-                      >
-                        <DiffViewer
-                          path={activeTab.path}
-                          language={activeLanguageOverride}
-                          original={activeBuffer?.diff?.original ?? ""}
-                          modified={activeBuffer?.diff?.modified ?? ""}
-                          allDelete={
-                            activeBuffer?.diff !== null &&
-                            activeBuffer?.diff !== undefined &&
-                            isAllDeleteDiff(activeBuffer.diff)
-                          }
-                        />
-                      </Suspense>
-                    </ChunkBoundary>
-                  </div>
-                )
-              ) : activeBuffer?.fileError && !isBufferStale(activeBuffer, activeTab.path) ? (
-                <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
-                  {activeBuffer.fileError}
-                  {/* Settled errors only retry on explicit user action. */}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => loadFileBuffer(activeTab.id, activeTab.path)}
-                  >
-                    <RotateCw />
-                    Retry
-                  </Button>
-                </div>
-              ) : !fileReady ? (
-                <div className="flex h-full items-center justify-center text-muted-foreground">
-                  <Loader2 className="size-5 motion-safe:animate-spin" />
-                </div>
-              ) : binary ? (
-                <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
-                  This file is binary and can&rsquo;t be edited here.
-                </div>
-              ) : showPreview ? (
-                renderPreviewPane(activeTab.path)
-              ) : (
-                // ChunkBoundary (outside Suspense) catches a failed lazy import after
-                // a redeploy — a 404 on the hashed Monaco chunk — and offers reload,
-                // instead of unmounting the whole app to a white screen.
-                <ChunkBoundary>
-                  <Suspense
-                    fallback={
-                      <div className="flex h-full items-center justify-center text-muted-foreground">
-                        <Loader2 className="size-5 motion-safe:animate-spin" />
-                      </div>
-                    }
-                  >
-                    <CodeEditor
-                      path={activeTab.path}
-                      language={activeLanguageOverride}
-                      value={activeBuffer?.draft ?? ""}
-                      onChange={handleDraftChange}
-                      onSave={save}
-                      onReady={(mon) => {
-                        monacoRef.current = mon
-                      }}
-                    />
-                  </Suspense>
-                </ChunkBoundary>
-              )}
               </div>
             </div>
           </ResizablePanel>
         </ResizablePanelGroup>
-      </div>
+        </div>
+      </>
+    )
+  }
 
-      {/* New File… / New Folder…, Rename…, Delete…: driven by the file
+  function renderDialogs(): React.ReactNode {
+    return (
+      <>
+        {/* New File… / New Folder…, Rename…, Delete…: driven by the file
           tree's right-click context menu (and the header FilePlus button,
           which targets the root). Local EditorBody state, not store targets
           (see the newEntryTarget/renameEntryTarget/deleteEntryTarget
@@ -2194,7 +2073,306 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         onClose={() => setDeleteEntryTarget(null)}
         onConfirm={handleDeleteConfirm}
       />
+      </>
+    )
+  }
+
+  return (
+    <>
+      {renderHeader()}
+      {renderWorkspace()}
+      {renderDialogs()}
     </>
+  )
+}
+
+function bufferForTab(
+  buffers: ReadonlyMap<string, TabBuffer>,
+  tab: EditorTab | null,
+): TabBuffer | undefined {
+  return tab === null ? undefined : buffers.get(tab.id)
+}
+
+function shouldStartExplorerCollapsed(
+  standalone: boolean,
+  mobile: boolean,
+  stored: boolean | undefined,
+): boolean {
+  return (standalone && mobile) || (stored ?? false)
+}
+
+function tabIsImage(tab: EditorTab | null): boolean {
+  return tab !== null && isImagePreviewPath(tab.path)
+}
+
+function tabPreviewKind(tab: EditorTab | null): ReturnType<typeof previewKind> {
+  return tab === null ? null : previewKind(tab.path)
+}
+
+function bufferIsFileReady(
+  tab: EditorTab | null,
+  buffer: TabBuffer | undefined,
+): boolean {
+  return (
+    tab !== null &&
+    buffer !== undefined &&
+    !isBufferStale(buffer, tab.path) &&
+    buffer.loadedPath === tab.path
+  )
+}
+
+function readyBufferFlag(ready: boolean, flag: boolean | undefined): boolean {
+  return ready ? (flag ?? false) : false
+}
+
+function previewableFileIsReady(ready: boolean, binary: boolean): boolean {
+  return ready && !binary
+}
+
+function languagePath(tab: EditorTab | null, image: boolean): string | null {
+  return tab !== null && !image ? tab.path : null
+}
+
+function hasLanguageChoices(
+  path: string | null,
+  choices: readonly unknown[],
+): boolean {
+  return path !== null && choices.length > 0
+}
+
+function changesForRoot(
+  changes: ChangesSlice,
+  root: EditorRoot,
+): ChangesSliceView | null {
+  return changes.sessionId === rootSessionId(root) ? changes : null
+}
+
+function bufferIsDiffReady(
+  tab: EditorTab | null,
+  buffer: TabBuffer | undefined,
+): boolean {
+  return (
+    tab !== null &&
+    buffer !== undefined &&
+    !isBufferStale(buffer, tab.path) &&
+    buffer.diffLoadedPath === tab.path
+  )
+}
+
+function diffBufferIsStale(
+  ready: boolean,
+  signal: string,
+  buffer: TabBuffer | undefined,
+): boolean {
+  return ready && signal !== (buffer?.diffLoadedSignal ?? "")
+}
+
+function previewableDiffIsReady(
+  ready: boolean,
+  buffer: TabBuffer | undefined,
+): boolean {
+  return ready && !(buffer?.diff?.binary ?? false)
+}
+
+function previewIsAvailable(
+  kind: ReturnType<typeof previewKind>,
+  tab: EditorTab | null,
+  diffReady: boolean,
+  fileReady: boolean,
+): boolean {
+  return kind !== null && (tab?.mode === "diff" ? diffReady : fileReady)
+}
+
+function previewIsOpen(
+  tab: EditorTab | null,
+  openTabIds: ReadonlySet<string>,
+  available: boolean,
+): boolean {
+  return tab !== null && openTabIds.has(tab.id) && available
+}
+
+function contentForPreview(
+  tab: EditorTab | null,
+  buffer: TabBuffer | undefined,
+  fileReady: boolean,
+  dirty: boolean,
+): string {
+  if (tab?.mode === "diff" && !(fileReady && dirty)) {
+    return buffer?.diff?.modified ?? ""
+  }
+  return buffer?.draft ?? ""
+}
+
+function tabIsSaving(savingTabId: string | null, tab: EditorTab | null): boolean {
+  return savingTabId !== null && savingTabId === tab?.id
+}
+
+interface EditorContentPaneProps {
+  root: EditorRoot
+  tab: EditorTab | null
+  buffer: TabBuffer | undefined
+  image: boolean
+  fileReady: boolean
+  binary: boolean
+  diffReady: boolean
+  preview: boolean
+  language: string | undefined
+  renderPreview: (path: string) => React.ReactNode
+  onRetryFile: (tabId: string, path: string) => void
+  onRetryDiff: (tabId: string, path: string) => void
+  onDraftChange: (value: string) => void
+  onSave: () => void
+  onMonacoReady: (monaco: MonacoInstance) => void
+}
+
+function EditorContentPane(props: EditorContentPaneProps) {
+  const { root, tab, image } = props
+  if (tab === null) {
+    return (
+      <CenteredPane>Select a file from the tree to view or edit it.</CenteredPane>
+    )
+  }
+  // Images have no text buffer and win even if stale state says "diff".
+  if (image) {
+    return (
+      <ImagePreviewPane
+        key={tab.path}
+        src={fileApi.rawUrl(root, tab.path)}
+        path={tab.path}
+      />
+    )
+  }
+  if (tab.mode === "diff") return <DiffContentPane {...props} tab={tab} />
+  return <FileContentPane {...props} tab={tab} />
+}
+
+interface ActiveEditorContentProps extends EditorContentPaneProps {
+  tab: EditorTab
+}
+
+function DiffContentPane({
+  tab,
+  buffer,
+  diffReady,
+  preview,
+  language,
+  renderPreview,
+  onRetryDiff,
+}: ActiveEditorContentProps) {
+  if (buffer?.diffError && !isBufferStale(buffer, tab.path)) {
+    return (
+      <ErrorPane
+        message={buffer.diffError}
+        onRetry={() => onRetryDiff(tab.id, tab.path)}
+      />
+    )
+  }
+  if (!diffReady) return <LoadingPane />
+  if (buffer?.diff?.binary) {
+    return (
+      <CenteredPane>
+        This file is binary and can&rsquo;t be diffed here.
+      </CenteredPane>
+    )
+  }
+  if (preview) return <>{renderPreview(tab.path)}</>
+
+  const diff = buffer?.diff
+  const allDelete = diff !== null && diff !== undefined && isAllDeleteDiff(diff)
+  return (
+    <div className={allDelete ? "dux-diff-all-delete h-full" : "h-full"}>
+      <ChunkBoundary>
+        <Suspense fallback={<LoadingPane />}>
+          <DiffViewer
+            path={tab.path}
+            language={language}
+            original={diff?.original ?? ""}
+            modified={diff?.modified ?? ""}
+            allDelete={allDelete}
+          />
+        </Suspense>
+      </ChunkBoundary>
+    </div>
+  )
+}
+
+function FileContentPane({
+  tab,
+  buffer,
+  fileReady,
+  binary,
+  preview,
+  language,
+  renderPreview,
+  onRetryFile,
+  onDraftChange,
+  onSave,
+  onMonacoReady,
+}: ActiveEditorContentProps) {
+  if (buffer?.fileError && !isBufferStale(buffer, tab.path)) {
+    return (
+      <ErrorPane
+        message={buffer.fileError}
+        onRetry={() => onRetryFile(tab.id, tab.path)}
+      />
+    )
+  }
+  if (!fileReady) return <LoadingPane />
+  if (binary) {
+    return (
+      <CenteredPane>
+        This file is binary and can&rsquo;t be edited here.
+      </CenteredPane>
+    )
+  }
+  if (preview) return <>{renderPreview(tab.path)}</>
+  return (
+    <ChunkBoundary>
+      <Suspense fallback={<LoadingPane />}>
+        <CodeEditor
+          path={tab.path}
+          language={language}
+          value={buffer?.draft ?? ""}
+          onChange={onDraftChange}
+          onSave={onSave}
+          onReady={onMonacoReady}
+        />
+      </Suspense>
+    </ChunkBoundary>
+  )
+}
+
+function LoadingPane() {
+  return (
+    <div className="flex h-full items-center justify-center text-muted-foreground">
+      <Loader2 className="size-5 motion-safe:animate-spin" />
+    </div>
+  )
+}
+
+function CenteredPane({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
+      {children}
+    </div>
+  )
+}
+
+function ErrorPane({
+  message,
+  onRetry,
+}: {
+  message: string
+  onRetry: () => void
+}) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
+      {message}
+      <Button size="sm" variant="outline" onClick={onRetry}>
+        <RotateCw />
+        Retry
+      </Button>
+    </div>
   )
 }
 
