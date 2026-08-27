@@ -9,7 +9,113 @@ import { PrBanner } from "@/components/PrBanner"
 import { Welcome } from "@/components/Welcome"
 import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { useDux } from "@/lib/store"
+import type { DuxState } from "@/lib/store"
 import { ownerSessionId as terminalOwnerSessionId } from "@/lib/terminalOwner"
+import type { Bootstrap } from "@/lib/bootstrapApi"
+import type { AgentTabView, PrView, SessionView } from "@/lib/types"
+
+type SelectedTarget = NonNullable<DuxState["selectedTarget"]>
+
+function PrLane({
+  pr,
+  atBottom,
+  position,
+}: {
+  pr: PrView | null
+  atBottom: boolean
+  position: "top" | "bottom"
+}) {
+  if (!pr || atBottom !== (position === "bottom")) return null
+  return <PrBanner pr={pr} position={position} />
+}
+
+function AgentTabLane({
+  target,
+  session,
+  tabs,
+  bootstrap,
+}: {
+  target: SelectedTarget
+  session: SessionView | undefined
+  tabs: AgentTabView[]
+  bootstrap: Bootstrap | null
+}) {
+  if (target.kind !== "agent" || !session) return null
+  if (!shouldShowTabStrip(tabs, bootstrap?.always_show_tab_strip ?? false)) {
+    return null
+  }
+  return (
+    <AgentTabsStrip
+      session={session}
+      activeTabId={target.tabId}
+      maxTabs={bootstrap?.agent_tabs_max}
+    />
+  )
+}
+
+function LiveTerminalPane({
+  target,
+  paneKey,
+  targetId,
+}: {
+  target: SelectedTarget
+  paneKey: string
+  targetId: string
+}) {
+  if (target.kind === "agent") {
+    return (
+      <LazyTerminalPane
+        key={paneKey}
+        kind="agent"
+        id={targetId}
+        sessionId={target.sessionId}
+      />
+    )
+  }
+  return (
+    <LazyTerminalPane
+      key={paneKey}
+      kind="terminal"
+      id={targetId}
+      owner={target.owner}
+    />
+  )
+}
+
+function TerminalSurface({
+  target,
+  paneKey,
+  targetId,
+  dormant,
+  focusedTab,
+}: {
+  target: SelectedTarget
+  paneKey: string
+  targetId: string
+  dormant: boolean
+  focusedTab: AgentTabView | undefined
+}) {
+  if (dormant && focusedTab && target.kind === "agent") {
+    return (
+      <DormantTabCard
+        sessionId={target.sessionId}
+        tabId={focusedTab.id}
+        provider={focusedTab.provider}
+      />
+    )
+  }
+  return (
+    <ChunkBoundary>
+      <Suspense fallback={null}>
+        <LiveTerminalPane
+          target={target}
+          paneKey={paneKey}
+          targetId={targetId}
+        />
+      </Suspense>
+    </ChunkBoundary>
+  )
+}
 
 // The center pane: the agent's terminal (or a companion terminal's), the tab
 // strip above it, and the PR banner. Split into its own module (rather than
@@ -109,46 +215,23 @@ export function TerminalArea() {
   // simply invisible and the loop can never start.
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {pr && !bannerAtBottom ? <PrBanner pr={pr} position="top" /> : null}
-      {selectedTarget.kind === "agent" &&
-      session &&
-      shouldShowTabStrip(tabs, bootstrap?.always_show_tab_strip ?? false) ? (
-        <AgentTabsStrip
-          session={session}
-          activeTabId={selectedTarget.tabId}
-          maxTabs={bootstrap?.agent_tabs_max}
-        />
-      ) : null}
+      <PrLane pr={pr} atBottom={bannerAtBottom} position="top" />
+      <AgentTabLane
+        target={selectedTarget}
+        session={session}
+        tabs={tabs}
+        bootstrap={bootstrap}
+      />
       <div className="min-h-0 flex-1 overflow-hidden">
-        {isExtraDormant && focusedTab && selectedTarget.kind === "agent" ? (
-          <DormantTabCard
-            sessionId={selectedTarget.sessionId}
-            tabId={focusedTab.id}
-            provider={focusedTab.provider}
-          />
-        ) : (
-          <ChunkBoundary>
-            <Suspense fallback={null}>
-              {selectedTarget.kind === "agent" ? (
-                <LazyTerminalPane
-                  key={paneKey}
-                  kind="agent"
-                  id={targetId}
-                  sessionId={selectedTarget.sessionId}
-                />
-              ) : (
-                <LazyTerminalPane
-                  key={paneKey}
-                  kind="terminal"
-                  id={targetId}
-                  owner={selectedTarget.owner}
-                />
-              )}
-            </Suspense>
-          </ChunkBoundary>
-        )}
+        <TerminalSurface
+          target={selectedTarget}
+          paneKey={paneKey}
+          targetId={targetId}
+          dormant={isExtraDormant}
+          focusedTab={focusedTab}
+        />
       </div>
-      {pr && bannerAtBottom ? <PrBanner pr={pr} position="bottom" /> : null}
+      <PrLane pr={pr} atBottom={bannerAtBottom} position="bottom" />
     </div>
   )
 }
