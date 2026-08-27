@@ -4716,22 +4716,19 @@ impl App {
         };
         let confirm = prompt.focus.is_confirm();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match action {
-            Some(Action::CloseOverlay) => {
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => {
                 let previous = prompt.previous.clone();
                 self.prompt = PromptState::KillRunning(previous);
                 self.set_info(
                     "Kill cancelled. Your running agents and companion terminals are unchanged.",
                 );
             }
-            Some(Action::ToggleSelection) => prompt.focus = prompt.focus.toggled(),
-            Some(Action::Confirm) => {
+            ModalKeyStep::MoveFocus(_) => prompt.focus = prompt.focus.toggled(),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
                 return Some(self.resolve_confirm_kill_running(confirm));
             }
-            _ if key.code == KeyCode::Char(' ') => {
-                return Some(self.resolve_confirm_kill_running(confirm));
-            }
-            _ => {}
+            ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
     }
@@ -4755,16 +4752,10 @@ impl App {
             ),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        if matches!(action, Some(Action::CloseOverlay)) {
-            self.prompt = PromptState::None;
-            return Some(false);
-        }
-        if matches!(action, Some(Action::ToggleSelection)) {
-            *focus = next_focus(&ring, *focus, !focus_move_is_reverse(key));
-            return Some(false);
-        }
-        if matches!(action, Some(Action::Confirm)) || key.code == KeyCode::Char(' ') {
-            match *focus {
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::MoveFocus(forward) => *focus = next_focus(&ring, *focus, forward),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
                 DeleteAgentFocus::Checkbox => *delete_worktree = !*delete_worktree,
                 DeleteAgentFocus::Cancel => {
                     return Some(self.resolve_confirm_delete_agent(false));
@@ -4772,7 +4763,8 @@ impl App {
                 DeleteAgentFocus::Delete => {
                     return Some(self.resolve_confirm_delete_agent(true));
                 }
-            }
+            },
+            ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
     }
@@ -4782,16 +4774,14 @@ impl App {
             return None;
         };
         let confirm = focus.is_confirm();
-        match self.bindings.lookup(&key, BindingScope::Dialog) {
-            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-            Some(Action::ToggleSelection) => *focus = focus.toggled(),
-            Some(Action::Confirm) => {
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
                 return Some(self.resolve_confirm_delete_terminal(confirm));
             }
-            _ if key.code == KeyCode::Char(' ') => {
-                return Some(self.resolve_confirm_delete_terminal(confirm));
-            }
-            _ => {}
+            ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
     }
@@ -4801,16 +4791,14 @@ impl App {
             return None;
         };
         let confirm = focus.is_confirm();
-        match self.bindings.lookup(&key, BindingScope::Dialog) {
-            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-            Some(Action::ToggleSelection) => *focus = focus.toggled(),
-            Some(Action::Confirm) => {
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
                 return Some(self.resolve_confirm_close_tab(confirm));
             }
-            _ if key.code == KeyCode::Char(' ') => {
-                return Some(self.resolve_confirm_close_tab(confirm));
-            }
-            _ => {}
+            ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
     }
@@ -4820,14 +4808,14 @@ impl App {
             return None;
         };
         let confirm = focus.is_confirm();
-        match self.bindings.lookup(&key, BindingScope::Dialog) {
-            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-            Some(Action::ToggleSelection) => *focus = focus.toggled(),
-            Some(Action::Confirm) => return Some(self.resolve_confirm_quit(confirm)),
-            _ if key.code == KeyCode::Char(' ') => {
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
                 return Some(self.resolve_confirm_quit(confirm));
             }
-            _ => {}
+            ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
     }
@@ -4837,16 +4825,14 @@ impl App {
             return None;
         };
         let confirm = focus.is_confirm();
-        match self.bindings.lookup(&key, BindingScope::Dialog) {
-            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-            Some(Action::ToggleSelection) => *focus = focus.toggled(),
-            Some(Action::Confirm) => {
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
                 return Some(self.resolve_confirm_discard_file(confirm));
             }
-            _ if key.code == KeyCode::Char(' ') => {
-                return Some(self.resolve_confirm_discard_file(confirm));
-            }
-            _ => {}
+            ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
     }
@@ -4856,18 +4842,16 @@ impl App {
             return None;
         };
         let confirm = focus.is_confirm();
-        match self.bindings.lookup(&key, BindingScope::Dialog) {
-            Some(Action::CloseOverlay) => {
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => {
                 self.resolve_confirm_create_initial_commit(false);
             }
-            Some(Action::ToggleSelection) => *focus = focus.toggled(),
-            Some(Action::Confirm) => {
+            ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
                 self.resolve_confirm_create_initial_commit(confirm);
             }
-            _ if key.code == KeyCode::Char(' ') => {
-                self.resolve_confirm_create_initial_commit(confirm);
-            }
-            _ => {}
+            ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
     }
@@ -4877,18 +4861,16 @@ impl App {
             return None;
         };
         let confirm = focus.is_confirm();
-        match self.bindings.lookup(&key, BindingScope::Dialog) {
-            Some(Action::CloseOverlay) => {
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => {
                 self.resolve_confirm_init_repo(false);
             }
-            Some(Action::ToggleSelection) => *focus = focus.toggled(),
-            Some(Action::Confirm) => {
+            ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
                 self.resolve_confirm_init_repo(confirm);
             }
-            _ if key.code == KeyCode::Char(' ') => {
-                self.resolve_confirm_init_repo(confirm);
-            }
-            _ => {}
+            ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
     }
@@ -4931,21 +4913,13 @@ impl App {
         };
         let has_checkbox =
             matches!(kind, BranchWarningKind::Known { .. }) && action.allows_add_anyway();
-        let binding = self.bindings.lookup(&key, BindingScope::Dialog);
-        if matches!(binding, Some(Action::CloseOverlay)) {
-            self.prompt = PromptState::None;
-            return Some(false);
-        }
-        if matches!(binding, Some(Action::ToggleSelection)) {
-            *focus = Self::next_non_default_branch_focus(
-                *focus,
-                has_checkbox,
-                focus_move_is_reverse(key),
-            );
-            return Some(false);
-        }
-        if matches!(binding, Some(Action::Confirm)) || key.code == KeyCode::Char(' ') {
-            match *focus {
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::MoveFocus(forward) => {
+                *focus = Self::next_non_default_branch_focus(*focus, has_checkbox, !forward);
+            }
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
                 ConfirmNonDefaultBranchFocus::Checkbox => {
                     *checkout_default = !*checkout_default;
                 }
@@ -4953,7 +4927,8 @@ impl App {
                 ConfirmNonDefaultBranchFocus::Add => {
                     return Some(self.resolve_confirm_non_default_branch());
                 }
-            }
+            },
+            ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
     }
@@ -4963,16 +4938,14 @@ impl App {
             return None;
         };
         let confirm = focus.is_confirm();
-        match self.bindings.lookup(&key, BindingScope::Dialog) {
-            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-            Some(Action::ToggleSelection) => *focus = focus.toggled(),
-            Some(Action::Confirm) => {
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
                 return Some(self.resolve_confirm_use_existing_branch(confirm));
             }
-            _ if key.code == KeyCode::Char(' ') => {
-                return Some(self.resolve_confirm_use_existing_branch(confirm));
-            }
-            _ => {}
+            ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
     }
@@ -4987,17 +4960,15 @@ impl App {
             (DeleteWorktreeFocus::Checkbox, prompt.has_branch_checkbox()),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        if matches!(action, Some(Action::CloseOverlay)) {
-            let previous = prompt.previous.clone();
-            self.prompt = PromptState::ManageWorktrees(previous);
-            return Some(false);
-        }
-        if matches!(action, Some(Action::ToggleSelection)) {
-            prompt.focus = next_focus(&ring, prompt.focus, !focus_move_is_reverse(key));
-            return Some(false);
-        }
-        if matches!(action, Some(Action::Confirm)) || key.code == KeyCode::Char(' ') {
-            match prompt.focus {
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => {
+                let previous = prompt.previous.clone();
+                self.prompt = PromptState::ManageWorktrees(previous);
+            }
+            ModalKeyStep::MoveFocus(forward) => {
+                prompt.focus = next_focus(&ring, prompt.focus, forward);
+            }
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match prompt.focus {
                 DeleteWorktreeFocus::Checkbox => {
                     prompt.delete_branch = !prompt.delete_branch;
                 }
@@ -5007,7 +4978,8 @@ impl App {
                 DeleteWorktreeFocus::Delete => {
                     return Some(self.resolve_confirm_delete_worktree(true));
                 }
-            }
+            },
+            ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
     }
