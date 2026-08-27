@@ -15207,7 +15207,7 @@ not_a_real_action = ["x"]
         install_mouse_layout(&mut app);
         app.engine.staged_files = (0..3)
             .map(|index| ChangedFile {
-                path: format!("{index}.txt").into(),
+                path: format!("{index}.txt"),
                 status: "M".into(),
                 additions: 1,
                 deletions: 0,
