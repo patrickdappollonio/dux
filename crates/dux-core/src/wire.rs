@@ -3735,18 +3735,9 @@ impl Engine {
         Ok(WireCommandMapping::Mapped(mapped))
     }
 
-    fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
-        let command = match self.map_changes_command(command)? {
-            WireCommandMapping::Mapped(command) => return Ok(command),
-            WireCommandMapping::Unhandled(command) => command,
-        };
-        Ok(match command {
+    fn map_project_command(&self, command: WireCommand) -> anyhow::Result<WireCommandMapping> {
+        let mapped = match command {
             WireCommand::PullProject { project_id } => {
-                // Mirror the TUI's `refresh_selected_project`: resolve the
-                // project, refuse when its checkout path is missing, then build
-                // `Command::Pull` with `PullTarget::Project` from the project's
-                // SOURCE checkout path (not a worktree) and the persisted leading
-                // branch — byte-for-byte the same payload and message strings.
                 let project = self
                     .projects
                     .iter()
@@ -3789,15 +3780,6 @@ impl Engine {
                     new_enabled: enabled,
                 }
             }
-            WireCommand::DeleteTerminal { terminal_id } => Command::DeleteTerminal { terminal_id },
-            WireCommand::DeleteSession {
-                session_id,
-                delete_worktree,
-            } => Command::BeginDeleteSession {
-                session_id,
-                delete_worktree,
-            },
-            WireCommand::PersistGlobalEnv { env } => Command::PersistGlobalEnv { env },
             WireCommand::UpdateProjectProvider {
                 project_id,
                 provider,
@@ -3852,18 +3834,10 @@ impl Engine {
                     status_op_id: None,
                 }
             }
-            WireCommand::ReloadConfig {} => Command::ReloadConfig,
-            WireCommand::RecoverConfig {} => Command::RecoverConfig,
             WireCommand::AddProject { path, name } => {
                 let validated = self
                     .validate_project_add_path(&path)
                     .map_err(|e| anyhow::anyhow!(e))?;
-                // Reject a *confirmed* unborn repo: registering a commit-less repo
-                // yields a phantom leading branch that later breaks agent
-                // creation. Clients that want the empty-commit bootstrap send
-                // `AddProjectCreateInitialCommit` instead. Fail OPEN on an
-                // indeterminate git result (don't misdiagnose a transient failure
-                // as "no commits") — `repo_has_commits`'s fail-open bool would.
                 if crate::git::repo_commit_state(&validated) == crate::git::CommitState::Unborn {
                     anyhow::bail!(
                         "\"{}\" has no commits yet, so it can't back a worktree. Create an initial commit first (the app offers to do this for you when adding the project).",
@@ -3909,39 +3883,106 @@ impl Engine {
                     status_op_id: None,
                 }
             }
-            WireCommand::RemoveProject { project_id } => {
-                // Resolve a display name, falling back to a short id slice for a
-                // "ghost" project that exists only via orphaned sessions (no
-                // project record). Removal cascades the project's agents
-                // (records + runtime) but KEEPS their worktrees on disk, so
-                // there is deliberately no "delete agents first" guard — see
-                // `Command::RemoveProject`.
-                let project_name = self
+            WireCommand::RemoveProject { project_id } => Command::RemoveProject {
+                project_name: self
                     .projects
                     .iter()
                     .find(|p| p.id == project_id)
                     .map(|p| p.name.clone())
-                    .unwrap_or_else(|| crate::sidebar::short_project_id(&project_id));
-                Command::RemoveProject {
-                    project_id,
-                    project_name,
-                }
-            }
-            WireCommand::DeleteProject { project_id } => {
-                // Same display-name resolution as RemoveProject, but this variant
-                // removes the agents' worktrees too. The guards and per-session
-                // sequencing live in `Command::DeleteProject`.
-                let project_name = self
+                    .unwrap_or_else(|| crate::sidebar::short_project_id(&project_id)),
+                project_id,
+            },
+            WireCommand::DeleteProject { project_id } => Command::DeleteProject {
+                project_name: self
                     .projects
                     .iter()
                     .find(|p| p.id == project_id)
                     .map(|p| p.name.clone())
-                    .unwrap_or_else(|| crate::sidebar::short_project_id(&project_id));
-                Command::DeleteProject {
-                    project_id,
-                    project_name,
-                }
+                    .unwrap_or_else(|| crate::sidebar::short_project_id(&project_id)),
+                project_id,
+            },
+            command => return Ok(WireCommandMapping::Unhandled(command)),
+        };
+        Ok(WireCommandMapping::Mapped(mapped))
+    }
+
+    fn create_agent_command(
+        &self,
+        project_id: String,
+        name: String,
+        copy_uncommitted_changes: Option<bool>,
+        use_existing_branch: bool,
+    ) -> anyhow::Result<Command> {
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
+        let trimmed = name.trim();
+        let custom_name = if trimmed.is_empty() {
+            None
+        } else {
+            if !crate::git::is_valid_agent_name(trimmed) {
+                anyhow::bail!(
+                    "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
+                     underscores and slashes; it must start with a letter or digit, must \
+                     not contain \"//\", and must not end with \"/\"."
+                );
             }
+            Some(trimmed.to_string())
+        };
+        if !use_existing_branch
+            && let Some(name) = &custom_name
+            && matches!(
+                crate::git::create_agent_branch_preflight(
+                    std::path::Path::new(&project.path),
+                    name,
+                ),
+                crate::git::CreateAgentBranchPlan::ExistingBranch { .. }
+            )
+        {
+            anyhow::bail!(
+                "A branch named \"{name}\" already exists. Creating this agent would \
+                 attach to that branch's history. Confirm to attach, or pick a different name."
+            );
+        }
+        let request = CreateAgentRequest::NewProject {
+            project,
+            custom_name,
+            use_existing_branch,
+            pull_before_create: self.config.defaults.pull_before_creating_agent_by_default,
+            copy_uncommitted_changes: copy_uncommitted_changes
+                .unwrap_or(self.config.defaults.copy_uncommitted_changes_by_default),
+        };
+        Ok(Command::DispatchCreateAgentRequest {
+            request: Box::new(request),
+            busy_message: "Creating a new agent\u{2026}".to_string(),
+            term_size: (80, 24),
+        })
+    }
+
+    fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
+        let command = match self.map_changes_command(command)? {
+            WireCommandMapping::Mapped(command) => return Ok(command),
+            WireCommandMapping::Unhandled(command) => command,
+        };
+        let command = match self.map_project_command(command)? {
+            WireCommandMapping::Mapped(command) => return Ok(command),
+            WireCommandMapping::Unhandled(command) => command,
+        };
+        Ok(match command {
+            WireCommand::DeleteTerminal { terminal_id } => Command::DeleteTerminal { terminal_id },
+            WireCommand::DeleteSession {
+                session_id,
+                delete_worktree,
+            } => Command::BeginDeleteSession {
+                session_id,
+                delete_worktree,
+            },
+            WireCommand::PersistGlobalEnv { env } => Command::PersistGlobalEnv { env },
+            WireCommand::ReloadConfig {} => Command::ReloadConfig,
+            WireCommand::RecoverConfig {} => Command::RecoverConfig,
             WireCommand::CreateStandaloneAgent {
                 folder,
                 name,
@@ -3963,67 +4004,12 @@ impl Engine {
                 name,
                 copy_uncommitted_changes,
                 use_existing_branch,
-            } => {
-                let project = self
-                    .projects
-                    .iter()
-                    .find(|p| p.id == project_id)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
-                let trimmed = name.trim();
-                let custom_name = if trimmed.is_empty() {
-                    None
-                } else {
-                    // Backstop: the TUI prompt filters keystrokes so an invalid
-                    // name can't be typed, but a raw wire client (e.g. the web
-                    // UI before its own sanitizer, or a scripted client) can send
-                    // anything. Reject names git would refuse as a ref before
-                    // dispatching the create worker.
-                    if !crate::git::is_valid_agent_name(trimmed) {
-                        anyhow::bail!(
-                            "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
-                             underscores and slashes; it must start with a letter or digit, must \
-                             not contain \"//\", and must not end with \"/\"."
-                        );
-                    }
-                    Some(trimmed.to_string())
-                };
-                // Defense in depth against a SILENT existing-branch attach (the
-                // web/scripted-client bug): when the caller did NOT confirm and a
-                // user-typed name already names a branch, refuse rather than adopt
-                // that branch's history. The REST layer pre-checks with the same
-                // core preflight and returns a confirmable 409 first, so this bail
-                // is only reached by a client that bypassed that dialog. The
-                // decision is the single-source `git::create_agent_branch_preflight`.
-                if !use_existing_branch
-                    && let Some(name) = &custom_name
-                    && matches!(
-                        crate::git::create_agent_branch_preflight(
-                            std::path::Path::new(&project.path),
-                            name,
-                        ),
-                        crate::git::CreateAgentBranchPlan::ExistingBranch { .. }
-                    )
-                {
-                    anyhow::bail!(
-                        "A branch named \"{name}\" already exists. Creating this agent would \
-                         attach to that branch's history. Confirm to attach, or pick a different name."
-                    );
-                }
-                let request = CreateAgentRequest::NewProject {
-                    project,
-                    custom_name,
-                    use_existing_branch,
-                    pull_before_create: self.config.defaults.pull_before_creating_agent_by_default,
-                    copy_uncommitted_changes: copy_uncommitted_changes
-                        .unwrap_or(self.config.defaults.copy_uncommitted_changes_by_default),
-                };
-                Command::DispatchCreateAgentRequest {
-                    request: Box::new(request),
-                    busy_message: "Creating a new agent\u{2026}".to_string(),
-                    term_size: (80, 24),
-                }
-            }
+            } => self.create_agent_command(
+                project_id,
+                name,
+                copy_uncommitted_changes,
+                use_existing_branch,
+            )?,
             WireCommand::ForkSession { session_id, name } => {
                 // THE FORK REFUSAL, at the ForkSession arm: forking copies a
                 // managed worktree onto a new branch, and a standalone agent
@@ -4174,6 +4160,15 @@ impl Engine {
             | WireCommand::CommitChanges { .. }
             | WireCommand::Push { .. }
             | WireCommand::Pull { .. }
+            | WireCommand::PullProject { .. }
+            | WireCommand::ToggleAgentAutoReopen { .. }
+            | WireCommand::UpdateProjectProvider { .. }
+            | WireCommand::UpdateProjectAutoReopen { .. }
+            | WireCommand::UpdateProjectStartupCommand { .. }
+            | WireCommand::UpdateProjectEnv { .. }
+            | WireCommand::AddProject { .. }
+            | WireCommand::RemoveProject { .. }
+            | WireCommand::DeleteProject { .. }
             | WireCommand::RenameSession { .. }
             | WireCommand::ReconnectSession { .. }
             | WireCommand::RerunStartupCommand { .. }
