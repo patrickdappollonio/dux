@@ -1726,7 +1726,7 @@ async fn handle_pty_socket(
         console: console.clone(),
         peer_ip,
     };
-    let (sink, mut stream) = socket.split();
+    let (sink, stream) = socket.split();
     let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
 
     // Subscribe to the target PTY. An agent subscribe also launches/resumes the
@@ -1842,7 +1842,7 @@ async fn handle_pty_socket(
     // read would leave a hole: a resize landing between the read and the
     // subscribe would be reported to nobody on this socket and its viewer would
     // sit on a stale grid until the next change.
-    let mut grid_changes = pty_grid_bus.subscribe();
+    let grid_changes = pty_grid_bus.subscribe();
     // The grid the child is actually drawing for, read once for the handshake.
     // A viewer compares it against its own xterm's grid: one PTY has one
     // authoritative grid (the owner's), and every other attached browser is
@@ -1897,269 +1897,231 @@ async fn handle_pty_socket(
             replay_generation,
             replay_bytes,
         ));
-        let mut pty_forwarder = spawn_pty_forwarder(Arc::clone(&sink), rx, engine.shutdown_flag());
+        AttachedPtySocket {
+            engine: &engine,
+            target: &target,
+            conn_id,
+            sink: &sink,
+            owners: &pty_size_owners,
+            grid_bus: &pty_grid_bus,
+            event_bus: &bus,
+            user_agent: user_agent.as_deref(),
+            live_limits: &live_limits,
+        }
+        .run(stream, rx, grid_changes, handshake_grid_seq)
+        .await;
+    }
 
-        // Liveness ping (every connection). Consume the immediate first tick so the
-        // first real ping waits a full period.
+    // The guards above release ownership and connection accounting on every exit.
+}
+
+enum PtyLoopAction {
+    Continue,
+    Break,
+}
+
+struct AttachedPtySocket<'a> {
+    engine: &'a EngineHandle,
+    target: &'a PtyTarget,
+    conn_id: u64,
+    sink: &'a SharedSink,
+    owners: &'a PtySizeOwners,
+    grid_bus: &'a crate::pty_sizes::PtyGridBus,
+    event_bus: &'a EventBus,
+    user_agent: Option<&'a str>,
+    live_limits: &'a crate::engine_actor::LiveServerLimits,
+}
+
+impl AttachedPtySocket<'_> {
+    async fn run(
+        &self,
+        mut stream: futures_util::stream::SplitStream<WebSocket>,
+        rx: std::sync::mpsc::Receiver<Vec<u8>>,
+        mut grid_changes: tokio::sync::broadcast::Receiver<crate::pty_sizes::PtyGridChange>,
+        mut last_grid_seq: u64,
+    ) {
+        let mut pty_forwarder =
+            spawn_pty_forwarder(Arc::clone(self.sink), rx, self.engine.shutdown_flag());
         let mut ping = tokio::time::interval(WS_LIVENESS_PING_PERIOD);
         ping.tick().await;
 
-        // The newest grid seq this socket has forwarded, seeded from the
-        // handshake's own read. Grid publishes happen after the owners lock
-        // releases, so two sockets' announcements of two ordered applies can reach
-        // the bus inverted; anything at or below this mark is older geometry than
-        // the client already knows and is dropped here. The client keeps the same
-        // filter itself (seeded from the handshake's `grid_seq`), which is the
-        // guard that must exist; this one just saves the wire trip.
-        let mut last_grid_seq = handshake_grid_seq;
-
         loop {
-            let msg = tokio::select! {
-                // Liveness ping: a failed send reaps a dead/half-open peer.
+            // Handle each received value inside its selected branch. A combined
+            // receive-and-handle future could consume a value and then be cancelled.
+            let action = tokio::select! {
                 _ = ping.tick() => {
-                    if send_ping(&sink).await.is_err() {
+                    if send_ping(self.sink).await.is_err() {
                         dux_core::logger::info(&crate::pty_log::describe_connection_reaped(
-                            conn_id,
+                            self.conn_id,
                             crate::pty_log::FailedSend::LivenessPing,
                         ));
-                        break;
+                        PtyLoopAction::Break
+                    } else {
+                        PtyLoopAction::Continue
                     }
-                    continue;
                 }
-                // Somebody resized THIS pty (possibly this very connection). Push
-                // the new grid down as a `size` event frame so a viewer can tell
-                // that it is rendering the child's output at a geometry the child
-                // is not drawing for. One arm in the loop this socket already runs,
-                // rather than a registry holding other tasks' sinks; see
-                // `pty_sizes.rs` for why.
                 change = grid_changes.recv() => {
-                    match change {
-                        Ok(change) => {
-                            if change.pty_id != target.pty_id() {
-                                continue;
-                            }
-                            // A stale announcement (reordered after the newer one
-                            // it lost to, or already covered by this socket's own
-                            // handshake read): drop it rather than letting the
-                            // older geometry become the client's last word.
-                            if change.seq <= last_grid_seq {
-                                continue;
-                            }
-                            last_grid_seq = change.seq;
-                            let text = pty_size_frame_text(change.rows, change.cols, change.seq);
-                            if !text.is_empty() && send_text(&sink, text).await.is_err() {
-                                break;
-                            }
-                            continue;
-                        }
-                        // Lagged: this socket fell behind the bus. Nothing to
-                        // recover, and deliberately nothing sent: the NEXT change
-                        // carries the current geometry, and a reconnect's handshake
-                        // re-reads it from scratch. Keep listening.
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        // Unreachable: this handler holds an `Arc` of the bus for
-                        // its whole lifetime, so the sender cannot have been
-                        // dropped while this receiver lives. Stated as a break
-                        // rather than a `continue`, which would spin.
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
+                    self.handle_grid_change(change, &mut last_grid_seq).await
                 }
-                // The forwarder task ends when the PTY is torn down server-side
-                // (close_tab/DetachAgent/crash) even while the client stays
-                // connected. Without this arm the socket + its connection-cap
-                // permit/guard linger until the client itself disconnects, which
-                // can pin the small per-agent WS sub-quota. Proactively tell the
-                // client to close and tear down our own loop the same way a
-                // client-initiated Close would.
                 _ = &mut pty_forwarder => {
-                    // The PTY was torn down server-side. If we are shutting down the
-                    // client should reconnect when the server returns (plain close);
-                    // otherwise the provider crashed/exited or its tab/agent closed, so
-                    // send the provider-gone code to stop the client relaunching it.
-                    let shutting_down = engine
+                    let shutting_down = self
+                        .engine
                         .shutdown_flag()
                         .load(std::sync::atomic::Ordering::SeqCst);
-                    let mut guard = sink.lock().await;
+                    let mut guard = self.sink.lock().await;
                     let _ = guard.send(forwarder_end_close(shutting_down)).await;
-                    break;
+                    PtyLoopAction::Break
                 }
                 next = stream.next() => match next {
-                    Some(Ok(msg)) => msg,
-                    _ => break,
+                    Some(Ok(message)) => self.handle_client_message(message).await,
+                    _ => PtyLoopAction::Break,
                 },
             };
-            match msg {
-                // Binary frame = raw PTY stdin for THIS socket's PTY. The write gate is
-                // resolved ATOMICALLY by `may_write` (holding the owners lock across the
-                // decision) so no concurrent claim can slip between the check and the
-                // write. A non-owner's stdin is dropped (with a diagnostic log) so a
-                // read-only secondary viewer can never disrupt the active device's
-                // typing; an UNOWNED PTY's first writer is allowed AND becomes the owner,
-                // emitting one `pty.owner` so other clients update (the uncontested
-                // out-of-band case that arrives before any size frame).
-                Message::Binary(bytes) => {
-                    let pty_id = target.pty_id();
-                    let claim = pty_size_owners.may_write(pty_id, conn_id, user_agent.as_deref());
-                    if claim.allowed {
-                        // `epoch` is `Some` exactly when this write newly claimed an
-                        // unowned PTY, so emit one handover stamped with that epoch.
-                        if let Some(epoch) = claim.epoch {
-                            dux_core::logger::info(&crate::pty_log::describe_claim_granted(
-                                pty_id,
-                                conn_id,
-                                user_agent.as_deref(),
-                                false,
-                                None,
-                            ));
-                            bus.emit(pty_owner_event(
-                                pty_id,
-                                conn_id,
-                                epoch,
-                                user_agent.as_deref(),
-                            ));
-                        }
-                        engine.write_pty(pty_id.to_string(), bytes.to_vec());
-                    } else {
-                        dux_core::logger::debug(&format!(
-                            "PTY stdin from non-owner conn {conn_id} dropped for pty {pty_id} \
-                             (another connection currently owns input)"
-                        ));
-                    }
-                }
-                // Text frame = a resize control message. The claim decision and the
-                // resize itself are resolved ATOMICALLY by `claim_for_resize`: an
-                // unowned pty is claimed, the current owner resizes freely, an
-                // explicit `takeover` transfers ownership, and any other non-owner's
-                // resize is refused whole (nothing applied, nothing broadcast) so
-                // attaching cannot steal the device being typed on. On a real
-                // handover we broadcast a `pty.owner` (carrying this connection's id)
-                // so other clients viewing this PTY flip to the read-only take-over
-                // placeholder.
-                Message::Text(text) => {
-                    if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text.as_str()) {
-                        let pty_id = target.pty_id();
-                        let expected_owner = parse_expected_owner(frame.expected_owner.as_deref());
-                        let outcome = pty_size_owners.claim_for_resize(
-                            pty_id,
-                            conn_id,
-                            frame.takeover,
-                            expected_owner,
-                            user_agent.as_deref(),
-                            |seq| {
-                                engine.resize_pty(pty_id.to_string(), frame.rows, frame.cols, seq);
-                            },
-                        );
-                        if let Some(epoch) = outcome.epoch {
-                            dux_core::logger::info(&crate::pty_log::describe_claim_granted(
-                                pty_id,
-                                conn_id,
-                                user_agent.as_deref(),
-                                frame.takeover,
-                                expected_owner,
-                            ));
-                            bus.emit(pty_owner_event(
-                                pty_id,
-                                conn_id,
-                                epoch,
-                                user_agent.as_deref(),
-                            ));
-                        }
-                        if let Some(seq) = outcome.seq {
-                            // The grid really moved, so tell every socket attached
-                            // to this pty. Published here, after the owners lock is
-                            // released, exactly like the `pty.owner` broadcast
-                            // above it, and keyed on the seq (present exactly when
-                            // the resize applied) so a refused resize (which
-                            // changed nothing) announces nothing. The announced
-                            // size is the one the closure enqueued, which is what
-                            // the child will be drawing for; the seq, stamped in
-                            // the same critical section, lets receivers drop this
-                            // announcement if a newer one overtook it on the way
-                            // out. One accepted anomaly: the closure's `try_send`
-                            // can drop the resize under a full engine queue while
-                            // this publish still announces it, and that is fine
-                            // because the viewer's healing handshake re-reads the
-                            // real grid, so the announcement self-corrects.
-                            pty_grid_bus.publish(pty_id, frame.rows, frame.cols, seq);
-                        } else {
-                            // Logged at INFO rather than debug: "my keystrokes do
-                            // nothing" is the report this line answers, and a debug
-                            // line nobody has switched on answers nothing. It names
-                            // the device that IS driving and which of the two
-                            // refusals this was, because a plain non-owner resize
-                            // and a superseded ghost succession look identical from
-                            // the browser and mean very different things.
-                            let reason = if frame.takeover {
-                                crate::pty_log::ResizeRefusal::ExpectedOwnerMismatch
-                            } else {
-                                crate::pty_log::ResizeRefusal::NonOwnerPlainResize
-                            };
-                            let (current_owner, _, _) = pty_size_owners.current_owner(pty_id);
-                            dux_core::logger::info(&crate::pty_log::describe_claim_refused(
-                                pty_id,
-                                conn_id,
-                                current_owner,
-                                reason,
-                            ));
-                        }
-                    } else if let Ok(frame) = serde_json::from_str::<PtyBeatFrame>(text.as_str()) {
-                        // The viewed half never claims sizing ownership; it only
-                        // stamps the engine's engagement window for this pty's tab.
-                        // The engine ignores it for a non-tab (companion) or unknown
-                        // id. A watcher's frame sets it false and must not suppress
-                        // attention for everybody.
-                        if frame.viewed {
-                            engine.note_viewed(target.pty_id().to_string());
-                        }
-                        // The beat half is answered unconditionally, watcher
-                        // included: every attached page needs a round trip it can
-                        // time out on, not just the one that is driving. A failed
-                        // send here is left to the ping reaper rather than breaking
-                        // the loop, because a single dropped answer is exactly what
-                        // the browser's own deadline is for.
-                        //
-                        // BOUNDED for the same reason the opening sends are: this
-                        // holds the shared sink lock while it waits, so an
-                        // unbounded one against a wedged peer wedges every other
-                        // write on the socket behind it, which is precisely the
-                        // argument in `pty_opening_send_timeout`. It does NOT
-                        // share that deadline, though: that one is a throughput
-                        // allowance for a whole scrollback replay, and this is
-                        // twenty-five bytes, bounded by the shorter of a fixed
-                        // ceiling and the client's own answer deadline. See
-                        // `pty_beat_echo_timeout`.
-                        //
-                        // A frame with no `beat` is a page that predates the fold
-                        // of the viewed ping into this message. Its `viewed` half
-                        // is still honored above; there is simply nothing to echo.
-                        if let Some(n) = frame.beat {
-                            let _ = with_send_deadline(
-                                pty_beat_echo_timeout(&live_limits),
-                                send_text(&sink, pty_beat_frame_text(n)),
-                            )
-                            .await;
-                        }
-                    }
-                }
-                Message::Close(_) => break,
-                _ => {}
+            if matches!(action, PtyLoopAction::Break) {
+                break;
             }
         }
 
-        // Detach: stop the forwarder so it doesn't linger on the subscription.
-        // Inside the block, because a socket that gave up before the forwarder
-        // was spawned has none to stop.
         pty_forwarder.abort();
     }
 
-    // Ownership release and the console's client count are the two GUARDS
-    // declared at the top of this function, so they run here by falling out of
-    // scope rather than by being called. See `PtyOwnershipGuard` and
-    // `ClientCountGuard`: they used to be two plain statements at the end, which
-    // a panic unwinding through the handler skipped, leaving a phantom owner on
-    // the pty for the life of the process and a client count that only ever went
-    // up. `_conn_guard` above them has been a Drop guard for exactly this reason
-    // all along.
+    async fn handle_grid_change(
+        &self,
+        change: Result<crate::pty_sizes::PtyGridChange, tokio::sync::broadcast::error::RecvError>,
+        last_grid_seq: &mut u64,
+    ) -> PtyLoopAction {
+        let change = match change {
+            Ok(change) => change,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                return PtyLoopAction::Continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                return PtyLoopAction::Break;
+            }
+        };
+        if change.pty_id != self.target.pty_id() || change.seq <= *last_grid_seq {
+            return PtyLoopAction::Continue;
+        }
+
+        *last_grid_seq = change.seq;
+        let text = pty_size_frame_text(change.rows, change.cols, change.seq);
+        if !text.is_empty() && send_text(self.sink, text).await.is_err() {
+            PtyLoopAction::Break
+        } else {
+            PtyLoopAction::Continue
+        }
+    }
+
+    async fn handle_client_message(&self, message: Message) -> PtyLoopAction {
+        match message {
+            Message::Binary(bytes) => self.handle_input(&bytes),
+            Message::Text(text) => self.handle_text_frame(text.as_str()).await,
+            Message::Close(_) => return PtyLoopAction::Break,
+            _ => {}
+        }
+        PtyLoopAction::Continue
+    }
+
+    fn handle_input(&self, bytes: &[u8]) {
+        let pty_id = self.target.pty_id();
+        let claim = self.owners.may_write(pty_id, self.conn_id, self.user_agent);
+        if !claim.allowed {
+            dux_core::logger::debug(&format!(
+                "PTY stdin from non-owner conn {} dropped for pty {pty_id} \
+                 (another connection currently owns input)",
+                self.conn_id
+            ));
+            return;
+        }
+
+        if let Some(epoch) = claim.epoch {
+            dux_core::logger::info(&crate::pty_log::describe_claim_granted(
+                pty_id,
+                self.conn_id,
+                self.user_agent,
+                false,
+                None,
+            ));
+            self.event_bus.emit(pty_owner_event(
+                pty_id,
+                self.conn_id,
+                epoch,
+                self.user_agent,
+            ));
+        }
+        self.engine.write_pty(pty_id.to_string(), bytes.to_vec());
+    }
+
+    async fn handle_text_frame(&self, text: &str) {
+        if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text) {
+            self.handle_resize_frame(frame);
+            return;
+        }
+        if let Ok(frame) = serde_json::from_str::<PtyBeatFrame>(text) {
+            self.handle_beat_frame(frame).await;
+        }
+    }
+
+    fn handle_resize_frame(&self, frame: PtyResizeFrame) {
+        let pty_id = self.target.pty_id();
+        let expected_owner = parse_expected_owner(frame.expected_owner.as_deref());
+        let outcome = self.owners.claim_for_resize(
+            pty_id,
+            self.conn_id,
+            frame.takeover,
+            expected_owner,
+            self.user_agent,
+            |seq| {
+                self.engine
+                    .resize_pty(pty_id.to_string(), frame.rows, frame.cols, seq);
+            },
+        );
+        if let Some(epoch) = outcome.epoch {
+            dux_core::logger::info(&crate::pty_log::describe_claim_granted(
+                pty_id,
+                self.conn_id,
+                self.user_agent,
+                frame.takeover,
+                expected_owner,
+            ));
+            self.event_bus.emit(pty_owner_event(
+                pty_id,
+                self.conn_id,
+                epoch,
+                self.user_agent,
+            ));
+        }
+        if let Some(seq) = outcome.seq {
+            self.grid_bus.publish(pty_id, frame.rows, frame.cols, seq);
+            return;
+        }
+
+        let reason = if frame.takeover {
+            crate::pty_log::ResizeRefusal::ExpectedOwnerMismatch
+        } else {
+            crate::pty_log::ResizeRefusal::NonOwnerPlainResize
+        };
+        let (current_owner, _, _) = self.owners.current_owner(pty_id);
+        dux_core::logger::info(&crate::pty_log::describe_claim_refused(
+            pty_id,
+            self.conn_id,
+            current_owner,
+            reason,
+        ));
+    }
+
+    async fn handle_beat_frame(&self, frame: PtyBeatFrame) {
+        if frame.viewed {
+            self.engine.note_viewed(self.target.pty_id().to_string());
+        }
+        if let Some(n) = frame.beat {
+            let _ = with_send_deadline(
+                pty_beat_echo_timeout(self.live_limits),
+                send_text(self.sink, pty_beat_frame_text(n)),
+            )
+            .await;
+        }
+    }
 }
 
 /// A `pty.owner` signal: the connection that owns a PTY's sizing+input changed (a
