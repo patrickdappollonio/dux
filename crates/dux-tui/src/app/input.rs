@@ -10568,8 +10568,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
+    use super::{DOUBLE_CLICK_THRESHOLD, MOUSE_WHEEL_LINES};
     use super::{
         LinkPressDecision, TerminalPressAction, decide_terminal_press, link_release_opens,
     };
@@ -10608,14 +10608,15 @@ mod tests {
         AgentLaunchKind, App, BranchWarningKind, CenterMode, ChangeAgentProviderMode,
         ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmKillRunningPrompt,
         ConfirmNonDefaultBranchFocus, CreateAgentBranchInspection, CreateAgentRequest,
-        DeleteAgentFocus, FocusPane, FullscreenOverlay, InputTarget, KillRunningAction,
-        KillRunningFocus, KillRunningFooterAction, KillRunningPrompt, KillableRuntime,
-        KillableRuntimeKind, LeftItem, LeftSection, MacroBarState, MacroEditFocus, MacroEditState,
-        MouseClickTarget, MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction,
-        OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, PickProjectWorktreePrompt,
-        ProcessInfo, ProjectChooserIntent, ProjectWorktreeEntry, PromptState, PullTarget,
-        RenameSessionFocus, ResourceKind, ResourceStats, RightSection, RuntimeTargetId,
-        SearchableList, StartupCommandLogFocus, StartupCommandLogPrompt, TextInput, WorkerEvent,
+        DeleteAgentFocus, FirstLoadButton, FirstLoadPrompt, FocusPane, FullscreenOverlay,
+        InputTarget, KillRunningAction, KillRunningFocus, KillRunningFooterAction,
+        KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection,
+        MacroBarState, MacroEditFocus, MacroEditState, MouseClickTarget, MouseLayoutState,
+        NameNewAgentFocus, NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId,
+        OverlayMouseLayout, PickProjectWorktreePrompt, ProcessInfo, ProjectChooserIntent,
+        ProjectWorktreeEntry, PromptState, PullTarget, RenameSessionFocus, ResourceKind,
+        ResourceStats, RightSection, RuntimeTargetId, SearchableList, StartupCommandLogFocus,
+        StartupCommandLogPrompt, TextInput, WorkerEvent,
     };
     use crate::app::{StartupLogViewer, pick_project_matches};
     use crate::app::{TermGridPos, TerminalSelection};
@@ -20982,6 +20983,107 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn resource_monitor_wheel_moves_selection_and_keeps_it_visible() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ResourceMonitor {
+            rows: (0..10)
+                .map(|index| ResourceStats {
+                    id: None,
+                    kind: ResourceKind::Dux,
+                    label: format!("row {index}"),
+                    pid: None,
+                    cpu_percent: 0.0,
+                    rss_bytes: 0,
+                    process_count: 1,
+                    children: Vec::new(),
+                })
+                .collect(),
+            scroll_offset: 0,
+            selected_row: 4,
+            expanded: std::collections::HashSet::new(),
+            last_refresh: std::time::Instant::now(),
+            short_window_sample: false,
+        };
+        install_resource_monitor_overlay(&mut app, 10);
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 15, 8));
+
+        match &app.prompt {
+            PromptState::ResourceMonitor {
+                selected_row,
+                scroll_offset,
+                ..
+            } => {
+                assert_eq!(*selected_row, 7);
+                assert_eq!(*scroll_offset, 2);
+            }
+            other => panic!("expected resource monitor prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn first_load_wheel_scrolls_content_without_changing_button_focus() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(
+            dux_core::welcome_screen::welcome_screen(&app.engine.paths.config_path),
+            false,
+        ));
+        app.last_first_load_lines = 20;
+        app.last_first_load_height = 5;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 20, 8));
+
+        let PromptState::FirstLoad(prompt) = &app.prompt else {
+            panic!("expected first-load prompt");
+        };
+        assert_eq!(prompt.scroll, MOUSE_WHEEL_LINES as u16);
+        assert_eq!(prompt.focus, FirstLoadButton::Primary);
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, 20, 8));
+        let PromptState::FirstLoad(prompt) = &app.prompt else {
+            panic!("expected first-load prompt");
+        };
+        assert_eq!(prompt.scroll, 0);
+        assert_eq!(prompt.focus, FirstLoadButton::Primary);
+    }
+
+    #[test]
+    fn debug_input_wheel_scrolls_without_logging_then_click_logs_coordinates() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::DebugInput {
+            lines: (0..5)
+                .map(|index| Line::raw(format!("event {index}")))
+                .collect(),
+            scroll_offset: 0,
+        };
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 12, 7));
+        let PromptState::DebugInput {
+            lines,
+            scroll_offset,
+        } = &app.prompt
+        else {
+            panic!("expected debug-input prompt");
+        };
+        assert_eq!(lines.len(), 5);
+        assert_eq!(*scroll_offset, 3);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 12, 7));
+        let PromptState::DebugInput {
+            lines,
+            scroll_offset,
+        } = &app.prompt
+        else {
+            panic!("expected debug-input prompt");
+        };
+        assert_eq!(lines.len(), 6);
+        assert_eq!(*scroll_offset, 6);
+        let recorded = lines.last().expect("mouse event line").to_string();
+        assert!(recorded.contains("Down(Left)"));
+        assert!(recorded.contains("col=12 row=7"));
+    }
+
+    #[test]
     fn mouse_click_browser_search_input_moves_cursor_and_edits_filter() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::BrowseProjects {
@@ -27554,6 +27656,52 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn raw_input_poll_without_a_selected_session_clears_transient_input_state() {
+        let mut app = test_app(default_bindings());
+        app.engine.sessions.clear();
+        app.input_target = InputTarget::Agent;
+        app.terminal_selection = Some(TerminalSelection {
+            anchor: TermGridPos { row: 0, col: 0 },
+            end: TermGridPos { row: 0, col: 1 },
+            dragging: true,
+            origin: app.snapshot_selection_origin(),
+        });
+        app.raw_input_parser
+            .feed_sequences(crate::raw_input::BRACKET_PASTE_START);
+        app.in_bracket_paste = true;
+        app.raw_input_buf = b"pending".to_vec();
+        app.loading_input_buf = b"loading".to_vec();
+
+        assert!(!app.poll_and_forward_raw_input().expect("poll raw input"));
+
+        assert_eq!(app.input_target, InputTarget::None);
+        assert!(app.terminal_selection.is_none());
+        assert!(!app.in_bracket_paste);
+        assert!(app.raw_input_buf.is_empty());
+        assert!(app.raw_input_parser.pending().is_empty());
+        assert!(!app.raw_input_parser.in_bracket_paste());
+        assert!(app.loading_input_buf.is_empty());
+    }
+
+    #[test]
+    fn raw_input_poll_without_provider_resets_state_and_reports_surface() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.raw_input_parser.feed_sequences(b"\x1b");
+        app.raw_input_buf = b"\x1b".to_vec();
+        app.loading_input_buf = b"loading".to_vec();
+
+        assert!(!app.poll_and_forward_raw_input().expect("poll raw input"));
+
+        assert_eq!(app.input_target, InputTarget::None);
+        assert!(app.raw_input_parser.pending().is_empty());
+        assert!(app.raw_input_buf.is_empty());
+        assert!(app.loading_input_buf.is_empty());
+        assert_eq!(app.status.message(), "Agent disconnected.");
+    }
+
+    #[test]
     fn pending_esc_before_sgr_mouse_does_not_leave_printable_tail() {
         let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["esc"])]);
         let mut app = app_with_scrolled_back_pty();
@@ -28689,6 +28837,23 @@ cyan = "#00ffff"
             app.terminal_focus
                 .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::ZERO),
             "a bare focus-in report during loading must resume stamping"
+        );
+    }
+
+    #[test]
+    fn loading_phase_fragmented_focus_report_completes_pending_esc() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.terminal_focus.on_focus_lost();
+
+        assert!(!app.scan_loading_phase(b"\x1b"));
+        assert_eq!(app.raw_input_buf, b"\x1b");
+        assert!(!app.scan_loading_phase(b"[I"));
+
+        assert!(app.raw_input_buf.is_empty());
+        assert!(
+            app.terminal_focus
+                .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::ZERO)
         );
     }
 
