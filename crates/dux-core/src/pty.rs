@@ -2428,36 +2428,36 @@ impl TerminalState {
     /// repaints overwrite the viewport without ever scrolling.
     fn reconnect_repaint(&self) -> Vec<u8> {
         if self.is_alt_screen() {
-            let snapshot = self.snapshot();
-            let mut out = synthesize_repaint(&snapshot, true, self.scroll_region.region());
-            // A HIDDEN cursor is absent from the snapshot, because a snapshot
-            // describes what is drawn and a hidden cursor draws nothing. So
-            // `synthesize_repaint` emitted no positioning for it, and the region
-            // restore it emitted just before that HOMED the cursor. Place it
-            // explicitly: a hidden cursor still has a position, and a program that
-            // moves or prints relative to it resumes from the wrong cell.
-            if snapshot.cursor.is_none() {
-                let renderable = self.term.renderable_content();
-                if let Some(point) =
-                    term::point_to_viewport(renderable.display_offset, renderable.cursor.point)
-                {
-                    out.extend_from_slice(
-                        format!("\x1b[{};{}H", point.line + 1, point.column.0 + 1).as_bytes(),
-                    );
-                }
-            }
-            // Cells alone are not the terminal's state: re-assert the child's
-            // private modes so a client that reset before applying the replay
-            // (every web reconnect does) comes back with mouse tracking,
-            // bracketed paste and cursor visibility intact.
-            out.extend_from_slice(mode_restore_sequence(*self.term.mode()).as_bytes());
-            out.extend_from_slice(
-                cursor_and_palette_restore_sequence(self.term.cursor_style(), self.term.colors())
-                    .as_bytes(),
-            );
-            return out;
+            self.reconnect_alt_screen_repaint()
+        } else {
+            self.reconnect_main_screen_repaint()
         }
+    }
 
+    fn reconnect_alt_screen_repaint(&self) -> Vec<u8> {
+        let snapshot = self.snapshot();
+        let mut out = synthesize_repaint(&snapshot, true, self.scroll_region.region());
+        // A hidden cursor is absent from the snapshot but still has a position
+        // that relative movement and output resume from.
+        if snapshot.cursor.is_none() {
+            let renderable = self.term.renderable_content();
+            if let Some(point) =
+                term::point_to_viewport(renderable.display_offset, renderable.cursor.point)
+            {
+                out.extend_from_slice(
+                    format!("\x1b[{};{}H", point.line + 1, point.column.0 + 1).as_bytes(),
+                );
+            }
+        }
+        out.extend_from_slice(mode_restore_sequence(*self.term.mode()).as_bytes());
+        out.extend_from_slice(
+            cursor_and_palette_restore_sequence(self.term.cursor_style(), self.term.colors())
+                .as_bytes(),
+        );
+        out
+    }
+
+    fn reconnect_main_screen_repaint(&self) -> Vec<u8> {
         let renderable = self.term.renderable_content();
         let colors = renderable.colors;
         // The replay always rebuilds the buffer ending at the live bottom, so the
