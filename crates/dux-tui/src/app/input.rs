@@ -25217,6 +25217,76 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn focus_next_walks_the_right_pane_sections_before_leaving_it() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Files);
+        assert_eq!(app.right_section, RightSection::Unstaged);
+
+        app.right_section = RightSection::Staged;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Files);
+        assert_eq!(app.right_section, RightSection::CommitInput);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.left_section, LeftSection::Projects);
+    }
+
+    #[test]
+    fn focus_previous_walks_the_right_pane_sections_before_leaving_it() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::CommitInput;
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Files);
+        assert_eq!(app.right_section, RightSection::Staged);
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.right_section, RightSection::Unstaged);
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Center);
+    }
+
+    #[test]
+    fn focus_navigation_visits_the_terminal_list_as_a_left_pane_section() {
+        let mut app = test_app(default_bindings());
+        app.show_companion_terminal().expect("launch terminal");
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.left_section, LeftSection::Terminals);
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.left_section, LeftSection::Projects);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(app.left_section, LeftSection::Projects);
+    }
+
+    #[test]
     fn resume_fallback_retries_with_fresh_session_on_quick_exit() {
         let mut app = test_app(default_bindings());
         // Override the "codex" provider to use /bin/sh so the fallback spawn
