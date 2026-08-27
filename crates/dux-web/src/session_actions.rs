@@ -1136,6 +1136,25 @@ mod tests {
         app.clone().oneshot(req).await.unwrap()
     }
 
+    #[tokio::test]
+    async fn session_delete_reports_a_launch_refusal_as_conflict() {
+        let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine, _| {
+            engine.mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch("s1".to_string()));
+        });
+
+        let response = send_json(
+            &app,
+            "DELETE",
+            "/api/v1/sessions/s1?delete_worktree=true",
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("still launching"));
+    }
+
     /// PUT on an id no session has is the truthful 404, not the gh-gate 400
     /// (the handler checks existence before dispatching).
     #[tokio::test]

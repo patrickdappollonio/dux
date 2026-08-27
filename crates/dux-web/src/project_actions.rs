@@ -642,6 +642,71 @@ mod tests {
             .unwrap()
     }
 
+    fn router_with_launching_project_session() -> (tempfile::TempDir, axum::Router) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = dux_core::config::DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        std::fs::write(
+            &paths.config_path,
+            format!(
+                "[[projects]]\nid = \"p1\"\npath = \"{}\"\nname = \"Project\"\n",
+                tmp.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+        let now = chrono::Utc::now();
+        store
+            .upsert_session(&dux_core::model::AgentSession {
+                id: "s1".to_string(),
+                provider: dux_core::model::ProviderKind::new("claude"),
+                title: None,
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: false,
+                status: dux_core::model::SessionStatus::Detached,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+                workspace: dux_core::model::AgentWorkspace::Managed(
+                    dux_core::model::ManagedWorkspace {
+                        project_id: "p1".to_string(),
+                        project_path: None,
+                        source_branch: "main".to_string(),
+                        branch_name: "feature".to_string(),
+                        initial_branch: "feature".to_string(),
+                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                        worktree_path: tmp.path().to_string_lossy().to_string(),
+                    },
+                ),
+            })
+            .unwrap();
+        drop(store);
+        let mut engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        engine.mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch("s1".to_string()));
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        (tmp, crate::server::router(handle))
+    }
+
+    #[tokio::test]
+    async fn project_delete_reports_a_launch_refusal_as_conflict() {
+        let (_tmp, app) = router_with_launching_project_session();
+
+        let response = app.oneshot(delete_project_req("p1", true)).await.unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("still launching"));
+    }
+
     #[tokio::test]
     async fn delete_project_with_worktrees_flag_removes_the_project_and_keeps_the_source_checkout()
     {
