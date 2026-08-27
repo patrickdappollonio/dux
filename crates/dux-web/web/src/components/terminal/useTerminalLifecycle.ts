@@ -30,16 +30,9 @@ import { inactiveCursorStyle } from "@/lib/composebar"
 import { copyTermSelection } from "@/lib/termClipboard"
 import { dragScrollLines, dragWheelReport } from "@/lib/viewport"
 import { isApplePlatform } from "@/lib/platform"
-import {
-  applyModifiers,
-  classifyClipboardKey,
-  copyOnSelectAction,
-  forcesTextPaste,
-  softNewlineAction,
-} from "@/lib/termkeys"
+import { copyOnSelectAction } from "@/lib/termkeys"
 import {
   dispatchMouseReplay,
-  latin1Bytes,
   tapReplaySteps,
   wheelReplaySteps,
 } from "@/lib/termmouse"
@@ -68,7 +61,6 @@ import { createHeartbeat, type Heartbeat } from "@/lib/heartbeat"
 import { onServerRunUnconfirmed } from "@/lib/serverRun"
 import { registerPageLifecycle } from "@/lib/pageLifecycle"
 import type { ConnState } from "@/lib/types"
-import { isFocusReport } from "@/lib/suppressViewerReports"
 import { suppressViewerReports } from "@/lib/suppressViewerReports"
 import { registerAgentNotifications } from "@/lib/agentNotifications"
 import type { TerminalOwnerRef } from "@/lib/store"
@@ -84,12 +76,9 @@ import type {
 import type { HandshakeOwner } from "@/lib/ptyOwnership"
 import {
   mouseCaptureHintShown,
-  raiseMouseCaptureHint,
 } from "./pageSessionHints"
 import {
-  DRAG_THRESHOLD_PX,
   WHEEL_SCROLL_SENSITIVITY,
-  writeSoftNewline,
   xtermScrollbarWidth,
 } from "./constants"
 import { createResizeCoordinator } from "./resizeCoordinator"
@@ -98,6 +87,7 @@ import { plainBounce } from "./plainBounce"
 import { createSelectionDrag } from "./selectionDrag"
 import { createTouchGesture } from "./touchGesture"
 import { createLinkPress } from "./linkPress"
+import { registerTerminalInputWiring } from "./inputWiring"
 
 /// The streamed target: an agent tab, or a companion terminal of either owner.
 /// `id` is the FOCUSED TAB id for an agent (the session-slot tab's equals
@@ -525,184 +515,20 @@ export function useTerminalLifecycle(
       noteRemotePtyGrid(grid, fromHandshake)
     }
 
-    // Forward keystrokes to the PTY as binary. On mobile, sticky modifiers from
-    // the accessory bar transform a single typed char (Ctrl-chord, Alt/Meta
-    // prefix) before sending; the latch then clears one-shot (visual included).
-    // Multi-char chunks (paste/IME) pass through untransformed but still clear
-    // any latch. `modsRef` is read live so this once-created closure sees the
-    // current latch rather than a stale capture.
-    const encoder = new TextEncoder()
-    const dataSub = term.onData((s) => {
-      // Read-only when we are not the owner: a secondary viewer's keystrokes are
-      // dropped client-side (and the server drops them too) so it can never
-      // disrupt the active device's typing. The take-over button reclaims input.
-      if (!ownership.read()) return
-      // A focus report raised by the replay we are applying right now is the
-      // viewer volunteering state, not a real focus change: drop it. Real
-      // transitions (the user clicking into or away from the pane) happen
-      // outside this window and still reach the PTY.
-      if (attach.replayInFlight() && isFocusReport(s)) return
-      const latch = mods.read()
-      const out =
-        latch.ctrl || latch.alt ? applyModifiers(s, latch) : s
-      if (latch.ctrl || latch.alt) {
-        mods.write({ ctrl: false, alt: false })
-      }
-      pty.sendInput(encoder.encode(out))
+    const inputWiring = registerTerminalInputWiring({
+      term,
+      pty,
+      container,
+      isMac,
+      live,
+      mods,
+      ownership,
+      pointerTypeRef,
+      replayInFlight: () => attach.replayInFlight(),
+      focusTypingSurface,
+      onClipboardPaste,
+      armForcedTextPaste,
     })
-
-    // The OTHER half of xterm's output stream. `onData` carries text; `onBinary`
-    // carries a byte-per-code-unit "binary string", and the only thing xterm
-    // routes through it is a mouse report in the DEFAULT (X10) encoding, which
-    // `CoreMouseService.triggerMouseEvent` sends via `triggerBinaryEvent`
-    // whenever the app enabled a tracking mode WITHOUT DECSET 1006 (see
-    // `lib/termmouse.ts`). Without this subscription every such report was
-    // dropped on the floor, desktop clicks included, so a `?1000`-only TUI was
-    // simply unclickable in the web UI. `latin1Bytes`, never `TextEncoder`: the
-    // X10 form puts `col + 32` in one byte and UTF-8 would split it in two.
-    // Deliberately does NOT run the sticky-modifier transform or clear a latch:
-    // a mouse report is not a keystroke.
-    const binarySub = term.onBinary((s) => {
-      if (!ownership.read()) return
-      pty.sendInput(latin1Bytes(s))
-    })
-
-    // xterm allows only ONE custom key-event handler, so this single closure owns
-    // both the soft-newline chord and the clipboard chords. They match disjoint
-    // keys (bare Shift-Enter vs Ctrl-based clipboard chords), so soft-newline is
-    // checked first and clipboard classification handles the rest.
-    //
-    // Shift-Enter inserts a "soft" newline (LF / Ctrl-j) instead of submitting.
-    // xterm collapses both Enter and Shift-Enter to a carriage return before
-    // `onData` can see them, so the two are indistinguishable at the data layer,
-    // we must intercept at the key-event layer instead. `softNewlineAction` owns
-    // the decision (chord match, IME guard, ownership gate, latch clear); this
-    // closure is the thin applicator that turns that decision into DOM/PTY effects.
-    //
-    // Clipboard chords: xterm's defaults don't bridge the browser clipboard on
-    // Linux/Windows: Ctrl+v emits \x16 to the REMOTE agent (pasting the server's
-    // clipboard) and Ctrl+c / a selection never reach the system clipboard. We
-    // intercept only the clipboard chords; everything else (Ctrl+c SIGINT, plain
-    // typing, mac Control/Cmd) passes through to xterm unchanged. `isMac` is stable
-    // for this mount and is resolved above, beside the link handler.
-    term.attachCustomKeyEventHandler((e) => {
-      const action = softNewlineAction(e, {
-        isOwner: ownership.read(),
-        ctrlLatched: mods.read().ctrl,
-        altLatched: mods.read().alt,
-      })
-      if (action.handled) {
-        // Cancel the key with the same semantics xterm applies to every key it
-        // handles: `preventDefault` stops the browser dropping a stray newline into
-        // the hidden textarea, `stopPropagation` stops the "handled" key bubbling to
-        // window-level shortcut listeners, and returning `false` tells xterm not to
-        // encode its own CR.
-        e.preventDefault()
-        e.stopPropagation()
-        // Owner-only write. Consume the latch here (the decision came from
-        // `softNewlineAction`), then `writeSoftNewline` replays the scroll/selection
-        // side effects our early return skipped, shared with the accessory bar's
-        // ⇧↵ key so the two entry points can't drift.
-        if (action.send !== null) {
-          if (action.clearLatch) mods.write({ ctrl: false, alt: false })
-          writeSoftNewline(term, pty)
-        }
-        return false
-      }
-      // Clipboard chords (keydown only).
-      if (e.type !== "keydown") return true
-      const chord = {
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-        metaKey: e.metaKey,
-        code: e.code,
-        keyCode: e.keyCode,
-        isMac,
-      }
-      // Arm the text-paste hatch BEFORE the classification and independently of
-      // it: on a Mac `Cmd+Shift+v` classifies as `passthrough` (the whole
-      // Cmd-anything branch is deliberately the browser's), so folding this
-      // into the classifier would have given the hatch to Linux only. Armed
-      // here, consumed by the `paste` listener the browser is about to fire.
-      if (forcesTextPaste(chord)) armForcedTextPaste()
-      const clip = classifyClipboardKey(chord)
-      if (clip === "passthrough") return true
-      if (clip === "copy") {
-        // The chord is not a browser copy event, so we copy the selection
-        // ourselves. preventDefault so the browser/devtools don't also act;
-        // return false so xterm doesn't process the chord.
-        void copyTermSelection(term, focusTypingSurface)
-        e.preventDefault()
-        return false
-      }
-      // clip === "paste": return false WITHOUT preventDefault so xterm emits no
-      // \x16 and the browser's default Ctrl+v fires a native `paste` event,
-      // which xterm's own handler reads from clipboardData (secure-context-free)
-      // and forwards as (bracketed) onData.
-      //
-      // A NON-OWNER takes the same path, deliberately. Swallowing the chord here
-      // used to look like the safe thing, and it was the bug: no native paste
-      // event fired, so the capture listener never ran, so an image paste from a
-      // viewer was silently inert instead of saying why (and only on Linux and
-      // Windows, since `Cmd+v` classifies as passthrough and never reached this
-      // branch at all). Nothing is lost by letting it through, because a
-      // viewer's TEXT paste still cannot reach the PTY: xterm's own paste
-      // handler ends in `triggerDataEvent`, which is the `onData` subscription
-      // above, and that returns early for a non-owner. The server's `may_write`
-      // denies a non-owner's stdin as well, so the gate is two-deep.
-      return false
-    })
-
-    // THE MOUNT-TIME FOCUS USED TO LIVE HERE, gated only on the foreground
-    // guess. It is gone, and the pane's own focus effect does it instead, when
-    // the pane has actually RECONCILED: the handshake has confirmed ownership
-    // and the replay for this attach epoch is on screen. Focusing summons the
-    // soft keyboard, and doing that over a pane that is still resolving
-    // ownership puts a keyboard over a placeholder. There is now exactly one
-    // automatic focus move in the pane, and one rule deciding it
-    // (`typingFocusAllowed`).
-
-    // Copy-on-select (highlight to copy), gated by the `copy_on_select`
-    // preference. Runs in the `mouseup` user gesture so the clipboard write is
-    // permitted even over plain-HTTP (copyToClipboard falls synchronously to its
-    // execCommand path there). Record the left-button-down position so mouseup can
-    // tell a drag from a click. `copyOnSelectAction` decides: copy a real local
-    // selection; when the user dragged but the app captured the mouse (so xterm
-    // forwarded the drag to the host and nothing was selected locally), surface a
-    // one-time hint to hold the force-selection modifier; otherwise do nothing.
-    // The left-button mousedown position, so `onMouseUp` can tell a drag (a
-    // selection attempt) from a plain click and only hint about mouse capture
-    // on the former. A closure local: it means nothing outside this pair.
-    let mouseDownPos: { x: number; y: number } | null = null
-    const onMouseDown = (e: MouseEvent) => {
-      if (e.button === 0) mouseDownPos = { x: e.clientX, y: e.clientY }
-    }
-    const onMouseUp = (e: MouseEvent) => {
-      const down = mouseDownPos
-      mouseDownPos = null
-      const dragged =
-        down !== null &&
-        Math.hypot(e.clientX - down.x, e.clientY - down.y) >= DRAG_THRESHOLD_PX
-      const action = copyOnSelectAction({
-        copyOnSelect: live.current.copyOnSelect,
-        selection: term.getSelection(),
-        dragged,
-        mouseTrackingMode: term.modes.mouseTrackingMode,
-        hintShown: mouseCaptureHintShown(),
-        gesture: "mouse-drag",
-      })
-      if (action === "copy") {
-        void copyTermSelection(term, focusTypingSurface)
-      } else if (action === "hint") {
-        // The wording, the once-per-PAGE latch and the deliberate absence of a
-        // toast id all live in `pageSessionHints`; see its doc for why each is
-        // what it is.
-        raiseMouseCaptureHint(isMac)
-      }
-    }
-    container.addEventListener("mousedown", onMouseDown)
-    container.addEventListener("mouseup", onMouseUp)
 
     // THE LINK-PRESS MACHINE owns the capture-phase intercept, the hover
     // cache, the one opener and the activation counter the touch probe reads.
@@ -710,36 +536,6 @@ export function useTerminalLifecycle(
     // phase and the `stopPropagation` are load-bearing, and why it abstains
     // entirely under the force-local-selection modifier.
     links.attach(container)
-
-    // Kill xterm's right-click paste. On a mouse right-click xterm's own handler
-    // stuffs the current selection into its hidden input textarea (its
-    // native-Copy preparation); left there it leaks back into the PTY as a paste.
-    // We drive our own clipboard menu, so wipe the textarea on `contextmenu`
-    // (which fires right after that handler, before any input event could send
-    // it). It only touches xterm's hidden input; the selection MODEL that our
-    // menu's Copy reads is untouched, so the highlight and Copy stay intact.
-    // Touch is NOT exempt, and used to be. Android fires `contextmenu` on a
-    // long press, xterm's listener is on `term.element` INSIDE this container
-    // so it runs first, and `preventDefault` further up cannot un-run it. That
-    // was harmless while a touch long press never produced a selection; now
-    // that it does, skipping the wipe would leave the user's selected text
-    // sitting in the textarea, which is precisely the leak this guard exists
-    // to close. It also takes focus (`moveTextAreaUnderMouseCursor` focuses the
-    // textarea), which would raise the soft keyboard over the selection, so
-    // hand focus back on the touch path.
-    const onContextMenuPasteGuard = () => {
-      if (!term.textarea) return
-      term.textarea.value = ""
-      if (pointerTypeRef.current === "touch") term.textarea.blur()
-    }
-    container.addEventListener("contextmenu", onContextMenuPasteGuard)
-
-    // Image paste. CAPTURE, and that is the whole trick: xterm's own paste
-    // handler sits on the hidden textarea inside this container, and a capture
-    // listener on an ancestor runs before it, so dux decides first and an
-    // ordinary text paste is passed through untouched. See `onClipboardPaste`.
-    const onPasteCapture = (e: ClipboardEvent) => onClipboardPaste(e)
-    container.addEventListener("paste", onPasteCapture, true)
 
     // TOUCH OVER THE TERMINAL, mapped to the natural mobile model. xterm's text
     // layer sits over its scrollable viewport, so a finger drag on the output
@@ -1239,15 +1035,10 @@ export function useTerminalLifecycle(
       if (beatRef.current === beat) beatRef.current = null
       unregisterLifecycle()
       unsubscribeRunProbe()
-      container.removeEventListener("mousedown", onMouseDown)
-      container.removeEventListener("mouseup", onMouseUp)
       links.dispose()
-      container.removeEventListener("contextmenu", onContextMenuPasteGuard)
-      container.removeEventListener("paste", onPasteCapture, true)
+      inputWiring.dispose()
       gesture.dispose()
       document.removeEventListener("visibilitychange", noteVisibility)
-      dataSub.dispose()
-      binarySub.dispose()
       localGridSub.dispose()
       // DISPOSE this target's PTY socket, never merely close it: the pane is
       // gone, so its wake signals and its run-identity gate subscription go with
