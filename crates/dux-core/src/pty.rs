@@ -848,6 +848,132 @@ pub struct ProgressReport {
     pub at: Instant,
 }
 
+struct ReaderLoopState {
+    terminal: Arc<Mutex<TerminalState>>,
+    writer_tx: std::sync::mpsc::SyncSender<PtyWriteMsg>,
+    exited: Arc<AtomicBool>,
+    exited_at: Arc<OnceLock<Instant>>,
+    has_output: Arc<AtomicBool>,
+    dirty: Arc<AtomicBool>,
+    received_data: Arc<AtomicBool>,
+    subscribers: SubscriberList,
+    attention_bell: Arc<AtomicBool>,
+    attention_notify: Arc<AtomicBool>,
+    progress: Arc<Mutex<Option<ProgressReport>>>,
+    passthrough: Arc<Mutex<VecDeque<crate::attention::CapturedSeq>>>,
+    track_agent_signals: bool,
+}
+
+impl ReaderLoopState {
+    fn mark_eof(&self) {
+        // Publish the timestamp before the release-store so an observer that
+        // sees `exited` also sees `exited_at`.
+        let _ = self.exited_at.set(Instant::now());
+        self.exited.store(true, Ordering::Release);
+    }
+
+    fn scan_signals(
+        &self,
+        scanner: &mut crate::attention::AttentionScanner,
+        overflow_seen: &mut u64,
+        data: &[u8],
+    ) {
+        if !self.track_agent_signals {
+            return;
+        }
+        let mut captures = Vec::new();
+        for event in scanner.scan_full(data, Some(&mut captures)) {
+            match event {
+                crate::attention::AttentionEvent::Bell => {
+                    self.attention_bell.store(true, Ordering::Release);
+                }
+                crate::attention::AttentionEvent::Notify => {
+                    self.attention_notify.store(true, Ordering::Release);
+                }
+                crate::attention::AttentionEvent::Progress { working } => {
+                    if let Ok(mut slot) = self.progress.lock() {
+                        *slot = Some(ProgressReport {
+                            working,
+                            at: Instant::now(),
+                        });
+                    }
+                }
+            }
+        }
+        let drops = scanner.overflow_drops();
+        if drops != *overflow_seen {
+            *overflow_seen = drops;
+            logger::debug("attention scanner dropped an over-long unterminated escape sequence");
+        }
+        self.store_passthrough(captures);
+    }
+
+    fn store_passthrough(&self, captures: Vec<crate::attention::CapturedSeq>) {
+        if captures.is_empty() {
+            return;
+        }
+        let Ok(mut ring) = self.passthrough.lock() else {
+            return;
+        };
+        let mut dropped = 0u64;
+        for sequence in captures {
+            if sequence.bytes.len() > PASSTHROUGH_SEQ_MAX {
+                dropped += 1;
+                continue;
+            }
+            if ring.len() >= PASSTHROUGH_RING_CAP {
+                ring.pop_front();
+                dropped += 1;
+            }
+            ring.push_back(sequence);
+        }
+        if dropped != 0 {
+            logger::warn(&format!(
+                "passthrough ring dropped {dropped} captured sequence(s) (ring cap reached or an \
+                 individual sequence exceeded the per-sequence size limit); the host will not \
+                 see them"
+            ));
+        }
+    }
+
+    fn ingest(&self, data: &[u8]) {
+        #[cfg(test)]
+        let _queued = resize_test_gate_reader_waiting(&self.terminal);
+        // Fanout and grid parsing share this lock so a reconnect sees each byte
+        // either in its snapshot or its live stream, never both.
+        let Ok(mut terminal) = self.terminal.lock() else {
+            fan_out_to_subscribers(&self.subscribers, data);
+            return;
+        };
+        fan_out_to_subscribers(&self.subscribers, data);
+        let replies = terminal.process(data);
+        self.dirty.store(true, Ordering::Release);
+        // Only an active-grid mutation counts as content activity; parser-only
+        // status sequences still make the terminal dirty for rendering.
+        if terminal.take_content_change() {
+            self.received_data.store(true, Ordering::Release);
+        }
+        let newly_visible =
+            !self.has_output.load(Ordering::Acquire) && terminal.has_visible_output();
+        // Never hold the terminal lock while handing replies to the writer.
+        drop(terminal);
+        if !replies.is_empty() {
+            pty_queue_send(&self.writer_tx, replies);
+        }
+        if newly_visible {
+            self.has_output.store(true, Ordering::Release);
+        }
+    }
+
+    fn disconnect_subscribers(&self) {
+        // Dropping every sender lets web forwarders observe disconnection when
+        // the PTY exits instead of timing out indefinitely.
+        if let Ok(mut subscribers) = self.subscribers.lock() {
+            subscribers.clear();
+        }
+    }
+}
+
 impl PtyClient {
     /// Spawn a CLI command in a new PTY with the given size.
     #[allow(dead_code)]
@@ -994,35 +1120,22 @@ impl PtyClient {
         let passthrough: Arc<Mutex<VecDeque<crate::attention::CapturedSeq>>> =
             Arc::new(Mutex::new(VecDeque::new()));
 
-        let terminal_ref = Arc::clone(&terminal);
-        let exited_ref = Arc::clone(&exited);
-        let exited_at_ref = Arc::clone(&exited_at);
-        let has_output_ref = Arc::clone(&has_output);
-        let dirty_ref = Arc::clone(&dirty);
-        let received_data_ref = Arc::clone(&received_data);
-        let subscribers_ref = Arc::clone(&subscribers);
-        let attention_bell_ref = Arc::clone(&attention_bell);
-        let attention_notify_ref = Arc::clone(&attention_notify);
-        let progress_ref = Arc::clone(&progress);
-        let passthrough_ref = Arc::clone(&passthrough);
-        let reader_thread = thread::spawn(move || {
-            Self::reader_loop(
-                reader,
-                terminal_ref,
-                writer_tx,
-                exited_ref,
-                exited_at_ref,
-                has_output_ref,
-                dirty_ref,
-                received_data_ref,
-                subscribers_ref,
-                attention_bell_ref,
-                attention_notify_ref,
-                progress_ref,
-                passthrough_ref,
-                track_agent_signals,
-            );
-        });
+        let reader_state = ReaderLoopState {
+            terminal: Arc::clone(&terminal),
+            writer_tx,
+            exited: Arc::clone(&exited),
+            exited_at: Arc::clone(&exited_at),
+            has_output: Arc::clone(&has_output),
+            dirty: Arc::clone(&dirty),
+            received_data: Arc::clone(&received_data),
+            subscribers: Arc::clone(&subscribers),
+            attention_bell: Arc::clone(&attention_bell),
+            attention_notify: Arc::clone(&attention_notify),
+            progress: Arc::clone(&progress),
+            passthrough: Arc::clone(&passthrough),
+            track_agent_signals,
+        };
+        let reader_thread = thread::spawn(move || Self::reader_loop(reader, reader_state));
 
         Ok(Self {
             master: pair.master,
@@ -1048,237 +1161,33 @@ impl PtyClient {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn reader_loop(
-        mut reader: Box<dyn std::io::Read + Send>,
-        terminal: Arc<Mutex<TerminalState>>,
-        writer_tx: std::sync::mpsc::SyncSender<PtyWriteMsg>,
-        exited: Arc<AtomicBool>,
-        exited_at: Arc<OnceLock<Instant>>,
-        has_output: Arc<AtomicBool>,
-        dirty: Arc<AtomicBool>,
-        received_data: Arc<AtomicBool>,
-        subscribers: SubscriberList,
-        attention_bell: Arc<AtomicBool>,
-        attention_notify: Arc<AtomicBool>,
-        progress: Arc<Mutex<Option<ProgressReport>>>,
-        passthrough: Arc<Mutex<VecDeque<crate::attention::CapturedSeq>>>,
-        track_agent_signals: bool,
-    ) {
+    fn reader_loop(mut reader: Box<dyn std::io::Read + Send>, state: ReaderLoopState) {
         let mut buf = [0u8; 4096];
-        // Raw-byte scanner for bell / OSC notifications and progress reports. Lives
-        // on the reader thread's stack so its cross-chunk carry persists between
-        // reads. It is the ONLY detection path for the notification and progress
-        // sequences, because the emulator does not report them: alacritty's
-        // `Event` carries a bell, a title/icon change, a clipboard store, a colour
-        // request and a PTY write, and nothing else, so an `OSC 9` notification or
-        // an `OSC 9;4` progress report reaching `process` is simply consumed. The
-        // bell is scanned here too rather than taken from `Event::Bell`, so that
-        // all three signals come from one place and cannot double-fire. Only agent
-        // tabs track signals; companion terminals leave the scanner unused.
         let mut scanner = crate::attention::AttentionScanner::new();
         let mut overflow_seen = 0u64;
-        // End of input, from either arm below. The instant is stamped BEFORE the
-        // flag is published so an observer that sees `is_exited()` (an `Acquire`
-        // load) is guaranteed to see the instant too, never `is_exited() == true`
-        // with `exited_at() == None`. Prune's readiness rule reads them as a pair.
-        let mark_eof = || {
-            let _ = exited_at.set(Instant::now());
-            exited.store(true, Ordering::Release);
-        };
         loop {
             match crate::io_retry::retry_on_interrupt(|| reader.read(&mut buf)) {
                 Ok(0) => {
-                    mark_eof();
+                    state.mark_eof();
                     break;
                 }
                 Ok(n) => {
                     let data = &buf[..n];
+                    state.scan_signals(&mut scanner, &mut overflow_seen, data);
 
-                    // Scan for attention/progress signals on the raw bytes, before
-                    // the parser gets them and swallows the two it has no event
-                    // for (see the scanner's declaration). The same
-                    // pass captures whitelisted passthrough sequences into the ring
-                    // (unconditionally: the host decides whether to forward them at
-                    // drain time, so a live config toggle applies immediately and a
-                    // never-draining headless server keeps the ring bounded).
-                    if track_agent_signals {
-                        let mut captures: Vec<crate::attention::CapturedSeq> = Vec::new();
-                        for event in scanner.scan_full(data, Some(&mut captures)) {
-                            match event {
-                                crate::attention::AttentionEvent::Bell => {
-                                    attention_bell.store(true, Ordering::Release);
-                                }
-                                crate::attention::AttentionEvent::Notify => {
-                                    attention_notify.store(true, Ordering::Release);
-                                }
-                                crate::attention::AttentionEvent::Progress { working } => {
-                                    if let Ok(mut slot) = progress.lock() {
-                                        *slot = Some(ProgressReport {
-                                            working,
-                                            at: Instant::now(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                        // A runaway unterminated sequence was dropped: surface it
-                        // at debug level (the scanner stays pure and only counts).
-                        let drops = scanner.overflow_drops();
-                        if drops != overflow_seen {
-                            overflow_seen = drops;
-                            logger::debug(
-                                "attention scanner dropped an over-long unterminated escape sequence",
-                            );
-                        }
-                        // Push captured passthrough sequences into the bounded ring,
-                        // dropping the oldest on overflow and any single sequence
-                        // that exceeds the per-seq cap.
-                        if !captures.is_empty()
-                            && let Ok(mut ring) = passthrough.lock()
-                        {
-                            let mut dropped = 0u64;
-                            for seq in captures {
-                                if seq.bytes.len() > PASSTHROUGH_SEQ_MAX {
-                                    dropped += 1;
-                                    continue;
-                                }
-                                if ring.len() >= PASSTHROUGH_RING_CAP {
-                                    ring.pop_front();
-                                    dropped += 1;
-                                }
-                                ring.push_back(seq);
-                            }
-                            if dropped != 0 {
-                                logger::warn(&format!(
-                                    "passthrough ring dropped {dropped} captured sequence(s) \
-                                     (ring cap reached or an individual sequence exceeded the \
-                                     per-sequence size limit); the host will not see them"
-                                ));
-                            }
-                        }
-                    }
-
-                    // Take the terminal lock BEFORE the subscriber fan-out and
-                    // hold it across both, so "this chunk reached the
-                    // subscribers" and "this chunk reached the grid" are ONE
-                    // atomic step as far as `subscribe_with_repaint` can tell.
-                    // That is what makes a fresh connection see every byte
-                    // exactly once.
-                    //
-                    // The fan-out used to run outside this lock, and the gap was
-                    // not the "few bytes" the old comment claimed: `Mutex` is not
-                    // fair, so the reader barges: it releases the lock, reads the
-                    // next chunk and re-acquires while a subscriber that has
-                    // ALREADY registered is still parked in the futex waiting for
-                    // its snapshot. Every chunk that lands in that window is fanned
-                    // out to that subscriber AND parsed into the grid it is about to
-                    // be handed, so the client renders the snapshot's tail and then
-                    // a replay of bytes already inside it (measured: thousands of
-                    // duplicated lines, which reads as a jump forward followed by a
-                    // jump back). Duplication is invisible in a full-screen TUI that
-                    // repaints over itself; line-oriented output appends, so it is
-                    // corruption. Keep the two under one lock.
-                    //
-                    // What it costs is nothing the reader did not already pay: the
-                    // ingest below takes this same lock, on every chunk, so the
-                    // reader waits exactly where it always waited. It does mean a
-                    // browser building a reconnect replay stalls the reader for as
-                    // long as the build takes, and everything downstream of the
-                    // read waits with it, including the attention scan above (bell
-                    // and notification detection for THIS one terminal lands late,
-                    // and is not lost). Measured on one machine: about 10ms to
-                    // build a replay at the default 10_000-line scrollback and
-                    // about 100ms at the `MAX_RECONNECT_REPLAY_LINES` cap. Treat
-                    // those as a floor rather than the number: the build loop is
-                    // rows-times-COLUMNS unconditionally, because every row is
-                    // scanned from its right edge to right-trim trailing empty
-                    // cells even when the row is blank, so a wide terminal costs
-                    // several times a narrow one at the same row count. The trade
-                    // is the cheap side: a reader running ahead of the grid is
-                    // exactly the state in which a connecting client loses bytes
-                    // outright, and the only consequence of making it wait is that
-                    // the child blocks on a full PTY buffer, which loses nothing.
-                    //
-                    // A poisoned terminal mutex means some other thread panicked
-                    // while holding it. Nothing here can fix that, but the fan-out
-                    // is independent of the grid, so keep streaming to web clients
-                    // exactly as this loop did before and skip only the ingest.
-                    #[cfg(test)]
-                    let _queued = resize_test_gate_reader_waiting(&terminal);
-                    let Ok(mut terminal) = terminal.lock() else {
-                        fan_out_to_subscribers(&subscribers, data);
-                        continue;
-                    };
-                    fan_out_to_subscribers(&subscribers, data);
-
-                    // Every chunk is parsed, unconditionally. There is deliberately
-                    // no "the operator is reading scrollback, hold this back" branch
-                    // here: dux used to have one, buffering unparsed bytes in a
-                    // 4 MiB side buffer and DROPPING THE OLDEST on overflow, so a
-                    // scrollback session across a busy build lost the middle of it
-                    // for good. Reading history is a view operation and must not
-                    // change what the terminal records, which is how real terminals
-                    // behave (tmux parses pty data regardless of copy mode; copy
-                    // mode routes the user's KEYS, not the child's bytes). The
-                    // stable-view part of that behaviour is the display offset's
-                    // job, in `TerminalState`, not the reader's.
-                    let replies = terminal.process(data);
-                    dirty.store(true, Ordering::Release);
-                    // Streaming/"working" signal: only a real content change in the
-                    // ACTIVE AREA counts as the agent producing output. OSC status
-                    // sequences (OSC 9;4 progress) and other non-rendering bytes
-                    // advance the parser without changing the grid, so they must
-                    // not read as activity; `is_agent_streaming` consults them only
-                    // as a fallback. The active area, not the DISPLAYED viewport:
-                    // while the operator is scrolled back the viewport is immutable
-                    // history and its fingerprint can never change, so hashing it
-                    // would make a still-producing agent read as idle (see
-                    // `take_content_change`). The raw `dirty` flag above still fires
-                    // for rendering regardless.
-                    if terminal.take_content_change() {
-                        received_data.store(true, Ordering::Release);
-                    }
-                    // Capture the visibility transition while we still hold the
-                    // terminal lock, then release it BEFORE handing the parser's
-                    // replies to the writer. Holding `terminal` across the write
-                    // is what let a stalled writer freeze the drain loop (and,
-                    // with it, every session): the reader must always return to
-                    // `read()` promptly so the child can never block on output.
-                    let newly_visible =
-                        !has_output.load(Ordering::Acquire) && terminal.has_visible_output();
-                    drop(terminal);
-                    if !replies.is_empty() {
-                        // Same non-blocking, drop-with-log policy as user input
-                        // (`PtyWriter::send`). Replies are tiny and the queue is
-                        // large, so a drop here needs a wedged writer AND a full
-                        // queue — practically unreachable, but logged if it ever
-                        // happens so a desynced child is diagnosable.
-                        pty_queue_send(&writer_tx, replies);
-                    }
-                    if newly_visible {
-                        has_output.store(true, Ordering::Release);
-                    }
+                    // Ingest holds the terminal lock across grid parsing and fanout,
+                    // so a reconnect snapshot cannot contain bytes that its live
+                    // stream also receives.
+                    state.ingest(data);
                 }
                 Err(err) => {
                     logger::debug(&format!("PTY reader error: {err}"));
-                    mark_eof();
+                    state.mark_eof();
                     break;
                 }
             }
         }
-        // The PTY is gone (EOF/error): drop every subscriber sender so each live
-        // web viewer's receiver disconnects promptly. Without this the senders
-        // linger in the shared list (each `PtyViewerGuard` holds an `Arc` clone
-        // that keeps the `Vec`, and therefore the `Sender`s, alive), so a
-        // web forwarder blocked on `recv_timeout` would only ever see `Timeout`,
-        // never `Disconnected` — its task would never end and its PTY socket
-        // would dangle (pinning a connection-cap permit) until the browser
-        // itself disconnected. Clearing here is what lets the socket's
-        // forwarder-completion arm reap the connection on server-side teardown.
-        if let Ok(mut subs) = subscribers.lock() {
-            subs.clear();
-        }
+        state.disconnect_subscribers();
     }
 
     /// Write raw bytes to the PTY (forwards keystrokes to the child process).
