@@ -13074,6 +13074,62 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_sidebar_publishes_one_click_row_per_visible_item() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.left_collapsed = true;
+        let expected_items = app.left_items().len();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        assert!(app.mouse_layout.left_list.width > 0);
+        let expected_rows = expected_items.min(app.mouse_layout.left_list.height as usize);
+        assert_eq!(
+            app.mouse_layout.left_row_to_item,
+            (0..expected_rows).collect::<Vec<_>>(),
+            "the collapsed rail has one screen row and one click-map entry per visible item"
+        );
+    }
+
+    #[test]
+    fn expanded_sidebar_keeps_agent_and_terminal_click_surfaces_separate() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = app_with_two_terminals();
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+        app.terminal_pane_height_pct = 50;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let agents = app.mouse_layout.left_list;
+        let terminals = app.mouse_layout.terminal_list;
+        assert!(agents.width > 0 && agents.height > 0);
+        assert!(terminals.width > 0 && terminals.height > 0);
+        assert!(
+            agents.bottom() <= terminals.y,
+            "agent and terminal click surfaces must occupy their own pane sections"
+        );
+        assert_eq!(
+            &app.mouse_layout.left_row_to_item[..3],
+            &[0, 0, 1],
+            "with no active agent above it, the inactive toggle occupies two rows"
+        );
+        assert_eq!(
+            &app.mouse_layout.terminal_row_to_item[..6],
+            &[0, 0, 0, 1, 1, 1],
+            "the terminal section keeps its independent three-row mapping"
+        );
+    }
+
+    #[test]
     fn selected_terminal_gets_tinted_frame() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
