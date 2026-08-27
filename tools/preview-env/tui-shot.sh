@@ -3,8 +3,39 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${DUX_SRC:-$(cd "$HERE/../.." && pwd)}"
-if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+
+usage() {
   echo "usage: ./tui-shot.sh [journey.js] [output.png] [--cols N] [--rows N] [--theme NAME]"
+}
+
+fail() {
+  echo "$1" >&2
+  exit "${2:-64}"
+}
+
+find_chromium() {
+  if [ -n "${CHROME:-}" ]; then
+    echo "$CHROME"
+    return
+  fi
+
+  local executable
+  executable="$(find "$HOME/.cache/ms-playwright" -path '*/chrome-linux64/chrome' -type f 2>/dev/null | head -1 || true)"
+  if [ -n "$executable" ]; then
+    echo "$executable"
+    return
+  fi
+
+  for candidate in chromium chromium-browser google-chrome google-chrome-stable; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return
+    fi
+  done
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
   exit 0
 fi
 JOURNEY="${1:-$HERE/tui-journey.example.js}"
@@ -20,38 +51,29 @@ while [ "$#" -gt 0 ]; do
     --rows) ROWS=${2:?missing value for --rows}; shift 2 ;;
     --theme) THEME=${2:?missing value for --theme}; shift 2 ;;
     -h|--help)
-      echo "usage: ./tui-shot.sh [journey.js] [output.png] [--cols N] [--rows N] [--theme NAME]"
+      usage
       exit 0
       ;;
-    *) echo "unknown option: $1" >&2; exit 64 ;;
+    *) fail "unknown option: $1" ;;
   esac
 done
 
-case "$COLS:$ROWS" in *[!0-9:]*|:*) echo "invalid terminal size: ${COLS}x${ROWS}" >&2; exit 64;; esac
-[[ "$OUT" == *.png ]] || { echo "output must end in .png: $OUT" >&2; exit 64; }
+case "$COLS:$ROWS" in
+  *[!0-9:]*|:*) fail "invalid terminal size: ${COLS}x${ROWS}" ;;
+esac
+[[ "$OUT" == *.png ]] || fail "output must end in .png: $OUT"
 
 JOURNEY=$(realpath "$JOURNEY")
-[[ "$JOURNEY" == *.js ]] || { echo "journey must be a JavaScript file: $JOURNEY" >&2; exit 64; }
-[ -f "$JOURNEY" ] || { echo "journey not found: $JOURNEY" >&2; exit 64; }
+[[ "$JOURNEY" == *.js ]] || fail "journey must be a JavaScript file: $JOURNEY"
+[ -f "$JOURNEY" ] || fail "journey not found: $JOURNEY"
 
 OUT=$(realpath -m "$OUT")
 OUTPUT_DIR=$(dirname "$OUT")
 OUTPUT_STEM=$(basename "$OUT" .png)
 mkdir -p "$OUTPUT_DIR"
 
-CHROME_BIN="${CHROME:-}"
-if [ -z "$CHROME_BIN" ]; then
-  CHROME_BIN="$(find "$HOME/.cache/ms-playwright" -path '*/chrome-linux64/chrome' -type f 2>/dev/null | head -1 || true)"
-fi
-if [ -z "$CHROME_BIN" ]; then
-  for candidate in chromium chromium-browser google-chrome google-chrome-stable; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      CHROME_BIN=$(command -v "$candidate")
-      break
-    fi
-  done
-fi
-[ -x "$CHROME_BIN" ] || { echo "no Chromium found; set CHROME=<path>" >&2; exit 1; }
+CHROME_BIN=$(find_chromium)
+[ -x "$CHROME_BIN" ] || fail "no Chromium found; set CHROME=<path>" 1
 
 echo ">> building dux (release) from $SRC"
 (cd "$SRC" && cargo build --release --bin dux)
@@ -65,10 +87,9 @@ fi
 if docker info >/dev/null 2>&1; then
   (
     cd "$HERE"
-    DUX_BIN="$DUX_BIN" DUX_TUI_OUTPUT_DIR="$OUTPUT_DIR" DUX_TUI_JOURNEY="$JOURNEY" \
-      docker compose --profile capture build tui-shot
-    DUX_BIN="$DUX_BIN" DUX_TUI_OUTPUT_DIR="$OUTPUT_DIR" DUX_TUI_JOURNEY="$JOURNEY" \
-      docker compose --profile capture run --rm --no-deps \
+    export DUX_BIN DUX_TUI_OUTPUT_DIR="$OUTPUT_DIR" DUX_TUI_JOURNEY="$JOURNEY"
+    docker compose --profile capture build tui-shot
+    docker compose --profile capture run --rm --no-deps \
       -e DUX_TUI_COLS="$COLS" \
       -e DUX_TUI_ROWS="$ROWS" \
       -e DUX_TUI_THEME="$THEME" \
@@ -78,9 +99,9 @@ if docker info >/dev/null 2>&1; then
       tui-shot
   )
 else
-  command -v sg >/dev/null 2>&1 || { echo "docker access denied and sg is unavailable" >&2; exit 1; }
+  command -v sg >/dev/null 2>&1 || fail "docker access denied and sg is unavailable" 1
   quoted=$(printf '%q ' "$DUX_BIN" "$OUTPUT_DIR" "$JOURNEY" "$COLS" "$ROWS" "$THEME" "$OUTPUT_STEM" "$REVISION" "$(basename "$JOURNEY")")
-  sg docker -c "cd '$HERE' && set -- $quoted && DUX_BIN=\"\$1\" DUX_TUI_OUTPUT_DIR=\"\$2\" DUX_TUI_JOURNEY=\"\$3\" docker compose --profile capture build tui-shot && DUX_BIN=\"\$1\" DUX_TUI_OUTPUT_DIR=\"\$2\" DUX_TUI_JOURNEY=\"\$3\" docker compose --profile capture run --rm --no-deps -e DUX_TUI_COLS=\"\$4\" -e DUX_TUI_ROWS=\"\$5\" -e DUX_TUI_THEME=\"\$6\" -e DUX_TUI_OUTPUT_STEM=\"\$7\" -e DUX_PREVIEW_REVISION=\"\$8\" -e DUX_TUI_JOURNEY_NAME=\"\$9\" tui-shot"
+  sg docker -c "cd '$HERE' && set -- $quoted && export DUX_BIN=\"\$1\" DUX_TUI_OUTPUT_DIR=\"\$2\" DUX_TUI_JOURNEY=\"\$3\" && docker compose --profile capture build tui-shot && docker compose --profile capture run --rm --no-deps -e DUX_TUI_COLS=\"\$4\" -e DUX_TUI_ROWS=\"\$5\" -e DUX_TUI_THEME=\"\$6\" -e DUX_TUI_OUTPUT_STEM=\"\$7\" -e DUX_PREVIEW_REVISION=\"\$8\" -e DUX_TUI_JOURNEY_NAME=\"\$9\" tui-shot"
 fi
 
 CHROME="$CHROME_BIN" node "$HERE/tui-shot.js" \
