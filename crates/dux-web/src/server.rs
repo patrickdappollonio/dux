@@ -1227,6 +1227,42 @@ struct PtyBeatFrame {
     viewed: bool,
 }
 
+fn upgrade_pty_socket(
+    ws: WebSocketUpgrade,
+    state: &AppState,
+    target: PtyTarget,
+    peer_ip: IpAddr,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    headers: &HeaderMap,
+) -> Response {
+    let engine = state.engine.clone();
+    let console = state.console.clone();
+    let pty_size_owners = Arc::clone(&state.pty_size_owners);
+    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
+    let bus = Arc::clone(&state.event_bus);
+    let connections = Arc::clone(&state.connections);
+    let live_limits = Arc::clone(&state.live_limits);
+    let user_agent = captured_user_agent(headers);
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .on_upgrade(move |socket| {
+            handle_pty_socket(
+                socket,
+                engine,
+                target,
+                console,
+                peer_ip,
+                permit,
+                pty_size_owners,
+                pty_grid_bus,
+                bus,
+                connections,
+                user_agent,
+                live_limits,
+            )
+        })
+        .into_response()
+}
+
 /// Upgrade handler for `GET /ws/sessions/:id/pty` — stream the agent session's main
 /// provider PTY. Replicates the `/ws` protections (origin check, connection-cap
 /// permit, frame-size limit) and path-validates `:id` against a known session
@@ -1268,35 +1304,14 @@ async fn ws_session_pty_upgrade(
                 .into_response();
         }
     };
-    let engine = state.engine.clone();
-    let console = state.console.clone();
-    let pty_size_owners = Arc::clone(&state.pty_size_owners);
-    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
-    let bus = Arc::clone(&state.event_bus);
-    let connections = Arc::clone(&state.connections);
-    let live_limits = Arc::clone(&state.live_limits);
-    let peer_ip = peer.ip();
-    // Capture the claiming connection's User-Agent before the upgrade so the eventual
-    // `pty.owner` handover can name this device to other viewers.
-    let user_agent = captured_user_agent(&headers);
-    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
-        .on_upgrade(move |socket| {
-            handle_pty_socket(
-                socket,
-                engine,
-                PtyTarget::Agent(id),
-                console,
-                peer_ip,
-                permit,
-                pty_size_owners,
-                pty_grid_bus,
-                bus,
-                connections,
-                user_agent,
-                live_limits,
-            )
-        })
-        .into_response()
+    upgrade_pty_socket(
+        ws,
+        &state,
+        PtyTarget::Agent(id),
+        peer.ip(),
+        permit,
+        &headers,
+    )
 }
 
 /// Upgrade handler for `GET /ws/sessions/:id/terminals/:tid/pty` — stream a
@@ -1346,33 +1361,14 @@ async fn ws_terminal_pty_upgrade(
                 .into_response();
         }
     };
-    let engine = state.engine.clone();
-    let console = state.console.clone();
-    let pty_size_owners = Arc::clone(&state.pty_size_owners);
-    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
-    let bus = Arc::clone(&state.event_bus);
-    let connections = Arc::clone(&state.connections);
-    let live_limits = Arc::clone(&state.live_limits);
-    let peer_ip = peer.ip();
-    let user_agent = captured_user_agent(&headers);
-    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
-        .on_upgrade(move |socket| {
-            handle_pty_socket(
-                socket,
-                engine,
-                PtyTarget::Terminal(tid),
-                console,
-                peer_ip,
-                permit,
-                pty_size_owners,
-                pty_grid_bus,
-                bus,
-                connections,
-                user_agent,
-                live_limits,
-            )
-        })
-        .into_response()
+    upgrade_pty_socket(
+        ws,
+        &state,
+        PtyTarget::Terminal(tid),
+        peer.ip(),
+        permit,
+        &headers,
+    )
 }
 
 /// Upgrade handler for `GET /ws/projects/:id/terminals/:tid/pty`: stream a
@@ -1422,33 +1418,14 @@ async fn ws_project_terminal_pty_upgrade(
                 .into_response();
         }
     };
-    let engine = state.engine.clone();
-    let console = state.console.clone();
-    let pty_size_owners = Arc::clone(&state.pty_size_owners);
-    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
-    let bus = Arc::clone(&state.event_bus);
-    let connections = Arc::clone(&state.connections);
-    let live_limits = Arc::clone(&state.live_limits);
-    let peer_ip = peer.ip();
-    let user_agent = captured_user_agent(&headers);
-    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
-        .on_upgrade(move |socket| {
-            handle_pty_socket(
-                socket,
-                engine,
-                PtyTarget::Terminal(tid),
-                console,
-                peer_ip,
-                permit,
-                pty_size_owners,
-                pty_grid_bus,
-                bus,
-                connections,
-                user_agent,
-                live_limits,
-            )
-        })
-        .into_response()
+    upgrade_pty_socket(
+        ws,
+        &state,
+        PtyTarget::Terminal(tid),
+        peer.ip(),
+        permit,
+        &headers,
+    )
 }
 
 /// Upgrade handler for `GET /ws/terminals/:tid/pty`: stream a STANDALONE
@@ -1493,33 +1470,14 @@ async fn ws_standalone_terminal_pty_upgrade(
                 .into_response();
         }
     };
-    let engine = state.engine.clone();
-    let console = state.console.clone();
-    let pty_size_owners = Arc::clone(&state.pty_size_owners);
-    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
-    let bus = Arc::clone(&state.event_bus);
-    let connections = Arc::clone(&state.connections);
-    let live_limits = Arc::clone(&state.live_limits);
-    let peer_ip = peer.ip();
-    let user_agent = captured_user_agent(&headers);
-    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
-        .on_upgrade(move |socket| {
-            handle_pty_socket(
-                socket,
-                engine,
-                PtyTarget::Terminal(tid),
-                console,
-                peer_ip,
-                permit,
-                pty_size_owners,
-                pty_grid_bus,
-                bus,
-                connections,
-                user_agent,
-                live_limits,
-            )
-        })
-        .into_response()
+    upgrade_pty_socket(
+        ws,
+        &state,
+        PtyTarget::Terminal(tid),
+        peer.ip(),
+        permit,
+        &headers,
+    )
 }
 
 /// RAII guard for the per-agent live-tab-socket sub-quota
