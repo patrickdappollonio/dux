@@ -485,6 +485,69 @@ struct RawInputPlan {
     normalized_paste_forwarded: bool,
 }
 
+struct RawInputDispatch {
+    forward_batch: Vec<u8>,
+    is_scrolled_back: bool,
+    may_write_pty: bool,
+    needs_selection_clear: bool,
+    forwarded: ForwardedInput,
+}
+
+enum RawInputFlow {
+    Continue,
+    Return(bool),
+}
+
+impl RawInputDispatch {
+    fn new(is_scrolled_back: bool, may_write_pty: bool) -> Self {
+        Self {
+            forward_batch: Vec::new(),
+            is_scrolled_back,
+            may_write_pty,
+            needs_selection_clear: false,
+            forwarded: ForwardedInput::default(),
+        }
+    }
+
+    fn queue(&mut self, bytes: &[u8]) {
+        self.forward_batch.extend_from_slice(bytes);
+    }
+
+    fn flush(&mut self, provider: Option<&crate::pty::PtyClient>) {
+        if self.forward_batch.is_empty() {
+            return;
+        }
+        self.needs_selection_clear = true;
+        if !self.is_scrolled_back
+            && self.may_write_pty
+            && let Some(provider) = provider
+        {
+            let _ = provider.write_bytes(&self.forward_batch);
+            self.forwarded.note(&self.forward_batch);
+        }
+        self.forward_batch.clear();
+    }
+
+    fn flush_and_stamp(&mut self, app: &mut App) {
+        self.flush(app.selected_terminal_surface_client());
+        app.stamp_forwarded_input(&mut self.forwarded);
+    }
+
+    fn finish(&mut self, app: &mut App, normalized_paste_forwarded: bool) {
+        self.flush(app.selected_terminal_surface_client());
+        if self.needs_selection_clear {
+            app.terminal_selection = None;
+        }
+        if normalized_paste_forwarded
+            && !self.is_scrolled_back
+            && app.selected_terminal_surface_client().is_some()
+        {
+            self.forwarded.typing = true;
+        }
+        app.stamp_forwarded_input(&mut self.forwarded);
+    }
+}
+
 fn raw_action_can_reach_pty(
     action: &RawSeqAction,
     has_scrollback: bool,
@@ -3254,6 +3317,325 @@ impl App {
         is_scrolled_back || !batch_can_reach_pty || self.may_type_into_focused_pty()
     }
 
+    fn route_raw_page_scroll(
+        &mut self,
+        direction: ScrollDirection,
+        raw: &[u8],
+        dispatch: &mut RawInputDispatch,
+    ) {
+        dispatch.flush(self.selected_terminal_surface_client());
+        let forward_scroll = self.selected_surface_forward_scroll();
+        let alt_screen = self
+            .selected_terminal_surface_client()
+            .is_some_and(|provider| provider.is_alt_screen());
+        if should_forward_page(forward_scroll, alt_screen) {
+            if self.may_type_into_focused_pty()
+                && let Some(provider) = self.selected_terminal_surface_client()
+            {
+                let _ = provider.write_bytes(raw);
+                dispatch.forwarded.note(raw);
+            }
+        } else if self.last_pty_size.0 > 0 {
+            self.scroll_pty(direction, self.last_pty_size.0 as usize);
+        }
+    }
+
+    fn route_raw_line_scroll(
+        &mut self,
+        direction: ScrollDirection,
+        conditional: bool,
+        raw: &[u8],
+        dispatch: &mut RawInputDispatch,
+    ) {
+        let has_scrollback = self
+            .selected_terminal_surface_client()
+            .is_some_and(|provider| provider.scrollback_offset() > 0);
+        if conditional && has_scrollback && self.last_pty_size.0 > 0 {
+            dispatch.flush(self.selected_terminal_surface_client());
+            self.scroll_pty(direction, 1);
+        } else {
+            dispatch.queue(raw);
+        }
+    }
+
+    fn route_raw_scroll_to_bottom(
+        &mut self,
+        conditional: bool,
+        raw: &[u8],
+        dispatch: &mut RawInputDispatch,
+    ) {
+        let has_scrollback = self
+            .selected_terminal_surface_client()
+            .is_some_and(|provider| provider.scrollback_offset() > 0);
+        if conditional && has_scrollback {
+            dispatch.flush(self.selected_terminal_surface_client());
+            self.reset_pty_scrollback();
+        } else {
+            dispatch.queue(raw);
+        }
+    }
+
+    fn route_raw_scroll_to_top(
+        &mut self,
+        conditional: bool,
+        raw: &[u8],
+        dispatch: &mut RawInputDispatch,
+    ) {
+        let has_scrollback = self
+            .selected_terminal_surface_client()
+            .is_some_and(|provider| provider.scrollback_offset() > 0);
+        if conditional && has_scrollback {
+            dispatch.flush(self.selected_terminal_surface_client());
+            self.set_pty_scrollback_max();
+        } else {
+            dispatch.queue(raw);
+        }
+    }
+
+    fn handle_raw_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        raw: &[u8],
+        dispatch: &mut RawInputDispatch,
+    ) -> RawInputFlow {
+        dispatch.flush(self.selected_terminal_surface_client());
+        if self.handle_takeover_card_mouse(&mouse) {
+            return RawInputFlow::Continue;
+        }
+
+        let is_scroll = matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        );
+        if is_scroll {
+            return self.handle_raw_mouse_wheel(mouse, raw, dispatch);
+        }
+        self.handle_raw_mouse_gesture(mouse, raw, dispatch)
+    }
+
+    fn handle_raw_mouse_wheel(
+        &mut self,
+        mouse_event: MouseEvent,
+        raw: &[u8],
+        dispatch: &mut RawInputDispatch,
+    ) -> RawInputFlow {
+        let forward_scroll = self.selected_surface_forward_scroll();
+        let (alt_screen, mouse_mode) = self
+            .selected_terminal_surface_client()
+            .map(|provider| (provider.is_alt_screen(), provider.has_mouse_mode()))
+            .unwrap_or((false, false));
+        if should_forward_wheel(forward_scroll, alt_screen, mouse_mode) {
+            self.terminal_selection = None;
+            if self.may_type_into_focused_pty()
+                && let Some(provider) = self.selected_terminal_surface_client()
+            {
+                let _ = provider.write_bytes(raw);
+                dispatch.forwarded.note(raw);
+            }
+        } else if self.handle_mouse(mouse_event) {
+            return RawInputFlow::Return(true);
+        }
+        RawInputFlow::Continue
+    }
+
+    fn handle_raw_mouse_gesture(
+        &mut self,
+        mouse: MouseEvent,
+        raw: &[u8],
+        dispatch: &mut RawInputDispatch,
+    ) -> RawInputFlow {
+        if self.handle_pending_link_mouse(&mouse) {
+            return RawInputFlow::Continue;
+        }
+        if self.continue_raw_mouse_forward(&mouse) {
+            return RawInputFlow::Continue;
+        }
+        if self.raw_mouse_is_outside_overlay(&mouse) {
+            self.exit_interactive_mode();
+            return RawInputFlow::Return(false);
+        }
+
+        let child_wants_mouse = self
+            .selected_terminal_surface_client()
+            .is_some_and(|provider| provider.has_mouse_mode());
+        if self.handle_raw_terminal_press(&mouse, child_wants_mouse, dispatch.is_scrolled_back) {
+            return RawInputFlow::Continue;
+        }
+        self.route_raw_terminal_pointer(mouse, raw, child_wants_mouse, dispatch);
+        RawInputFlow::Continue
+    }
+
+    fn continue_raw_mouse_forward(&mut self, mouse: &MouseEvent) -> bool {
+        if self.center_mouse_forward.is_none() {
+            return false;
+        }
+        match mouse.kind {
+            MouseEventKind::Drag(_) => {
+                self.continue_center_mouse_forward(mouse);
+                true
+            }
+            MouseEventKind::Up(_) => {
+                self.finish_center_mouse_forward(mouse);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn raw_mouse_is_outside_overlay(&self, mouse: &MouseEvent) -> bool {
+        matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && !self
+                .mouse_layout
+                .agent_term
+                .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row))
+    }
+
+    fn handle_raw_terminal_press(
+        &mut self,
+        mouse: &MouseEvent,
+        child_wants_mouse: bool,
+        is_scrolled_back: bool,
+    ) -> bool {
+        let link = self
+            .link_at_screen_point(mouse.column, mouse.row)
+            .map(str::to_string);
+        match decide_terminal_press(
+            mouse.kind,
+            mouse.modifiers,
+            link.as_deref(),
+            child_wants_mouse,
+        ) {
+            TerminalPressAction::Link(decision) => {
+                let suppress = decision.suppress;
+                self.note_link_press(decision, mouse);
+                suppress
+            }
+            TerminalPressAction::ForwardPlainClick => {
+                if !is_scrolled_back {
+                    let button_code = sgr_button_code(MouseButton::Left);
+                    self.center_mouse_forward = Some(button_code);
+                    self.write_center_mouse_report(button_code, b'M', mouse.column, mouse.row);
+                }
+                true
+            }
+            TerminalPressAction::Unclaimed => false,
+        }
+    }
+
+    fn route_raw_terminal_pointer(
+        &mut self,
+        mouse: MouseEvent,
+        raw: &[u8],
+        child_wants_mouse: bool,
+        dispatch: &mut RawInputDispatch,
+    ) {
+        let shift_held = mouse
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::SHIFT);
+        if !child_wants_mouse || shift_held {
+            self.handle_terminal_selection_mouse(mouse);
+        } else if !dispatch.is_scrolled_back
+            && self.may_type_into_focused_pty()
+            && let Some(provider) = self.selected_terminal_surface_client()
+        {
+            // SGR coordinates are screen-absolute; the child expects them
+            // relative to the embedded terminal grid.
+            if let Some(term_area) = self.mouse_layout.agent_term
+                && let Some(translated) =
+                    crate::raw_input::translate_sgr_mouse(raw, term_area.x, term_area.y)
+            {
+                let _ = provider.write_bytes(&translated);
+                dispatch.forwarded.note(&translated);
+            }
+        }
+    }
+
+    fn execute_raw_input_actions(
+        &mut self,
+        actions: Vec<RawSeqAction>,
+        dispatch: &mut RawInputDispatch,
+    ) -> Option<bool> {
+        for action in actions {
+            match action {
+                RawSeqAction::Intercept(Action::OpenMacroBar, _, _) => {
+                    // Stamp now, before `input_target` moves below: this arm can
+                    // leave the function without reaching the tail stamp, and
+                    // the id is resolved from `input_target`.
+                    dispatch.flush_and_stamp(self);
+                    if dispatch.is_scrolled_back {
+                        continue;
+                    }
+                    self.open_macro_bar();
+                    self.raw_input_buf.clear();
+                    self.raw_input_parser.clear();
+                    return Some(false);
+                }
+                // Only reachable while the take-over card covers this pane (see
+                // the match above), which is the one state where this key means
+                // something other than "type into the child".
+                RawSeqAction::Intercept(Action::FocusAgent, _, _) => {
+                    dispatch.flush_and_stamp(self);
+                    self.take_over_focused_pty();
+                    self.raw_input_buf.clear();
+                    self.raw_input_parser.clear();
+                    return Some(false);
+                }
+                // Only reachable while another device drives the pty (see the
+                // match above); the prompt takes over input from here.
+                RawSeqAction::Intercept(Action::OpenPalette, _, _) => {
+                    dispatch.flush_and_stamp(self);
+                    self.open_command_palette();
+                    self.raw_input_buf.clear();
+                    self.raw_input_parser.clear();
+                    return Some(false);
+                }
+                // In fullscreen the toggle means one thing: leave fullscreen.
+                RawSeqAction::Intercept(Action::ToggleFullscreen, _, _) => {
+                    // Stamp before leaving interactive mode: that moves
+                    // `input_target`, which is what resolves the id.
+                    dispatch.flush_and_stamp(self);
+                    self.exit_interactive_mode();
+                    return Some(false);
+                }
+                RawSeqAction::Intercept(Action::ScrollPageUp, _, raw) => {
+                    self.route_raw_page_scroll(ScrollDirection::Up, &raw, dispatch);
+                }
+                RawSeqAction::Intercept(Action::ScrollPageDown, _, raw) => {
+                    self.route_raw_page_scroll(ScrollDirection::Down, &raw, dispatch);
+                }
+                RawSeqAction::Intercept(Action::ScrollLineUp, conditional, raw) => {
+                    self.route_raw_line_scroll(ScrollDirection::Up, conditional, &raw, dispatch);
+                }
+                RawSeqAction::Intercept(Action::ScrollLineDown, conditional, raw) => {
+                    self.route_raw_line_scroll(ScrollDirection::Down, conditional, &raw, dispatch);
+                }
+                RawSeqAction::Intercept(Action::ScrollToBottom, conditional, raw) => {
+                    self.route_raw_scroll_to_bottom(conditional, &raw, dispatch);
+                }
+                RawSeqAction::Intercept(Action::ScrollToTop, conditional, raw) => {
+                    self.route_raw_scroll_to_top(conditional, &raw, dispatch);
+                }
+                RawSeqAction::Mouse(mouse, raw) => {
+                    match self.handle_raw_mouse(mouse, &raw, dispatch) {
+                        RawInputFlow::Continue => {}
+                        RawInputFlow::Return(should_exit) => return Some(should_exit),
+                    }
+                }
+                RawSeqAction::Intercept(_, _, raw) | RawSeqAction::Forward(raw) => {
+                    // Unknown intercepted action or normal forward — batch
+                    // for a single PTY write. In scroll mode, all non-scroll
+                    // input is suppressed (the batch won't be flushed).
+                    dispatch.queue(&raw);
+                }
+            }
+        }
+
+        None
+    }
+
     /// Process raw bytes that have already been read from stdin.
     ///
     /// This is the core logic of interactive input handling, split out from
@@ -3268,479 +3650,12 @@ impl App {
         self.reconcile_scroll_mode();
         let may_write_pty = self.raw_input_batch_may_write(&actions, is_scrolled_back);
 
-        // Process collected actions, batching consecutive forward sequences
-        // into a single PTY write to avoid per-character lock/write/flush
-        // overhead (critical for large pastes).
-        let mut forward_batch: Vec<u8> = Vec::new();
+        let mut dispatch = RawInputDispatch::new(is_scrolled_back, may_write_pty);
 
-        /// Flush accumulated forward bytes to the PTY in a single write. Sets
-        /// `forwarded` when bytes actually reach the PTY so the caller can
-        /// record user input for the streaming-indicator suppression.
-        fn flush_forward_batch(
-            batch: &mut Vec<u8>,
-            is_scrolled_back: bool,
-            // False when another device owns this pty's input, in which case the
-            // batch is dropped exactly as scroll mode drops it: nothing reaches
-            // the child, and nothing is recorded as having been forwarded.
-            may_write_pty: bool,
-            needs_selection_clear: &mut bool,
-            forwarded: &mut ForwardedInput,
-            provider: Option<&crate::pty::PtyClient>,
-        ) {
-            if batch.is_empty() {
-                return;
-            }
-            *needs_selection_clear = true;
-            if !is_scrolled_back
-                && may_write_pty
-                && let Some(p) = provider
-            {
-                let _ = p.write_bytes(batch);
-                forwarded.note(batch);
-            }
-            batch.clear();
+        if let Some(should_exit) = self.execute_raw_input_actions(actions, &mut dispatch) {
+            return Ok(should_exit);
         }
-
-        // Track whether the selection should be cleared (set by flush or
-        // individual forward writes). We defer the clear to avoid repeated
-        // borrow-mut conflicts inside the loop.
-        let mut needs_selection_clear = false;
-
-        // Track WHAT reached the focused PTY this batch, not merely whether
-        // anything did. Keystrokes and forwarded pointer reports both provoke
-        // output that must not light the "working" indicator, but only one of
-        // them is the user typing, so they are recorded separately.
-        let mut forwarded_to_pty = ForwardedInput::default();
-
-        for action in actions {
-            match action {
-                RawSeqAction::Intercept(Action::OpenMacroBar, _, _) => {
-                    flush_forward_batch(
-                        &mut forward_batch,
-                        is_scrolled_back,
-                        may_write_pty,
-                        &mut needs_selection_clear,
-                        &mut forwarded_to_pty,
-                        self.selected_terminal_surface_client(),
-                    );
-                    // Stamp now, before `input_target` moves below: this arm can
-                    // leave the function without reaching the tail stamp, and
-                    // the id is resolved from `input_target`.
-                    self.stamp_forwarded_input(&mut forwarded_to_pty);
-                    if is_scrolled_back {
-                        continue;
-                    }
-                    self.open_macro_bar();
-                    self.raw_input_buf.clear();
-                    self.raw_input_parser.clear();
-                    return Ok(false);
-                }
-                // Only reachable while the take-over card covers this pane (see
-                // the match above), which is the one state where this key means
-                // something other than "type into the child".
-                RawSeqAction::Intercept(Action::FocusAgent, _, _) => {
-                    flush_forward_batch(
-                        &mut forward_batch,
-                        is_scrolled_back,
-                        may_write_pty,
-                        &mut needs_selection_clear,
-                        &mut forwarded_to_pty,
-                        self.selected_terminal_surface_client(),
-                    );
-                    self.stamp_forwarded_input(&mut forwarded_to_pty);
-                    self.take_over_focused_pty();
-                    self.raw_input_buf.clear();
-                    self.raw_input_parser.clear();
-                    return Ok(false);
-                }
-                // Only reachable while another device drives the pty (see the
-                // match above); the prompt takes over input from here.
-                RawSeqAction::Intercept(Action::OpenPalette, _, _) => {
-                    flush_forward_batch(
-                        &mut forward_batch,
-                        is_scrolled_back,
-                        may_write_pty,
-                        &mut needs_selection_clear,
-                        &mut forwarded_to_pty,
-                        self.selected_terminal_surface_client(),
-                    );
-                    self.stamp_forwarded_input(&mut forwarded_to_pty);
-                    self.open_command_palette();
-                    self.raw_input_buf.clear();
-                    self.raw_input_parser.clear();
-                    return Ok(false);
-                }
-                // In fullscreen the toggle means one thing: leave fullscreen.
-                RawSeqAction::Intercept(Action::ToggleFullscreen, _, _) => {
-                    flush_forward_batch(
-                        &mut forward_batch,
-                        is_scrolled_back,
-                        may_write_pty,
-                        &mut needs_selection_clear,
-                        &mut forwarded_to_pty,
-                        self.selected_terminal_surface_client(),
-                    );
-                    // Stamp before leaving interactive mode: that moves
-                    // `input_target`, which is what resolves the id.
-                    self.stamp_forwarded_input(&mut forwarded_to_pty);
-                    self.exit_interactive_mode();
-                    return Ok(false);
-                }
-                RawSeqAction::Intercept(Action::ScrollPageUp, _, raw) => {
-                    flush_forward_batch(
-                        &mut forward_batch,
-                        is_scrolled_back,
-                        may_write_pty,
-                        &mut needs_selection_clear,
-                        &mut forwarded_to_pty,
-                        self.selected_terminal_surface_client(),
-                    );
-                    let fs = self.selected_surface_forward_scroll();
-                    let alt = self
-                        .selected_terminal_surface_client()
-                        .is_some_and(|p| p.is_alt_screen());
-                    if should_forward_page(fs, alt) {
-                        // The gate is consulted HERE, not through the batch
-                        // verdict, and for two reasons. Only at this point is it
-                        // known that the key is going to the child at all (the
-                        // other branch scrolls dux's own scrollback and writes
-                        // nothing, so it must not claim). And the batch verdict
-                        // short-circuits to "allowed" while scrolled back, which
-                        // is true of the batched forwards and NOT of a page key
-                        // the provider says to forward: reusing it sent a demoted
-                        // surface's page keys into somebody else's terminal.
-                        if self.may_type_into_focused_pty()
-                            && let Some(provider) = self.selected_terminal_surface_client()
-                        {
-                            let _ = provider.write_bytes(&raw);
-                            forwarded_to_pty.note(&raw);
-                        }
-                    } else if self.last_pty_size.0 > 0 {
-                        self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
-                    }
-                }
-                RawSeqAction::Intercept(Action::ScrollPageDown, _, raw) => {
-                    flush_forward_batch(
-                        &mut forward_batch,
-                        is_scrolled_back,
-                        may_write_pty,
-                        &mut needs_selection_clear,
-                        &mut forwarded_to_pty,
-                        self.selected_terminal_surface_client(),
-                    );
-                    let fs = self.selected_surface_forward_scroll();
-                    let alt = self
-                        .selected_terminal_surface_client()
-                        .is_some_and(|p| p.is_alt_screen());
-                    if should_forward_page(fs, alt) {
-                        // The gate is consulted HERE, not through the batch
-                        // verdict, and for two reasons. Only at this point is it
-                        // known that the key is going to the child at all (the
-                        // other branch scrolls dux's own scrollback and writes
-                        // nothing, so it must not claim). And the batch verdict
-                        // short-circuits to "allowed" while scrolled back, which
-                        // is true of the batched forwards and NOT of a page key
-                        // the provider says to forward: reusing it sent a demoted
-                        // surface's page keys into somebody else's terminal.
-                        if self.may_type_into_focused_pty()
-                            && let Some(provider) = self.selected_terminal_surface_client()
-                        {
-                            let _ = provider.write_bytes(&raw);
-                            forwarded_to_pty.note(&raw);
-                        }
-                    } else if self.last_pty_size.0 > 0 {
-                        self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
-                    }
-                }
-                RawSeqAction::Intercept(Action::ScrollLineUp, conditional, raw) => {
-                    let has_scrollback = self
-                        .selected_terminal_surface_client()
-                        .is_some_and(|p| p.scrollback_offset() > 0);
-                    if conditional && has_scrollback && self.last_pty_size.0 > 0 {
-                        flush_forward_batch(
-                            &mut forward_batch,
-                            is_scrolled_back,
-                            may_write_pty,
-                            &mut needs_selection_clear,
-                            &mut forwarded_to_pty,
-                            self.selected_terminal_surface_client(),
-                        );
-                        self.scroll_pty(ScrollDirection::Up, 1);
-                    } else {
-                        forward_batch.extend_from_slice(&raw);
-                    }
-                }
-                RawSeqAction::Intercept(Action::ScrollLineDown, conditional, raw) => {
-                    let has_scrollback = self
-                        .selected_terminal_surface_client()
-                        .is_some_and(|p| p.scrollback_offset() > 0);
-                    if conditional && has_scrollback && self.last_pty_size.0 > 0 {
-                        flush_forward_batch(
-                            &mut forward_batch,
-                            is_scrolled_back,
-                            may_write_pty,
-                            &mut needs_selection_clear,
-                            &mut forwarded_to_pty,
-                            self.selected_terminal_surface_client(),
-                        );
-                        self.scroll_pty(ScrollDirection::Down, 1);
-                    } else {
-                        forward_batch.extend_from_slice(&raw);
-                    }
-                }
-                RawSeqAction::Intercept(Action::ScrollToBottom, conditional, raw) => {
-                    let has_scrollback = self
-                        .selected_terminal_surface_client()
-                        .is_some_and(|p| p.scrollback_offset() > 0);
-                    if conditional && has_scrollback {
-                        flush_forward_batch(
-                            &mut forward_batch,
-                            is_scrolled_back,
-                            may_write_pty,
-                            &mut needs_selection_clear,
-                            &mut forwarded_to_pty,
-                            self.selected_terminal_surface_client(),
-                        );
-                        self.reset_pty_scrollback();
-                    } else {
-                        forward_batch.extend_from_slice(&raw);
-                    }
-                }
-                RawSeqAction::Intercept(Action::ScrollToTop, conditional, raw) => {
-                    let has_scrollback = self
-                        .selected_terminal_surface_client()
-                        .is_some_and(|p| p.scrollback_offset() > 0);
-                    if conditional && has_scrollback {
-                        flush_forward_batch(
-                            &mut forward_batch,
-                            is_scrolled_back,
-                            may_write_pty,
-                            &mut needs_selection_clear,
-                            &mut forwarded_to_pty,
-                            self.selected_terminal_surface_client(),
-                        );
-                        self.set_pty_scrollback_max();
-                    } else {
-                        forward_batch.extend_from_slice(&raw);
-                    }
-                }
-                RawSeqAction::Mouse(mouse_ev, raw) => {
-                    // Flush any pending forward bytes before handling mouse
-                    // events — mouse actions may change scroll state or exit
-                    // interactive mode.
-                    flush_forward_batch(
-                        &mut forward_batch,
-                        is_scrolled_back,
-                        may_write_pty,
-                        &mut needs_selection_clear,
-                        &mut forwarded_to_pty,
-                        self.selected_terminal_surface_client(),
-                    );
-                    // The take-over card covers the fullscreen grid too, and
-                    // takes its clicks first for the same reasons it does in the
-                    // windowed pane.
-                    if self.handle_takeover_card_mouse(&mouse_ev) {
-                        continue;
-                    }
-                    let is_scroll = matches!(
-                        mouse_ev.kind,
-                        MouseEventKind::ScrollUp
-                            | MouseEventKind::ScrollDown
-                            | MouseEventKind::ScrollLeft
-                            | MouseEventKind::ScrollRight
-                    );
-                    if is_scroll {
-                        // Tri-state forward decision from the selected surface's
-                        // `forward_scroll` policy plus the child's live alt-screen
-                        // and mouse-reporting state. Applies to both agents and
-                        // companion terminals (terminals auto-detect via `None`).
-                        let fs = self.selected_surface_forward_scroll();
-                        let (alt, mouse) = self
-                            .selected_terminal_surface_client()
-                            .map(|p| (p.is_alt_screen(), p.has_mouse_mode()))
-                            .unwrap_or((false, false));
-                        let forward = should_forward_wheel(fs, alt, mouse);
-                        if forward {
-                            // The wheel goes to the CHILD, which will repaint
-                            // the grid however it likes. Nothing in the
-                            // snapshot's scroll numbers describes that, so the
-                            // selection has no text left to track and is
-                            // dropped. A LOCAL scroll is the opposite case: the
-                            // text is stable and `to_origin_row` follows it, so
-                            // that branch deliberately keeps the selection.
-                            self.terminal_selection = None;
-                            // A forwarded pointer report is still a write, so it
-                            // goes through the same gate a keystroke does: a
-                            // device that may not type may not make the child
-                            // repaint either. Asked here rather than with the
-                            // batch, because this is where it is known the report
-                            // is going to the child at all.
-                            if self.may_type_into_focused_pty()
-                                && let Some(provider) = self.selected_terminal_surface_client()
-                            {
-                                let _ = provider.write_bytes(&raw);
-                                forwarded_to_pty.note(&raw);
-                            }
-                        } else if self.handle_mouse(mouse_ev) {
-                            return Ok(true);
-                        }
-                    } else {
-                        // The rest of a gesture dux took an interest in: the
-                        // release opens the address here, exactly as it does on
-                        // the windowed path, and a withheld drag or release
-                        // never reaches the child.
-                        if self.handle_pending_link_mouse(&mouse_ev) {
-                            continue;
-                        }
-                        // The drag and release of a HATCH press. The raw bytes
-                        // carry the Ctrl bit the press was rebuilt without, so
-                        // the rest of the gesture is rebuilt too: a child that
-                        // was handed a plain press must not then be handed a
-                        // modified release.
-                        if self.center_mouse_forward.is_some() {
-                            match mouse_ev.kind {
-                                MouseEventKind::Drag(_) => {
-                                    self.continue_center_mouse_forward(&mouse_ev);
-                                    continue;
-                                }
-                                MouseEventKind::Up(_) => {
-                                    self.finish_center_mouse_forward(&mouse_ev);
-                                    continue;
-                                }
-                                _ => {}
-                            }
-                        }
-                        // If the click landed outside the fullscreen overlay,
-                        // exit interactive mode instead of forwarding to the PTY.
-                        // This check runs regardless of scroll state so the user
-                        // can always click outside to dismiss the overlay.
-                        let outside_overlay =
-                            matches!(mouse_ev.kind, MouseEventKind::Down(MouseButton::Left))
-                                && !self.mouse_layout.agent_term.is_some_and(|rect| {
-                                    contains_point(rect, mouse_ev.column, mouse_ev.row)
-                                });
-                        if outside_overlay {
-                            self.exit_interactive_mode();
-                            return Ok(false);
-                        }
-
-                        let child_wants_mouse = self
-                            .selected_terminal_surface_client()
-                            .is_some_and(|p| p.has_mouse_mode());
-
-                        // The same link rule the windowed pane applies, decided
-                        // by the same pure helper against the same rendered
-                        // snapshot (whose cells are viewport-relative, so the
-                        // fullscreen grid needs no special case).
-                        let link = self
-                            .link_at_screen_point(mouse_ev.column, mouse_ev.row)
-                            .map(str::to_string);
-                        match decide_terminal_press(
-                            mouse_ev.kind,
-                            mouse_ev.modifiers,
-                            link.as_deref(),
-                            child_wants_mouse,
-                        ) {
-                            TerminalPressAction::Link(decision) => {
-                                let suppress = decision.suppress;
-                                self.note_link_press(decision, &mouse_ev);
-                                if suppress {
-                                    continue;
-                                }
-                                // Not withheld: with no child tracking the
-                                // mouse the press keeps its ordinary meaning
-                                // below, which is where a drag-select over a
-                                // URL comes from.
-                            }
-                            TerminalPressAction::ForwardPlainClick => {
-                                // Rebuild the report from the button code alone:
-                                // the raw bytes carry the Ctrl bit, and the child
-                                // asked for a click, not for the hatch that let it
-                                // through. Arming the same forwarding record the
-                                // windowed path uses is what makes the drag and
-                                // the release rebuilt too. Scrolled back, the
-                                // scroll vocabulary owns the pane and nothing is
-                                // forwarded, exactly as for an unmodified press.
-                                if !is_scrolled_back {
-                                    let cb = sgr_button_code(MouseButton::Left);
-                                    self.center_mouse_forward = Some(cb);
-                                    self.write_center_mouse_report(
-                                        cb,
-                                        b'M',
-                                        mouse_ev.column,
-                                        mouse_ev.row,
-                                    );
-                                }
-                                continue;
-                            }
-                            TerminalPressAction::Unclaimed => {}
-                        }
-
-                        let shift_held = mouse_ev
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::SHIFT);
-                        let should_select = !child_wants_mouse || shift_held;
-
-                        if should_select {
-                            self.handle_terminal_selection_mouse(mouse_ev);
-                        } else if child_wants_mouse
-                            && !is_scrolled_back
-                            && self.may_type_into_focused_pty()
-                            && let Some(provider) = self.selected_terminal_surface_client()
-                        {
-                            // Translate screen-absolute coordinates to
-                            // child-relative coordinates before forwarding.
-                            // Without this, the child sees rows/cols offset
-                            // by the terminal area's position on screen
-                            // (header + borders), causing highlights to land
-                            // several lines below the actual click.
-                            if let Some(term_area) = self.mouse_layout.agent_term
-                                && let Some(translated) = crate::raw_input::translate_sgr_mouse(
-                                    &raw,
-                                    term_area.x,
-                                    term_area.y,
-                                )
-                            {
-                                let _ = provider.write_bytes(&translated);
-                                forwarded_to_pty.note(&translated);
-                            }
-                        }
-                    }
-                }
-                RawSeqAction::Intercept(_, _, raw) | RawSeqAction::Forward(raw) => {
-                    // Unknown intercepted action or normal forward — batch
-                    // for a single PTY write. In scroll mode, all non-scroll
-                    // input is suppressed (the batch won't be flushed).
-                    forward_batch.extend_from_slice(&raw);
-                }
-            }
-        }
-
-        // Flush any remaining batched forward bytes.
-        flush_forward_batch(
-            &mut forward_batch,
-            is_scrolled_back,
-            may_write_pty,
-            &mut needs_selection_clear,
-            &mut forwarded_to_pty,
-            self.selected_terminal_surface_client(),
-        );
-
-        if needs_selection_clear {
-            self.terminal_selection = None;
-        }
-
-        // Unwrapped paste body reached the PTY: that is typing, whatever the
-        // bytes looked like to the classifier (see the note at the top of
-        // the sequence loop). Mirrors `paste_to_center_pty`'s explicit stamp.
-        if normalized_paste_forwarded
-            && !is_scrolled_back
-            && self.selected_terminal_surface_client().is_some()
-        {
-            forwarded_to_pty.typing = true;
-        }
-
-        self.stamp_forwarded_input(&mut forwarded_to_pty);
+        dispatch.finish(self, normalized_paste_forwarded);
 
         Ok(false)
     }
