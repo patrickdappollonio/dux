@@ -1278,6 +1278,11 @@ pub fn delete_session_status_message(
     }
 }
 
+enum WireCommandMapping {
+    Mapped(Command),
+    Unhandled(WireCommand),
+}
+
 impl Engine {
     /// Reconstruct and dispatch a wire command, returning a wire-safe outcome.
     pub fn apply_wire(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
@@ -3664,8 +3669,8 @@ impl Engine {
         }
     }
 
-    fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
-        Ok(match command {
+    fn map_changes_command(&self, command: WireCommand) -> anyhow::Result<WireCommandMapping> {
+        let mapped = match command {
             WireCommand::StageFile { session_id, path } => Command::StageFile {
                 worktree_path: self.changes_worktree(&session_id)?,
                 path,
@@ -3725,6 +3730,17 @@ impl Engine {
                     "Pull already in progress for this worktree. Wait for the current pull to finish."
                         .to_string(),
             },
+            command => return Ok(WireCommandMapping::Unhandled(command)),
+        };
+        Ok(WireCommandMapping::Mapped(mapped))
+    }
+
+    fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
+        let command = match self.map_changes_command(command)? {
+            WireCommandMapping::Mapped(command) => return Ok(command),
+            WireCommandMapping::Unhandled(command) => command,
+        };
+        Ok(match command {
             WireCommand::PullProject { project_id } => {
                 // Mirror the TUI's `refresh_selected_project`: resolve the
                 // project, refuse when its checkout path is missing, then build
@@ -3855,8 +3871,10 @@ impl Engine {
                     );
                 }
                 let branch = crate::git::current_branch_opt(&validated)?;
-                let leading_branch =
-                    crate::project_browser::leading_branch_for_project(&validated, branch.as_deref());
+                let leading_branch = crate::project_browser::leading_branch_for_project(
+                    &validated,
+                    branch.as_deref(),
+                );
                 let path_str = validated.to_string_lossy().to_string();
                 let display_name = if name.trim().is_empty() {
                     validated
@@ -3882,8 +3900,7 @@ impl Engine {
                     path_missing: false,
                     created_at: Some(chrono::Utc::now()),
                 };
-                let status_message =
-                    format!("Added project \"{display_name}\" to the workspace.");
+                let status_message = format!("Added project \"{display_name}\" to the workspace.");
                 Command::PersistProject {
                     action: Box::new(ProjectPersistenceAction::Add {
                         project,
@@ -4030,9 +4047,7 @@ impl Engine {
                     .iter()
                     .find(|p| p.id == managed.project_id)
                     .cloned()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("unknown project: {}", managed.project_id)
-                    })?;
+                    .ok_or_else(|| anyhow::anyhow!("unknown project: {}", managed.project_id))?;
                 // `source_label` mirrors the TUI's `session_label`: the custom
                 // title if set, otherwise the branch name.
                 let source_label = source_session.display_label();
@@ -4153,7 +4168,13 @@ impl Engine {
             // synchronously; change-provider persists + pins in place).
             // `apply_wire` intercepts them before this immutable mapping;
             // reaching here means that interception broke.
-            WireCommand::RenameSession { .. }
+            WireCommand::StageFile { .. }
+            | WireCommand::UnstageFile { .. }
+            | WireCommand::DiscardFile { .. }
+            | WireCommand::CommitChanges { .. }
+            | WireCommand::Push { .. }
+            | WireCommand::Pull { .. }
+            | WireCommand::RenameSession { .. }
             | WireCommand::ReconnectSession { .. }
             | WireCommand::RerunStartupCommand { .. }
             | WireCommand::CheckoutProjectDefaultBranch { .. }
@@ -4182,7 +4203,7 @@ impl Engine {
             | WireCommand::ChangeAgentTabProvider { .. }
             | WireCommand::SetLastFocusedTab { .. } => {
                 unreachable!(
-                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
+                    "changes commands are mapped before the remaining wire_to_command dispatch; rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -4192,9 +4213,7 @@ impl Engine {
                 project_id,
                 session_ids,
             },
-            WireCommand::ReorderAgents { session_ids } => {
-                Command::ReorderAgents { session_ids }
-            }
+            WireCommand::ReorderAgents { session_ids } => Command::ReorderAgents { session_ids },
             WireCommand::ReorderProjects { project_ids } => {
                 Command::ReorderProjects { project_ids }
             }
