@@ -1196,6 +1196,41 @@ async fn nested_agent_pty_socket_streams_bytes() {
     );
 }
 
+#[tokio::test]
+async fn first_binary_input_claims_an_unowned_pty_and_announces_its_owner() {
+    let (addr, _tmp) = boot().await;
+    let (mut events, _) = connect_events(addr).await;
+    events
+        .send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
+        .await
+        .unwrap();
+
+    let (mut pty, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/pty"))
+        .await
+        .expect("connect agent pty socket");
+    let hello = next_event_frame(&mut pty, "connected", Duration::from_secs(8))
+        .await
+        .expect("the pty handshake");
+    let connection_id = hello["id"]
+        .as_str()
+        .expect("the handshake names this connection");
+
+    pty.send(Message::Binary(b"dux-first-input-marker\n".to_vec().into()))
+        .await
+        .unwrap();
+    let echoed = accumulate_until(&mut pty, "dux-first-input-marker", Duration::from_secs(8)).await;
+    assert!(
+        String::from_utf8_lossy(&echoed).contains("dux-first-input-marker"),
+        "first input on an unowned pty must be forwarded"
+    );
+
+    let owner = next_event_frame(&mut events, "pty.owner", Duration::from_secs(8))
+        .await
+        .expect("first input must announce the new owner");
+    assert_eq!(owner["id"].as_str(), Some("s1"));
+    assert_eq!(owner["owner"].as_str(), Some(connection_id));
+}
+
 /// Read Binary frames off `ws` until the accumulated bytes contain `needle` or
 /// the deadline passes; returns everything read. Text frames (the `connected`
 /// handshake) and pings are skipped, exactly as the browser client ignores them
@@ -1462,6 +1497,37 @@ async fn a_beat_frame_is_answered_with_the_same_number() {
     assert_eq!(answer["n"].as_u64(), Some(42));
 }
 
+#[tokio::test]
+async fn an_unknown_text_frame_is_ignored_without_poisoning_the_socket() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/pty"))
+        .await
+        .expect("connect the pty socket");
+    let _ = next_event_frame(&mut ws, "connected", Duration::from_secs(8))
+        .await
+        .expect("the handshake");
+
+    ws.send(Message::Text(
+        r#"{"unknown_control":"must-not-reach-stdin"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+    ws.send(Message::Binary(
+        b"dux-after-unknown-control\n".to_vec().into(),
+    ))
+    .await
+    .unwrap();
+
+    let output =
+        accumulate_until(&mut ws, "dux-after-unknown-control", Duration::from_secs(8)).await;
+    let output = String::from_utf8_lossy(&output);
+    assert!(output.contains("dux-after-unknown-control"));
+    assert!(!output.contains("must-not-reach-stdin"));
+}
+
 /// Read the next Text frame that carries the given `event` value, or `None` if
 /// none arrives inside `within`. Binary frames (the scrollback replay and live
 /// PTY output) and pings are skipped, as is any Text frame of another kind.
@@ -1590,6 +1656,43 @@ async fn an_applied_resize_tells_every_attached_socket_the_ptys_new_grid() {
         (Some(40), Some(120)),
         "the handshake grid must be the LIVE pty's, or a viewer starts out \
          believing it agrees with a geometry the child left behind"
+    );
+}
+
+#[tokio::test]
+async fn a_grid_change_is_forwarded_only_to_sockets_for_that_pty() {
+    let (addr, _tmp) = boot().await;
+    let terminal_id = create_terminal_via_rest(addr, "s1").await;
+    let (mut first, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/pty"))
+            .await
+            .expect("connect first pty socket");
+    let (mut second, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{addr}/ws/sessions/s1/terminals/{terminal_id}/pty"
+    ))
+    .await
+    .expect("connect companion terminal pty socket");
+    let _ = next_event_frame(&mut first, "connected", Duration::from_secs(8))
+        .await
+        .expect("first handshake");
+    let _ = next_event_frame(&mut second, "connected", Duration::from_secs(8))
+        .await
+        .expect("second handshake");
+
+    first
+        .send(Message::Text(r#"{"rows":37,"cols":111}"#.into()))
+        .await
+        .unwrap();
+    let size = next_event_frame(&mut first, "size", Duration::from_secs(8))
+        .await
+        .expect("the resized pty must receive its grid change");
+    assert_eq!(size["rows"].as_u64(), Some(37));
+    assert_eq!(size["cols"].as_u64(), Some(111));
+    assert!(
+        next_event_frame(&mut second, "size", Duration::from_secs(2))
+            .await
+            .is_none(),
+        "a socket for another pty must not receive the grid change"
     );
 }
 
