@@ -468,6 +468,50 @@ impl ForwardedInput {
     }
 }
 
+enum RawSeqAction {
+    Intercept(Action, bool, Vec<u8>),
+    Mouse(MouseEvent, Vec<u8>),
+    Forward(Vec<u8>),
+}
+
+#[derive(Default)]
+struct DemotedInputPatterns {
+    palette: Vec<Vec<u8>>,
+    takeover: Vec<Vec<u8>>,
+}
+
+struct RawInputPlan {
+    actions: Vec<RawSeqAction>,
+    normalized_paste_forwarded: bool,
+}
+
+fn raw_action_can_reach_pty(
+    action: &RawSeqAction,
+    has_scrollback: bool,
+    has_page_height: bool,
+) -> bool {
+    match action {
+        RawSeqAction::Forward(_) => true,
+        RawSeqAction::Intercept(
+            Action::OpenMacroBar
+            | Action::ToggleFullscreen
+            | Action::OpenPalette
+            | Action::FocusAgent,
+            _,
+            _,
+        ) => false,
+        RawSeqAction::Intercept(Action::ScrollPageUp | Action::ScrollPageDown, _, _) => false,
+        RawSeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, conditional, _) => {
+            !(*conditional && has_scrollback && has_page_height)
+        }
+        RawSeqAction::Intercept(Action::ScrollToBottom | Action::ScrollToTop, conditional, _) => {
+            !(*conditional && has_scrollback)
+        }
+        RawSeqAction::Intercept(..) => true,
+        RawSeqAction::Mouse(..) => false,
+    }
+}
+
 /// Decide whether a mouse-wheel event should be forwarded to the embedded
 /// child process instead of scrolling dux's own host scrollback.
 ///
@@ -3069,13 +3113,7 @@ impl App {
         self.process_raw_input_bytes(&[])
     }
 
-    /// Process raw bytes that have already been read from stdin.
-    ///
-    /// This is the core logic of interactive input handling, split out from
-    /// `poll_and_forward_raw_input` so it can be tested without real stdin I/O.
-    pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> Result<bool> {
-        // Keep compatibility with tests that still seed raw_input_buf
-        // directly, while making the parser the owner of live pending bytes.
+    fn parse_raw_input_sequences(&mut self, bytes: &[u8]) -> Vec<crate::raw_input::ParsedSequence> {
         if self.raw_input_buf.as_slice() != self.raw_input_parser.pending() {
             self.raw_input_parser
                 .replace_pending(self.raw_input_buf.as_slice());
@@ -3092,236 +3130,143 @@ impl App {
         }
         self.raw_input_buf = self.raw_input_parser.pending().to_vec();
         self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
+        sequences
+    }
 
-        // Collect what to do for each sequence: an intercepted action, a
-        // mouse event to handle in the UI, or raw bytes to forward.
-        enum SeqAction {
-            Intercept(Action, bool, Vec<u8>),
-            Mouse(MouseEvent, Vec<u8>),
-            Forward(Vec<u8>),
+    fn demoted_input_patterns(&self) -> DemotedInputPatterns {
+        if !self.focused_pty_is_covered_by_card() {
+            return DemotedInputPatterns::default();
         }
 
-        // Build actions with bracket-paste awareness: inside a paste
-        // (between ESC[200~ and ESC[201~), skip intercept matching so
-        // pasted text never triggers keybindings.
-        let mut actions: Vec<SeqAction> = Vec::with_capacity(sequences.len());
-        // Whether this batch carried unwrapped paste BODY for a non-2004
-        // child. A paste is typing whatever its bytes look like, but with
-        // the markers stripped the classifier can no longer see that (a
-        // pasted literal `ESC[I` classifies as a focus report), so the
-        // typing stamp is asserted directly at the tail.
-        let mut normalized_paste_forwarded = false;
-        // While this pty is not this surface's, no key reaches the child, so the
-        // take-over card is covering this pane and its keys become dux's here
-        // exactly as they are in the windowed pane: the palette chord, because a
-        // way out of a covered pane has to work where the card shows, and the
-        // two that press the card's button, the focus-agent binding and Space.
-        // The binding's BYTES come from the bindings rather than a literal, or
-        // the card would name one key and answer another. While this surface
-        // drives the pty, all of them ride to the child untouched.
-        let (demoted_palette_patterns, demoted_takeover_patterns) =
-            if self.focused_pty_is_covered_by_card() {
-                let mut takeover = self.bindings.byte_patterns_for(Action::FocusAgent);
-                // SPACE, the one literal here, and deliberately so: activating
-                // the focused control is a universal convention rather than a
-                // binding, so there is no pattern to look up for it. The
-                // windowed pane already answers it; without this line the same
-                // key pressed on the same card did nothing in fullscreen.
-                //
-                // Safe because a PASTED space never reaches this matching at
-                // all (`intercepts_allowed` is false inside a bracket paste),
-                // which matters more for a space than for any chord: almost
-                // every paste contains one.
-                takeover.push(b" ".to_vec());
-                (
-                    self.bindings.byte_patterns_for(Action::OpenPalette),
-                    takeover,
-                )
-            } else {
-                (Vec::new(), Vec::new())
-            };
-        for parsed in &sequences {
-            let seq = parsed.bytes.as_slice();
-            // PASTED BYTES ARE CONTENT, never a binding, which is the same rule
-            // the intercept matching below follows. A pasted line break looks
-            // exactly like the card's key on this stream, and a paste that took
-            // a terminal away from whoever is driving it on its second line
-            // would be the quietest kind of wrong.
-            let intercepts_allowed = !parsed.in_bracket_paste;
-            if intercepts_allowed && demoted_palette_patterns.iter().any(|p| p == seq) {
-                actions.push(SeqAction::Intercept(
-                    Action::OpenPalette,
-                    false,
-                    seq.to_vec(),
-                ));
-                continue;
-            }
-            if intercepts_allowed && demoted_takeover_patterns.iter().any(|p| p == seq) {
-                actions.push(SeqAction::Intercept(
-                    Action::FocusAgent,
-                    false,
-                    seq.to_vec(),
-                ));
-                continue;
-            }
-            if seq == crate::raw_input::BRACKET_PASTE_START {
-                self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
-                // dux enables host bracketed paste globally, so EVERY host
-                // paste arrives wrapped. Forward the wrapper verbatim only
-                // to a child that asked for it (DECSET 2004); a child that
-                // never did (cat, an old REPL, readline with 2004 off)
-                // would get the literal markers typed at it and LF line
-                // endings, so for that child the markers are stripped and
-                // the body's newlines are normalized to CR below, mirroring
-                // `paste_to_center_pty`'s non-2004 arm.
-                self.raw_paste_normalize = !self
-                    .selected_terminal_surface_client()
-                    .is_some_and(|p| p.has_bracketed_paste());
-                self.raw_paste_prev_cr = false;
-                if !self.raw_paste_normalize {
-                    actions.push(SeqAction::Forward(seq.to_vec()));
-                }
-                continue;
-            }
-            if seq == crate::raw_input::BRACKET_PASTE_END {
-                self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
-                if !self.raw_paste_normalize {
-                    actions.push(SeqAction::Forward(seq.to_vec()));
-                }
-                self.raw_paste_normalize = false;
-                self.raw_paste_prev_cr = false;
-                continue;
-            }
-            if parsed.in_bracket_paste {
-                if self.raw_paste_normalize {
-                    // Paste body for a non-2004 child: LF becomes CR, with
-                    // the last-byte-was-CR fact threaded across chunks so a
-                    // CR-LF pair split over two reads still collapses.
-                    let (bytes, prev_cr) =
-                        crate::raw_input::normalize_paste_newlines(seq, self.raw_paste_prev_cr);
-                    self.raw_paste_prev_cr = prev_cr;
-                    if !bytes.is_empty() {
-                        normalized_paste_forwarded = true;
-                        actions.push(SeqAction::Forward(bytes));
-                    }
-                } else {
-                    actions.push(SeqAction::Forward(seq.to_vec()));
-                }
-                continue;
-            }
-            // Terminal focus reports (DEC mode 1004: ESC[I / ESC[O) are host
-            // status, not user input. Update focus state and drop them; they
-            // must NEVER reach the child PTY (they would type stray `[I`/`[O`).
-            // Ordered after the bracket-paste branch above so a literal ESC[I
-            // pasted as content still forwards.
-            if let Some(gained) = crate::raw_input::parse_focus_event(seq) {
-                if gained {
-                    self.terminal_focus.on_focus_gained(Instant::now());
-                } else {
-                    // A press whose release will be delivered to some other
-                    // window is a press that will never be completed here.
-                    self.retire_pending_link_click();
-                    self.terminal_focus.on_focus_lost();
-                }
-                continue;
-            }
-            // Mouse events must be handled by the UI, not forwarded to the
-            // PTY. crossterm's EnableMouseCapture uses SGR (1006) encoding,
-            // so terminal mouse events arrive as CSI `<…M` / `<…m`.
-            if let Some(mouse_ev) = crate::raw_input::parse_sgr_mouse(seq) {
-                actions.push(SeqAction::Mouse(mouse_ev, seq.to_vec()));
-                continue;
-            }
-            if let Some((action, conditional)) = self.interactive_patterns.match_sequence(seq) {
-                actions.push(SeqAction::Intercept(action, conditional, seq.to_vec()));
-            } else {
-                actions.push(SeqAction::Forward(seq.to_vec()));
+        let mut takeover = self.bindings.byte_patterns_for(Action::FocusAgent);
+        takeover.push(b" ".to_vec());
+        DemotedInputPatterns {
+            palette: self.bindings.byte_patterns_for(Action::OpenPalette),
+            takeover,
+        }
+    }
+
+    fn classify_raw_input_sequences(
+        &mut self,
+        sequences: &[crate::raw_input::ParsedSequence],
+    ) -> RawInputPlan {
+        let patterns = self.demoted_input_patterns();
+        let mut plan = RawInputPlan {
+            actions: Vec::with_capacity(sequences.len()),
+            normalized_paste_forwarded: false,
+        };
+        for parsed in sequences {
+            if let Some(action) = self.classify_raw_input_sequence(
+                parsed,
+                &patterns,
+                &mut plan.normalized_paste_forwarded,
+            ) {
+                plan.actions.push(action);
             }
         }
+        plan
+    }
 
-        // Check once whether the user is in scroll mode so we can suppress
-        // non-scroll input for the entire batch.
-        //
-        // Read the MODE, never the grid: the child can zero `scrollback_offset`
-        // (see `reconcile_scroll_mode`), and sampling the grid here is what let
-        // it re-enable forwarding behind the user's back. The sample is taken
-        // BEFORE reconciling so a batch that arrives in the same instant the
-        // mode dies is still suppressed: the user cannot have read the status
-        // message yet, and their keystroke was aimed at a pane they believed
-        // was frozen.
-        let is_scrolled_back = self.scroll_mode_active();
-        self.reconcile_scroll_mode();
+    fn classify_raw_input_sequence(
+        &mut self,
+        parsed: &crate::raw_input::ParsedSequence,
+        patterns: &DemotedInputPatterns,
+        normalized_paste_forwarded: &mut bool,
+    ) -> Option<RawSeqAction> {
+        let seq = parsed.bytes.as_slice();
+        let intercepts_allowed = !parsed.in_bracket_paste;
+        if intercepts_allowed && patterns.palette.iter().any(|pattern| pattern == seq) {
+            return Some(RawSeqAction::Intercept(
+                Action::OpenPalette,
+                false,
+                seq.to_vec(),
+            ));
+        }
+        if intercepts_allowed && patterns.takeover.iter().any(|pattern| pattern == seq) {
+            return Some(RawSeqAction::Intercept(
+                Action::FocusAgent,
+                false,
+                seq.to_vec(),
+            ));
+        }
+        if seq == crate::raw_input::BRACKET_PASTE_START {
+            self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
+            self.raw_paste_normalize = !self
+                .selected_terminal_surface_client()
+                .is_some_and(|provider| provider.has_bracketed_paste());
+            self.raw_paste_prev_cr = false;
+            return (!self.raw_paste_normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
+        }
+        if seq == crate::raw_input::BRACKET_PASTE_END {
+            self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
+            let action = (!self.raw_paste_normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
+            self.raw_paste_normalize = false;
+            self.raw_paste_prev_cr = false;
+            return action;
+        }
+        if parsed.in_bracket_paste {
+            if !self.raw_paste_normalize {
+                return Some(RawSeqAction::Forward(seq.to_vec()));
+            }
+            let (bytes, prev_cr) =
+                crate::raw_input::normalize_paste_newlines(seq, self.raw_paste_prev_cr);
+            self.raw_paste_prev_cr = prev_cr;
+            if bytes.is_empty() {
+                return None;
+            }
+            *normalized_paste_forwarded = true;
+            return Some(RawSeqAction::Forward(bytes));
+        }
+        if let Some(gained) = crate::raw_input::parse_focus_event(seq) {
+            self.observe_raw_terminal_focus(gained);
+            return None;
+        }
+        if let Some(mouse_event) = crate::raw_input::parse_sgr_mouse(seq) {
+            return Some(RawSeqAction::Mouse(mouse_event, seq.to_vec()));
+        }
+        if let Some((action, conditional)) = self.interactive_patterns.match_sequence(seq) {
+            return Some(RawSeqAction::Intercept(action, conditional, seq.to_vec()));
+        }
+        Some(RawSeqAction::Forward(seq.to_vec()))
+    }
 
-        // THE OWNERSHIP GATE for this batch. While a background web server is
-        // serving, this surface holds a seat in the PTY-ownership registry and
-        // may write only to a pty it already drives; every other keystroke is
-        // dropped rather than written, whether another device is driving or
-        // nobody is, and the card over the pane plus the hint bar say why. A
-        // keystroke never claims: the card's button does.
-        //
-        // Asked ONCE per batch rather than per byte, and only when the batch
-        // actually has something that could reach the child: a bare host focus
-        // report, or a wheel dux scrolls itself, is not this device claiming
-        // anything. Mouse actions are gated at their own two forward sites, which
-        // is where it is known whether the report is going to the child at all,
-        // and so are the page keys (see their arms below).
-        //
-        // The write-capable actions are named EXPLICITLY rather than answered with
-        // "any intercept might write". Several of them write nothing at all: the
-        // macro bar and the fullscreen toggle are dux's own keys, and a page key
-        // dux answers by scrolling its own scrollback never reaches the child.
-        // Under the old blanket answer every one of those CLAIMED an unowned pty
-        // and broadcast the claim, which flips each watching browser onto a
-        // take-over card and starts dropping its keystrokes, all from a keypress
-        // the child never saw.
-        //
-        // Nothing serving means no registry and no gate: this is `true` before it
-        // touches anything.
-        //
-        // The two live facts the conditional scroll arms branch on are sampled
-        // once, here, with the same predicates those arms use.
+    fn observe_raw_terminal_focus(&mut self, gained: bool) {
+        if gained {
+            self.terminal_focus.on_focus_gained(Instant::now());
+        } else {
+            self.retire_pending_link_click();
+            self.terminal_focus.on_focus_lost();
+        }
+    }
+
+    fn raw_input_batch_may_write(
+        &mut self,
+        actions: &[RawSeqAction],
+        is_scrolled_back: bool,
+    ) -> bool {
         let has_scrollback = self
             .selected_terminal_surface_client()
-            .is_some_and(|p| p.scrollback_offset() > 0);
+            .is_some_and(|provider| provider.scrollback_offset() > 0);
         let has_page_height = self.last_pty_size.0 > 0;
-        let batch_can_reach_pty = actions.iter().any(|action| match action {
-            SeqAction::Forward(_) => true,
-            // dux's own keys. Both arms below flush whatever forward bytes the
-            // batch had already collected, and those bytes are counted by the
-            // `Forward` arm above; the key itself writes nothing.
-            SeqAction::Intercept(
-                Action::OpenMacroBar
-                | Action::ToggleFullscreen
-                | Action::OpenPalette
-                | Action::FocusAgent,
-                _,
-                _,
-            ) => false,
-            // A page key either scrolls locally (no write) or is forwarded, and
-            // which one it is depends on the provider's `forward_scroll` and the
-            // child's live alt-screen state. Its arm consults the gate itself, at
-            // the forward site, so it is not counted here.
-            SeqAction::Intercept(Action::ScrollPageUp | Action::ScrollPageDown, _, _) => false,
-            // The conditional scroll keys fall THROUGH to the forward batch
-            // whenever they have no scrollback to move in, which makes them
-            // ordinary keystrokes aimed at the child.
-            SeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, conditional, _) => {
-                !(*conditional && has_scrollback && has_page_height)
-            }
-            SeqAction::Intercept(Action::ScrollToBottom | Action::ScrollToTop, conditional, _) => {
-                !(*conditional && has_scrollback)
-            }
-            // Any other intercepted action lands in the forward batch (see the
-            // catch-all arm at the end of the loop), so it is a write.
-            SeqAction::Intercept(..) => true,
-            SeqAction::Mouse(..) => false,
-        });
-        // Scroll mode is asked about first: while it is on nothing in this batch
-        // reaches the child at all, so claiming a pty on the strength of it would
-        // be this device announcing itself as the driver of a terminal it is not
-        // typing into.
-        let may_write_pty =
-            is_scrolled_back || !batch_can_reach_pty || self.may_type_into_focused_pty();
+        let batch_can_reach_pty = actions
+            .iter()
+            .any(|action| raw_action_can_reach_pty(action, has_scrollback, has_page_height));
+        is_scrolled_back || !batch_can_reach_pty || self.may_type_into_focused_pty()
+    }
+
+    /// Process raw bytes that have already been read from stdin.
+    ///
+    /// This is the core logic of interactive input handling, split out from
+    /// `poll_and_forward_raw_input` so it can be tested without real stdin I/O.
+    pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> Result<bool> {
+        let sequences = self.parse_raw_input_sequences(bytes);
+        let plan = self.classify_raw_input_sequences(&sequences);
+        let actions = plan.actions;
+        let normalized_paste_forwarded = plan.normalized_paste_forwarded;
+
+        let is_scrolled_back = self.scroll_mode_active();
+        self.reconcile_scroll_mode();
+        let may_write_pty = self.raw_input_batch_may_write(&actions, is_scrolled_back);
 
         // Process collected actions, batching consecutive forward sequences
         // into a single PTY write to avoid per-character lock/write/flush
@@ -3369,7 +3314,7 @@ impl App {
 
         for action in actions {
             match action {
-                SeqAction::Intercept(Action::OpenMacroBar, _, _) => {
+                RawSeqAction::Intercept(Action::OpenMacroBar, _, _) => {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
@@ -3393,7 +3338,7 @@ impl App {
                 // Only reachable while the take-over card covers this pane (see
                 // the match above), which is the one state where this key means
                 // something other than "type into the child".
-                SeqAction::Intercept(Action::FocusAgent, _, _) => {
+                RawSeqAction::Intercept(Action::FocusAgent, _, _) => {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
@@ -3410,7 +3355,7 @@ impl App {
                 }
                 // Only reachable while another device drives the pty (see the
                 // match above); the prompt takes over input from here.
-                SeqAction::Intercept(Action::OpenPalette, _, _) => {
+                RawSeqAction::Intercept(Action::OpenPalette, _, _) => {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
@@ -3426,7 +3371,7 @@ impl App {
                     return Ok(false);
                 }
                 // In fullscreen the toggle means one thing: leave fullscreen.
-                SeqAction::Intercept(Action::ToggleFullscreen, _, _) => {
+                RawSeqAction::Intercept(Action::ToggleFullscreen, _, _) => {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
@@ -3441,7 +3386,7 @@ impl App {
                     self.exit_interactive_mode();
                     return Ok(false);
                 }
-                SeqAction::Intercept(Action::ScrollPageUp, _, raw) => {
+                RawSeqAction::Intercept(Action::ScrollPageUp, _, raw) => {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
@@ -3474,7 +3419,7 @@ impl App {
                         self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
                     }
                 }
-                SeqAction::Intercept(Action::ScrollPageDown, _, raw) => {
+                RawSeqAction::Intercept(Action::ScrollPageDown, _, raw) => {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
@@ -3507,7 +3452,7 @@ impl App {
                         self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
                     }
                 }
-                SeqAction::Intercept(Action::ScrollLineUp, conditional, raw) => {
+                RawSeqAction::Intercept(Action::ScrollLineUp, conditional, raw) => {
                     let has_scrollback = self
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.scrollback_offset() > 0);
@@ -3525,7 +3470,7 @@ impl App {
                         forward_batch.extend_from_slice(&raw);
                     }
                 }
-                SeqAction::Intercept(Action::ScrollLineDown, conditional, raw) => {
+                RawSeqAction::Intercept(Action::ScrollLineDown, conditional, raw) => {
                     let has_scrollback = self
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.scrollback_offset() > 0);
@@ -3543,7 +3488,7 @@ impl App {
                         forward_batch.extend_from_slice(&raw);
                     }
                 }
-                SeqAction::Intercept(Action::ScrollToBottom, conditional, raw) => {
+                RawSeqAction::Intercept(Action::ScrollToBottom, conditional, raw) => {
                     let has_scrollback = self
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.scrollback_offset() > 0);
@@ -3561,7 +3506,7 @@ impl App {
                         forward_batch.extend_from_slice(&raw);
                     }
                 }
-                SeqAction::Intercept(Action::ScrollToTop, conditional, raw) => {
+                RawSeqAction::Intercept(Action::ScrollToTop, conditional, raw) => {
                     let has_scrollback = self
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.scrollback_offset() > 0);
@@ -3579,7 +3524,7 @@ impl App {
                         forward_batch.extend_from_slice(&raw);
                     }
                 }
-                SeqAction::Mouse(mouse_ev, raw) => {
+                RawSeqAction::Mouse(mouse_ev, raw) => {
                     // Flush any pending forward bytes before handling mouse
                     // events — mouse actions may change scroll state or exit
                     // interactive mode.
@@ -3762,7 +3707,7 @@ impl App {
                         }
                     }
                 }
-                SeqAction::Intercept(_, _, raw) | SeqAction::Forward(raw) => {
+                RawSeqAction::Intercept(_, _, raw) | RawSeqAction::Forward(raw) => {
                     // Unknown intercepted action or normal forward — batch
                     // for a single PTY write. In scroll mode, all non-scroll
                     // input is suppressed (the batch won't be flushed).
