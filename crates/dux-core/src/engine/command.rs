@@ -360,140 +360,12 @@ impl Engine {
             Command::RemoveProject {
                 project_id,
                 project_name,
-            } => {
-                // Refuse while one of the project's agents has an in-flight async
-                // worktree removal: proceeding could race `git::remove_worktree`
-                // and delete a worktree we promised to keep.
-                if self.sessions.iter().any(|s| {
-                    s.project_id() == Some(project_id.as_str())
-                        && self.pending_deletions.contains(&s.id)
-                }) {
-                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
-                        "An agent in \"{project_name}\" is still being removed — try again in a moment."
-                    ))));
-                }
-                // Was this a real, config-backed project (vs. a ghost id that only
-                // exists as orphaned session rows)? A ghost was never written to
-                // config, so there is nothing to rewrite for it below.
-                let was_real = self.projects.iter().any(|p| p.id == project_id);
-                // Delete the project row, every session record, and their PR rows in
-                // a SINGLE transaction, so a mid-way failure cannot leave the project
-                // half-removed (e.g. agents gone but the project row surviving to
-                // reappear on restart). The rows are gone before any in-memory state
-                // changes, and on error nothing is mutated. Tolerates a ghost id.
-                let removed = self.session_store.remove_project_records(&project_id)?;
-                // The DB rows are already gone (one transaction above), so run ONLY
-                // the infallible in-memory/runtime teardown per session — never
-                // re-invoke delete_session here, so a transient DB error can't abort
-                // the cleanup and strand ghost sessions/tabs against an empty DB.
-                // Dropping each provider SIGKILLs the PTY process group; worktrees
-                // are deliberately left on disk.
-                for id in &removed {
-                    self.finish_delete_session_memory(id);
-                }
-                // Close the project's own project terminals gracefully (SIGTERM,
-                // then the background reaper), exactly as deleting an agent closes
-                // that agent's terminals. Without this the terminals would be
-                // orphaned: no sidebar row, no owning project, and no route able
-                // to name them.
-                self.begin_close_project_terminals(&project_id);
-                // Remove the project from memory synchronously so a concurrent
-                // CreateAgent cannot attach a new session to a project mid-removal.
-                self.projects.retain(|p| p.id != project_id);
-                let detail = match removed.len() {
-                    0 => String::new(),
-                    1 => " and its agent".to_string(),
-                    n => format!(" and its {n} agents"),
-                };
-                // Keep portable config in sync with the now-removed project. Only a
-                // real project needs this (a ghost was never in config). The DB delete
-                // already committed, so a config-write failure is reported but does not
-                // undo the removal — it warns that the project may reappear on restart.
-                if was_real && let Err(e) = self.persist_projects_to_config() {
-                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
-                        "Removed \"{project_name}\"{detail} from dux, but updating config.toml \
-                         failed: {e}. The project may reappear on restart — check the file is \
-                         writable."
-                    ))));
-                }
-                Ok(EventReaction::Status(StatusUpdate::info(format!(
-                    "Removed project \"{project_name}\"{detail}. Worktrees were kept on disk."
-                ))))
-            }
+            } => self.remove_project_keep_worktrees(&project_id, &project_name),
 
             Command::DeleteProject {
                 project_id,
                 project_name,
-            } => {
-                // Guard the WHOLE project up front. do_delete_session soft-refuses
-                // (Ok(None)) per session on either condition, but the loop below
-                // would then report success while silently leaving that session and
-                // its worktree behind, so refuse the entire delete instead.
-                if self.sessions.iter().any(|s| {
-                    s.project_id() == Some(project_id.as_str())
-                        && self.pending_deletions.contains(&s.id)
-                }) {
-                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
-                        "Cannot delete project \"{project_name}\" while agent worktree removals are in progress. Wait for them to finish, then try again."
-                    ))));
-                }
-                if self.sessions.iter().any(|s| {
-                    s.project_id() == Some(project_id.as_str())
-                        && self
-                            .tab_ids_for_session(&s.id)
-                            .iter()
-                            .any(|id| self.is_in_flight(&InFlightKey::AgentLaunch(id.clone())))
-                }) {
-                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
-                        "Cannot delete project \"{project_name}\" while an agent tab is still launching. Wait a moment, then try again."
-                    ))));
-                }
-                // A ghost id (orphaned sessions, no config-backed project) was never
-                // written to config, so it needs no config rewrite below.
-                let was_real = self.projects.iter().any(|p| p.id == project_id);
-                // Cascade every session through the shared delete path with worktree
-                // removal. A git failure (a worktree that cannot be removed) aborts
-                // the whole delete via `?`, leaving the rest of the project intact
-                // rather than half-deleted.
-                let session_ids: Vec<String> = self
-                    .sessions
-                    .iter()
-                    .filter(|s| s.project_id() == Some(project_id.as_str()))
-                    .map(|s| s.id.clone())
-                    .collect();
-                let mut removed = 0usize;
-                for id in &session_ids {
-                    if self.do_delete_session(id, true)?.is_some() {
-                        removed += 1;
-                    }
-                }
-                // The session rows are already gone (each do_delete_session removed
-                // its own); this drops the project row and any leftover PR rows in a
-                // single transaction, tolerating a ghost id.
-                self.session_store.remove_project_records(&project_id)?;
-                // Close the project's own project terminals gracefully, exactly as
-                // RemoveProject does (SIGTERM, then the background reaper).
-                self.begin_close_project_terminals(&project_id);
-                // Drop the project from memory synchronously so a concurrent
-                // CreateAgent cannot attach a new session mid-removal.
-                self.projects.retain(|p| p.id != project_id);
-                let detail = match removed {
-                    0 => String::new(),
-                    1 => " and its agent".to_string(),
-                    n => format!(" and its {n} agents"),
-                };
-                // Keep portable config in sync. Only a real project needs it; the DB
-                // delete already committed, so a config-write failure is reported but
-                // does not undo the removal.
-                if was_real && let Err(e) = self.persist_projects_to_config() {
-                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
-                        "Deleted \"{project_name}\"{detail} from dux, but updating config.toml failed: {e}. The project may reappear on restart. Check the file is writable."
-                    ))));
-                }
-                Ok(EventReaction::Status(StatusUpdate::info(format!(
-                    "Deleted project \"{project_name}\"{detail}. Worktrees were removed."
-                ))))
-            }
+            } => self.delete_project_with_worktrees(&project_id, &project_name),
 
             Command::DispatchCreateAgentRequest {
                 request,
@@ -1045,6 +917,99 @@ impl Engine {
         }
     }
 
+    fn remove_project_keep_worktrees(
+        &mut self,
+        project_id: &str,
+        project_name: &str,
+    ) -> anyhow::Result<EventReaction> {
+        if self.project_has_pending_deletion(project_id) {
+            return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                "An agent in \"{project_name}\" is still being removed — try again in a moment."
+            ))));
+        }
+        let was_real = self.projects.iter().any(|project| project.id == project_id);
+        let removed = self.session_store.remove_project_records(project_id)?;
+        for session_id in &removed {
+            self.finish_delete_session_memory(session_id);
+        }
+        self.remove_project_from_runtime(project_id);
+        let detail = removed_agents_detail(removed.len());
+        if was_real && let Err(error) = self.persist_projects_to_config() {
+            return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                "Removed \"{project_name}\"{detail} from dux, but updating config.toml failed: \
+                 {error}. The project may reappear on restart — check the file is writable."
+            ))));
+        }
+        Ok(EventReaction::Status(StatusUpdate::info(format!(
+            "Removed project \"{project_name}\"{detail}. Worktrees were kept on disk."
+        ))))
+    }
+
+    fn delete_project_with_worktrees(
+        &mut self,
+        project_id: &str,
+        project_name: &str,
+    ) -> anyhow::Result<EventReaction> {
+        if self.project_has_pending_deletion(project_id) {
+            return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                "Cannot delete project \"{project_name}\" while agent worktree removals are in \
+                 progress. Wait for them to finish, then try again."
+            ))));
+        }
+        if self.project_has_launching_tab(project_id) {
+            return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                "Cannot delete project \"{project_name}\" while an agent tab is still launching. \
+                 Wait a moment, then try again."
+            ))));
+        }
+        let was_real = self.projects.iter().any(|project| project.id == project_id);
+        let session_ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|session| session.project_id() == Some(project_id))
+            .map(|session| session.id.clone())
+            .collect();
+        let mut removed = 0usize;
+        for session_id in &session_ids {
+            if self.do_delete_session(session_id, true)?.is_some() {
+                removed += 1;
+            }
+        }
+        self.session_store.remove_project_records(project_id)?;
+        self.remove_project_from_runtime(project_id);
+        let detail = removed_agents_detail(removed);
+        if was_real && let Err(error) = self.persist_projects_to_config() {
+            return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                "Deleted \"{project_name}\"{detail} from dux, but updating config.toml failed: \
+                 {error}. The project may reappear on restart. Check the file is writable."
+            ))));
+        }
+        Ok(EventReaction::Status(StatusUpdate::info(format!(
+            "Deleted project \"{project_name}\"{detail}. Worktrees were removed."
+        ))))
+    }
+
+    fn project_has_pending_deletion(&self, project_id: &str) -> bool {
+        self.sessions.iter().any(|session| {
+            session.project_id() == Some(project_id) && self.pending_deletions.contains(&session.id)
+        })
+    }
+
+    fn project_has_launching_tab(&self, project_id: &str) -> bool {
+        self.sessions.iter().any(|session| {
+            session.project_id() == Some(project_id)
+                && self
+                    .tab_ids_for_session(&session.id)
+                    .iter()
+                    .any(|tab_id| self.is_in_flight(&InFlightKey::AgentLaunch(tab_id.clone())))
+        })
+    }
+
+    fn remove_project_from_runtime(&mut self, project_id: &str) {
+        self.begin_close_project_terminals(project_id);
+        self.projects.retain(|project| project.id != project_id);
+    }
+
     fn apply_project_persistence(
         &mut self,
         action: ProjectPersistenceAction,
@@ -1304,6 +1269,14 @@ fn project_added_reaction(
         },
         status_op_id: None,
     }))
+}
+
+fn removed_agents_detail(removed: usize) -> String {
+    match removed {
+        0 => String::new(),
+        1 => " and its agent".to_string(),
+        count => format!(" and its {count} agents"),
+    }
 }
 
 /// Strict reorder validation: `requested` must be a permutation of `current`
