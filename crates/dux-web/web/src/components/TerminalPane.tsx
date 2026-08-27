@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { Terminal } from "@xterm/xterm"
 import type { FitAddon } from "@xterm/addon-fit"
 import { MonitorSmartphone } from "lucide-react"
@@ -49,11 +49,6 @@ import {
 import type { TerminalOwnerRef } from "@/lib/store"
 import type { PtySocket } from "@/lib/ptySocket"
 import { matchOwner, ownerProjectId, ownerSessionId } from "@/lib/terminalOwner"
-import {
-  clampTerminalFontSize,
-  loadTerminalFontsThenRefit,
-  terminalFontFamily,
-} from "@/lib/terminalFont"
 import { terminalsForOwner } from "@/lib/terminals"
 import { DEFAULT_ATTENTION_GRACE_SECONDS } from "@/lib/viewedPing"
 import { attachCover } from "@/lib/attachCover"
@@ -66,16 +61,13 @@ import {
   type TerminalLiveSettings,
 } from "@/components/terminal/liveValues"
 import { useTerminalLifecycle } from "@/components/terminal/useTerminalLifecycle"
+import { useTerminalRelayout } from "@/components/terminal/useTerminalRelayout"
 import { useTerminalOwnership } from "@/components/terminal/ownership"
 import { plainBounce } from "@/components/terminal/plainBounce"
 import {
   useViewerGrid,
 } from "@/components/terminal/viewerGrid"
-import {
-  REPLAY_WAIT_POLL_MS,
-  xtermScrollbarWidth,
-} from "@/components/terminal/constants"
-import { viewerFontFit } from "@/lib/viewerFit"
+import { REPLAY_WAIT_POLL_MS } from "@/components/terminal/constants"
 import {
   focusTypingSurfaceIn,
   nextTypingFocus,
@@ -433,13 +425,6 @@ export function TerminalPane(props: TerminalPaneProps) {
   // of a font change), and the pane's own relayout, which the coordinator's
   // ResizeObserver calls in place of the fit it does not run.
   const viewerRegridRef = useRef<(() => void) | null>(null)
-  const viewerRelayoutRef = useRef<(() => void) | null>(null)
-  // Whether the LAST relayout ran the faithful branch. A PROMOTION out of it (a
-  // take-over, or self-succeeding after a blip) can change neither the family
-  // nor the size, and the else branch below fits only on those, so leaving the
-  // branch has to be a third reason to fit; without it the freshly promoted
-  // owner stays at the grid it adopted as a watcher forever.
-  const lastRelayoutFaithfulRef = useRef(false)
 
   // THE INPUT SURFACE: the compose Send, the accessory sends, the sticky
   // modifier latches and the draft splice.
@@ -473,157 +458,19 @@ export function TerminalPane(props: TerminalPaneProps) {
     fileDropEnabled,
   })
 
-  // THE RELAYOUT: the one place that decides what font the OPEN terminal wears
-  // and how the picture is presented, in both modes.
-  //
-  // OWNER (and the legacy fit-my-window watcher): the job of the live
-  // font-preference effect this replaced, with two deliberate improvements
-  // over it: the font load below is kicked off only when the FAMILY actually
-  // changed (a size change moves no faces, so fetching on it bought nothing),
-  // and the whole thing runs as a layout effect (measured, see below) where
-  // the old effect ran after paint. Live-apply a font preference change by
-  // setting the xterm options in place and refitting, so rows/cols track the
-  // new cell metrics and the re-grid flows to the PTY through xterm's own
-  // resize event. A user-named family may not have loaded when the option is
-  // set, so refit once more after the browser fetches it; the guard inside
-  // `loadTerminalFontsThenRefit` keeps that late refit off a successor
-  // terminal after a remount.
-  //
-  // FAITHFUL WATCHER: the grid is the PTY's, not this window's, so there is no
-  // fit at all. The font shrinks instead, to the largest half-pixel size at
-  // which the agent's own rows and columns fit here (`lib/viewerFit.ts` owns
-  // that arithmetic and its floor), and the grid is re-asserted through the
-  // coordinator afterwards. Below the floor the terminal is left overflowing
-  // and the host is made pannable, which keeps the picture correct where
-  // shrinking further would only make it illegible.
-  //
-  // A LAYOUT EFFECT because it MEASURES: it reads the host's box and the
-  // rendered cell, and doing that after paint would show one frame of the
-  // agent's full-size grid every time a watcher adopts a new one. On mount it
-  // runs before the lifecycle has created the terminal and is a no-op, exactly
-  // as the font effect it replaced was.
-  useLayoutEffect(() => {
-    const relayout = () => {
-      const term = termRef.current
-      const container = containerRef.current
-      const host = hostRef.current
-      if (!term || !container || !host) return
-      const family = terminalFontFamily(terminalFontFamilySetting)
-      const prefSize = clampTerminalFontSize(terminalFontSizeSetting)
-      // The pannable-overflow styles belong to the faithful branch alone;
-      // clearing them here means a promotion or a preference flip cannot leave
-      // a stale pixel size pinned on the container.
-      const clearOverflow = () => {
-        setViewerOverflow(false)
-        container.style.removeProperty("width")
-        container.style.removeProperty("height")
-      }
-      // Nothing to be faithful TO until the wire has reported a grid, so an
-      // older server (or a pty it could not read) keeps the old behavior
-      // rather than rendering at a guess.
-      const faithful = faithfulWatcher && remoteRows > 0 && remoteCols > 0
-      // Which branch the LAST relayout ran, updated on every run so a flip is
-      // seen exactly once whichever caller (the effect, the coordinator's
-      // observer, the font load) runs next.
-      const wasFaithful = lastRelayoutFaithfulRef.current
-      lastRelayoutFaithfulRef.current = faithful
-      let size = prefSize
-      if (faithful) {
-        // The cell, measured at whatever font is on screen right now. Cell
-        // metrics are font-relative, so one measurement answers for every
-        // candidate size. `.xterm-screen` rather than the container, for the
-        // reason the selection machine measures it too: the container is wider
-        // by the scrollbar gutter. If a grid adoption in this same pass has
-        // not reached the DOM yet the ratio is momentarily off by that grid's
-        // change, which the next layout signal corrects; it can only ever be a
-        // slightly wrong font, never a wrong grid.
-        const screen = term.element?.querySelector(".xterm-screen")
-        const rect = screen?.getBoundingClientRect()
-        const cell =
-          rect && term.cols > 0 && term.rows > 0
-            ? { width: rect.width / term.cols, height: rect.height / term.rows }
-            : { width: 0, height: 0 }
-        const style = getComputedStyle(host)
-        const padX =
-          parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
-        const padY =
-          parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
-        const gutter = xtermScrollbarWidth()
-        const fitted = viewerFontFit({
-          // Measured off the HOST, never off the container: the container is
-          // what this effect resizes in the overflow case, and measuring it
-          // would feed its own output back in.
-          available: {
-            width: host.clientWidth - padX - gutter,
-            height: host.clientHeight - padY,
-          },
-          grid: { rows: remoteRows, cols: remoteCols },
-          cell,
-          referenceFontSize:
-            typeof term.options.fontSize === "number"
-              ? term.options.fontSize
-              : prefSize,
-          maxFontSize: prefSize,
-        })
-        size = fitted.fontSize
-        if (fitted.overflows) {
-          setViewerOverflow(true)
-          // Give the overflow a real scroll area rather than hoping one
-          // appears: the container is sized to the grid, the host scrolls it.
-          container.style.width = `${fitted.width + gutter}px`
-          container.style.height = `${fitted.height}px`
-        } else {
-          clearOverflow()
-        }
-      } else {
-        clearOverflow()
-      }
-      const familyChanged = term.options.fontFamily !== family
-      const sizeChanged = term.options.fontSize !== size
-      if (familyChanged) term.options.fontFamily = family
-      if (sizeChanged) term.options.fontSize = size
-      if (faithful) {
-        // The cell metrics just moved, so re-assert the adopted grid: xterm
-        // leaves rows/cols alone across a font change, but a fit anywhere else
-        // could have moved them and this is the cheap idempotent guard against
-        // ever rendering a watcher at the wrong grid.
-        viewerRegridRef.current?.()
-      } else if (familyChanged || sizeChanged || wasFaithful) {
-        // The stated font exception to "only the coordinator fits" (see its
-        // module doc): the metrics have moved and the canvas would otherwise
-        // be wrong. `wasFaithful` covers the one leaving-the-faithful-branch
-        // case the other two miss: a promotion whose shrunk size already equals
-        // the preference, with the family untouched, still leaves the terminal
-        // standing at the adopted remote grid, and only a fit brings it back to
-        // this container's.
-        fitAddonRef.current?.fit()
-      }
-      if (familyChanged) {
-        loadTerminalFontsThenRefit(
-          term,
-          termRef,
-          // Late-bound on purpose: the faces can land after another relayout
-          // has replaced this closure, and the refit must run the CURRENT
-          // rules, not the ones in force when the fetch started.
-          () => viewerRelayoutRef.current?.(),
-          size,
-          family,
-        )
-      }
-    }
-    viewerRelayoutRef.current = relayout
-    relayout()
-    return () => {
-      // Only retire our own registration, the pane's standard guard.
-      if (viewerRelayoutRef.current === relayout) viewerRelayoutRef.current = null
-    }
-  }, [
-    terminalFontFamilySetting,
-    terminalFontSizeSetting,
+  const viewerRelayoutRef = useTerminalRelayout({
+    hostRef,
+    containerRef,
+    termRef,
+    fitAddonRef,
+    viewerRegridRef,
+    setViewerOverflow,
+    fontFamilySetting: terminalFontFamilySetting,
+    fontSizeSetting: terminalFontSizeSetting,
     faithfulWatcher,
     remoteRows,
     remoteCols,
-  ])
+  })
 
   // Retire any in-flight drag the moment the feature stops being available.
   // The gate refuses events for a disabled feature, so once it closes there is
