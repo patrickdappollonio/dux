@@ -18887,6 +18887,55 @@ not_a_real_action = ["x"]
         }
     }
 
+    #[test]
+    fn center_keyboard_scroll_actions_keep_their_distinct_diff_steps() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Diff {
+            lines: Arc::new(vec![Line::from("diff")]),
+            scroll: 4,
+            gutter_width: 0,
+            worktree_path: String::new(),
+            rel_path: String::new(),
+        };
+        app.last_diff_height = 2;
+        app.last_diff_visual_lines = 10;
+
+        for (key, expected) in [
+            (KeyCode::PageDown, 6),
+            (KeyCode::Down, 7),
+            (KeyCode::End, 8),
+            (KeyCode::Up, 7),
+            (KeyCode::PageUp, 5),
+            (KeyCode::Home, 0),
+        ] {
+            app.handle_key(KeyEvent::new(key, KeyModifiers::NONE))
+                .unwrap();
+            match app.center_mode {
+                CenterMode::Diff { scroll, .. } => assert_eq!(scroll, expected),
+                _ => panic!("expected diff mode"),
+            }
+        }
+    }
+
+    #[test]
+    fn center_agent_actions_are_inert_while_a_diff_is_open() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        open_fake_diff(&mut app);
+
+        for key in [
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+        ] {
+            app.handle_key(key).unwrap();
+            assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
+            assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+            assert!(matches!(app.prompt, PromptState::None));
+        }
+    }
+
     fn open_fake_diff(app: &mut App) {
         app.center_mode = CenterMode::Diff {
             lines: Arc::new(vec![Line::from("diff")]),
