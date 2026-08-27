@@ -5,6 +5,7 @@
 //! each tick so exited agents/terminals don't linger in `providers` /
 //! `companion_terminals` (and therefore the ViewModel).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::model::{AgentSession, SessionStatus, TerminalOwner};
@@ -235,6 +236,55 @@ pub struct ShutdownReport {
     /// `agents_exited < agents_total || terminals_exited < terminals_total`. With
     /// a grace of `0` the wait is skipped, so any not-yet-exited child sets this.
     pub timed_out: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ShutdownTotals {
+    agents: usize,
+    terminals: usize,
+}
+
+impl ShutdownTotals {
+    fn is_empty(self) -> bool {
+        self.agents == 0 && self.terminals == 0
+    }
+
+    fn report(self, tally: ShutdownTally, elapsed: Duration) -> ShutdownReport {
+        ShutdownReport {
+            agents_total: self.agents,
+            terminals_total: self.terminals,
+            agents_exited: tally.agents_exited,
+            terminals_exited: tally.terminals_exited,
+            elapsed,
+            timed_out: tally.agents_exited < self.agents || tally.terminals_exited < self.terminals,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ShutdownTally {
+    agents_exited: usize,
+    terminals_exited: usize,
+}
+
+fn shutdown_aborted(abort: Option<&AtomicBool>) -> bool {
+    abort.is_some_and(|flag| flag.load(Ordering::SeqCst))
+}
+
+fn pty_has_exited(client: &mut PtyClient) -> bool {
+    client.is_exited() || client.try_wait().is_some()
+}
+
+fn force_survivors_and_count_exited<'a>(clients: impl Iterator<Item = &'a mut PtyClient>) -> usize {
+    let mut exited = 0;
+    for client in clients {
+        if pty_has_exited(client) {
+            exited += 1;
+        } else {
+            client.force_terminate();
+        }
+    }
+    exited
 }
 
 /// `"1 agent"` / `"2 agents"` — pluralize `word` for `n`.
@@ -800,101 +850,93 @@ impl Engine {
         self.shutdown_ptys_interruptible(grace, None)
     }
 
-    /// Like [`shutdown_ptys`](Self::shutdown_ptys), but the grace wait also ends
-    /// early if `abort` flips to `true` — the second-signal escape hatch: a quit
-    /// already in its (possibly long) wait can be cut short by another SIGINT/
-    /// SIGTERM so a child that ignores SIGTERM cannot trap the operator. On an
-    /// abort the surviving children are force-killed immediately, exactly as on a
-    /// deadline timeout.
+    /// Ends the grace wait early when `abort` is set. Surviving children are
+    /// force-killed with the same tally semantics as a deadline timeout.
     pub fn shutdown_ptys_interruptible(
         &mut self,
         grace: std::time::Duration,
-        abort: Option<&std::sync::atomic::AtomicBool>,
+        abort: Option<&AtomicBool>,
     ) -> ShutdownReport {
-        let agents_total = self.providers.len();
-        let terminals_total = self.companion_terminals.len();
-
-        if agents_total == 0 && terminals_total == 0 {
-            return ShutdownReport {
-                agents_total: 0,
-                terminals_total: 0,
-                agents_exited: 0,
-                terminals_exited: 0,
-                elapsed: std::time::Duration::ZERO,
-                timed_out: false,
-            };
+        let totals = ShutdownTotals {
+            agents: self.providers.len(),
+            terminals: self.companion_terminals.len(),
+        };
+        if totals.is_empty() {
+            return totals.report(ShutdownTally::default(), Duration::ZERO);
         }
 
-        crate::logger::info(&format_shutdown_start(agents_total, terminals_total, grace));
+        crate::logger::info(&format_shutdown_start(
+            totals.agents,
+            totals.terminals,
+            grace,
+        ));
+        self.terminate_shutdown_ptys();
 
+        let start = Instant::now();
+        self.wait_for_shutdown_ptys(start, grace, abort);
+        let tally = self.force_shutdown_survivors();
+        let report = totals.report(tally, start.elapsed());
+        crate::logger::info(&format_shutdown_result(&report));
+        self.detach_shutdown_sessions();
+
+        report
+    }
+
+    fn terminate_shutdown_ptys(&self) {
         for client in self.providers.values() {
             client.terminate();
         }
         for terminal in self.companion_terminals.values() {
             terminal.client.terminate();
         }
+    }
 
-        let aborted = || abort.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
-        let start = std::time::Instant::now();
+    fn wait_for_shutdown_ptys(
+        &mut self,
+        start: Instant,
+        grace: Duration,
+        abort: Option<&AtomicBool>,
+    ) {
         let deadline = start + grace;
-        // grace == 0 means "force immediately": SIGTERM was still sent above, but
-        // we skip the wait loop and go straight to the force-kill tally below. An
-        // `abort` flip (a second termination signal) also ends the wait early.
-        if !grace.is_zero() && !aborted() {
-            loop {
-                let providers_done = self
-                    .providers
-                    .values_mut()
-                    .all(|c| c.is_exited() || c.try_wait().is_some());
-                let terminals_done = self
-                    .companion_terminals
-                    .values_mut()
-                    .all(|t| t.client.is_exited() || t.client.try_wait().is_some());
-                if (providers_done && terminals_done)
-                    || std::time::Instant::now() >= deadline
-                    || aborted()
-                {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
+        if grace.is_zero() || shutdown_aborted(abort) {
+            return;
         }
 
-        // Tally how many exited cleanly and SIGKILL any survivor now, so the
-        // result line reflects reality at the moment it is logged rather than
-        // deferring every straggler to `Drop`.
-        let mut agents_exited = 0usize;
-        for client in self.providers.values_mut() {
-            if client.is_exited() || client.try_wait().is_some() {
-                agents_exited += 1;
-            } else {
-                client.force_terminate();
+        loop {
+            if self.all_shutdown_ptys_exited()
+                || Instant::now() >= deadline
+                || shutdown_aborted(abort)
+            {
+                break;
             }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        let mut terminals_exited = 0usize;
-        for terminal in self.companion_terminals.values_mut() {
-            if terminal.client.is_exited() || terminal.client.try_wait().is_some() {
-                terminals_exited += 1;
-            } else {
-                terminal.client.force_terminate();
-            }
-        }
+    }
 
-        let report = ShutdownReport {
-            agents_total,
-            terminals_total,
+    fn all_shutdown_ptys_exited(&mut self) -> bool {
+        let agents_exited = self.providers.values_mut().all(pty_has_exited);
+        let terminals_exited = self
+            .companion_terminals
+            .values_mut()
+            .all(|terminal| pty_has_exited(&mut terminal.client));
+        agents_exited && terminals_exited
+    }
+
+    fn force_shutdown_survivors(&mut self) -> ShutdownTally {
+        let agents_exited = force_survivors_and_count_exited(self.providers.values_mut());
+        let terminals_exited = force_survivors_and_count_exited(
+            self.companion_terminals
+                .values_mut()
+                .map(|terminal| &mut terminal.client),
+        );
+        ShutdownTally {
             agents_exited,
             terminals_exited,
-            elapsed: start.elapsed(),
-            timed_out: agents_exited < agents_total || terminals_exited < terminals_total,
-        };
-        crate::logger::info(&format_shutdown_result(&report));
+        }
+    }
 
-        // `providers` is keyed by tab id; resolve each live tab back to its
-        // owning session and mark each session Detached exactly once. Resolving
-        // matters when a session's session-slot tab already exited but an extra tab is
-        // still running — its only provider key is the extra tab id, which is
-        // not a session id, so a bare `mark_session_status` would silently miss.
+    /// Resolve live tab IDs so sessions owned only by an extra tab are detached.
+    fn detach_shutdown_sessions(&mut self) {
         let keys: Vec<String> = self.providers.keys().cloned().collect();
         let mut session_ids: Vec<String> = keys
             .iter()
@@ -905,8 +947,6 @@ impl Engine {
         for id in session_ids {
             self.mark_session_status(&id, SessionStatus::Detached);
         }
-
-        report
     }
 }
 
