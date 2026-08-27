@@ -7,12 +7,14 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::State;
-use axum::routing::get;
+use axum::extract::{Path, State};
+use axum::routing::{get, post};
 use dux_core::config::{DuxPaths, ProjectConfig};
 use dux_core::storage::SessionStore;
+use dux_core::wire::WireStatus;
 use dux_web::bootstrap::bootstrap_engine;
 use dux_web::engine_actor::spawn_engine_thread;
+use dux_web::event_bus::Event;
 use dux_web::server::{AppState, RouterParams, build_app};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
@@ -147,14 +149,41 @@ async fn boot() -> (SocketAddr, tempfile::TempDir) {
     let engine = bootstrap_engine(&paths).unwrap();
     let (handle, _join) = spawn_engine_thread(engine);
 
-    let probe: Router<AppState> = Router::new().route(
-        "/api/_interest",
-        get(|State(state): State<AppState>| async move {
-            let mut ids = state.event_bus.interested_sessions();
-            ids.sort();
-            axum::Json(ids)
-        }),
-    );
+    let probe: Router<AppState> = Router::new()
+        .route(
+            "/api/_interest",
+            get(|State(state): State<AppState>| async move {
+                let mut ids = state.event_bus.interested_sessions();
+                ids.sort();
+                axum::Json(ids)
+            }),
+        )
+        .route(
+            "/api/_emit/{event}/{id}",
+            post(
+                |State(state): State<AppState>, Path((event, id)): Path<(String, String)>| async move {
+                    let id = (id != "-").then_some(id);
+                    let is_pty_owner = event == "pty.owner";
+                    state.event_bus.emit(Event::Resource {
+                        event,
+                        id,
+                        rev: Some(777),
+                        owner: is_pty_owner.then(|| "test-owner".to_string()),
+                        epoch: is_pty_owner.then_some(9),
+                        device: None,
+                    });
+                },
+            ),
+        )
+        .route(
+            "/api/_clear_status",
+            post(|State(state): State<AppState>| async move {
+                state
+                    .engine
+                    .emit_status(WireStatus::keyed("probe", "busy", "probe busy"));
+                state.engine.clear_status("probe");
+            }),
+        );
     let app = build_app(handle, probe, RouterParams::plain_http());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -637,6 +666,134 @@ async fn unknown_session_subscription_registers_no_interest() {
         ids.is_empty(),
         "a phantom-session subscription must not inflate the poll set: {ids:?}"
     );
+}
+
+#[tokio::test]
+async fn events_socket_unsubscribe_stops_delivery_without_closing_socket() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .unwrap();
+    let _ = read_connection_id(&mut ws).await;
+
+    ws.send(Message::Text(
+        r#"{"subscribe":["session:s1:changes"]}"#.into(),
+    ))
+    .await
+    .unwrap();
+    assert!(wait_for_interest(&client, addr, &["s1"]).await);
+    let _ = wait_for_frame(&mut ws, 5, |text| {
+        text.contains(r#""event":"session.changes""#)
+    })
+    .await;
+
+    ws.send(Message::Text(
+        r#"{"unsubscribe":["session:s1:changes"]}"#.into(),
+    ))
+    .await
+    .unwrap();
+    assert!(wait_for_interest(&client, addr, &[]).await);
+    client
+        .post(format!("http://{addr}/api/_emit/session.changes/s1"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        wait_for_frame(&mut ws, 1, |text| text.contains(r#""rev":777"#))
+            .await
+            .is_none(),
+        "an unsubscribed topic must stop delivering immediately"
+    );
+
+    ws.send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_frame(&mut ws, 5, |text| text.contains(r#""event":"workspace""#))
+            .await
+            .is_some(),
+        "the socket must remain usable after an unsubscribe"
+    );
+}
+
+#[tokio::test]
+async fn events_socket_ignores_malformed_and_non_text_frames() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .unwrap();
+    let _ = read_connection_id(&mut ws).await;
+
+    ws.send(Message::Text("not-json".into())).await.unwrap();
+    ws.send(Message::Binary(b"ignored".to_vec().into()))
+        .await
+        .unwrap();
+    ws.send(Message::Ping(Vec::new().into())).await.unwrap();
+    ws.send(Message::Pong(Vec::new().into())).await.unwrap();
+    ws.send(Message::Text(r#"{"subscribe":["projects"]}"#.into()))
+        .await
+        .unwrap();
+
+    assert!(
+        wait_for_frame(&mut ws, 5, |text| text.contains(r#""event":"workspace""#))
+            .await
+            .is_some(),
+        "ignored frames must not poison later control messages"
+    );
+}
+
+#[tokio::test]
+async fn events_socket_forwards_status_cleared() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .unwrap();
+    let _ = read_connection_id(&mut ws).await;
+
+    client
+        .post(format!("http://{addr}/api/_clear_status"))
+        .send()
+        .await
+        .unwrap();
+    let cleared = wait_for_frame(&mut ws, 5, |text| {
+        text.contains(r#""event":"status_cleared""#) && text.contains(r#""key":"probe""#)
+    })
+    .await;
+    assert!(
+        cleared.is_some(),
+        "a keyed clear must reach the live socket"
+    );
+}
+
+#[tokio::test]
+async fn mixed_subscription_replays_workspace_before_fine_topic_catchup() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .unwrap();
+    let _ = read_connection_id(&mut ws).await;
+
+    ws.send(Message::Text(
+        r#"{"subscribe":["sessions","session:s1:changes"]}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut events = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while events.len() < 2 && tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(Message::Text(text)))) =
+            tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text)
+            && let Some(event) = frame["event"].as_str()
+            && matches!(event, "workspace" | "session.changes")
+        {
+            events.push(event.to_string());
+        }
+    }
+    assert_eq!(events, vec!["workspace", "session.changes"]);
 }
 
 /// One client's operation toast (a pull busy) is delivered ONLY back to it, not to
