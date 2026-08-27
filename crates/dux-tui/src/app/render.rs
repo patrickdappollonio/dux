@@ -11706,6 +11706,28 @@ mod tests {
         );
     }
 
+    /// The other intents render the footer this modal has always rendered. The
+    /// hand-written span builder was replaced by the shared hint line, so these
+    /// are the old bytes, pinned: the migration is proved unchanged rather than
+    /// merely reviewed.
+    #[test]
+    fn a_non_new_agent_chooser_footer_keeps_the_bytes_it_always_had() {
+        let app = test_app(default_bindings());
+
+        let idle = line_text(
+            &app.project_chooser_hint_line(false, crate::app::ProjectChooserIntent::Manage),
+        );
+        assert_eq!(
+            idle,
+            " <j> down  <k> up  </> search  <Enter> choose  <Esc> cancel"
+        );
+
+        let searching = line_text(
+            &app.project_chooser_hint_line(true, crate::app::ProjectChooserIntent::Manage),
+        );
+        assert_eq!(searching, " <Enter> choose  <Esc> clear");
+    }
+
     /// The other intents of the same modal ask a different question, and the
     /// key is inert there: a footer must never name a key that does nothing.
     #[test]

@@ -303,18 +303,18 @@ pile of downloads to sort, or a repository you want worked on in place.
 ![A standalone agent in the sidebar showing the folder it runs in, with the changes panel saying the folder has no git repository.](/screens/sidebar-standalone.png)
 
 In the browser, the launcher's `⋯` menu and **New standalone agent…**. In the terminal
-UI there are three ways in: a key anywhere in the agents pane, the same key inside the
-"New agent in project" chooser (so you can change your mind once you are already there
-and no project fits), and the `new-standalone-agent` palette command. The `?` help
-overlay names the keys, and you can rebind them under `[keys]` in `config.toml`. Every
-way in opens the same folder browser. Any folder is accepted: it does not have to be a
-git repository, and dux initializes nothing in it.
+UI there are three ways in: a key anywhere in the agents pane, a key inside the "New
+agent in project" chooser too (so you can change your mind once you are already there and
+no project fits), and the `new-standalone-agent` palette command. The `?` help overlay
+names the keys, and you can rebind them under `[keys]` in `config.toml`. Every way in
+opens the same folder browser. Any folder is accepted: it does not have to be a git
+repository, and dux initializes nothing in it.
 
 > [!NOTE]
-> Inside the chooser the key is a modifier chord, because plain letters go into the search
-> box once you start filtering. GNU Screen's flow control can swallow that chord before
-> dux ever sees it (stock tmux does not); the palette command still works there, and so
-> does rebinding the key to something your terminal passes through.
+> Once you start filtering inside the chooser, the key that still works is a modifier
+> chord, because plain letters go into the search box. GNU Screen's flow control can
+> swallow that chord before dux ever sees it; the palette command still works there, and
+> so does rebinding the key to something your terminal passes through.
 
 What a standalone agent does NOT have:
 

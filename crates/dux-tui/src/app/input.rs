@@ -1216,7 +1216,7 @@ impl App {
                 Action::NewAgentFromWorktree => self.create_agent_from_existing_worktree()?,
                 // The same folder browser the palette command opens: one way
                 // in, two gestures.
-                Action::NewStandaloneAgent => self.open_standalone_agent_browser()?,
+                Action::NewStandaloneAgent => self.leave_pane_for_standalone_browser()?,
                 Action::ForkAgent => self.fork_selected_session()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
                 Action::CheckoutProjectDefaultBranch => {
@@ -1360,6 +1360,22 @@ impl App {
         }
     }
 
+    /// Open the standalone folder browser from the Left pane, dropping the
+    /// agent filter first if one is engaged.
+    ///
+    /// The filter is a live query over the very pane the browser covers, so a
+    /// surviving one is a pruned list waiting behind a modal, carrying a query
+    /// the user will have forgotten typing by the time they see it again. The
+    /// chord reaches dux while the filter has the keystrokes (its text input
+    /// rejects modifier chords), which is exactly the state this exists for.
+    /// Both Left handlers route through here so the two cannot drift.
+    fn leave_pane_for_standalone_browser(&mut self) -> Result<()> {
+        if self.agent_filter.is_some() {
+            self.close_agent_filter();
+        }
+        self.open_standalone_agent_browser()
+    }
+
     fn handle_left_terminal_key(&mut self, key: KeyEvent) -> Result<()> {
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
@@ -1377,7 +1393,7 @@ impl App {
                 // from anywhere in the Left pane: the terminals subsection is
                 // still the agents pane, and the footer names the key there
                 // too.
-                Action::NewStandaloneAgent => self.open_standalone_agent_browser()?,
+                Action::NewStandaloneAgent => self.leave_pane_for_standalone_browser()?,
                 _ => {}
             }
         }
@@ -22920,6 +22936,33 @@ cyan = "#00ffff"
             app.handle_key(key).expect("the key must be handled");
 
             assert_in_the_standalone_folder_browser(&app, &format!("{key:?}"));
+        }
+    }
+
+    /// The filter row is a live query over the pane, and the browser covers the
+    /// pane it filters: leaving it engaged means coming back to a pruned list
+    /// nobody asked for, carrying a query the user has by then forgotten
+    /// typing. The chord reaches dux there (the filter's text input rejects
+    /// modifier chords), so the action has to close the filter on its way out.
+    #[test]
+    fn the_standalone_key_closes_the_agent_filter_behind_it() {
+        for section in [LeftSection::Projects, LeftSection::Terminals] {
+            let mut app = test_app(default_bindings());
+            app.focus = FocusPane::Left;
+            app.left_section = section;
+            app.open_agent_filter();
+            app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+                .expect("the letter types into the query");
+            assert!(app.agent_filter.is_some(), "{section:?}: fixture");
+
+            app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                .expect("the chord must be handled");
+
+            assert!(
+                app.agent_filter.is_none(),
+                "{section:?}: the filter must not survive behind the browser"
+            );
+            assert_in_the_standalone_folder_browser(&app, &format!("{section:?}"));
         }
     }
 

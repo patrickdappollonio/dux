@@ -2026,33 +2026,40 @@ fn resolve_keys(
         .collect()
 }
 
+/// The scope a collision between these two scopes should be REPORTED under, or
+/// `None` when the same keystroke can never reach both.
+///
+/// Usually two scopes collide only with themselves, but a surface whose key
+/// handler consults one scope and then FALLS THROUGH to another makes those two
+/// collide even though no binding lists both: the fallback is shadowed by the
+/// first lookup, silently, which is exactly what this detector exists to
+/// refuse. Such a pair reports under the surface the user can actually see, not
+/// whichever of the two happened to be declared first, so the message points at
+/// the modal where the shadowing is visible.
+///
+/// The one such ladder today is the project chooser, whose handler asks
+/// `ProjectChooser` and then `Palette` (`app::input`). Add a rule here whenever
+/// a handler grows another fallback, or the shadowing goes unreported.
+fn conflict_scope(a: BindingScope, b: BindingScope) -> Option<BindingScope> {
+    if a == b {
+        return Some(a);
+    }
+    match (a, b) {
+        (BindingScope::ProjectChooser, BindingScope::Palette)
+        | (BindingScope::Palette, BindingScope::ProjectChooser) => {
+            Some(BindingScope::ProjectChooser)
+        }
+        _ => None,
+    }
+}
+
 /// Detect key combination conflicts across bindings that share scopes.
 ///
 /// Returns all pairs of actions that bind the same normalized key in at least
-/// one overlapping scope. This is called during config validation to prevent
-/// silent shadowing (where declaration order would pick a winner).
-/// Whether two scopes can be reached by the same keystroke.
-///
-/// Usually that means "the same scope", but a surface whose key handler
-/// consults one scope and then FALLS THROUGH to another makes those two
-/// overlap for conflict purposes even though no binding lists both: the
-/// fallback is shadowed by the first lookup, silently, which is exactly what
-/// this detector exists to refuse.
-///
-/// The one such ladder today is the project chooser, whose handler asks
-/// `ProjectChooser` and then `Palette` (`app::input`). Add a rule here
-/// whenever a handler grows another fallback, or the shadowing goes unreported.
-fn scopes_overlap(a: BindingScope, b: BindingScope) -> bool {
-    if a == b {
-        return true;
-    }
-    matches!(
-        (a, b),
-        (BindingScope::ProjectChooser, BindingScope::Palette)
-            | (BindingScope::Palette, BindingScope::ProjectChooser)
-    )
-}
-
+/// one overlapping scope (see [`conflict_scope`], which also decides which
+/// scope such a pair is reported under). This is called during config
+/// validation to prevent silent shadowing (where declaration order would pick a
+/// winner).
 pub fn detect_conflicts(keys: &crate::config::KeysConfig) -> Vec<KeyConflict> {
     let resolved = resolve_keys(keys);
     let format = config_format();
@@ -2063,12 +2070,18 @@ pub fn detect_conflicts(keys: &crate::config::KeysConfig) -> Vec<KeyConflict> {
             let (action_a, keys_a, scopes_a) = &resolved[i];
             let (action_b, keys_b, scopes_b) = &resolved[j];
 
-            // Find scopes shared between the two bindings.
-            let shared_scopes: Vec<BindingScope> = scopes_a
-                .iter()
-                .filter(|s| scopes_b.iter().any(|other| scopes_overlap(**s, *other)))
-                .copied()
-                .collect();
+            // Find the scopes a keystroke could reach both bindings through,
+            // each named the way it will be reported.
+            let mut shared_scopes: Vec<BindingScope> = Vec::new();
+            for sa in scopes_a.iter() {
+                for sb in scopes_b.iter() {
+                    if let Some(scope) = conflict_scope(*sa, *sb)
+                        && !shared_scopes.contains(&scope)
+                    {
+                        shared_scopes.push(scope);
+                    }
+                }
+            }
             if shared_scopes.is_empty() {
                 continue;
             }
@@ -2598,13 +2611,28 @@ mod tests {
         keys.bindings
             .insert("new_standalone_agent".to_string(), vec!["/".to_string()]);
         let conflicts = detect_conflicts(&keys);
-        assert!(
-            conflicts.iter().any(|c| {
+        let reported: Vec<&KeyConflict> = conflicts
+            .iter()
+            .filter(|c| {
                 (c.action_a == "new_standalone_agent" && c.action_b == "search_toggle")
                     || (c.action_a == "search_toggle" && c.action_b == "new_standalone_agent")
-            }),
+            })
+            .collect();
+        assert!(
+            !reported.is_empty(),
             "the shadowed search key must be reported, got: {conflicts:?}"
         );
+        for conflict in reported {
+            assert_eq!(conflict.key_label, "/", "got {conflict:?}");
+            // The message names the surface the user can actually see, which is
+            // the chooser. "Command palette" would send them looking at a modal
+            // where nothing is wrong.
+            assert_eq!(
+                conflict.scope,
+                BindingScope::ProjectChooser,
+                "got {conflict:?}"
+            );
+        }
     }
 
     /// The action's config id is real: a user who writes it under `[keys]` gets
