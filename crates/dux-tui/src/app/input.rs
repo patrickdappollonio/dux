@@ -2934,29 +2934,7 @@ impl App {
         use std::io::Read;
         use std::os::fd::AsFd;
 
-        // Verify we have an active session/provider.
-        if self.selected_session().is_none() {
-            self.input_target = InputTarget::None;
-            self.terminal_selection = None;
-            self.in_bracket_paste = false;
-            self.raw_input_buf.clear();
-            self.raw_input_parser.clear();
-            self.loading_input_buf.clear();
-            return Ok(false);
-        }
-        let surface = self.session_surface;
-        if self.selected_terminal_surface_client().is_none() {
-            self.input_target = InputTarget::None;
-            self.terminal_selection = None;
-            self.in_bracket_paste = false;
-            self.raw_input_buf.clear();
-            self.raw_input_parser.clear();
-            self.loading_input_buf.clear();
-            let label = match surface {
-                SessionSurface::Agent => "Agent",
-                SessionSurface::Terminal => "Companion terminal",
-            };
-            self.set_error(format!("{label} disconnected."));
+        if !self.raw_input_target_available() {
             return Ok(false);
         }
 
@@ -2978,9 +2956,7 @@ impl App {
             poll(&mut pollfd, Some(&timeout))
         })?;
         if ready == 0 {
-            if self.resolve_pending_bare_esc(&stdin_borrow, None, &mut buf)? {
-                return Ok(false);
-            }
+            self.resolve_pending_bare_esc(&stdin_borrow, None, &mut buf)?;
             return Ok(false);
         }
 
@@ -2991,63 +2967,79 @@ impl App {
             return Ok(false);
         }
 
-        // Don't forward input until the agent has produced visible output.
-        // Keystrokes during the loading phase would reach a process that
-        // isn't ready for them. We still drain stdin above to prevent
-        // buffer accumulation. However, we still honour ToggleFullscreen so
-        // the user can minimize a loading agent.
-        //
-        // Bytes are accumulated into a dedicated `loading_input_buf` (not
-        // `raw_input_buf`) so that suppressed keystrokes typed during
-        // loading cannot leak into the first post-loading
-        // `process_raw_input_bytes` call when `has_output()` flips to true.
-        // The buffer is capped at LOADING_INPUT_BUF_MAX so that pasting a
-        // large amount of text (or an unterminated OSC sequence, which
-        // split_sequences reports as an entirely-incomplete remainder)
-        // cannot grow the buffer without bound.
-        if let Some(provider) = self.selected_terminal_surface_client()
-            && !provider.has_output()
-        {
-            append_capped(
-                &mut self.loading_input_buf,
-                &buf[..n],
-                LOADING_INPUT_BUF_MAX,
-            );
-            // Focus reports arriving before the provider produced output are
-            // suppressed from forwarding (like every loading-phase byte), but we
-            // still want to track them so a focus change during agent startup is
-            // not lost. scan_loading_phase applies the focus scan before the
-            // exit scan's early return, and feeds the shared raw_input_parser
-            // so bracket-paste state (and therefore focus-report exemption) is
-            // tracked exactly like the interactive path, including across the
-            // loading -> interactive transition.
-            if self.scan_loading_phase(&buf[..n]) {
-                return Ok(false);
-            }
-            // Trim to the incomplete remainder so a partial escape can be
-            // completed by the next read (already bounded by the cap above).
-            let (_, remainder) = crate::raw_input::split_sequences(&self.loading_input_buf);
-            let keep = remainder.len();
-            let start = self.loading_input_buf.len() - keep;
-            self.loading_input_buf = self.loading_input_buf[start..].to_vec();
+        if self.consume_loading_raw_input(&buf[..n]) {
             return Ok(false);
         }
 
-        // If we just transitioned out of loading, clear the loading buffer
-        // so stale remainders don't accumulate across sessions.
-        if !self.loading_input_buf.is_empty() {
-            self.loading_input_buf.clear();
-        }
-
-        let should_exit = self.process_raw_input_bytes(&buf[..n])?;
-        if should_exit {
+        if self.process_raw_input_bytes(&buf[..n])? {
             return Ok(true);
         }
 
-        // Drain any remaining stdin data without returning to the main loop
-        // (which would render between every 4096-byte chunk). This prevents
-        // intermediate renders during large pastes while still respecting a
-        // time budget so we don't starve the UI.
+        if self.drain_ready_raw_input(&stdin_borrow, &mut stdin_lock, &mut buf)? {
+            return Ok(true);
+        }
+
+        self.resolve_pending_bare_esc(&stdin_borrow, Some(&mut stdin_lock), &mut buf)?;
+        Ok(false)
+    }
+
+    fn reset_raw_input_state(&mut self) {
+        self.input_target = InputTarget::None;
+        self.terminal_selection = None;
+        self.in_bracket_paste = false;
+        self.raw_input_buf.clear();
+        self.raw_input_parser.clear();
+        self.loading_input_buf.clear();
+    }
+
+    fn raw_input_target_available(&mut self) -> bool {
+        if self.selected_session().is_none() {
+            self.reset_raw_input_state();
+            return false;
+        }
+        if self.selected_terminal_surface_client().is_some() {
+            return true;
+        }
+
+        let label = match self.session_surface {
+            SessionSurface::Agent => "Agent",
+            SessionSurface::Terminal => "Companion terminal",
+        };
+        self.reset_raw_input_state();
+        self.set_error(format!("{label} disconnected."));
+        false
+    }
+
+    /// Suppress bytes until the provider has visible output while retaining
+    /// only enough incomplete input to recognize a split control sequence.
+    fn consume_loading_raw_input(&mut self, bytes: &[u8]) -> bool {
+        if let Some(provider) = self.selected_terminal_surface_client()
+            && !provider.has_output()
+        {
+            append_capped(&mut self.loading_input_buf, bytes, LOADING_INPUT_BUF_MAX);
+            if !self.scan_loading_phase(bytes) {
+                let (_, remainder) = crate::raw_input::split_sequences(&self.loading_input_buf);
+                let start = self.loading_input_buf.len() - remainder.len();
+                self.loading_input_buf = self.loading_input_buf[start..].to_vec();
+            }
+            return true;
+        }
+
+        self.loading_input_buf.clear();
+        false
+    }
+
+    /// Drain immediately available chunks within one frame budget so a large
+    /// paste is not interrupted by intermediate renders.
+    fn drain_ready_raw_input(
+        &mut self,
+        stdin_borrow: &impl std::os::fd::AsFd,
+        stdin_lock: &mut std::io::StdinLock<'_>,
+        buf: &mut [u8; 4096],
+    ) -> Result<bool> {
+        use rustix::event::{PollFd, PollFlags, poll};
+        use std::io::Read;
+
         let drain_deadline = std::time::Instant::now() + std::time::Duration::from_millis(16);
         let zero_timeout = rustix::time::Timespec {
             tv_sec: 0,
@@ -3072,7 +3064,7 @@ impl App {
             if more == 0 {
                 break;
             }
-            let n2 = crate::io_retry::retry_on_interrupt(|| stdin_lock.read(&mut buf))?;
+            let n2 = crate::io_retry::retry_on_interrupt(|| stdin_lock.read(buf))?;
             if n2 == 0 {
                 break;
             }
@@ -3087,11 +3079,6 @@ impl App {
                 return Ok(true);
             }
         }
-
-        if self.resolve_pending_bare_esc(&stdin_borrow, Some(&mut stdin_lock), &mut buf)? {
-            return Ok(false);
-        }
-
         Ok(false)
     }
 
@@ -8164,226 +8151,238 @@ impl App {
         }
     }
 
-    fn handle_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if matches!(self.prompt, PromptState::FirstLoad(_)) {
-            // Wheel scrolls the prose; clicks fall through to the shared button
-            // press machinery below.
-            match mouse.kind {
-                MouseEventKind::ScrollDown => {
-                    self.scroll_first_load(MOUSE_WHEEL_LINES as i32);
-                    return false;
-                }
-                MouseEventKind::ScrollUp => {
-                    self.scroll_first_load(-(MOUSE_WHEEL_LINES as i32));
-                    return false;
-                }
-                _ => {}
-            }
+    fn handle_first_load_prompt_mouse(&mut self, mouse: &MouseEvent) -> Option<bool> {
+        if !matches!(self.prompt, PromptState::FirstLoad(_)) {
+            return None;
         }
-        // The two overlays below consume every mouse event they see, which
-        // would swallow an outside click before it could reach the shared
-        // dismissal chokepoint at the bottom of this function. Skip their local
-        // handling for a press that landed outside the modal (and only then) so
-        // the engine — not a per-modal copy of it — decides what happens.
-        let outside_press =
-            overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), &mouse);
-        if let PromptState::ResourceMonitor {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                self.scroll_first_load(MOUSE_WHEEL_LINES as i32);
+                Some(false)
+            }
+            MouseEventKind::ScrollUp => {
+                self.scroll_first_load(-(MOUSE_WHEEL_LINES as i32));
+                Some(false)
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_resource_monitor_mouse(
+        &mut self,
+        mouse: &MouseEvent,
+        outside_press: bool,
+    ) -> Option<bool> {
+        let PromptState::ResourceMonitor {
             scroll_offset,
             selected_row,
             expanded,
             rows,
             ..
         } = &mut self.prompt
-            && !outside_press
-        {
-            let visual = build_visual_rows(rows, expanded);
-            let max_row = visual.len().saturating_sub(1);
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let OverlayMouseLayout::ResourceMonitor {
-                        list,
-                        items,
-                        offset,
-                    } = self.overlay_layout.active
-                        && let Some(index) =
-                            Self::overlay_row_at(list, offset, items, mouse.column, mouse.row)
-                    {
-                        *selected_row = index;
-                        if let Some(VisualRow::Parent(row_idx)) = visual.get(index) {
-                            let stat = &rows[*row_idx];
-                            // Same gate as the keyboard path: clicking a leaf
-                            // row must not expand a duplicate of itself.
-                            if let Some(pid) = stat.pid
-                                && stat.has_breakdown()
-                                && !expanded.remove(&pid)
-                            {
-                                expanded.insert(pid);
-                            }
+        else {
+            return None;
+        };
+        if outside_press {
+            return None;
+        }
+
+        let visual = build_visual_rows(rows, expanded);
+        let max_row = visual.len().saturating_sub(1);
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let OverlayMouseLayout::ResourceMonitor {
+                    list,
+                    items,
+                    offset,
+                } = self.overlay_layout.active
+                    && let Some(index) =
+                        Self::overlay_row_at(list, offset, items, mouse.column, mouse.row)
+                {
+                    *selected_row = index;
+                    if let Some(VisualRow::Parent(row_idx)) = visual.get(index) {
+                        let stat = &rows[*row_idx];
+                        if let Some(pid) = stat.pid
+                            && stat.has_breakdown()
+                            && !expanded.remove(&pid)
+                        {
+                            expanded.insert(pid);
                         }
                     }
                 }
-                MouseEventKind::ScrollUp => {
-                    *selected_row = selected_row.saturating_sub(3);
-                }
-                MouseEventKind::ScrollDown => {
-                    *selected_row = (*selected_row + 3).min(max_row);
-                }
-                _ => {}
             }
-            *scroll_offset = (*selected_row).saturating_sub(5) as u16;
-            return false;
+            MouseEventKind::ScrollUp => {
+                *selected_row = selected_row.saturating_sub(3);
+            }
+            MouseEventKind::ScrollDown => {
+                *selected_row = (*selected_row + 3).min(max_row);
+            }
+            _ => {}
         }
+        *scroll_offset = (*selected_row).saturating_sub(5) as u16;
+        Some(false)
+    }
 
-        if let PromptState::DebugInput {
+    fn handle_debug_input_mouse(
+        &mut self,
+        mouse: &MouseEvent,
+        outside_press: bool,
+    ) -> Option<bool> {
+        let PromptState::DebugInput {
             lines,
             scroll_offset,
         } = &mut self.prompt
-            && !outside_press
-        {
-            // Scroll wheel navigates history without logging.
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    *scroll_offset = scroll_offset.saturating_sub(3);
-                    return false;
-                }
-                MouseEventKind::ScrollDown => {
-                    *scroll_offset = (*scroll_offset + 3).min(lines.len() as u16);
-                    return false;
-                }
-                _ => {}
+        else {
+            return None;
+        };
+        if outside_press {
+            return None;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                *scroll_offset = scroll_offset.saturating_sub(3);
+                return Some(false);
             }
+            MouseEventKind::ScrollDown => {
+                *scroll_offset = (*scroll_offset + 3).min(lines.len() as u16);
+                return Some(false);
+            }
+            _ => {}
+        }
 
-            let kind_label = format!("{:?}", mouse.kind);
-            let ts = Local::now().format("%H:%M:%S%.3f").to_string();
-            lines.push(Line::from(vec![
-                Span::styled(ts, Style::default().add_modifier(Modifier::DIM)),
-                Span::raw(" │ "),
-                Span::styled(
-                    "Mouse",
-                    Style::default().fg(self.theme.help_section_header_fg),
-                ),
-                Span::raw(" │ "),
-                Span::styled(
-                    format!("{:<18}", kind_label),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" │ "),
-                Span::styled(
-                    format!("col={} row={}", mouse.column, mouse.row),
-                    Style::default().add_modifier(Modifier::DIM),
-                ),
-            ]));
+        let kind_label = format!("{:?}", mouse.kind);
+        let ts = Local::now().format("%H:%M:%S%.3f").to_string();
+        lines.push(Line::from(vec![
+            Span::styled(ts, Style::default().add_modifier(Modifier::DIM)),
+            Span::raw(" │ "),
+            Span::styled(
+                "Mouse",
+                Style::default().fg(self.theme.help_section_header_fg),
+            ),
+            Span::raw(" │ "),
+            Span::styled(
+                format!("{:<18}", kind_label),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" │ "),
+            Span::styled(
+                format!("col={} row={}", mouse.column, mouse.row),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        ]));
+        *scroll_offset = lines.len() as u16;
+        Some(false)
+    }
 
-            // Auto-scroll to bottom.
-            let total = lines.len() as u16;
-            *scroll_offset = total;
+    fn handle_startup_command_logs_mouse(&mut self, mouse: MouseEvent) -> Option<bool> {
+        if !matches!(self.prompt, PromptState::StartupCommandLogs(_)) {
+            return None;
+        }
+        let OverlayMouseLayout::StartupCommandLogs { body, .. } = self.overlay_layout.active else {
+            return None;
+        };
 
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left)
+            | MouseEventKind::Drag(MouseButton::Left)
+            | MouseEventKind::Up(MouseButton::Left)
+                if contains_point(body, mouse.column, mouse.row)
+                    || self
+                        .startup_log_selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.dragging) =>
+            {
+                Some(self.handle_startup_log_selection_mouse(mouse))
+            }
+            MouseEventKind::ScrollUp if contains_point(body, mouse.column, mouse.row) => {
+                if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
+                    scroll_startup_command_log(prompt, Some(body), -(MOUSE_WHEEL_LINES as i16));
+                }
+                Some(false)
+            }
+            MouseEventKind::ScrollDown if contains_point(body, mouse.column, mouse.row) => {
+                if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
+                    scroll_startup_command_log(prompt, Some(body), MOUSE_WHEEL_LINES as i16);
+                }
+                Some(false)
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_prompt_mouse_down(&mut self, mouse: MouseEvent) -> bool {
+        let Some(target) = self.prompt_mouse_target(mouse.column, mouse.row) else {
+            self.dismiss_prompt_on_outside_click(&mouse);
             return false;
+        };
+        if let Some(button) = ButtonPressedTarget::from_prompt_target(target) {
+            self.pressed_button = Some(PressedButton {
+                target: button,
+                inside: true,
+            });
+            false
+        } else {
+            self.dispatch_prompt_target_action(target, mouse)
+        }
+    }
+
+    fn handle_prompt_mouse_drag(&mut self, mouse: &MouseEvent) {
+        let Some(target) = self.pressed_button.map(|pressed| pressed.target) else {
+            return;
+        };
+        let still_inside = match self.prompt_mouse_target(mouse.column, mouse.row) {
+            Some(candidate) => ButtonPressedTarget::from_prompt_target(candidate) == Some(target),
+            None => false,
+        };
+        if let Some(pressed) = self.pressed_button.as_mut() {
+            pressed.inside = still_inside;
+        }
+    }
+
+    fn handle_prompt_mouse_up(&mut self, mouse: &MouseEvent) -> bool {
+        let Some(pressed) = self.pressed_button.take() else {
+            return false;
+        };
+        let still_inside = match self.prompt_mouse_target(mouse.column, mouse.row) {
+            Some(target) => ButtonPressedTarget::from_prompt_target(target) == Some(pressed.target),
+            None => false,
+        };
+        if still_inside {
+            self.activate_button(pressed.target)
+        } else {
+            false
+        }
+    }
+
+    fn handle_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if let Some(result) = self.handle_first_load_prompt_mouse(&mouse) {
+            return result;
+        }
+        let outside_press =
+            overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), &mouse);
+        if let Some(result) = self.handle_resource_monitor_mouse(&mouse, outside_press) {
+            return result;
+        }
+        if let Some(result) = self.handle_debug_input_mouse(&mouse, outside_press) {
+            return result;
+        }
+        if let Some(result) = self.handle_startup_command_logs_mouse(mouse) {
+            return result;
         }
 
-        if matches!(self.prompt, PromptState::StartupCommandLogs(_))
-            && let OverlayMouseLayout::StartupCommandLogs { body, .. } = self.overlay_layout.active
-        {
-            // The click-outside dismissal that used to be hand-rolled here now
-            // comes from the shared engine at the bottom of this function (this
-            // variant's policy is `Cancel`); only the in-modal drag/scroll
-            // handling stays local.
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left)
-                | MouseEventKind::Drag(MouseButton::Left)
-                | MouseEventKind::Up(MouseButton::Left)
-                    if contains_point(body, mouse.column, mouse.row)
-                        || self
-                            .startup_log_selection
-                            .as_ref()
-                            .is_some_and(|selection| selection.dragging) =>
-                {
-                    return self.handle_startup_log_selection_mouse(mouse);
-                }
-                MouseEventKind::ScrollUp if contains_point(body, mouse.column, mouse.row) => {
-                    if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
-                        scroll_startup_command_log(prompt, Some(body), -(MOUSE_WHEEL_LINES as i16));
-                    }
-                    return false;
-                }
-                MouseEventKind::ScrollDown if contains_point(body, mouse.column, mouse.row) => {
-                    if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
-                        scroll_startup_command_log(prompt, Some(body), MOUSE_WHEEL_LINES as i16);
-                    }
-                    return false;
-                }
-                _ => {}
-            }
-        }
-
-        // Watchdog: a press cannot outlive the modal it was made in. If
-        // the prompt closed between Down and a follow-up event (e.g. via
-        // a key handler), drop any stale press before doing anything
-        // else.
         if matches!(self.prompt, PromptState::None) {
             self.pressed_button = None;
             return false;
         }
 
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                let Some(target) = self.prompt_mouse_target(mouse.column, mouse.row) else {
-                    // The hit-test found nothing, so this press is either
-                    // outside the modal or on inert padding inside it. THIS is
-                    // the only place the click-outside dismissal may run:
-                    // gating it on "nothing was hit" makes it structurally
-                    // impossible to preempt a button, a row, a checkbox, a text
-                    // input, or a modal's deliberate blank misclick-safe
-                    // spacer. `dismiss_prompt_on_outside_click` returns whether
-                    // it dismissed; either way the click is consumed and the
-                    // app never exits here.
-                    self.dismiss_prompt_on_outside_click(&mouse);
-                    return false;
-                };
-                if let Some(button) = ButtonPressedTarget::from_prompt_target(target) {
-                    // Buttons no longer fire on Down — record the press and
-                    // wait for Up. Drag updates the `inside` flag so the
-                    // press visual follows the cursor.
-                    self.pressed_button = Some(PressedButton {
-                        target: button,
-                        inside: true,
-                    });
-                    false
-                } else {
-                    // Non-button targets (text inputs, list rows,
-                    // checkboxes) keep their existing on-Down behavior.
-                    self.dispatch_prompt_target_action(target, mouse)
-                }
-            }
+            MouseEventKind::Down(MouseButton::Left) => self.handle_prompt_mouse_down(mouse),
             MouseEventKind::Drag(MouseButton::Left) => {
-                if let Some(target) = self.pressed_button.map(|p| p.target) {
-                    let still_inside = match self.prompt_mouse_target(mouse.column, mouse.row) {
-                        Some(t) => ButtonPressedTarget::from_prompt_target(t) == Some(target),
-                        None => false,
-                    };
-                    if let Some(pressed) = self.pressed_button.as_mut() {
-                        pressed.inside = still_inside;
-                    }
-                }
+                self.handle_prompt_mouse_drag(&mouse);
                 false
             }
-            MouseEventKind::Up(MouseButton::Left) => {
-                let Some(pressed) = self.pressed_button.take() else {
-                    return false;
-                };
-                // Defensive re-hit-test: a fast click may not produce an
-                // intervening Drag, so trust the cursor at Up time rather
-                // than the last known `inside` flag.
-                let still_inside = match self.prompt_mouse_target(mouse.column, mouse.row) {
-                    Some(t) => ButtonPressedTarget::from_prompt_target(t) == Some(pressed.target),
-                    None => false,
-                };
-                if still_inside {
-                    self.activate_button(pressed.target)
-                } else {
-                    false
-                }
-            }
+            MouseEventKind::Up(MouseButton::Left) => self.handle_prompt_mouse_up(&mouse),
             _ => false,
         }
     }
