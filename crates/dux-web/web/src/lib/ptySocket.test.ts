@@ -191,6 +191,42 @@ describe("PtySocket", () => {
     expect(sock.replayGeneration).toBeNull()
   })
 
+  it("ignores malformed and unsupported control frames without interrupting later traffic", () => {
+    const bytes: number[][] = []
+    const connected: string[] = []
+    const sock = new PtySocket("ws://x/pty")
+    sock.onBytes((chunk) => bytes.push(Array.from(chunk)))
+    sock.onConnected = (id) => connected.push(id)
+    sock.connect()
+    const ws = last()
+    ws.open()
+
+    expect(() => {
+      ws.text("{")
+      ws.text("null")
+      ws.text(JSON.stringify({ event: "unknown", id: "ignored" }))
+      ws.text(JSON.stringify({ event: "connected", id: 7 }))
+      ws.text(JSON.stringify({ event: "size", rows: 24 }))
+    }).not.toThrow()
+
+    ws.binary([1, 2, 3])
+    ws.text(
+      JSON.stringify({
+        event: "connected",
+        id: "c-1",
+        gen: 4,
+        rows: 24,
+        cols: 80,
+      }),
+    )
+
+    expect(bytes).toEqual([[1, 2, 3]])
+    expect(connected).toEqual(["c-1"])
+    expect(sock.connectionId).toBe("c-1")
+    expect(sock.replayGeneration).toBe(4)
+    expect(sock.grid).toEqual({ rows: 24, cols: 80 })
+  })
+
   // ONE PTY HAS ONE AUTHORITATIVE GRID, the owner's, and every other attached
   // browser renders the same byte stream into its own differently sized xterm.
   // The wire is the only way a viewer can learn that, and it learns it twice
