@@ -54,7 +54,7 @@ digraph topology {
 
     caddy  [class="d-tls",  label=<caddy<br/><font point-size="9">:80 and :443, published</font>>];
     gate   [class="d-gate", label=<oauth2&#45;proxy<br/><font point-size="9">:4180, not published</font>>];
-    duxsvc [class="d-app",  label=<dux server<br/><font point-size="9">:8080, never published</font>>];
+    duxsvc [class="d-app",  label=<dux server<br/><font point-size="9">:3890, never published</font>>];
 
     caddy -> gate   [label="  http"];
     gate  -> duxsvc [label="  http"];
@@ -130,7 +130,7 @@ services:
       - --http-address=0.0.0.0:4180
       # Docker's embedded DNS resolves `dux` to the service of that name on the
       # shared network. Resolution happens per request, so no depends_on is needed.
-      - --upstream=http://dux:8080
+      - --upstream=http://dux:3890
       - --redirect-url=https://dux.example.com/oauth2/callback
       # Pick at least one gate. --github-user is an OR escape hatch: a listed
       # username is let in whether or not the org check would have passed.
@@ -168,7 +168,7 @@ services:
     # with no published port, the container's only neighbours are the other two
     # services. dux prints a warning about the non-loopback bind on startup and
     # in this topology that warning is expected.
-    command: ["dux", "server", "--bind", "0.0.0.0:8080", "--no-tailscale"]
+    command: ["dux", "server", "--bind", "0.0.0.0:3890", "--no-tailscale"]
     volumes:
       # Your config, your session database and your log. Keep it on a named
       # volume or a bind mount: this is where projects and agents live.

@@ -45,7 +45,7 @@ disable_release_notes = false
 default = "cursor"
 
 [server]
-port = 8080
+port = 3890
 tailscale_enabled = true
 listen_addrs = []
 insecure_allow_remote = false

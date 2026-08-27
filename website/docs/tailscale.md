@@ -137,7 +137,7 @@ running `reload-config` is live too, and takes the same path.
 dux runs a Host-header allowlist in front of everything, which is what stops a malicious web
 page from DNS-rebinding your browser into your server. It accepts `localhost` and any
 loopback address, a Host that is an IP literal it actually bound, and, unless the mode is
-`"no"`, any IP literal inside Tailscale's own ranges. So `http://100.101.102.103:8080` just
+`"no"`, any IP literal inside Tailscale's own ranges. So `http://100.101.102.103:3890` just
 works, and it keeps working even while the Tailscale leg is down.
 
 A MagicDNS name like `box.tailnet.ts.net` is a hostname, never something dux bound, so it
@@ -230,8 +230,8 @@ plain tailnet IP is not. dux needs no TLS setup of its own.
 Serve dux on loopback, then point the proxy at that port:
 
 ```bash
-dux server --bind 127.0.0.1:8080
-tailscale serve --bg 8080
+dux server --bind 127.0.0.1:3890
+tailscale serve --bg 3890
 ```
 
 Then allow the node's MagicDNS name:
@@ -245,7 +245,7 @@ Open `https://box.tailnet.ts.net` and you are done. The socket URLs are derived 
 page, so they become `wss://` on their own.
 
 The Tailscale leg is still added on top of your `--bind` address, so dux is also answering
-plain HTTP directly on `100.x:8080` alongside the proxied URL. To make the HTTPS path the
+plain HTTP directly on `100.x:3890` alongside the proxied URL. To make the HTTPS path the
 only way in, add `--no-tailscale` to the `dux server` line and let the proxy own the tailnet
 side.
 
@@ -264,7 +264,7 @@ nothing is live, with the in-app *Reconnecting…* overlay sitting there.
 request, and a same-origin check compares the `Origin`'s host and port against `Host` on
 every WebSocket upgrade and every write request. A proxy that forwards the original `Host`
 satisfies both, once that hostname is in `allowed_hosts`. A proxy that rewrites `Host` to its
-backend target (`127.0.0.1:8080`) passes the allowlist, since loopback is always allowed, and
+backend target (`127.0.0.1:3890`) passes the allowlist, since loopback is always allowed, and
 then fails the origin check, because the browser still sends the external name as `Origin`.
 Preserving the original `Host` is the fix; adding a rewritten one to `allowed_hosts` only
 silences the first check.

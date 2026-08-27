@@ -680,7 +680,8 @@ pub struct ServerConfig {
     /// hostnames are not resolved. Default `127.0.0.1`.
     pub host: String,
     /// LOCAL MODE port. `dux server` and the palette flip bind `host:port` (plus
-    /// the machine's Tailscale address unless `tailscale` is `"no"`). Default 8080.
+    /// the machine's Tailscale address unless `tailscale` is `"no"`). Default 3890,
+    /// which is how you spell "dux" on a phone keypad.
     pub port: u16,
     /// Tailscale binding, a tri-state: `"auto"` (the default), `"yes"`, or
     /// `"no"`. Read through [`ServerConfig::tailscale_mode`], never compared as a
@@ -1928,7 +1929,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             host: "127.0.0.1".to_string(),
-            port: 8080,
+            port: 3890,
             tailscale: TailscaleMode::Auto.as_str().to_string(),
             allowed_hosts: Vec::new(),
             color: "auto".to_string(),
@@ -3050,7 +3051,7 @@ pub fn resolve_server_plan(
     let bind: std::net::SocketAddr = match cli.bind.as_deref() {
         Some(raw) => raw.parse().map_err(|_| {
             anyhow!(
-                "invalid --bind address \"{raw}\": expected IP:port, e.g. 0.0.0.0:8080 \
+                "invalid --bind address \"{raw}\": expected IP:port, e.g. 0.0.0.0:3890 \
                  (hostnames are not resolved)"
             )
         })?,
@@ -3062,7 +3063,7 @@ pub fn resolve_server_plan(
     if bind.port() == 0 {
         bail!(
             "refusing to bind {bind}: port 0 means \"pick any free port\", so there would be no \
-             stable address to open. Set [server] port (default 8080) or pass --port / --bind with \
+             stable address to open. Set [server] port (default 3890) or pass --port / --bind with \
              a non-zero port."
         );
     }
@@ -3115,10 +3116,10 @@ mod local_addrs_tests {
 
     #[test]
     fn loopback_only_when_no_tailscale() {
-        let addrs = local_addrs(8080, None);
+        let addrs = local_addrs(3890, None);
         assert_eq!(
             addrs,
-            vec![PlanAddr::required("127.0.0.1:8080".parse().unwrap())]
+            vec![PlanAddr::required("127.0.0.1:3890".parse().unwrap())]
         );
     }
 
@@ -3145,12 +3146,12 @@ mod local_addrs_tests {
     #[test]
     fn tailscale_ipv6_uses_bracketed_socketaddr() {
         let ts = "fd7a:115c:a1e0::1".parse().unwrap();
-        let addrs = local_addrs(8080, Some(ts));
+        let addrs = local_addrs(3890, Some(ts));
         assert_eq!(
             addrs,
             vec![
-                PlanAddr::required("127.0.0.1:8080".parse().unwrap()),
-                PlanAddr::best_effort("[fd7a:115c:a1e0::1]:8080".parse().unwrap()),
+                PlanAddr::required("127.0.0.1:3890".parse().unwrap()),
+                PlanAddr::best_effort("[fd7a:115c:a1e0::1]:3890".parse().unwrap()),
             ]
         );
     }
@@ -3172,7 +3173,7 @@ mod resolve_plan_tests {
         let p = resolve_server_plan(&ServerConfig::default(), &cli(), None).unwrap();
         assert_eq!(
             p.addrs,
-            vec![PlanAddr::required("127.0.0.1:8080".parse().unwrap())]
+            vec![PlanAddr::required("127.0.0.1:3890".parse().unwrap())]
         );
     }
     #[test]
@@ -4225,10 +4226,10 @@ github_integration = false
     #[test]
     fn server_config_defaults_when_section_absent() {
         // A config TOML with no [server] section must still parse and yield the
-        // safe local defaults (loopback host, port 8080, Tailscale on "auto").
+        // safe local defaults (loopback host, port 3890, Tailscale on "auto").
         let config: Config = toml::from_str("").expect("empty config should parse");
         assert_eq!(config.server.host, "127.0.0.1");
-        assert_eq!(config.server.port, 8080);
+        assert_eq!(config.server.port, 3890);
         assert_eq!(config.server.tailscale_mode(), TailscaleMode::Auto);
         assert!(config.server.allowed_hosts.is_empty());
     }
@@ -4497,7 +4498,7 @@ port = 9000
         let config: Config = toml::from_str(
             r#"
 [server]
-port = 8080
+port = 3890
 "#,
         )
         .expect("config without max_websocket_* keys should parse");

@@ -22,7 +22,7 @@ They are not identical, on purpose. Each surface does what its medium is good at
 
 ## Server mode, and the fact that it has no login
 
-`dux server` serves the web UI over the same workspace: the same `config.toml`, the same projects, the same agents on the same worktrees, the same live PTYs. Nothing is mirrored or re-synced. By default it binds `127.0.0.1:8080`, loopback only, and if the `tailscale` CLI is around it also binds this machine's Tailscale address so your own tailnet devices can reach it.
+`dux server` serves the web UI over the same workspace: the same `config.toml`, the same projects, the same agents on the same worktrees, the same live PTYs. Nothing is mirrored or re-synced. By default it binds `127.0.0.1:3890`, loopback only, and if the `tailscale` CLI is around it also binds this machine's Tailscale address so your own tailnet devices can reach it.
 
 Before you serve it anywhere: **there is no login.** No password, no token, no user accounts. dux is a single-tenant, trusted-access tool and server mode is honest about that. Everyone who can reach the address shares one workspace: they can drive any agent or terminal, browse the server's filesystem, edit files in your worktrees, and see every session. That is deliberate, so access control is entirely a question of where you bind.
 

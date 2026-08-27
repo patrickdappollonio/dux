@@ -11,10 +11,10 @@ login gate; only run a non-loopback bind on a network you trust.
 Options:
       --bind <ADDR:PORT>  Bind this exact address, overriding [server] host+port.
                           An IP:port socket address (hostnames are NOT resolved),
-                          e.g. 0.0.0.0:8080. May be given only once.
+                          e.g. 0.0.0.0:3890. May be given only once.
       --port <PORT>       Override [server] port only (ignored when --bind is set).
                           dux binds host:port (and the machine's Tailscale address
-                          unless disabled). Default port 8080.
+                          unless disabled). Default port 3890.
       --no-tailscale      Skip Tailscale detection this run (serve the configured
                           host only).
   -h, --help              Print this help and exit.";

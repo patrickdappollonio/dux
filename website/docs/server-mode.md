@@ -38,8 +38,9 @@ Run the web UI with no TUI in front of it:
 dux server
 ```
 
-It binds `127.0.0.1:8080` (loopback only) by default and prints a small vite-style
+It binds `127.0.0.1:3890` (loopback only) by default and prints a small vite-style
 banner: one row per bound address with its `http://…` URL, plus a reachability note.
+The port is 3890 because that is how you spell "dux" on a phone keypad.
 
 The flags:
 
@@ -48,7 +49,7 @@ dux server [OPTIONS]
 
   --bind <ADDR:PORT>   Bind this exact address, overriding [server] host+port.
                        An IP:port socket (hostnames are NOT resolved), e.g.
-                       0.0.0.0:8080. May be given only once.
+                       0.0.0.0:3890. May be given only once.
   --port <PORT>        Override [server] port only (ignored when --bind is set).
   --no-tailscale       Skip Tailscale detection this run.
   -h, --help           Print help and exit.
@@ -129,8 +130,8 @@ custom host.
 > **start-web-server** while the background server serves is refused with a note saying
 > so.
 
-While it serves, the top bar grows a crumb right after the version: `● serving :8080` on
-its own, becoming `● serving :8080 · 3 connected` once somebody is on it. The count is
+While it serves, the top bar grows a crumb right after the version: `● serving :3890` on
+its own, becoming `● serving :3890 · 3 connected` once somebody is on it. The count is
 browser tabs, not people, so one laptop with two tabs open counts as two, and a tab that
 vanished without saying goodbye keeps counting until dux notices the socket is dead.
 
@@ -188,7 +189,7 @@ dux is a single-tenant, trusted-access tool.
 
 Where dux binds:
 
-- **Loopback by default.** `127.0.0.1:8080` is reachable only from the machine dux runs
+- **Loopback by default.** `127.0.0.1:3890` is reachable only from the machine dux runs
   on.
 - **Tailscale, opt-out.** Unless `tailscale = "no"`, dux also binds your machine's
   Tailscale address, so your tailnet devices can reach it over WireGuard with no further
@@ -200,7 +201,7 @@ Where dux binds:
 
 > [!CAUTION]
 > **Anything wider is on you.** Binding a LAN or public address (say
-> `--bind 0.0.0.0:8080`) puts your agents and worktrees in reach of anyone who can hit
+> `--bind 0.0.0.0:3890`) puts your agents and worktrees in reach of anyone who can hit
 > that address, with no login in front. dux prints a loud warning before it does this.
 > Put it behind a trusted reverse proxy or keep it on Tailscale.
 > [Hosting dux behind a login](/docs/public-hosting) is one worked example: TLS,
@@ -229,8 +230,9 @@ Every key below carries a full inline comment in your `config.toml`:
 # inside the TUI ignores this either way and always binds loopback (+ Tailscale).
 host = "127.0.0.1"
 
-# Bind port. Every way of serving uses it.
-port = 8080
+# Bind port. Every way of serving uses it. The default is 3890, which is how
+# you spell "dux" on a phone keypad.
+port = 3890
 
 # Whether dux also binds the machine's Tailscale address, so tailnet devices can
 # reach it. "auto" (the default) binds it whenever the interface exists and keeps

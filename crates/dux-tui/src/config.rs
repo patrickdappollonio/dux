@@ -859,7 +859,8 @@ fn config_schema() -> Vec<ConfigEntry> {
             key: "port",
             comment: Some(CommentSource::Static(
                 "# Bind port. dux binds host:port (and the Tailscale address:port when\n\
-                 # tailscale is not \"no\"). The default is 8080.",
+                 # tailscale is not \"no\"). The default is 3890, which is how you\n\
+                 # spell \"dux\" on a phone keypad.",
             )),
             value_fn: |c| FieldValue::U16(c.server.port),
         },
@@ -2425,7 +2426,7 @@ mod tests {
         assert!(rendered.contains("default = \"cursor\""));
         assert!(rendered.contains("[server]"));
         assert!(rendered.contains("host = \"127.0.0.1\""));
-        assert!(rendered.contains("port = 8080"));
+        assert!(rendered.contains("port = 3890"));
         assert!(rendered.contains("tailscale = \"auto\""));
         assert!(rendered.contains("allowed_hosts = []"));
         assert!(
