@@ -4020,6 +4020,9 @@ impl App {
         }
 
         if matches!(self.prompt, PromptState::Command { .. }) {
+            // Availability may have moved under the open palette since the
+            // last keystroke, so reconcile the cursor before anything reads it.
+            self.clamp_command_palette_selection();
             // The palette and the macro bar are the deliberate exception to the
             // filterable-modal Escape ladder (leave search and clear the query on
             // the first press, close on the second). Their search cannot be turned
@@ -4072,8 +4075,7 @@ impl App {
                             PromptState::Command {
                                 input, selected, ..
                             } => self
-                                .filtered_palette_commands(&input.text)
-                                .get(*selected)
+                                .palette_command_at(&input.text, *selected)
                                 .and_then(|binding| binding.palette_name)
                                 .map(str::to_string),
                             _ => None,
@@ -7012,6 +7014,36 @@ impl App {
         false
     }
 
+    /// The command the palette's cursor is actually ON, which is the row the
+    /// renderer highlights.
+    ///
+    /// `selected` is stored state and the match list is recomputed on every
+    /// read, so availability can shrink the list out from under it: a pull
+    /// request that closes, a terminal that exits. The renderer clamps the
+    /// highlight, so resolving the raw index here instead would run (or fail
+    /// to find) a different command than the one the user can see selected.
+    fn palette_command_at(
+        &self,
+        input: &str,
+        selected: usize,
+    ) -> Option<&crate::keybindings::RuntimeBinding> {
+        let commands = self.filtered_palette_commands(input);
+        let index = selected.min(commands.len().saturating_sub(1));
+        commands.get(index).copied()
+    }
+
+    /// Pull a stale `selected` back onto the list as it stands now, so the
+    /// stored cursor and the drawn highlight cannot disagree.
+    fn clamp_command_palette_selection(&mut self) {
+        let count = match &self.prompt {
+            PromptState::Command { input, .. } => self.filtered_palette_commands(&input.text).len(),
+            _ => return,
+        };
+        if let PromptState::Command { selected, .. } = &mut self.prompt {
+            *selected = (*selected).min(count.saturating_sub(1));
+        }
+    }
+
     fn set_command_palette_selection(&mut self, index: usize) {
         let count = match &self.prompt {
             PromptState::Command { input, .. } => self.filtered_palette_commands(&input.text).len(),
@@ -7032,7 +7064,16 @@ impl App {
     /// path needs to know: a second click on the divider must do nothing at
     /// all rather than run whatever was selected before it.
     fn set_command_palette_selection_from_visual_row(&mut self, visual_index: usize) -> bool {
-        let command_index = match &self.prompt {
+        let Some(command_index) = self.palette_command_index_at_visual_row(visual_index) else {
+            return false;
+        };
+        self.set_command_palette_selection(command_index);
+        true
+    }
+
+    /// The command a visual row carries, or `None` for the divider.
+    fn palette_command_index_at_visual_row(&self, visual_index: usize) -> Option<usize> {
+        match &self.prompt {
             PromptState::Command { input, .. } => {
                 let (direct, other) = self.palette_command_tiers(&input.text);
                 palette_visual_rows(direct.len(), other.len())
@@ -7043,12 +7084,7 @@ impl App {
                     })
             }
             _ => None,
-        };
-        let Some(command_index) = command_index else {
-            return false;
-        };
-        self.set_command_palette_selection(command_index);
-        true
+        }
     }
 
     fn set_command_palette_cursor_from_mouse(&mut self, column: u16) {
@@ -7068,7 +7104,7 @@ impl App {
             input, selected, ..
         } = &self.prompt
         {
-            if let Some(binding) = self.filtered_palette_commands(&input.text).get(*selected) {
+            if let Some(binding) = self.palette_command_at(&input.text, *selected) {
                 binding.palette_name.unwrap().to_string()
             } else {
                 input.text.trim().to_string()
@@ -8629,13 +8665,20 @@ impl App {
                 self.set_command_palette_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::CommandItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                // The divider leaves the selection where it was, so confirming
-                // here would run a command the pointer was never on.
-                let landed = self.set_command_palette_selection_from_visual_row(index);
-                if landed && double_click {
-                    self.execute_selected_command_palette();
+                // Resolve the row BEFORE recording the click: a press on the
+                // divider is not a click on anything, so it must neither
+                // select nor prime the next press to count as a double click.
+                // Filtering can put a command at that same visual index a
+                // keystroke later.
+                if self.palette_command_index_at_visual_row(index).is_none() {
+                    self.last_mouse_click = None;
+                } else {
+                    let double_click =
+                        self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                    self.set_command_palette_selection_from_visual_row(index);
+                    if double_click {
+                        self.execute_selected_command_palette();
+                    }
                 }
             }
             PromptMouseTarget::BrowseProjectInput => {
@@ -19564,6 +19607,64 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn enter_runs_the_highlighted_row_after_availability_shrinks_the_list() {
+        // The four terminal-move commands sit in the middle of the matches for
+        // `terminal` and vanish with the terminal, so a cursor on the last row
+        // is left pointing past the end of the list the user can see.
+        let mut app = palette_app("terminal", 0);
+        let args: Vec<String> = vec![];
+        app.engine.companion_terminals.insert(
+            "term-1".to_string(),
+            crate::app::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Session("s1".to_string()),
+                label: "shell".to_string(),
+                foreground_cmd: None,
+                client: PtyClient::spawn(
+                    "/bin/sh",
+                    &args,
+                    std::path::Path::new("."),
+                    24,
+                    80,
+                    1_000,
+                )
+                .expect("spawn terminal"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        let with_terminal = app.filtered_palette_commands("terminal").len();
+        let last = with_terminal - 1;
+        app.set_command_palette_selection(last);
+        assert_eq!(palette_selection(&app), last);
+
+        app.engine.companion_terminals.clear();
+        let commands = app.filtered_palette_commands("terminal");
+        assert!(
+            commands.len() < with_terminal,
+            "the fixture must actually shrink the list"
+        );
+        let highlighted = commands[commands.len() - 1].palette_name.unwrap();
+
+        assert_eq!(highlighted, "kill-running");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        // Enter used to read the stale index, miss the end of the list and
+        // fall back to running the typed text, which is not a command name.
+        let status = app.status.most_recent_tui().expect("a status");
+        assert!(
+            !status.1.contains("Unknown command"),
+            "Enter must not report the query as a command: {status:?}"
+        );
+        assert!(
+            status
+                .1
+                .contains("No running agents or companion terminals"),
+            "the highlighted command is what must have run: {status:?}"
+        );
+    }
+
+    #[test]
     fn the_palette_tiers_split_the_phrase_matches_from_the_loose_ones() {
         let app = test_app(default_bindings());
         assert_eq!(
@@ -19659,6 +19760,106 @@ not_a_real_action = ["x"]
         assert!(
             matches!(app.prompt, PromptState::Command { selected: 0, .. }),
             "a double click on the divider must not run the selected command"
+        );
+    }
+
+    /// Render the palette small enough to scroll, and hand back the app with
+    /// the layout the RENDERER recorded (offset included).
+    fn scrolled_palette(filter: &str, selected: usize) -> (App, Rect, usize) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = palette_app(filter, selected);
+        let mut terminal = Terminal::new(TestBackend::new(160, 16)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let (list, offset) = match app.overlay_layout.active {
+            OverlayMouseLayout::Command { list, offset, .. } => (list, offset),
+            ref other => panic!("expected the palette layout, got {other:?}"),
+        };
+        assert_eq!(list.height, 2, "fixture must overflow its viewport");
+        (app, list, offset)
+    }
+
+    fn click_palette_row(app: &mut App, list: Rect, row: u16) {
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + 2,
+            list.y + row,
+        ));
+    }
+
+    #[test]
+    fn clicks_land_on_the_right_command_with_the_divider_below_the_viewport() {
+        // Rows 0 and 1 are the two phrase matches; the divider is at 2.
+        let (mut app, list, offset) = scrolled_palette("agent tab", 0);
+        assert_eq!(offset, 0);
+        click_palette_row(&mut app, list, 1);
+        assert_eq!(palette_selection(&app), 1);
+    }
+
+    #[test]
+    fn clicks_land_on_the_right_command_with_the_divider_inside_the_viewport() {
+        // Selecting the first loose match scrolls the divider to the top row.
+        let (mut app, list, offset) = scrolled_palette("agent tab", 2);
+        assert_eq!(offset, 2, "the viewport must start on the divider");
+        click_palette_row(&mut app, list, 0);
+        assert_eq!(
+            palette_selection(&app),
+            2,
+            "the divider under the pointer must not move the cursor"
+        );
+        click_palette_row(&mut app, list, 1);
+        assert_eq!(palette_selection(&app), 2);
+        let commands = app.filtered_palette_commands("agent tab");
+        assert_eq!(
+            commands[palette_selection(&app)].palette_name,
+            Some("toggle-tab-to-agent")
+        );
+    }
+
+    #[test]
+    fn clicks_land_on_the_right_command_with_the_divider_above_the_viewport() {
+        let (mut app, list, offset) = scrolled_palette("agent tab", 3);
+        assert_eq!(offset, 3, "the divider has scrolled off the top");
+        click_palette_row(&mut app, list, 0);
+        let commands = app.filtered_palette_commands("agent tab");
+        assert_eq!(
+            commands[palette_selection(&app)].palette_name,
+            Some("toggle-tab-to-agent"),
+            "visual row 3 is command 2 once the divider is counted"
+        );
+        click_palette_row(&mut app, list, 1);
+        let commands = app.filtered_palette_commands("agent tab");
+        assert_eq!(
+            commands[palette_selection(&app)].palette_name,
+            Some("close-tab")
+        );
+    }
+
+    #[test]
+    fn a_divider_click_does_not_prime_the_next_click_as_a_double_click() {
+        // Row 2 is the divider for `agent tab`. Clicking it must record
+        // nothing, or a filter change that puts a command at that same visual
+        // index turns the very next press into a double click and runs it.
+        let mut app = palette_app("agent tab", 0);
+        install_command_overlay(&mut app, 5);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 9 + 2));
+        assert!(
+            app.last_mouse_click.is_none(),
+            "the divider must leave no click behind it"
+        );
+
+        // `agent` has no second tier, so visual row 2 is now a command.
+        if let PromptState::Command { input, .. } = &mut app.prompt {
+            input.set_text("agent".to_string());
+        }
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 9 + 2));
+        assert!(
+            matches!(app.prompt, PromptState::Command { selected: 2, .. }),
+            "the click must only select: {:?}",
+            app.prompt
         );
     }
 
@@ -19772,6 +19973,12 @@ not_a_real_action = ["x"]
         let commands = app.filtered_palette_commands("open-current-pr");
 
         assert!(commands.is_empty());
+        // Per tier: the phrase tier is where this one would have been, and
+        // gating empties it without leaving anything below the divider.
+        assert_eq!(
+            palette_tier_names(&app, "open-current-pr"),
+            (Vec::new(), Vec::new())
+        );
     }
 
     #[test]
@@ -19793,6 +20000,11 @@ not_a_real_action = ["x"]
 
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].palette_name, Some("open-current-pr"));
+        assert_eq!(
+            palette_tier_names(&app, "open-current-pr"),
+            (vec!["open-current-pr"], Vec::new()),
+            "it is a phrase match, so it belongs above the divider"
+        );
         assert_eq!(
             app.current_pr_url(),
             Some("https://github.com/owner/repo/pull/42")

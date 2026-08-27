@@ -17412,14 +17412,27 @@ mod tests {
         // `agent tab` is a phrase in two commands and two loose words in a
         // third, so the answer needs the boundary drawn.
         let (app, buf) = palette_frame((160, 30), "agent tab", 0);
+        // The leading word of each row: the command names in order, with the
+        // divider between the tiers. Descriptions are the registry's business,
+        // not this test's.
+        let rows = palette_list_rows(&app, &buf)
+            .into_iter()
+            .map(|row| {
+                row.trim()
+                    .split("  ")
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            palette_list_rows(&app, &buf),
+            rows,
             vec![
-                "new-agent-tab            Add a tab to the selected agent, choosing its provider",
-                "toggle-always-show-tabs  Toggle always showing the agent tab strip, even with a single tab",
-                " Other matches",
-                "toggle-tab-to-agent      Toggle whether Tab reaches the agent instead of moving between panes",
-                "close-tab                Close the focused tab of the selected agent",
+                "new-agent-tab",
+                "toggle-always-show-tabs",
+                "Other matches",
+                "toggle-tab-to-agent",
+                "close-tab",
             ],
             "rendered palette rows"
         );
