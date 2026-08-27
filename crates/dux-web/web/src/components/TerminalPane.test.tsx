@@ -1489,6 +1489,26 @@ describe("TerminalPane macro trigger", () => {
     view.unmount()
     expect(peekTerminalFocusTarget()).toBeNull()
   })
+
+  it("does not let an older pane's cleanup retire the newer focus target", async () => {
+    const { getTerminalFocusElement } = await import("@/lib/terminalFocus")
+    const first = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const second = render(
+      <TerminalPane
+        kind="terminal"
+        id="t1"
+        owner={{ kind: "session", sessionId: "s1" }}
+      />,
+    )
+    const secondTextarea = TermStub.instances.at(-1)!.textarea
+
+    expect(getTerminalFocusElement()).toBe(secondTextarea)
+    first.unmount()
+    expect(getTerminalFocusElement()).toBe(secondTextarea)
+
+    second.unmount()
+    expect(getTerminalFocusElement()).toBeNull()
+  })
 })
 
 // The mobile compose bar (the `ui.compose_bar` preference, default on): the
@@ -3236,6 +3256,31 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
     screen.queryByRole("textbox", { name: "Message" }) !== null
   const accessoryUp = () =>
     screen.queryByRole("button", { name: "Esc" }) !== null
+
+  it("uses the terminal pane itself as the desktop root when no input rows render", () => {
+    pointerStub = stubCoarsePointer(false)
+    const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const terminalPane = screen.getByTestId("terminal-container")
+      .parentElement!.parentElement!
+
+    expect(view.container.firstElementChild).toBe(terminalPane)
+    expect(terminalPane.className).toContain("h-full")
+    expect(terminalPane.className).not.toContain("flex-1")
+  })
+
+  it("puts the terminal pane and touch rows under one column on a coarse desktop", () => {
+    pointerStub = stubCoarsePointer(true)
+    const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const terminalPane = screen.getByTestId("terminal-container")
+      .parentElement!.parentElement!
+    const column = view.container.firstElementChild
+
+    expect(terminalPane.parentElement).toBe(column)
+    expect(column?.className).toContain("flex-col")
+    expect(terminalPane.className).toContain("flex-1")
+    expect(composeUp()).toBe(true)
+    expect(accessoryUp()).toBe(true)
+  })
 
   it("renders BOTH bars in the desktop shell on a coarse pointer", () => {
     pointerStub = stubCoarsePointer(true)
