@@ -5129,48 +5129,8 @@ impl App {
         };
     }
 
-    fn render_prompt(&mut self, frame: &mut Frame) {
-        // The standalone delete dialog is rendered ahead of the main match,
-        // with its content copied out first, because it needs `&mut self` for
-        // the shared frame renderer and the match below borrows `self.prompt`
-        // for the whole arm.
-        if let PromptState::ConfirmDeleteAgent {
-            agent_label,
-            target: DeleteAgentTarget::Folder { folder_label },
-            focus,
-            ..
-        } = &self.prompt
-        {
-            let (agent_label, folder_label, focus) =
-                (agent_label.clone(), folder_label.clone(), *focus);
-            self.render_dim_overlay(frame);
-            let dialog_width = 56.min(frame.area().width.max(1));
-            let inner_width = dialog_width.saturating_sub(2);
-            // Say plainly that the folder is not dux's to remove and is not
-            // being touched, so the user is never left wondering what else went
-            // with the record.
-            let body_lines = vec![
-                Line::from(""),
-                Line::from(vec![
-                    Span::raw(" Are you sure you want to delete "),
-                    Span::styled(agent_label, Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw("?"),
-                ]),
-                Line::from(""),
-                Line::from(Span::styled(
-                    " This removes dux's record of the agent only.",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                )),
-                Line::from(Span::styled(
-                    format!(" Its folder \"{folder_label}\" is left untouched."),
-                    Style::default().fg(self.theme.hint_desc_fg),
-                )),
-            ];
-            self.render_delete_agent_frame(frame, dialog_width, inner_width, body_lines, focus);
-            return;
-        }
+    fn render_browse_projects_prompt(&mut self, frame: &mut Frame) {
         match &self.prompt {
-            PromptState::Command { .. } => self.render_command_prompt(frame),
             PromptState::BrowseProjects {
                 purpose,
                 current_dir,
@@ -5273,13 +5233,7 @@ impl App {
                     (None, area)
                 };
                 if let Some(filter_area) = top_areas {
-                    // The browser is shared; only what a pick DOES differs, so the
-                    // title says which act the user is in the middle of.
-                    let verb = match purpose {
-                        BrowsePurpose::AddProject => "Add Project",
-                        BrowsePurpose::StandaloneAgent => "Standalone Agent In",
-                    };
-                    let title = format!("{verb}: {}", current_dir.display());
+                    let title = Self::browse_projects_title(*purpose, current_dir);
                     let (prefix, text, cursor) = if *editing_path {
                         ("go: ", path_input.text.as_str(), path_input.cursor)
                     } else {
@@ -5303,57 +5257,16 @@ impl App {
                     let open_key = self.bindings.label_for(Action::OpenEntry);
                     let goto_key = self.bindings.label_for(Action::GoToPath);
                     let exit_path_key = self.bindings.label_for(Action::ExitPathEditorOnProjectAdd);
-                    let mut bottom_spans = vec![Span::raw(" ")];
-                    if *editing_path {
-                        // Path editor: Tab/Enter are text-input controls, not rebindable.
-                        bottom_spans.extend(self.theme.key_badge_default("Tab"));
-                        bottom_spans.push(Span::styled(
-                            " complete  ",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        bottom_spans.extend(self.theme.key_badge_default("Enter"));
-                        bottom_spans.push(Span::styled(
-                            " add  ",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        bottom_spans.extend(self.theme.key_badge_default(&exit_path_key));
-                        bottom_spans.push(Span::styled(
-                            " browse",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                    } else if *searching {
-                        bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                        bottom_spans.push(Span::styled(
-                            " done  ",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                        bottom_spans.push(Span::styled(
-                            " clear",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                    } else {
-                        bottom_spans.extend(self.theme.key_badge_default(&search_key));
-                        bottom_spans.push(Span::styled(
-                            " search  ",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        bottom_spans.extend(self.theme.key_badge_default(&open_key));
-                        bottom_spans.push(Span::styled(
-                            " open  ",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        bottom_spans.extend(self.theme.key_badge_default(&goto_key));
-                        bottom_spans.push(Span::styled(
-                            " go to  ",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                        bottom_spans.push(Span::styled(
-                            " cancel",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                    }
+                    let bottom_spans = self.browse_projects_input_footer(
+                        *editing_path,
+                        *searching,
+                        &confirm_key,
+                        &close_key,
+                        &search_key,
+                        &open_key,
+                        &goto_key,
+                        &exit_path_key,
+                    );
                     let list_block = Block::default()
                         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                         .border_style(Style::default().fg(self.theme.overlay_border))
@@ -5422,13 +5335,7 @@ impl App {
                         " cancel",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    // The browser is shared; only what a pick DOES differs, so the
-                    // title says which act the user is in the middle of.
-                    let verb = match purpose {
-                        BrowsePurpose::AddProject => "Add Project",
-                        BrowsePurpose::StandaloneAgent => "Standalone Agent In",
-                    };
-                    let title = format!("{verb}: {}", current_dir.display());
+                    let title = Self::browse_projects_title(*purpose, current_dir);
                     let list_block = self
                         .themed_overlay_block(&title)
                         .title_bottom(Line::from(bottom_spans));
@@ -5460,6 +5367,84 @@ impl App {
                     };
                 }
             }
+            _ => {}
+        }
+    }
+
+    fn browse_projects_title(purpose: BrowsePurpose, current_dir: &Path) -> String {
+        let verb = match purpose {
+            BrowsePurpose::AddProject => "Add Project",
+            BrowsePurpose::StandaloneAgent => "Standalone Agent In",
+        };
+        format!("{verb}: {}", current_dir.display())
+    }
+
+    fn browse_projects_input_footer<'a>(
+        &'a self,
+        editing_path: bool,
+        searching: bool,
+        confirm_key: &'a str,
+        close_key: &'a str,
+        search_key: &'a str,
+        open_key: &'a str,
+        goto_key: &'a str,
+        exit_path_key: &'a str,
+    ) -> Vec<Span<'a>> {
+        let mut spans = vec![Span::raw(" ")];
+        if editing_path {
+            spans.extend(self.theme.key_badge_default("Tab"));
+            spans.push(Span::styled(
+                " complete  ",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+            spans.extend(self.theme.key_badge_default("Enter"));
+            spans.push(Span::styled(
+                " add  ",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+            spans.extend(self.theme.key_badge_default(exit_path_key));
+            spans.push(Span::styled(
+                " browse",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        } else if searching {
+            spans.extend(self.theme.key_badge_default(confirm_key));
+            spans.push(Span::styled(
+                " done  ",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+            spans.extend(self.theme.key_badge_default(close_key));
+            spans.push(Span::styled(
+                " clear",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        } else {
+            spans.extend(self.theme.key_badge_default(search_key));
+            spans.push(Span::styled(
+                " search  ",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+            spans.extend(self.theme.key_badge_default(open_key));
+            spans.push(Span::styled(
+                " open  ",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+            spans.extend(self.theme.key_badge_default(goto_key));
+            spans.push(Span::styled(
+                " go to  ",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+            spans.extend(self.theme.key_badge_default(close_key));
+            spans.push(Span::styled(
+                " cancel",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        }
+        spans
+    }
+
+    fn render_change_agent_provider_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 42, frame.area());
@@ -5573,6 +5558,12 @@ impl App {
                     offset: state.offset(),
                 };
             }
+            _ => {}
+        }
+    }
+
+    fn render_change_default_provider_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
             PromptState::ChangeDefaultProvider(prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 42, frame.area());
@@ -5667,6 +5658,12 @@ impl App {
                     offset: state.offset(),
                 };
             }
+            _ => {}
+        }
+    }
+
+    fn render_change_project_default_provider_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
             PromptState::ChangeProjectDefaultProvider(prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(64, 60, frame.area());
@@ -5798,6 +5795,2604 @@ impl App {
                     items: prompt.options.len(),
                     offset: state.offset(),
                 };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_pick_editor_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::PickEditor {
+                session_label,
+                worktree_path,
+                editors,
+                selected,
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(64, 34, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " open  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(4), Constraint::Min(4)])
+                    .areas(area);
+
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(" Agent: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            session_label.as_str(),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(" Path: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            worktree_path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
+                    ]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("Open Worktree In")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let configured_default = self.engine.config.editor.default.trim();
+                let items = editors
+                    .iter()
+                    .map(|editor| {
+                        let mut spans = vec![Span::styled(
+                            format!("{:<14}", editor.label),
+                            Style::default()
+                                .fg(self.theme.help_section_header_fg)
+                                .add_modifier(Modifier::BOLD),
+                        )];
+                        spans.push(Span::styled(
+                            format!(" {}", editor.command),
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
+                        if crate::editor::matches_configured_editor(editor, configured_default) {
+                            spans.push(Span::styled(
+                                "  default",
+                                Style::default().fg(self.theme.branch_fg),
+                            ));
+                        }
+                        ListItem::new(Line::from(spans))
+                    })
+                    .collect::<Vec<_>>();
+                let mut state = ListState::default()
+                    .with_selected(Some((*selected).min(editors.len().saturating_sub(1))));
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+                self.overlay_layout.active = OverlayMouseLayout::PickEditor {
+                    list: list_inner,
+                    items: editors.len(),
+                    offset: state.offset(),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_manage_worktrees_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ManageWorktrees(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(78, 58, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " remove  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(4), Constraint::Min(6)])
+                    .areas(area);
+
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(" Project: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.project.name.as_str(),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(" Repo: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.project.path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
+                    ]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("Manage Worktrees")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let rows = manage_worktree_visual_rows(
+                    &prompt.entries,
+                    prompt.loading,
+                    prompt.error.as_deref(),
+                );
+                let path_col = prompt
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        entry
+                            .path
+                            .file_name()
+                            .map_or(0, |name| name.to_string_lossy().chars().count())
+                    })
+                    .max()
+                    .unwrap_or(8)
+                    .clamp(8, 24);
+                let items = rows
+                    .iter()
+                    .map(|row| match row {
+                        ManageWorktreeVisualRow::Header(label) => {
+                            ListItem::new(Line::from(Span::styled(
+                                format!(" {label}"),
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            )))
+                        }
+                        ManageWorktreeVisualRow::Empty(message) => {
+                            ListItem::new(Line::from(Span::styled(
+                                format!("  {message}"),
+                                Style::default().fg(self.theme.hint_dim_desc_fg),
+                            )))
+                        }
+                        ManageWorktreeVisualRow::Entry(index) => {
+                            let entry = &prompt.entries[*index];
+                            let removable = entry.is_removable();
+                            let name_style = if removable {
+                                Style::default().fg(self.theme.text_fg)
+                            } else {
+                                Style::default().fg(self.theme.hint_dim_desc_fg)
+                            };
+                            let branch_label_style = Style::default().fg(if removable {
+                                self.theme.branch_fg
+                            } else {
+                                self.theme.hint_dim_desc_fg
+                            });
+                            let branch_value_style = Style::default().fg(if removable {
+                                self.theme.hint_desc_fg
+                            } else {
+                                self.theme.hint_dim_desc_fg
+                            });
+                            // Dirtiness and the holding agent are the two facts
+                            // the web's list carries too, so the two managers
+                            // show the same thing.
+                            let mut suffix_spans = Vec::new();
+                            if entry.dirty {
+                                suffix_spans.push(Span::styled(
+                                    "  uncommitted changes",
+                                    Style::default().fg(self.theme.warning_fg),
+                                ));
+                            }
+                            if !removable {
+                                suffix_spans.push(Span::styled(
+                                    "  held by an agent",
+                                    Style::default().fg(self.theme.hint_dim_desc_fg),
+                                ));
+                            }
+                            let name = git::ellipsize_middle(
+                                entry
+                                    .path
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| entry.path.display().to_string())
+                                    .as_str(),
+                                path_col,
+                            );
+                            let mut spans = vec![
+                                Span::styled(
+                                    format!("  {:path_col$}", name),
+                                    name_style.add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled("  branch: ", branch_label_style),
+                                Span::styled(entry.label.as_str(), branch_value_style),
+                            ];
+                            spans.extend(suffix_spans);
+                            ListItem::new(Line::from(spans))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let selected_visual = prompt.selected.and_then(|selected| {
+                    rows.iter().position(|row| {
+                        matches!(row, ManageWorktreeVisualRow::Entry(index) if *index == selected)
+                    })
+                });
+                let mut state = ListState::default().with_selected(selected_visual);
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+                self.overlay_layout.active = OverlayMouseLayout::ManageWorktrees {
+                    list: list_inner,
+                    items: rows.len(),
+                    offset: state.offset(),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_confirm_delete_worktree_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ConfirmDeleteWorktree(prompt) => {
+                self.render_dim_overlay(frame);
+                let dialog_width = 60.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let has_checkbox = prompt.has_branch_checkbox();
+                let checkbox_label = delete_worktree_checkbox_label(prompt.branch.as_deref());
+                let checkbox_height = if has_checkbox {
+                    let state = if prompt.focus == DeleteWorktreeFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let checkbox = Checkbox::new(checkbox_label.as_str())
+                        .checked(prompt.delete_branch)
+                        .state(state);
+                    checkbox
+                        .layout(
+                            inner_width,
+                            checkbox.marker_style(Style::default()),
+                            checkbox.label_style(Style::default()),
+                        )
+                        .height
+                } else {
+                    0
+                };
+
+                // The copy is the web dialog's, sentence for sentence, and both
+                // sides pin it (see `delete_worktree_title` and the constants
+                // beside it).
+                let mut body_lines = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        format!(" {}", delete_worktree_title(&prompt.label)),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(
+                            prompt.path.display().to_string(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" will be removed from disk. {DELETE_WORKTREE_FORCED}"),
+                            Style::default().fg(self.theme.warning_fg),
+                        ),
+                    ]),
+                ];
+                if prompt.dirty {
+                    body_lines.push(Line::from(Span::styled(
+                        format!(" {DELETE_WORKTREE_DIRTY}"),
+                        Style::default().fg(self.theme.warning_fg),
+                    )));
+                }
+                match (prompt.branch.as_deref(), prompt.delete_branch) {
+                    (None, _) => body_lines.push(Line::from(Span::styled(
+                        format!(" {DELETE_WORKTREE_DETACHED}"),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ))),
+                    (Some(branch), delete_branch) => body_lines.push(Line::from(Span::styled(
+                        format!(" {}", delete_worktree_branch_line(branch, delete_branch)),
+                        Style::default().fg(if delete_branch {
+                            self.theme.warning_fg
+                        } else {
+                            self.theme.hint_desc_fg
+                        }),
+                    ))),
+                }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+                let checkbox_spacing = u16::from(has_checkbox);
+                let area = centered_rect_exact(
+                    dialog_width,
+                    2 + body_height + checkbox_spacing + checkbox_height + 1 + 3,
+                    frame.area(),
+                );
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Delete Worktree");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, checkbox_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(body_height),
+                        Constraint::Length(checkbox_spacing),
+                        Constraint::Length(checkbox_height),
+                        // Misclick-safe spacing: the checkbox never sits flush
+                        // against the destructive button.
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(body_lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let checkbox_rect = if has_checkbox {
+                    let checkbox_state = if prompt.focus == DeleteWorktreeFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let (rect, _) = self.render_overlay_checkbox(
+                        frame,
+                        checkbox_area,
+                        checkbox_label.as_str(),
+                        prompt.delete_branch,
+                        checkbox_state,
+                        None,
+                    );
+                    Some(OverlayCheckbox {
+                        id: OverlayCheckboxId::DeleteWorktreeBranch,
+                        rect,
+                    })
+                } else {
+                    None
+                };
+
+                let btn_width = 18u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let delete_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDeleteWorktreeCancel,
+                        self.pressed_button,
+                        prompt.focus == DeleteWorktreeFocus::Cancel,
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Delete worktree")
+                    .kind(ButtonKind::Danger)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDeleteWorktreeConfirm,
+                        self.pressed_button,
+                        prompt.focus == DeleteWorktreeFocus::Delete,
+                        true,
+                    ))
+                    .render(frame, delete_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteWorktree {
+                    cancel_button: cancel_area,
+                    delete_button: delete_area,
+                    checkbox: checkbox_rect,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_pick_project_worktree_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::PickProjectWorktree(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(78, 58, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " use  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(4), Constraint::Min(6)])
+                    .areas(area);
+
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(" Project: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.project.name.as_str(),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(" Repo: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.project.path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
+                    ]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("New Agent From Worktree")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let rows = project_worktree_visual_rows(
+                    &prompt.entries,
+                    prompt.loading,
+                    prompt.error.as_deref(),
+                );
+                let path_col = prompt
+                    .entries
+                    .iter()
+                    .map(|entry| entry.display_name().chars().count())
+                    .max()
+                    .unwrap_or(8)
+                    .clamp(8, 24);
+                let items = rows
+                    .iter()
+                    .map(|row| match row {
+                        ProjectWorktreeVisualRow::Header(label) => {
+                            ListItem::new(Line::from(Span::styled(
+                                format!(" {label}"),
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            )))
+                        }
+                        ProjectWorktreeVisualRow::Empty(message) => {
+                            ListItem::new(Line::from(Span::styled(
+                                format!("  {message}"),
+                                Style::default().fg(self.theme.hint_dim_desc_fg),
+                            )))
+                        }
+                        ProjectWorktreeVisualRow::Entry(index) => {
+                            let entry = &prompt.entries[*index];
+                            let style = if entry.is_selectable {
+                                Style::default().fg(self.theme.text_fg)
+                            } else {
+                                Style::default().fg(self.theme.hint_dim_desc_fg)
+                            };
+                            let kind = if entry.is_project_checkout {
+                                "project"
+                            } else if entry.is_external {
+                                "external"
+                            } else {
+                                "managed"
+                            };
+                            let session_suffix = entry
+                                .existing_session_id
+                                .as_ref()
+                                .map(|id| format!("  agent {id}"))
+                                .unwrap_or_default();
+                            let kind_style = if !entry.is_selectable {
+                                Style::default().fg(self.theme.hint_dim_desc_fg)
+                            } else if entry.is_managed_by_dux {
+                                Style::default().fg(self.theme.branch_fg)
+                            } else {
+                                Style::default().fg(self.theme.hint_desc_fg)
+                            };
+                            let branch_label_style = Style::default().fg(if entry.is_selectable {
+                                self.theme.branch_fg
+                            } else {
+                                self.theme.hint_dim_desc_fg
+                            });
+                            let branch_value_style = Style::default().fg(if entry.is_selectable {
+                                self.theme.hint_desc_fg
+                            } else {
+                                self.theme.hint_dim_desc_fg
+                            });
+                            let name = git::ellipsize_middle(&entry.display_name(), path_col);
+                            ListItem::new(Line::from(vec![
+                                Span::styled(
+                                    format!("  {:path_col$}", name),
+                                    style.add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(format!("  {:<8}", kind), kind_style),
+                                Span::styled("  branch: ", branch_label_style),
+                                Span::styled(entry.branch_name.as_str(), branch_value_style),
+                                Span::styled(
+                                    session_suffix,
+                                    Style::default().fg(self.theme.hint_dim_desc_fg),
+                                ),
+                            ]))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let selected_visual = prompt.selected.and_then(|selected| {
+                    rows.iter().position(|row| {
+                        matches!(row, ProjectWorktreeVisualRow::Entry(index) if *index == selected)
+                    })
+                });
+                let mut state = ListState::default().with_selected(selected_visual);
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+                self.overlay_layout.active = OverlayMouseLayout::PickProjectWorktree {
+                    list: list_inner,
+                    items: rows.len(),
+                    offset: state.offset(),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_pick_project_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::PickProject {
+                intent,
+                entries,
+                list,
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(72, 58, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                // Which entries survive the `/` filter (indices into `entries`).
+                let visible: Vec<usize> = list.visible_indices(entries, pick_project_matches);
+
+                let bottom_line = self.project_chooser_hint_line(list.searching, *intent);
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(3), Constraint::Min(4)])
+                    .areas(area);
+
+                // Header row: the `/`-search input while searching (or once a
+                // query has been typed), else a plain count line.
+                let details_block = self
+                    .themed_overlay_block(intent.title())
+                    .title_bottom(bottom_line);
+                // A field the user cannot click into is a gap: the filter rect
+                // is published whenever the filter is the thing being drawn.
+                let filter_input_rect = list
+                    .is_filtering()
+                    .then(|| details_block.inner(details_area));
+                if list.is_filtering() {
+                    Paragraph::new(render_single_line_cursor_input(
+                        "/ ",
+                        &list.filter.text,
+                        list.filter.cursor,
+                        self.theme.input_cursor_fg,
+                        self.theme.input_cursor_bg,
+                        true,
+                    ))
+                    .block(details_block)
+                    .render(details_area, frame.buffer_mut());
+                } else {
+                    Paragraph::new(vec![Line::from(vec![Span::styled(
+                        format!(" Pick a project to continue ({} available).", entries.len()),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )])])
+                    .block(details_block)
+                    .render(details_area, frame.buffer_mut());
+                }
+
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+
+                // Column plan, sized to the visible rows and the inner width, with a
+                // symmetric one-space margin inside each border. The warning glyph
+                // is a fixed gutter; the path takes the remaining width and shows
+                // its TAIL (leading dirs elided) so the leaf stays readable.
+                let start_dir = self.engine.config.defaults.start_directory.as_deref();
+                let display_path = |entry: &ProjectChooserEntry| {
+                    git::display_path_relative_to(&entry.path, start_dir)
+                };
+                let name_col = visible
+                    .iter()
+                    .filter_map(|i| entries.get(*i))
+                    .map(|entry| entry.name.chars().count())
+                    .max()
+                    .unwrap_or(8)
+                    .clamp(8, 28);
+                let count_label = |n: usize| match n {
+                    0 => "no agents".to_string(),
+                    1 => "1 agent".to_string(),
+                    n => format!("{n} agents"),
+                };
+                let count_col = visible
+                    .iter()
+                    .filter_map(|i| entries.get(*i))
+                    .map(|entry| count_label(entry.agent_count).chars().count())
+                    .max()
+                    .unwrap_or(8);
+                // margin(1) warn(1) sp(1) name sp(2) count sp(2) path margin(1)
+                let fixed = 1 + 1 + 1 + name_col + 2 + count_col + 2 + 1;
+                let path_col = (list_inner.width as usize).saturating_sub(fixed);
+
+                let items = visible
+                    .iter()
+                    .filter_map(|i| entries.get(*i))
+                    .map(|entry| {
+                        let warn = if entry.path_missing {
+                            Span::styled("⚠", Style::default().fg(self.theme.warning_fg))
+                        } else {
+                            Span::raw(" ")
+                        };
+                        let name = git::ellipsize_middle(&entry.name, name_col);
+                        let path = git::ellipsize_start(&display_path(entry), path_col);
+                        ListItem::new(Line::from(vec![
+                            Span::raw(" "),
+                            warn,
+                            Span::raw(" "),
+                            Span::styled(
+                                format!("{name:name_col$}"),
+                                Style::default()
+                                    .fg(self.theme.text_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw("  "),
+                            Span::styled(
+                                format!("{:count_col$}", count_label(entry.agent_count)),
+                                Style::default().fg(self.theme.hint_desc_fg),
+                            ),
+                            Span::raw("  "),
+                            Span::styled(path, Style::default().fg(self.theme.hint_dim_desc_fg)),
+                        ]))
+                    })
+                    .collect::<Vec<_>>();
+
+                let mut state = ListState::default().with_selected(Some(list.selected));
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+                self.overlay_layout.active = OverlayMouseLayout::PickProject {
+                    input: filter_input_rect,
+                    list: list_inner,
+                    items: visible.len(),
+                    offset: state.offset(),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_confirm_kill_running_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ConfirmKillRunning(confirm_prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(56, 32, frame.area());
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Confirm Kill");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let targets = confirm_prompt.target_ids.len();
+                let (agent_count, terminal_count) = confirm_prompt.target_ids.iter().fold(
+                    (0usize, 0usize),
+                    |(agents, terminals), target_id| match target_id {
+                        RuntimeTargetId::Agent(_) | RuntimeTargetId::Tab(_) => {
+                            (agents + 1, terminals)
+                        }
+                        RuntimeTargetId::Terminal(_) => (agents, terminals + 1),
+                    },
+                );
+                let mut summary = Vec::new();
+                if agent_count > 0 {
+                    summary.push(format!(
+                        "{agent_count} agent{}",
+                        if agent_count == 1 { "" } else { "s" }
+                    ));
+                }
+                if terminal_count > 0 {
+                    summary.push(format!(
+                        "{terminal_count} terminal{}",
+                        if terminal_count == 1 { "" } else { "s" }
+                    ));
+                }
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(format!(
+                            " {} will stop ",
+                            confirm_prompt.action.button_label()
+                        )),
+                        Span::styled(
+                            format!(
+                                "{targets} running process{}",
+                                if targets == 1 { "" } else { "es" }
+                            ),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("."),
+                    ]),
+                    Line::from(format!(" Affected: {}", summary.join(" and "))),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " In-progress CLI work will be lost immediately.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                    Line::from(Span::styled(
+                        " Worktree files remain on disk for review or relaunch.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )),
+                ];
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let kill_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmKillCancel,
+                        self.pressed_button,
+                        !confirm_prompt.focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Kill")
+                    .kind(ButtonKind::Danger)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmKillConfirm,
+                        self.pressed_button,
+                        confirm_prompt.focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, kill_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmKillRunning {
+                    cancel_button: cancel_area,
+                    kill_button: kill_area,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_config_reload_failed_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ConfigReloadFailed {
+                error,
+                recover_old_config,
+                focus,
+                scroll,
+            } => {
+                self.render_dim_overlay(frame);
+                let dialog_width = 68.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let checkbox_label = "Recover last working config";
+                let checkbox_state = if *focus == ConfigReloadFailedFocus::Checkbox {
+                    CheckboxState::Focused
+                } else {
+                    CheckboxState::Normal
+                };
+                let checkbox = Checkbox::new(checkbox_label)
+                    .checked(*recover_old_config)
+                    .state(checkbox_state);
+                let checkbox_height = checkbox
+                    .layout(
+                        inner_width,
+                        checkbox.marker_style(Style::default()),
+                        checkbox.label_style(Style::default()),
+                    )
+                    .height;
+
+                let mut body_lines = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " config.toml could not be reloaded, so the running config was kept.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Validation error:",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )),
+                ];
+                // The WHOLE error, never a `take(6)`. A TOML validation failure
+                // runs long and its tail is usually the part naming the actual
+                // problem, so the dialog scrolls (marker below) instead of
+                // dropping lines with nothing to say it did.
+                for line in error.lines() {
+                    body_lines.push(Line::from(format!(" {line}")));
+                }
+                let dialog = self.render_error_dialog_body(
+                    frame,
+                    "Reload Config Failed",
+                    dialog_width,
+                    body_lines,
+                    1 + checkbox_height + 3,
+                    *scroll,
+                );
+                self.last_error_dialog_height = dialog.body.height;
+                self.last_error_dialog_lines = dialog.total_rows;
+
+                let [_, checkbox_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Length(checkbox_height),
+                        Constraint::Length(3),
+                    ])
+                    .areas(dialog.rest);
+
+                let (checkbox_rect, _) = self.render_overlay_checkbox(
+                    frame,
+                    checkbox_area,
+                    checkbox_label,
+                    *recover_old_config,
+                    checkbox_state,
+                    None,
+                );
+                let checkbox = OverlayCheckbox {
+                    id: OverlayCheckboxId::ConfigReloadRecoverOldConfig,
+                    rect: checkbox_rect,
+                };
+
+                let btn_width = shared_button_width(&["Close", "Recover"]);
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let close_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let apply_area = Rect {
+                    x: close_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Close")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfigReloadFailedClose,
+                        self.pressed_button,
+                        *focus == ConfigReloadFailedFocus::Close,
+                        true,
+                    ))
+                    .render(frame, close_area, &self.theme);
+
+                Button::new("Recover")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfigReloadFailedApply,
+                        self.pressed_button,
+                        *focus == ConfigReloadFailedFocus::Apply,
+                        *recover_old_config,
+                    ))
+                    .render(frame, apply_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfigReloadFailed {
+                    close_button: close_area,
+                    apply_button: apply_area,
+                    checkbox,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_add_project_failed_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::AddProjectFailed {
+                message, scroll, ..
+            } => {
+                self.render_dim_overlay(frame);
+                let dialog_width = 68.min(frame.area().width.max(1));
+                let mut body_lines = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " The project could not be added.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                    Line::from(""),
+                ];
+                // The WHOLE message, never a `take(6)`: a rejected path plus the
+                // git error explaining it runs past six lines, and the tail is
+                // the part that says why. The body scrolls instead (marker in the
+                // border column).
+                for line in message.lines() {
+                    body_lines.push(Line::from(format!(" {line}")));
+                }
+                let dialog = self.render_error_dialog_body(
+                    frame,
+                    "Add Project Failed",
+                    dialog_width,
+                    body_lines,
+                    3,
+                    *scroll,
+                );
+                self.last_error_dialog_height = dialog.body.height;
+                self.last_error_dialog_lines = dialog.total_rows;
+                let buttons_area = dialog.rest;
+
+                let btn_width = shared_button_width(&["OK"]);
+                let ok_area = Rect {
+                    x: buttons_area.x + buttons_area.width.saturating_sub(btn_width) / 2,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("OK")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::AddProjectFailedOk,
+                        self.pressed_button,
+                        true,
+                        true,
+                    ))
+                    .render(frame, ok_area, &self.theme);
+
+                self.overlay_layout.active =
+                    OverlayMouseLayout::AddProjectFailed { ok_button: ok_area };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_first_load_prompt_overlay(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::FirstLoad(prompt) => {
+                self.render_dim_overlay(frame);
+                // Height comes from the BODY's row target (floored so the duck is
+                // never clipped) plus the border ring, the button row and its
+                // rule; `centered_rect_exact` clamps on a short terminal. See
+                // `first_load::MIN_BODY_ROWS` for why the body sets it and not
+                // the duck.
+                let area = first_load::modal_area(frame.area());
+                self.clear_overlay_area(frame, area);
+                let rendered = first_load::render_modal(frame, area, prompt, &self.theme);
+                self.last_first_load_height = rendered.content_height;
+                self.last_first_load_lines = rendered.content_lines;
+                self.overlay_layout.active = OverlayMouseLayout::FirstLoad {
+                    primary_button: rendered.primary_button,
+                    secondary_button: rendered.secondary_button,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_agent_info_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::AgentInfo(prompt) => {
+                self.render_dim_overlay(frame);
+                let dialog_width = 72.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let mut body_lines = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        format!(" {}", prompt.session_label),
+                        Style::default()
+                            .fg(self.theme.text_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                ];
+                for (line, tone) in &prompt.lines {
+                    // Style by the precomputed semantic tone (tag), never by
+                    // re-parsing the prose. The drift note is the one line tagged
+                    // Warning; everything else is neutral body text. All colors
+                    // come from the theme.
+                    let style = match tone {
+                        AgentInfoTone::Warning => Style::default().fg(self.theme.warning_fg),
+                        AgentInfoTone::Neutral => Style::default().fg(self.theme.text_fg),
+                    };
+                    body_lines.push(Line::from(Span::styled(format!(" {line}"), style)));
+                }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+                let area = centered_rect_exact(dialog_width, 2 + body_height + 3, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let mut bottom = vec![Span::raw(" ")];
+                bottom.extend(self.theme.key_badge_default(&close_key));
+                bottom.push(Span::styled(
+                    " close",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                let outer = self
+                    .themed_overlay_block("Agent Info")
+                    .title_bottom(Line::from(bottom));
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(body_height), Constraint::Length(3)])
+                    .areas(inner);
+
+                Paragraph::new(body_lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = shared_button_width(&["Close"]);
+                let close_area = Rect {
+                    x: buttons_area.x + buttons_area.width.saturating_sub(btn_width) / 2,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                // A read-only modal still gets a focused Close button that Space
+                // activates (universal accessibility convention).
+                Button::new("Close")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::AgentInfoClose,
+                        self.pressed_button,
+                        true,
+                        true,
+                    ))
+                    .render(frame, close_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::AgentInfo {
+                    close_button: close_area,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_confirm_delete_terminal_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ConfirmDeleteTerminal {
+                terminal_label,
+                foreground_cmd,
+                focus,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(56, 30, frame.area());
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Delete Terminal");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let mut lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" Are you sure you want to delete "),
+                        Span::styled(
+                            terminal_label.as_str(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("?"),
+                    ]),
+                ];
+                // Only warn about killing a process when an app is actually
+                // running in the foreground. Closing an idle terminal merely
+                // ends the bare shell, which is not worth a warning.
+                if foreground_cmd.is_some() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        " The running process will be killed.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )));
+                }
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let delete_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDeleteTerminalCancel,
+                        self.pressed_button,
+                        !focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Delete")
+                    .kind(ButtonKind::Danger)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDeleteTerminalConfirm,
+                        self.pressed_button,
+                        focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, delete_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteTerminal {
+                    cancel_button: cancel_area,
+                    delete_button: delete_area,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_confirm_close_tab_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ConfirmCloseTab {
+                session_id,
+                provider_label,
+                is_main,
+                focus,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(56, 30, frame.area());
+                self.clear_overlay_area(frame, area);
+                // Closing the agent's only tab detaches the agent instead of
+                // ending a single tab; word the copy accordingly.
+                let only_tab = self.engine.tab_ids_for_session(session_id).len() <= 1;
+                let outer = self.themed_overlay_block("Close Tab");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let agent_name = self
+                    .engine
+                    .sessions
+                    .iter()
+                    .find(|s| &s.id == session_id)
+                    .map(|s| self.session_label(s))
+                    .unwrap_or_else(|| session_id.clone());
+
+                let tail = confirm_close_tab_tail(only_tab, *is_main);
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" Close the "),
+                        Span::styled(
+                            provider_label.as_str(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" tab on "),
+                        Span::styled(
+                            agent_name.as_str(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("?"),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        tail,
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                ];
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let confirm_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmCloseTabCancel,
+                        self.pressed_button,
+                        !focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Close")
+                    .kind(ButtonKind::Danger)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmCloseTabConfirm,
+                        self.pressed_button,
+                        focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, confirm_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmCloseTab {
+                    cancel_button: cancel_area,
+                    confirm_button: confirm_area,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_confirm_quit_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ConfirmQuit {
+                agent_count,
+                terminal_count,
+                focus,
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(56, 30, frame.area());
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Quit dux");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let process_desc = quit_process_description(*agent_count, *terminal_count);
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(format!(" {process_desc} will be ")),
+                        Span::styled(
+                            "killed",
+                            Style::default()
+                                .fg(self.theme.button_danger_border)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" if you quit."),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Any in-progress work will be lost.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                    Line::from(Span::styled(
+                        " File changes in worktrees are preserved.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )),
+                ];
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let quit_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmQuitCancel,
+                        self.pressed_button,
+                        !focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Quit")
+                    .kind(ButtonKind::Danger)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmQuitConfirm,
+                        self.pressed_button,
+                        focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, quit_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmQuit {
+                    cancel_button: cancel_area,
+                    quit_button: quit_area,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_confirm_discard_file_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ConfirmDiscardFile {
+                file_path, focus, ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(56, 30, frame.area());
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Discard Changes");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" Discard all changes to \""),
+                        Span::styled(
+                            file_path.as_str(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("\"?"),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " This action cannot be undone.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                ];
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let discard_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDiscardCancel,
+                        self.pressed_button,
+                        !focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Discard")
+                    .kind(ButtonKind::Danger)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDiscardConfirm,
+                        self.pressed_button,
+                        focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, discard_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
+                    cancel_button: cancel_area,
+                    discard_button: discard_area,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_confirm_initial_commit_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ConfirmCreateInitialCommit { path, focus, .. } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(60, 36, frame.area());
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Repository Has No Commits");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" \""),
+                        Span::styled(path.as_str(), Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw("\" has no commits yet,"),
+                    ]),
+                    Line::from(" so agents can't branch worktrees from it."),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Dux can make an empty initial commit so it works.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                    Line::from(Span::styled(
+                        " Your existing files are left untouched (untracked).",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )),
+                ];
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 22u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let create_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmCreateInitialCommitCancel,
+                        self.pressed_button,
+                        !focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Create Commit & Add")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmCreateInitialCommitConfirm,
+                        self.pressed_button,
+                        focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, create_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmCreateInitialCommit {
+                    cancel_button: cancel_area,
+                    create_button: create_area,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_confirm_init_repo_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ConfirmInitRepo {
+                path,
+                candidates,
+                focus,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(60, 40, frame.area());
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Not a Git Repository");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let mut lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" \""),
+                        Span::styled(path.as_str(), Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw("\" is not a git repository."),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Dux can initialize one and make an empty initial commit.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                ];
+                if !candidates.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            " A starter .gitignore will cover: {}.",
+                            candidates.join(", ")
+                        ),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                }
+                lines.push(Line::from(Span::styled(
+                    " Your existing files are left untouched (untracked).",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )));
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 22u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let init_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmInitRepoCancel,
+                        self.pressed_button,
+                        !focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Initialize & Add")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmInitRepoConfirm,
+                        self.pressed_button,
+                        focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, init_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmInitRepo {
+                    cancel_button: cancel_area,
+                    init_button: init_area,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_confirm_non_default_branch_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ConfirmNonDefaultBranch {
+                action,
+                current_branch,
+                kind,
+                focus,
+                checkout_default,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                let dialog_width = 60u16.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let has_checkbox =
+                    matches!(kind, BranchWarningKind::Known { .. }) && action.allows_add_anyway();
+
+                // Body: warning text + the "new worktrees branch from …" note,
+                // plus a dim info line on the heuristic path explaining why dux
+                // won't offer to switch branches automatically.
+                let mut body_lines = vec![Line::from("")];
+                match kind {
+                    BranchWarningKind::Known { default_branch } => {
+                        body_lines.push(Line::from(vec![
+                            Span::raw(" This repository is on branch "),
+                            Span::styled(
+                                current_branch.as_str(),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(", but the"),
+                        ]));
+                        body_lines.push(Line::from(vec![
+                            Span::raw(" remote default branch is "),
+                            Span::styled(
+                                default_branch.as_str(),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw("."),
+                        ]));
+                    }
+                    BranchWarningKind::Heuristic => {
+                        body_lines.push(Line::from(vec![
+                            Span::raw(" This repository is on branch "),
+                            Span::styled(
+                                current_branch.as_str(),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(","),
+                        ]));
+                        body_lines.push(Line::from(" which doesn't appear to be the main branch."));
+                    }
+                }
+                body_lines.push(Line::from(""));
+                let worktree_warning =
+                    format!(" New worktrees will branch from \"{current_branch}\".");
+                body_lines.push(Line::from(Span::styled(
+                    worktree_warning,
+                    Style::default().fg(self.theme.warning_fg),
+                )));
+                if matches!(kind, BranchWarningKind::Heuristic) {
+                    body_lines.push(Line::from(""));
+                    body_lines.push(Line::from(Span::styled(
+                        " Dux can't confidently identify this repo's default",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                    body_lines.push(Line::from(Span::styled(
+                        " branch, so it won't change branches for you.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+
+                // Checkbox height is measured up-front so the outer rect can
+                // be sized exactly — mirrors the Delete Agent modal.
+                let checkbox_height = if has_checkbox {
+                    let BranchWarningKind::Known { default_branch } = kind else {
+                        unreachable!("has_checkbox requires a known default branch");
+                    };
+                    let state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let label = format!("Check out \"{default_branch}\" before adding");
+                    let checkbox = Checkbox::new(&label)
+                        .checked(*checkout_default)
+                        .state(state);
+                    checkbox
+                        .layout(
+                            inner_width,
+                            checkbox.marker_style(Style::default()),
+                            checkbox.label_style(Style::default()),
+                        )
+                        .height
+                } else {
+                    0
+                };
+                let checkbox_spacing = u16::from(has_checkbox);
+
+                let area = centered_rect_exact(
+                    dialog_width,
+                    2 + body_height + checkbox_spacing + checkbox_height + 3,
+                    frame.area(),
+                );
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Non-Default Branch");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, checkbox_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(body_height),
+                        Constraint::Length(checkbox_spacing),
+                        Constraint::Length(checkbox_height),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(body_lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let checkbox_rect = if has_checkbox {
+                    let BranchWarningKind::Known { default_branch } = kind else {
+                        unreachable!("has_checkbox requires a known default branch");
+                    };
+                    let checkbox_state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let label = format!("Check out \"{default_branch}\" before adding");
+                    let (rect, _) = self.render_overlay_checkbox(
+                        frame,
+                        checkbox_area,
+                        &label,
+                        *checkout_default,
+                        checkbox_state,
+                        None,
+                    );
+                    Some(OverlayCheckbox {
+                        id: OverlayCheckboxId::NonDefaultBranchCheckoutDefault,
+                        rect,
+                    })
+                } else {
+                    None
+                };
+
+                // Both buttons share a single width derived from the longest
+                // label that could appear in either slot. Including
+                // "Check Out & Add" and "Add Anyway" in the calculation keeps
+                // the layout stable when the user toggles the checkbox —
+                // otherwise the buttons would resize mid-modal.
+                let btn_width = shared_button_width(&["Cancel", "Add Anyway", "Check Out & Add"]);
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let add_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                // Swap the confirm button label so the user sees exactly what
+                // pressing it will do. When the checkbox is on and we know the
+                // default branch, the action is a two-step (switch + add),
+                // otherwise it's the original "Add Anyway" add-as-is.
+                let add_label = if has_checkbox && *checkout_default {
+                    "Check Out & Add"
+                } else {
+                    "Add Anyway"
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmNonDefaultBranchCancel,
+                        self.pressed_button,
+                        *focus == ConfirmNonDefaultBranchFocus::Cancel,
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new(add_label)
+                    .kind(ButtonKind::Danger)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmNonDefaultBranchAdd,
+                        self.pressed_button,
+                        *focus == ConfirmNonDefaultBranchFocus::Add,
+                        true,
+                    ))
+                    .render(frame, add_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmNonDefaultBranch {
+                    cancel_button: cancel_area,
+                    add_button: add_area,
+                    checkbox: checkbox_rect,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_confirm_use_existing_branch_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ConfirmUseExistingBranch {
+                branch_name,
+                location,
+                focus,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(60, 30, frame.area());
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Branch Already Exists");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let location_label = match location {
+                    crate::git::BranchLocation::Local => "local",
+                    crate::git::BranchLocation::Remote => "remote",
+                };
+                let mut lines = vec![Line::from("")];
+                lines.push(Line::from(vec![
+                    Span::raw(" A "),
+                    Span::raw(location_label),
+                    Span::raw(" branch named "),
+                    Span::styled(
+                        branch_name.as_str(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                lines.push(Line::from(" already exists."));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " A new worktree will be created using this branch,",
+                    Style::default().fg(self.theme.warning_fg),
+                )));
+                lines.push(Line::from(Span::styled(
+                    " allowing you to continue working on it.",
+                    Style::default().fg(self.theme.warning_fg),
+                )));
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let use_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmUseExistingBranchCancel,
+                        self.pressed_button,
+                        !focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                // "Use Existing" reuses a branch that already exists — not
+                // destructive, so it shares the Confirm kind with Cancel.
+                Button::new("Use Existing")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmUseExistingBranchUse,
+                        self.pressed_button,
+                        focus.is_confirm(),
+                        true,
+                    ))
+                    .render(frame, use_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmUseExistingBranch {
+                    cancel_button: cancel_area,
+                    use_button: use_area,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_rename_session_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::RenameSession {
+                input,
+                rename_branch,
+                focus,
+                branch_named,
+                ..
+            } => {
+                let checkbox_state = if *focus == RenameSessionFocus::RenameBranchCheckbox {
+                    CheckboxState::Focused
+                } else {
+                    CheckboxState::Normal
+                };
+                let checkbox = Checkbox::new("Also rename the git branch")
+                    .checked(*rename_branch)
+                    .state(checkbox_state);
+                let dialog_width = 62.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                // A standalone agent has no branch, so the checkbox is ABSENT
+                // rather than present-and-inert, and the modal shrinks to the
+                // one control it really has.
+                let checkbox_height = if *branch_named {
+                    checkbox
+                        .layout(
+                            inner_width,
+                            checkbox.marker_style(Style::default()),
+                            checkbox.label_style(Style::default()),
+                        )
+                        .height
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                let checkbox_spacing = if *branch_named { 1 } else { 0 };
+                let area = centered_rect_exact(
+                    dialog_width,
+                    9 + checkbox_spacing + checkbox_height,
+                    frame.area(),
+                );
+                // The shared chrome trio (dim, clear-and-claim, titled ring).
+                // See `modal::App::open_modal_frame` for why the rect claim and
+                // the border ring cannot be hand-rolled per modal.
+                let inner = self.open_modal_frame(frame, "Rename Agent", area).inner;
+
+                let [label_area, input_area, _, checkbox_area, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                        Constraint::Length(checkbox_spacing),
+                        Constraint::Length(checkbox_height),
+                        Constraint::Min(1),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(Line::from(Span::styled(
+                    " Enter a new name (empty to reset):",
+                    Style::default().fg(self.theme.input_label_fg),
+                )))
+                .render(label_area, frame.buffer_mut());
+
+                // The field draws its caret only while it HAS focus: with the
+                // checkbox focused the field takes no keystrokes, so a caret
+                // there would be a lie (and the key handler already drops
+                // every key on that basis).
+                let input_focused = *focus == RenameSessionFocus::Input;
+                let input_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(self.theme.overlay_field_border_style(input_focused));
+                let input_inner = input_block.inner(input_area);
+                Paragraph::new(render_single_line_cursor_input(
+                    " ",
+                    &input.text,
+                    input.cursor,
+                    self.theme.input_cursor_fg,
+                    self.theme.input_cursor_bg,
+                    input_focused,
+                ))
+                .block(input_block)
+                .render(input_area, frame.buffer_mut());
+
+                let checkbox_rect = if *branch_named {
+                    let (rect, _) = self.render_overlay_checkbox(
+                        frame,
+                        checkbox_area,
+                        "Also rename the git branch",
+                        *rename_branch,
+                        checkbox_state,
+                        Some(Line::from(Span::styled(
+                            format!(
+                                "{}Open PRs will still reference the old branch name",
+                                Checkbox::indent()
+                            ),
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ))),
+                    );
+                    Some(rect)
+                } else {
+                    None
+                };
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                // Same rule as the new-agent modal: the name field owns the
+                // letters and the horizontal arrows, so the hint names the
+                // first key of the action that still reaches focus movement
+                // here (see `text_field_owns_key`). If a rebinding leaves none,
+                // the segment is dropped: naming a key that types a character
+                // is worse than naming none.
+                // Nothing to move focus to when the checkbox is absent, so the
+                // segment goes with it rather than naming a key that does
+                // nothing.
+                let focus_key = if *branch_named {
+                    self.bindings
+                        .label_for_text_field_dialog(Action::ToggleSelection)
+                } else {
+                    None
+                };
+                let hints = modal_hint_line(
+                    &self.theme,
+                    &[
+                        Hint::key(confirm_key, "confirm"),
+                        // Dropped entirely when the field swallows every key the
+                        // movement action is bound to; the builder owns that rule.
+                        Hint::maybe_key(focus_key, "focus"),
+                        // Space-on-focus is hardcoded (the accessibility tenet),
+                        // so there is no binding to resolve for it. Dropped
+                        // while the name field has focus, where Space is a
+                        // typed character and toggles nothing.
+                        // An empty segment is dropped by the builder.
+                        Hint::plain(if *focus == RenameSessionFocus::Input {
+                            ""
+                        } else {
+                            "Space toggle"
+                        }),
+                        Hint::key(close_key, "cancel"),
+                    ],
+                );
+                Paragraph::new(hints).render(hint_area, frame.buffer_mut());
+                self.overlay_layout.active = OverlayMouseLayout::RenameSession {
+                    input: input_inner,
+                    checkbox: checkbox_rect.map(|rect| OverlayCheckbox {
+                        id: OverlayCheckboxId::RenameSessionBranch,
+                        rect,
+                    }),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_edit_macros_prompt_overlay(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::EditMacros { .. } => {
+                // Full rendering implemented in Task #5.
+                self.render_edit_macros(frame);
+            }
+            _ => {}
+        }
+    }
+
+    fn render_resource_monitor_prompt_overlay(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::ResourceMonitor {
+                rows,
+                scroll_offset,
+                selected_row,
+                expanded,
+                short_window_sample,
+                ..
+            } => {
+                let rows = rows.clone();
+                let scroll_offset = *scroll_offset;
+                let selected_row = *selected_row;
+                let expanded = expanded.clone();
+                let short_window_sample = *short_window_sample;
+                self.render_resource_monitor(
+                    frame,
+                    &rows,
+                    scroll_offset,
+                    selected_row,
+                    &expanded,
+                    short_window_sample,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn render_debug_input_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::DebugInput {
+                lines,
+                scroll_offset,
+            } => {
+                self.render_dim_overlay(frame);
+                let popup = centered_rect(80, 70, frame.area());
+                self.clear_overlay_area(frame, popup);
+
+                // Split: content area + 1-line footer hint.
+                let chunks =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(popup);
+                let content_area = chunks[0];
+                let hint_area = chunks[1];
+
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .title(" Input Debugger ")
+                    .title_style(
+                        Style::default()
+                            .fg(self.theme.help_section_header_fg)
+                            .add_modifier(Modifier::BOLD),
+                    );
+                let inner = block.inner(content_area);
+                block.render(content_area, frame.buffer_mut());
+
+                // Compute the visible window.
+                let visible_h = inner.height as usize;
+                let total = lines.len();
+                let max_offset = total.saturating_sub(visible_h);
+                let offset = (*scroll_offset as usize).min(max_offset);
+
+                // When scroll_offset exceeds max (auto-scroll sentinel), pin to bottom.
+                let start = if *scroll_offset as usize >= total {
+                    max_offset
+                } else {
+                    offset
+                };
+
+                let visible: Vec<Line> =
+                    lines.iter().skip(start).take(visible_h).cloned().collect();
+
+                let paragraph = Paragraph::new(visible);
+                paragraph.render(inner, frame.buffer_mut());
+
+                // Footer hint.
+                let hint = Line::from(vec![
+                    Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" close  "),
+                    Span::styled("Scroll", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" navigate"),
+                ]);
+                let hint_para = Paragraph::new(hint)
+                    .alignment(ratatui::layout::Alignment::Center)
+                    .style(
+                        Style::default()
+                            .fg(self.theme.hint_desc_fg)
+                            .add_modifier(Modifier::DIM),
+                    );
+                hint_para.render(hint_area, frame.buffer_mut());
+            }
+            _ => {}
+        }
+    }
+
+    fn render_pull_request_input_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::PullRequestInput {
+                project,
+                input,
+                focus,
+            } => {
+                self.render_dim_overlay(frame);
+                // The reference-first shape carries a secondary action under the
+                // field, so it needs four more rows than the project-first one.
+                let has_project = project.is_some();
+                let height = if has_project { 8 } else { 12 };
+                let area = centered_rect_exact(64, height, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let outer = self.themed_overlay_block("Create Agent From PR");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [label_area, input_area, action_area, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(2),
+                        Constraint::Length(3),
+                        Constraint::Length(if has_project { 0 } else { 4 }),
+                        Constraint::Min(1),
+                    ])
+                    .areas(inner);
+
+                let labels = match project {
+                    Some(project) => vec![
+                        Line::from(Span::styled(
+                            format!(" Project: {}", project.name),
+                            Style::default().fg(self.theme.input_label_fg),
+                        )),
+                        Line::from(Span::styled(
+                            " Paste a GitHub PR URL or enter a PR number:",
+                            Style::default().fg(self.theme.input_label_fg),
+                        )),
+                    ],
+                    None => vec![
+                        Line::from(Span::styled(
+                            " Paste a pull request link, or type owner/repo#123:",
+                            Style::default().fg(self.theme.input_label_fg),
+                        )),
+                        Line::from(Span::styled(
+                            " dux finds the project that repository is open in.",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        )),
+                    ],
+                };
+                Paragraph::new(labels).render(label_area, frame.buffer_mut());
+
+                // Focus is visible or it is not focus: the border and the caret
+                // both follow it, so a field that will not take your keystrokes
+                // never draws a caret.
+                let field_focused = *focus == PullRequestInputFocus::Input;
+                let input_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(self.theme.overlay_field_border_style(field_focused));
+                let input_inner = input_block.inner(input_area);
+                Paragraph::new(render_single_line_cursor_input(
+                    " ",
+                    &input.text,
+                    input.cursor,
+                    self.theme.input_cursor_fg,
+                    self.theme.input_cursor_bg,
+                    field_focused,
+                ))
+                .block(input_block)
+                .render(input_area, frame.buffer_mut());
+
+                // The secondary action, and the misclick-safe blank row above
+                // it. Only offered when no project has been chosen: with one
+                // already chosen this modal is exactly what it always was.
+                let mut choose_button = None;
+                if !has_project && action_area.height >= 4 {
+                    // The same words the inline refusal of a bare number uses,
+                    // so the message and the control it points at agree.
+                    let label = "Choose an existing project…";
+                    let width = button_width_for(label).min(action_area.width);
+                    let button = Rect {
+                        x: action_area.x + (action_area.width.saturating_sub(width)) / 2,
+                        y: action_area.y + 1,
+                        width,
+                        height: 3,
+                    };
+                    Button::new(label)
+                        .kind(ButtonKind::Confirm)
+                        .state(button_state_for(
+                            ButtonPressedTarget::PullRequestChooseProject,
+                            self.pressed_button,
+                            !field_focused,
+                            true,
+                        ))
+                        .render(frame, button, &self.theme);
+                    choose_button = Some(button);
+                }
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let mut hints = vec![Hint::key(
+                    confirm_key,
+                    if field_focused {
+                        "resolve"
+                    } else {
+                        "choose a project"
+                    },
+                )];
+                if !has_project {
+                    hints.push(Hint::maybe_key(
+                        self.bindings
+                            .label_for_text_field_dialog(Action::ToggleSelection),
+                        "move focus",
+                    ));
+                }
+                hints.push(Hint::key(close_key, "cancel"));
+                Paragraph::new(modal_hint_line(&self.theme, &hints))
+                    .render(hint_area, frame.buffer_mut());
+                self.overlay_layout.active = OverlayMouseLayout::PullRequestInput {
+                    input: input_inner,
+                    choose_project: choose_button,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_attach_pull_request_input_prompt(&mut self, frame: &mut Frame) {
+        match &self.prompt {
+            PromptState::AttachPullRequestInput {
+                current_pr, input, ..
+            } => {
+                self.render_dim_overlay(frame);
+                // Two body rows always (the accepted-forms hint plus spacing),
+                // plus one more when there is a current PR to name.
+                let has_current = current_pr.is_some();
+                let height = if has_current { 9 } else { 8 };
+                let area = centered_rect_exact(64, height, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let outer = self.themed_overlay_block("Attach Pull Request");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [label_area, input_area, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(if has_current { 3 } else { 2 }),
+                        Constraint::Length(3),
+                        Constraint::Min(1),
+                    ])
+                    .areas(inner);
+
+                let mut labels = Vec::new();
+                if let Some(current) = current_pr {
+                    labels.push(Line::from(Span::styled(
+                        format!(" Currently showing {current}; attaching replaces it."),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                }
+                labels.push(Line::from(Span::styled(
+                    " Enter a PR URL, owner/repo#123, #123, or 123:",
+                    Style::default().fg(self.theme.input_label_fg),
+                )));
+                labels.push(Line::from(Span::styled(
+                    " Attaching pins the PR and pauses autodetection.",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )));
+                Paragraph::new(labels).render(label_area, frame.buffer_mut());
+
+                // The field is the modal's only control, so it is always
+                // focused: focused border, caret drawn.
+                let input_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(self.theme.overlay_field_border_style(true));
+                let input_inner = input_block.inner(input_area);
+                Paragraph::new(render_single_line_cursor_input(
+                    " ",
+                    &input.text,
+                    input.cursor,
+                    self.theme.input_cursor_fg,
+                    self.theme.input_cursor_bg,
+                    true,
+                ))
+                .block(input_block)
+                .render(input_area, frame.buffer_mut());
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let hints = vec![
+                    Hint::key(confirm_key, "attach"),
+                    Hint::key(close_key, "cancel"),
+                ];
+                Paragraph::new(modal_hint_line(&self.theme, &hints))
+                    .render(hint_area, frame.buffer_mut());
+                self.overlay_layout.active =
+                    OverlayMouseLayout::AttachPullRequestInput { input: input_inner };
+            }
+            _ => {}
+        }
+    }
+
+    fn render_prompt(&mut self, frame: &mut Frame) {
+        // The standalone delete dialog is rendered ahead of the main match,
+        // with its content copied out first, because it needs `&mut self` for
+        // the shared frame renderer and the match below borrows `self.prompt`
+        // for the whole arm.
+        if let PromptState::ConfirmDeleteAgent {
+            agent_label,
+            target: DeleteAgentTarget::Folder { folder_label },
+            focus,
+            ..
+        } = &self.prompt
+        {
+            let (agent_label, folder_label, focus) =
+                (agent_label.clone(), folder_label.clone(), *focus);
+            self.render_dim_overlay(frame);
+            let dialog_width = 56.min(frame.area().width.max(1));
+            let inner_width = dialog_width.saturating_sub(2);
+            // Say plainly that the folder is not dux's to remove and is not
+            // being touched, so the user is never left wondering what else went
+            // with the record.
+            let body_lines = vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw(" Are you sure you want to delete "),
+                    Span::styled(agent_label, Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw("?"),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " This removes dux's record of the agent only.",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )),
+                Line::from(Span::styled(
+                    format!(" Its folder \"{folder_label}\" is left untouched."),
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )),
+            ];
+            self.render_delete_agent_frame(frame, dialog_width, inner_width, body_lines, focus);
+            return;
+        }
+        match &self.prompt {
+            PromptState::Command { .. } => self.render_command_prompt(frame),
+            PromptState::BrowseProjects { .. } => self.render_browse_projects_prompt(frame),
+            PromptState::ChangeAgentProvider(_) => self.render_change_agent_provider_prompt(frame),
+            PromptState::ChangeDefaultProvider(_) => {
+                self.render_change_default_provider_prompt(frame)
+            }
+            PromptState::ChangeProjectDefaultProvider(_) => {
+                self.render_change_project_default_provider_prompt(frame)
             }
             PromptState::SetTailscaleMode(_) => self.render_set_tailscale_mode_prompt(frame),
             PromptState::ChangeTheme(_) => self.render_change_theme_prompt(frame),
@@ -6325,755 +8920,13 @@ impl App {
                     close_button: close_area,
                 };
             }
-            PromptState::PickEditor {
-                session_label,
-                worktree_path,
-                editors,
-                selected,
-            } => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(64, 34, frame.area());
-                self.clear_overlay_area(frame, area);
-
-                let confirm_key = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let move_down = self.bindings.label_for(Action::MoveDown);
-                let move_up = self.bindings.label_for(Action::MoveUp);
-                let mut bottom_spans = vec![Span::raw(" ")];
-                bottom_spans.extend(self.theme.key_badge_default(&move_down));
-                bottom_spans.push(Span::styled(
-                    " down  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&move_up));
-                bottom_spans.push(Span::styled(
-                    " up  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                bottom_spans.push(Span::styled(
-                    " open  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                bottom_spans.push(Span::styled(
-                    " cancel",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-
-                let [details_area, list_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(4), Constraint::Min(4)])
-                    .areas(area);
-
-                let detail_lines = vec![
-                    Line::from(vec![
-                        Span::styled(" Agent: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::styled(
-                            session_label.as_str(),
-                            Style::default()
-                                .fg(self.theme.text_fg)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(" Path: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::styled(
-                            worktree_path.as_str(),
-                            Style::default().fg(self.theme.text_fg),
-                        ),
-                    ]),
-                ];
-                Paragraph::new(detail_lines)
-                    .block(
-                        self.themed_overlay_block("Open Worktree In")
-                            .title_bottom(Line::from(bottom_spans)),
-                    )
-                    .render(details_area, frame.buffer_mut());
-
-                let configured_default = self.engine.config.editor.default.trim();
-                let items = editors
-                    .iter()
-                    .map(|editor| {
-                        let mut spans = vec![Span::styled(
-                            format!("{:<14}", editor.label),
-                            Style::default()
-                                .fg(self.theme.help_section_header_fg)
-                                .add_modifier(Modifier::BOLD),
-                        )];
-                        spans.push(Span::styled(
-                            format!(" {}", editor.command),
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        if crate::editor::matches_configured_editor(editor, configured_default) {
-                            spans.push(Span::styled(
-                                "  default",
-                                Style::default().fg(self.theme.branch_fg),
-                            ));
-                        }
-                        ListItem::new(Line::from(spans))
-                    })
-                    .collect::<Vec<_>>();
-                let mut state = ListState::default()
-                    .with_selected(Some((*selected).min(editors.len().saturating_sub(1))));
-                let list_block = Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border))
-                    .style(Style::default().bg(self.theme.overlay_bg));
-                let list_inner = list_block.inner(list_area);
-                StatefulWidget::render(
-                    List::new(items)
-                        .block(list_block)
-                        .highlight_style(self.theme.selection_style()),
-                    list_area,
-                    frame.buffer_mut(),
-                    &mut state,
-                );
-                self.overlay_layout.active = OverlayMouseLayout::PickEditor {
-                    list: list_inner,
-                    items: editors.len(),
-                    offset: state.offset(),
-                };
+            PromptState::PickEditor { .. } => self.render_pick_editor_prompt(frame),
+            PromptState::ManageWorktrees(_) => self.render_manage_worktrees_prompt(frame),
+            PromptState::ConfirmDeleteWorktree(_) => {
+                self.render_confirm_delete_worktree_prompt(frame)
             }
-            PromptState::ManageWorktrees(prompt) => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(78, 58, frame.area());
-                self.clear_overlay_area(frame, area);
-
-                let confirm_key = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let move_down = self.bindings.label_for(Action::MoveDown);
-                let move_up = self.bindings.label_for(Action::MoveUp);
-                let mut bottom_spans = vec![Span::raw(" ")];
-                bottom_spans.extend(self.theme.key_badge_default(&move_down));
-                bottom_spans.push(Span::styled(
-                    " down  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&move_up));
-                bottom_spans.push(Span::styled(
-                    " up  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                bottom_spans.push(Span::styled(
-                    " remove  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                bottom_spans.push(Span::styled(
-                    " cancel",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-
-                let [details_area, list_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(4), Constraint::Min(6)])
-                    .areas(area);
-
-                let detail_lines = vec![
-                    Line::from(vec![
-                        Span::styled(" Project: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::styled(
-                            prompt.project.name.as_str(),
-                            Style::default()
-                                .fg(self.theme.text_fg)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(" Repo: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::styled(
-                            prompt.project.path.as_str(),
-                            Style::default().fg(self.theme.text_fg),
-                        ),
-                    ]),
-                ];
-                Paragraph::new(detail_lines)
-                    .block(
-                        self.themed_overlay_block("Manage Worktrees")
-                            .title_bottom(Line::from(bottom_spans)),
-                    )
-                    .render(details_area, frame.buffer_mut());
-
-                let rows = manage_worktree_visual_rows(
-                    &prompt.entries,
-                    prompt.loading,
-                    prompt.error.as_deref(),
-                );
-                let path_col = prompt
-                    .entries
-                    .iter()
-                    .map(|entry| {
-                        entry
-                            .path
-                            .file_name()
-                            .map_or(0, |name| name.to_string_lossy().chars().count())
-                    })
-                    .max()
-                    .unwrap_or(8)
-                    .clamp(8, 24);
-                let items = rows
-                    .iter()
-                    .map(|row| match row {
-                        ManageWorktreeVisualRow::Header(label) => {
-                            ListItem::new(Line::from(Span::styled(
-                                format!(" {label}"),
-                                Style::default()
-                                    .fg(self.theme.help_section_header_fg)
-                                    .add_modifier(Modifier::BOLD),
-                            )))
-                        }
-                        ManageWorktreeVisualRow::Empty(message) => {
-                            ListItem::new(Line::from(Span::styled(
-                                format!("  {message}"),
-                                Style::default().fg(self.theme.hint_dim_desc_fg),
-                            )))
-                        }
-                        ManageWorktreeVisualRow::Entry(index) => {
-                            let entry = &prompt.entries[*index];
-                            let removable = entry.is_removable();
-                            let name_style = if removable {
-                                Style::default().fg(self.theme.text_fg)
-                            } else {
-                                Style::default().fg(self.theme.hint_dim_desc_fg)
-                            };
-                            let branch_label_style = Style::default().fg(if removable {
-                                self.theme.branch_fg
-                            } else {
-                                self.theme.hint_dim_desc_fg
-                            });
-                            let branch_value_style = Style::default().fg(if removable {
-                                self.theme.hint_desc_fg
-                            } else {
-                                self.theme.hint_dim_desc_fg
-                            });
-                            // Dirtiness and the holding agent are the two facts
-                            // the web's list carries too, so the two managers
-                            // show the same thing.
-                            let mut suffix_spans = Vec::new();
-                            if entry.dirty {
-                                suffix_spans.push(Span::styled(
-                                    "  uncommitted changes",
-                                    Style::default().fg(self.theme.warning_fg),
-                                ));
-                            }
-                            if !removable {
-                                suffix_spans.push(Span::styled(
-                                    "  held by an agent",
-                                    Style::default().fg(self.theme.hint_dim_desc_fg),
-                                ));
-                            }
-                            let name = git::ellipsize_middle(
-                                entry
-                                    .path
-                                    .file_name()
-                                    .map(|name| name.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| entry.path.display().to_string())
-                                    .as_str(),
-                                path_col,
-                            );
-                            let mut spans = vec![
-                                Span::styled(
-                                    format!("  {:path_col$}", name),
-                                    name_style.add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled("  branch: ", branch_label_style),
-                                Span::styled(entry.label.as_str(), branch_value_style),
-                            ];
-                            spans.extend(suffix_spans);
-                            ListItem::new(Line::from(spans))
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let selected_visual = prompt.selected.and_then(|selected| {
-                    rows.iter().position(|row| {
-                        matches!(row, ManageWorktreeVisualRow::Entry(index) if *index == selected)
-                    })
-                });
-                let mut state = ListState::default().with_selected(selected_visual);
-                let list_block = Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border))
-                    .style(Style::default().bg(self.theme.overlay_bg));
-                let list_inner = list_block.inner(list_area);
-                StatefulWidget::render(
-                    List::new(items)
-                        .block(list_block)
-                        .highlight_style(self.theme.selection_style()),
-                    list_area,
-                    frame.buffer_mut(),
-                    &mut state,
-                );
-                self.overlay_layout.active = OverlayMouseLayout::ManageWorktrees {
-                    list: list_inner,
-                    items: rows.len(),
-                    offset: state.offset(),
-                };
-            }
-            PromptState::ConfirmDeleteWorktree(prompt) => {
-                self.render_dim_overlay(frame);
-                let dialog_width = 60.min(frame.area().width.max(1));
-                let inner_width = dialog_width.saturating_sub(2);
-                let has_checkbox = prompt.has_branch_checkbox();
-                let checkbox_label = delete_worktree_checkbox_label(prompt.branch.as_deref());
-                let checkbox_height = if has_checkbox {
-                    let state = if prompt.focus == DeleteWorktreeFocus::Checkbox {
-                        CheckboxState::Focused
-                    } else {
-                        CheckboxState::Normal
-                    };
-                    let checkbox = Checkbox::new(checkbox_label.as_str())
-                        .checked(prompt.delete_branch)
-                        .state(state);
-                    checkbox
-                        .layout(
-                            inner_width,
-                            checkbox.marker_style(Style::default()),
-                            checkbox.label_style(Style::default()),
-                        )
-                        .height
-                } else {
-                    0
-                };
-
-                // The copy is the web dialog's, sentence for sentence, and both
-                // sides pin it (see `delete_worktree_title` and the constants
-                // beside it).
-                let mut body_lines = vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        format!(" {}", delete_worktree_title(&prompt.label)),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::raw(" "),
-                        Span::styled(
-                            prompt.path.display().to_string(),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!(" will be removed from disk. {DELETE_WORKTREE_FORCED}"),
-                            Style::default().fg(self.theme.warning_fg),
-                        ),
-                    ]),
-                ];
-                if prompt.dirty {
-                    body_lines.push(Line::from(Span::styled(
-                        format!(" {DELETE_WORKTREE_DIRTY}"),
-                        Style::default().fg(self.theme.warning_fg),
-                    )));
-                }
-                match (prompt.branch.as_deref(), prompt.delete_branch) {
-                    (None, _) => body_lines.push(Line::from(Span::styled(
-                        format!(" {DELETE_WORKTREE_DETACHED}"),
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ))),
-                    (Some(branch), delete_branch) => body_lines.push(Line::from(Span::styled(
-                        format!(" {}", delete_worktree_branch_line(branch, delete_branch)),
-                        Style::default().fg(if delete_branch {
-                            self.theme.warning_fg
-                        } else {
-                            self.theme.hint_desc_fg
-                        }),
-                    ))),
-                }
-                let body_height = wrapped_line_count(&body_lines, inner_width, false);
-                let checkbox_spacing = u16::from(has_checkbox);
-                let area = centered_rect_exact(
-                    dialog_width,
-                    2 + body_height + checkbox_spacing + checkbox_height + 1 + 3,
-                    frame.area(),
-                );
-                self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Delete Worktree");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, _, checkbox_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(body_height),
-                        Constraint::Length(checkbox_spacing),
-                        Constraint::Length(checkbox_height),
-                        // Misclick-safe spacing: the checkbox never sits flush
-                        // against the destructive button.
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                Paragraph::new(body_lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
-
-                let checkbox_rect = if has_checkbox {
-                    let checkbox_state = if prompt.focus == DeleteWorktreeFocus::Checkbox {
-                        CheckboxState::Focused
-                    } else {
-                        CheckboxState::Normal
-                    };
-                    let (rect, _) = self.render_overlay_checkbox(
-                        frame,
-                        checkbox_area,
-                        checkbox_label.as_str(),
-                        prompt.delete_branch,
-                        checkbox_state,
-                        None,
-                    );
-                    Some(OverlayCheckbox {
-                        id: OverlayCheckboxId::DeleteWorktreeBranch,
-                        rect,
-                    })
-                } else {
-                    None
-                };
-
-                let btn_width = 18u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let delete_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmDeleteWorktreeCancel,
-                        self.pressed_button,
-                        prompt.focus == DeleteWorktreeFocus::Cancel,
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new("Delete worktree")
-                    .kind(ButtonKind::Danger)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmDeleteWorktreeConfirm,
-                        self.pressed_button,
-                        prompt.focus == DeleteWorktreeFocus::Delete,
-                        true,
-                    ))
-                    .render(frame, delete_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteWorktree {
-                    cancel_button: cancel_area,
-                    delete_button: delete_area,
-                    checkbox: checkbox_rect,
-                };
-            }
-            PromptState::PickProjectWorktree(prompt) => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(78, 58, frame.area());
-                self.clear_overlay_area(frame, area);
-
-                let confirm_key = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let move_down = self.bindings.label_for(Action::MoveDown);
-                let move_up = self.bindings.label_for(Action::MoveUp);
-                let mut bottom_spans = vec![Span::raw(" ")];
-                bottom_spans.extend(self.theme.key_badge_default(&move_down));
-                bottom_spans.push(Span::styled(
-                    " down  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&move_up));
-                bottom_spans.push(Span::styled(
-                    " up  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                bottom_spans.push(Span::styled(
-                    " use  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                bottom_spans.push(Span::styled(
-                    " cancel",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-
-                let [details_area, list_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(4), Constraint::Min(6)])
-                    .areas(area);
-
-                let detail_lines = vec![
-                    Line::from(vec![
-                        Span::styled(" Project: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::styled(
-                            prompt.project.name.as_str(),
-                            Style::default()
-                                .fg(self.theme.text_fg)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(" Repo: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::styled(
-                            prompt.project.path.as_str(),
-                            Style::default().fg(self.theme.text_fg),
-                        ),
-                    ]),
-                ];
-                Paragraph::new(detail_lines)
-                    .block(
-                        self.themed_overlay_block("New Agent From Worktree")
-                            .title_bottom(Line::from(bottom_spans)),
-                    )
-                    .render(details_area, frame.buffer_mut());
-
-                let rows = project_worktree_visual_rows(
-                    &prompt.entries,
-                    prompt.loading,
-                    prompt.error.as_deref(),
-                );
-                let path_col = prompt
-                    .entries
-                    .iter()
-                    .map(|entry| entry.display_name().chars().count())
-                    .max()
-                    .unwrap_or(8)
-                    .clamp(8, 24);
-                let items = rows
-                    .iter()
-                    .map(|row| match row {
-                        ProjectWorktreeVisualRow::Header(label) => {
-                            ListItem::new(Line::from(Span::styled(
-                                format!(" {label}"),
-                                Style::default()
-                                    .fg(self.theme.help_section_header_fg)
-                                    .add_modifier(Modifier::BOLD),
-                            )))
-                        }
-                        ProjectWorktreeVisualRow::Empty(message) => {
-                            ListItem::new(Line::from(Span::styled(
-                                format!("  {message}"),
-                                Style::default().fg(self.theme.hint_dim_desc_fg),
-                            )))
-                        }
-                        ProjectWorktreeVisualRow::Entry(index) => {
-                            let entry = &prompt.entries[*index];
-                            let style = if entry.is_selectable {
-                                Style::default().fg(self.theme.text_fg)
-                            } else {
-                                Style::default().fg(self.theme.hint_dim_desc_fg)
-                            };
-                            let kind = if entry.is_project_checkout {
-                                "project"
-                            } else if entry.is_external {
-                                "external"
-                            } else {
-                                "managed"
-                            };
-                            let session_suffix = entry
-                                .existing_session_id
-                                .as_ref()
-                                .map(|id| format!("  agent {id}"))
-                                .unwrap_or_default();
-                            let kind_style = if !entry.is_selectable {
-                                Style::default().fg(self.theme.hint_dim_desc_fg)
-                            } else if entry.is_managed_by_dux {
-                                Style::default().fg(self.theme.branch_fg)
-                            } else {
-                                Style::default().fg(self.theme.hint_desc_fg)
-                            };
-                            let branch_label_style = Style::default().fg(if entry.is_selectable {
-                                self.theme.branch_fg
-                            } else {
-                                self.theme.hint_dim_desc_fg
-                            });
-                            let branch_value_style = Style::default().fg(if entry.is_selectable {
-                                self.theme.hint_desc_fg
-                            } else {
-                                self.theme.hint_dim_desc_fg
-                            });
-                            let name = git::ellipsize_middle(&entry.display_name(), path_col);
-                            ListItem::new(Line::from(vec![
-                                Span::styled(
-                                    format!("  {:path_col$}", name),
-                                    style.add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled(format!("  {:<8}", kind), kind_style),
-                                Span::styled("  branch: ", branch_label_style),
-                                Span::styled(entry.branch_name.as_str(), branch_value_style),
-                                Span::styled(
-                                    session_suffix,
-                                    Style::default().fg(self.theme.hint_dim_desc_fg),
-                                ),
-                            ]))
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let selected_visual = prompt.selected.and_then(|selected| {
-                    rows.iter().position(|row| {
-                        matches!(row, ProjectWorktreeVisualRow::Entry(index) if *index == selected)
-                    })
-                });
-                let mut state = ListState::default().with_selected(selected_visual);
-                let list_block = Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border))
-                    .style(Style::default().bg(self.theme.overlay_bg));
-                let list_inner = list_block.inner(list_area);
-                StatefulWidget::render(
-                    List::new(items)
-                        .block(list_block)
-                        .highlight_style(self.theme.selection_style()),
-                    list_area,
-                    frame.buffer_mut(),
-                    &mut state,
-                );
-                self.overlay_layout.active = OverlayMouseLayout::PickProjectWorktree {
-                    list: list_inner,
-                    items: rows.len(),
-                    offset: state.offset(),
-                };
-            }
-            PromptState::PickProject {
-                intent,
-                entries,
-                list,
-            } => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(72, 58, frame.area());
-                self.clear_overlay_area(frame, area);
-
-                // Which entries survive the `/` filter (indices into `entries`).
-                let visible: Vec<usize> = list.visible_indices(entries, pick_project_matches);
-
-                let bottom_line = self.project_chooser_hint_line(list.searching, *intent);
-
-                let [details_area, list_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(3), Constraint::Min(4)])
-                    .areas(area);
-
-                // Header row: the `/`-search input while searching (or once a
-                // query has been typed), else a plain count line.
-                let details_block = self
-                    .themed_overlay_block(intent.title())
-                    .title_bottom(bottom_line);
-                // A field the user cannot click into is a gap: the filter rect
-                // is published whenever the filter is the thing being drawn.
-                let filter_input_rect = list
-                    .is_filtering()
-                    .then(|| details_block.inner(details_area));
-                if list.is_filtering() {
-                    Paragraph::new(render_single_line_cursor_input(
-                        "/ ",
-                        &list.filter.text,
-                        list.filter.cursor,
-                        self.theme.input_cursor_fg,
-                        self.theme.input_cursor_bg,
-                        true,
-                    ))
-                    .block(details_block)
-                    .render(details_area, frame.buffer_mut());
-                } else {
-                    Paragraph::new(vec![Line::from(vec![Span::styled(
-                        format!(" Pick a project to continue ({} available).", entries.len()),
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )])])
-                    .block(details_block)
-                    .render(details_area, frame.buffer_mut());
-                }
-
-                let list_block = Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border))
-                    .style(Style::default().bg(self.theme.overlay_bg));
-                let list_inner = list_block.inner(list_area);
-
-                // Column plan, sized to the visible rows and the inner width, with a
-                // symmetric one-space margin inside each border. The warning glyph
-                // is a fixed gutter; the path takes the remaining width and shows
-                // its TAIL (leading dirs elided) so the leaf stays readable.
-                let start_dir = self.engine.config.defaults.start_directory.as_deref();
-                let display_path = |entry: &ProjectChooserEntry| {
-                    git::display_path_relative_to(&entry.path, start_dir)
-                };
-                let name_col = visible
-                    .iter()
-                    .filter_map(|i| entries.get(*i))
-                    .map(|entry| entry.name.chars().count())
-                    .max()
-                    .unwrap_or(8)
-                    .clamp(8, 28);
-                let count_label = |n: usize| match n {
-                    0 => "no agents".to_string(),
-                    1 => "1 agent".to_string(),
-                    n => format!("{n} agents"),
-                };
-                let count_col = visible
-                    .iter()
-                    .filter_map(|i| entries.get(*i))
-                    .map(|entry| count_label(entry.agent_count).chars().count())
-                    .max()
-                    .unwrap_or(8);
-                // margin(1) warn(1) sp(1) name sp(2) count sp(2) path margin(1)
-                let fixed = 1 + 1 + 1 + name_col + 2 + count_col + 2 + 1;
-                let path_col = (list_inner.width as usize).saturating_sub(fixed);
-
-                let items = visible
-                    .iter()
-                    .filter_map(|i| entries.get(*i))
-                    .map(|entry| {
-                        let warn = if entry.path_missing {
-                            Span::styled("⚠", Style::default().fg(self.theme.warning_fg))
-                        } else {
-                            Span::raw(" ")
-                        };
-                        let name = git::ellipsize_middle(&entry.name, name_col);
-                        let path = git::ellipsize_start(&display_path(entry), path_col);
-                        ListItem::new(Line::from(vec![
-                            Span::raw(" "),
-                            warn,
-                            Span::raw(" "),
-                            Span::styled(
-                                format!("{name:name_col$}"),
-                                Style::default()
-                                    .fg(self.theme.text_fg)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw("  "),
-                            Span::styled(
-                                format!("{:count_col$}", count_label(entry.agent_count)),
-                                Style::default().fg(self.theme.hint_desc_fg),
-                            ),
-                            Span::raw("  "),
-                            Span::styled(path, Style::default().fg(self.theme.hint_dim_desc_fg)),
-                        ]))
-                    })
-                    .collect::<Vec<_>>();
-
-                let mut state = ListState::default().with_selected(Some(list.selected));
-                StatefulWidget::render(
-                    List::new(items)
-                        .block(list_block)
-                        .highlight_style(self.theme.selection_style()),
-                    list_area,
-                    frame.buffer_mut(),
-                    &mut state,
-                );
-                self.overlay_layout.active = OverlayMouseLayout::PickProject {
-                    input: filter_input_rect,
-                    list: list_inner,
-                    items: visible.len(),
-                    offset: state.offset(),
-                };
-            }
+            PromptState::PickProjectWorktree(_) => self.render_pick_project_worktree_prompt(frame),
+            PromptState::PickProject { .. } => self.render_pick_project_prompt(frame),
             PromptState::KillRunning(prompt) => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(78, 72, frame.area());
@@ -7381,387 +9234,13 @@ impl App {
                     visible_button: button_rects[3],
                 };
             }
-            PromptState::ConfirmKillRunning(confirm_prompt) => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(56, 32, frame.area());
-                self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Confirm Kill");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                let targets = confirm_prompt.target_ids.len();
-                let (agent_count, terminal_count) = confirm_prompt.target_ids.iter().fold(
-                    (0usize, 0usize),
-                    |(agents, terminals), target_id| match target_id {
-                        RuntimeTargetId::Agent(_) | RuntimeTargetId::Tab(_) => {
-                            (agents + 1, terminals)
-                        }
-                        RuntimeTargetId::Terminal(_) => (agents, terminals + 1),
-                    },
-                );
-                let mut summary = Vec::new();
-                if agent_count > 0 {
-                    summary.push(format!(
-                        "{agent_count} agent{}",
-                        if agent_count == 1 { "" } else { "s" }
-                    ));
-                }
-                if terminal_count > 0 {
-                    summary.push(format!(
-                        "{terminal_count} terminal{}",
-                        if terminal_count == 1 { "" } else { "s" }
-                    ));
-                }
-                let lines = vec![
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::raw(format!(
-                            " {} will stop ",
-                            confirm_prompt.action.button_label()
-                        )),
-                        Span::styled(
-                            format!(
-                                "{targets} running process{}",
-                                if targets == 1 { "" } else { "es" }
-                            ),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw("."),
-                    ]),
-                    Line::from(format!(" Affected: {}", summary.join(" and "))),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " In-progress CLI work will be lost immediately.",
-                        Style::default().fg(self.theme.warning_fg),
-                    )),
-                    Line::from(Span::styled(
-                        " Worktree files remain on disk for review or relaunch.",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )),
-                ];
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
-
-                let btn_width = 16u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let kill_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmKillCancel,
-                        self.pressed_button,
-                        !confirm_prompt.focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new("Kill")
-                    .kind(ButtonKind::Danger)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmKillConfirm,
-                        self.pressed_button,
-                        confirm_prompt.focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, kill_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmKillRunning {
-                    cancel_button: cancel_area,
-                    kill_button: kill_area,
-                };
+            PromptState::ConfirmKillRunning(_) => self.render_confirm_kill_running_prompt(frame),
+            PromptState::ConfigReloadFailed { .. } => {
+                self.render_config_reload_failed_prompt(frame)
             }
-            PromptState::ConfigReloadFailed {
-                error,
-                recover_old_config,
-                focus,
-                scroll,
-            } => {
-                self.render_dim_overlay(frame);
-                let dialog_width = 68.min(frame.area().width.max(1));
-                let inner_width = dialog_width.saturating_sub(2);
-                let checkbox_label = "Recover last working config";
-                let checkbox_state = if *focus == ConfigReloadFailedFocus::Checkbox {
-                    CheckboxState::Focused
-                } else {
-                    CheckboxState::Normal
-                };
-                let checkbox = Checkbox::new(checkbox_label)
-                    .checked(*recover_old_config)
-                    .state(checkbox_state);
-                let checkbox_height = checkbox
-                    .layout(
-                        inner_width,
-                        checkbox.marker_style(Style::default()),
-                        checkbox.label_style(Style::default()),
-                    )
-                    .height;
-
-                let mut body_lines = vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " config.toml could not be reloaded, so the running config was kept.",
-                        Style::default().fg(self.theme.warning_fg),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " Validation error:",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )),
-                ];
-                // The WHOLE error, never a `take(6)`. A TOML validation failure
-                // runs long and its tail is usually the part naming the actual
-                // problem, so the dialog scrolls (marker below) instead of
-                // dropping lines with nothing to say it did.
-                for line in error.lines() {
-                    body_lines.push(Line::from(format!(" {line}")));
-                }
-                let dialog = self.render_error_dialog_body(
-                    frame,
-                    "Reload Config Failed",
-                    dialog_width,
-                    body_lines,
-                    1 + checkbox_height + 3,
-                    *scroll,
-                );
-                self.last_error_dialog_height = dialog.body.height;
-                self.last_error_dialog_lines = dialog.total_rows;
-
-                let [_, checkbox_area, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(1),
-                        Constraint::Length(checkbox_height),
-                        Constraint::Length(3),
-                    ])
-                    .areas(dialog.rest);
-
-                let (checkbox_rect, _) = self.render_overlay_checkbox(
-                    frame,
-                    checkbox_area,
-                    checkbox_label,
-                    *recover_old_config,
-                    checkbox_state,
-                    None,
-                );
-                let checkbox = OverlayCheckbox {
-                    id: OverlayCheckboxId::ConfigReloadRecoverOldConfig,
-                    rect: checkbox_rect,
-                };
-
-                let btn_width = shared_button_width(&["Close", "Recover"]);
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-                let close_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let apply_area = Rect {
-                    x: close_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                Button::new("Close")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfigReloadFailedClose,
-                        self.pressed_button,
-                        *focus == ConfigReloadFailedFocus::Close,
-                        true,
-                    ))
-                    .render(frame, close_area, &self.theme);
-
-                Button::new("Recover")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfigReloadFailedApply,
-                        self.pressed_button,
-                        *focus == ConfigReloadFailedFocus::Apply,
-                        *recover_old_config,
-                    ))
-                    .render(frame, apply_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::ConfigReloadFailed {
-                    close_button: close_area,
-                    apply_button: apply_area,
-                    checkbox,
-                };
-            }
-            PromptState::AddProjectFailed {
-                message, scroll, ..
-            } => {
-                self.render_dim_overlay(frame);
-                let dialog_width = 68.min(frame.area().width.max(1));
-                let mut body_lines = vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " The project could not be added.",
-                        Style::default().fg(self.theme.warning_fg),
-                    )),
-                    Line::from(""),
-                ];
-                // The WHOLE message, never a `take(6)`: a rejected path plus the
-                // git error explaining it runs past six lines, and the tail is
-                // the part that says why. The body scrolls instead (marker in the
-                // border column).
-                for line in message.lines() {
-                    body_lines.push(Line::from(format!(" {line}")));
-                }
-                let dialog = self.render_error_dialog_body(
-                    frame,
-                    "Add Project Failed",
-                    dialog_width,
-                    body_lines,
-                    3,
-                    *scroll,
-                );
-                self.last_error_dialog_height = dialog.body.height;
-                self.last_error_dialog_lines = dialog.total_rows;
-                let buttons_area = dialog.rest;
-
-                let btn_width = shared_button_width(&["OK"]);
-                let ok_area = Rect {
-                    x: buttons_area.x + buttons_area.width.saturating_sub(btn_width) / 2,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                Button::new("OK")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::AddProjectFailedOk,
-                        self.pressed_button,
-                        true,
-                        true,
-                    ))
-                    .render(frame, ok_area, &self.theme);
-
-                self.overlay_layout.active =
-                    OverlayMouseLayout::AddProjectFailed { ok_button: ok_area };
-            }
-            PromptState::FirstLoad(prompt) => {
-                self.render_dim_overlay(frame);
-                // Height comes from the BODY's row target (floored so the duck is
-                // never clipped) plus the border ring, the button row and its
-                // rule; `centered_rect_exact` clamps on a short terminal. See
-                // `first_load::MIN_BODY_ROWS` for why the body sets it and not
-                // the duck.
-                let area = first_load::modal_area(frame.area());
-                self.clear_overlay_area(frame, area);
-                let rendered = first_load::render_modal(frame, area, prompt, &self.theme);
-                self.last_first_load_height = rendered.content_height;
-                self.last_first_load_lines = rendered.content_lines;
-                self.overlay_layout.active = OverlayMouseLayout::FirstLoad {
-                    primary_button: rendered.primary_button,
-                    secondary_button: rendered.secondary_button,
-                };
-            }
-            PromptState::AgentInfo(prompt) => {
-                self.render_dim_overlay(frame);
-                let dialog_width = 72.min(frame.area().width.max(1));
-                let inner_width = dialog_width.saturating_sub(2);
-                let mut body_lines = vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        format!(" {}", prompt.session_label),
-                        Style::default()
-                            .fg(self.theme.text_fg)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(""),
-                ];
-                for (line, tone) in &prompt.lines {
-                    // Style by the precomputed semantic tone (tag), never by
-                    // re-parsing the prose. The drift note is the one line tagged
-                    // Warning; everything else is neutral body text. All colors
-                    // come from the theme.
-                    let style = match tone {
-                        AgentInfoTone::Warning => Style::default().fg(self.theme.warning_fg),
-                        AgentInfoTone::Neutral => Style::default().fg(self.theme.text_fg),
-                    };
-                    body_lines.push(Line::from(Span::styled(format!(" {line}"), style)));
-                }
-                let body_height = wrapped_line_count(&body_lines, inner_width, false);
-                let area = centered_rect_exact(dialog_width, 2 + body_height + 3, frame.area());
-                self.clear_overlay_area(frame, area);
-
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let mut bottom = vec![Span::raw(" ")];
-                bottom.extend(self.theme.key_badge_default(&close_key));
-                bottom.push(Span::styled(
-                    " close",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                let outer = self
-                    .themed_overlay_block("Agent Info")
-                    .title_bottom(Line::from(bottom));
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(body_height), Constraint::Length(3)])
-                    .areas(inner);
-
-                Paragraph::new(body_lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
-
-                let btn_width = shared_button_width(&["Close"]);
-                let close_area = Rect {
-                    x: buttons_area.x + buttons_area.width.saturating_sub(btn_width) / 2,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                // A read-only modal still gets a focused Close button that Space
-                // activates (universal accessibility convention).
-                Button::new("Close")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::AgentInfoClose,
-                        self.pressed_button,
-                        true,
-                        true,
-                    ))
-                    .render(frame, close_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::AgentInfo {
-                    close_button: close_area,
-                };
-            }
+            PromptState::AddProjectFailed { .. } => self.render_add_project_failed_prompt(frame),
+            PromptState::FirstLoad(_) => self.render_first_load_prompt_overlay(frame),
+            PromptState::AgentInfo(_) => self.render_agent_info_prompt(frame),
             PromptState::ConfirmDeleteAgent {
                 agent_label,
                 target,
@@ -7974,1083 +9453,30 @@ impl App {
                     checkbox: checkbox_rect,
                 };
             }
-            PromptState::ConfirmDeleteTerminal {
-                terminal_label,
-                foreground_cmd,
-                focus,
-                ..
-            } => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(56, 30, frame.area());
-                self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Delete Terminal");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                let mut lines = vec![
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::raw(" Are you sure you want to delete "),
-                        Span::styled(
-                            terminal_label.as_str(),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw("?"),
-                    ]),
-                ];
-                // Only warn about killing a process when an app is actually
-                // running in the foreground. Closing an idle terminal merely
-                // ends the bare shell, which is not worth a warning.
-                if foreground_cmd.is_some() {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        " The running process will be killed.",
-                        Style::default().fg(self.theme.warning_fg),
-                    )));
-                }
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
-
-                let btn_width = 16u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let delete_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmDeleteTerminalCancel,
-                        self.pressed_button,
-                        !focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new("Delete")
-                    .kind(ButtonKind::Danger)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmDeleteTerminalConfirm,
-                        self.pressed_button,
-                        focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, delete_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteTerminal {
-                    cancel_button: cancel_area,
-                    delete_button: delete_area,
-                };
+            PromptState::ConfirmDeleteTerminal { .. } => {
+                self.render_confirm_delete_terminal_prompt(frame)
             }
-            PromptState::ConfirmCloseTab {
-                session_id,
-                provider_label,
-                is_main,
-                focus,
-                ..
-            } => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(56, 30, frame.area());
-                self.clear_overlay_area(frame, area);
-                // Closing the agent's only tab detaches the agent instead of
-                // ending a single tab; word the copy accordingly.
-                let only_tab = self.engine.tab_ids_for_session(session_id).len() <= 1;
-                let outer = self.themed_overlay_block("Close Tab");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                let agent_name = self
-                    .engine
-                    .sessions
-                    .iter()
-                    .find(|s| &s.id == session_id)
-                    .map(|s| self.session_label(s))
-                    .unwrap_or_else(|| session_id.clone());
-
-                let tail = confirm_close_tab_tail(only_tab, *is_main);
-                let lines = vec![
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::raw(" Close the "),
-                        Span::styled(
-                            provider_label.as_str(),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(" tab on "),
-                        Span::styled(
-                            agent_name.as_str(),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw("?"),
-                    ]),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        tail,
-                        Style::default().fg(self.theme.warning_fg),
-                    )),
-                ];
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
-
-                let btn_width = 16u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let confirm_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmCloseTabCancel,
-                        self.pressed_button,
-                        !focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new("Close")
-                    .kind(ButtonKind::Danger)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmCloseTabConfirm,
-                        self.pressed_button,
-                        focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, confirm_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmCloseTab {
-                    cancel_button: cancel_area,
-                    confirm_button: confirm_area,
-                };
+            PromptState::ConfirmCloseTab { .. } => self.render_confirm_close_tab_prompt(frame),
+            PromptState::ConfirmQuit { .. } => self.render_confirm_quit_prompt(frame),
+            PromptState::ConfirmDiscardFile { .. } => {
+                self.render_confirm_discard_file_prompt(frame)
             }
-            PromptState::ConfirmQuit {
-                agent_count,
-                terminal_count,
-                focus,
-            } => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(56, 30, frame.area());
-                self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Quit dux");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                let process_desc = quit_process_description(*agent_count, *terminal_count);
-                let lines = vec![
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::raw(format!(" {process_desc} will be ")),
-                        Span::styled(
-                            "killed",
-                            Style::default()
-                                .fg(self.theme.button_danger_border)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(" if you quit."),
-                    ]),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " Any in-progress work will be lost.",
-                        Style::default().fg(self.theme.warning_fg),
-                    )),
-                    Line::from(Span::styled(
-                        " File changes in worktrees are preserved.",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )),
-                ];
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
-
-                let btn_width = 16u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let quit_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmQuitCancel,
-                        self.pressed_button,
-                        !focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new("Quit")
-                    .kind(ButtonKind::Danger)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmQuitConfirm,
-                        self.pressed_button,
-                        focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, quit_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmQuit {
-                    cancel_button: cancel_area,
-                    quit_button: quit_area,
-                };
+            PromptState::ConfirmCreateInitialCommit { .. } => {
+                self.render_confirm_initial_commit_prompt(frame)
             }
-            PromptState::ConfirmDiscardFile {
-                file_path, focus, ..
-            } => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(56, 30, frame.area());
-                self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Discard Changes");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                let lines = vec![
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::raw(" Discard all changes to \""),
-                        Span::styled(
-                            file_path.as_str(),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw("\"?"),
-                    ]),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " This action cannot be undone.",
-                        Style::default().fg(self.theme.warning_fg),
-                    )),
-                ];
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
-
-                let btn_width = 16u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let discard_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmDiscardCancel,
-                        self.pressed_button,
-                        !focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new("Discard")
-                    .kind(ButtonKind::Danger)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmDiscardConfirm,
-                        self.pressed_button,
-                        focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, discard_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
-                    cancel_button: cancel_area,
-                    discard_button: discard_area,
-                };
+            PromptState::ConfirmInitRepo { .. } => self.render_confirm_init_repo_prompt(frame),
+            PromptState::ConfirmNonDefaultBranch { .. } => {
+                self.render_confirm_non_default_branch_prompt(frame)
             }
-            PromptState::ConfirmCreateInitialCommit { path, focus, .. } => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(60, 36, frame.area());
-                self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Repository Has No Commits");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                let lines = vec![
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::raw(" \""),
-                        Span::styled(path.as_str(), Style::default().add_modifier(Modifier::BOLD)),
-                        Span::raw("\" has no commits yet,"),
-                    ]),
-                    Line::from(" so agents can't branch worktrees from it."),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " Dux can make an empty initial commit so it works.",
-                        Style::default().fg(self.theme.warning_fg),
-                    )),
-                    Line::from(Span::styled(
-                        " Your existing files are left untouched (untracked).",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )),
-                ];
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
-
-                let btn_width = 22u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let create_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmCreateInitialCommitCancel,
-                        self.pressed_button,
-                        !focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new("Create Commit & Add")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmCreateInitialCommitConfirm,
-                        self.pressed_button,
-                        focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, create_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmCreateInitialCommit {
-                    cancel_button: cancel_area,
-                    create_button: create_area,
-                };
+            PromptState::ConfirmUseExistingBranch { .. } => {
+                self.render_confirm_use_existing_branch_prompt(frame)
             }
-            PromptState::ConfirmInitRepo {
-                path,
-                candidates,
-                focus,
-                ..
-            } => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(60, 40, frame.area());
-                self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Not a Git Repository");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                let mut lines = vec![
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::raw(" \""),
-                        Span::styled(path.as_str(), Style::default().add_modifier(Modifier::BOLD)),
-                        Span::raw("\" is not a git repository."),
-                    ]),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " Dux can initialize one and make an empty initial commit.",
-                        Style::default().fg(self.theme.warning_fg),
-                    )),
-                ];
-                if !candidates.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            " A starter .gitignore will cover: {}.",
-                            candidates.join(", ")
-                        ),
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )));
-                }
-                lines.push(Line::from(Span::styled(
-                    " Your existing files are left untouched (untracked).",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                )));
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
-
-                let btn_width = 22u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let init_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmInitRepoCancel,
-                        self.pressed_button,
-                        !focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new("Initialize & Add")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmInitRepoConfirm,
-                        self.pressed_button,
-                        focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, init_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmInitRepo {
-                    cancel_button: cancel_area,
-                    init_button: init_area,
-                };
+            PromptState::RenameSession { .. } => self.render_rename_session_prompt(frame),
+            PromptState::EditMacros { .. } => self.render_edit_macros_prompt_overlay(frame),
+            PromptState::ResourceMonitor { .. } => {
+                self.render_resource_monitor_prompt_overlay(frame)
             }
-            PromptState::ConfirmNonDefaultBranch {
-                action,
-                current_branch,
-                kind,
-                focus,
-                checkout_default,
-                ..
-            } => {
-                self.render_dim_overlay(frame);
-                let dialog_width = 60u16.min(frame.area().width.max(1));
-                let inner_width = dialog_width.saturating_sub(2);
-                let has_checkbox =
-                    matches!(kind, BranchWarningKind::Known { .. }) && action.allows_add_anyway();
-
-                // Body: warning text + the "new worktrees branch from …" note,
-                // plus a dim info line on the heuristic path explaining why dux
-                // won't offer to switch branches automatically.
-                let mut body_lines = vec![Line::from("")];
-                match kind {
-                    BranchWarningKind::Known { default_branch } => {
-                        body_lines.push(Line::from(vec![
-                            Span::raw(" This repository is on branch "),
-                            Span::styled(
-                                current_branch.as_str(),
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(", but the"),
-                        ]));
-                        body_lines.push(Line::from(vec![
-                            Span::raw(" remote default branch is "),
-                            Span::styled(
-                                default_branch.as_str(),
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw("."),
-                        ]));
-                    }
-                    BranchWarningKind::Heuristic => {
-                        body_lines.push(Line::from(vec![
-                            Span::raw(" This repository is on branch "),
-                            Span::styled(
-                                current_branch.as_str(),
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(","),
-                        ]));
-                        body_lines.push(Line::from(" which doesn't appear to be the main branch."));
-                    }
-                }
-                body_lines.push(Line::from(""));
-                let worktree_warning =
-                    format!(" New worktrees will branch from \"{current_branch}\".");
-                body_lines.push(Line::from(Span::styled(
-                    worktree_warning,
-                    Style::default().fg(self.theme.warning_fg),
-                )));
-                if matches!(kind, BranchWarningKind::Heuristic) {
-                    body_lines.push(Line::from(""));
-                    body_lines.push(Line::from(Span::styled(
-                        " Dux can't confidently identify this repo's default",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )));
-                    body_lines.push(Line::from(Span::styled(
-                        " branch, so it won't change branches for you.",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )));
-                }
-                let body_height = wrapped_line_count(&body_lines, inner_width, false);
-
-                // Checkbox height is measured up-front so the outer rect can
-                // be sized exactly — mirrors the Delete Agent modal.
-                let checkbox_height = if has_checkbox {
-                    let BranchWarningKind::Known { default_branch } = kind else {
-                        unreachable!("has_checkbox requires a known default branch");
-                    };
-                    let state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
-                        CheckboxState::Focused
-                    } else {
-                        CheckboxState::Normal
-                    };
-                    let label = format!("Check out \"{default_branch}\" before adding");
-                    let checkbox = Checkbox::new(&label)
-                        .checked(*checkout_default)
-                        .state(state);
-                    checkbox
-                        .layout(
-                            inner_width,
-                            checkbox.marker_style(Style::default()),
-                            checkbox.label_style(Style::default()),
-                        )
-                        .height
-                } else {
-                    0
-                };
-                let checkbox_spacing = u16::from(has_checkbox);
-
-                let area = centered_rect_exact(
-                    dialog_width,
-                    2 + body_height + checkbox_spacing + checkbox_height + 3,
-                    frame.area(),
-                );
-                self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Non-Default Branch");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, _, checkbox_area, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(body_height),
-                        Constraint::Length(checkbox_spacing),
-                        Constraint::Length(checkbox_height),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                Paragraph::new(body_lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
-
-                let checkbox_rect = if has_checkbox {
-                    let BranchWarningKind::Known { default_branch } = kind else {
-                        unreachable!("has_checkbox requires a known default branch");
-                    };
-                    let checkbox_state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
-                        CheckboxState::Focused
-                    } else {
-                        CheckboxState::Normal
-                    };
-                    let label = format!("Check out \"{default_branch}\" before adding");
-                    let (rect, _) = self.render_overlay_checkbox(
-                        frame,
-                        checkbox_area,
-                        &label,
-                        *checkout_default,
-                        checkbox_state,
-                        None,
-                    );
-                    Some(OverlayCheckbox {
-                        id: OverlayCheckboxId::NonDefaultBranchCheckoutDefault,
-                        rect,
-                    })
-                } else {
-                    None
-                };
-
-                // Both buttons share a single width derived from the longest
-                // label that could appear in either slot. Including
-                // "Check Out & Add" and "Add Anyway" in the calculation keeps
-                // the layout stable when the user toggles the checkbox —
-                // otherwise the buttons would resize mid-modal.
-                let btn_width = shared_button_width(&["Cancel", "Add Anyway", "Check Out & Add"]);
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let add_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                // Swap the confirm button label so the user sees exactly what
-                // pressing it will do. When the checkbox is on and we know the
-                // default branch, the action is a two-step (switch + add),
-                // otherwise it's the original "Add Anyway" add-as-is.
-                let add_label = if has_checkbox && *checkout_default {
-                    "Check Out & Add"
-                } else {
-                    "Add Anyway"
-                };
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmNonDefaultBranchCancel,
-                        self.pressed_button,
-                        *focus == ConfirmNonDefaultBranchFocus::Cancel,
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new(add_label)
-                    .kind(ButtonKind::Danger)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmNonDefaultBranchAdd,
-                        self.pressed_button,
-                        *focus == ConfirmNonDefaultBranchFocus::Add,
-                        true,
-                    ))
-                    .render(frame, add_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmNonDefaultBranch {
-                    cancel_button: cancel_area,
-                    add_button: add_area,
-                    checkbox: checkbox_rect,
-                };
-            }
-            PromptState::ConfirmUseExistingBranch {
-                branch_name,
-                location,
-                focus,
-                ..
-            } => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(60, 30, frame.area());
-                self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Branch Already Exists");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                let location_label = match location {
-                    crate::git::BranchLocation::Local => "local",
-                    crate::git::BranchLocation::Remote => "remote",
-                };
-                let mut lines = vec![Line::from("")];
-                lines.push(Line::from(vec![
-                    Span::raw(" A "),
-                    Span::raw(location_label),
-                    Span::raw(" branch named "),
-                    Span::styled(
-                        branch_name.as_str(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-                lines.push(Line::from(" already exists."));
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    " A new worktree will be created using this branch,",
-                    Style::default().fg(self.theme.warning_fg),
-                )));
-                lines.push(Line::from(Span::styled(
-                    " allowing you to continue working on it.",
-                    Style::default().fg(self.theme.warning_fg),
-                )));
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
-
-                let btn_width = 16u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let use_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmUseExistingBranchCancel,
-                        self.pressed_button,
-                        !focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                // "Use Existing" reuses a branch that already exists — not
-                // destructive, so it shares the Confirm kind with Cancel.
-                Button::new("Use Existing")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ConfirmUseExistingBranchUse,
-                        self.pressed_button,
-                        focus.is_confirm(),
-                        true,
-                    ))
-                    .render(frame, use_area, &self.theme);
-
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmUseExistingBranch {
-                    cancel_button: cancel_area,
-                    use_button: use_area,
-                };
-            }
-            PromptState::RenameSession {
-                input,
-                rename_branch,
-                focus,
-                branch_named,
-                ..
-            } => {
-                let checkbox_state = if *focus == RenameSessionFocus::RenameBranchCheckbox {
-                    CheckboxState::Focused
-                } else {
-                    CheckboxState::Normal
-                };
-                let checkbox = Checkbox::new("Also rename the git branch")
-                    .checked(*rename_branch)
-                    .state(checkbox_state);
-                let dialog_width = 62.min(frame.area().width.max(1));
-                let inner_width = dialog_width.saturating_sub(2);
-                // A standalone agent has no branch, so the checkbox is ABSENT
-                // rather than present-and-inert, and the modal shrinks to the
-                // one control it really has.
-                let checkbox_height = if *branch_named {
-                    checkbox
-                        .layout(
-                            inner_width,
-                            checkbox.marker_style(Style::default()),
-                            checkbox.label_style(Style::default()),
-                        )
-                        .height
-                        .saturating_add(1)
-                } else {
-                    0
-                };
-                let checkbox_spacing = if *branch_named { 1 } else { 0 };
-                let area = centered_rect_exact(
-                    dialog_width,
-                    9 + checkbox_spacing + checkbox_height,
-                    frame.area(),
-                );
-                // The shared chrome trio (dim, clear-and-claim, titled ring).
-                // See `modal::App::open_modal_frame` for why the rect claim and
-                // the border ring cannot be hand-rolled per modal.
-                let inner = self.open_modal_frame(frame, "Rename Agent", area).inner;
-
-                let [label_area, input_area, _, checkbox_area, hint_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                        Constraint::Length(checkbox_spacing),
-                        Constraint::Length(checkbox_height),
-                        Constraint::Min(1),
-                    ])
-                    .areas(inner);
-
-                Paragraph::new(Line::from(Span::styled(
-                    " Enter a new name (empty to reset):",
-                    Style::default().fg(self.theme.input_label_fg),
-                )))
-                .render(label_area, frame.buffer_mut());
-
-                // The field draws its caret only while it HAS focus: with the
-                // checkbox focused the field takes no keystrokes, so a caret
-                // there would be a lie (and the key handler already drops
-                // every key on that basis).
-                let input_focused = *focus == RenameSessionFocus::Input;
-                let input_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_set(border::ROUNDED)
-                    .border_style(self.theme.overlay_field_border_style(input_focused));
-                let input_inner = input_block.inner(input_area);
-                Paragraph::new(render_single_line_cursor_input(
-                    " ",
-                    &input.text,
-                    input.cursor,
-                    self.theme.input_cursor_fg,
-                    self.theme.input_cursor_bg,
-                    input_focused,
-                ))
-                .block(input_block)
-                .render(input_area, frame.buffer_mut());
-
-                let checkbox_rect = if *branch_named {
-                    let (rect, _) = self.render_overlay_checkbox(
-                        frame,
-                        checkbox_area,
-                        "Also rename the git branch",
-                        *rename_branch,
-                        checkbox_state,
-                        Some(Line::from(Span::styled(
-                            format!(
-                                "{}Open PRs will still reference the old branch name",
-                                Checkbox::indent()
-                            ),
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ))),
-                    );
-                    Some(rect)
-                } else {
-                    None
-                };
-
-                let confirm_key = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
-                // Same rule as the new-agent modal: the name field owns the
-                // letters and the horizontal arrows, so the hint names the
-                // first key of the action that still reaches focus movement
-                // here (see `text_field_owns_key`). If a rebinding leaves none,
-                // the segment is dropped: naming a key that types a character
-                // is worse than naming none.
-                // Nothing to move focus to when the checkbox is absent, so the
-                // segment goes with it rather than naming a key that does
-                // nothing.
-                let focus_key = if *branch_named {
-                    self.bindings
-                        .label_for_text_field_dialog(Action::ToggleSelection)
-                } else {
-                    None
-                };
-                let hints = modal_hint_line(
-                    &self.theme,
-                    &[
-                        Hint::key(confirm_key, "confirm"),
-                        // Dropped entirely when the field swallows every key the
-                        // movement action is bound to; the builder owns that rule.
-                        Hint::maybe_key(focus_key, "focus"),
-                        // Space-on-focus is hardcoded (the accessibility tenet),
-                        // so there is no binding to resolve for it. Dropped
-                        // while the name field has focus, where Space is a
-                        // typed character and toggles nothing.
-                        // An empty segment is dropped by the builder.
-                        Hint::plain(if *focus == RenameSessionFocus::Input {
-                            ""
-                        } else {
-                            "Space toggle"
-                        }),
-                        Hint::key(close_key, "cancel"),
-                    ],
-                );
-                Paragraph::new(hints).render(hint_area, frame.buffer_mut());
-                self.overlay_layout.active = OverlayMouseLayout::RenameSession {
-                    input: input_inner,
-                    checkbox: checkbox_rect.map(|rect| OverlayCheckbox {
-                        id: OverlayCheckboxId::RenameSessionBranch,
-                        rect,
-                    }),
-                };
-            }
-            PromptState::EditMacros { .. } => {
-                // Full rendering implemented in Task #5.
-                self.render_edit_macros(frame);
-            }
-            PromptState::ResourceMonitor {
-                rows,
-                scroll_offset,
-                selected_row,
-                expanded,
-                short_window_sample,
-                ..
-            } => {
-                let rows = rows.clone();
-                let scroll_offset = *scroll_offset;
-                let selected_row = *selected_row;
-                let expanded = expanded.clone();
-                let short_window_sample = *short_window_sample;
-                self.render_resource_monitor(
-                    frame,
-                    &rows,
-                    scroll_offset,
-                    selected_row,
-                    &expanded,
-                    short_window_sample,
-                );
-            }
-            PromptState::DebugInput {
-                lines,
-                scroll_offset,
-            } => {
-                self.render_dim_overlay(frame);
-                let popup = centered_rect(80, 70, frame.area());
-                self.clear_overlay_area(frame, popup);
-
-                // Split: content area + 1-line footer hint.
-                let chunks =
-                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(popup);
-                let content_area = chunks[0];
-                let hint_area = chunks[1];
-
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(self.theme.overlay_border))
-                    .title(" Input Debugger ")
-                    .title_style(
-                        Style::default()
-                            .fg(self.theme.help_section_header_fg)
-                            .add_modifier(Modifier::BOLD),
-                    );
-                let inner = block.inner(content_area);
-                block.render(content_area, frame.buffer_mut());
-
-                // Compute the visible window.
-                let visible_h = inner.height as usize;
-                let total = lines.len();
-                let max_offset = total.saturating_sub(visible_h);
-                let offset = (*scroll_offset as usize).min(max_offset);
-
-                // When scroll_offset exceeds max (auto-scroll sentinel), pin to bottom.
-                let start = if *scroll_offset as usize >= total {
-                    max_offset
-                } else {
-                    offset
-                };
-
-                let visible: Vec<Line> =
-                    lines.iter().skip(start).take(visible_h).cloned().collect();
-
-                let paragraph = Paragraph::new(visible);
-                paragraph.render(inner, frame.buffer_mut());
-
-                // Footer hint.
-                let hint = Line::from(vec![
-                    Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" close  "),
-                    Span::styled("Scroll", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" navigate"),
-                ]);
-                let hint_para = Paragraph::new(hint)
-                    .alignment(ratatui::layout::Alignment::Center)
-                    .style(
-                        Style::default()
-                            .fg(self.theme.hint_desc_fg)
-                            .add_modifier(Modifier::DIM),
-                    );
-                hint_para.render(hint_area, frame.buffer_mut());
-            }
+            PromptState::DebugInput { .. } => self.render_debug_input_prompt(frame),
             PromptState::NameNewAgent {
                 request,
                 input,
@@ -9284,198 +9710,9 @@ impl App {
                     }),
                 };
             }
-            PromptState::PullRequestInput {
-                project,
-                input,
-                focus,
-            } => {
-                self.render_dim_overlay(frame);
-                // The reference-first shape carries a secondary action under the
-                // field, so it needs four more rows than the project-first one.
-                let has_project = project.is_some();
-                let height = if has_project { 8 } else { 12 };
-                let area = centered_rect_exact(64, height, frame.area());
-                self.clear_overlay_area(frame, area);
-
-                let outer = self.themed_overlay_block("Create Agent From PR");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [label_area, input_area, action_area, hint_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(2),
-                        Constraint::Length(3),
-                        Constraint::Length(if has_project { 0 } else { 4 }),
-                        Constraint::Min(1),
-                    ])
-                    .areas(inner);
-
-                let labels = match project {
-                    Some(project) => vec![
-                        Line::from(Span::styled(
-                            format!(" Project: {}", project.name),
-                            Style::default().fg(self.theme.input_label_fg),
-                        )),
-                        Line::from(Span::styled(
-                            " Paste a GitHub PR URL or enter a PR number:",
-                            Style::default().fg(self.theme.input_label_fg),
-                        )),
-                    ],
-                    None => vec![
-                        Line::from(Span::styled(
-                            " Paste a pull request link, or type owner/repo#123:",
-                            Style::default().fg(self.theme.input_label_fg),
-                        )),
-                        Line::from(Span::styled(
-                            " dux finds the project that repository is open in.",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        )),
-                    ],
-                };
-                Paragraph::new(labels).render(label_area, frame.buffer_mut());
-
-                // Focus is visible or it is not focus: the border and the caret
-                // both follow it, so a field that will not take your keystrokes
-                // never draws a caret.
-                let field_focused = *focus == PullRequestInputFocus::Input;
-                let input_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_set(border::ROUNDED)
-                    .border_style(self.theme.overlay_field_border_style(field_focused));
-                let input_inner = input_block.inner(input_area);
-                Paragraph::new(render_single_line_cursor_input(
-                    " ",
-                    &input.text,
-                    input.cursor,
-                    self.theme.input_cursor_fg,
-                    self.theme.input_cursor_bg,
-                    field_focused,
-                ))
-                .block(input_block)
-                .render(input_area, frame.buffer_mut());
-
-                // The secondary action, and the misclick-safe blank row above
-                // it. Only offered when no project has been chosen: with one
-                // already chosen this modal is exactly what it always was.
-                let mut choose_button = None;
-                if !has_project && action_area.height >= 4 {
-                    // The same words the inline refusal of a bare number uses,
-                    // so the message and the control it points at agree.
-                    let label = "Choose an existing project…";
-                    let width = button_width_for(label).min(action_area.width);
-                    let button = Rect {
-                        x: action_area.x + (action_area.width.saturating_sub(width)) / 2,
-                        y: action_area.y + 1,
-                        width,
-                        height: 3,
-                    };
-                    Button::new(label)
-                        .kind(ButtonKind::Confirm)
-                        .state(button_state_for(
-                            ButtonPressedTarget::PullRequestChooseProject,
-                            self.pressed_button,
-                            !field_focused,
-                            true,
-                        ))
-                        .render(frame, button, &self.theme);
-                    choose_button = Some(button);
-                }
-
-                let confirm_key = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let mut hints = vec![Hint::key(
-                    confirm_key,
-                    if field_focused {
-                        "resolve"
-                    } else {
-                        "choose a project"
-                    },
-                )];
-                if !has_project {
-                    hints.push(Hint::maybe_key(
-                        self.bindings
-                            .label_for_text_field_dialog(Action::ToggleSelection),
-                        "move focus",
-                    ));
-                }
-                hints.push(Hint::key(close_key, "cancel"));
-                Paragraph::new(modal_hint_line(&self.theme, &hints))
-                    .render(hint_area, frame.buffer_mut());
-                self.overlay_layout.active = OverlayMouseLayout::PullRequestInput {
-                    input: input_inner,
-                    choose_project: choose_button,
-                };
-            }
-            PromptState::AttachPullRequestInput {
-                current_pr, input, ..
-            } => {
-                self.render_dim_overlay(frame);
-                // Two body rows always (the accepted-forms hint plus spacing),
-                // plus one more when there is a current PR to name.
-                let has_current = current_pr.is_some();
-                let height = if has_current { 9 } else { 8 };
-                let area = centered_rect_exact(64, height, frame.area());
-                self.clear_overlay_area(frame, area);
-
-                let outer = self.themed_overlay_block("Attach Pull Request");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [label_area, input_area, hint_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(if has_current { 3 } else { 2 }),
-                        Constraint::Length(3),
-                        Constraint::Min(1),
-                    ])
-                    .areas(inner);
-
-                let mut labels = Vec::new();
-                if let Some(current) = current_pr {
-                    labels.push(Line::from(Span::styled(
-                        format!(" Currently showing {current}; attaching replaces it."),
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )));
-                }
-                labels.push(Line::from(Span::styled(
-                    " Enter a PR URL, owner/repo#123, #123, or 123:",
-                    Style::default().fg(self.theme.input_label_fg),
-                )));
-                labels.push(Line::from(Span::styled(
-                    " Attaching pins the PR and pauses autodetection.",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                )));
-                Paragraph::new(labels).render(label_area, frame.buffer_mut());
-
-                // The field is the modal's only control, so it is always
-                // focused: focused border, caret drawn.
-                let input_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_set(border::ROUNDED)
-                    .border_style(self.theme.overlay_field_border_style(true));
-                let input_inner = input_block.inner(input_area);
-                Paragraph::new(render_single_line_cursor_input(
-                    " ",
-                    &input.text,
-                    input.cursor,
-                    self.theme.input_cursor_fg,
-                    self.theme.input_cursor_bg,
-                    true,
-                ))
-                .block(input_block)
-                .render(input_area, frame.buffer_mut());
-
-                let confirm_key = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let hints = vec![
-                    Hint::key(confirm_key, "attach"),
-                    Hint::key(close_key, "cancel"),
-                ];
-                Paragraph::new(modal_hint_line(&self.theme, &hints))
-                    .render(hint_area, frame.buffer_mut());
-                self.overlay_layout.active =
-                    OverlayMouseLayout::AttachPullRequestInput { input: input_inner };
+            PromptState::PullRequestInput { .. } => self.render_pull_request_input_prompt(frame),
+            PromptState::AttachPullRequestInput { .. } => {
+                self.render_attach_pull_request_input_prompt(frame)
             }
             PromptState::None => {}
         }
