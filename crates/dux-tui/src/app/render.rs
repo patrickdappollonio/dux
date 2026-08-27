@@ -4726,6 +4726,147 @@ impl App {
         }
     }
 
+    fn render_command_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::Command { input, selected } = &self.prompt else {
+            return;
+        };
+        self.render_dim_overlay(frame);
+        let popup = centered_rect(72, 40, frame.area());
+        self.clear_overlay_area(frame, popup);
+        let (direct, other) = self.palette_command_tiers(&input.text);
+        let divider_at = (!other.is_empty()).then_some(direct.len());
+        let mut commands = direct;
+        commands.extend(other);
+        let visual_rows = palette_visual_rows(
+            divider_at.unwrap_or(commands.len()),
+            divider_at.map_or(0, |at| commands.len() - at),
+        );
+        let items = if commands.is_empty() {
+            vec![ListItem::new("No matching commands.")]
+        } else {
+            let name_col = commands
+                .iter()
+                .map(|binding| binding.palette_name.unwrap().len())
+                .max()
+                .unwrap_or(0);
+            let inner_width = popup.width as usize - 3;
+            let gap = 2usize;
+            visual_rows
+                .iter()
+                .map(|row| {
+                    let index = match row {
+                        PaletteVisualRow::Divider => {
+                            return ListItem::new(Line::from(Span::styled(
+                                " Other matches",
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            )));
+                        }
+                        PaletteVisualRow::Command(index) => *index,
+                    };
+                    let binding = commands[index];
+                    let name = binding.palette_name.unwrap();
+                    let name_padded = format!("{name:name_col$}");
+                    let mut spans = vec![Span::styled(
+                        name_padded,
+                        Style::default()
+                            .fg(self.theme.help_section_header_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    let description_width = inner_width.saturating_sub(name_col + gap);
+                    let description = binding.palette_description.unwrap_or("");
+                    let description_display = if description.chars().count() > description_width
+                        && description_width > 1
+                    {
+                        let end: String = description.chars().take(description_width - 1).collect();
+                        format!("  {end}\u{2026}")
+                    } else {
+                        format!("  {description:description_width$}")
+                    };
+                    spans.push(Span::styled(
+                        description_display,
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    ListItem::new(Line::from(spans))
+                })
+                .collect::<Vec<_>>()
+        };
+        // The stored selection counts commands; the rendered list also counts
+        // its non-selectable divider row.
+        let selected_command = (*selected).min(commands.len().saturating_sub(1));
+        let selected_visual = visual_rows
+            .iter()
+            .position(|row| *row == PaletteVisualRow::Command(selected_command))
+            .unwrap_or(0);
+        let mut state = ListState::default().with_selected(Some(selected_visual));
+        let [input_area, list_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(3)])
+            .areas(popup);
+        let confirm_key = self.bindings.label_for(Action::Confirm);
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let mut bottom_spans = vec![Span::raw(" ")];
+        bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+        bottom_spans.push(Span::styled(
+            " run  ",
+            Style::default().fg(self.theme.hint_desc_fg),
+        ));
+        bottom_spans.extend(self.theme.key_badge_default("Tab"));
+        bottom_spans.push(Span::styled(
+            " complete  ",
+            Style::default().fg(self.theme.hint_desc_fg),
+        ));
+        bottom_spans.extend(self.theme.key_badge_default(&close_key));
+        bottom_spans.push(Span::styled(
+            " cancel",
+            Style::default().fg(self.theme.hint_desc_fg),
+        ));
+        let input_block = self
+            .themed_overlay_block("Command Palette")
+            .title_bottom(Line::from(bottom_spans));
+        let input_inner = input_block.inner(input_area);
+        Paragraph::new(render_single_line_cursor_input(
+            "> ",
+            &input.text,
+            input.cursor,
+            self.theme.input_cursor_fg,
+            self.theme.input_cursor_bg,
+            true,
+        ))
+        .block(input_block)
+        .render(input_area, frame.buffer_mut());
+        let list_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(self.theme.overlay_border))
+            .style(Style::default().bg(self.theme.overlay_bg));
+        let list_inner = list_block.inner(list_area);
+        StatefulWidget::render(
+            List::new(items)
+                .block(list_block)
+                .highlight_style(self.theme.selection_style()),
+            list_area,
+            frame.buffer_mut(),
+            &mut state,
+        );
+        render_scroll_marker(
+            frame,
+            list_area,
+            list_inner,
+            state.offset(),
+            list_inner.height as usize,
+            visual_rows.len(),
+            self.theme.hint_key_fg,
+        );
+        self.overlay_layout.active = OverlayMouseLayout::Command {
+            input: input_inner,
+            list: list_inner,
+            items: visual_rows.len(),
+            offset: state.offset(),
+        };
+    }
+
     fn render_prompt(&mut self, frame: &mut Frame) {
         // The standalone delete dialog is rendered ahead of the main match,
         // with its content copied out first, because it needs `&mut self` for
@@ -4767,156 +4908,7 @@ impl App {
             return;
         }
         match &self.prompt {
-            PromptState::Command { input, selected } => {
-                self.render_dim_overlay(frame);
-                let popup = centered_rect(72, 40, frame.area());
-                self.clear_overlay_area(frame, popup);
-                let (direct, other) = self.palette_command_tiers(&input.text);
-                let divider_at = (!other.is_empty()).then_some(direct.len());
-                let mut commands = direct;
-                commands.extend(other);
-                let visual_rows = palette_visual_rows(
-                    divider_at.unwrap_or(commands.len()),
-                    divider_at.map_or(0, |at| commands.len() - at),
-                );
-                let items = if commands.is_empty() {
-                    vec![ListItem::new("No matching commands.")]
-                } else {
-                    let name_col = commands
-                        .iter()
-                        .map(|b| b.palette_name.unwrap().len())
-                        .max()
-                        .unwrap_or(0);
-                    let inner_w = popup.width as usize - 3;
-                    let gap = 2usize;
-                    visual_rows
-                        .iter()
-                        .map(|row| {
-                            let index = match row {
-                                PaletteVisualRow::Divider => {
-                                    // The one non-selectable row, in the same
-                                    // tone the worktree manager's section
-                                    // headers use.
-                                    return ListItem::new(Line::from(Span::styled(
-                                        " Other matches",
-                                        Style::default()
-                                            .fg(self.theme.help_section_header_fg)
-                                            .add_modifier(Modifier::BOLD),
-                                    )));
-                                }
-                                PaletteVisualRow::Command(index) => *index,
-                            };
-                            let binding = commands[index];
-                            let name = binding.palette_name.unwrap();
-                            let name_padded = format!("{name:name_col$}");
-                            let mut spans = vec![Span::styled(
-                                name_padded,
-                                Style::default()
-                                    .fg(self.theme.help_section_header_fg)
-                                    .add_modifier(Modifier::BOLD),
-                            )];
-                            let desc_avail = inner_w.saturating_sub(name_col + gap);
-                            let desc = binding.palette_description.unwrap_or("");
-                            let desc_display =
-                                if desc.chars().count() > desc_avail && desc_avail > 1 {
-                                    let end: String = desc.chars().take(desc_avail - 1).collect();
-                                    format!("  {end}\u{2026}")
-                                } else {
-                                    format!("  {desc:desc_avail$}")
-                                };
-                            spans.push(Span::styled(
-                                desc_display,
-                                Style::default().fg(self.theme.hint_desc_fg),
-                            ));
-                            ListItem::new(Line::from(spans))
-                        })
-                        .collect::<Vec<_>>()
-                };
-                // `selected` counts commands; the list counts rows, and the
-                // divider is a row with no command behind it.
-                let selected_command = (*selected).min(commands.len().saturating_sub(1));
-                let selected_visual = visual_rows
-                    .iter()
-                    .position(|row| *row == PaletteVisualRow::Command(selected_command))
-                    .unwrap_or(0);
-                let mut state = ListState::default().with_selected(Some(selected_visual));
-                let [input_area, list_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(3), Constraint::Min(3)])
-                    .areas(popup);
-                let title = "Command Palette";
-                let confirm_key = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let mut bottom_spans = vec![Span::raw(" ")];
-                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                bottom_spans.push(Span::styled(
-                    " run  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                // Tab autocomplete is text-input behavior, not a rebindable action.
-                bottom_spans.extend(self.theme.key_badge_default("Tab"));
-                bottom_spans.push(Span::styled(
-                    " complete  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                bottom_spans.push(Span::styled(
-                    " cancel",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                let prompt_prefix = "> ";
-                let input_block = self
-                    .themed_overlay_block(title)
-                    .title_bottom(Line::from(bottom_spans));
-                let input_inner = input_block.inner(input_area);
-                Paragraph::new(render_single_line_cursor_input(
-                    prompt_prefix,
-                    &input.text,
-                    input.cursor,
-                    self.theme.input_cursor_fg,
-                    self.theme.input_cursor_bg,
-                    true,
-                ))
-                .block(input_block)
-                .render(input_area, frame.buffer_mut());
-                let list_block = Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(self.theme.overlay_border))
-                    .style(Style::default().bg(self.theme.overlay_bg));
-                let list_inner = list_block.inner(list_area);
-                StatefulWidget::render(
-                    List::new(items)
-                        .block(list_block)
-                        .highlight_style(self.theme.selection_style()),
-                    list_area,
-                    frame.buffer_mut(),
-                    &mut state,
-                );
-                // Scroll marker in the list block's right border column. This is
-                // an ITEM-offset surface, not a line-offset one: a `ListState`
-                // offset counts whole items and never clips the top one, so the
-                // unit here is items — `state.offset()` (read AFTER the render,
-                // which is what scrolls it to the selection), the list viewport
-                // in rows (one row per item here), and the VISUAL row count,
-                // which counts the divider: it occupies a row and has to be
-                // scrolled past like any other.
-                render_scroll_marker(
-                    frame,
-                    list_area,
-                    list_inner,
-                    state.offset(),
-                    list_inner.height as usize,
-                    visual_rows.len(),
-                    self.theme.hint_key_fg,
-                );
-                self.overlay_layout.active = OverlayMouseLayout::Command {
-                    input: input_inner,
-                    list: list_inner,
-                    items: visual_rows.len(),
-                    offset: state.offset(),
-                };
-            }
+            PromptState::Command { .. } => self.render_command_prompt(frame),
             PromptState::BrowseProjects {
                 purpose,
                 current_dir,
