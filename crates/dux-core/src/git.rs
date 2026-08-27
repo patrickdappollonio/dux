@@ -1085,6 +1085,13 @@ pub struct UncommittedCopySummary {
     pub skipped_paths: Vec<String>,
 }
 
+#[derive(Default)]
+struct UncommittedCopyPlan {
+    deletions: Vec<PathBuf>,
+    copies: Vec<PathBuf>,
+    skipped_paths: Vec<String>,
+}
+
 /// Copies exactly what `git status --porcelain=v1 -z --untracked-files=all`
 /// reports in `source` into `destination`. Nothing gitignored travels.
 /// PRECONDITION: both worktrees are at the SAME HEAD commit; callers enforce
@@ -1106,6 +1113,17 @@ pub fn copy_uncommitted_changes(
         ));
     }
 
+    let plan = classify_uncommitted_records(&uncommitted_status(&source)?)?;
+    let mut summary = UncommittedCopySummary {
+        skipped_paths: plan.skipped_paths,
+        ..Default::default()
+    };
+    apply_uncommitted_deletions(&destination, &plan.deletions, &mut summary)?;
+    apply_uncommitted_copies(&source, &destination, &plan.copies, &mut summary)?;
+    Ok(summary)
+}
+
+fn uncommitted_status(source: &Path) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -1126,91 +1144,91 @@ pub fn copy_uncommitted_changes(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+    Ok(output.stdout)
+}
 
-    // Classify every record before touching the filesystem, then run all
-    // deletions before any copies (one path can appear twice, e.g. a staged
-    // delete plus an untracked recreate, and a tracked file can be replaced
-    // by a directory).
-    let mut deletions: Vec<PathBuf> = Vec::new();
-    let mut copies: Vec<PathBuf> = Vec::new();
-    let mut skipped_paths: Vec<String> = Vec::new();
-
-    for record in output.stdout.split(|byte| *byte == 0) {
-        if record.len() < 4 {
-            continue;
-        }
-        let index_status = record[0] as char;
-        let worktree_status = record[1] as char;
-        if matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C') {
-            return Err(anyhow!(
-                "rename/copy detection produced a two-path record despite `-c status.renames=false`; this needs git >= 2.18"
-            ));
-        }
-        let path_bytes = &record[3..];
-        let rel: &Path =
-            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path_bytes).as_ref();
-        // Defensive guard: status never emits absolute paths, `..`, or paths
-        // under `.git`, but corrupt output must not escape the destination.
-        let mut components = rel.components();
-        let first_is_git_dir =
-            matches!(components.next(), Some(Component::Normal(name)) if name == ".git");
-        if rel.is_absolute()
-            || first_is_git_dir
-            || rel
-                .components()
-                .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-        {
-            continue;
-        }
-
-        if path_bytes.ends_with(b"/") {
-            // An untracked directory git will not descend into (an embedded
-            // repo): never a recursive copy, skip with a note.
-            skipped_paths.push(rel.to_string_lossy().trim_end_matches('/').to_string());
-            continue;
-        }
-        let unmerged = index_status == 'U'
-            || worktree_status == 'U'
-            || (index_status == 'A' && worktree_status == 'A')
-            || (index_status == 'D' && worktree_status == 'D');
-        if unmerged {
-            // Unmerged records cannot be classified by status code: both `UD`
-            // and `DU` leave a file on disk (with different contents). The
-            // copy phase decides by source disk state, the only honest source
-            // for a mid-merge tree.
-            copies.push(rel.to_path_buf());
-        } else if worktree_status == 'D' || (index_status == 'D' && worktree_status == ' ') {
-            // ` D`/`MD`/`AD` (the worktree delete wins) and a staged delete;
-            // an untracked recreate arrives as its own `??` record.
-            deletions.push(rel.to_path_buf());
-        } else {
-            copies.push(rel.to_path_buf());
-        }
+fn classify_uncommitted_records(status: &[u8]) -> Result<UncommittedCopyPlan> {
+    let mut plan = UncommittedCopyPlan::default();
+    for record in status.split(|byte| *byte == 0) {
+        classify_uncommitted_record(record, &mut plan)?;
     }
+    Ok(plan)
+}
 
-    let mut summary = UncommittedCopySummary {
-        skipped_paths,
-        ..Default::default()
-    };
+fn classify_uncommitted_record(record: &[u8], plan: &mut UncommittedCopyPlan) -> Result<()> {
+    if record.len() < 4 {
+        return Ok(());
+    }
+    let index_status = record[0] as char;
+    let worktree_status = record[1] as char;
+    if matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C') {
+        return Err(anyhow!(
+            "rename/copy detection produced a two-path record despite `-c status.renames=false`; this needs git >= 2.18"
+        ));
+    }
+    let path_bytes = &record[3..];
+    let relative: &Path =
+        <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path_bytes).as_ref();
+    if !is_safe_status_path(relative) {
+        return Ok(());
+    }
+    if path_bytes.ends_with(b"/") {
+        plan.skipped_paths
+            .push(relative.to_string_lossy().trim_end_matches('/').to_string());
+    } else if is_unmerged_status(index_status, worktree_status) {
+        plan.copies.push(relative.to_path_buf());
+    } else if worktree_status == 'D' || (index_status == 'D' && worktree_status == ' ') {
+        plan.deletions.push(relative.to_path_buf());
+    } else {
+        plan.copies.push(relative.to_path_buf());
+    }
+    Ok(())
+}
 
-    // Phase 1: deletions. Classified purely by status code, never by probing
-    // the source filesystem (a `D` means the tracked thing is gone from the
-    // working tree regardless of what occupies the path now).
-    for rel in &deletions {
-        remove_path_if_exists(&destination.join(rel))?;
+fn is_safe_status_path(relative: &Path) -> bool {
+    let first_is_git_dir = matches!(
+        relative.components().next(),
+        Some(Component::Normal(name)) if name == ".git"
+    );
+    !relative.is_absolute()
+        && !first_is_git_dir
+        && !relative
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+}
+
+fn is_unmerged_status(index_status: char, worktree_status: char) -> bool {
+    index_status == 'U'
+        || worktree_status == 'U'
+        || (index_status == 'A' && worktree_status == 'A')
+        || (index_status == 'D' && worktree_status == 'D')
+}
+
+fn apply_uncommitted_deletions(
+    destination: &Path,
+    deletions: &[PathBuf],
+    summary: &mut UncommittedCopySummary,
+) -> Result<()> {
+    for relative in deletions {
+        remove_path_if_exists(&destination.join(relative))?;
         summary.deleted += 1;
-        prune_empty_ancestors(&destination, rel);
+        prune_empty_ancestors(destination, relative);
     }
+    Ok(())
+}
 
-    // Phase 2: copies. The source filesystem is probed on this side only.
-    for rel in &copies {
-        let source_path = source.join(rel);
-        let destination_path = destination.join(rel);
+fn apply_uncommitted_copies(
+    source: &Path,
+    destination: &Path,
+    copies: &[PathBuf],
+    summary: &mut UncommittedCopySummary,
+) -> Result<()> {
+    for relative in copies {
+        let source_path = source.join(relative);
+        let destination_path = destination.join(relative);
         let metadata = match fs::symlink_metadata(&source_path) {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                // The unmerged-record-absent-on-disk branch (e.g. `DD`), and
-                // race tolerance for plain copies.
                 remove_path_if_exists(&destination_path)?;
                 summary.deleted += 1;
                 continue;
@@ -1218,22 +1236,16 @@ pub fn copy_uncommitted_changes(
             Err(err) => return Err(err.into()),
         };
         if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
-            // A dirty submodule (` M smdir`), an unmerged record that turned
-            // out to be a directory, or a non-regular file (FIFO, socket,
-            // device): skip with a note, touch nothing. `sync_entry` must
-            // only ever see regular files and symlinks, because opening a
-            // FIFO with no writer blocks forever.
             summary
                 .skipped_paths
-                .push(rel.to_string_lossy().to_string());
+                .push(relative.to_string_lossy().to_string());
             continue;
         }
-        ensure_destination_parents(&source, &destination, rel)?;
+        ensure_destination_parents(source, destination, relative)?;
         sync_entry(&source_path, &destination_path)?;
         summary.copied += 1;
     }
-
-    Ok(summary)
+    Ok(())
 }
 
 /// Best-effort removal of now-empty ancestor directories of `rel` inside
