@@ -76,11 +76,10 @@ For interactions (clicking through a flow before screenshotting), write a
 throwaway `puppeteer-core` script for the journey at hand and delete it after:
 `shot.js` shows the connection boilerplate (launch args, viewport, the
 forwarded port), and `puppeteer-core` is already in this directory's
-`package.json`. A generic action-DSL driver used to live here and was removed
-on purpose: every real journey needed bespoke selectors anyway, so the DSL was
-a second thing to learn that still could not click half the UI. Driving the
-app over REST (`/api/v1/...`) is often faster than clicking; see the routes in
-`crates/dux-web/src/`.
+`package.json`. Use journey-specific selectors instead of a generic action DSL;
+real flows need bespoke selectors, and the extra abstraction cannot express
+many UI interactions. Driving the app over REST (`/api/v1/...`) is often faster
+than clicking; see the routes in `crates/dux-web/src/`.
 
 ## TUI screenshots
 
