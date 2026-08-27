@@ -189,18 +189,19 @@ export function loadTerminalFontsThenRefit(
     return
   }
   // Every bundled face is loaded explicitly, one family per call, from
-  // TERMINAL_FONT_PRELOADS. Measured (headless Chromium, the four faces
-  // declared exactly as index.css declares them): the whole-stack shorthand
-  // this used to rely on already loads every family in the list whose range
-  // covers a sample code point, the fill face included, so the old comment
-  // here claiming the fill face was deliberately left lazy described
-  // something that was not happening. `document.fonts.load` returned
-  // ["Dux Mono Symbols 400", "Dux Mono 400", "Dux Mono Fill 400"] for the
-  // stack with the "█⣿" sample, and all three read `loaded` afterwards. So
-  // the fill face's ~79 KB was already being fetched on every mount; naming
-  // it makes that deliberate and, more importantly, makes it independent of
-  // the stack's contents (a user family prepended ahead of it, a reordering,
-  // a range recut).
+  // TERMINAL_FONT_PRELOADS, so no face's fetch depends on where its family
+  // sits in the stack: not on a user family prepended ahead of it, not on a
+  // reordering, not on a range recut. A face that is not fetched before xterm
+  // measures it gets a fallback advance cached in its place, and every row
+  // carrying one of its glyphs is dragged sideways.
+  //
+  // Measured (headless Chromium, the four faces declared exactly as index.css
+  // declares them): a whole-stack shorthand loads EVERY family in the list
+  // whose range covers a sample code point, not just the one CSS matching
+  // would pick. `document.fonts.load` on the stack with a "█⣿" sample
+  // returns ["Dux Mono Symbols 400", "Dux Mono 400", "Dux Mono Fill 400"] and
+  // leaves all three `loaded`, so the fill face's ~79 KB is paid on every
+  // mount either way; naming it makes that deliberate.
   //
   // The user's own family is loaded separately below, through the whole
   // sanitized stack, because there is no declared face to name for it.

@@ -158,9 +158,17 @@ describe("terminal font preload samples", () => {
   it("keeps every restricted face's sample inside that face's own unicode-range", () => {
     for (const preload of TERMINAL_FONT_PRELOADS) {
       const declared = rangesByFamily[preload.family]
-      // The text face carries no `unicode-range` at all, so any sample fetches
-      // it and there is nothing to pin.
-      if (!declared) continue
+      if (!declared) {
+        // "Dux Mono" carries no `unicode-range` at all, so any sample fetches
+        // it and there is nothing to pin. Every OTHER family is unknown to
+        // this test, and skipping an unknown one would let a fifth face join
+        // the preload list with a sample nothing ever checks. Naming the one
+        // legitimate exception makes that a failure instead.
+        expect(preload.family, "unrestricted face missing its range").toBe(
+          DUX_MONO_FAMILY,
+        )
+        continue
+      }
       const ranges = parseUnicodeRange(declared)
       for (const character of [...preload.sample]) {
         const cp = character.codePointAt(0) as number

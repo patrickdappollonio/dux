@@ -2779,16 +2779,13 @@ describe("TerminalPane bundled font load on mount", () => {
       expect.stringContaining('"Dux Mono"'),
       expect.any(String),
     )
-    // Every bundled face is asked for BY NAME, the fill face included. This
-    // assertion used to say the opposite, on the belief that the fill face
-    // was left lazy to save its ~79 KB; measuring `document.fonts` in
-    // headless Chromium refuted that. The whole-stack shorthand this used to
-    // rely on loads every family in the list whose `unicode-range` covers a
-    // sample code point, so the fill face was already being fetched on every
-    // mount. Naming it makes that deliberate and, more to the point, stops
-    // any face's fetch from depending on the stack's contents: a face that is
-    // not fetched before xterm measures it gets a fallback advance cached in
-    // its place, which drags every row carrying one of its glyphs sideways.
+    // Every bundled face is asked for BY NAME, the fill face included, so no
+    // face's fetch depends on the stack's contents. A face that is not
+    // fetched before xterm measures it gets a fallback advance cached in its
+    // place, which drags every row carrying one of its glyphs sideways.
+    // Measured in headless Chromium: a whole-stack shorthand loads every
+    // family whose `unicode-range` covers a sample code point, so the fill
+    // face costs its ~79 KB on every mount whether or not it is named here.
     const fillCall = load.mock.calls.find(([shorthand]: [string]) =>
       /^\d+px "Dux Mono Fill"/.test(String(shorthand)),
     )

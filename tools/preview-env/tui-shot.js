@@ -70,13 +70,28 @@ const xtermCss = fs.readFileSync(path.join(packageRoot, "css", "xterm.css"), "ut
   // crates/dux-web/web/src/lib/terminalFont.ts; when a range moves there, move
   // it here and re-pick these samples. Deliberately not shared code: a build
   // step for a screenshot tool is not worth it.
+  //
+  // A load whose family or sample matches no declared face resolves to an
+  // EMPTY array rather than rejecting, so a typo here would silently bring the
+  // drifted capture back. Every result is checked and an empty one fails the
+  // capture out loud.
   await page.evaluate(async () => {
-    await Promise.all([
-      document.fonts.load('14px "Dux Mono"', "Ag"),
-      document.fonts.load('bold 14px "Dux Mono"', "Ag"),
-      document.fonts.load('14px "Dux Mono Symbols"', "✓⣿─"),
-      document.fonts.load('14px "Dux Mono Fill"', "※✷"),
-    ])
+    const preloads = [
+      { shorthand: '14px "Dux Mono"', sample: "Ag" },
+      { shorthand: 'bold 14px "Dux Mono"', sample: "Ag" },
+      { shorthand: '14px "Dux Mono Symbols"', sample: "✓⣿─" },
+      { shorthand: '14px "Dux Mono Fill"', sample: "※✷" },
+    ]
+    const loaded = await Promise.all(
+      preloads.map((preload) =>
+        document.fonts.load(preload.shorthand, preload.sample),
+      ),
+    )
+    loaded.forEach((faces, index) => {
+      if (faces.length === 0) {
+        throw new Error(`a terminal face did not load: ${preloads[index].shorthand}`)
+      }
+    })
   })
   await page.evaluate(() => document.fonts.ready)
   await page.evaluate(
