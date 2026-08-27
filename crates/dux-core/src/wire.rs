@@ -4067,35 +4067,13 @@ impl Engine {
         })
     }
 
-    fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
-        let command = match self.map_changes_command(command)? {
-            WireCommandMapping::Mapped(command) => return Ok(command),
-            WireCommandMapping::Unhandled(command) => command,
-        };
-        let command = match self.map_project_command(command)? {
-            WireCommandMapping::Mapped(command) => return Ok(command),
-            WireCommandMapping::Unhandled(command) => command,
-        };
-        Ok(match command {
-            WireCommand::DeleteTerminal { terminal_id } => Command::DeleteTerminal { terminal_id },
-            WireCommand::DeleteSession {
-                session_id,
-                delete_worktree,
-            } => Command::BeginDeleteSession {
-                session_id,
-                delete_worktree,
-            },
-            WireCommand::PersistGlobalEnv { env } => Command::PersistGlobalEnv { env },
-            WireCommand::ReloadConfig {} => Command::ReloadConfig,
-            WireCommand::RecoverConfig {} => Command::RecoverConfig,
+    fn map_agent_command(&self, command: WireCommand) -> anyhow::Result<WireCommandMapping> {
+        let mapped = match command {
             WireCommand::CreateStandaloneAgent {
                 folder,
                 name,
                 provider,
             } => {
-                // Every refusal, the title rule and the provider default live
-                // in one core helper, shared with the TUI's folder-browser
-                // flow, so the two surfaces cannot answer differently.
                 let (request, busy_message) =
                     self.plan_standalone_agent(&folder, &name, provider.as_deref())?;
                 Command::DispatchCreateAgentRequest {
@@ -4123,6 +4101,67 @@ impl Engine {
                 worktree_path,
                 name,
             } => self.adopt_worktree_command(project_id, worktree_path, name)?,
+            command => return Ok(WireCommandMapping::Unhandled(command)),
+        };
+        Ok(WireCommandMapping::Mapped(mapped))
+    }
+
+    fn update_macros_command(entries: Vec<WireMacroEntry>) -> anyhow::Result<Command> {
+        let mut macros = crate::config::MacrosConfig::default();
+        for entry in entries {
+            let name = entry.name.trim().to_string();
+            if name.is_empty() {
+                anyhow::bail!("Macro name cannot be empty.");
+            }
+            if macros.entries.contains_key(&name) {
+                anyhow::bail!("Name \"{name}\" is already in use. Choose another.");
+            }
+            if entry.text.is_empty() {
+                anyhow::bail!("Macro \"{name}\" has no text. Enter the text to send.");
+            }
+            let surface = crate::config::MacroSurface::from_config_str(&entry.surface)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Macro \"{name}\" has an unknown surface \"{}\". Use \"agent\", \"terminal\", or \"both\".",
+                        entry.surface
+                    )
+                })?;
+            macros.entries.insert(
+                name,
+                crate::config::MacroEntry {
+                    text: entry.text,
+                    surface,
+                },
+            );
+        }
+        Ok(Command::UpdateMacros { macros })
+    }
+
+    fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
+        let command = match self.map_changes_command(command)? {
+            WireCommandMapping::Mapped(command) => return Ok(command),
+            WireCommandMapping::Unhandled(command) => command,
+        };
+        let command = match self.map_project_command(command)? {
+            WireCommandMapping::Mapped(command) => return Ok(command),
+            WireCommandMapping::Unhandled(command) => command,
+        };
+        let command = match self.map_agent_command(command)? {
+            WireCommandMapping::Mapped(command) => return Ok(command),
+            WireCommandMapping::Unhandled(command) => command,
+        };
+        Ok(match command {
+            WireCommand::DeleteTerminal { terminal_id } => Command::DeleteTerminal { terminal_id },
+            WireCommand::DeleteSession {
+                session_id,
+                delete_worktree,
+            } => Command::BeginDeleteSession {
+                session_id,
+                delete_worktree,
+            },
+            WireCommand::PersistGlobalEnv { env } => Command::PersistGlobalEnv { env },
+            WireCommand::ReloadConfig {} => Command::ReloadConfig,
+            WireCommand::RecoverConfig {} => Command::RecoverConfig,
             // Rename, Reconnect, CheckoutProjectDefaultBranch, and
             // ChangeAgentProvider are NOT reconstructible into a single
             // `Command` — all need `&mut self` (rename persists in place;
@@ -4146,6 +4185,10 @@ impl Engine {
             | WireCommand::AddProject { .. }
             | WireCommand::RemoveProject { .. }
             | WireCommand::DeleteProject { .. }
+            | WireCommand::CreateStandaloneAgent { .. }
+            | WireCommand::CreateAgent { .. }
+            | WireCommand::ForkSession { .. }
+            | WireCommand::CreateAgentFromWorktree { .. }
             | WireCommand::RenameSession { .. }
             | WireCommand::ReconnectSession { .. }
             | WireCommand::RerunStartupCommand { .. }
@@ -4193,46 +4236,7 @@ impl Engine {
                 Command::ReorderTerminals { terminal_ids }
             }
             WireCommand::RunMacro { target_id, name } => Command::RunMacro { target_id, name },
-            WireCommand::UpdateMacros { entries } => {
-                // AUTHORITATIVE validation (council decision): the client is never
-                // trusted. This re-runs the rules server-side regardless of any
-                // client-side check — a name must be non-empty, names must be
-                // unique, text must be non-empty, and the surface string must be
-                // one of the known variants. The web client mirrors these in
-                // `validateMacros` (crates/dux-web/web/src/lib/macros.ts) for fast
-                // feedback only; that mirror is deliberately NOT pinned to this
-                // code (it's a behavioral rule, not a static contract). If it
-                // drifts the worst case is fail-safe: a too-lenient client Save
-                // that this arm still rejects.
-                let mut macros = crate::config::MacrosConfig::default();
-                for entry in entries {
-                    let name = entry.name.trim().to_string();
-                    if name.is_empty() {
-                        anyhow::bail!("Macro name cannot be empty.");
-                    }
-                    if macros.entries.contains_key(&name) {
-                        anyhow::bail!("Name \"{name}\" is already in use. Choose another.");
-                    }
-                    if entry.text.is_empty() {
-                        anyhow::bail!("Macro \"{name}\" has no text. Enter the text to send.");
-                    }
-                    let surface = crate::config::MacroSurface::from_config_str(&entry.surface)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Macro \"{name}\" has an unknown surface \"{}\". Use \"agent\", \"terminal\", or \"both\".",
-                                entry.surface
-                            )
-                        })?;
-                    macros.entries.insert(
-                        name,
-                        crate::config::MacroEntry {
-                            text: entry.text,
-                            surface,
-                        },
-                    );
-                }
-                Command::UpdateMacros { macros }
-            }
+            WireCommand::UpdateMacros { entries } => Self::update_macros_command(entries)?,
             WireCommand::WatchChangedFiles { session_id } => {
                 Command::WatchChangedFiles { session_id }
             }
