@@ -3197,6 +3197,85 @@ fn handle_apply_wire_request(
     let _ = reply.send(result);
 }
 
+fn handle_attach_pull_request(
+    engine: &mut Engine,
+    session_id: String,
+    raw: String,
+    origin: StatusScope,
+    reply: oneshot::Sender<Result<String, String>>,
+    status_tx: &mut StatusEmitter,
+) {
+    engine.current_origin = origin;
+    let result = engine.dispatch_attach_pull_request(&session_id, &raw);
+    engine.current_origin = StatusScope::All;
+    let result = match result {
+        Ok((op_id, pending)) => {
+            for status in
+                dux_core::wire::wire_statuses_from_reaction(&EventReaction::Status(pending))
+            {
+                let _ = status_tx.send(status);
+            }
+            Ok(op_id)
+        }
+        Err(error) => Err(error.to_string()),
+    };
+    let _ = reply.send(result);
+}
+
+fn handle_create_agent_branch_plan(
+    engine: &Engine,
+    project_id: String,
+    name: String,
+    reply: oneshot::Sender<Option<dux_core::git::CreateAgentBranchPlan>>,
+) {
+    let repo_path = engine
+        .projects
+        .iter()
+        .find(|project| project.id == project_id)
+        .map(|project| project.path.clone());
+    if let Some(repo_path) = repo_path {
+        std::thread::spawn(move || {
+            let plan = dux_core::git::create_agent_branch_preflight(
+                std::path::Path::new(&repo_path),
+                &name,
+            );
+            let _ = reply.send(Some(plan));
+        });
+    } else {
+        let _ = reply.send(None);
+    }
+}
+
+fn first_load_inputs(engine: &Engine) -> FirstLoadInputs {
+    let last_seen = match engine.session_store.last_seen_version() {
+        Ok(version) => version,
+        Err(error) => {
+            dux_core::logger::warn(&format!(
+                "[server] could not read the last-seen version; treating this \
+                 as a first launch: {error:#}"
+            ));
+            None
+        }
+    };
+    FirstLoadInputs {
+        last_seen,
+        running: dux_core::display_version().to_string(),
+        disable_welcome: engine.config.ui.disable_automated_welcome_screen,
+        disable_release_notes: engine.config.ui.disable_release_notes,
+        state_root: engine.paths.root.clone(),
+    }
+}
+
+fn read_raw_config(engine: &Engine) -> Result<String, String> {
+    match std::fs::read_to_string(&engine.paths.config_path) {
+        Ok(raw) => Ok(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(dux_core::config_write::render_config_plain(&engine.config))
+        }
+        Err(error) => Err(format!("Could not read config.toml: {error}")),
+    }
+}
+
 fn handle_request(
     engine: &mut Engine,
     req: EngineRequest,
@@ -3233,29 +3312,7 @@ fn handle_request(
             status_tx.clear(key);
         }
         EngineRequest::AttachPullRequest(session_id, raw, origin, reply) => {
-            // Mirror the `ApplyWire` arm's origin discipline: the engine reads
-            // `current_origin` when it mints the keyed op (the pending busy AND
-            // the eventual final carry that scope), so set it for the duration
-            // of the dispatch and reset to `All` after.
-            engine.current_origin = origin;
-            let res = engine.dispatch_attach_pull_request(&session_id, &raw);
-            engine.current_origin = StatusScope::All;
-            let res = match res {
-                Ok((op_id, pending)) => {
-                    // Broadcast the pending busy so the toast actually reaches
-                    // clients: unlike a wire command there is no outcome.status
-                    // carrying it, so route it through the same shared stream
-                    // the `ApplyWire` arm uses.
-                    for status in
-                        dux_core::wire::wire_statuses_from_reaction(&EventReaction::Status(pending))
-                    {
-                        let _ = status_tx.send(status);
-                    }
-                    Ok(op_id)
-                }
-                Err(e) => Err(e.to_string()),
-            };
-            let _ = reply.send(res);
+            handle_attach_pull_request(engine, session_id, raw, origin, reply, status_tx);
         }
         // SubscribePty is handled inline in the loop (it needs `&mut pending`).
         EngineRequest::SubscribePty(_, _) => unreachable!("SubscribePty handled in the loop"),
@@ -3328,36 +3385,7 @@ fn handle_request(
             let _ = reply.send(owner);
         }
         EngineRequest::CreateAgentBranchPlan(project_id, name, reply) => {
-            // The pre-flight shells out to git (up to two `rev-parse` calls), so
-            // it does not run here. On the concurrent path this thread is the
-            // terminal UI's own run loop, and a slow filesystem or a held index
-            // lock would stall a frame; even on the dedicated actor loop it blocks
-            // every other queued request. Only the project lookup needs the
-            // engine, so that part stays and a one-shot thread answers the waiting
-            // request directly with the subprocess result. No deferred-reply
-            // bookkeeping is needed because the reply channel is already a
-            // oneshot the caller is awaiting.
-            let repo_path = engine
-                .projects
-                .iter()
-                .find(|p| p.id == project_id)
-                .map(|p| p.path.clone());
-            match repo_path {
-                Some(repo_path) => {
-                    std::thread::spawn(move || {
-                        let plan = dux_core::git::create_agent_branch_preflight(
-                            std::path::Path::new(&repo_path),
-                            &name,
-                        );
-                        let _ = reply.send(Some(plan));
-                    });
-                }
-                // No such project: the same `None` the caller has always read,
-                // answered on the spot because there is nothing to go and ask git.
-                None => {
-                    let _ = reply.send(None);
-                }
-            }
+            handle_create_agent_branch_plan(engine, project_id, name, reply);
         }
         EngineRequest::FileDropDestination(pty_id, reply) => {
             let _ = reply.send(engine.file_drop_destination(&pty_id));
@@ -3491,19 +3519,7 @@ fn handle_request(
             let _ = reply.send(context);
         }
         EngineRequest::ReadRawConfig(reply) => {
-            // Verbatim file (comments + unknown keys intact) so the editor shows
-            // exactly what is on disk. Only a genuinely-missing file falls back to
-            // the plain render of the running config; any other read error
-            // (permission, I/O) is surfaced so the editor never opens on blank
-            // content the user could then save over their real config.
-            let result = match std::fs::read_to_string(&engine.paths.config_path) {
-                Ok(raw) => Ok(raw),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    Ok(dux_core::config_write::render_config_plain(&engine.config))
-                }
-                Err(e) => Err(format!("Could not read config.toml: {e}")),
-            };
-            let _ = reply.send(result);
+            let _ = reply.send(read_raw_config(engine));
         }
         EngineRequest::WriteRawConfig(content, reply) => {
             let _ = reply.send(write_raw_config_on_engine(
@@ -3513,26 +3529,7 @@ fn handle_request(
             ));
         }
         EngineRequest::FirstLoadInputs(reply) => {
-            // A store read failure is treated as "no version recorded", which is
-            // the conservative direction: the worst case is showing the welcome
-            // screen once more, never silently swallowing a release's notes.
-            let last_seen = match engine.session_store.last_seen_version() {
-                Ok(v) => v,
-                Err(err) => {
-                    dux_core::logger::warn(&format!(
-                        "[server] could not read the last-seen version; treating this \
-                         as a first launch: {err:#}"
-                    ));
-                    None
-                }
-            };
-            let _ = reply.send(FirstLoadInputs {
-                last_seen,
-                running: dux_core::display_version().to_string(),
-                disable_welcome: engine.config.ui.disable_automated_welcome_screen,
-                disable_release_notes: engine.config.ui.disable_release_notes,
-                state_root: engine.paths.root.clone(),
-            });
+            let _ = reply.send(first_load_inputs(engine));
         }
         EngineRequest::MarkVersionSeen(version, reply) => {
             let result = engine
