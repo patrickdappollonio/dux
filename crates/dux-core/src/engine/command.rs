@@ -1466,6 +1466,70 @@ mod tests {
     }
 
     #[test]
+    fn config_mutation_is_deferred_unchanged_while_reload_barrier_is_open() {
+        let (mut engine, _tmp) = test_engine();
+        engine.reloading = true;
+        let original_macros = engine.config.macros.clone();
+        let mut deferred_macros = original_macros.clone();
+        deferred_macros.entries.insert(
+            "deferred".to_string(),
+            crate::config::MacroEntry {
+                text: "echo deferred".to_string(),
+                surface: crate::config::MacroSurface::Both,
+            },
+        );
+
+        let reaction = engine
+            .apply(Command::UpdateMacros {
+                macros: deferred_macros,
+            })
+            .expect("defer config mutation");
+
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(engine.config.macros, original_macros);
+        assert_eq!(engine.deferred_commands.len(), 1);
+        assert!(matches!(
+            engine.deferred_commands.first(),
+            Some(Command::UpdateMacros { .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_project_add_reports_the_registered_project_without_adding_a_second_row() {
+        let (mut engine, tmp) = test_engine();
+        let path = tmp.path().join("shared-project");
+        let registered = sample_project("registered", path.to_string_lossy().as_ref());
+        engine.projects.push(registered.clone());
+
+        let mut duplicate = sample_project("duplicate", path.to_string_lossy().as_ref());
+        duplicate.name = "Losing request".to_string();
+        let reaction = engine
+            .apply(Command::PersistProject {
+                action: Box::new(ProjectPersistenceAction::Add {
+                    project: duplicate,
+                    status_message: "Added losing request".to_string(),
+                }),
+                status_op_id: Some("ignored-for-inline-add".to_string()),
+            })
+            .expect("deduplicate project add");
+
+        let EventReaction::ProjectPersistenceOutcome(outcome) = reaction else {
+            panic!("expected an inline project persistence outcome");
+        };
+        assert!(matches!(
+            outcome.view,
+            ProjectPersistenceView::Added {
+                ref project_id,
+                ref status_message,
+            } if project_id == "registered"
+                && status_message.contains(&registered.name)
+        ));
+        assert_eq!(outcome.status_op_id, None);
+        assert_eq!(engine.projects.len(), 1);
+        assert_eq!(engine.projects[0].id, "registered");
+    }
+
+    #[test]
     fn remove_project_closes_project_terminals_but_not_other_projects() {
         let (mut engine, _tmp) = test_engine();
         let repo1 = tempfile::tempdir().expect("p1 dir");
