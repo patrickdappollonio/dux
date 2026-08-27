@@ -54,6 +54,33 @@ export const FILL_UNICODE_RANGES =
 export const DUX_TERMINAL_FONT_STACK =
   `"${DUX_MONO_SYMBOLS_FAMILY}", "${DUX_MONO_FAMILY}", "${DUX_MONO_FILL_FAMILY}", ui-monospace, SFMono-Regular, Menlo, monospace`
 
+// The eager-load list `loadTerminalFontsThenRefit` iterates: one entry per
+// bundled face, each naming ONE family with a sample that sits inside that
+// family's own `unicode-range`. Naming one family per entry is what makes each
+// face's fetch independent of where it sits in the stack, and pairing it with
+// an in-range sample is what makes the fetch happen at all: `document.fonts`
+// only fetches a restricted face for text it actually covers. The samples are
+// pinned against the declared ranges by terminalFonts.test.ts.
+//
+// The capture harness (tools/preview-env/tui-shot.js) declares the same faces
+// and the same range literals for its own headless xterm and preloads them the
+// same way; the two are deliberately separate copies rather than shared code,
+// so a range change here needs the same edit there.
+export const TERMINAL_FONT_PRELOADS: readonly {
+  family: string
+  weight?: "bold"
+  sample: string
+}[] = [
+  { family: DUX_MONO_FAMILY, sample: "Ag" },
+  { family: DUX_MONO_FAMILY, weight: "bold", sample: "Ag" },
+  // U+2713, U+28FF and U+2500: one each from the Dingbats, Braille and Box
+  // Drawing blocks the symbols face is cut for.
+  { family: DUX_MONO_SYMBOLS_FAMILY, sample: "✓⣿─" },
+  // U+203B sits in the fill face's range and in no other bundled face's, so
+  // this sample cannot be satisfied by a neighbour.
+  { family: DUX_MONO_FILL_FAMILY, sample: "※✷" },
+]
+
 export const MIN_TERMINAL_FONT_SIZE = 8
 export const MAX_TERMINAL_FONT_SIZE = 32
 export const DEFAULT_TERMINAL_FONT_SIZE = 14
@@ -161,34 +188,47 @@ export function loadTerminalFontsThenRefit(
   if (typeof document.fonts?.load !== "function") {
     return
   }
-  // The sample text includes a glyph from the unicode-range-restricted
-  // symbols face (█⣿) so the browser actually loads THAT face rather than
-  // only the always-matched text face.
-  const sample = "█⣿"
-  // "Dux Mono Fill" is deliberately NOT in this eager load. It is the rarely
-  // hit backstop, and forcing it here would fetch ~79 KB on every terminal
-  // mount, including on the phones this face exists to serve. Three reasons
-  // it is safe to leave lazy: its `unicode-range` already makes the browser
-  // fetch it on first use of a code point the earlier faces do not cover; the
-  // cell grid cannot depend on it, because xterm measures the cell from a
-  // `"W".repeat(32)` span and both U+0057 and U+0020 fall outside every
-  // restricted face's range, so the metrics come from the text face; and
-  // `font-display: swap` means the worst case for a rare glyph is one frame
-  // drawn in a fallback before the face arrives.
+  // Every bundled face is loaded explicitly, one family per call, from
+  // TERMINAL_FONT_PRELOADS. Measured (headless Chromium, the four faces
+  // declared exactly as index.css declares them): the whole-stack shorthand
+  // this used to rely on already loads every family in the list whose range
+  // covers a sample code point, the fill face included, so the old comment
+  // here claiming the fill face was deliberately left lazy described
+  // something that was not happening. `document.fonts.load` returned
+  // ["Dux Mono Symbols 400", "Dux Mono 400", "Dux Mono Fill 400"] for the
+  // stack with the "█⣿" sample, and all three read `loaded` afterwards. So
+  // the fill face's ~79 KB was already being fetched on every mount; naming
+  // it makes that deliberate and, more importantly, makes it independent of
+  // the stack's contents (a user family prepended ahead of it, a reordering,
+  // a range recut).
   //
-  // The `family` shorthand below is the whole stack, so it does mention the
-  // fill face, but that costs nothing: CSS font matching hands both sample
-  // characters to "Dux Mono Symbols", which leads the stack and really
-  // carries them, so the fill face is never selected and never fetched.
+  // The user's own family is loaded separately below, through the whole
+  // sanitized stack, because there is no declared face to name for it.
+  //
+  // ACCEPTED RACE, cold cache only: a terminal opens synchronously against
+  // fallback metrics (deliberate, so the PTY connection is not held up by a
+  // font fetch), and xterm's DOM renderer caches the glyph advances it
+  // measured. Reading xterm 6.0: the options setter no-ops when the new value
+  // equals the old, WidthCache.setFont no-ops on an equal font tuple, and
+  // clearTextureAtlas is unimplemented for the DOM renderer, so there is no
+  // sanctioned way to invalidate that cache without a real font change. A
+  // glyph painted in that first cold frame therefore keeps a fallback advance
+  // until the font size or family actually changes. The refit below fixes the
+  // cell grid, which is what governs layout; the residue is per-glyph
+  // letter-spacing on characters drawn before the faces resolved, and it is
+  // accepted rather than worked around.
   const refit = () => {
     if (termRef.current === term) refitNow()
   }
   void Promise.race([
     Promise.all([
-      document.fonts.load(`${size}px "${DUX_MONO_FAMILY}"`, sample),
-      document.fonts.load(`bold ${size}px "${DUX_MONO_FAMILY}"`, sample),
-      document.fonts.load(`${size}px "${DUX_MONO_SYMBOLS_FAMILY}"`, sample),
-      document.fonts.load(`${size}px ${family}`, sample),
+      ...TERMINAL_FONT_PRELOADS.map((preload) =>
+        document.fonts.load(
+          `${preload.weight ? `${preload.weight} ` : ""}${size}px "${preload.family}"`,
+          preload.sample,
+        ),
+      ),
+      document.fonts.load(`${size}px ${family}`, "Ag"),
     ]),
     new Promise((resolve) => setTimeout(resolve, 2000)),
   ])

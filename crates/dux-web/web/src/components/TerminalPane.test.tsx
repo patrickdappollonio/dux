@@ -2779,24 +2779,24 @@ describe("TerminalPane bundled font load on mount", () => {
       expect.stringContaining('"Dux Mono"'),
       expect.any(String),
     )
-    // The fill face is deliberately absent from the eager load, and this
-    // assertion exists so re-adding it has to argue with a test. It is a
-    // rarely hit backstop of ~79 KB; its `unicode-range` already makes the
-    // browser fetch it lazily on first use of a code point the earlier faces
-    // lack, and it cannot affect the cell grid, which xterm measures from a
-    // `"W".repeat(32)` span whose code points fall outside every restricted
-    // face's range. Forcing it here would cost every terminal mount, phones
-    // included, a download nothing was waiting on.
-    // Matched on the fill family leading the shorthand, which is what asks
-    // for that face by name. The user-family call passes the whole stack, so
-    // it mentions the fill family too, but its sample is the symbols sample:
-    // CSS font matching hands U+2588 and U+28FF to "Dux Mono Symbols", which
-    // leads the stack and really carries them, so the fill face is never
-    // selected and never fetched.
+    // Every bundled face is asked for BY NAME, the fill face included. This
+    // assertion used to say the opposite, on the belief that the fill face
+    // was left lazy to save its ~79 KB; measuring `document.fonts` in
+    // headless Chromium refuted that. The whole-stack shorthand this used to
+    // rely on loads every family in the list whose `unicode-range` covers a
+    // sample code point, so the fill face was already being fetched on every
+    // mount. Naming it makes that deliberate and, more to the point, stops
+    // any face's fetch from depending on the stack's contents: a face that is
+    // not fetched before xterm measures it gets a fallback advance cached in
+    // its place, which drags every row carrying one of its glyphs sideways.
     const fillCall = load.mock.calls.find(([shorthand]: [string]) =>
       /^\d+px "Dux Mono Fill"/.test(String(shorthand)),
     )
-    expect(fillCall).toBeUndefined()
+    expect(fillCall).toBeDefined()
+    // Matched on the fill family LEADING the shorthand, which is what asks
+    // for that face by name; the separate user-family call passes the whole
+    // stack and so mentions it too.
+    expect(String(fillCall?.[1])).toContain("※")
     // The font-load promise resolving triggers a refit on top of whatever
     // synchronous fits mounting itself already performed.
     expect(FitStub.fits).toBeGreaterThan(fitsAfterMount)

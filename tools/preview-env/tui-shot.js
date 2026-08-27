@@ -54,6 +54,30 @@ const xtermCss = fs.readFileSync(path.join(packageRoot, "css", "xterm.css"), "ut
     .xterm { padding: 0; }
   ` })
   await page.addScriptTag({ path: xtermJs })
+  // Fetch every face BEFORE the Terminal is constructed. `document.fonts.ready`
+  // alone is not enough: it settles once no load is pending, and a
+  // `unicode-range`-restricted face nothing has rendered yet has no load
+  // pending, so it stays unfetched. xterm's DOM renderer then measures glyph
+  // advances against the fallback font, caches them (its WidthCache busts only
+  // on a font change), and emits negative letter-spacing that drags whole rows
+  // left once the real face arrives: measured drift of a full cell for ※, 0.4
+  // for ✓/✷/↳, 0.22 for braille.
+  //
+  // Each load names ONE family with a sample inside that family's own
+  // unicode-range, so no face depends on where it sits in the stack. The range
+  // literals above are the same ones the web app declares in
+  // crates/dux-web/web/src/index.css and exports from
+  // crates/dux-web/web/src/lib/terminalFont.ts; when a range moves there, move
+  // it here and re-pick these samples. Deliberately not shared code: a build
+  // step for a screenshot tool is not worth it.
+  await page.evaluate(async () => {
+    await Promise.all([
+      document.fonts.load('14px "Dux Mono"', "Ag"),
+      document.fonts.load('bold 14px "Dux Mono"', "Ag"),
+      document.fonts.load('14px "Dux Mono Symbols"', "✓⣿─"),
+      document.fonts.load('14px "Dux Mono Fill"', "※✷"),
+    ])
+  })
   await page.evaluate(() => document.fonts.ready)
   await page.evaluate(
     ({ ansi, cols, rows }) => new Promise((resolve) => {

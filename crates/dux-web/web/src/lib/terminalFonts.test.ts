@@ -13,6 +13,7 @@ import {
   DUX_MONO_SYMBOLS_FAMILY,
   DUX_TERMINAL_FONT_STACK,
   FILL_UNICODE_RANGES,
+  TERMINAL_FONT_PRELOADS,
   UNICODE_RANGES,
 } from "./terminalFont"
 
@@ -123,6 +124,61 @@ describe("Dux Mono / Dux Mono Symbols / Dux Mono Fill font wiring", () => {
     ]) {
       const bytes = readBytes(`../assets/fonts/${name}`)
       expect(bytes.subarray(0, 4).toString("latin1"), name).toBe("wOF2")
+    }
+  })
+})
+
+// Parses a CSS `unicode-range` value ("U+2190-21FF, U+2800-28FF, ...") into
+// inclusive [start, end] pairs. Only the two forms dux writes are accepted; a
+// wildcard form (`U+27??`) throws rather than being skipped, so a range style
+// this reader cannot see through can never pass the membership test below by
+// covering nothing.
+function parseUnicodeRange(value: string): [number, number][] {
+  return value.split(",").map((part) => {
+    const token = part.trim()
+    const match = /^U\+([0-9A-Fa-f]+)(?:-([0-9A-Fa-f]+))?$/.exec(token)
+    if (!match) throw new Error(`unhandled unicode-range token: ${token}`)
+    const start = parseInt(match[1], 16)
+    return [start, match[2] ? parseInt(match[2], 16) : start]
+  })
+}
+
+describe("terminal font preload samples", () => {
+  // The real drift guard. A restricted face is only fetched by
+  // `document.fonts.load` when the sample text contains a code point its
+  // `unicode-range` actually covers; a sample outside the range loads nothing,
+  // xterm measures that face's glyphs against a fallback, and every row
+  // carrying one shifts. Recutting a face's range without re-picking its
+  // sample is exactly how that regresses, so the two are pinned together here.
+  const rangesByFamily: Record<string, string> = {
+    [DUX_MONO_SYMBOLS_FAMILY]: UNICODE_RANGES,
+    [DUX_MONO_FILL_FAMILY]: FILL_UNICODE_RANGES,
+  }
+
+  it("keeps every restricted face's sample inside that face's own unicode-range", () => {
+    for (const preload of TERMINAL_FONT_PRELOADS) {
+      const declared = rangesByFamily[preload.family]
+      // The text face carries no `unicode-range` at all, so any sample fetches
+      // it and there is nothing to pin.
+      if (!declared) continue
+      const ranges = parseUnicodeRange(declared)
+      for (const character of [...preload.sample]) {
+        const cp = character.codePointAt(0) as number
+        const inside = ranges.some(([start, end]) => cp >= start && cp <= end)
+        expect(
+          inside,
+          `${preload.family} sample U+${cp.toString(16).toUpperCase()}`,
+        ).toBe(true)
+      }
+    }
+  })
+
+  it("covers both restricted faces with at least one sample each", () => {
+    for (const family of [DUX_MONO_SYMBOLS_FAMILY, DUX_MONO_FILL_FAMILY]) {
+      expect(
+        TERMINAL_FONT_PRELOADS.some((preload) => preload.family === family),
+        family,
+      ).toBe(true)
     }
   })
 })

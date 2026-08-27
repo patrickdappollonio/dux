@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   DUX_TERMINAL_FONT_STACK,
+  TERMINAL_FONT_PRELOADS,
   clampTerminalFontSize,
   terminalFontFamily,
 } from "./terminalFont"
@@ -11,6 +12,30 @@ describe("DUX_TERMINAL_FONT_STACK", () => {
     expect(DUX_TERMINAL_FONT_STACK).toBe(
       '"Dux Mono Symbols", "Dux Mono", "Dux Mono Fill", ui-monospace, SFMono-Regular, Menlo, monospace',
     )
+  })
+})
+
+describe("TERMINAL_FONT_PRELOADS", () => {
+  // The list exists so the eager load names one family per entry. A face
+  // missing from it is not fetched before xterm measures its cell advances,
+  // and xterm caches the fallback advance it measured instead, which is the
+  // row-drift bug the capture harness hit.
+  it("names all four bundled faces, the bold weight included", () => {
+    const entries = TERMINAL_FONT_PRELOADS.map(
+      (preload) => `${preload.weight ? `${preload.weight} ` : ""}${preload.family}`,
+    )
+    expect(entries).toEqual([
+      "Dux Mono",
+      "bold Dux Mono",
+      "Dux Mono Symbols",
+      "Dux Mono Fill",
+    ])
+  })
+
+  it("gives every entry a non-empty sample", () => {
+    for (const preload of TERMINAL_FONT_PRELOADS) {
+      expect(preload.sample.length, preload.family).toBeGreaterThan(0)
+    }
   })
 })
 
