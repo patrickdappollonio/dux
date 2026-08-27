@@ -1337,6 +1337,21 @@ mod tests {
     }
 
     #[test]
+    fn a_click_in_the_help_gap_closes_the_overlay() {
+        let mut app = test_app(default_bindings());
+        open_help(&mut app);
+        render(&mut app);
+        let rect = frame_rect(&app);
+
+        app.handle_mouse(left_down(rect.x - 1, rect.y));
+
+        assert_eq!(
+            app.help_scroll, None,
+            "the visual gap became part of Help's click target"
+        );
+    }
+
+    #[test]
     fn a_click_inside_the_help_overlay_does_not_close_it() {
         let mut app = test_app(default_bindings());
         open_help(&mut app);

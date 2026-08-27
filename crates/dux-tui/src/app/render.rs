@@ -3260,6 +3260,15 @@ impl App {
         let inner = outer_block.inner(area);
         outer_block.render(area, frame.buffer_mut());
 
+        // Ratatui cannot detect damage to the physical terminal outside its
+        // previous-frame buffer, so resend the vulnerable focused edge.
+        if focused && area.width > 0 && area.height > 2 {
+            let x = area.right() - 1;
+            for y in area.y + 1..area.bottom() - 1 {
+                frame.buffer_mut()[(x, y)].set_diff_option(CellDiffOption::AlwaysUpdate);
+            }
+        }
+
         if inner.height < 2 || inner.width < 4 {
             return;
         }
@@ -4602,6 +4611,20 @@ impl App {
     fn render_help(&mut self, frame: &mut Frame) {
         self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
+        let isolation = Rect::new(
+            area.x.saturating_sub(1),
+            area.y.saturating_sub(1),
+            area.width.saturating_add(2),
+            area.height.saturating_add(2),
+        )
+        .intersection(self.dim_overlay_area(frame.area()));
+        Clear.render(isolation, frame.buffer_mut());
+        frame.buffer_mut().set_style(
+            isolation,
+            Style::default()
+                .fg(self.theme.overlay_dim_fg)
+                .bg(self.theme.overlay_dim_bg),
+        );
         self.clear_overlay_area(frame, area);
 
         let outer_block = self.themed_overlay_block("Help");
@@ -10903,8 +10926,7 @@ impl App {
         hint_para.render(hint_area, frame.buffer_mut());
     }
 
-    pub(super) fn render_dim_overlay(&self, frame: &mut Frame) {
-        let full = frame.area();
+    fn dim_overlay_area(&self, full: Rect) -> Rect {
         // Keep the statusline (bottom rows) undimmed so errors stay visible.
         let status_text = self
             .status
@@ -10913,9 +10935,14 @@ impl App {
         let status_lines = status_footer_lines(&status_text, full.width);
         let footer_h = 1 + status_lines; // hints bar + status line(s)
         let dim_h = full.height.saturating_sub(footer_h);
+        Rect::new(full.x, full.y, full.width, dim_h)
+    }
+
+    pub(super) fn render_dim_overlay(&self, frame: &mut Frame) {
+        let area = self.dim_overlay_area(frame.area());
         let buf = frame.buffer_mut();
-        for y in full.y..full.y + dim_h {
-            for x in full.x..full.x + full.width {
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
                 let cell = &mut buf[(x, y)];
                 cell.set_fg(self.theme.overlay_dim_fg);
                 cell.set_bg(self.theme.overlay_dim_bg);
@@ -17443,6 +17470,72 @@ mod tests {
                 .iter()
                 .any(|(x, y, cell)| (*x, *y) == border && cell.symbol() == "│"),
             "the second draw omitted the damaged border cell"
+        );
+    }
+
+    #[test]
+    fn only_the_focused_agent_border_is_always_emitted() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        for (focus, expected) in [
+            (FocusPane::Center, CellDiffOption::AlwaysUpdate),
+            (FocusPane::Left, CellDiffOption::None),
+        ] {
+            let mut app = test_app(default_bindings());
+            app.focus = focus;
+            let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+
+            let term_area = app.mouse_layout.agent_term.expect("agent terminal area");
+            let x = term_area.right();
+            for y in term_area.y..term_area.bottom() {
+                assert_eq!(
+                    terminal.backend().buffer()[(x, y)].diff_option,
+                    expected,
+                    "unexpected diff policy at ({x}, {y}) for {focus:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn help_open_and_close_preserves_a_self_healing_agent_border() {
+        use ratatui::Terminal;
+
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        let mut terminal = Terminal::new(RecordingBackend::new(160, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("initial frame");
+        let term_area = app.mouse_layout.agent_term.expect("agent terminal area");
+        let border = (term_area.right(), term_area.y + 2);
+
+        app.help_scroll = Some(0);
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("Help frame");
+        let help_area = app.overlay_layout.frame.get().expect("Help area");
+        let frame = terminal.backend().physical.area;
+        assert!(
+            help_isolation_ring(help_area, frame)
+                .iter()
+                .all(|&position| terminal.backend().physical[position].symbol() == " "),
+            "Help did not isolate itself from the workspace"
+        );
+
+        app.help_scroll = None;
+        terminal.backend_mut().physical[border].set_symbol(" ");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("frame after Help");
+        assert_eq!(
+            terminal.backend().physical[border].symbol(),
+            "│",
+            "closing Help did not restore the damaged agent border"
         );
     }
 
