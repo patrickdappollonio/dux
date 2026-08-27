@@ -62,6 +62,11 @@ Both front ends lay the workspace out the same way:
   browser a diff opens in the file-editor overlay instead.
 - The **right pane** shows the files an agent has changed, with diffs.
 
+This is the terminal UI, with a prompt being typed straight into the center pane while the
+agent streams its work and the sidebar marks the agent as typing.
+
+![The terminal UI: the agent list on the left, a running agent's terminal in the middle with a prompt being typed into it, and the changed files on the right.](/screens/tui-typing-in-pane.png)
+
 > [!IMPORTANT]
 > In the terminal UI's windowed layout, not every key reaches the agent. dux keeps its
 > own chords for itself: pane navigation, the command palette, tab switching, and the

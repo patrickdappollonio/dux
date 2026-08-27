@@ -25,7 +25,13 @@ looking.
 - **The favicon** gets a small cyan dot in the corner of the duck while the count is
   above zero.
 
+This is the web sidebar.
+
 ![The sidebar with one agent lit cyan and marked Needs you, while the others carry on working.](/screens/attention-sidebar.png)
+
+And this is the same moment in the terminal UI, where the accent dot and the words "Needs you" mark the one agent waiting on you.
+
+![The terminal UI sidebar with one agent carrying a cyan dot and the words Needs you, the two agents below it idle.](/screens/tui-attention-sidebar.png)
 
 The flag clears the moment you look. Selecting the agent and focusing its terminal in
 the terminal UI, opening its live view on the web, or typing into it all put the flag

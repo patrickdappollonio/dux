@@ -18,6 +18,8 @@ Open the **theme picker** from the terminal UI's command palette and arrow throu
 options with a live preview. It discovers every built-in plus anything you have
 authored, and labels where each one came from.
 
+![The terminal UI theme picker open over the workspace, listing dux_dark as the current theme with the bundled themes below it.](/screens/tui-theme-picker.png)
+
 To set it by hand instead, edit the `[ui]` section of `config.toml` and restart:
 
 ```toml

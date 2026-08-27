@@ -15,7 +15,7 @@ one tab, and the strip stays hidden until you add a second.
 ## Every tab is equal
 
 There is no "main" tab and no "support" tab. Every tab is a provider session in the
-agent's shared worktree, and they all behave the same.
+agent's shared worktree, and they all behave the same. This is the strip in the browser:
 
 ![Three provider tabs on one agent, the first one active, with a plus button for adding another.](/screens/agent-tabs-strip.png)
 
@@ -88,6 +88,11 @@ hop tabs mid-sentence. Each pill carries its position number, so the switch-by-n
 keys have a visible address. A pill also reports what its own tab is up to, with the
 same cues the agent list uses: a spinner while that tab's provider is working, and a
 blinking dot when it wants you. The pill you are looking at is the highlighted one.
+
+That is the terminal UI strip: each pill leads with its position number, and the first one
+is highlighted because it is the tab on screen.
+
+![The terminal UI tab strip above an agent's terminal, three numbered pills for the same provider with the first one highlighted.](/screens/tui-tabs-strip-ordinals.png)
 
 > [!IMPORTANT]
 > Fullscreen gives every key to the agent verbatim and does not draw the strip at all.

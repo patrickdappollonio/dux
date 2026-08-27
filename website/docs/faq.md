@@ -191,6 +191,8 @@ Open the help overlay in the terminal UI. Its key is in the footer hint bar, and
 overlay is the authoritative reference. Every binding is configurable under `[keys]`;
 see [keybindings](/docs/configuration#keybindings).
 
+![The terminal UI help overlay open over the workspace, listing the global bindings with their keys.](/screens/tui-help-overlay.png)
+
 ### How do I change the theme?
 
 Set `theme` under `[ui]`, or open the theme picker for a live preview. See

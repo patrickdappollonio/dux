@@ -135,6 +135,8 @@ its own, becoming `● serving :3890 · 3 connected` once somebody is on it. The
 browser tabs, not people, so one laptop with two tabs open counts as two, and a tab that
 vanished without saying goodbye keeps counting until dux notices the socket is dead.
 
+![The terminal UI top bar carrying a serving crumb with the port, above the usual workspace with one agent working.](/screens/tui-serving-crumb.png)
+
 Each agent's row picks up a quiet `2 remote` on its second line when browsers have that
 agent open, counting every terminal it owns: its provider tabs and its companion
 terminals. The center pane's caption says the same for the provider tab it is showing.

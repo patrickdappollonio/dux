@@ -48,10 +48,17 @@ Terminals (3) ──────────────────────
   ✷ ~/code · Idle
 ```
 
+![The terminal UI sidebar: three active agents, one of them running three tabs, a collapsed Inactive tail, and a Terminals section below with one terminal.](/screens/tui-agent-list-two-line.png)
+
 A terminal's second line names its owner as `agent@project`, or just the project for a
 project terminal. A standalone terminal has no owner, so it names the directory it
 opened in instead, shortened with `~`. Whichever it shows is what the sidebar search
 matches on.
+
+Typing in the filter narrows the list to the rows that match, with the matching text
+picked out, and the pane title counts what survived.
+
+![The same sidebar filtered by the word retry: the title reads Agents 2 of 5 and only the two matching agents remain.](/screens/tui-sidebar-search.png)
 
 > [!NOTE]
 > The `✷` star means the same thing wherever you see it: this one lives in your own

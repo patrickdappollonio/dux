@@ -265,12 +265,19 @@ offers **Delete worktree…**. The terminal UI has the same manager as the
 `manage-worktrees` palette command. The project picker in front of it labels each project
 with how many worktrees it has.
 
+This is the terminal UI's manager: free worktrees on top, the ones a live agent is holding
+below them, each row naming its branch and saying whether there is uncommitted work in it.
+
+![The terminal UI worktree manager listing one removable worktree and two held by an agent, each with its branch and an uncommitted-changes note.](/screens/tui-worktree-manager.png)
+
 > [!CAUTION]
 > Deleting a worktree removes the directory from disk. The confirmation names the branch
 > and the full path, and says specifically when there are uncommitted changes to lose. It
 > also offers to delete the branch, **ticked by default**; untick it and the branch
 > survives. If git refuses the deletion, dux reports the branch as still there with git's
 > own reason.
+
+![The terminal UI confirmation for deleting a worktree, naming the path, warning about the uncommitted changes, and offering a ticked checkbox that also deletes the branch.](/screens/tui-worktree-delete-confirm.png)
 
 Worktrees a live agent is holding are listed but unselectable: removing one from under a
 running session leaves it broken. Delete the agent instead.
@@ -300,7 +307,14 @@ Everything above creates a branch and a working copy. A **standalone agent** doe
 you pick a folder, and the AI runs there. Good for a scratch directory, a notes folder, a
 pile of downloads to sort, or a repository you want worked on in place.
 
+This is the browser.
+
 ![A standalone agent in the sidebar showing the folder it runs in, with the changes panel saying the folder has no git repository.](/screens/sidebar-standalone.png)
+
+And this is the terminal UI, where the star and the folder replace the project a managed
+agent would name, and the changes panel says why it has nothing to show.
+
+![The terminal UI with a standalone agent selected: its row carries a star over the folder path, and the changes panel says the folder has no git repository.](/screens/tui-standalone-star.png)
 
 In the browser, the launcher's `⋯` menu and **New standalone agent…**. In the terminal
 UI there are three ways in: a key anywhere in the agents pane, a key inside the "New
