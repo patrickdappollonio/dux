@@ -287,92 +287,125 @@ fn writer_loop(rx: Receiver<WriteMsg>, path: PathBuf, lazy_inflight: Arc<AtomicU
     }
 }
 
+struct WriterDisconnected;
+
+enum WriterControl {
+    Continue,
+    Stop,
+}
+
 fn writer_loop_inner(rx: Receiver<WriteMsg>, path: PathBuf, lazy_inflight: Arc<AtomicUsize>) {
     let mut pending: Option<Config> = None;
     let mut deadline: Option<Instant> = None;
 
     loop {
-        let msg = match deadline {
-            Some(d) => {
-                let wait = d.saturating_duration_since(Instant::now());
-                match rx.recv_timeout(wait) {
-                    Ok(m) => Some(m),
-                    Err(RecvTimeoutError::Timeout) => None, // deadline elapsed
-                    Err(RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            None => match rx.recv() {
-                Ok(m) => Some(m),
-                Err(_) => break,
-            },
-        };
+        let input = receive_writer_input(&rx, deadline);
+        if matches!(
+            handle_writer_input(
+                input,
+                &rx,
+                &path,
+                &lazy_inflight,
+                &mut pending,
+                &mut deadline,
+            ),
+            WriterControl::Stop
+        ) {
+            break;
+        }
+    }
+}
 
-        match msg {
-            None => flush_pending(&path, &mut pending, &mut deadline),
-            Some(WriteMsg::Lazy(cfg)) => {
-                decr_inflight(&lazy_inflight);
-                pending = Some(cfg);
-                if deadline.is_none() {
-                    deadline = Some(Instant::now() + QUIET_WINDOW);
+fn receive_writer_input(
+    rx: &Receiver<WriteMsg>,
+    deadline: Option<Instant>,
+) -> Result<Option<WriteMsg>, WriterDisconnected> {
+    match deadline {
+        Some(deadline) => {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(wait) {
+                Ok(message) => Ok(Some(message)),
+                Err(RecvTimeoutError::Timeout) => Ok(None),
+                Err(RecvTimeoutError::Disconnected) => Err(WriterDisconnected),
+            }
+        }
+        None => match rx.recv() {
+            Ok(message) => Ok(Some(message)),
+            Err(_) => Err(WriterDisconnected),
+        },
+    }
+}
+
+fn handle_writer_input(
+    input: Result<Option<WriteMsg>, WriterDisconnected>,
+    rx: &Receiver<WriteMsg>,
+    path: &std::path::Path,
+    lazy_inflight: &AtomicUsize,
+    pending: &mut Option<Config>,
+    deadline: &mut Option<Instant>,
+) -> WriterControl {
+    match input {
+        Ok(None) => flush_pending(path, pending, deadline),
+        Err(WriterDisconnected) => return WriterControl::Stop,
+        Ok(Some(WriteMsg::Lazy(config))) => {
+            decr_inflight(lazy_inflight);
+            *pending = Some(config);
+            if deadline.is_none() {
+                *deadline = Some(Instant::now() + QUIET_WINDOW);
+            }
+        }
+        Ok(Some(WriteMsg::Eager { config, reply })) => {
+            *pending = None;
+            *deadline = None;
+            let result =
+                save_config_with(path, &config, Durability::Fsync).map_err(|e| format!("{e:#}"));
+            if let Err(error) = &result {
+                crate::logger::error(&format!("eager config write failed: {error}"));
+            }
+            let _ = reply.send(result);
+        }
+        Ok(Some(WriteMsg::Flush(ack))) => {
+            flush_pending(path, pending, deadline);
+            let _ = ack.send(());
+        }
+        Ok(Some(WriteMsg::Pause(ack))) => {
+            flush_pending(path, pending, deadline);
+            let _ = ack.send(());
+            debug_assert!(pending.is_none());
+            if !run_paused_writer(rx, lazy_inflight) {
+                return WriterControl::Stop;
+            }
+        }
+        Ok(Some(WriteMsg::Resume)) => {}
+        Ok(Some(WriteMsg::Shutdown)) => {
+            flush_pending(path, pending, deadline);
+            return WriterControl::Stop;
+        }
+    }
+    WriterControl::Continue
+}
+
+fn run_paused_writer(rx: &Receiver<WriteMsg>, lazy_inflight: &AtomicUsize) -> bool {
+    let mut depth = 1usize;
+    loop {
+        match rx.recv() {
+            Ok(WriteMsg::Resume) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return true;
                 }
             }
-            Some(WriteMsg::Eager { config, reply }) => {
-                pending = None;
-                deadline = None;
-                let res = save_config_with(&path, &config, Durability::Fsync)
-                    .map_err(|e| format!("{e:#}"));
-                if let Err(ref e) = res {
-                    crate::logger::error(&format!("eager config write failed: {e}"));
-                }
-                let _ = reply.send(res); // dropped reply = caller moved on; no-op
+            Ok(WriteMsg::Shutdown) | Err(_) => return false,
+            Ok(WriteMsg::Lazy(_)) => decr_inflight(lazy_inflight),
+            Ok(WriteMsg::Eager { reply, .. }) => {
+                let _ = reply.send(Err("config busy (reload in progress); retry".into()));
             }
-            Some(WriteMsg::Flush(ack)) => {
-                flush_pending(&path, &mut pending, &mut deadline);
+            Ok(WriteMsg::Flush(ack)) => {
                 let _ = ack.send(());
             }
-            Some(WriteMsg::Pause(ack)) => {
-                flush_pending(&path, &mut pending, &mut deadline);
+            Ok(WriteMsg::Pause(ack)) => {
+                depth = depth.saturating_add(1);
                 let _ = ack.send(());
-                // Hold paused until Resume; drop stray lazies, reject stray eagers.
-                let mut depth: usize = 1;
-                loop {
-                    match rx.recv() {
-                        Ok(WriteMsg::Resume) => {
-                            depth = depth.saturating_sub(1);
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        Ok(WriteMsg::Shutdown) => return, // exit even while paused
-                        Ok(WriteMsg::Lazy(_)) => {
-                            decr_inflight(&lazy_inflight);
-                        } // stale snapshot — drop
-                        Ok(WriteMsg::Eager { reply, .. }) => {
-                            let _ =
-                                reply.send(Err("config busy (reload in progress); retry".into()));
-                        }
-                        Ok(WriteMsg::Flush(ack)) => {
-                            // pending was drained on pause entry and lazies arriving
-                            // during the barrier are discarded below, so nothing is
-                            // pending here — the ack truthfully means "drained".
-                            debug_assert!(pending.is_none());
-                            let _ = ack.send(());
-                        }
-                        Ok(WriteMsg::Pause(ack)) => {
-                            depth = depth.saturating_add(1);
-                            let _ = ack.send(());
-                        }
-                        Err(_) => return,
-                    }
-                }
-            }
-            Some(WriteMsg::Resume) => {} // no-op when not paused
-            Some(WriteMsg::Shutdown) => {
-                // Drain any pending lazy before exiting, so a Shutdown that did
-                // not arrive through Drop's flush-first sequence still cannot drop
-                // a write. `return` matches the paused-loop exit below.
-                flush_pending(&path, &mut pending, &mut deadline);
-                return;
             }
         }
     }
