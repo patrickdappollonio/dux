@@ -1813,11 +1813,8 @@ impl App {
                             let (glyph, color) = self.theme.session_dot(&session.status);
                             (glyph.to_string(), color)
                         };
-                    // Surface a warning glyph in the narrow rail too, when the
-                    // agent's project has a missing path or its record is gone.
-                    // A standalone agent has no project, so no project
-                    // warning can apply to it: `agent_row_owner_tag` takes
-                    // the folder arm and the glyph is skipped.
+                    // Project warnings appear in the narrow rail; standalone
+                    // agents have no project and therefore no warning glyph.
                     let found = session.project_id().and_then(|project_id| {
                         self.engine.projects.iter().find(|p| p.id == project_id)
                     });
@@ -2116,13 +2113,8 @@ impl App {
         };
         let term_block = self.themed_block(&term_title, terminals_focused);
         let term_inner = term_block.inner(term_area);
-        // Two reservations for the framed selection, matching the agent path:
-        //  - a one-row top margin (only with room and at least one terminal)
-        //    so the first terminal's `▄` top edge has a row to paint into; and
-        //  - a one-column gutter on each side, so the tinted frame has a margin
-        //    and the text sits evenly padded left and right.
-        // `term_content` is the click surface and the origin for the frame
-        // edges; the list itself renders into `term_body`, inset by a gutter.
+        // Reserve a top row and side gutters for the framed selection. The
+        // content rect owns clicks and frame edges; the body holds list text.
         let term_top_margin: u16 = if term_count > 0 && term_inner.height >= 4 {
             1
         } else {
@@ -2159,11 +2151,8 @@ impl App {
         let term_items: Vec<ListItem> = terminal_render_data
             .iter()
             .map(|row| {
-                // A terminal is either alive or gone (never detached / needs
-                // you), so the state reduces to typing -> working -> idle. It
-                // is Working when streaming output OR running a foreground app
-                // (busy while quiet), via the shared `terminal_is_working`; a
-                // terminal id (`term-N`) keys both engine predicates.
+                // Terminal state precedence is typing, working, then idle;
+                // working includes output streaming or a foreground app.
                 let typing = self.engine.is_typing(&row.id);
                 let working = self.engine.terminal_is_working(&row.id);
                 let (line1, line2) = terminal_row_lines(
@@ -2232,13 +2221,8 @@ impl App {
         // selection, the mouse map) is an index into this list.
         let terminal_items = self.terminal_items();
         let has_terminals = !terminal_items.is_empty();
-        // The whole list, for the two questions that are not about what is on
-        // screen: which terminals a running one has to disambiguate its title
-        // against (a "(#2)" that renumbered as the user typed a query would be
-        // worse than useless), and how many terminals exist at all (the pane's
-        // "visible / total" count). The count is taken as a plain number rather
-        // than kept borrowed, because the title is built well after this pane
-        // has started writing its mouse layout back into `self`.
+        // Titles disambiguate against the unfiltered list, and the pane total
+        // remains stable while a search changes visible rows.
         let all_terminals = self.sorted_terminal_items();
         let total_terminal_count = all_terminals.len();
 
@@ -2247,11 +2231,8 @@ impl App {
 
         let body_will_dim = self.render_agent_sidebar_section(frame, projects_area, focused);
 
-        // Render terminals section if any terminals exist. This mirrors the agent
-        // path above exactly: the block draws the border, and the list renders
-        // into a gutter-inset body offset by a one-row top margin, with the
-        // framed selection hand-painted (no widget highlight) so a terminal row
-        // and an agent row are pixel-identical in framing, spacing, and selection.
+        // Hand-paint the selection in the inset body so terminal and agent rows
+        // share identical framing, spacing, and selection geometry.
         if let Some(term_area) = terminals_area {
             self.render_terminal_sidebar_section(
                 frame,
@@ -3856,12 +3837,8 @@ impl App {
         let active_surface = context.active_surface;
         let receives_keys = context.receives_keys;
         let session_provider_name = context.provider_name.as_deref();
-        // The hardware caret follows KEYS, not just fullscreen-interactive
-        // mode: the minimized typeable pane receives keystrokes too, and the
-        // caret is both the "your keys land here" cue and what anchors IME
-        // composition popups. While scrolled back the cursor cell maps out of
-        // the viewport (the bounds check below skips it), so the caret
-        // vanishes there on both regimes without extra gating.
+        // The hardware caret follows every typeable pane and anchors IME UI.
+        // Bounds naturally hide it while the cursor is outside scrollback view.
         // Reserve 2 lines at the bottom for the hint bar (top border + text).
         let hint_height = 2;
         let [term_area, hint_area] = Layout::default()
@@ -3872,11 +3849,8 @@ impl App {
 
         self.resize_agent_terminal(term_area);
 
-        // THE TAKE-OVER CARD's one question, asked of the live registry and
-        // asked AFTER the sizing claim above, because that is where an armed
-        // take-over is SPENT: a claim granted in this very pass means the card
-        // is already gone by the time the pane is painted, rather than lingering
-        // for one frame over a terminal that is this device's again.
+        // Read ownership after sizing spends an armed claim, preventing a
+        // one-frame stale take-over card after a successful claim.
         let takeover_card = self.prepare_terminal_takeover();
         let card_up = takeover_card.is_some();
 
@@ -3895,11 +3869,8 @@ impl App {
             self.render_terminal_empty_state(frame, term_area, &context);
         }
 
-        // THE CARD, painted last over the grid and only over the grid: the tab
-        // strip, the PR banner and the hint bar are siblings of this area, not
-        // children of it, and they stay exactly as they are. That is the web's
-        // geometry too, where the card is `absolute inset-0` inside the terminal
-        // pane and the strip above it is outside.
+        // Paint the card last over the grid only; tab, PR, and hint lanes remain
+        // visible siblings, matching the web pane geometry.
         if let Some(card) = takeover_card {
             self.render_takeover_card(frame, term_area, &card);
         } else {
@@ -3920,14 +3891,8 @@ impl App {
             return;
         }
 
-        // A STANDALONE agent whose folder is not a repository: the region is
-        // quiet, and it says WHICH quiet rather than showing an empty file list
-        // the user cannot interpret. The sentence is the engine's, shared with
-        // the browser, so both surfaces describe the same folder the same way.
-        //
-        // Ahead of the collapsed rail too: a rail of nothing is no more
-        // informative than an empty list, and the pane is the only place this
-        // can be said.
+        // Show the shared non-repository message before even the collapsed rail;
+        // an empty file region cannot explain a standalone folder on its own.
         if let Some(reason) = self.quiet_changes_reason() {
             self.render_quiet_changes(frame, area, &reason);
             return;
@@ -5344,13 +5309,8 @@ impl App {
                 frame.buffer_mut(),
                 &mut state,
             );
-            // Scroll marker in the list block's right border column. ITEM
-            // units: a `ListState` offset counts whole entries and never
-            // clips the top one, and every directory row is one line.
-            // `item_count` is the count that matches `items` (completions
-            // while editing a path, filtered entries otherwise); the
-            // placeholder rows ("No matching entries.") report 0, which
-            // reads as unscrollable, as it should.
+            // The marker uses item units in the right border. Placeholder rows
+            // report zero items and therefore remain unscrollable.
             render_scroll_marker(
                 frame,
                 list_render_area,
@@ -6910,11 +6870,8 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        // Height comes from the BODY's row target (floored so the duck is
-        // never clipped) plus the border ring, the button row and its
-        // rule; `centered_rect_exact` clamps on a short terminal. See
-        // `first_load::MIN_BODY_ROWS` for why the body sets it and not
-        // the duck.
+        // Height combines the body minimum, border, rule, and button row;
+        // `centered_rect_exact` clamps it on short terminals.
         let area = first_load::modal_area(frame.area());
         self.clear_overlay_area(frame, area);
         let rendered = first_load::render_modal(frame, area, prompt, &self.theme);
@@ -7726,11 +7683,8 @@ impl App {
             None
         };
 
-        // Both buttons share a single width derived from the longest
-        // label that could appear in either slot. Including
-        // "Check Out & Add" and "Add Anyway" in the calculation keeps
-        // the layout stable when the user toggles the checkbox —
-        // otherwise the buttons would resize mid-modal.
+        // Size both buttons from every possible label so checkbox changes never
+        // resize the modal controls.
         let btn_width = shared_button_width(&["Cancel", "Add Anyway", "Check Out & Add"]);
         let gap = 2u16;
         let total = btn_width * 2 + gap;
@@ -7993,15 +7947,8 @@ impl App {
 
         let confirm_key = self.bindings.label_for(Action::Confirm);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        // Same rule as the new-agent modal: the name field owns the
-        // letters and the horizontal arrows, so the hint names the
-        // first key of the action that still reaches focus movement
-        // here (see `text_field_owns_key`). If a rebinding leaves none,
-        // the segment is dropped: naming a key that types a character
-        // is worse than naming none.
-        // Nothing to move focus to when the checkbox is absent, so the
-        // segment goes with it rather than naming a key that does
-        // nothing.
+        // Name only a binding that can move focus out of the name field; omit
+        // the segment when rebinding or a missing checkbox leaves none.
         let focus_key = if *branch_named {
             self.bindings
                 .label_for_text_field_dialog(Action::ToggleSelection)
@@ -8015,11 +7962,8 @@ impl App {
                 // Dropped entirely when the field swallows every key the
                 // movement action is bound to; the builder owns that rule.
                 Hint::maybe_key(focus_key, "focus"),
-                // Space-on-focus is hardcoded (the accessibility tenet),
-                // so there is no binding to resolve for it. Dropped
-                // while the name field has focus, where Space is a
-                // typed character and toggles nothing.
-                // An empty segment is dropped by the builder.
+                // Space activates a focused control but types normally in the
+                // name field, so the hint appears only on the checkbox.
                 Hint::plain(if *focus == RenameSessionFocus::Input {
                     ""
                 } else {
@@ -8367,12 +8311,8 @@ impl App {
         );
         let is_global_env = matches!(&self.prompt, PromptState::ConfigureGlobalEnv { .. });
         self.render_dim_overlay(frame);
-        // Four rows taller than the field-only modal used to be: a
-        // blank misclick-safety row plus the three-row Cancel/Save pair
-        // the dual-mode rule requires of a full-text field.
-        // Wider than the field-only modal was: the footer now names
-        // the focus, engage, activate, clear and cancel keys, and a
-        // truncated footer is a footer that stops being an answer.
+        // Reserve a blank row plus three button rows for misclick safety and the
+        // full-text field's controls. Width must fit the complete key footer.
         let area = centered_rect_exact(84, if is_env { 22 } else { 20 }, frame.area());
         self.clear_overlay_area(frame, area);
         let outer = self.themed_overlay_block(if is_global_env {
@@ -8420,12 +8360,8 @@ impl App {
         ])
         .render(label_area, frame.buffer_mut());
 
-        // Two different questions, and conflating them is the bug this
-        // modal used to have: FOCUS is "the next keystroke is aimed
-        // here", ENGAGED is "the field is swallowing keystrokes". A
-        // focused-but-unengaged field takes nothing, so it gets the
-        // focus border and no caret, and the footer names the key that
-        // engages it.
+        // Focus routes the next modal action; engagement lets the field consume
+        // keys. Focused but unengaged renders a border without a caret.
         let field_focused = focus == ConfigureFieldFocus::Input;
         let engaged = self.input_target == InputTarget::StartupCommand;
         let text_area = self.render_modal_text_field_frame(
@@ -8547,13 +8483,8 @@ impl App {
                 ));
             }
             if !field_focused {
-                // Space-on-focus is hardcoded (the accessibility
-                // tenet), so there is no binding to resolve for it.
-                // The segment is a promise about what Space does RIGHT
-                // NOW, so it is as state-aware as the `move focus`
-                // segment above: on the unengaged body Space does
-                // nothing at all, and a footer may be incomplete but
-                // may never be WRONG.
+                // Space activates focused controls, so the hint appears only
+                // when the current focus can actually consume it.
                 hints.push(Hint::plain("Space act on focus"));
             }
             if field_focused {
@@ -8819,13 +8750,8 @@ impl App {
             }
         }
 
-        // Scroll marker in the Output block's own right BORDER column.
-        // The body is painted cell-by-cell, so a full-width log line
-        // owns its last content column; the border column is the only
-        // cell nothing else can want. Units are wrapped visual ROWS
-        // (`startup_command_log_visual_lines` pre-splits to the body
-        // width), the same measure `max_scroll` above clamps with. The
-        // sibling "Runs" list is deliberately left unmarked.
+        // Put the output marker in its right border and measure wrapped visual
+        // rows, matching the units used by `max_scroll`.
         render_scroll_marker(
             frame,
             body_area,
@@ -9047,22 +8973,8 @@ impl App {
             KillRunningFooterAction::Visible,
         ];
         let gap = 2u16;
-        // NOTE for whoever comes here to "finish" the picker cleanup:
-        // the three provider pickers lost their Cancel/Apply pair
-        // because a picker confirms by PICKING and a button label
-        // cannot stay truthful once a key is rebound. That rule does
-        // not reach these four. They are not a confirm/cancel pair
-        // restating Enter; they are four DISTINCT actions (cancel, kill
-        // the hovered runtime, kill the marked ones, kill everything
-        // the filter currently shows), and three of them have no
-        // keyboard equivalent that a footer hint could name instead.
-        // Leave them.
-        //
-        // This footer pre-dates the Button widget's standard sizing —
-        // its labels are long ("Kill Hovered" etc.) and it lays four
-        // buttons in a row. The wider per-label width (label_chars + 6)
-        // keeps the row visually balanced; Button still handles the
-        // colors and bold-when-enabled rules.
+        // These are four distinct actions, not picker confirmation controls;
+        // three have no keyboard equivalent. Extra width balances long labels.
         let button_widths = buttons.map(|action| {
             let label_chars =
                 u16::try_from(action.button_label().chars().count()).unwrap_or(u16::MAX);
@@ -9274,12 +9186,8 @@ impl App {
                 } else {
                     initial_branch
                 };
-                // The shared reason, never a second wording of it:
-                // this dialog had its own shorter copy, which drifted
-                // from the status line's on the adopted case and would
-                // have claimed "existed before this agent" of a
-                // provenance a future dux writes and this one cannot
-                // read.
+                // Use the shared provenance wording so unknown future values
+                // remain accurate across every surface.
                 let reason = branch_provenance.kept_reason();
                 body_lines.push(Line::from(Span::styled(
                     format!(" Branch \"{kept}\" {reason} and is kept."),

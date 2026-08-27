@@ -884,26 +884,8 @@ fn apply_pending_copy(
     }
 }
 
-/// Create a STANDALONE agent: build the record, check the provider is there,
-/// and launch it in the user's folder.
-///
-/// Everything the ordinary create path does is provisioning, and this does none
-/// of it: no branch is minted, no worktree is added, no uncommitted changes are
-/// copied, and no startup command runs (that is a worktree provisioning step,
-/// and there is no worktree). The folder is used exactly as the user gave it.
-///
-/// ROLLBACK IS RECORD-ONLY, and structurally so: nothing here creates anything
-/// on disk, so there is nothing to undo, and `rollback_created_worktree` is
-/// unreachable from this path. The launch request is built with
-/// `owns_worktree: false`, which is the same flag
-/// `CreateAgentRequest::ExistingManagedWorktree` uses for the same reason: dux
-/// did not make the directory, so a failed launch must not remove it.
-///
-/// The environment is the GLOBAL environment with no project overlay, the same
-/// answer `Engine::create_standalone_terminal` gives, because there is no
-/// project to overlay it with. Named and tested rather than inherited: the
-/// project-lookup code paths would silently produce an EMPTY environment for a
-/// project-less agent, which is a different and much worse thing.
+/// Launch a standalone agent in a caller-owned folder using only global env.
+/// It performs no worktree provisioning, and rollback never touches the folder.
 #[allow(clippy::too_many_arguments)]
 fn run_create_standalone_agent_job(
     folder: PathBuf,
@@ -1232,11 +1214,7 @@ pub fn run_create_agent_job(
     // across the job and appended to the create status message, so they ride
     // the keyed create-op final and stay visible.
     let mut creation_notes: Vec<String> = Vec::new();
-    // The standalone arm shares nothing with the common tail below, which is
-    // entirely worktree provisioning: branch creation, the uncommitted-changes
-    // copy, the project's startup command, and the rollbacks that undo them.
-    // A standalone agent provisions NOTHING, so it takes its own short path and
-    // never reaches code that could remove a directory.
+    // Standalone agents bypass worktree provisioning and its disk rollbacks.
     if let CreateAgentRequest::Standalone {
         folder,
         title,

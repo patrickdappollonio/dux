@@ -1647,11 +1647,8 @@ impl App {
         }
         Ok(())
     }
-    /// Whether the Center-scope scroll bindings are GATED by minimized typing:
-    /// the pane is typeable and sitting at the live edge, so a scroll key has
-    /// nothing to scroll and falls through to the encoder instead. False in
-    /// every other state (non-typeable panes keep scrolling unconditionally;
-    /// a scrolled-back typeable pane is exactly what the scroll keys are for).
+    /// True when a typeable center pane is at the live edge, where scroll keys
+    /// must reach the PTY. Other center-pane states consume scroll bindings.
     fn center_scroll_keys_gated(&self) -> bool {
         self.center_typeable()
             && !self.scroll_mode_active()
@@ -6051,15 +6048,7 @@ impl App {
         Self::overlay_row_at_sized(rect, offset, items, 1, column, row)
     }
 
-    /// `overlay_row_at` for a list whose items are more than one terminal row
-    /// tall.
-    ///
-    /// `ListState::offset()` counts ITEMS, but a click arrives as a screen ROW,
-    /// so the two only line up when an item is one row. The startup-log picker
-    /// draws each run as a name line plus a timestamp line, and the one-row
-    /// assumption mapped a click on run N onto run 2N: the second run's name
-    /// line resolved past the end of the list and selected nothing at all. It
-    /// went unnoticed because nothing outside tests could open that picker.
+    /// Map a screen row into a list whose offset counts multi-row items.
     fn overlay_row_at_sized(
         rect: Rect,
         offset: usize,

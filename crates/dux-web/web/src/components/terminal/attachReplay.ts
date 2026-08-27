@@ -1,8 +1,5 @@
-// Applies the first binary replay for each PTY attach. Reconnects drain pending
-// xterm writes, reset the buffer, and then apply the replay plus its server-owned
-// mode-restore tail. Replay generations prevent duplicate application; bytes
-// arriving during a drain remain ordered behind the replay. A callback-scoped
-// counter suppresses focus reports emitted while xterm parses replayed modes.
+// Reconnects drain and reset xterm before applying the generation-deduped replay.
+// Live bytes stay ordered, and replay-generated focus reports are suppressed.
 import type { Terminal } from "@xterm/xterm"
 
 import {

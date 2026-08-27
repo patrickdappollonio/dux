@@ -1,12 +1,8 @@
 import { reconnectBackoffCapMs } from "./connectionTiming"
 import type { ConnState } from "./types"
 
-// Shared reconnect lifecycle for events and PTY sockets. Network failures retry
-// indefinitely with capped exponential backoff; terminal close codes enter the
-// `failed` state. Subclasses decide whether hidden pages park. Visibility,
-// pageshow, focus, and online signals wake idempotently, and a connection resets
-// its backoff only after receiving a frame or remaining open through the healthy
-// settle window.
+// Events and PTY sockets retry network failures indefinitely with capped backoff.
+// Terminal close codes fail; wake signals are idempotent and health resets delay.
 export const RECONNECT_MIN_MS = 500
 
 /// Maximum time a socket may remain in CONNECTING before it is retried.

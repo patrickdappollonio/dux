@@ -1,9 +1,5 @@
-// Coordinates local xterm fits with remote PTY resizes. Owner mode debounces and
-// deduplicates the fit/send pair; viewer mode adopts the driver's reported grid
-// without sending. Gesture holds suspend both halves so the local grid cannot
-// diverge from the child. First-frame, foreground, take-over, and font-driven
-// resizes all pass through this ownership gate; the pane separately scales a
-// viewer's font to fit the adopted grid.
+// Owner mode coordinates debounced xterm fits with PTY resizes; viewer mode only
+// adopts the driver's grid. Gesture holds suspend the fit/send pair together.
 import type { Terminal } from "@xterm/xterm"
 import type { FitAddon } from "@xterm/addon-fit"
 

@@ -2816,11 +2816,8 @@ impl Engine {
         EventReaction::ClampFilesCursor
     }
 
-    /// Process a `WorkerEvent`: perform engine-side mutations and return the
-    /// view follow-up the App caller should apply.
-    ///
-    /// The Engine MUST NOT touch view state. Anything view-side is returned
-    /// via `EventReaction` for the App to apply.
+    /// Apply engine mutations for a worker event and return any view reaction.
+    /// The engine never mutates view state directly.
     pub fn process_worker_event(&mut self, event: WorkerEvent) -> EventReaction {
         match event {
             WorkerEvent::CommandWorkerStarted(status) => EventReaction::Status(status),
@@ -2894,11 +2891,8 @@ impl Engine {
                 EventReaction::Nothing
             }
             WorkerEvent::PullRequestReferenceResolved { .. } => {
-                // Resolution is a question about the SURFACE's next screen (a
-                // lookup, a picker over the matches, or a message naming a
-                // repository dux has no project for), so the surface that asked
-                // reads it off the channel itself. The engine has nothing to
-                // decide here and deliberately does not invent a reaction.
+                // The requesting surface consumes PR resolution directly because
+                // it alone decides which screen the result opens.
                 EventReaction::Nothing
             }
             WorkerEvent::PullRequestResolved {
