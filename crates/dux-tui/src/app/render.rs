@@ -17276,6 +17276,176 @@ mod tests {
         (app, buf)
     }
 
+    fn help_isolation_ring(area: Rect, frame: Rect) -> Vec<(u16, u16)> {
+        let mut ring = Vec::new();
+        if area.y > frame.y {
+            for x in area.x.saturating_sub(1)..=(area.right().min(frame.right() - 1)) {
+                ring.push((x, area.y - 1));
+            }
+        }
+        if area.bottom() < frame.bottom() {
+            for x in area.x.saturating_sub(1)..=(area.right().min(frame.right() - 1)) {
+                ring.push((x, area.bottom()));
+            }
+        }
+        if area.x > frame.x {
+            for y in area.y..area.bottom() {
+                ring.push((area.x - 1, y));
+            }
+        }
+        if area.right() < frame.right() {
+            for y in area.y..area.bottom() {
+                ring.push((area.right(), y));
+            }
+        }
+        ring
+    }
+
+    #[test]
+    fn help_overlay_has_a_dim_blank_gap_from_the_workspace() {
+        for (width, height) in [(80, 24), (100, 30), (120, 40)] {
+            let frame = Rect::new(0, 0, width, height);
+            let (area, _, _) = help_rects(frame);
+            let (app, buf) = help_frame((width, height), 0);
+            let ring = help_isolation_ring(area, frame);
+
+            let occupied: Vec<_> = ring
+                .iter()
+                .copied()
+                .filter(|&position| buf[position].symbol() != " ")
+                .collect();
+            assert!(
+                occupied.is_empty(),
+                "Help gap is occupied at {occupied:?} in {width}x{height}"
+            );
+            assert!(
+                ring.iter()
+                    .all(|&position| buf[position].bg == app.theme.overlay_dim_bg),
+                "Help gap does not use the dim background in {width}x{height}"
+            );
+            assert_eq!(app.overlay_layout.frame.get(), Some(area));
+        }
+    }
+
+    struct RecordingBackend {
+        physical: ratatui::buffer::Buffer,
+        draws: Vec<Vec<(u16, u16, ratatui::buffer::Cell)>>,
+        cursor: ratatui::layout::Position,
+        cursor_visible: bool,
+    }
+
+    impl RecordingBackend {
+        fn new(width: u16, height: u16) -> Self {
+            Self {
+                physical: ratatui::buffer::Buffer::empty(Rect::new(0, 0, width, height)),
+                draws: Vec::new(),
+                cursor: ratatui::layout::Position::ORIGIN,
+                cursor_visible: false,
+            }
+        }
+    }
+
+    impl ratatui::backend::Backend for RecordingBackend {
+        type Error = std::convert::Infallible;
+
+        fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+        where
+            I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+        {
+            let draw: Vec<_> = content.map(|(x, y, cell)| (x, y, cell.clone())).collect();
+            for (x, y, cell) in &draw {
+                self.physical[(*x, *y)] = cell.clone();
+            }
+            self.draws.push(draw);
+            Ok(())
+        }
+
+        fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+            self.cursor_visible = false;
+            Ok(())
+        }
+
+        fn show_cursor(&mut self) -> Result<(), Self::Error> {
+            self.cursor_visible = true;
+            Ok(())
+        }
+
+        fn get_cursor_position(&mut self) -> Result<ratatui::layout::Position, Self::Error> {
+            Ok(self.cursor)
+        }
+
+        fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+            &mut self,
+            position: P,
+        ) -> Result<(), Self::Error> {
+            self.cursor = position.into();
+            Ok(())
+        }
+
+        fn clear(&mut self) -> Result<(), Self::Error> {
+            self.physical.reset();
+            Ok(())
+        }
+
+        fn clear_region(
+            &mut self,
+            _clear_type: ratatui::backend::ClearType,
+        ) -> Result<(), Self::Error> {
+            self.clear()
+        }
+
+        fn size(&self) -> Result<ratatui::layout::Size, Self::Error> {
+            Ok(self.physical.area.as_size())
+        }
+
+        fn window_size(&mut self) -> Result<ratatui::backend::WindowSize, Self::Error> {
+            Ok(ratatui::backend::WindowSize {
+                columns_rows: self.physical.area.as_size(),
+                pixels: ratatui::layout::Size::ZERO,
+            })
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn focused_agent_border_repairs_physical_drift_on_the_next_frame() {
+        use ratatui::Terminal;
+
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        let mut terminal = Terminal::new(RecordingBackend::new(160, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("first frame");
+
+        let term_area = app.mouse_layout.agent_term.expect("agent terminal area");
+        let border = (term_area.right(), term_area.y + 2);
+        assert_eq!(terminal.backend().physical[border].symbol(), "│");
+        terminal.backend_mut().physical[border].set_symbol(" ");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("second frame");
+
+        assert_eq!(
+            terminal.backend().physical[border].symbol(),
+            "│",
+            "the next frame did not repair the focused agent border"
+        );
+        assert!(
+            terminal
+                .backend()
+                .draws
+                .last()
+                .expect("second draw")
+                .iter()
+                .any(|(x, y, cell)| (*x, *y) == border && cell.symbol() == "│"),
+            "the second draw omitted the damaged border cell"
+        );
+    }
+
     #[test]
     fn the_help_overlay_marker_points_the_way_at_top_middle_and_bottom() {
         let frame = Rect::new(0, 0, 80, 40);
