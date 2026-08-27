@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState } from "react"
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react"
 import type { Terminal } from "@xterm/xterm"
 import type { FitAddon } from "@xterm/addon-fit"
 import { MonitorSmartphone } from "lucide-react"
@@ -37,7 +43,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useTypingSurface } from "@/hooks/use-typing-surface"
 import { useFilePicker } from "@/hooks/use-file-picker"
-import { inputMenuHasItems } from "@/lib/inputMenu"
+import { inputMenuHasItems, type InputMenuGates } from "@/lib/inputMenu"
 import { setTypingSurface } from "@/lib/typingSurface"
 import { ESC, TAB } from "@/lib/termkeys"
 import {
@@ -46,12 +52,12 @@ import {
   mobileTopBarVisible,
   useDux,
 } from "@/lib/store"
-import type { TerminalOwnerRef } from "@/lib/store"
+import type { DuxState, TerminalOwnerRef } from "@/lib/store"
 import type { PtySocket } from "@/lib/ptySocket"
 import { matchOwner, ownerProjectId, ownerSessionId } from "@/lib/terminalOwner"
 import { terminalsForOwner } from "@/lib/terminals"
 import { DEFAULT_ATTENTION_GRACE_SECONDS } from "@/lib/viewedPing"
-import { attachCover } from "@/lib/attachCover"
+import { attachCover, type AttachCover } from "@/lib/attachCover"
 import { replayWaitMs } from "@/lib/connectionTiming"
 import { createVisibleClock, type VisibleClock } from "@/lib/visibleClock"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
@@ -73,8 +79,13 @@ import {
   nextTypingFocus,
   typingFocusAllowed,
   useInputSurface,
+  type InputSurface,
 } from "@/components/terminal/inputSurface"
-import { useUploadPipeline } from "@/components/terminal/uploadPipeline"
+import {
+  useUploadPipeline,
+  type UploadPipeline,
+} from "@/components/terminal/uploadPipeline"
+import type { TakeoverIntent } from "@/components/terminal/channels"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
 type TerminalPaneProps =
@@ -90,224 +101,41 @@ type TerminalPaneProps =
 
 export function TerminalPane(props: TerminalPaneProps) {
   const { kind, id } = props
-  // The owning session id, when there is one: the agent's own session, or a
-  // session-owned terminal's parent. A PROJECT terminal has none (null); every
-  // session-scoped branch below must tolerate that. These two are LOSSY on
-  // purpose and are used only to look an owner record up by id; anything that
-  // has to SAY something about the owner (the notification title below) matches
-  // on it exhaustively instead, because a pair of nulls is indistinguishable
-  // from an owner nothing here understands.
-  const sessionId =
-    props.kind === "agent" ? props.sessionId : ownerSessionId(props.owner)
-  const projectId =
-    props.kind === "terminal" ? ownerProjectId(props.owner) : null
-  // The padded, background-painted host. Padding must live HERE — one layer
-  // OUTSIDE the element xterm opens into — because FitAddon measures the open
-  // target's parent via getComputedStyle().height, which under Tailwind's
-  // global box-sizing: border-box INCLUDES padding. Padding on the measured
-  // element inflates availableHeight by 16px and mints a phantom terminal row
-  // (~16 of every 17 window heights) that renders clipped under the status
-  // bar — and the PTY is told about it, so bottom-anchored TUIs (codex's
-  // input box) draw into an invisible row.
-  const hostRef = useRef<HTMLDivElement>(null)
-  // The unpadded element xterm opens into; its border-box equals its content
-  // box, so FitAddon's measurement is exact.
-  const containerRef = useRef<HTMLDivElement>(null)
-  const termRef = useRef<Terminal | null>(null)
-  // The FitAddon of the open terminal, kept in a ref (and cleared alongside
-  // termRef) so the live font-settings effect below can refit after changing
-  // the xterm options in place.
-  const fitAddonRef = useRef<FitAddon | null>(null)
-  // The dedicated PTY socket for the focused target. Created by the lifecycle
-  // hook and read by the input surface (defined at component scope) so its
-  // sends reach the same socket xterm's `onData` does.
-  const ptyRef = useRef<PtySocket | null>(null)
-  const isMobile = useIsMobile()
-  // Is touch the primary pointer? Gates the TYPING SURFACES (see below);
-  // `isMobile` stays the width signal for layout and sizing.
-  const isCoarsePointer = useIsCoarsePointer()
-  // Which typing surface this device was last left on, or null while the
-  // pointer capability answers. Transient, per-device, never configuration.
-  const typingSurface = useTypingSurface()
-  // The hidden `<input type="file">` behind "Attach a file…", and the call that
-  // opens it. `pickerInput` is rendered with the bars at the bottom of this
-  // file; `openFilePicker` must be called straight from the activating click,
-  // or the browser's user activation is spent and no dialog appears.
-  const { input: pickerInput, open: openFilePicker } = useFilePicker()
-
-  // Drag-and-drop of a file onto the pane. `dragDepth` counts enter/leave pairs
-  // because dragging across a child element fires a `dragleave` for the parent;
-  // a plain boolean would flicker the overlay off over every internal boundary.
-  const [dragActive, setDragActive] = useState(false)
-  const dragDepthRef = useRef(0)
-
-  const duxState = useDux()
-  const { spine, bootstrap, offline, conn } = duxState
-
-  // The two `ui.terminal_font_*` preferences (web UI only), read reactively so
-  // a live change (Preferences dialog) refonts the open terminal below.
-  const terminalFontFamilySetting = bootstrap?.terminal_font_family ?? ""
-  const terminalFontSizeSetting = bootstrap?.terminal_font_size ?? 14
-  // Whether dropping a file onto this pane does anything at all. `[server]
-  // file_drop_max_bytes = 0` switches the feature off, so the whole drag
-  // surface goes with it (see `paneAcceptsFileDrag`).
-  //
-  // NOT YET KNOWN is NOT ENABLED. Bootstrap and the workspace load in parallel,
-  // so the pane renders before the bootstrap document arrives, and an older
-  // server never sends the field at all. Defaulting that window to ON matched
-  // the config default but offered a feature dux could not yet say it had: with
-  // the setting switched off, a drag landing in that window still showed the
-  // overlay and still uploaded. There is nothing to lose by waiting, because
-  // the window closes in one fetch and the drag surface simply appears then.
-  const fileDropEnabled = (bootstrap?.file_drop_max_bytes ?? 0) > 0
-  // `ui.upload_pasted_text_chars`: how long a TEXT paste has to be before dux
-  // saves it as a document and pastes its path instead of typing it. Read as
-  // OFF when absent: an older server never published it, and a paste that
-  // quietly becomes a file before dux can say the feature exists is a surprise,
-  // not a convenience. It only ever reaches an AGENT pane.
-  const pastedTextChars = bootstrap?.upload_pasted_text_chars ?? 0
-
-  // THE TYPING SURFACES: the accessory keys and the compose bar.
-  //
-  // TWO ORTHOGONAL QUESTIONS, and this is the whole rule. WIDTH decides the
-  // LAYOUT: how much room is there, so which shell you get, which is what
-  // `isMobile` and the mobile column further down answer. THE POINTER decides
-  // the TYPING SURFACE: is a finger doing the typing, so does the text need a
-  // buffer where autocorrect, swipe and an IME have something to work with. A
-  // tablet in landscape gets the DESKTOP layout because it has the room AND
-  // needs the buffered input because a finger is still typing, so both bars
-  // render inside the desktop shell too. They travel with the pointer, not with
-  // the mobile column. `pointer: coarse` also does not change with orientation,
-  // which is what stopped a rotation from swapping the typing surface
-  // mid-session.
-  //
-  // The `always`/`never` modes exist because the capability check provably
-  // cannot finish the job (see `hooks/use-coarse-pointer.ts` for the
-  // measurements), and `typingSurface` is the transient per-device toggle that
-  // resolves the same ambiguity in the moment; `composeBarShown` is where the
-  // setting-wins rule lives.
-  const composeMode = composeBarMode(bootstrap?.compose_bar)
-  const composeBarEnabled = composeBarShown(
-    composeMode,
+  const {
+    hostRef,
+    containerRef,
+    termRef,
+    fitAddonRef,
+    ptyRef,
+    isMobile,
     isCoarsePointer,
-    typingSurface
-  )
-  // Do the touch surfaces belong on this device at all? Gates the ACCESSORY
-  // bar, and with it the toggle that turns the compose bar on and off.
-  const touchSurfaces = touchSurfacesApply(composeMode, isCoarsePointer)
-  const surfaceToggleOffered = typingSurfaceToggleOffered(
-    composeMode,
-    isCoarsePointer
-  )
-  // The two hideable-bar preferences (`ui.mobile_top_bar`,
-  // `ui.mobile_accessory_bar`), resolved through their optimistic overrides.
-  const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
-  const topBarVisible = mobileTopBarVisible(duxState)
-
-  // Always resolve the owning session by `sessionId` (for an agent, `id` is the
-  // FOCUSED TAB id — the session-slot tab's equals the session id, but an extra
-  // tab's does not, so a lookup by `id` would miss). A project terminal has no
-  // session; it resolves its owning PROJECT instead. The focused tab, when this
-  // is an agent, drives the provider label / readiness / exit gating.
-  const session =
-    sessionId !== null ? spine?.sessions.find((s) => s.id === sessionId) : undefined
-  const project =
-    projectId !== null ? spine?.projects.find((p) => p.id === projectId) : undefined
-  const focusedTab =
-    kind === "agent" ? session?.tabs.find((t) => t.id === id) : undefined
-  // Title for a bridged desktop notification: the agent's name (or its branch),
-  // or the owning project's name for a project terminal.
-  //
-  // A TERMINAL is named after its OWNER through an exhaustive match, not off the
-  // nullable `projectId`/`sessionId` pair above: those collapse an unrecognized
-  // owner into two nulls, and this expression then called the terminal "Agent",
-  // which is both wrong and unfixable from here. The fallback inside each arm
-  // covers an owner id the spine no longer carries, which is a lookup miss, not
-  // an unhandled kind.
-  const notifyTitle =
-    props.kind === "terminal"
-      ? matchOwner(props.owner, {
-          // A session-owned terminal is named after its AGENT, exactly as
-          // before; the generic fallback stays "Agent" for the same reason.
-          session: () => (session ? sessionLabel(session) : "Agent"),
-          project: () => project?.name || "Terminal",
-          // No owner to be named after, so the generic noun is the whole name.
-          standalone: () => "Terminal",
-        })
-      : session
-        ? sessionLabel(session)
-        : "Agent"
-  const isSessionSlotTab = kind === "agent" && id === sessionId
-  // A terminal's siblings: the terminals sharing its owner, selected out of the
-  // spine's flat collection rather than read off whichever parent it used to be
-  // nested under.
-  const ownedTerminals =
-    props.kind === "terminal"
-      ? terminalsForOwner(spine?.terminals ?? [], props.owner)
-      : undefined
-  const hasOutput =
-    kind === "agent"
-      ? (focusedTab?.has_output ?? session?.has_output ?? false)
-      : (ownedTerminals?.find((t) => t.id === id)?.has_output ?? false)
-  const providerName =
-    kind === "agent" ? (focusedTab?.provider ?? session?.provider) : session?.provider
-  // The server-published driver of this pty, refetched on every events-socket
-  // open. `null` means the server said nobody drives it; `undefined` means it did
-  // not answer (an older server), which is no evidence either way.
-  const spineTerminal =
-    props.kind === "terminal"
-      ? ownedTerminals?.find((t) => t.id === id)
-      : undefined
-  const spineInputOwner =
-    kind === "agent"
-      ? focusedTab === undefined
-        ? undefined
-        : (focusedTab.input_owner ?? null)
-      : spineTerminal === undefined
-        ? undefined
-        : (spineTerminal.input_owner ?? null)
-
-  // The compose textarea, owned by ComposeBar but targeted from here: the
-  // tap-to-focus redirect and the scroll-gesture keyboard dismissal both need
-  // to focus/blur it from outside the component.
-  const composeInputRef = useRef<HTMLTextAreaElement | null>(null)
-  // True when even the floor font cannot fit the agent's grid in this window.
-  // The terminal then overflows deliberately and the host becomes pannable;
-  // see the relayout effect. Declared before the live-settings container
-  // because the touch gesture's scroll gate reads it through there.
-  const [viewerOverflow, setViewerOverflow] = useState(false)
-  // THE LIVE-SETTINGS CONTAINER. One snapshot, one synchronising effect, read
-  // at call time by every long-lived closure the lifecycle creates. It replaces
-  // the sixteen individual ref mirrors (and their sixteen effects) this pane
-  // used to carry, and it is deliberately READ-ONLY: the three values the
-  // wiring WRITES are named channels, each owned by the unit below that writes
-  // it. Declared before the lifecycle hook so its synchronisation runs first on
-  // every commit.
-  const liveSettings: TerminalLiveSettings = {
-    scrollbackLines: bootstrap?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES,
-    copyOnSelect: bootstrap?.copy_on_select ?? true,
-    fontFamily: terminalFontFamilySetting,
-    fontSize: terminalFontSizeSetting,
+    typingSurface,
+    pickerInput,
+    openFilePicker,
+    dragActive,
+    setDragActive,
+    dragDepthRef,
+    offline,
+    conn,
+    terminalFontFamilySetting,
+    terminalFontSizeSetting,
     fileDropEnabled,
-    pastedTextChars,
-    attentionGraceMs:
-      (bootstrap?.attention_grace_seconds ?? DEFAULT_ATTENTION_GRACE_SECONDS) *
-      1000,
-    webNotifications: bootstrap?.web_notifications ?? true,
-    hyperlinks: bootstrap?.hyperlinks ?? true,
-    clipboardPassthrough: bootstrap?.clipboard_passthrough ?? "focused",
-    notifyTitle,
+    composeMode,
+    composeBarEnabled,
+    touchSurfaces,
+    surfaceToggleOffered,
+    accessoryBarVisible,
+    topBarVisible,
+    session,
+    hasOutput,
     providerName,
-    configuredDropPaste: bootstrap?.provider_drop_paste,
-    launchedDropPaste: focusedTab?.drop_paste,
-    sessionTabs: session?.tabs,
+    spineInputOwner,
+    composeInputRef,
     viewerOverflow,
-    // Deliberately the RENDERED value, published one commit later like every
-    // other field: see the field's doc for why both mismatch directions are
-    // harmless.
-    composeActive: composeBarEnabled,
-  }
-  const live = useTerminalLiveSettings(liveSettings)
+    setViewerOverflow,
+    live,
+    isSessionSlotTab,
+  } = useTerminalPaneSetup(props)
 
   // THE ONE FOCUS-ROUTING RULE, bound to this pane's three handles. It is a
   // standalone function in the input surface rather than a method of it,
@@ -438,7 +266,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     // and each terminal keeps its own unsent message across a remount.
     targetId: props.id,
   })
-  const { ctrl, alt, composeText, setComposeText } = input
 
   // THE UPLOAD PIPELINE: the three-gesture file journey (drop, paste, picker),
   // its sinks, its batch loop and its one toast.
@@ -499,7 +326,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   // branch above because a ref must not be written during render.
   useEffect(() => {
     if (!dragActive) dragDepthRef.current = 0
-  }, [dragActive])
+  }, [dragActive, dragDepthRef])
   // Keep an OPEN terminal's unfocused-caret style in step with the typing
   // surface. The Box/Direct toggle and a preference flip both change the
   // answer mid-session, and xterm options are mutable in place (verified
@@ -511,7 +338,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     const term = termRef.current
     if (!term) return
     term.options.cursorInactiveStyle = inactiveCursorStyle(composeBarEnabled)
-  }, [composeBarEnabled])
+  }, [composeBarEnabled, termRef])
   // Tracks the attention-grace hidden -> visible transition (see
   // `visibleSinceAfterTransition` in viewedPing.ts). Refs, not state, so both
   // the lifecycle's visibility listeners and the ownership-gain effect below
@@ -567,70 +394,27 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
   }, [])
 
-  // WHICH INPUT ROWS EXIST. The accessory keys and the message box each answer
-  // for themselves; the menu's own row exists only when neither does.
-  const accessoryBarShown = isOwner && touchSurfaces && accessoryBarVisible
-  const composeBarShownHere = isOwner && composeBarEnabled
+  const {
+    accessoryBarShown,
+    composeBarShown: composeBarShownHere,
+    inputMenuGates,
+    menuHasItems,
+    inputMenuRow,
+    inColumn,
+  } = terminalInputLayout({
+    isOwner,
+    fileDropEnabled,
+    composeMode,
+    isCoarsePointer,
+    typingSurface,
+    touchSurfaces,
+    accessoryBarVisible,
+    composeBarEnabled,
+    isMobile,
+    topBarVisible,
+  })
 
-  // THE INPUT ⋯ MENU'S CONTENTS, computed before anything renders, because an
-  // ⋯ that opens an empty popup is worse than no ⋯ and the empty state is
-  // reachable (a fine pointer whose stored choice put the message box up, with
-  // uploads switched off: every gate below is false).
-  //
-  // A NON-OWNER gets the view toggles only, and only the top-bar one. Attach
-  // and the typing surface are input, which a viewer does not have; the keys
-  // toggle would be a write with no visible effect on their own screen (their
-  // keys never render) that re-hides the OWNER's keys. What is left is the
-  // pre-existing dead end this closes: a viewer who hid the top bar from the
-  // header menu had hidden the menu with it.
-  const inputMenuGates = {
-    attach: isOwner && fileDropEnabled,
-    surfaceSwitch:
-      isOwner &&
-      inputMenuSurfaceSwitchOffered(composeMode, isCoarsePointer, typingSurface),
-    keysToggle: isOwner && touchSurfaces,
-    topBarToggle: isMobile,
-  }
-  const menuHasItems = inputMenuHasItems(inputMenuGates)
-
-  // THE MENU'S OWN ROW, the third anchor. It renders only when NEITHER bar did,
-  // so exactly one ⋯ is ever on screen (the state that used to produce two:
-  // keys up, message box off, top bar hidden).
-  //
-  // "Neither bar" is necessary but not sufficient. The menu belongs to the
-  // VIRTUAL INPUT, so its own row appears where that input lives: on the touch
-  // surfaces (phone or coarse-pointer tablet, desktop shell included, since
-  // both bar preferences are stored server-side and hiding the keys from a
-  // phone hides them on the tablet too), or on the phone whose top bar is
-  // hidden, which is the chrome-free screen the PWA has no browser Back button
-  // to escape from. A fine-pointer desktop grows no new row: its path to the
-  // same upload is the agent and terminal row menus.
-  const inputMenuRow =
-    !accessoryBarShown &&
-    !composeBarShownHere &&
-    menuHasItems &&
-    (isOwner ? touchSurfaces || (isMobile && !topBarVisible) : isMobile && !topBarVisible)
-
-  // IS THIS PANE A COLUMN? True whenever something renders BELOW the terminal:
-  // the mobile shell always is one, and any layout showing the touch bars
-  // becomes one, desktop included. It decides the pane's own flex role, so the
-  // terminal is the flexible row when it has company and simply fills its
-  // parent when it does not.
-  //
-  // The menu's own row counts as company: with both bars down it is the ONLY
-  // thing below the terminal, and leaving it out here made the desktop shell
-  // drop the row that carries the way back.
-  const inColumn =
-    isMobile || accessoryBarShown || composeBarShownHere || inputMenuRow
-
-  // Latch readiness: once the PTY has emitted output we keep the spinner hidden,
-  // even if a later view model reports `has_output: false` (e.g. an exited
-  // agent). Adjusting state during render is the React-sanctioned latch pattern
-  // — the guard makes it run at most once, so it can't cascade.
-  const [everReady, setEverReady] = useState(false)
-  if (hasOutput && !everReady) {
-    setEverReady(true)
-  }
+  const everReady = useEverReady(hasOutput)
   // THE ONE LIFECYCLE OWNER. It creates the terminal and the socket, wires
   // every listener the pair needs, and tears both down, re-running only when
   // the streamed target changes. Everything it reads travels through the
@@ -753,6 +537,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     compositionEnded,
     kind,
     id,
+    composeInputRef,
+    termRef,
   ])
   // While the compose bar is actually rendered (mobile, `ui.compose_bar` on,
   // input owner — the same gate as the render below), register the
@@ -797,7 +583,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     return () => {
       if (peekTerminalFocusTarget() === target) setTerminalFocusTarget(null)
     }
-  }, [live])
+  }, [live, composeInputRef, termRef])
   // The compose textarea's own image-paste listener. The compose bar renders
   // OUTSIDE the terminal container (it is a sibling row of the mobile shell),
   // so the container's capture listener cannot see a paste that lands in it,
@@ -847,23 +633,6 @@ export function TerminalPane(props: TerminalPaneProps) {
   // beat when this verdict flips, so the gap already armed under the slow
   // cadence is cleared instead of waited out.
 
-  // The host div owns the padding so the resolved bg fills the padding area
-  // seamlessly — no external "border" look. FitAddon measures the content box.
-  // The wrapper is `relative` so the readiness spinner can overlay the host
-  // until the PTY emits its first output (latched via `everReady`). On mobile it
-  // becomes the flex-1 child of a column root so the accessory bar can sit
-  // beneath it; on desktop it stays the lone full-size element.
-  //
-  // overflow-hidden: the pane is its own clip boundary. Between a container
-  // resize and the next-rAF refit, xterm still holds its previous (possibly
-  // larger) size; if that one-frame overflow escapes to a scrollable ancestor
-  // it flashes scrollbars and oscillates the layout (scrollbar shrinks the box
-  // → ResizeObserver → refit → scrollbar gone → grow → repeat). Clipping at
-  // the pane covers every host: the desktop ResizablePanel and the mobile
-  // viewport-pinned root. The overlays (macro popover, readiness card) are
-  // absolutely positioned inside these bounds, so clipping never affects them.
-  // THE ONE COVER DECISION, taken here and read three times below (the box, the
-  // spinner, the card) so the three can never disagree about which is on screen.
   const cover = attachCover({
     socket: connectionLost ? "failed" : reconnecting ? "connecting" : "open",
     replayApplied,
@@ -871,313 +640,660 @@ export function TerminalPane(props: TerminalPaneProps) {
     offline,
     waitExpired: replayWaitExpired,
     isOwner,
-    // "First attach" is a fact about the PICTURE, not the socket: this pane has
-    // never had a screen, so "Attaching…" is what a reader needs rather than
-    // "Reconnecting…", which would claim something went away.
     firstAttach: appliedEpoch === null,
   })
 
   const pane = (
+    <TerminalPaneSurface
+      kind={kind}
+      inColumn={inColumn}
+      dragActive={dragActive}
+      setDragActive={setDragActive}
+      dragDepthRef={dragDepthRef}
+      viewerOverflow={viewerOverflow}
+      hostRef={hostRef}
+      pointerTypeRef={pointerTypeRef}
+      containerRef={containerRef}
+      pickerInput={pickerInput}
+      cover={cover}
+      upload={upload}
+      input={input}
+      providerName={providerName}
+      ptyRef={ptyRef}
+      takeoverIntent={takeoverIntent}
+      takeoverLabel={takeoverLabel}
+      ownerPresent={ownerPresent}
+      takeOver={takeOver}
+    />
+  )
+
+  return (
+    <TerminalPaneLayout
+      pane={pane}
+      inColumn={inColumn}
+      isOwner={isOwner}
+      accessoryBarShown={accessoryBarShown}
+      composeBarShown={composeBarShownHere}
+      inputMenuRow={inputMenuRow}
+      inputMenuGates={inputMenuGates}
+      menuHasItems={menuHasItems}
+      composeBarEnabled={composeBarEnabled}
+      surfaceToggleOffered={surfaceToggleOffered}
+      input={input}
+      composeInputRef={composeInputRef}
+      kind={kind}
+      onAttach={upload.attachFromPicker}
+    />
+  )
+}
+
+type TerminalTargetIds = {
+  sessionId: string | null
+  projectId: string | null
+}
+
+function terminalTargetIds(props: TerminalPaneProps): TerminalTargetIds {
+  return {
+    sessionId:
+      props.kind === "agent" ? props.sessionId : ownerSessionId(props.owner),
+    projectId:
+      props.kind === "terminal" ? ownerProjectId(props.owner) : null,
+  }
+}
+
+function terminalTargetRecords(
+  props: TerminalPaneProps,
+  spine: DuxState["spine"],
+  ids: TerminalTargetIds,
+) {
+  const session =
+    ids.sessionId === null
+      ? undefined
+      : spine?.sessions.find((candidate) => candidate.id === ids.sessionId)
+  const project =
+    ids.projectId === null
+      ? undefined
+      : spine?.projects.find((candidate) => candidate.id === ids.projectId)
+  const focusedTab =
+    props.kind === "agent"
+      ? session?.tabs.find((candidate) => candidate.id === props.id)
+      : undefined
+  const ownedTerminals =
+    props.kind === "terminal"
+      ? terminalsForOwner(spine?.terminals ?? [], props.owner)
+      : undefined
+  const spineTerminal =
+    props.kind === "terminal"
+      ? ownedTerminals?.find((candidate) => candidate.id === props.id)
+      : undefined
+  return { session, project, focusedTab, ownedTerminals, spineTerminal }
+}
+
+type TerminalTargetRecords = ReturnType<typeof terminalTargetRecords>
+
+function terminalNotifyTitle(
+  props: TerminalPaneProps,
+  records: TerminalTargetRecords,
+): string {
+  if (props.kind === "agent") {
+    return records.session ? sessionLabel(records.session) : "Agent"
+  }
+  return matchOwner(props.owner, {
+    session: () =>
+      records.session ? sessionLabel(records.session) : "Agent",
+    project: () => records.project?.name || "Terminal",
+    standalone: () => "Terminal",
+  })
+}
+
+function terminalHasOutput(
+  props: TerminalPaneProps,
+  records: TerminalTargetRecords,
+): boolean {
+  if (props.kind === "agent") {
+    return records.focusedTab?.has_output ?? records.session?.has_output ?? false
+  }
+  return (
+    records.ownedTerminals?.find((terminal) => terminal.id === props.id)
+      ?.has_output ?? false
+  )
+}
+
+function terminalProviderName(
+  kind: TerminalPaneProps["kind"],
+  records: TerminalTargetRecords,
+): string | undefined {
+  if (kind === "agent") {
+    return records.focusedTab?.provider ?? records.session?.provider
+  }
+  return records.session?.provider
+}
+
+function terminalSpineInputOwner(
+  kind: TerminalPaneProps["kind"],
+  records: TerminalTargetRecords,
+): string | null | undefined {
+  if (kind === "agent") {
+    if (records.focusedTab === undefined) return undefined
+    return records.focusedTab.input_owner ?? null
+  }
+  if (records.spineTerminal === undefined) return undefined
+  return records.spineTerminal.input_owner ?? null
+}
+
+function terminalTargetView(
+  props: TerminalPaneProps,
+  spine: DuxState["spine"],
+  ids: TerminalTargetIds,
+) {
+  const records = terminalTargetRecords(props, spine, ids)
+  return {
+    ...records,
+    notifyTitle: terminalNotifyTitle(props, records),
+    hasOutput: terminalHasOutput(props, records),
+    providerName: terminalProviderName(props.kind, records),
+    spineInputOwner: terminalSpineInputOwner(props.kind, records),
+    isSessionSlotTab: props.kind === "agent" && props.id === ids.sessionId,
+  }
+}
+
+function terminalBasePreferences(bootstrap: DuxState["bootstrap"]) {
+  return {
+    fontFamily: bootstrap?.terminal_font_family ?? "",
+    fontSize: bootstrap?.terminal_font_size ?? 14,
+    fileDropEnabled: (bootstrap?.file_drop_max_bytes ?? 0) > 0,
+    pastedTextChars: bootstrap?.upload_pasted_text_chars ?? 0,
+    scrollbackLines:
+      bootstrap?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES,
+    copyOnSelect: bootstrap?.copy_on_select ?? true,
+  }
+}
+
+function terminalLivePreferences(bootstrap: DuxState["bootstrap"]) {
+  return {
+    attentionGraceMs:
+      (bootstrap?.attention_grace_seconds ??
+        DEFAULT_ATTENTION_GRACE_SECONDS) * 1000,
+    webNotifications: bootstrap?.web_notifications ?? true,
+    hyperlinks: bootstrap?.hyperlinks ?? true,
+    clipboardPassthrough: bootstrap?.clipboard_passthrough ?? "focused",
+    configuredDropPaste: bootstrap?.provider_drop_paste,
+  }
+}
+
+function terminalPreferences(bootstrap: DuxState["bootstrap"]) {
+  return {
+    ...terminalBasePreferences(bootstrap),
+    ...terminalLivePreferences(bootstrap),
+  }
+}
+
+type TerminalPreferences = ReturnType<typeof terminalPreferences>
+
+function terminalTouchSettings(
+  duxState: DuxState,
+  isCoarsePointer: boolean,
+  typingSurface: ReturnType<typeof useTypingSurface>,
+) {
+  const composeMode = composeBarMode(duxState.bootstrap?.compose_bar)
+  return {
+    composeMode,
+    composeBarEnabled: composeBarShown(
+      composeMode,
+      isCoarsePointer,
+      typingSurface,
+    ),
+    touchSurfaces: touchSurfacesApply(composeMode, isCoarsePointer),
+    surfaceToggleOffered: typingSurfaceToggleOffered(
+      composeMode,
+      isCoarsePointer,
+    ),
+    accessoryBarVisible: mobileAccessoryBarVisible(duxState),
+    topBarVisible: mobileTopBarVisible(duxState),
+  }
+}
+
+type TerminalInputLayoutInputs = {
+  isOwner: boolean
+  fileDropEnabled: boolean
+  composeMode: ReturnType<typeof composeBarMode>
+  isCoarsePointer: boolean
+  typingSurface: ReturnType<typeof useTypingSurface>
+  touchSurfaces: boolean
+  accessoryBarVisible: boolean
+  composeBarEnabled: boolean
+  isMobile: boolean
+  topBarVisible: boolean
+}
+
+function terminalInputLayout(input: TerminalInputLayoutInputs) {
+  const accessoryBarShown =
+    input.isOwner && input.touchSurfaces && input.accessoryBarVisible
+  const composeBarShown = input.isOwner && input.composeBarEnabled
+  const inputMenuGates = {
+    attach: input.isOwner && input.fileDropEnabled,
+    surfaceSwitch:
+      input.isOwner &&
+      inputMenuSurfaceSwitchOffered(
+        input.composeMode,
+        input.isCoarsePointer,
+        input.typingSurface,
+      ),
+    keysToggle: input.isOwner && input.touchSurfaces,
+    topBarToggle: input.isMobile,
+  }
+  const menuHasItems = inputMenuHasItems(inputMenuGates)
+  const ownerNeedsMenuRow =
+    input.touchSurfaces || (input.isMobile && !input.topBarVisible)
+  const viewerNeedsMenuRow = input.isMobile && !input.topBarVisible
+  const inputMenuRow =
+    !accessoryBarShown &&
+    !composeBarShown &&
+    menuHasItems &&
+    (input.isOwner ? ownerNeedsMenuRow : viewerNeedsMenuRow)
+  const inColumn =
+    input.isMobile || accessoryBarShown || composeBarShown || inputMenuRow
+  return {
+    accessoryBarShown,
+    composeBarShown,
+    inputMenuGates,
+    menuHasItems,
+    inputMenuRow,
+    inColumn,
+  }
+}
+
+function useEverReady(hasOutput: boolean): boolean {
+  const [everReady, setEverReady] = useState(false)
+  if (hasOutput && !everReady) setEverReady(true)
+  return everReady
+}
+
+function terminalLiveSettings(
+  preferences: TerminalPreferences,
+  target: ReturnType<typeof terminalTargetView>,
+  viewerOverflow: boolean,
+  composeBarEnabled: boolean,
+): TerminalLiveSettings {
+  return {
+    scrollbackLines: preferences.scrollbackLines,
+    copyOnSelect: preferences.copyOnSelect,
+    fontFamily: preferences.fontFamily,
+    fontSize: preferences.fontSize,
+    fileDropEnabled: preferences.fileDropEnabled,
+    pastedTextChars: preferences.pastedTextChars,
+    attentionGraceMs: preferences.attentionGraceMs,
+    webNotifications: preferences.webNotifications,
+    hyperlinks: preferences.hyperlinks,
+    clipboardPassthrough: preferences.clipboardPassthrough,
+    notifyTitle: target.notifyTitle,
+    providerName: target.providerName,
+    configuredDropPaste: preferences.configuredDropPaste,
+    launchedDropPaste: target.focusedTab?.drop_paste,
+    sessionTabs: target.session?.tabs,
+    viewerOverflow,
+    composeActive: composeBarEnabled,
+  }
+}
+
+function useTerminalPaneSetup(props: TerminalPaneProps) {
+  const ids = terminalTargetIds(props)
+  const hostRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const termRef = useRef<Terminal | null>(null)
+  const fitAddonRef = useRef<FitAddon | null>(null)
+  const ptyRef = useRef<PtySocket | null>(null)
+  const isMobile = useIsMobile()
+  const isCoarsePointer = useIsCoarsePointer()
+  const typingSurface = useTypingSurface()
+  const { input: pickerInput, open: openFilePicker } = useFilePicker()
+  const [dragActive, setDragActive] = useState(false)
+  const dragDepthRef = useRef(0)
+  const duxState = useDux()
+  const { spine, bootstrap, offline, conn } = duxState
+  const preferences = terminalPreferences(bootstrap)
+  const touch = terminalTouchSettings(
+    duxState,
+    isCoarsePointer,
+    typingSurface,
+  )
+  const target = terminalTargetView(props, spine, ids)
+  const composeInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const [viewerOverflow, setViewerOverflow] = useState(false)
+  const live = useTerminalLiveSettings(
+    terminalLiveSettings(
+      preferences,
+      target,
+      viewerOverflow,
+      touch.composeBarEnabled,
+    ),
+  )
+
+  return {
+    hostRef,
+    containerRef,
+    termRef,
+    fitAddonRef,
+    ptyRef,
+    isMobile,
+    isCoarsePointer,
+    typingSurface,
+    pickerInput,
+    openFilePicker,
+    dragActive,
+    setDragActive,
+    dragDepthRef,
+    offline,
+    conn,
+    terminalFontFamilySetting: preferences.fontFamily,
+    terminalFontSizeSetting: preferences.fontSize,
+    fileDropEnabled: preferences.fileDropEnabled,
+    ...touch,
+    session: target.session,
+    hasOutput: target.hasOutput,
+    providerName: target.providerName,
+    spineInputOwner: target.spineInputOwner,
+    composeInputRef,
+    viewerOverflow,
+    setViewerOverflow,
+    live,
+    isSessionSlotTab: target.isSessionSlotTab,
+  }
+}
+
+type TerminalPaneSurfaceProps = {
+  kind: TerminalPaneProps["kind"]
+  inColumn: boolean
+  dragActive: boolean
+  setDragActive: (active: boolean) => void
+  dragDepthRef: RefObject<number>
+  viewerOverflow: boolean
+  hostRef: RefObject<HTMLDivElement | null>
+  pointerTypeRef: RefObject<string>
+  containerRef: RefObject<HTMLDivElement | null>
+  pickerInput: ReactNode
+  cover: AttachCover
+  upload: UploadPipeline
+  input: InputSurface
+  providerName?: string
+  ptyRef: RefObject<PtySocket | null>
+  takeoverIntent: TakeoverIntent
+  takeoverLabel: string | null
+  ownerPresent: boolean
+  takeOver: () => void
+}
+
+function TerminalPaneSurface({
+  kind,
+  inColumn,
+  dragActive,
+  setDragActive,
+  dragDepthRef,
+  viewerOverflow,
+  hostRef,
+  pointerTypeRef,
+  containerRef,
+  pickerInput,
+  cover,
+  upload,
+  input,
+  providerName,
+  ptyRef,
+  takeoverIntent,
+  takeoverLabel,
+  ownerPresent,
+  takeOver,
+}: TerminalPaneSurfaceProps) {
+  return (
     <div
       className={
-        // Inside a column (the mobile shell, or ANY layout carrying the touch
-        // bars below the terminal) the pane is the flexible row; standing alone
-        // it simply fills its parent.
         inColumn
           ? "group relative min-h-0 w-full flex-1 overflow-hidden bg-background"
           : "group relative h-full w-full overflow-hidden bg-background"
       }
-      onDragEnter={(e) => {
-        if (!upload.paneAcceptsFileDrag(e)) return
-        e.preventDefault()
+      onDragEnter={(event) => {
+        if (!upload.paneAcceptsFileDrag(event)) return
+        event.preventDefault()
         dragDepthRef.current += 1
         setDragActive(true)
       }}
-      onDragOver={(e) => {
-        if (!upload.paneAcceptsFileDrag(e)) return
-        // Without preventDefault on dragover the browser refuses the drop and
-        // navigates to the file instead, which loses the whole page.
-        e.preventDefault()
-        e.dataTransfer.dropEffect = "copy"
+      onDragOver={(event) => {
+        if (!upload.paneAcceptsFileDrag(event)) return
+        // Browsers refuse a drop unless dragover cancels their default navigation.
+        event.preventDefault()
+        event.dataTransfer.dropEffect = "copy"
       }}
-      onDragLeave={(e) => {
-        if (!upload.paneAcceptsFileDrag(e)) return
+      onDragLeave={(event) => {
+        if (!upload.paneAcceptsFileDrag(event)) return
         dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
         if (dragDepthRef.current === 0) setDragActive(false)
       }}
-      onDrop={(e) => {
-        if (!upload.paneAcceptsFileDrag(e)) return
-        e.preventDefault()
+      onDrop={(event) => {
+        if (!upload.paneAcceptsFileDrag(event)) return
+        event.preventDefault()
         dragDepthRef.current = 0
         setDragActive(false)
-        // Desktop only (`paneAcceptsFileDrag` refuses a drag on a phone), so this
-        // always resolves to the terminal today. It still asks rather than
-        // assuming, so a drop and a paste can never disagree about where a
-        // path belongs.
         void upload.runUpload(
-          Array.from(e.dataTransfer.files),
+          Array.from(event.dataTransfer.files),
           upload.activeUploadSink(),
         )
       }}
     >
-      {/* The drop target. Shown only while a file is actually over the pane and
-          only to whoever holds input, because a viewer cannot paste the path
-          afterwards. It names what will happen and where the file will land;
-          the terminal's real folder is discovered server-side at upload time, so
-          the promise here is deliberately about WHICH folder rather than its
-          path. Pointer-events-none so it cannot swallow the drop it is
-          advertising. */}
-      {dragActive ? (
-        <div
-          data-testid="file-drop-overlay"
-          className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-primary bg-background/90 p-4 text-center"
-        >
-          <p className="text-sm font-medium text-foreground">
-            Drop to save the file and paste its path
-          </p>
-          <p className="text-xs text-muted-foreground">
-            {props.kind === "agent"
-              ? "It lands in this agent's upload folder, hidden from git and removed with the agent."
-              : "It lands in the folder this terminal is currently in."}
-          </p>
-        </div>
-      ) : null}
-      {/* Padding lives on the host, NOT the measured element below — see the
-          hostRef comment: border-box computed heights include padding, and
-          FitAddon would mint a phantom row/column from it. A mouse/pen right-click
-          pastes the clipboard; a TOUCH long-press (which fires `contextmenu` on
-          Android) is dux's own text-selection gesture, so its menu is
-          suppressed instead. See `pointerTypeRef`. */}
+      {dragActive ? <FileDropOverlay kind={kind} /> : null}
       <div
         ref={hostRef}
-        // PANNABLE ONLY WHEN IT HAS TO BE. A faithful watcher whose window
-        // cannot hold the agent's grid even at the floor font gets the
-        // terminal at its true size and scrolls to the rest of it, which is
-        // the honest answer where shrinking further would be an illegible one.
-        // In every other state this is the same fixed, unscrollable host it
-        // has always been, and the pane above it stays the clip boundary.
         className={
           viewerOverflow ? "h-full w-full overflow-auto p-2" : "h-full w-full p-2"
         }
-        onPointerDown={(e) => {
-          pointerTypeRef.current = e.pointerType
+        onPointerDown={(event) => {
+          pointerTypeRef.current = event.pointerType
         }}
-        onContextMenu={(e) => {
-          // Touch long-press. dux OWNS this gesture now (it selects the word
-          // under the finger), so suppress whatever menu the platform wanted to
-          // raise over it: Android fires `contextmenu` on a long press, and a
-          // menu appearing on top of a selection the user is dragging is the
-          // gesture failing. It must NOT fall through to the paste below: a
-          // long press is not a right-click.
+        onContextMenu={(event) => {
           if (pointerTypeRef.current === "touch") {
-            e.preventDefault()
+            event.preventDefault()
             return
           }
-          // Mouse/pen right-click pastes the clipboard (classic terminal model,
-          // no menu). preventDefault suppresses the native browser menu; the
-          // contextmenu textarea-wipe (mount effect) kills xterm's own right-click
-          // selection-stuffing so only the clipboard is pasted.
-          e.preventDefault()
+          event.preventDefault()
           input.onRightClickPaste()
         }}
       >
-        {/* data-testid: the touch-gesture and tap-redirect tests dispatch real
-            TouchEvents on this exact node (the element the gesture listeners
-            are registered on); there is no accessible role to query it by. */}
-        {/* `-webkit-touch-callout: none` is load-bearing on iOS: without it a
-            long press raises Safari's own magnifier loupe and share menu over
-            the gesture dux is using to select text. It costs nothing on the
-            platforms that ignore it. */}
         <div
           ref={containerRef}
           data-testid="terminal-container"
           className="h-full w-full [-webkit-touch-callout:none]"
         />
       </div>
-      {/* The picker's hidden input. It lives INSIDE the pane rather than with
-          the bars because the bars are conditional and this must not be: the
-          row menus can attach through a pane that renders no input row at all
-          (a desktop with a mouse), and the click that opens the dialog has to
-          reach a mounted element synchronously. It renders nothing and is out
-          of the accessibility tree; see `useFilePicker`. */}
       {pickerInput}
-      {/* The desktop macro trigger used to float HERE, as an
-          absolutely-positioned overlay over the PTY text. It now lives in the
-          center pane's top bar (`InsetHeader`), parked on this pane's right
-          edge, so it no longer covers the terminal's own output and reads as one
-          family with the header's other controls. The mobile entry point is
-          unchanged: the terminal screen's header icon button (MobileShell).
-          Focus still returns to this pane's typing surface on close, through the
-          `terminalFocus` registration above rather than a prop. */}
-      {/* WHAT COVERS THE TERMINAL. One pure decision (`lib/attachCover.ts`)
-          replaces the chain of inline conditions this used to be, because the
-          bug it fixes was a HOLE between two of them rather than a wrong one:
-          the pane cleared its cover at WebSocket OPEN, while the picture only
-          exists once the server's replay frame has been parsed, and in between
-          it drew nothing at all. The helper's own test pins the property that
-          makes that unreachable: it never answers `none` while the replay for
-          the current attach epoch is unapplied.
+      <TerminalCover
+        cover={cover}
+        kind={kind}
+        providerName={providerName}
+        ptyRef={ptyRef}
+        takeoverIntent={takeoverIntent}
+        takeoverLabel={takeoverLabel}
+        ownerPresent={ownerPresent}
+        takeOver={takeOver}
+      />
+    </div>
+  )
+}
 
-          The take-over card below is the `card` answer, rendered separately
-          because it is a whole surface with its own copy rather than an
-          overlay. */}
-      {cover.kind === "box" ? (
-        // A Reconnect affordance, for two different reasons. `lost` is the
-        // socket giving up, which it now only does on a terminal close code (a
-        // provider that will not launch, a deleted tab's route). `no-screen` is
-        // the bounded wait: the socket is healthy and the server never sent a
-        // screen, so rather than leaving the pane blank forever we say what is
-        // missing and offer the one thing that can fix it.
-        //
-        // Reconnect imperatively on THIS pane's own socket: the bounce resets
-        // the backoff and reopens in place, working uniformly for an agent tab
-        // OR a companion terminal. (A `terminalEpoch` bump would NOT: it only
-        // feeds the pane key for `kind === "agent"`, so it is a no-op for a
-        // companion terminal and would leave its button dead.) It is a PLAIN
-        // attach: it goes through `plainBounce`, which spends any armed
-        // take-over first, because a deliberate reopen fires no close and an
-        // unspent intent would make this button a silent steal.
+function FileDropOverlay({ kind }: { kind: TerminalPaneProps["kind"] }) {
+  return (
+    <div
+      data-testid="file-drop-overlay"
+      className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-primary bg-background/90 p-4 text-center"
+    >
+      <p className="text-sm font-medium text-foreground">
+        Drop to save the file and paste its path
+      </p>
+      <p className="text-xs text-muted-foreground">
+        {kind === "agent"
+          ? "It lands in this agent's upload folder, hidden from git and removed with the agent."
+          : "It lands in the folder this terminal is currently in."}
+      </p>
+    </div>
+  )
+}
+
+type TerminalCoverProps = {
+  cover: AttachCover
+  kind: TerminalPaneProps["kind"]
+  providerName?: string
+  ptyRef: RefObject<PtySocket | null>
+  takeoverIntent: TakeoverIntent
+  takeoverLabel: string | null
+  ownerPresent: boolean
+  takeOver: () => void
+}
+
+function TerminalCover(props: TerminalCoverProps) {
+  switch (props.cover.kind) {
+    case "none":
+      return null
+    case "box":
+      return (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-background">
           <div className="flex items-center gap-3 rounded-lg border bg-card px-4 py-3 text-card-foreground">
             <span className="text-sm text-muted-foreground">
-              {cover.reason === "lost"
+              {props.cover.reason === "lost"
                 ? "Connection lost."
                 : "Still waiting for the terminal's screen."}
             </span>
             <Button
               size="sm"
               variant="secondary"
-              onClick={() => plainBounce(ptyRef.current, takeoverIntent)}
+              onClick={() =>
+                plainBounce(props.ptyRef.current, props.takeoverIntent)
+              }
             >
               Reconnect
             </Button>
           </div>
         </div>
-      ) : cover.kind === "spinner" ? (
-        // Non-blocking (pointer-events-none) so it never steals input.
+      )
+    case "spinner":
+      return (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-card-foreground">
             <GlyphSpinner className="text-primary" />
             <span className="text-sm text-muted-foreground">
-              {cover.wording === "reconnecting"
-                ? "Reconnecting…"
-                : cover.wording === "attaching"
-                  ? "Attaching…"
-                  : kind === "agent"
-                    ? `Starting ${providerName ?? "agent"}…`
-                    : "Launching terminal…"}
+              {terminalCoverText(props.cover.wording, props.kind, props.providerName)}
             </span>
           </div>
         </div>
-      ) : null}
-      {/* THE TAKE-OVER CARD, full-pane and solid on purpose. When another
-          device drives this PTY we replace the editable terminal with a
-          take-over placeholder: a solid bg-background overlay so it reads as
-          "instead of" the terminal rather than a banner over it.
+      )
+    case "card":
+      return (
+        <TakeoverCard
+          kind={props.kind}
+          takeoverLabel={props.takeoverLabel}
+          ownerPresent={props.ownerPresent}
+          takeOver={props.takeOver}
+        />
+      )
+  }
+}
 
-          DELIBERATE, not a rendering shield. The faithful view keeps the
-          picture underneath clean (the watcher renders at the PTY's own grid,
-          so the local scrollback never records wrapped garbage), but the card
-          is a statement about control, not about pixels: a device with a
-          DIFFERENT viewport size is driving this PTY, and taking over
-          retargets the PTY's size to this device. Covering the pane says that
-          plainly where a strip along one edge would not. The xterm stays
-          mounted underneath, still receiving output, so reclaiming is instant;
-          it is covered and its input is gated off, and the take-over remains a
-          fresh attach.
+function terminalCoverText(
+  wording: "starting" | "attaching" | "reconnecting",
+  kind: TerminalPaneProps["kind"],
+  providerName?: string,
+): string {
+  if (wording === "reconnecting") return "Reconnecting…"
+  if (wording === "attaching") return "Attaching…"
+  return kind === "agent"
+    ? "Starting " + (providerName ?? "agent") + "…"
+    : "Launching terminal…"
+}
 
-          It yields to the connection-lost affordance above. This card paints
-          solid over the whole pane and renders AFTER those overlays, so a
-          non-owner whose socket has died would otherwise see only "Take over"
-          and never the Reconnect button: the health of the connection would be
-          invisible behind exactly the surface that needs it. Suppressing the
-          card here (rather than lifting the overlays' z-order) keeps one state
-          on screen at a time; raising the overlays instead would leave this
-          solid card painted underneath a floating Reconnect box, reading as two
-          stacked answers to one question. The precedence is not restated here
-          any more: `attachCover` decides it once, and a dead socket the app-wide
-          offline overlay is not already speaking for answers `box`, so this
-          branch simply does not run. */}
-      {cover.kind === "card" ? (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-4">
-          <Card className="w-full max-w-sm text-center">
-            <CardHeader className="items-center gap-3">
-              <MonitorSmartphone className="size-8 text-muted-foreground" />
-              {/* THREE TITLES for three truths. "Running in the background" is
-                  the one the owner-cleared broadcast makes reachable: the
-                  device that was driving has disconnected, and nobody claims
-                  passively, so every viewer, foregrounded or not, keeps the
-                  card until a deliberate act. It frames the state as
-                  continuity rather than as an unclaimed thing going spare:
-                  the session did not stop when its driver left, and
-                  "Active on another device" would name a browser tab that has
-                  closed. */}
-              <CardTitle>
-                {takeoverLabel
-                  ? `Open on ${takeoverLabel}`
-                  : ownerPresent
-                    ? "Active on another device"
-                    : "Running in the background"}
-              </CardTitle>
-              {/* The kind sits in a different clause in each sentence, so the
-                  two are written whole rather than sharing a tail. */}
-              <CardDescription>
-                {ownerPresent ? (
-                  <>
-                    Only one device can type at a time. Take over to drive this{" "}
-                    {kind === "agent" ? "agent" : "terminal"} from here.
-                  </>
-                ) : (
-                  <>
-                    The device driving this{" "}
-                    {kind === "agent" ? "agent" : "terminal"} disconnected, so
-                    it kept running in the background. Take over to drive it
-                    from here.
-                  </>
-                )}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button onClick={takeOver} className="w-full max-md:min-h-11">
-                <MonitorSmartphone />
-                Take over
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-      ) : null}
+function TakeoverCard({
+  kind,
+  takeoverLabel,
+  ownerPresent,
+  takeOver,
+}: {
+  kind: TerminalPaneProps["kind"]
+  takeoverLabel: string | null
+  ownerPresent: boolean
+  takeOver: () => void
+}) {
+  const title = takeoverLabel
+    ? "Open on " + takeoverLabel
+    : ownerPresent
+      ? "Active on another device"
+      : "Running in the background"
+  return (
+    <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-4">
+      <Card className="w-full max-w-sm text-center">
+        <CardHeader className="items-center gap-3">
+          <MonitorSmartphone className="size-8 text-muted-foreground" />
+          <CardTitle>{title}</CardTitle>
+          <CardDescription>
+            {ownerPresent ? (
+              <>
+                Only one device can type at a time. Take over to drive this{" "}
+                {kind === "agent" ? "agent" : "terminal"} from here.
+              </>
+            ) : (
+              <>
+                The device driving this {kind === "agent" ? "agent" : "terminal"}{" "}
+                disconnected, so it kept running in the background. Take over to
+                drive it from here.
+              </>
+            )}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={takeOver} className="w-full max-md:min-h-11">
+            <MonitorSmartphone />
+            Take over
+          </Button>
+        </CardContent>
+      </Card>
     </div>
   )
+}
 
-  // NOTHING BELOW THE TERMINAL: the pane stands alone exactly as it always did
-  // on a desktop with a mouse.
+type TerminalPaneLayoutProps = {
+  pane: ReactNode
+  inColumn: boolean
+  isOwner: boolean
+  accessoryBarShown: boolean
+  composeBarShown: boolean
+  inputMenuRow: boolean
+  inputMenuGates: InputMenuGates
+  menuHasItems: boolean
+  composeBarEnabled: boolean
+  surfaceToggleOffered: boolean
+  input: InputSurface
+  composeInputRef: RefObject<HTMLTextAreaElement | null>
+  kind: TerminalPaneProps["kind"]
+  onAttach: () => void
+}
+
+function TerminalPaneLayout({
+  pane,
+  inColumn,
+  isOwner,
+  accessoryBarShown,
+  composeBarShown,
+  inputMenuRow,
+  inputMenuGates,
+  menuHasItems,
+  composeBarEnabled,
+  surfaceToggleOffered,
+  input,
+  composeInputRef,
+  kind,
+  onAttach,
+}: TerminalPaneLayoutProps) {
   if (!inColumn) return pane
 
-  // A column root so the terminal host (flex-1 min-h-0) and the bars (shrink-0)
-  // stack. In the MOBILE shell the MobileApp root pins the whole thing to the
-  // visual viewport (and interactive-widget=resizes-content shrinks the layout
-  // viewport for the soft keyboard), so this column just fills its parent and
-  // the accessory bar sits on the keyboard, with no per-pane keyboard sizing.
-  //
-  // In the DESKTOP shell the pane fills a ResizablePanel of a fixed height, so
-  // the bars take their height OUT of the terminal rather than growing the
-  // page: the terminal shrinks by the bars' height and the panel geometry is
-  // untouched. That is the right trade and it is the same one the phone makes.
-  // The bars are only up when a finger is doing the typing, the soft keyboard
-  // is about to take far more room than they do, and a user who wants the rows
-  // back has the toggle in the accessory bar. Nothing here reaches out to the
-  // panel: the pane's own ResizeObserver refits and debounce-resizes the PTY
-  // when this column reflows, so the PTY learns its new size through the path
-  // it already used. (The web UI has no fullscreen mode; see the CLAUDE.md web
-  // tenet.)
-  // THE ONE INPUT ⋯, built once and placed by the anchor matrix below. It is
-  // the same element in every state, so the menu cannot drift between anchors,
-  // and building it here (rather than three times inline) is what makes
-  // "exactly one instance renders" readable at the call sites.
   const inputMenu = (
     <InputMenu
       gates={inputMenuGates}
-      onAttach={upload.attachFromPicker}
+      onAttach={onAttach}
       composeSurface={composeBarEnabled}
     />
   )
@@ -1185,99 +1301,87 @@ export function TerminalPane(props: TerminalPaneProps) {
   return (
     <div className="flex h-full w-full flex-col bg-background">
       {pane}
-      {/* Typing surfaces render only for the input OWNER. When another device
-          drives this PTY, the take-over card (inside `pane`) is this client's
-          only interaction: hiding the accessory keys and the compose bar
-          removes any surface that could even stage input at a session this
-          device does not drive. The per-write owner gates (`sendSeq`,
-          `sendCompose`) stay behind this as defense in depth, and the bars
-          reappear the moment ownership returns.
-
-          The input ⋯ menu is NOT owner-gated, because its view toggles are not
-          input: a viewer who hid the phone's top bar from the header menu hid
-          the menu with it, and had no way back at all. Their menu carries that
-          one item; see `inputMenuGates`. */}
       {isOwner ? (
-        <>
-          {/* The accessory bar is additionally gated on the
-              `ui.mobile_accessory_bar` preference (default on): hiding it
-              returns its two key rows to the terminal. The input ⋯ menu (which
-              is on screen in every bar state) and Preferences bring it back.
-
-              ANCHOR: when the message box is off, this row is the bottom-most
-              input row, so it carries the menu. When the box is up, the compose
-              row below carries it instead and this passes nothing. */}
-          {accessoryBarShown ? (
-            <AccessoryBar
-              onEsc={() => input.sendSeq(ESC)}
-              onTab={() => input.sendSeq(TAB)}
-              onNewline={input.sendNewline}
-              onArrow={input.onArrow}
-              onScroll={input.onScroll}
-              ctrl={ctrl}
-              alt={alt}
-              onToggleCtrl={input.toggleCtrl}
-              onToggleAlt={input.toggleAlt}
-              composeSurface={surfaceToggleOffered ? composeBarEnabled : undefined}
-              onToggleSurface={
-                surfaceToggleOffered
-                  ? () =>
-                      setTypingSurface(composeBarEnabled ? "direct" : "compose")
-                  : undefined
-              }
-              inputMenu={
-                !composeBarShownHere && menuHasItems ? inputMenu : undefined
-              }
-            />
-          ) : null}
-          {/* The compose bar: the row below the accessory bar's two key rows,
-              so the typing surface sits directly on the soft keyboard. When it
-              is off nothing renders and the tap-to-focus redirect stays
-              dormant, so the terminal behaves exactly as it did before the bar
-              existed. The draft value lives in this pane's state, so losing and
-              regaining ownership keeps an in-progress draft.
-
-              ANCHOR: whenever this row exists it is the bottom-most input row,
-              so it carries the menu in its leading slot. */}
-          {composeBarShownHere ? (
-            <ComposeBar
-              value={composeText}
-              onChange={setComposeText}
-              onSend={input.sendCompose}
-              inputRef={composeInputRef}
-              // A physical keyboard's Escape or F-key pressed while the
-              // compose box is focused: the same bytes on the same write
-              // path as the accessory bar's Esc key (`sendSeq` owns the
-              // ownership gate and the modifier latch), because a hardware
-              // Esc is the physical twin of tapping that key. Which keys
-              // qualify is the pure `composeHardwareKeyForwards` rule.
-              onForwardKey={input.sendSeq}
-              // WHAT THIS SURFACE IS FOR, off the pane's own kind: an agent
-              // pane is a conversation with a CLI, every terminal pane is a
-              // shell, and `kind` is the discriminator that already answers
-              // that (a terminal's OWNER kind, session/project/standalone,
-              // varies the spawn directory, not the activity, so all three
-              // get the shell wording).
-              placeholder={
-                kind === "agent" ? AGENT_PLACEHOLDER : TERMINAL_PLACEHOLDER
-              }
-              leading={menuHasItems ? inputMenu : undefined}
-            />
-          ) : null}
-        </>
+        <TerminalInputRows
+          accessoryBarShown={accessoryBarShown}
+          composeBarShown={composeBarShown}
+          menuHasItems={menuHasItems}
+          composeBarEnabled={composeBarEnabled}
+          surfaceToggleOffered={surfaceToggleOffered}
+          input={input}
+          composeInputRef={composeInputRef}
+          kind={kind}
+          inputMenu={inputMenu}
+        />
       ) : null}
-      {/* THE MENU'S OWN ROW, the third anchor: neither bar rendered, so
-          without this the terminal screen would be completely chrome-free, and
-          the app ships as a standalone PWA where no browser Back button
-          exists. It is the way back to the keys in the DESKTOP shell too, on a
-          coarse pointer: the accessory keys belong to that shell as well, so a
-          hidden key row is just as much a dead end there. See `inputMenuRow`
-          for why "neither bar" alone is not enough to put it on screen. */}
       {inputMenuRow ? (
         <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
           {inputMenu}
         </div>
       ) : null}
     </div>
+  )
+}
+
+type TerminalInputRowsProps = {
+  accessoryBarShown: boolean
+  composeBarShown: boolean
+  menuHasItems: boolean
+  composeBarEnabled: boolean
+  surfaceToggleOffered: boolean
+  input: InputSurface
+  composeInputRef: RefObject<HTMLTextAreaElement | null>
+  kind: TerminalPaneProps["kind"]
+  inputMenu: ReactNode
+}
+
+function TerminalInputRows({
+  accessoryBarShown,
+  composeBarShown,
+  menuHasItems,
+  composeBarEnabled,
+  surfaceToggleOffered,
+  input,
+  composeInputRef,
+  kind,
+  inputMenu,
+}: TerminalInputRowsProps) {
+  return (
+    <>
+      {accessoryBarShown ? (
+        <AccessoryBar
+          onEsc={() => input.sendSeq(ESC)}
+          onTab={() => input.sendSeq(TAB)}
+          onNewline={input.sendNewline}
+          onArrow={input.onArrow}
+          onScroll={input.onScroll}
+          ctrl={input.ctrl}
+          alt={input.alt}
+          onToggleCtrl={input.toggleCtrl}
+          onToggleAlt={input.toggleAlt}
+          composeSurface={surfaceToggleOffered ? composeBarEnabled : undefined}
+          onToggleSurface={
+            surfaceToggleOffered
+              ? () =>
+                  setTypingSurface(composeBarEnabled ? "direct" : "compose")
+              : undefined
+          }
+          inputMenu={!composeBarShown && menuHasItems ? inputMenu : undefined}
+        />
+      ) : null}
+      {composeBarShown ? (
+        <ComposeBar
+          value={input.composeText}
+          onChange={input.setComposeText}
+          onSend={input.sendCompose}
+          inputRef={composeInputRef}
+          onForwardKey={input.sendSeq}
+          placeholder={
+            kind === "agent" ? AGENT_PLACEHOLDER : TERMINAL_PLACEHOLDER
+          }
+          leading={menuHasItems ? inputMenu : undefined}
+        />
+      ) : null}
+    </>
   )
 }
