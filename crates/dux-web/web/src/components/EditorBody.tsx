@@ -1072,6 +1072,18 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     )
   }
 
+  function localEditorMenuItems(): React.ReactNode {
+    return OPEN_IN_EDITORS.map((editor) => (
+      <DropdownMenuItem
+        key={editor.key}
+        onClick={() => openInEditorAction(editor.key)}
+      >
+        <EditorIcon editorKey={editor.key} />
+        {editor.label}
+      </DropdownMenuItem>
+    ))
+  }
+
   function renderStatusIndicators(): React.ReactNode {
     return (
       <>
@@ -1207,15 +1219,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               <ChevronDown />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {OPEN_IN_EDITORS.map((editor) => (
-                <DropdownMenuItem
-                  key={editor.key}
-                  onClick={() => openInEditorAction(editor.key)}
-                >
-                  <EditorIcon editorKey={editor.key} />
-                  {editor.label}
-                </DropdownMenuItem>
-              ))}
+              {localEditorMenuItems()}
             </DropdownMenuContent>
           </DropdownMenu>
         </span>
@@ -1305,15 +1309,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               Open local editor
             </DropdownMenuSubTrigger>
             <DropdownMenuSubContent>
-              {OPEN_IN_EDITORS.map((editor) => (
-                <DropdownMenuItem
-                  key={editor.key}
-                  onClick={() => openInEditorAction(editor.key)}
-                >
-                  <EditorIcon editorKey={editor.key} />
-                  {editor.label}
-                </DropdownMenuItem>
-              ))}
+              {localEditorMenuItems()}
             </DropdownMenuSubContent>
           </DropdownMenuSub>
         </DropdownMenuContent>
