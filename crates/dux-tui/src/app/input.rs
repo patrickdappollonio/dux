@@ -26514,6 +26514,73 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn pending_bytes_seeded_through_the_compatibility_buffer_complete_one_sequence() {
+        let (mut app, session_id) = app_with_live_agent_pty();
+        app.raw_input_buf = b"\x1b[".to_vec();
+
+        app.process_raw_input_bytes(b"A").unwrap();
+
+        assert!(app.raw_input_buf.is_empty());
+        assert!(app.raw_input_parser.pending().is_empty());
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "the completed arrow sequence must reach the focused PTY"
+        );
+    }
+
+    #[test]
+    fn macro_bar_interception_flushes_and_stamps_earlier_bytes() {
+        let (mut app, session_id) = app_with_live_agent_pty();
+        app.engine.config.macros.entries.insert(
+            "test".to_string(),
+            crate::config::MacroEntry {
+                text: "hello".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+
+        app.process_raw_input_bytes(b"x\x1c").unwrap();
+
+        assert!(
+            app.macro_bar.is_some(),
+            "the intercept must open the macro bar"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert!(app.raw_input_buf.is_empty());
+        assert!(app.raw_input_parser.pending().is_empty());
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "bytes before the intercept must be flushed and stamped first"
+        );
+    }
+
+    #[test]
+    fn scrolled_back_typing_clears_selection_without_stamping_input() {
+        let mut app = test_app(default_bindings());
+        fill_and_select_l30(&mut app);
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        enter_scroll_mode(&mut app, 3);
+        let session_id = app.engine.sessions[0].id.clone();
+        assert!(
+            app.terminal_selection.is_some(),
+            "the fixture must start selected"
+        );
+
+        app.process_raw_input_bytes(b"x").unwrap();
+
+        assert!(
+            app.terminal_selection.is_none(),
+            "a typed key retires the selection even when scroll mode drops it"
+        );
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "a dropped key must not stamp PTY input"
+        );
+    }
+
+    #[test]
     fn arrow_key_passthrough_records_input_when_not_scrolled_back() {
         // Arrow keys are bound to line-scroll but pass through to the PTY when
         // not scrolled back. They echo back like typing, so they must also
