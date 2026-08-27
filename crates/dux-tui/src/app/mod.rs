@@ -6622,6 +6622,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_loop_uses_raw_input_only_for_unobscured_terminal_targets() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        app.prompt = PromptState::None;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+
+        app.input_target = InputTarget::Agent;
+        assert!(app.should_poll_raw_input());
+
+        app.input_target = InputTarget::Terminal;
+        assert!(app.should_poll_raw_input());
+
+        app.input_target = InputTarget::None;
+        assert!(!app.should_poll_raw_input());
+
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::StartupLog;
+        assert!(!app.should_poll_raw_input());
+
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.prompt = PromptState::Command {
+            input: TextInput::default(),
+            selected: 0,
+        };
+        assert!(!app.should_poll_raw_input());
+    }
+
+    #[test]
     fn palette_visual_rows_place_the_divider_only_above_a_real_second_tier() {
         use PaletteVisualRow::{Command, Divider};
         assert_eq!(palette_visual_rows(0, 0), Vec::new());
