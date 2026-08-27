@@ -2134,6 +2134,144 @@ impl Engine {
         EventReaction::Multi(reactions)
     }
 
+    fn process_changed_files_ready(
+        &mut self,
+        outcome: Result<
+            (
+                Vec<crate::model::ChangedFile>,
+                Vec<crate::model::ChangedFile>,
+            ),
+            String,
+        >,
+        worktree: std::path::PathBuf,
+    ) -> EventReaction {
+        let Ok((staged, unstaged)) = outcome else {
+            return EventReaction::Nothing;
+        };
+        // Poll results can outlive their watch and must not replace another worktree's files.
+        let still_watched = self
+            .watched_worktree
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .is_some_and(|current| current == worktree);
+        if !still_watched {
+            return EventReaction::Nothing;
+        }
+        self.staged_files = staged;
+        self.unstaged_files = unstaged;
+        EventReaction::ClampFilesCursor
+    }
+
+    fn process_pull_completed(
+        &mut self,
+        repo_path: String,
+        target: PullTarget,
+        result: Result<crate::worker::PullOutcome, String>,
+        status: ResolvedFinal,
+    ) -> EventReaction {
+        self.clear_in_flight(&InFlightKey::Pull(repo_path));
+        if let PullTarget::Project { project_id, .. } = &target
+            && let Ok(outcome) = &result
+            && let Some(branch_name) = outcome.current_branch()
+            && let Some(existing) = self.projects.iter_mut().find(|c| c.id == *project_id)
+        {
+            existing.current_branch = branch_name.clone();
+            existing.branch_status =
+                if existing.leading_branch.as_deref() == Some(&existing.current_branch) {
+                    ProjectBranchStatus::Leading
+                } else if existing.leading_branch.is_some() {
+                    ProjectBranchStatus::NotLeading
+                } else {
+                    let warning = crate::git::branch_warning_kind(
+                        Path::new(&existing.path),
+                        &existing.current_branch,
+                    );
+                    crate::git::branch_status_from_warning(warning.as_ref())
+                };
+        }
+        let final_reaction = status.into_reaction();
+        if matches!(target, PullTarget::Session) && result.is_ok() {
+            EventReaction::Multi(vec![final_reaction, EventReaction::ReloadChangedFiles])
+        } else {
+            final_reaction
+        }
+    }
+
+    fn process_branch_sync_ready(&mut self, updates: Vec<(String, String)>) -> EventReaction {
+        let mut changed = false;
+        for (session_id, actual_branch) in updates {
+            // Rename completion owns the authoritative branch mutation while a rename is active.
+            if self.is_in_flight(&InFlightKey::BranchRename(session_id.clone())) {
+                match self.rename_expected.get(&session_id) {
+                    Some(expected) if expected.matches(&actual_branch) => {}
+                    Some(expected) => logger::warn(&format!(
+                        "[{session_id}] branch-sync observed unexpected branch '{actual_branch}' \
+                         while a rename to '{}' (from '{}') is in flight; deferring until the rename completes",
+                        expected.new_branch, expected.old_branch,
+                    )),
+                    None => logger::debug(&format!(
+                        "[{session_id}] branch-sync skipped mid-rename (no expected branch recorded); actual '{actual_branch}'",
+                    )),
+                }
+                continue;
+            }
+            if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
+                && session.branch_name() != Some(actual_branch.as_str())
+            {
+                let label = session.display_label();
+                let Some(managed) = session.workspace.as_managed_mut() else {
+                    continue;
+                };
+                let previous = managed.branch_name.clone();
+                let original = managed.initial_branch.clone();
+                logger::warn(&branch_drift_log_line(
+                    &session.id,
+                    &label,
+                    &actual_branch,
+                    &previous,
+                    &original,
+                ));
+                managed.branch_name = actual_branch;
+                session.updated_at = Utc::now();
+                if let Err(err) = self.session_store.upsert_session(session) {
+                    logger::error(&format!(
+                        "failed to persist branch-sync update for {} (new branch: {:?}): {err}",
+                        session.id,
+                        session.branch_name(),
+                    ));
+                }
+                changed = true;
+            }
+        }
+        if !changed {
+            return EventReaction::Nothing;
+        }
+        self.update_branch_sync_sessions();
+        EventReaction::RebuildLeftItems
+    }
+
+    fn process_worktree_remove_completed(
+        &mut self,
+        session_id: String,
+        result: Result<RemovedBranches, String>,
+    ) -> EventReaction {
+        self.pending_deletions.remove(&session_id);
+        self.closing_sessions.remove(&session_id);
+        let our_busy_message = self.deletion_busy_messages.remove(&session_id);
+        match result {
+            Ok(branches) => EventReaction::WorktreeRemoveSucceeded {
+                session_id,
+                branches,
+                our_busy_message,
+            },
+            Err(message) => EventReaction::WorktreeRemoveFailed {
+                session_id,
+                message,
+            },
+        }
+    }
+
     /// Process a `WorkerEvent`: perform engine-side mutations and return the
     /// view follow-up the App caller should apply.
     ///
@@ -2188,35 +2326,7 @@ impl Engine {
                 )
             }
             WorkerEvent::ChangedFilesReady { outcome, worktree } => {
-                // A read git could not answer leaves the lists exactly as they
-                // are. Emptying them would render an unreadable worktree as a
-                // clean one, and the surface that asked for this refresh reports
-                // the failure from the same event.
-                let Ok((staged, unstaged)) = outcome else {
-                    return EventReaction::Nothing;
-                };
-                // Stale-poll race / CF1 watched_session_id invariant: the poller
-                // snapshots the watched worktree, releases the lock, then computes
-                // `git::changed_files` off-thread. If the watch moved to a
-                // different session (or was cleared) while this poll was in
-                // flight, applying these lists would leave the ViewModel showing
-                // another worktree's files under the current `watched_session_id`
-                // — which CF1's cross-tab guard would then wrongly accept. Only
-                // apply when the event's worktree still matches the watch; drop
-                // it otherwise.
-                let still_watched = self
-                    .watched_worktree
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.clone())
-                    .is_some_and(|current| current == worktree);
-                if still_watched {
-                    self.staged_files = staged;
-                    self.unstaged_files = unstaged;
-                    EventReaction::ClampFilesCursor
-                } else {
-                    EventReaction::Nothing
-                }
+                self.process_changed_files_ready(outcome, worktree)
             }
             WorkerEvent::FolderRepoStatusReady { session_id, status } => {
                 self.clear_in_flight(&InFlightKey::FolderRepoProbe(session_id.clone()));
@@ -2248,39 +2358,7 @@ impl Engine {
                 target,
                 result,
                 status,
-            } => {
-                self.clear_in_flight(&InFlightKey::Pull(repo_path.clone()));
-                // Domain mutation: a successful project refresh updates the
-                // project's current branch and re-derives its leading status.
-                // The user-facing message was resolved at dispatch by the
-                // StatusOp and rides in `status`.
-                if let PullTarget::Project { project_id, .. } = &target
-                    && let Ok(outcome) = &result
-                    && let Some(branch_name) = outcome.current_branch()
-                    && let Some(existing) = self.projects.iter_mut().find(|c| c.id == *project_id)
-                {
-                    existing.current_branch = branch_name.clone();
-                    existing.branch_status =
-                        if existing.leading_branch.as_deref() == Some(&existing.current_branch) {
-                            ProjectBranchStatus::Leading
-                        } else if existing.leading_branch.is_some() {
-                            ProjectBranchStatus::NotLeading
-                        } else {
-                            let warning = crate::git::branch_warning_kind(
-                                Path::new(&existing.path),
-                                &existing.current_branch,
-                            );
-                            crate::git::branch_status_from_warning(warning.as_ref())
-                        };
-                }
-                let final_reaction = status.into_reaction();
-                // A successful session pull also reloads the changed-files view.
-                if matches!(target, PullTarget::Session) && result.is_ok() {
-                    EventReaction::Multi(vec![final_reaction, EventReaction::ReloadChangedFiles])
-                } else {
-                    final_reaction
-                }
-            }
+            } => self.process_pull_completed(repo_path, target, result, status),
             WorkerEvent::ClipboardCopyCompleted {
                 label: _,
                 result: _,
@@ -2364,84 +2442,7 @@ impl Engine {
                     status.into_reaction(),
                 ])
             }
-            WorkerEvent::BranchSyncReady(updates) => {
-                let mut changed = false;
-                for (session_id, actual_branch) in updates {
-                    // In-flight-rename guard: the branch-sync poller can observe
-                    // the user's OWN in-progress rename and would otherwise
-                    // classify it as external drift — logging a false warning and,
-                    // if it lands before `BranchRenameCompleted`, reading a
-                    // corrupted `previous` (the already-updated branch). But the
-                    // skip is SCOPED to the rename's own branches so an *unrelated*
-                    // external change landing mid-rename isn't silently swallowed:
-                    // skip quietly only when the observed branch is the still-
-                    // pending old name or the expected new name; log an unexpected
-                    // value and still skip (no mutation mid-rename — that races
-                    // `BranchRenameCompleted`, which writes the authoritative
-                    // branch and clears the marker). Check before the mutable
-                    // borrow below.
-                    if self.is_in_flight(&InFlightKey::BranchRename(session_id.clone())) {
-                        match self.rename_expected.get(&session_id) {
-                            Some(expected) if expected.matches(&actual_branch) => {}
-                            Some(expected) => {
-                                logger::warn(&format!(
-                                    "[{session_id}] branch-sync observed unexpected branch '{actual_branch}' \
-                                     while a rename to '{}' (from '{}') is in flight; deferring until the rename completes",
-                                    expected.new_branch, expected.old_branch,
-                                ));
-                            }
-                            None => {
-                                logger::debug(&format!(
-                                    "[{session_id}] branch-sync skipped mid-rename (no expected branch recorded); actual '{actual_branch}'",
-                                ));
-                            }
-                        }
-                        continue;
-                    }
-                    // Standalone agents are never enrolled in branch sync (no
-                    // branch, nothing to watch), so no result can name one.
-                    // Asking the workspace keeps this arm unreachable for them
-                    // rather than merely unused.
-                    if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
-                        && session.branch_name() != Some(actual_branch.as_str())
-                    {
-                        let label = session.display_label();
-                        let Some(managed) = session.workspace.as_managed_mut() else {
-                            continue;
-                        };
-                        // External drift: the worktree's current branch changed
-                        // out from under us. Update the current branch label
-                        // (correct — the label should track reality) but never
-                        // `title` or `initial_branch`. Warn so the exact
-                        // name-vs-branch scenario is greppable in the log.
-                        let previous = managed.branch_name.clone();
-                        let original = managed.initial_branch.clone();
-                        logger::warn(&branch_drift_log_line(
-                            &session.id,
-                            &label,
-                            &actual_branch,
-                            &previous,
-                            &original,
-                        ));
-                        managed.branch_name = actual_branch;
-                        session.updated_at = Utc::now();
-                        if let Err(err) = self.session_store.upsert_session(session) {
-                            logger::error(&format!(
-                                "failed to persist branch-sync update for {} (new branch: {:?}): {err}",
-                                session.id,
-                                session.branch_name(),
-                            ));
-                        }
-                        changed = true;
-                    }
-                }
-                if changed {
-                    self.update_branch_sync_sessions();
-                    EventReaction::RebuildLeftItems
-                } else {
-                    EventReaction::Nothing
-                }
-            }
+            WorkerEvent::BranchSyncReady(updates) => self.process_branch_sync_ready(updates),
             WorkerEvent::GhStatusChecked {
                 generation,
                 outcome,
@@ -2811,33 +2812,7 @@ impl Engine {
                 status_op_id,
             },
             WorkerEvent::WorktreeRemoveCompleted { session_id, result } => {
-                // Always clear the in-flight guard so the session is
-                // interactive again — whether we're about to remove it
-                // (Ok path) or leave it in place for retry (Err path).
-                self.pending_deletions.remove(&session_id);
-                // The worktree removal is done (or failed and will be retried), so
-                // the session is no longer "closing" — allow tab creation again.
-                self.closing_sessions.remove(&session_id);
-
-                // Retrieve (and remove) the exact Busy message we set when
-                // the worker was spawned. The App compares this against the
-                // current status-line content rather than checking tone
-                // alone, because another operation (push, pull, refresh,
-                // concurrent delete) may have since set its own Busy message
-                // that must not be clobbered.
-                let our_busy_msg = self.deletion_busy_messages.remove(&session_id);
-
-                match result {
-                    Ok(branches) => EventReaction::WorktreeRemoveSucceeded {
-                        session_id,
-                        branches,
-                        our_busy_message: our_busy_msg,
-                    },
-                    Err(msg) => EventReaction::WorktreeRemoveFailed {
-                        session_id,
-                        message: msg,
-                    },
-                }
+                self.process_worktree_remove_completed(session_id, result)
             }
             WorkerEvent::ResourceStatsReady(stats, was_baseline) => {
                 self.clear_in_flight(&InFlightKey::ResourceStats);
