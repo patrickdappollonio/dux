@@ -126,13 +126,16 @@ pub enum Action {
     /// `NewProjectTerminal` (project-scoped): this one needs nothing selected
     /// and no owner to exist. No default keybinding.
     NewStandaloneTerminal,
-    /// Palette-only: open the folder browser to pick a directory the user
+    /// Open the folder browser to pick a directory the user
     /// already has, and run an agent in it. Distinct from `NewAgent`, which
     /// creates a branch and a worktree inside a project: this one belongs to no
     /// project, makes nothing, and never creates, moves or removes the folder it
     /// is pointed at. (The agent works IN that folder, of course; what dux never
     /// touches is the folder's own existence and location.)
-    /// No default keybinding, like the standalone terminal beside it.
+    /// Reachable from the palette, from anywhere in the agents pane, and from
+    /// inside the NEW-AGENT project chooser, where it is the answer to "none of
+    /// these". It is inert in that modal's other intents, which ask a different
+    /// question. The standalone terminal beside it stays key-less.
     NewStandaloneAgent,
     RenameSession,
     DeleteProject,
@@ -602,6 +605,7 @@ impl Action {
             | Action::ToggleProject
             | Action::NewAgent
             | Action::NewAgentFromWorktree
+            | Action::NewStandaloneAgent
             | Action::FilterAgents
             | Action::ForkAgent
             | Action::ChangeAgentProvider
@@ -681,7 +685,6 @@ impl Action {
             | Action::NewTerminal
             | Action::NewProjectTerminal
             | Action::NewStandaloneTerminal
-            | Action::NewStandaloneAgent
             | Action::RenameSession
             | Action::DeleteProject
             | Action::RemoveProject

@@ -2517,6 +2517,44 @@ mod tests {
         );
     }
 
+    /// The config file is the documentation, so the standalone-agent key is a
+    /// real row with both its defaults, filed under the pane it acts in rather
+    /// than swept into "Other".
+    #[test]
+    fn render_keys_documents_the_standalone_agent_key() {
+        let config = Config::default();
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+        let rendered = render_config(&config, &bindings);
+
+        assert!(
+            rendered
+                .lines()
+                .any(|l| l.trim() == r#"new_standalone_agent = ["s", "ctrl-s"]"#),
+            "the standalone agent key must render as a real row"
+        );
+        // The template groups by help section, so the nearest preceding header
+        // is where a reader will look for the row. "Other" is where an action
+        // with no help section lands, and that is the wrong shelf for a key
+        // the agents pane names in its footer.
+        let mut section = "";
+        for line in rendered.lines() {
+            let line = line.trim();
+            if let Some(name) = line
+                .strip_prefix("# -- ")
+                .and_then(|n| n.strip_suffix(" --"))
+            {
+                section = name;
+            }
+            if line.starts_with("new_standalone_agent =") {
+                break;
+            }
+        }
+        assert_eq!(
+            section, "Projects pane",
+            "the standalone agent key must be filed under the pane it acts in"
+        );
+    }
+
     /// A user who bound one of the shipped-unbound actions gets a real,
     /// uncommented row carrying their keys.
     #[test]

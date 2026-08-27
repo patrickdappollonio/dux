@@ -6897,59 +6897,7 @@ impl App {
                 // Which entries survive the `/` filter (indices into `entries`).
                 let visible: Vec<usize> = list.visible_indices(entries, pick_project_matches);
 
-                let confirm_key = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let move_down = self.bindings.label_for(Action::MoveDown);
-                let move_up = self.bindings.label_for(Action::MoveUp);
-                let search_key = self.bindings.label_for(Action::SearchToggle);
-                let mut bottom_spans = vec![Span::raw(" ")];
-                if list.searching {
-                    // Search mode takes over most of this vocabulary: the
-                    // vertical and search keys are plain characters that the
-                    // filter now swallows, and the close key leaves search
-                    // instead of cancelling. Only the confirm key still means
-                    // what it says. The two filterable peers (the project
-                    // browser and the kill-running dialog) swap the same way;
-                    // they say `done` where this one says `choose`, because
-                    // their confirm ends the search while this one PICKS the
-                    // highlighted row.
-                    bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                    bottom_spans.push(Span::styled(
-                        " choose  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                    bottom_spans.push(Span::styled(
-                        " clear",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                } else {
-                    bottom_spans.extend(self.theme.key_badge_default(&move_down));
-                    bottom_spans.push(Span::styled(
-                        " down  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    bottom_spans.extend(self.theme.key_badge_default(&move_up));
-                    bottom_spans.push(Span::styled(
-                        " up  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    bottom_spans.extend(self.theme.key_badge_default(&search_key));
-                    bottom_spans.push(Span::styled(
-                        " search  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                    bottom_spans.push(Span::styled(
-                        " choose  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                    bottom_spans.push(Span::styled(
-                        " cancel",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                }
+                let bottom_line = self.project_chooser_hint_line(list.searching, *intent);
 
                 let [details_area, list_area] = Layout::default()
                     .direction(Direction::Vertical)
@@ -6960,7 +6908,7 @@ impl App {
                 // query has been typed), else a plain count line.
                 let details_block = self
                     .themed_overlay_block(intent.title())
-                    .title_bottom(Line::from(bottom_spans));
+                    .title_bottom(bottom_line);
                 // A field the user cannot click into is a gap: the filter rect
                 // is published whenever the filter is the thing being drawn.
                 let filter_input_rect = list
@@ -10002,6 +9950,65 @@ impl App {
         };
     }
 
+    /// The project chooser's footer, in its two states.
+    ///
+    /// Search mode takes over most of this vocabulary: the vertical and search
+    /// keys are plain characters that the filter now swallows, and the close
+    /// key leaves search instead of cancelling. Only the confirm key still
+    /// means what it says. The two filterable peers (the project browser and
+    /// the kill-running dialog) swap the same way; they say `done` where this
+    /// one says `choose`, because their confirm ends the search while this one
+    /// PICKS the highlighted row.
+    ///
+    /// The standalone segment is the one whose key changes with the state, so
+    /// it is resolved through the same predicate the input layer suppresses on
+    /// ([`RuntimeBindings::label_for_text_field_dialog`]) while the filter is
+    /// typing: the bare letter idle, the chord engaged, and NOTHING at all if a
+    /// rebinding leaves only keys the filter would swallow. Built through
+    /// `modal_hint_line` for exactly that drop, rather than by hand. It is also
+    /// the LAST segment in both states, because this footer is a `title_bottom`
+    /// with no width logic of its own: what clips is what comes last, and the
+    /// keys that must survive are the ones the modal exists for.
+    ///
+    /// The segment appears only for the new-agent intent, matching the key's
+    /// own gate in `super::input`: the other intents ask a different question,
+    /// and a footer must never name a key that does nothing.
+    fn project_chooser_hint_line(
+        &self,
+        searching: bool,
+        intent: ProjectChooserIntent,
+    ) -> Line<'static> {
+        let standalone = if intent != ProjectChooserIntent::NewAgent {
+            Hint::maybe_key(None::<String>, "standalone")
+        } else if searching {
+            Hint::maybe_key(
+                self.bindings
+                    .label_for_text_field_dialog(Action::NewStandaloneAgent),
+                "standalone",
+            )
+        } else {
+            Hint::key(
+                self.bindings.label_for(Action::NewStandaloneAgent),
+                "standalone",
+            )
+        };
+        let confirm = Hint::key(self.bindings.label_for(Action::Confirm), "choose");
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let hints = if searching {
+            vec![confirm, Hint::key(close_key, "clear"), standalone]
+        } else {
+            vec![
+                Hint::key(self.bindings.label_for(Action::MoveDown), "down"),
+                Hint::key(self.bindings.label_for(Action::MoveUp), "up"),
+                Hint::key(self.bindings.label_for(Action::SearchToggle), "search"),
+                confirm,
+                Hint::key(close_key, "cancel"),
+                standalone,
+            ]
+        };
+        modal_hint_line(&self.theme, &hints)
+    }
+
     /// The macro LIST's footer. Every key is resolved through the bindings,
     /// so a rebind moves the hint with it; the four labels used to be the
     /// literals `Enter`, `n`, `d` and `Esc`.
@@ -11600,6 +11607,152 @@ mod tests {
     };
     use crate::model::{CompanionTerminal, SessionSurface};
     use crate::pty::PtyClient;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// The chooser's footer names whichever key actually reaches dux from the
+    /// state it is in: the bare letter while the list is being walked, the
+    /// chord once the filter owns the letters.
+    #[test]
+    fn the_project_chooser_footer_names_the_reachable_standalone_key() {
+        let app = test_app(default_bindings());
+
+        let idle = line_text(
+            &app.project_chooser_hint_line(false, crate::app::ProjectChooserIntent::NewAgent),
+        );
+        assert_eq!(
+            idle,
+            " <j> down  <k> up  </> search  <Enter> choose  <Esc> cancel  <s> standalone"
+        );
+
+        let searching = line_text(
+            &app.project_chooser_hint_line(true, crate::app::ProjectChooserIntent::NewAgent),
+        );
+        assert_eq!(
+            searching,
+            " <Enter> choose  <Esc> clear  <Ctrl-s> standalone"
+        );
+    }
+
+    /// The footer is a `title_bottom` with no width logic, so what clips is
+    /// what comes last. The keys the modal exists for come first.
+    #[test]
+    fn the_standalone_segment_is_the_last_thing_the_chooser_footer_names() {
+        let app = test_app(default_bindings());
+        for searching in [false, true] {
+            let line =
+                line_text(&app.project_chooser_hint_line(
+                    searching,
+                    crate::app::ProjectChooserIntent::NewAgent,
+                ));
+            assert!(
+                line.ends_with("standalone"),
+                "searching={searching}: got {line:?}"
+            );
+        }
+    }
+
+    fn bindings_with_standalone_keys(keys: Vec<crokey::KeyCombination>) -> RuntimeBindings {
+        crate::keybindings::RuntimeBindings::new(
+            move |action| {
+                if action == crate::keybindings::Action::NewStandaloneAgent {
+                    keys.clone()
+                } else {
+                    crate::keybindings::BINDING_DEFS
+                        .iter()
+                        .find(|d| d.action == action)
+                        .map(|d| d.default_keys.to_vec())
+                        .unwrap_or_default()
+                }
+            },
+            true,
+        )
+    }
+
+    /// A rebinding that leaves only keys the filter types must drop the whole
+    /// segment rather than advertise a key that types a character; one that
+    /// keeps a chord must name the user's chord, not the shipped one.
+    #[test]
+    fn the_project_chooser_footer_follows_a_rebinding_and_drops_what_it_cannot_name() {
+        let app = test_app(bindings_with_standalone_keys(vec![
+            crokey::key!(s),
+            crokey::key!(ctrl - x),
+        ]));
+        let searching = line_text(
+            &app.project_chooser_hint_line(true, crate::app::ProjectChooserIntent::NewAgent),
+        );
+        assert!(
+            searching.ends_with("<Ctrl-x> standalone"),
+            "the user's own chord must be named, got {searching:?}"
+        );
+
+        let letters_only = test_app(bindings_with_standalone_keys(vec![crokey::key!(s)]));
+        let searching = line_text(
+            &letters_only
+                .project_chooser_hint_line(true, crate::app::ProjectChooserIntent::NewAgent),
+        );
+        assert!(
+            !searching.contains("standalone"),
+            "the segment must vanish, got {searching:?}"
+        );
+        assert!(
+            searching.contains("choose") && searching.contains("clear"),
+            "the rest of the footer is untouched, got {searching:?}"
+        );
+    }
+
+    /// The other intents of the same modal ask a different question, and the
+    /// key is inert there: a footer must never name a key that does nothing.
+    #[test]
+    fn the_chooser_footer_names_no_standalone_key_for_the_other_intents() {
+        let app = test_app(default_bindings());
+        for intent in [
+            crate::app::ProjectChooserIntent::Manage,
+            crate::app::ProjectChooserIntent::ManageWorktrees,
+            crate::app::ProjectChooserIntent::FromPr,
+            crate::app::ProjectChooserIntent::FromPrReference,
+            crate::app::ProjectChooserIntent::FromWorktree,
+            crate::app::ProjectChooserIntent::ProjectTerminal,
+        ] {
+            for searching in [false, true] {
+                let line = line_text(&app.project_chooser_hint_line(searching, intent));
+                assert!(
+                    !line.contains("standalone"),
+                    "{intent:?} (searching={searching}) must not name it, got {line:?}"
+                );
+                assert!(
+                    line.contains("choose"),
+                    "and must keep the rest, got {line:?}"
+                );
+            }
+        }
+    }
+
+    /// The agents pane says the key exists; a user who never opens the palette
+    /// is exactly who this footer is for. The terminals subsection is still the
+    /// agents pane, and the key works there too.
+    #[test]
+    fn the_agents_pane_footer_names_the_standalone_key() {
+        let app = test_app(default_bindings());
+        for ctx in [
+            HintContext::LeftProject,
+            HintContext::LeftSession,
+            HintContext::LeftTerminal,
+        ] {
+            let hints = app.footer_hints_for(ctx);
+            assert!(
+                hints
+                    .iter()
+                    .any(|(key, desc)| key == "s" && *desc == "Standalone"),
+                "{ctx:?} must name the standalone key, got {hints:?}"
+            );
+        }
+    }
 
     /// The top bar is not blank for a standalone agent: it names the folder
     /// where a project agent's bar names the project and the branch, and it

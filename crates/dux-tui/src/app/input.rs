@@ -1214,6 +1214,9 @@ impl App {
                 Action::FilterAgents => self.open_agent_filter(),
                 Action::NewAgent => self.create_agent_for_selected_project()?,
                 Action::NewAgentFromWorktree => self.create_agent_from_existing_worktree()?,
+                // The same folder browser the palette command opens: one way
+                // in, two gestures.
+                Action::NewStandaloneAgent => self.open_standalone_agent_browser()?,
                 Action::ForkAgent => self.fork_selected_session()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
                 Action::CheckoutProjectDefaultBranch => {
@@ -1370,6 +1373,11 @@ impl App {
                     self.spawn_terminal_for_selected_terminal()?;
                 }
                 Action::DeleteSession => self.confirm_delete_selected_terminal()?,
+                // A standalone agent belongs to no row, so it is creatable
+                // from anywhere in the Left pane: the terminals subsection is
+                // still the agents pane, and the footer names the key there
+                // too.
+                Action::NewStandaloneAgent => self.open_standalone_agent_browser()?,
                 _ => {}
             }
         }
@@ -4554,12 +4562,26 @@ impl App {
             let action = if binding_lookup_is_suppressed(key, searching) {
                 None
             } else {
-                self.bindings.lookup(&key, BindingScope::Palette)
+                // The chooser's own scope first, then the shared picker
+                // vocabulary: the standalone-agent key belongs to this modal
+                // alone, and putting it in `Palette` would arm it inside every
+                // other picker.
+                self.bindings
+                    .lookup(&key, BindingScope::ProjectChooser)
+                    .or_else(|| self.bindings.lookup(&key, BindingScope::Palette))
             };
-            // Confirm-while-picking is the one branch that needs `self`; handle it
-            // after releasing the prompt borrow so the borrow checker is happy.
+            // Confirm-while-picking and the standalone jump are the branches
+            // that need `self`; handle them after releasing the prompt borrow
+            // so the borrow checker is happy.
             let mut do_confirm = false;
-            if let PromptState::PickProject { entries, list, .. } = &mut self.prompt {
+            let mut go_standalone = false;
+            if let PromptState::PickProject {
+                entries,
+                list,
+                intent,
+                ..
+            } = &mut self.prompt
+            {
                 let vis_len = list.visible_indices(entries, pick_project_matches).len();
                 match action {
                     Some(Action::CloseOverlay) => {
@@ -4569,6 +4591,18 @@ impl App {
                     }
                     Some(Action::SearchToggle) if !searching => list.begin_search(),
                     Some(Action::Confirm) => do_confirm = true,
+                    // Only the NEW-AGENT chooser. The same modal also asks
+                    // which project to manage, which one a pull request is in,
+                    // and which one to open a terminal in; "start a standalone
+                    // agent instead" is an answer to the first question and to
+                    // no other, so the key is inert (and unadvertised) there.
+                    // Whatever row is highlighted: a standalone agent belongs
+                    // to no project, so there is nothing here to carry over.
+                    Some(Action::NewStandaloneAgent)
+                        if *intent == ProjectChooserIntent::NewAgent =>
+                    {
+                        go_standalone = true
+                    }
                     Some(Action::MoveDown) => list.move_down(vis_len),
                     Some(Action::MoveUp) => list.move_up(),
                     _ => {
@@ -4582,6 +4616,10 @@ impl App {
             }
             if do_confirm {
                 self.confirm_project_chooser_selection()?;
+            }
+            if go_standalone {
+                // Replaces the chooser: `open_folder_browser` sets the prompt.
+                self.open_standalone_agent_browser()?;
             }
             return Ok(false);
         }
@@ -22845,6 +22883,163 @@ cyan = "#00ffff"
             }
             other => panic!("expected the folder browser, got {other:?}"),
         }
+    }
+
+    fn assert_in_the_standalone_folder_browser(app: &App, note: &str) {
+        match &app.prompt {
+            PromptState::BrowseProjects { purpose, .. } => {
+                assert_eq!(
+                    *purpose,
+                    crate::app::BrowsePurpose::StandaloneAgent,
+                    "{note}"
+                );
+            }
+            other => panic!("{note}: expected the folder browser, got {other:?}"),
+        }
+    }
+
+    /// The agents pane reaches the same folder browser the palette command
+    /// does. The `<n> new agent` flow has no way into a standalone agent, so
+    /// the key sits beside it rather than hiding behind the palette.
+    ///
+    /// With ZERO projects, deliberately: `new_agent` refuses there ("no
+    /// projects yet"), and a folder agent needs no project at all, so it must
+    /// not inherit that refusal. This is the state a brand new install is in,
+    /// and it is exactly when someone reaches for a folder they already have.
+    #[test]
+    fn the_agents_pane_standalone_key_opens_the_folder_browser_with_no_projects() {
+        for key in [
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        ] {
+            let mut app = test_app(default_bindings());
+            app.engine.sessions.clear();
+            app.engine.projects.clear();
+            app.focus = FocusPane::Left;
+
+            app.handle_key(key).expect("the key must be handled");
+
+            assert_in_the_standalone_folder_browser(&app, &format!("{key:?}"));
+        }
+    }
+
+    /// The terminals subsection has a key handler of its own that ignores every
+    /// action it does not name. A standalone agent needs nothing selected, so
+    /// it is creatable from anywhere in the pane, terminals included.
+    #[test]
+    fn the_terminals_subsection_starts_a_standalone_agent_too() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Terminals;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .expect("the key must be handled");
+
+        assert_in_the_standalone_folder_browser(&app, "terminals subsection");
+    }
+
+    /// Inside the project chooser, with the search idle, both keys fire:
+    /// nothing is typing, so the letter is a command like every other row key.
+    #[test]
+    fn the_idle_project_chooser_starts_a_standalone_agent_on_either_key() {
+        for key in [
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        ] {
+            let mut app = test_app(default_bindings());
+            app.execute_command("new-agent".to_string())
+                .expect("the chooser must open");
+            assert!(matches!(app.prompt, PromptState::PickProject { .. }));
+
+            app.handle_key(key).expect("the key must be handled");
+
+            assert_in_the_standalone_folder_browser(&app, &format!("{key:?}"));
+        }
+    }
+
+    /// The same modal also asks which project to manage, which one a pull
+    /// request is in, and which one to open a terminal in. "Start a standalone
+    /// agent instead" answers none of those, so the key is inert and the
+    /// chooser stays open.
+    #[test]
+    fn the_standalone_key_is_inert_in_the_choosers_other_intents() {
+        for intent in [
+            ProjectChooserIntent::Manage,
+            ProjectChooserIntent::FromPrReference,
+            ProjectChooserIntent::ProjectTerminal,
+        ] {
+            for key in [
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            ] {
+                let mut app = test_app(default_bindings());
+                app.open_project_chooser(intent)
+                    .expect("the chooser must open");
+
+                app.handle_key(key).expect("the key must be handled");
+
+                match &app.prompt {
+                    PromptState::PickProject {
+                        intent: still_open, ..
+                    } => assert_eq!(*still_open, intent, "{key:?}"),
+                    other => {
+                        panic!(
+                            "{intent:?} with {key:?} must stay on its own question, got {other:?}"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// With the search engaged the letter belongs to the filter, and the chord
+    /// is what still reaches dux. This is the whole reason the action carries
+    /// two keys.
+    #[test]
+    fn the_searching_project_chooser_types_the_letter_and_fires_on_the_chord() {
+        let mut app = test_app(default_bindings());
+        app.execute_command("new-agent".to_string())
+            .expect("the chooser must open");
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .expect("search engages");
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .expect("the letter types");
+
+        match &app.prompt {
+            PromptState::PickProject { list, .. } => {
+                assert_eq!(
+                    list.filter.text, "s",
+                    "the letter must land in the filter, not start an agent"
+                );
+            }
+            other => panic!("expected the chooser to still be open, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .expect("the chord must be handled");
+
+        assert_in_the_standalone_folder_browser(&app, "searching chooser");
+    }
+
+    /// The new key must not have taken the chooser's own confirm with it: the
+    /// highlighted project is still what Enter picks.
+    #[test]
+    fn the_project_chooser_confirm_key_still_picks_the_highlighted_project() {
+        let mut app = test_app(default_bindings());
+        app.execute_command("new-agent".to_string())
+            .expect("the chooser must open");
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the confirm key must be handled");
+
+        assert!(
+            !matches!(app.prompt, PromptState::BrowseProjects { .. }),
+            "confirming a project must never land in the standalone folder browser"
+        );
+        assert!(
+            !matches!(app.prompt, PromptState::PickProject { .. }),
+            "the chooser must have closed onto the project it picked"
+        );
     }
 
     /// Picking a plain folder that is not a repository creates the agent: the

@@ -17,6 +17,10 @@ pub enum BindingScope {
     RuntimeKill,
     StartupCommandLogs,
     MacroList,
+    /// The "New agent in project" chooser. A scope of its own rather than a
+    /// share of `Palette`, which every picker resolves through: an action put
+    /// there would arm its key inside all of them.
+    ProjectChooser,
     Dialog,
     CommitInput,
     Help,
@@ -36,6 +40,7 @@ impl BindingScope {
         Self::RuntimeKill,
         Self::StartupCommandLogs,
         Self::MacroList,
+        Self::ProjectChooser,
         Self::Dialog,
         Self::CommitInput,
         Self::Help,
@@ -55,6 +60,7 @@ impl BindingScope {
             Self::RuntimeKill => "Kill running modal",
             Self::StartupCommandLogs => "Startup command logs modal",
             Self::MacroList => "Text macros list",
+            Self::ProjectChooser => "Project chooser",
             Self::Dialog => "Dialog",
             Self::CommitInput => "Commit input",
             Self::Help => "Help overlay",
@@ -182,6 +188,41 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "New agent session (creates worktree)",
         }),
         hint_contexts: &[(HintContext::LeftProject, "New agent")],
+    },
+    BindingDef {
+        // Sits beside `new_agent` deliberately: the `<n>` flow only ever
+        // reaches a managed worktree, so without a key of its own the folder
+        // agent is discoverable through the palette alone.
+        //
+        // Two keys and two scopes, and the defaults are a flat CROSS PRODUCT
+        // rather than one key per surface: the chord also fires in the agents
+        // pane and the bare letter also fires in an idle chooser, both
+        // accepted. What each key is for is the chooser's search row, which
+        // types the letters the moment it is engaged (see
+        // `text_field_owns_key`): the bare letter is the pane-and-idle-list
+        // key, and the chord is the one that still reaches dux while a filter
+        // is being typed. A terminal or multiplexer that swallows the chord
+        // never delivers it; the bare key, the palette command and a rebinding
+        // are the ways round that.
+        //
+        // `new_standalone_terminal` beside it stays key-less on purpose: a
+        // shell in a directory is a smaller act than starting an agent, and it
+        // has no pane of its own to be discovered from.
+        action: Action::NewStandaloneAgent,
+        default_keys: &[key!(s), key!(ctrl - s)],
+        scopes: &[BindingScope::Left, BindingScope::ProjectChooser],
+        help: Some(HelpEntry {
+            section: "Projects pane",
+            description: "Start a standalone agent in a folder you choose",
+        }),
+        hint_contexts: &[
+            (HintContext::LeftProject, "Standalone"),
+            (HintContext::LeftSession, "Standalone"),
+            // The terminals subsection is still the agents pane, and creating
+            // an agent needs nothing selected, so the key works and is named
+            // there too.
+            (HintContext::LeftTerminal, "Standalone"),
+        ],
     },
     BindingDef {
         action: Action::NewAgentFromPr,
@@ -1019,9 +1060,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Browser,
             BindingScope::RuntimeKill,
             BindingScope::StartupCommandLogs,
-            // The project chooser (`PickProject`) rides the Palette scope; the
-            // command palette itself ignores plain chars, so `/` only reaches
-            // search-capable list modals here.
+            // The project chooser (`PickProject`) falls through to the Palette
+            // scope for this shared vocabulary; the command palette itself
+            // ignores plain chars, so `/` only reaches search-capable list
+            // modals here.
             BindingScope::Palette,
         ],
         help: Some(HelpEntry {
@@ -1186,15 +1228,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         // Palette-only: opens the project chooser to spawn a project terminal.
         // No default key (like manage-projects).
         action: Action::NewProjectTerminal,
-        default_keys: &[],
-        scopes: &[],
-        help: None,
-        hint_contexts: &[],
-    },
-    BindingDef {
-        // Palette-only: opens the folder browser to pick a directory to run an
-        // agent in. No default key, like the standalone terminal beside it.
-        action: Action::NewStandaloneAgent,
         default_keys: &[],
         scopes: &[],
         help: None,
@@ -1998,6 +2031,28 @@ fn resolve_keys(
 /// Returns all pairs of actions that bind the same normalized key in at least
 /// one overlapping scope. This is called during config validation to prevent
 /// silent shadowing (where declaration order would pick a winner).
+/// Whether two scopes can be reached by the same keystroke.
+///
+/// Usually that means "the same scope", but a surface whose key handler
+/// consults one scope and then FALLS THROUGH to another makes those two
+/// overlap for conflict purposes even though no binding lists both: the
+/// fallback is shadowed by the first lookup, silently, which is exactly what
+/// this detector exists to refuse.
+///
+/// The one such ladder today is the project chooser, whose handler asks
+/// `ProjectChooser` and then `Palette` (`app::input`). Add a rule here
+/// whenever a handler grows another fallback, or the shadowing goes unreported.
+fn scopes_overlap(a: BindingScope, b: BindingScope) -> bool {
+    if a == b {
+        return true;
+    }
+    matches!(
+        (a, b),
+        (BindingScope::ProjectChooser, BindingScope::Palette)
+            | (BindingScope::Palette, BindingScope::ProjectChooser)
+    )
+}
+
 pub fn detect_conflicts(keys: &crate::config::KeysConfig) -> Vec<KeyConflict> {
     let resolved = resolve_keys(keys);
     let format = config_format();
@@ -2011,7 +2066,7 @@ pub fn detect_conflicts(keys: &crate::config::KeysConfig) -> Vec<KeyConflict> {
             // Find scopes shared between the two bindings.
             let shared_scopes: Vec<BindingScope> = scopes_a
                 .iter()
-                .filter(|s| scopes_b.contains(s))
+                .filter(|s| scopes_b.iter().any(|other| scopes_overlap(**s, *other)))
                 .copied()
                 .collect();
             if shared_scopes.is_empty() {
@@ -2425,6 +2480,150 @@ mod tests {
         let move_hint = hints.iter().find(|(_, desc)| *desc == "Move");
         assert!(move_hint.is_some());
         assert_eq!(move_hint.unwrap().0, "j/k");
+    }
+
+    /// The standalone-agent action is reachable from the agents pane and from
+    /// inside the project chooser. The defaults are a flat cross product, so
+    /// each key fires in both scopes; what matters is that a bare letter works
+    /// where a list is being walked and the chord works where a filter is being
+    /// typed.
+    #[test]
+    fn new_standalone_agent_is_bound_in_the_left_pane_and_the_project_chooser() {
+        let bindings = default_bindings();
+        for key in [
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        ] {
+            for scope in [BindingScope::Left, BindingScope::ProjectChooser] {
+                assert_eq!(
+                    bindings.lookup(&key, scope),
+                    Some(Action::NewStandaloneAgent),
+                    "{key:?} must reach the standalone agent in {scope:?}"
+                );
+            }
+        }
+    }
+
+    /// The chooser gets a scope of its own rather than borrowing `Palette`,
+    /// which every other picker resolves through: putting the action there
+    /// would arm the key inside every one of them.
+    #[test]
+    fn the_standalone_key_stays_out_of_the_shared_palette_scope() {
+        let bindings = default_bindings();
+        for key in [
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        ] {
+            assert_ne!(
+                bindings.lookup(&key, BindingScope::Palette),
+                Some(Action::NewStandaloneAgent),
+                "{key:?} must not fire in every Palette-scoped modal"
+            );
+        }
+    }
+
+    /// The two labels the surfaces name: the agents-pane footer takes the first
+    /// key, and the chooser's footer, whose filter owns the letters, takes the
+    /// first key that filter does NOT swallow.
+    #[test]
+    fn the_standalone_labels_follow_the_surface_that_names_them() {
+        let bindings = default_bindings();
+        assert_eq!(bindings.label_for(Action::NewStandaloneAgent), "s");
+        assert_eq!(
+            bindings.label_for_text_field_dialog(Action::NewStandaloneAgent),
+            Some("Ctrl-s".to_string())
+        );
+    }
+
+    /// A rebinding that leaves only keys the filter types must leave the
+    /// chooser's footer with nothing to name, rather than naming a key that
+    /// types a character.
+    #[test]
+    fn a_letters_only_rebinding_leaves_the_chooser_footer_no_label() {
+        let bindings = RuntimeBindings::new(
+            |action| {
+                if action == Action::NewStandaloneAgent {
+                    vec![key!(s)]
+                } else {
+                    BINDING_DEFS
+                        .iter()
+                        .find(|d| d.action == action)
+                        .map(|d| d.default_keys.to_vec())
+                        .unwrap_or_default()
+                }
+            },
+            true,
+        );
+        assert_eq!(
+            bindings.label_for_text_field_dialog(Action::NewStandaloneAgent),
+            None
+        );
+    }
+
+    /// The chooser scope is a real scope: diagnostics iterate `ALL`, so a scope
+    /// missing from it is invisible to every conflict report.
+    #[test]
+    fn the_project_chooser_scope_is_listed_and_named() {
+        assert!(BindingScope::ALL.contains(&BindingScope::ProjectChooser));
+        assert_eq!(
+            BindingScope::ProjectChooser.display_name(),
+            "Project chooser"
+        );
+    }
+
+    /// The help overlay is built from the `BindingDef`, independently of the
+    /// config template's core `help_section`, so both have to be right.
+    #[test]
+    fn the_help_overlay_lists_the_standalone_agent_under_the_projects_pane() {
+        let bindings = default_bindings();
+        let sections = bindings.help_sections();
+        let (_, entries) = sections
+            .iter()
+            .find(|(name, _)| *name == "Projects pane")
+            .expect("the Projects pane section exists");
+        assert!(
+            entries.iter().any(|(label, desc)| label == "s/Ctrl-s"
+                && *desc == "Start a standalone agent in a folder you choose"),
+            "got {entries:?}"
+        );
+    }
+
+    /// The chooser's handler asks its own scope and then falls through to
+    /// `Palette`, so a key bound in both is shadowed at runtime with nothing
+    /// said. The detector has to see that ladder, even though no binding lists
+    /// both scopes.
+    #[test]
+    fn a_rebinding_onto_the_choosers_palette_fallback_is_reported() {
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings
+            .insert("new_standalone_agent".to_string(), vec!["/".to_string()]);
+        let conflicts = detect_conflicts(&keys);
+        assert!(
+            conflicts.iter().any(|c| {
+                (c.action_a == "new_standalone_agent" && c.action_b == "search_toggle")
+                    || (c.action_a == "search_toggle" && c.action_b == "new_standalone_agent")
+            }),
+            "the shadowed search key must be reported, got: {conflicts:?}"
+        );
+    }
+
+    /// The action's config id is real: a user who writes it under `[keys]` gets
+    /// their key instead of the defaults, in both of its scopes.
+    #[test]
+    fn new_standalone_agent_round_trips_through_the_config_id() {
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings.insert(
+            "new_standalone_agent".to_string(),
+            vec!["ctrl-y".to_string()],
+        );
+        let resolved = resolve_keys(&keys);
+        let (_, combos, scopes) = resolved
+            .iter()
+            .find(|(action, _, _)| *action == Action::NewStandaloneAgent)
+            .expect("the action must be in the resolved table");
+        assert_eq!(combos, &vec![key!(ctrl - y)]);
+        assert!(scopes.contains(&BindingScope::Left));
+        assert!(scopes.contains(&BindingScope::ProjectChooser));
     }
 
     #[test]
