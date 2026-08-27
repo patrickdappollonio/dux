@@ -73,6 +73,817 @@ struct PendingCopy {
     on_head_mismatch: HeadMismatch,
 }
 
+struct ManagedCreatePlan {
+    project: crate::model::Project,
+    provider: crate::model::ProviderKind,
+    source_branch: String,
+    status_message: String,
+    branch_name: String,
+    worktree_path: PathBuf,
+    owns_worktree: bool,
+    title: Option<String>,
+    launch_with_resume: bool,
+    pending_copy: Option<PendingCopy>,
+    branch_provenance: BranchProvenance,
+}
+
+struct CreatePlanContext<'a> {
+    paths: &'a DuxPaths,
+    worker_tx: &'a Sender<WorkerEvent>,
+    create_key: &'a str,
+    creation_notes: &'a mut Vec<String>,
+}
+
+impl CreatePlanContext<'_> {
+    fn plan(&mut self, request: CreateAgentRequest) -> Option<ManagedCreatePlan> {
+        match request {
+            CreateAgentRequest::Standalone { .. } => {
+                logger::error("standalone create reached managed provisioning");
+                self.send_failure(
+                    "Could not create the standalone agent: dux took the wrong internal path. Nothing was created and no folder was touched. Please report this with the contents of dux.log."
+                        .to_string(),
+                );
+                None
+            }
+            CreateAgentRequest::NewProject {
+                project,
+                custom_name,
+                use_existing_branch,
+                pull_before_create,
+                copy_uncommitted_changes,
+            } => self.plan_new_project(
+                project,
+                custom_name,
+                use_existing_branch,
+                pull_before_create,
+                copy_uncommitted_changes,
+            ),
+            CreateAgentRequest::PullRequest {
+                project,
+                host,
+                owner_repo,
+                number,
+                title,
+                state,
+                head_branch,
+                custom_name,
+                use_existing_branch,
+            } => self.plan_pull_request(
+                project,
+                host,
+                owner_repo,
+                number,
+                title,
+                state,
+                head_branch,
+                custom_name,
+                use_existing_branch,
+            ),
+            CreateAgentRequest::ForkSession {
+                project,
+                source_session,
+                source_label,
+                custom_name,
+            } => self.plan_fork_session(project, source_session, source_label, custom_name),
+            CreateAgentRequest::ExistingManagedWorktree {
+                project,
+                worktree_path,
+                branch_name,
+                custom_name,
+            } => self.plan_existing_worktree(project, worktree_path, branch_name, custom_name),
+            CreateAgentRequest::ForkExternalWorktree {
+                project,
+                source_worktree_path,
+                source_label,
+                source_branch,
+                custom_name,
+            } => self.plan_external_worktree(
+                project,
+                source_worktree_path,
+                source_label,
+                source_branch,
+                custom_name,
+            ),
+        }
+    }
+
+    fn send_failure(&self, message: String) {
+        let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
+            status_op_id: self.create_key.to_string(),
+            message,
+        });
+    }
+
+    fn send_progress(&self, message: String) {
+        let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
+            status_op_id: self.create_key.to_string(),
+            message,
+        });
+    }
+
+    fn try_pre_create_pull(
+        &mut self,
+        project: &crate::model::Project,
+        repo_path: &Path,
+        leading_branch: &str,
+    ) {
+        self.send_progress(format!(
+            "Pulling latest changes for project \"{}\" before creating the agent...",
+            project.name
+        ));
+        if let Err(err) = git::switch_branch_if_needed(repo_path, leading_branch) {
+            logger::error(&format!(
+                "pre-create branch switch failed for {}: {err}",
+                project.path
+            ));
+            self.creation_notes.push(format!(
+                "Warning: could not switch the project checkout to \"{leading_branch}\": {err}. The agent starts from the local branch state."
+            ));
+            return;
+        }
+        match git::has_origin_remote(repo_path) {
+            Ok(true) => {
+                if let Err(err) = git::pull_branch(repo_path, leading_branch) {
+                    logger::error(&format!(
+                        "pre-create pull failed for {}: {err}",
+                        project.path
+                    ));
+                    self.creation_notes.push(format!(
+                        "Warning: could not pull \"{leading_branch}\" from origin: {err}. The agent starts from the local branch state."
+                    ));
+                }
+            }
+            Ok(false) => logger::info(&format!(
+                "skipping pre-create pull for {}: no origin remote",
+                project.path
+            )),
+            Err(err) => {
+                logger::error(&format!(
+                    "pre-create origin check failed for {}: {err}",
+                    project.path
+                ));
+                self.creation_notes.push(format!(
+                    "Warning: could not check for an origin remote: {err}. The agent starts from the local branch state."
+                ));
+            }
+        }
+    }
+
+    fn create_new_project_worktree(
+        &self,
+        project: &crate::model::Project,
+        repo_path: &Path,
+        leading_branch: &str,
+        resolved_name: &str,
+        attach_existing: bool,
+    ) -> Option<(String, PathBuf)> {
+        let result = if attach_existing {
+            git::create_worktree_existing_branch(
+                repo_path,
+                &self.paths.worktrees_root,
+                &project.name,
+                resolved_name,
+            )
+        } else {
+            git::create_worktree_from_start_point(
+                repo_path,
+                &self.paths.worktrees_root,
+                &project.name,
+                Some(leading_branch),
+                Some(resolved_name),
+            )
+        };
+        match result {
+            Ok(worktree) => Some(worktree),
+            Err(err) => {
+                let operation = if attach_existing {
+                    "worktree creation (existing branch)"
+                } else {
+                    "worktree creation"
+                };
+                logger::error(&format!("{operation} failed for {}: {err}", project.path));
+                let action = if attach_existing {
+                    "attach to existing branch"
+                } else {
+                    "create a new worktree"
+                };
+                self.send_failure(format!(
+                    "Failed to {action} for project \"{}\": {err}",
+                    project.name
+                ));
+                None
+            }
+        }
+    }
+
+    fn plan_new_project(
+        &mut self,
+        project: crate::model::Project,
+        custom_name: Option<String>,
+        use_existing_branch: bool,
+        pull_before_create: bool,
+        copy_uncommitted_changes: bool,
+    ) -> Option<ManagedCreatePlan> {
+        let repo_path = PathBuf::from(&project.path);
+        let leading_branch = project.leading_branch.clone().unwrap_or_else(|| {
+            let current =
+                (!project.current_branch.is_empty()).then_some(project.current_branch.as_str());
+            crate::project_browser::leading_branch_for_project(&repo_path, current)
+        });
+        if pull_before_create {
+            self.try_pre_create_pull(&project, &repo_path, &leading_branch);
+        }
+        let title = custom_name.clone();
+        let resolved_name = custom_name.unwrap_or_else(git::docker_style_name);
+        let attach_existing =
+            use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
+        if !attach_existing && git::repo_commit_state(&repo_path) == git::CommitState::Unborn {
+            self.send_failure(format!(
+                "Cannot create agent for \"{}\": the repository at {} has no commits yet. Create an initial commit (for example `git commit --allow-empty -m \"Initial commit\"`), then try again.",
+                project.name,
+                repo_path.display()
+            ));
+            return None;
+        }
+        if !attach_existing && !git::local_branch_exists(&repo_path, &leading_branch) {
+            self.send_failure(format!(
+                "Cannot create agent for \"{}\": leading branch \"{}\" no longer exists locally. Restore that branch or re-add the project.",
+                project.name, leading_branch
+            ));
+            return None;
+        }
+        self.send_progress(if attach_existing {
+            format!(
+                "Attaching to existing branch \"{}\" for project \"{}\"...",
+                resolved_name, project.name
+            )
+        } else {
+            format!(
+                "Creating a new worktree for project \"{}\"...",
+                project.name
+            )
+        });
+        let (branch_name, worktree_path) = self.create_new_project_worktree(
+            &project,
+            &repo_path,
+            &leading_branch,
+            &resolved_name,
+            attach_existing,
+        )?;
+        let status_message = if attach_existing {
+            format!(
+                "Attached to existing branch \"{}\" in project \"{}\". The worktree is ready in a fresh session.",
+                branch_name, project.name
+            )
+        } else {
+            format!(
+                "Created {} agent \"{}\" in project \"{}\". The new worktree is ready in a fresh session.",
+                project.default_provider.as_str(),
+                branch_name,
+                project.name
+            )
+        };
+        let pending_copy = copy_uncommitted_changes.then(|| PendingCopy {
+            source: repo_path,
+            source_desc: format!("project \"{}\"", project.name),
+            on_head_mismatch: HeadMismatch::SkipWithNote {
+                branch: if attach_existing {
+                    resolved_name
+                } else {
+                    leading_branch.clone()
+                },
+            },
+        });
+        Some(ManagedCreatePlan {
+            provider: project.default_provider.clone(),
+            source_branch: if attach_existing {
+                project.current_branch.clone()
+            } else {
+                leading_branch
+            },
+            project,
+            status_message,
+            branch_name,
+            worktree_path,
+            owns_worktree: true,
+            title,
+            launch_with_resume: false,
+            pending_copy,
+            branch_provenance: if attach_existing {
+                BranchProvenance::AttachedExisting
+            } else {
+                BranchProvenance::CreatedByDux
+            },
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan_pull_request(
+        &self,
+        project: crate::model::Project,
+        host: String,
+        owner_repo: String,
+        number: u64,
+        title: String,
+        state: String,
+        head_branch: String,
+        custom_name: Option<String>,
+        use_existing_branch: bool,
+    ) -> Option<ManagedCreatePlan> {
+        Some({
+            let repo_path = PathBuf::from(&project.path);
+            // A typed name is the agent's durable title; falling back to the PR
+            // head branch means no user-authored name, so leave title empty.
+            // (Named `agent_title` to avoid shadowing the PR `title` above.)
+            let agent_title = custom_name.clone();
+            let resolved_name = custom_name.unwrap_or_else(|| head_branch.clone());
+            let attach_existing =
+                use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
+
+            if attach_existing {
+                let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
+                    status_op_id: self.create_key.to_string(),
+                    message: format!(
+                        "Attaching to existing branch \"{}\" for PR #{} in project \"{}\"...",
+                        resolved_name, number, project.name
+                    ),
+                });
+            } else {
+                let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
+                    status_op_id: self.create_key.to_string(),
+                    message: format!(
+                        "Fetching PR #{} from {} into branch \"{}\"...",
+                        number, owner_repo, resolved_name
+                    ),
+                });
+                if let Err(err) = git::fetch_pull_request_head(&repo_path, number, &resolved_name) {
+                    logger::error(&format!(
+                        "PR worktree fetch failed for {} #{}: {err}",
+                        owner_repo, number
+                    ));
+                    let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
+                        status_op_id: self.create_key.to_string(),
+                        message: format!(
+                            "Failed to fetch PR #{} from {}: {err}",
+                            number, owner_repo
+                        ),
+                    });
+                    return None;
+                }
+            }
+
+            let (branch_name, worktree_path) = match git::create_worktree_existing_branch(
+                &repo_path,
+                &self.paths.worktrees_root,
+                &project.name,
+                &resolved_name,
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    logger::error(&format!(
+                        "PR worktree creation failed for {} #{}: {err}",
+                        owner_repo, number
+                    ));
+                    // THE RESPONSIBILITY BOUNDARY. The fetch above minted
+                    // `refs/heads/<resolved_name>`, and the worktree that the
+                    // provenance-driven rollback keys off does not exist, so
+                    // nothing else in this job would ever remove that ref. From
+                    // the next line on (worktree created, session built) the
+                    // rollback owns the branch and this cleanup must not run,
+                    // or the two would both delete it.
+                    //
+                    // Only when dux minted it: an attach found the user's
+                    // branch already there and it survives the failure.
+                    if !attach_existing {
+                        git::delete_created_branch_best_effort(&repo_path, &resolved_name);
+                    }
+                    let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
+                        status_op_id: self.create_key.to_string(),
+                        message: format!(
+                            "Failed to create a worktree for PR #{} in project \"{}\": {err}",
+                            number, project.name
+                        ),
+                    });
+                    return None;
+                }
+            };
+            let status_message = format!(
+                "Created {} agent \"{}\" from PR #{} ({}) in project \"{}\".",
+                project.default_provider.as_str(),
+                branch_name,
+                number,
+                title,
+                project.name
+            );
+            logger::info(&format!(
+                "created PR worktree from {} #{} ({state}) {}",
+                owner_repo,
+                number,
+                gh::pull_request_url(&host, &owner_repo, number)
+            ));
+            ManagedCreatePlan {
+                project: project.clone(),
+                provider: project.default_provider.clone(),
+                source_branch: project.current_branch.clone(),
+                status_message,
+                branch_name,
+                worktree_path,
+                owns_worktree: true,
+                title: agent_title,
+                launch_with_resume: false,
+                pending_copy: None,
+                // Fetching the PR head MINTS `refs/heads/<name>` here, so that
+                // branch is dux's to clean up (and leaving it behind is what
+                // makes recreating the agent collide). Attaching means the
+                // branch was already there and stays.
+                branch_provenance: if attach_existing {
+                    BranchProvenance::AttachedExisting
+                } else {
+                    BranchProvenance::CreatedByDux
+                },
+            }
+        })
+    }
+
+    fn plan_fork_session(
+        &self,
+        project: crate::model::Project,
+        source_session: Box<AgentSession>,
+        source_label: String,
+        custom_name: Option<String>,
+    ) -> Option<ManagedCreatePlan> {
+        Some({
+            let Some(custom_name) = custom_name else {
+                let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
+                    status_op_id: self.create_key.to_string(),
+                    message: "Forking an agent requires choosing a name first.".to_string(),
+                });
+                return None;
+            };
+            // Forking copies a managed worktree onto a new branch, so a
+            // standalone agent has nothing to fork. The wire's ForkSession arm
+            // already refuses one with a purposeful message; this is the
+            // structural restatement, so no folder path can reach the branch
+            // machinery below even if a future caller forgets that gate.
+            let (Some(source_worktree), Some(source_branch_name)) = (
+                source_session.managed_worktree().map(PathBuf::from),
+                source_session.branch_name().map(str::to_string),
+            ) else {
+                let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
+                            status_op_id: self.create_key.to_string(),
+                            message: format!(
+                                "Agent \"{source_label}\" is a standalone agent, so there is no branch or managed worktree to fork. \
+                                 Add its folder as a project if you want several agents working on it, and fork one of those instead."
+                            ),
+                        });
+                return None;
+            };
+            let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
+                status_op_id: self.create_key.to_string(),
+                message: format!("Creating a forked worktree from agent \"{source_label}\"..."),
+            });
+            let source_head = match git::head_commit(&source_worktree) {
+                Ok(head) => head,
+                Err(err) => {
+                    logger::error(&format!(
+                        "failed to resolve HEAD for {}: {err}",
+                        source_worktree.display()
+                    ));
+                    let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: self.create_key.to_string(), message: format!(
+                                "Failed to inspect the source worktree for agent \"{source_label}\": {err}",
+                            ) });
+                    return None;
+                }
+            };
+            let repo_path = PathBuf::from(&project.path);
+            let (branch_name, worktree_path) = match git::create_worktree_from_start_point(
+                &repo_path,
+                &self.paths.worktrees_root,
+                &project.name,
+                Some(&source_head),
+                Some(&custom_name),
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    logger::error(&format!(
+                        "fork worktree creation failed for {}: {err}",
+                        project.path
+                    ));
+                    let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: self.create_key.to_string(), message: format!(
+                                "Failed to create a forked worktree from agent \"{source_label}\": {err}",
+                            ) });
+                    return None;
+                }
+            };
+            let status_message = format!(
+                "Forked {} agent \"{}\" from \"{}\" in project \"{}\". The new worktree starts with the copied uncommitted and untracked changes (gitignored files are not copied) and a fresh session.",
+                source_session.provider.as_str(),
+                branch_name,
+                source_label,
+                project.name
+            );
+            // Equal HEADs hold by construction (the worktree was just created
+            // from `source_head`); the copy itself runs in the common tail.
+            let pending_copy = Some(PendingCopy {
+                source: source_worktree,
+                source_desc: format!("agent \"{source_label}\""),
+                on_head_mismatch: HeadMismatch::Fail,
+            });
+            ManagedCreatePlan {
+                project,
+                provider: source_session.provider,
+                source_branch: source_branch_name,
+                status_message,
+                branch_name,
+                worktree_path,
+                owns_worktree: true,
+                // A fork always requires a chosen name; persist it as the
+                // agent's durable title.
+                title: Some(custom_name),
+                launch_with_resume: false,
+                pending_copy,
+                // A fork always creates a new branch off the source's HEAD.
+                branch_provenance: BranchProvenance::CreatedByDux,
+            }
+        })
+    }
+
+    fn plan_existing_worktree(
+        &self,
+        project: crate::model::Project,
+        worktree_path: PathBuf,
+        branch_name: String,
+        custom_name: Option<String>,
+    ) -> Option<ManagedCreatePlan> {
+        Some({
+            let agent_name = custom_name.clone().unwrap_or_else(|| branch_name.clone());
+            let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
+                status_op_id: self.create_key.to_string(),
+                message: format!(
+                    "Launching {} in existing worktree \"{}\"...",
+                    project.default_provider.as_str(),
+                    worktree_path.display(),
+                ),
+            });
+            let status_message = format!(
+                "Imported {} agent \"{}\" from existing managed worktree for project \"{}\".",
+                project.default_provider.as_str(),
+                agent_name,
+                project.name
+            );
+            ManagedCreatePlan {
+                project: project.clone(),
+                provider: project.default_provider.clone(),
+                source_branch: branch_name.clone(),
+                status_message,
+                branch_name,
+                worktree_path,
+                owns_worktree: false,
+                title: custom_name,
+                launch_with_resume: true,
+                pending_copy: None,
+                // Adopting an existing worktree adopts its branch too: it
+                // predates the agent and is not dux's to delete.
+                branch_provenance: BranchProvenance::Adopted,
+            }
+        })
+    }
+
+    fn plan_external_worktree(
+        &self,
+        project: crate::model::Project,
+        source_worktree_path: PathBuf,
+        source_label: String,
+        source_branch: String,
+        custom_name: Option<String>,
+    ) -> Option<ManagedCreatePlan> {
+        Some({
+            let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
+                status_op_id: self.create_key.to_string(),
+                message: format!(
+                    "Creating a managed worktree from external worktree \"{source_label}\"...",
+                ),
+            });
+            let source_head = match git::head_commit(&source_worktree_path) {
+                Ok(head) => head,
+                Err(err) => {
+                    logger::error(&format!(
+                        "failed to resolve HEAD for {}: {err}",
+                        source_worktree_path.display()
+                    ));
+                    let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
+                        status_op_id: self.create_key.to_string(),
+                        message: format!(
+                            "Failed to inspect external worktree \"{source_label}\": {err}",
+                        ),
+                    });
+                    return None;
+                }
+            };
+            let repo_path = PathBuf::from(&project.path);
+            let (branch_name, worktree_path) = match git::create_worktree_from_start_point(
+                &repo_path,
+                &self.paths.worktrees_root,
+                &project.name,
+                Some(&source_head),
+                custom_name.as_deref(),
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    logger::error(&format!(
+                        "external worktree fork creation failed for {}: {err}",
+                        project.path
+                    ));
+                    let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: self.create_key.to_string(), message: format!(
+                                "Failed to create a managed worktree from external worktree \"{source_label}\": {err}",
+                            ) });
+                    return None;
+                }
+            };
+            let status_message = format!(
+                "Created {} agent \"{}\" from external worktree \"{}\" in project \"{}\". Uncommitted and untracked changes were copied into the managed worktree (gitignored files are not copied).",
+                project.default_provider.as_str(),
+                branch_name,
+                source_label,
+                project.name
+            );
+            // Equal HEADs hold by construction (the worktree was just created
+            // from the external worktree's head); the copy runs in the tail.
+            let pending_copy = Some(PendingCopy {
+                source: source_worktree_path,
+                source_desc: format!("external worktree \"{source_label}\""),
+                on_head_mismatch: HeadMismatch::Fail,
+            });
+            ManagedCreatePlan {
+                project: project.clone(),
+                provider: project.default_provider.clone(),
+                source_branch,
+                status_message,
+                branch_name,
+                worktree_path,
+                owns_worktree: true,
+                // A typed name becomes the agent's durable title; None leaves the
+                // display tracking the branch (an auto-derived worktree name).
+                title: custom_name,
+                launch_with_resume: false,
+                pending_copy,
+                // The managed worktree is created here on a new branch; the
+                // external worktree it was seeded from is untouched.
+                branch_provenance: BranchProvenance::CreatedByDux,
+            }
+        })
+    }
+}
+
+enum CopyHeadCheck {
+    Equal,
+    Different,
+    Failed(anyhow::Error),
+}
+
+fn compare_copy_heads(source: &Path, destination: &Path) -> CopyHeadCheck {
+    match (git::head_commit(source), git::head_commit(destination)) {
+        (Ok(source_head), Ok(destination_head)) if source_head == destination_head => {
+            CopyHeadCheck::Equal
+        }
+        (Ok(_), Ok(_)) => CopyHeadCheck::Different,
+        (Err(error), _) | (_, Err(error)) => CopyHeadCheck::Failed(error),
+    }
+}
+
+fn rollback_managed_create(repo_path: &Path, session: &AgentSession, owns_worktree: bool) {
+    if owns_worktree && let Some(managed) = session.workspace.as_managed() {
+        rollback_created_worktree(repo_path, managed);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_copy_mismatch(
+    copy: PendingCopy,
+    check_error: Option<anyhow::Error>,
+    session: &AgentSession,
+    repo_path: &Path,
+    owns_worktree: bool,
+    worker_tx: &Sender<WorkerEvent>,
+    create_key: &str,
+    creation_notes: &mut Vec<String>,
+) -> bool {
+    match copy.on_head_mismatch {
+        HeadMismatch::SkipWithNote { branch } => {
+            creation_notes.push(match check_error {
+                Some(error) => format!(
+                    "Uncommitted changes were not copied: could not verify the checkout's commit: {error}."
+                ),
+                None => format!(
+                    "Uncommitted changes were not copied: the project checkout is not on \"{branch}\"'s commit."
+                ),
+            });
+            true
+        }
+        HeadMismatch::Fail => {
+            if check_error.is_none() {
+                logger::error(&format!(
+                    "uncommitted-changes copy aborted: {} is no longer on the commit {} was created from",
+                    copy.source.display(),
+                    session.directory()
+                ));
+            }
+            rollback_managed_create(repo_path, session, owns_worktree);
+            let message = match check_error {
+                Some(error) => format!(
+                    "Failed to copy uncommitted changes from {}: could not verify the source worktree's commit: {error}.",
+                    copy.source_desc
+                ),
+                None => format!(
+                    "Failed to copy uncommitted changes from {}: the source moved to a different commit during creation.",
+                    copy.source_desc
+                ),
+            };
+            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                status_op_id: create_key.to_string(),
+                message,
+            });
+            false
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_pending_copy(
+    copy: PendingCopy,
+    session: &AgentSession,
+    repo_path: &Path,
+    owns_worktree: bool,
+    worker_tx: &Sender<WorkerEvent>,
+    create_key: &str,
+    creation_notes: &mut Vec<String>,
+) -> bool {
+    let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+        status_op_id: create_key.to_string(),
+        message: format!(
+            "Copying uncommitted and untracked changes from {} into the new worktree (gitignored files are not copied)...",
+            copy.source_desc
+        ),
+    });
+    let worktree = Path::new(session.directory());
+    match compare_copy_heads(&copy.source, worktree) {
+        CopyHeadCheck::Equal => match git::copy_uncommitted_changes(&copy.source, worktree) {
+            Ok(summary) => {
+                if !summary.skipped_paths.is_empty() {
+                    creation_notes.push(format!(
+                        "Some paths were not copied (submodules, embedded repositories, or special files): {}.",
+                        summary.skipped_paths.join(", ")
+                    ));
+                }
+                true
+            }
+            Err(error) => {
+                logger::error(&format!(
+                    "failed to copy uncommitted changes from {} into {}: {error}",
+                    copy.source.display(),
+                    session.directory()
+                ));
+                rollback_managed_create(repo_path, session, owns_worktree);
+                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                    status_op_id: create_key.to_string(),
+                    message: format!(
+                        "Failed to copy uncommitted changes from {}: {error}",
+                        copy.source_desc
+                    ),
+                });
+                false
+            }
+        },
+        CopyHeadCheck::Different => handle_copy_mismatch(
+            copy,
+            None,
+            session,
+            repo_path,
+            owns_worktree,
+            worker_tx,
+            create_key,
+            creation_notes,
+        ),
+        CopyHeadCheck::Failed(error) => {
+            logger::error(&format!(
+                "uncommitted-changes copy: could not resolve HEAD for {} or {}: {error}",
+                copy.source.display(),
+                session.directory()
+            ));
+            handle_copy_mismatch(
+                copy,
+                Some(error),
+                session,
+                repo_path,
+                owns_worktree,
+                worker_tx,
+                create_key,
+                creation_notes,
+            )
+        }
+    }
+}
+
 /// Create a STANDALONE agent: build the record, check the provider is there,
 /// and launch it in the user's folder.
 ///
@@ -202,40 +1013,17 @@ fn run_create_standalone_agent_job(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn run_create_agent_job(
-    request: CreateAgentRequest,
+fn launch_managed_create(
+    plan: ManagedCreatePlan,
     paths: DuxPaths,
     config: Config,
     worker_tx: Sender<WorkerEvent>,
     term_size: (u16, u16),
-    status_op_id: String,
+    create_key: String,
     identity: crate::term_identity::TerminalIdentity,
+    mut creation_notes: Vec<String>,
 ) {
-    // The opaque id of the shared create-agent `HandlerStatusOp` keys every
-    // progress/failure event and is carried in `AgentLaunchKind::Create` so the
-    // launch-ready/failed handler can resolve the op's final on the same id.
-    let create_key = status_op_id;
-    // Non-fatal notes (best-effort pull problems, skipped copies) accumulated
-    // across the job and appended to the create status message, so they ride
-    // the keyed create-op final and stay visible.
-    let mut creation_notes: Vec<String> = Vec::new();
-    // The standalone arm shares nothing with the common tail below, which is
-    // entirely worktree provisioning: branch creation, the uncommitted-changes
-    // copy, the project's startup command, and the rollbacks that undo them.
-    // A standalone agent provisions NOTHING, so it takes its own short path and
-    // never reaches code that could remove a directory.
-    if let CreateAgentRequest::Standalone {
-        folder,
-        title,
-        provider,
-    } = request
-    {
-        run_create_standalone_agent_job(
-            folder, title, provider, paths, config, worker_tx, term_size, create_key, identity,
-        );
-        return;
-    }
-    let (
+    let ManagedCreatePlan {
         project,
         provider,
         source_branch,
@@ -246,594 +1034,8 @@ pub fn run_create_agent_job(
         title,
         launch_with_resume,
         pending_copy,
-        // Where the branch came from, decided here per request arm and carried
-        // to the session row (and to this job's rollbacks, which must not
-        // force-delete a branch dux did not create).
         branch_provenance,
-    ) = match request {
-        // Handled above, before this match: a standalone agent shares none of
-        // the provisioning this tail does. Answered here anyway so the match
-        // stays exhaustive and a future request kind cannot slip past it.
-        CreateAgentRequest::Standalone { .. } => {
-            crate::logger::error(
-                "standalone create reached the managed provisioning tail; this is a bug",
-            );
-            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                status_op_id: create_key.clone(),
-                message: "Could not create the standalone agent: dux took the wrong internal \
-                          path. Nothing was created and no folder was touched. Please report \
-                          this with the contents of dux.log."
-                    .to_string(),
-            });
-            return;
-        }
-        CreateAgentRequest::NewProject {
-            project,
-            custom_name,
-            use_existing_branch,
-            pull_before_create,
-            copy_uncommitted_changes,
-        } => {
-            let repo_path = PathBuf::from(&project.path);
-            let leading_branch = project.leading_branch.clone().unwrap_or_else(|| {
-                let cur =
-                    (!project.current_branch.is_empty()).then_some(project.current_branch.as_str());
-                crate::project_browser::leading_branch_for_project(&repo_path, cur)
-            });
-
-            if pull_before_create {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                    status_op_id: create_key.clone(),
-                    message: format!(
-                        "Pulling latest changes for project \"{}\" before creating the agent...",
-                        project.name
-                    ),
-                });
-                // The pull is best-effort: creation never aborts on a failed
-                // switch or pull. The agent simply starts from the local
-                // branch state, and the create status says so.
-                if let Err(err) = git::switch_branch_if_needed(&repo_path, &leading_branch) {
-                    logger::error(&format!(
-                        "pre-create branch switch failed for {}: {err}",
-                        project.path
-                    ));
-                    creation_notes.push(format!(
-                        "Warning: could not switch the project checkout to \"{leading_branch}\": {err}. The agent starts from the local branch state."
-                    ));
-                    // Deliberately skip the pull after a failed switch:
-                    // `pull_branch` re-runs the same switch internally, so it
-                    // would just re-fail and duplicate the warning.
-                } else {
-                    match git::has_origin_remote(&repo_path) {
-                        Ok(true) => {
-                            if let Err(err) = git::pull_branch(&repo_path, &leading_branch) {
-                                logger::error(&format!(
-                                    "pre-create pull failed for {}: {err}",
-                                    project.path
-                                ));
-                                creation_notes.push(format!(
-                                    "Warning: could not pull \"{leading_branch}\" from origin: {err}. The agent starts from the local branch state."
-                                ));
-                            }
-                        }
-                        Ok(false) => {
-                            // Steady state for local-only repos: the pull was
-                            // never promised, so this is a log-only skip.
-                            logger::info(&format!(
-                                "skipping pre-create pull for {}: no origin remote",
-                                project.path
-                            ));
-                        }
-                        Err(err) => {
-                            logger::error(&format!(
-                                "pre-create origin check failed for {}: {err}",
-                                project.path
-                            ));
-                            creation_notes.push(format!(
-                                "Warning: could not check for an origin remote: {err}. The agent starts from the local branch state."
-                            ));
-                        }
-                    }
-                }
-            }
-
-            // A user-typed name becomes the agent's durable `title` (identity),
-            // not just the branch name. An auto-generated pet name (custom_name
-            // is None) leaves `title` empty so the display keeps tracking the
-            // branch — there is nothing user-authored to protect.
-            let title = custom_name.clone();
-            // Resolve the branch name early so we can check for an
-            // existing branch before calling git worktree add.  When no
-            // custom name was provided, a random pet name is generated.
-            let resolved_name = custom_name.unwrap_or_else(git::docker_style_name);
-
-            // If the caller already confirmed via the UI dialog,
-            // `use_existing_branch` is true.  Otherwise, do a last-mile
-            // check — this covers auto-generated pet names that
-            // coincidentally match an existing branch.
-            let attach_existing =
-                use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
-            // Distinguish an unborn repo (no commits at all) from a genuinely
-            // deleted branch. `local_branch_exists` is false for both, but the
-            // remedies differ: an unborn repo needs an initial commit, not a
-            // "restore the branch" that never existed. Check commits first so
-            // the message is accurate for a freshly `git init`'d project that
-            // slipped in (e.g. added via the raw API, or hand-written config).
-            // Only a CONFIRMED unborn HEAD takes this branch — an indeterminate
-            // git result falls through to the branch-missing check rather than
-            // wrongly advising "create an initial commit" on a repo with history.
-            if !attach_existing && git::repo_commit_state(&repo_path) == git::CommitState::Unborn {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
-                    "Cannot create agent for \"{}\": the repository at {} has no commits yet. Create an initial commit (for example `git commit --allow-empty -m \"Initial commit\"`), then try again.",
-                    project.name, repo_path.display()
-                ) });
-                return;
-            }
-            if !attach_existing && !git::local_branch_exists(&repo_path, &leading_branch) {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
-                    "Cannot create agent for \"{}\": leading branch \"{}\" no longer exists locally. Restore that branch or re-add the project.",
-                    project.name, leading_branch
-                ) });
-                return;
-            }
-
-            let progress = if attach_existing {
-                format!(
-                    "Attaching to existing branch \"{}\" for project \"{}\"...",
-                    resolved_name, project.name
-                )
-            } else {
-                format!(
-                    "Creating a new worktree for project \"{}\"...",
-                    project.name
-                )
-            };
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                status_op_id: create_key.clone(),
-                message: progress,
-            });
-
-            let (branch_name, worktree_path) = if attach_existing {
-                match git::create_worktree_existing_branch(
-                    &repo_path,
-                    &paths.worktrees_root,
-                    &project.name,
-                    &resolved_name,
-                ) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        logger::error(&format!(
-                            "worktree creation (existing branch) failed for {}: {err}",
-                            project.path
-                        ));
-                        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                            status_op_id: create_key.clone(),
-                            message: format!(
-                                "Failed to attach to existing branch for project \"{}\": {err}",
-                                project.name
-                            ),
-                        });
-                        return;
-                    }
-                }
-            } else {
-                match git::create_worktree_from_start_point(
-                    &repo_path,
-                    &paths.worktrees_root,
-                    &project.name,
-                    Some(&leading_branch),
-                    Some(&resolved_name),
-                ) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        logger::error(&format!(
-                            "worktree creation failed for {}: {err}",
-                            project.path
-                        ));
-                        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                            status_op_id: create_key.clone(),
-                            message: format!(
-                                "Failed to create a new worktree for project \"{}\": {err}",
-                                project.name
-                            ),
-                        });
-                        return;
-                    }
-                }
-            };
-            let status_message = if attach_existing {
-                format!(
-                    "Attached to existing branch \"{}\" in project \"{}\". The worktree is ready in a fresh session.",
-                    branch_name, project.name
-                )
-            } else {
-                format!(
-                    "Created {} agent \"{}\" in project \"{}\". The new worktree is ready in a fresh session.",
-                    project.default_provider.as_str(),
-                    branch_name,
-                    project.name
-                )
-            };
-            // The copy runs in the common tail (after the provider check).
-            // No per-path exceptions: the HEAD-equality guard decides, for
-            // fresh worktrees and attached existing branches alike.
-            let pending_copy = copy_uncommitted_changes.then(|| PendingCopy {
-                source: repo_path.clone(),
-                source_desc: format!("project \"{}\"", project.name),
-                on_head_mismatch: HeadMismatch::SkipWithNote {
-                    branch: if attach_existing {
-                        resolved_name.clone()
-                    } else {
-                        leading_branch.clone()
-                    },
-                },
-            });
-            (
-                project.clone(),
-                project.default_provider.clone(),
-                if attach_existing {
-                    project.current_branch.clone()
-                } else {
-                    leading_branch
-                },
-                status_message,
-                branch_name,
-                worktree_path,
-                true,
-                title,
-                false,
-                pending_copy,
-                // The branch is dux's only when dux minted it. Attaching means
-                // the user's branch existed first, so deleting this agent must
-                // never delete it.
-                if attach_existing {
-                    BranchProvenance::AttachedExisting
-                } else {
-                    BranchProvenance::CreatedByDux
-                },
-            )
-        }
-        CreateAgentRequest::PullRequest {
-            project,
-            host,
-            owner_repo,
-            number,
-            title,
-            state,
-            head_branch,
-            custom_name,
-            use_existing_branch,
-        } => {
-            let repo_path = PathBuf::from(&project.path);
-            // A typed name is the agent's durable title; falling back to the PR
-            // head branch means no user-authored name, so leave title empty.
-            // (Named `agent_title` to avoid shadowing the PR `title` above.)
-            let agent_title = custom_name.clone();
-            let resolved_name = custom_name.unwrap_or_else(|| head_branch.clone());
-            let attach_existing =
-                use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
-
-            if attach_existing {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                    status_op_id: create_key.clone(),
-                    message: format!(
-                        "Attaching to existing branch \"{}\" for PR #{} in project \"{}\"...",
-                        resolved_name, number, project.name
-                    ),
-                });
-            } else {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                    status_op_id: create_key.clone(),
-                    message: format!(
-                        "Fetching PR #{} from {} into branch \"{}\"...",
-                        number, owner_repo, resolved_name
-                    ),
-                });
-                if let Err(err) = git::fetch_pull_request_head(&repo_path, number, &resolved_name) {
-                    logger::error(&format!(
-                        "PR worktree fetch failed for {} #{}: {err}",
-                        owner_repo, number
-                    ));
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                        status_op_id: create_key.clone(),
-                        message: format!(
-                            "Failed to fetch PR #{} from {}: {err}",
-                            number, owner_repo
-                        ),
-                    });
-                    return;
-                }
-            }
-
-            let (branch_name, worktree_path) = match git::create_worktree_existing_branch(
-                &repo_path,
-                &paths.worktrees_root,
-                &project.name,
-                &resolved_name,
-            ) {
-                Ok(result) => result,
-                Err(err) => {
-                    logger::error(&format!(
-                        "PR worktree creation failed for {} #{}: {err}",
-                        owner_repo, number
-                    ));
-                    // THE RESPONSIBILITY BOUNDARY. The fetch above minted
-                    // `refs/heads/<resolved_name>`, and the worktree that the
-                    // provenance-driven rollback keys off does not exist, so
-                    // nothing else in this job would ever remove that ref. From
-                    // the next line on (worktree created, session built) the
-                    // rollback owns the branch and this cleanup must not run,
-                    // or the two would both delete it.
-                    //
-                    // Only when dux minted it: an attach found the user's
-                    // branch already there and it survives the failure.
-                    if !attach_existing {
-                        git::delete_created_branch_best_effort(&repo_path, &resolved_name);
-                    }
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                        status_op_id: create_key.clone(),
-                        message: format!(
-                            "Failed to create a worktree for PR #{} in project \"{}\": {err}",
-                            number, project.name
-                        ),
-                    });
-                    return;
-                }
-            };
-            let status_message = format!(
-                "Created {} agent \"{}\" from PR #{} ({}) in project \"{}\".",
-                project.default_provider.as_str(),
-                branch_name,
-                number,
-                title,
-                project.name
-            );
-            logger::info(&format!(
-                "created PR worktree from {} #{} ({state}) {}",
-                owner_repo,
-                number,
-                gh::pull_request_url(&host, &owner_repo, number)
-            ));
-            (
-                project.clone(),
-                project.default_provider.clone(),
-                project.current_branch.clone(),
-                status_message,
-                branch_name,
-                worktree_path,
-                true,
-                agent_title,
-                false,
-                None,
-                // Fetching the PR head MINTS `refs/heads/<name>` here, so that
-                // branch is dux's to clean up (and leaving it behind is what
-                // makes recreating the agent collide). Attaching means the
-                // branch was already there and stays.
-                if attach_existing {
-                    BranchProvenance::AttachedExisting
-                } else {
-                    BranchProvenance::CreatedByDux
-                },
-            )
-        }
-        CreateAgentRequest::ForkSession {
-            project,
-            source_session,
-            source_label,
-            custom_name,
-        } => {
-            let Some(custom_name) = custom_name else {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                    status_op_id: create_key.clone(),
-                    message: "Forking an agent requires choosing a name first.".to_string(),
-                });
-                return;
-            };
-            // Forking copies a managed worktree onto a new branch, so a
-            // standalone agent has nothing to fork. The wire's ForkSession arm
-            // already refuses one with a purposeful message; this is the
-            // structural restatement, so no folder path can reach the branch
-            // machinery below even if a future caller forgets that gate.
-            let (Some(source_worktree), Some(source_branch_name)) = (
-                source_session.managed_worktree().map(PathBuf::from),
-                source_session.branch_name().map(str::to_string),
-            ) else {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                    status_op_id: create_key.clone(),
-                    message: format!(
-                        "Agent \"{source_label}\" is a standalone agent, so there is no branch or managed worktree to fork. \
-                         Add its folder as a project if you want several agents working on it, and fork one of those instead."
-                    ),
-                });
-                return;
-            };
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                status_op_id: create_key.clone(),
-                message: format!("Creating a forked worktree from agent \"{source_label}\"..."),
-            });
-            let source_head = match git::head_commit(&source_worktree) {
-                Ok(head) => head,
-                Err(err) => {
-                    logger::error(&format!(
-                        "failed to resolve HEAD for {}: {err}",
-                        source_worktree.display()
-                    ));
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
-                        "Failed to inspect the source worktree for agent \"{source_label}\": {err}",
-                    ) });
-                    return;
-                }
-            };
-            let repo_path = PathBuf::from(&project.path);
-            let (branch_name, worktree_path) = match git::create_worktree_from_start_point(
-                &repo_path,
-                &paths.worktrees_root,
-                &project.name,
-                Some(&source_head),
-                Some(&custom_name),
-            ) {
-                Ok(result) => result,
-                Err(err) => {
-                    logger::error(&format!(
-                        "fork worktree creation failed for {}: {err}",
-                        project.path
-                    ));
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
-                        "Failed to create a forked worktree from agent \"{source_label}\": {err}",
-                    ) });
-                    return;
-                }
-            };
-            let status_message = format!(
-                "Forked {} agent \"{}\" from \"{}\" in project \"{}\". The new worktree starts with the copied uncommitted and untracked changes (gitignored files are not copied) and a fresh session.",
-                source_session.provider.as_str(),
-                branch_name,
-                source_label,
-                project.name
-            );
-            // Equal HEADs hold by construction (the worktree was just created
-            // from `source_head`); the copy itself runs in the common tail.
-            let pending_copy = Some(PendingCopy {
-                source: source_worktree,
-                source_desc: format!("agent \"{source_label}\""),
-                on_head_mismatch: HeadMismatch::Fail,
-            });
-            (
-                project,
-                source_session.provider,
-                source_branch_name,
-                status_message,
-                branch_name,
-                worktree_path,
-                true,
-                // A fork always requires a chosen name; persist it as the
-                // agent's durable title.
-                Some(custom_name),
-                false,
-                pending_copy,
-                // A fork always creates a new branch off the source's HEAD.
-                BranchProvenance::CreatedByDux,
-            )
-        }
-        CreateAgentRequest::ExistingManagedWorktree {
-            project,
-            worktree_path,
-            branch_name,
-            custom_name,
-        } => {
-            let agent_name = custom_name.clone().unwrap_or_else(|| branch_name.clone());
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                status_op_id: create_key.clone(),
-                message: format!(
-                    "Launching {} in existing worktree \"{}\"...",
-                    project.default_provider.as_str(),
-                    worktree_path.display(),
-                ),
-            });
-            let status_message = format!(
-                "Imported {} agent \"{}\" from existing managed worktree for project \"{}\".",
-                project.default_provider.as_str(),
-                agent_name,
-                project.name
-            );
-            (
-                project.clone(),
-                project.default_provider.clone(),
-                branch_name.clone(),
-                status_message,
-                branch_name,
-                worktree_path,
-                false,
-                custom_name,
-                true,
-                None,
-                // Adopting an existing worktree adopts its branch too: it
-                // predates the agent and is not dux's to delete.
-                BranchProvenance::Adopted,
-            )
-        }
-        CreateAgentRequest::ForkExternalWorktree {
-            project,
-            source_worktree_path,
-            source_label,
-            source_branch,
-            custom_name,
-        } => {
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                status_op_id: create_key.clone(),
-                message: format!(
-                    "Creating a managed worktree from external worktree \"{source_label}\"...",
-                ),
-            });
-            let source_head = match git::head_commit(&source_worktree_path) {
-                Ok(head) => head,
-                Err(err) => {
-                    logger::error(&format!(
-                        "failed to resolve HEAD for {}: {err}",
-                        source_worktree_path.display()
-                    ));
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                        status_op_id: create_key.clone(),
-                        message: format!(
-                            "Failed to inspect external worktree \"{source_label}\": {err}",
-                        ),
-                    });
-                    return;
-                }
-            };
-            let repo_path = PathBuf::from(&project.path);
-            let (branch_name, worktree_path) = match git::create_worktree_from_start_point(
-                &repo_path,
-                &paths.worktrees_root,
-                &project.name,
-                Some(&source_head),
-                custom_name.as_deref(),
-            ) {
-                Ok(result) => result,
-                Err(err) => {
-                    logger::error(&format!(
-                        "external worktree fork creation failed for {}: {err}",
-                        project.path
-                    ));
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
-                        "Failed to create a managed worktree from external worktree \"{source_label}\": {err}",
-                    ) });
-                    return;
-                }
-            };
-            let status_message = format!(
-                "Created {} agent \"{}\" from external worktree \"{}\" in project \"{}\". Uncommitted and untracked changes were copied into the managed worktree (gitignored files are not copied).",
-                project.default_provider.as_str(),
-                branch_name,
-                source_label,
-                project.name
-            );
-            // Equal HEADs hold by construction (the worktree was just created
-            // from the external worktree's head); the copy runs in the tail.
-            let pending_copy = Some(PendingCopy {
-                source: source_worktree_path,
-                source_desc: format!("external worktree \"{source_label}\""),
-                on_head_mismatch: HeadMismatch::Fail,
-            });
-            (
-                project.clone(),
-                project.default_provider.clone(),
-                source_branch,
-                status_message,
-                branch_name,
-                worktree_path,
-                true,
-                // A typed name becomes the agent's durable title; None leaves the
-                // display tracking the branch (an auto-derived worktree name).
-                custom_name,
-                false,
-                pending_copy,
-                // The managed worktree is created here on a new branch; the
-                // external worktree it was seeded from is untouched.
-                BranchProvenance::CreatedByDux,
-            )
-        }
-    };
+    } = plan;
     let repo_path = PathBuf::from(&project.path);
     if owns_worktree {
         logger::info(&format!(
@@ -897,106 +1099,18 @@ pub fn run_create_agent_job(
     // The planned copy of uncommitted changes runs here, after the provider
     // availability check (so a missing provider does not discard completed
     // copy work) and before the startup command (which must see the files).
-    if let Some(copy) = pending_copy {
-        let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-            status_op_id: create_key.clone(),
-            message: format!(
-                "Copying uncommitted and untracked changes from {} into the new worktree (gitignored files are not copied)...",
-                copy.source_desc
-            ),
-        });
-        let worktree = Path::new(session.directory());
-        // Porcelain status is relative to the HEAD commit's tree, so the copy
-        // is only faithful when both sides sit on the same commit. A failed
-        // `head_commit` is NOT a branch mismatch: it is reported as its own
-        // verification failure so the user is not told the wrong cause.
-        let head_check = match (git::head_commit(&copy.source), git::head_commit(worktree)) {
-            (Ok(source_head), Ok(worktree_head)) if source_head == worktree_head => Ok(true),
-            (Ok(_), Ok(_)) => Ok(false),
-            (Err(err), _) | (_, Err(err)) => Err(err),
-        };
-        match head_check {
-            Ok(true) => match git::copy_uncommitted_changes(&copy.source, worktree) {
-                Ok(summary) => {
-                    if !summary.skipped_paths.is_empty() {
-                        creation_notes.push(format!(
-                                "Some paths were not copied (submodules, embedded repositories, or special files): {}.",
-                                summary.skipped_paths.join(", ")
-                            ));
-                    }
-                }
-                Err(err) => {
-                    logger::error(&format!(
-                        "failed to copy uncommitted changes from {} into {}: {err}",
-                        copy.source.display(),
-                        session.directory()
-                    ));
-                    if owns_worktree && let Some(managed) = session.workspace.as_managed() {
-                        rollback_created_worktree(&repo_path, managed);
-                    }
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                        status_op_id: create_key.clone(),
-                        message: format!(
-                            "Failed to copy uncommitted changes from {}: {err}",
-                            copy.source_desc
-                        ),
-                    });
-                    return;
-                }
-            },
-            not_equal_or_failed => {
-                let check_error = match not_equal_or_failed {
-                    Err(err) => {
-                        logger::error(&format!(
-                            "uncommitted-changes copy: could not resolve HEAD for {} or {}: {err}",
-                            copy.source.display(),
-                            session.directory()
-                        ));
-                        Some(err)
-                    }
-                    _ => None,
-                };
-                match copy.on_head_mismatch {
-                    HeadMismatch::SkipWithNote { branch } => {
-                        creation_notes.push(match &check_error {
-                            Some(err) => format!(
-                                "Uncommitted changes were not copied: could not verify the checkout's commit: {err}."
-                            ),
-                            None => format!(
-                                "Uncommitted changes were not copied: the project checkout is not on \"{branch}\"'s commit."
-                            ),
-                        });
-                    }
-                    HeadMismatch::Fail => {
-                        if check_error.is_none() {
-                            logger::error(&format!(
-                                "uncommitted-changes copy aborted: {} is no longer on the commit {} was created from",
-                                copy.source.display(),
-                                session.directory()
-                            ));
-                        }
-                        if owns_worktree && let Some(managed) = session.workspace.as_managed() {
-                            rollback_created_worktree(&repo_path, managed);
-                        }
-                        let message = match &check_error {
-                            Some(err) => format!(
-                                "Failed to copy uncommitted changes from {}: could not verify the source worktree's commit: {err}.",
-                                copy.source_desc
-                            ),
-                            None => format!(
-                                "Failed to copy uncommitted changes from {}: the source moved to a different commit during creation.",
-                                copy.source_desc
-                            ),
-                        };
-                        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                            status_op_id: create_key.clone(),
-                            message,
-                        });
-                        return;
-                    }
-                }
-            }
-        }
+    if let Some(copy) = pending_copy
+        && !apply_pending_copy(
+            copy,
+            &session,
+            &repo_path,
+            owns_worktree,
+            &worker_tx,
+            &create_key,
+            &mut creation_notes,
+        )
+    {
+        return;
     }
     // Notes ride the keyed create-op final so they surface as the visible
     // status/toast, never log-only.
@@ -1100,6 +1214,63 @@ pub fn run_create_agent_job(
     run_agent_launch_job(request, worker_tx);
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn run_create_agent_job(
+    request: CreateAgentRequest,
+    paths: DuxPaths,
+    config: Config,
+    worker_tx: Sender<WorkerEvent>,
+    term_size: (u16, u16),
+    status_op_id: String,
+    identity: crate::term_identity::TerminalIdentity,
+) {
+    // The opaque id of the shared create-agent `HandlerStatusOp` keys every
+    // progress/failure event and is carried in `AgentLaunchKind::Create` so the
+    // launch-ready/failed handler can resolve the op's final on the same id.
+    let create_key = status_op_id;
+    // Non-fatal notes (best-effort pull problems, skipped copies) accumulated
+    // across the job and appended to the create status message, so they ride
+    // the keyed create-op final and stay visible.
+    let mut creation_notes: Vec<String> = Vec::new();
+    // The standalone arm shares nothing with the common tail below, which is
+    // entirely worktree provisioning: branch creation, the uncommitted-changes
+    // copy, the project's startup command, and the rollbacks that undo them.
+    // A standalone agent provisions NOTHING, so it takes its own short path and
+    // never reaches code that could remove a directory.
+    if let CreateAgentRequest::Standalone {
+        folder,
+        title,
+        provider,
+    } = request
+    {
+        run_create_standalone_agent_job(
+            folder, title, provider, paths, config, worker_tx, term_size, create_key, identity,
+        );
+        return;
+    }
+    let plan = {
+        let mut context = CreatePlanContext {
+            paths: &paths,
+            worker_tx: &worker_tx,
+            create_key: &create_key,
+            creation_notes: &mut creation_notes,
+        };
+        let Some(plan) = context.plan(request) else {
+            return;
+        };
+        plan
+    };
+    launch_managed_create(
+        plan,
+        paths,
+        config,
+        worker_tx,
+        term_size,
+        create_key,
+        identity,
+        creation_notes,
+    );
+}
 pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<WorkerEvent>) {
     let launch_args = request.provider_config.interactive_args(request.resume);
     let (rows, cols) = request.pty_size;
