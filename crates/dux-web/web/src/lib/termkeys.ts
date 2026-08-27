@@ -115,15 +115,8 @@ export function arrowSeq(
   return `${ESC}${applicationCursorKeys ? "O" : "["}${final}`
 }
 
-/*
- * A mouse report is DELIBERATELY not encoded here. `sgrWheelSeq` and
- * `sgrClickSeq` used to live at this spot and hand-built SGR (DECSET 1006)
- * bytes unconditionally, which is wrong for any app that enables a tracking
- * mode without also enabling 1006, and computed the cell with arithmetic of
- * their own that did not match xterm's. Both are gone: `lib/termmouse.ts`
- * replays the DOM events instead and lets xterm encode. Do not reinstate an
- * encoder here.
- */
+// Mouse input is replayed through `lib/termmouse.ts` so xterm selects the
+// negotiated protocol and cell coordinates. Do not encode mouse reports here.
 
 /**
  * Returns the byte sequence for a Page Up / Page Down key, used to page a

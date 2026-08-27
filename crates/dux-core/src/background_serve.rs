@@ -19,14 +19,8 @@
 //!
 //! ## Accepted hazard: a panic in either surface takes both down
 //!
-//! While a background server is running, the TUI thread IS the web layer's engine
-//! servicer. A panic anywhere in the TUI therefore stops serving, and a panic
-//! inside a companion call unwinds through the TUI's run loop. This is written
-//! down rather than defended against, because a TUI panic already killed the
-//! process (and with it every agent's terminal), so nothing that used to survive
-//! stops surviving. What is genuinely new is the reverse direction: a bug in the
-//! web layer's per-iteration servicing can now take down a terminal UI that used
-//! to be independent of it. That is why the mode is opt-in.
+//! The TUI thread services the web layer's engine turns, so a panic in either
+//! surface can unwind the shared process. Background serving is opt-in.
 
 use std::sync::Arc;
 

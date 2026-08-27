@@ -27,18 +27,8 @@ use crate::worker::{ResourceKind, ResourceStats};
 pub struct SpineView {
     pub projects: Vec<ProjectView>,
     pub sessions: Vec<SessionView>,
-    /// EVERY companion terminal, of every owner, as ONE flat collection ordered
-    /// by the manual `sort_order` (the base order each surface applies the
-    /// active sort mode on top of).
-    ///
-    /// Terminals used to reach the client only by being nested inside the
-    /// session or the project that owns them, with no owner on the terminal at
-    /// all, and the client walked both collections to rebuild exactly this list
-    /// because the sidebar shows terminals flat. The flat, owner-bearing shape
-    /// is what the client actually wants, and it is the shape a new owner kind
-    /// cannot silently be left out of: there is ONE projection rather than two,
-    /// and each terminal carries a tagged [`TerminalOwnerView`] the client must
-    /// switch on exhaustively.
+    /// Every companion terminal in manual `sort_order`. Each carries a tagged
+    /// [`TerminalOwnerView`] so clients handle owner kinds exhaustively.
     pub terminals: Vec<TerminalView>,
     /// Core-computed sidebar grouping (projects + sessions, with orphaned
     /// sessions surfaced) so both surfaces render an identical tree without

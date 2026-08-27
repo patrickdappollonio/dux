@@ -119,11 +119,7 @@ export function MacroPopover({
           and on a phone icon-only is the default because space is scarce. Do
           not give it a label back.
 
-          BOTH variants are `outline`. The labelled one used to be `secondary`
-          because it FLOATED over live terminal output and needed a filled
-          surface to stay legible against it; it now sits in the desktop
-          header's control row beside the Settings cog and the Show-Changes
-          button, and outline is that row's one-family treatment. Its height
+          Both variants are `outline` to match the desktop header's controls. Its height
           comes from the button's default `h-8` token, which is exactly the
           `size="icon"` (`size-8`) height of the icon-only buttons next to it,
           so the label changes the WIDTH and nothing else.

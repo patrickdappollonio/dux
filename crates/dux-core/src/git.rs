@@ -1323,13 +1323,8 @@ pub struct RemoveResult {
 
 /// What `git branch -D` did to one branch.
 ///
-/// Three answers rather than two, because a failed `-D` means two very
-/// different things and dux used to report both as "already gone". MEASURED on
-/// git 2.55: a branch that is CHECKED OUT in another worktree makes `-D` exit 1
-/// with "cannot delete branch 'x' used by worktree at ...", and the branch is
-/// still there afterwards. Saying it was already gone is then the exact
-/// opposite of the truth, and the collision it was meant to warn about (create
-/// foo, delete foo, recreate foo) silently survives.
+/// A failed `git branch -D` is distinct from an absent branch: a branch checked
+/// out in another worktree is refused and remains present.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum BranchDeletion {
     /// git deleted the branch here.
@@ -2480,11 +2475,8 @@ pub enum CommitPreflight {
     Ready,
 }
 
-/// Decide whether a commit may proceed, from the worktree's LIVE git status.
-/// Both the TUI's commit action and the web commit route call this so they agree
-/// on the empty-message and nothing-staged refusals (the web previously lacked
-/// the nothing-staged gate and let `git commit` fail with raw stderr as a 500).
-/// Surface-specific concerns such as a message length cap are NOT decided here.
+/// Decide whether a commit may proceed from live git status, using the same
+/// empty-message and nothing-staged rules for TUI and web callers.
 pub fn commit_preflight(worktree_path: &Path, message: &str) -> CommitPreflight {
     if message.trim().is_empty() {
         return CommitPreflight::EmptyMessage;
@@ -3245,9 +3237,7 @@ pub(crate) fn resolve_remote_from_git_output(
     classify_github_remote(strip_git_record_terminator(text), policy)
 }
 
-/// Split the two questions the parser used to answer at once: WHAT ADDRESS is
-/// this (the grammar, which does not consult the policy), and MAY DUX ASK about
-/// it (the policy, and nothing else).
+/// Classify the address grammar first, then apply the host access policy.
 pub(crate) fn classify_github_remote(
     url: &str,
     policy: &crate::gh::GithubHostPolicy,

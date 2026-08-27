@@ -1,12 +1,5 @@
-// What the worktree manager says after removing one worktree.
-//
-// The report is derived from the SERVER'S ANSWER, never from the checkbox the
-// request carried. Those are different questions: `git branch -D` refuses a
-// branch that is still checked out somewhere, so "the user asked for the
-// branch" and "the branch is gone" come apart, and the toast used to assert
-// the second while only knowing the first.
-//
-// Pure, so every rung is testable without a server or a toast.
+// Report branch deletion from the server outcome, not the requested checkbox:
+// git may refuse to delete a branch still checked out elsewhere.
 
 import type { FinalTone } from "@/lib/notify"
 

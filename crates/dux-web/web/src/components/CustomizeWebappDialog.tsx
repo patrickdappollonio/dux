@@ -143,24 +143,8 @@ function clampToControl(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n))
 }
 
-// A number row keeps its OWN local text buffer, decoupled from the committed
-// `value` prop, for two reasons (see the adversarial-review findings this
-// fixes): (1) an emptied field must render empty while the user is between
-// keystrokes, and Input's `value` is otherwise fully controlled by the
-// committed numeric override, so without a local buffer the field would snap
-// back to a stale digit the instant the last character is deleted; (2) an
-// empty field must NOT commit as `0`, since 0 is a meaningful value for every
-// numeric setting here (never auto-clear, clear immediately, leave tabs
-// as-is). Every keystroke that parses to a finite number commits immediately,
-// clamped to the descriptor's [min, max] client-side so an out-of-range value
-// never reaches the wire (the server re-clamps too, but silently, which is
-// surprising UX on its own). The buffer re-syncs whenever the committed
-// `value` changes from OUTSIDE this control (an override reset, or a
-// concurrent client's bootstrap update reflected while untouched), via the
-// React-documented "adjust state during render" pattern (a `prevValue`
-// tracker compared on every render) rather than a `useEffect`, so the
-// re-sync lands in the SAME render/commit as the prop change instead of a
-// cascading extra render.
+// Local text preserves an empty in-progress field without committing it as zero.
+// Finite values commit within bounds; external value changes resync during render.
 function NumberControl({
   id,
   label,

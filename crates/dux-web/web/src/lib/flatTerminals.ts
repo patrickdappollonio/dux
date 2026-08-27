@@ -2,12 +2,8 @@
 // desktop sidebar and the mobile hub so the two surfaces never drift. Kept free
 // of React so every rule here is trivially unit-testable.
 //
-// Since the terminal/agent sidebar parity work, companion terminals are no longer
-// nested under their agent row and project terminals are no longer a loose group:
-// EVERY terminal (session-owned + project-owned) renders flat in one "Terminals"
-// section at the bottom of the list. These helpers own the two data decisions that
-// section needs: assembling that flat list with each terminal's owner label, and
-// deriving a terminal's state word from its working/typing flags.
+// Every session-, project-, and standalone-owned terminal renders in one flat
+// "Terminals" section. These helpers assemble its labels and state words.
 
 import { assertNever } from "@/lib/assertNever"
 import type { FlatSortKey, StateWord } from "@/lib/flatList"
@@ -36,13 +32,8 @@ export interface FlatTerminal {
 // that the terminal itself does not carry: its owner reference, the owner's
 // display label, the project tag, and its sibling set.
 //
-// `terminals` arrives flat and owner-tagged, so this walks it ONCE and switches
-// on each terminal's own owner. It used to walk `sessions[].terminals` and then
-// `projects[].terminals`, which meant ownership was inferred from which loop a
-// terminal turned up in and a new kind of owner would simply have had no loop.
-// `sessions` and `projects` are now only lookup tables for the labels, so the
-// output order is the order of `terminals` (the caller re-sorts into the global
-// `sort_order` base either way).
+// `terminals` is already flat and owner-tagged. Sessions and projects are lookup
+// tables for labels, and the input order is preserved.
 //
 // A companion terminal is labeled `agent@project` (the agent's display name --
 // title, or branch name when untitled -- at its project); a project terminal
@@ -59,10 +50,7 @@ export function assembleFlatTerminals(
 ): FlatTerminal[] {
   const sessionsById = new Map(sessions.map((s) => [s.id, s]))
   const projectsById = new Map(projects.map((p) => [p.id, p]))
-  // Siblings are the terminals sharing an owner. Nesting used to give this for
-  // free (the array a terminal sat in WAS its sibling set); with one flat list
-  // it is a grouping pass, keyed so a session and a project with the same id can
-  // never merge.
+  // Group siblings by owner kind and id so equal session/project ids never merge.
   const byOwner = new Map<string, TerminalView[]>()
   for (const terminal of terminals) {
     const key = ownerKey(terminal.owner)

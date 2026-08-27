@@ -14,8 +14,7 @@ import {
 import { appMenuModel, type AppMenuEntry } from "@/lib/appMenu"
 import { useDux } from "@/lib/store"
 
-// The desktop app menu: the cog in the header's top-right corner, replacing the
-// old "Commands…" command-palette button. It renders `appMenuModel()` and
+// The desktop app menu renders `appMenuModel()` and
 // hand-authors no items, so it cannot drift from the mobile bottom sheet
 // (`AppMenuSheet.tsx`), which renders the same model.
 //
@@ -74,10 +73,8 @@ export function AppMenu() {
           behind. The label changes the WIDTH and nothing else, the button's
           default size token is `h-8`, exactly the `size="icon"` (`size-8`)
           height of the icon-only buttons beside it, so the control row stays one
-          height. The `aria-label="Menu"` it used to carry is GONE rather than
-          kept: an aria-label overrides the accessible name, so a button reading
-          "Settings" would have announced as "Menu" and no voice command matching
-          the visible word would reach it. The visible text is the name now. */}
+          height. Visible text supplies the accessible name so voice commands
+          can match "Settings". */}
       <DropdownMenuTrigger
         render={
           <Button variant="outline">

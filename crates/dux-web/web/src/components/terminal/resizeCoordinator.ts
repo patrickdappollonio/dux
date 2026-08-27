@@ -8,16 +8,9 @@
 //    drag settles) and deduplicated, since ResizeObserver also fires an initial
 //    callback on observe.
 //
-// Cheap is not the same as free, and the debounce is the SECOND hold source. The
-// ResizeObserver used to refit per animation frame while the send waited out the
-// debounce, so for the whole of a divider drag the local grid ran ahead of the
-// child's. Measured on a simulated drag: 13 transcript rows duplicated
-// permanently into local scrollback, and zero once the fit was held with the
-// send. So the observer's refit is parked for the debounce window and released
-// WITH the send, coalesced, last geometry wins. The accepted tradeoff mirrors
-// the touch hold's, in the other direction: the canvas letterboxes for up to
-// RESIZE_SEND_DEBOUNCE_MS while the drag is in flight, rather than the child
-// repainting into a geometry the viewer no longer has.
+// The ResizeObserver parks its refit for the debounce window and releases it
+// with the send. Last geometry wins, and the canvas may letterbox briefly rather
+// than letting the local grid run ahead of the child during a drag.
 //
 // THE INVARIANT, and the reason this is a machine rather than a handful of
 // closures: NO CALL SITE TOUCHES `fit.fit()` OR `sendResize` EXCEPT THROUGH
@@ -56,21 +49,14 @@
 // arithmetic in `lib/viewerFit.ts`. This module owns the grid; nothing else
 // re-grids a viewer.
 //
-// THERE IS NO LONGER AN EXCEPTION TO "no other call site sends". The take-over
-// button used to be one: it called the socket's `sendResize` directly for the
-// synchronous did-it-go-out boolean that told it whether to reopen a dead
-// socket. Take-over is now a socket BOUNCE carrying an armed intent, so it
-// sends nothing itself and the claim rides the reconnect's ordinary first-frame
-// resize, through here like everything else. The intent is read and cleared in
-// the `sendResize` the lifecycle hands this machine, which is the one confirmed
-// write; this machine does not know the flag exists.
+// Take-over bounces the socket, and its claim rides the reconnect's ordinary
+// first-frame resize through this coordinator. The lifecycle-owned `sendResize`
+// reads and clears that intent; this machine does not know the flag exists.
 //
-// ONE STATED EXCEPTION REMAINS, to "no other call site fits": the FONT-driven
-// refit in the pane's relayout. Its sibling, the late refit once the bundled
-// faces land, is no longer one: `lib/terminalFont.ts` now takes the refit as a
-// closure and the lifecycle passes `refitForFonts` from here, because that
-// refit has two right answers (fit the container, or recompute the watcher's
-// shrink) and only this machine knows which. The relayout re-grids the
+// The one exception to "no other call site fits" is the font-driven refit in
+// the pane's relayout. Late bundled-font refits receive `refitForFonts` from
+// here because only this machine knows whether to fit the container or recompute
+// a viewer's shrink. The relayout re-grids the
 // terminal without asking, and it is pre-existing and deliberate, because the
 // metrics have moved and the canvas would otherwise be wrong. It is safe for
 // the PTY half of the pair for the reason A4 exists: the grid change reaches
@@ -267,9 +253,7 @@ export function createResizeCoordinator(
   // ownership-ACQUIRING claim does. Every claim now runs with the verdict
   // ALREADY flipped to "mine" (a take-over flips it before bouncing the socket,
   // and a self-succeeding owner flips it at the handshake), so claims pass this
-  // gate and are recorded like any other send. That is a change from the shape this
-  // comment used to describe, where a claim ran while the verdict still said
-  // somebody else owned the pty and had to bypass the record entirely.
+  // gate and are recorded like any other send.
   //
   // A FLAGGED FRAME IS BOOKED BY THE ANSWER, NOT BY THE SEND, and it is the one
   // frame that gets that treatment. There are two refusable classes now: a plain
@@ -353,12 +337,8 @@ export function createResizeCoordinator(
   // gesture end. These paths bypass the debounce on purpose, so each has to
   // route through the hold explicitly or the pair comes apart again.
   //
-  // THIS IS NO LONGER AN EXPORTED PORT. It used to be published as
-  // `directSend`, for exactly one external caller: the freed-pty auto-claim in
-  // the ownership machine. That claim is gone (losing ownership is sticky, and
-  // a blipped owner takes its pty back through the ordinary flagged first-frame
-  // resize of its new connection instead), so the port went with it rather than
-  // being left dangling with no caller.
+  // Direct resize paths remain internal so every external resize follows the
+  // coordinator's ownership and hold rules.
   const fitAndSend = (send: () => void) => {
     if (holding) {
       fitHeldByGesture = true

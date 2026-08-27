@@ -87,41 +87,9 @@ export type ConnectionIdentity = Channel<string | null>
 /// THE TAKE-OVER INTENT. Whether the NEXT resize frame that actually reaches the
 /// wire must carry the ownership-transfer flag.
 ///
-/// OWNER: the ownership machine's `takeOver`, which arms it and then bounces the
-/// socket. It is state, not a queued closure, and that distinction is the fix:
-/// a parked "send this exact frame" closure was lost twice over, once to the
-/// gesture coalescer (which keeps the FIRST held direct send and drops later
-/// ones) and once to a socket that re-dropped between the decision to send and
-/// the send. A flag cannot be coalesced away, because it does not care WHICH
-/// frame carries it.
-///
-/// CONSUMED by the lifecycle's `sendResize` wrapper, and only on a CONFIRMED
-/// wire write (`sendResize === true`). A frame the socket silently discarded
-/// must leave the intent armed, or the take-over is lost with it.
-///
-/// THE INTENT NEVER OUTLIVES THE SOCKET IT WAS ARMED FOR. An automatic
-/// reconnect is a plain attach and never a take-over: no retry, no resume, no
-/// heal bounce carries the flag, and only a press on the button does. So it is
-/// ALSO CLEARED, without ever being sent, by:
-///
-///   - ANY close of the live socket, delivered as `onConn("closed")`. The
-///     take-over's own deliberate close does not fire that, because `connect()`
-///     detaches the orphan's handlers first, which is exactly what lets the
-///     intent survive the bounce it armed and nothing else. A request made
-///     minutes ago on a train must not surface later and pull the terminal away
-///     from whoever is using it by then.
-///   - a `pty.owner` naming ANOTHER owner (the take-over lost a race; re-arming
-///     is the user's to decide), and an owner-cleared one too. The freed
-///     exemption that used to park the intent through a disconnect is gone: the
-///     bounce's own handshake seeds a plain claim on an unowned pty and reaches
-///     the same place without a flag outliving its socket.
-///   - the lifecycle teardown (unmount, or a switch to a different target).
-///
-/// `expectedOwner` is the connection id a SELF-SUCCESSION expects to displace:
-/// its own previous, dead connection. The server refuses the transfer if
-/// somebody else holds the pty by then, so a frame delayed on a mobile radio
-/// cannot steal from a legitimate claimer. A PRESSED take-over leaves it
-/// undefined, which means "take from anyone", because a press may.
+/// Armed by ownership and consumed only after a confirmed resize write. Socket
+/// close, a definitive owner frame, or teardown clears it before reuse.
+/// `expectedOwner` makes self-succession conditional on the named prior owner.
 export type TakeoverIntent = {
   read: () => boolean
   expectedOwner: () => string | undefined

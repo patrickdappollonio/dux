@@ -154,15 +154,8 @@ export function primeLinkHover(
   // then re-resolve from xterm's own per-line cache, so this costs a lookup,
   // not a repaint.
   screen.dispatchEvent(mouse("mouseleave", 0))
-  // A PRIMING move at a different cell first. xterm's Linkifier only re-runs
-  // its providers when the pointer's CELL changes from the last one it saw, and
-  // a finger that taps the same link twice reports the same cell both times: on
-  // the second tap the hover was skipped, no link was resolved, and the tap
-  // opened nothing. MEASURED in the container as "a second tap on the same link
-  // opens 0 tabs" before this line existed. Priming from the far side of the
-  // element on the same row guarantees a different column while staying inside
-  // the element (a point outside it resolves to no cell at all, which would
-  // leave the stale cell in place instead of displacing it).
+  // Prime a different in-bounds cell because xterm's Linkifier reruns providers
+  // only when the pointer cell changes. This makes repeated taps resolve again.
   const rect = screen.getBoundingClientRect()
   const primeX =
     clientX >= rect.left + rect.width / 2 ? rect.left + 1 : rect.right - 1
@@ -189,16 +182,9 @@ export interface TerminalTapContext {
 /**
  * Decides what a tap does after the link probe.
  *
- * A tap that OPENED A LINK is not forwarded. dux is the sole opener of a
- * terminal hyperlink: the agent CLI answers a forwarded click by opening the
- * URL on the SERVER's machine, where the person holding the phone cannot see
- * it, so a link tap used to open the page twice, once in the right place and
- * once in the wrong one. This used to mirror the desktop, which forwarded the
- * click as well; the desktop no longer does either (the pane's capture-phase
- * link intercept withholds the whole press/release pair from xterm), so both
- * surfaces now say the same thing: the click that dispatched a link belongs to
- * dux. There is deliberately NO force-forward hatch on touch, since the long
- * press already owns "force local" and a finger has no modifier keys.
+ * A tap that opens a link belongs to dux and is not forwarded to the terminal;
+ * otherwise a mouse-aware remote app could open the same URL on the server.
+ * Touch has no force-forward chord because long press already means local use.
  *
  * Focus is the opposite: a link tap does NOT pull the caret into the compose
  * box. The gesture asked to go somewhere else (the tab is already opening),

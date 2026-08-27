@@ -178,10 +178,8 @@ export function useTerminalOwnership(
     setReconnecting,
   } = deps
 
-  // SITE 1: the initial guess, and now ONLY a guess: it holds for the handful of
-  // milliseconds before the `connected` handshake answers (site 4), and after
-  // that the server's answer decides. No-document contexts read as foreground,
-  // so a claim is never silently suppressed.
+  // The foreground guess lasts only until the server's connected handshake.
+  // No-document contexts count as foreground so a claim is never suppressed.
   const [isOwner, setIsOwner] = useState(isForeground)
   const isOwnerRef = useRef(isOwner)
   const ownership = useMemo<OwnershipVerdict>(
@@ -219,12 +217,8 @@ export function useTerminalOwnership(
   // connection, and self-succession would then hand this pane a pty it never
   // owned.
   //
-  // ONLY A CONFIRMED CHANGE RETIRES THEM, and the previous signal (the epoch
-  // reset, which the store fires on every events reconnect) was the bug that
-  // killed self-succession in the exact case it exists for: an ordinary mobile
-  // drop takes BOTH sockets, so the events socket reconnects and clears this set
-  // strictly before the pty handshake that names the ghost arrives, and the
-  // returning driver lands on the take-over card. A reconnect is not a restart.
+  // Only a confirmed server-run change retires them. An events reconnect is not
+  // evidence of a restart and may precede the PTY handshake naming the ghost.
   //
   // The stamp on each id is the other half, and it is what makes an UNPROVEN
   // answer safe: a ghost is only ever ACTED ON while the current run is
@@ -321,33 +315,10 @@ export function useTerminalOwnership(
   // waits for this before it summons a keyboard.
   const [handshakeSeen, setHandshakeSeen] = useState(false)
 
-  // SITE 6, REVERSED. Losing the events socket used to WIPE the device name
-  // while `ownerPresent` stayed true, so a flapping spine downgraded a perfectly
-  // good "Open on Chrome on Linux" to "Active on another device" and back again.
-  // The wipe was defending against a name going stale with no correction coming;
-  // the correction now exists, so the name is KEPT and only ever REPLACED by a
-  // newer fact:
-  //
-  //   - a `pty.owner` handover (a definitive new owner and device), or
-  //   - a `connected` handshake's owner snapshot, or
-  //   - the check below, which compares the id the name was learned with against
-  //     the SPINE's `input_owner` once the events socket is back and the spine
-  //     has been refetched. A mismatch (or the spine saying nobody drives) means
-  //     the name describes a device that is no longer driving, and it goes.
-  //
-  // The spine carries `input_owner` for companion terminals as well as agent
-  // tabs, so a terminal's card gets the same correction an agent's does.
-  //
-  // AND THE SAME READ CORRECTS THE VERDICT, not merely the name. That half was
-  // missing and it left a real hole. `seedVerdictFromConnected` returns true the
-  // instant a self-succession arms, which used to be right by construction
-  // because a flagged claim was granted unconditionally; the server now REFUSES
-  // it, silently, when the ghost no longer holds the pty. The pane was then a
-  // phantom owner: typing surfaces up, no card, every keystroke dying at the
-  // server write gate, and no broadcast coming to say so, because a refusal
-  // changes nothing and emits nothing.
-  //
-  // THE RULE, and each clause is load-bearing:
+  // Device names survive events reconnects and are replaced only by a handover,
+  // handshake, or a refetched spine owner. The same spine read corrects the
+  // ownership verdict when a conditional self-succession was refused silently.
+  // The demotion rule is:
   //
   //   - The spine must NAME somebody. `undefined` is the server declining to
   //     answer and `null` is nobody driving; neither is evidence against us.
@@ -383,28 +354,9 @@ export function useTerminalOwnership(
     setOwnerPresent(true)
   }, [conn, spineInputOwner, connId, ownership])
 
-  // SITE 2. The server broadcasts a `pty.owner` carrying the claimer's
-  // connection id; the store fans it out by pty id plus that owner id. For OUR
-  // pty the owner id is compared against this socket's own connection id: an
-  // equal id confirms our own claim (stay the owner), a different id means
-  // another device took over (demote to the placeholder). Keyed by `id` so a
-  // focus switch re-subscribes for the new target.
-  // SITE 5 lives here too: an event with NO owner is the server saying the
-  // driver disconnected and nobody holds the pty. Every client reads that as
-  // "not me" (a missing id is "not us" by rule), so the fan-out below demotes
-  // everyone, and that is ALL it does. LOSING OWNERSHIP IS STICKY: the
-  // broadcast re-titles the card to "Running in the background" and claims
-  // nothing,
-  // whatever this pane's visibility is.
-  //
-  // There used to be a passive claim here, taken by any mounted foregrounded
-  // viewer. It was the thing that beat a blipped owner back to its own pty: the
-  // server's liveness reap is send-failure based and lands tens of seconds
-  // after the drop, by which time the real owner has reconnected, so an idle
-  // desktop sitting on an open card won a race the returning driver did not
-  // know it was in. The four legitimate re-claim gestures all funnel through a
-  // fresh handshake or the card's own button instead, and the blipped owner's
-  // half of that is the self-succession rule in `seedFromConnected`.
+  // A `pty.owner` event confirms this connection, demotes it for another owner,
+  // or marks the PTY unowned. Demotion is sticky until a fresh handshake or an
+  // explicit take-over; visibility alone never claims ownership.
   useEffect(() => {
     return onPtyOwner((ptyId, ownerId, device) => {
       if (ptyId !== id) return
@@ -420,16 +372,8 @@ export function useTerminalOwnership(
       // this, the highest-traffic transition, by construction.
       ownership.write(mine)
       if (!mine) {
-        // ANY event that does not name us retires an armed take-over WITHOUT
-        // sending it: re-arming is the user's decision, not a retry loop's.
-        //
-        // The FREED exemption that used to live here is gone. It parked the
-        // intent through the old owner's disconnect so a mid-bounce take-over
-        // could still claim flagged, but the bounce's own handshake finds the
-        // pty UNOWNED and seeds a plain claim that reaches exactly the same
-        // outcome. Keeping the flag alive past its socket was the cost, and
-        // the flag outliving its socket is the whole class of bug this rule
-        // exists to close.
+        // An event that does not name this connection retires the armed intent;
+        // the bounce handshake handles an unowned PTY without carrying it forward.
         takeoverIntent.clear()
       }
       // Remember which device took over (for the placeholder's copy) while
@@ -463,14 +407,8 @@ export function useTerminalOwnership(
     return () => noteAgentPtyOwnership(id, "unknown")
   }, [kind, id, isOwner, connectionLost])
 
-  // SITE 4. The `connected` handshake, delivered by the lifecycle. The server
-  // says who is driving; that answer replaces the foreground guess (except while
-  // a take-over is armed, which `seedVerdictFromConnected` handles). This is
-  // where a phone opening a desktop-driven agent learns it is a watcher, and it
-  // is the reason a silently-refused claim can no longer wedge a pane as a
-  // phantom owner.
-  //
-  // The handshake can also be STALE: it rides the PTY socket while `pty.owner`
+  // The connected handshake replaces the foreground guess unless a take-over is
+  // armed. It can be stale: it rides the PTY socket while `pty.owner`
   // rides the events socket, and nothing orders the two connections. When a
   // `pty.owner` with a strictly newer epoch has already been applied for this
   // pty, the seed keeps the verdict that event wrote (rule 2 in the pure
@@ -593,25 +531,8 @@ export function useTerminalOwnership(
     if (state === "connecting" || state === "open") setConnectionLost(false)
   }
 
-  // SITE 3. TAKE-OVER IS A FRESH ATTACH: arm the intent, flip the verdict, bounce
-  // the socket.
-  //
-  // Nothing is written down the live socket any more, and that is the fix rather
-  // than a simplification. A claim over the live socket left this client's buffer
-  // exactly as it was, and a viewer's buffer is precisely the thing that is
-  // polluted: while the owner drives a wider grid, every cursor-positioned
-  // repaint overflows this narrower viewport and scrolls mangled wrapped rows
-  // into the LOCAL scrollback. Resizing the PTY makes the child repaint cleanly
-  // and clears nothing already recorded, so scrolling up after a take-over read
-  // back garbage. Reconnecting instead routes through the machinery that already
-  // exists for every reconnect: reset, server repaint (which clears the client's
-  // scrollback), mode restore. Taking over IS a fresh attach, so it cannot
-  // inherit viewer-era history.
-  //
-  // The claim itself rides the first resize frame of the NEW connection, flagged
-  // by the armed intent; ownership therefore lags the press by one reconnect and
-  // one replay parse. The stated cost: every take-over is now a
-  // reset + replay + SIGWINCH rather than a single Text frame.
+  // Take-over is a fresh attach: bouncing the socket resets viewer-era buffer
+  // state, and the armed intent rides the new connection's first resize frame.
   function takeOver() {
     // Idempotent while the bounce is in flight. A second press must not close
     // a socket that is still opening: the intent is already armed and the frame
@@ -634,15 +555,11 @@ export function useTerminalOwnership(
       setReconnecting(true)
       // One call, whatever state the socket is in: `connect()` detaches and
       // closes a live socket before reopening, and refills the retry budget of
-      // one that gave up. The old dead-socket special case collapses into this.
+      // one that gave up; dead sockets follow the same path.
       pty.connect()
     }
-    // Deliberately NO refocus here. It used to call `focusTypingSurface()` at
-    // once, which on a phone raises the soft keyboard over a pane that is a whole
-    // reconnect and one replay parse away from having anything to type into. The
-    // pane's own focus effect does it instead, when both facts are in: the
-    // handshake has confirmed ownership and the replay for this attach epoch is
-    // on screen.
+    // Refocus waits for confirmed ownership and the current attach replay, so a
+    // phone does not raise its keyboard over a still-reconnecting pane.
   }
 
   return {

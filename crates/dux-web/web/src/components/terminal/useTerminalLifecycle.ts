@@ -355,18 +355,12 @@ export function useTerminalLifecycle(
       firstFrameLanded: resize.firstFrameLanded,
     })
     pty.onBytes((bytes) => attach.onBytes(bytes))
-    // A run this tab can no longer vouch for retires the replay dedupe's
-    // high-water mark: the server's generation counter restarts with the
-    // process, so a surviving mark would drop the new run's replay whole and
-    // uncover the previous run's screen. See `lib/serverRun.ts`.
+    // An unconfirmed run retires the replay high-water mark because replay
+    // generation counters restart with the server process.
     const unsubscribeRunProbe = onServerRunUnconfirmed(() => {
       attach.forgetAppliedGeneration()
     })
-    // THE COVER CLEARS HERE, and nowhere else. Not at WebSocket open, which is
-    // the hole this closes: the pane used to drop its reconnect cover the moment
-    // the socket opened, while the screen only exists once the server's replay
-    // frame has been PARSED, so a socket that opened and stayed healthy without
-    // ever sending a replay left the pane drawing nothing at all.
+    // Clear the cover only after replay is parsed and applied, not at socket open.
     attach.onReplayApplied((epoch) => noteReplayApplied(epoch))
     // THE ONE PERIODIC CLIENT FRAME (see `lib/heartbeat.ts`): the viewed
     // semantics and an application-level beat, folded into one message on one
@@ -444,15 +438,8 @@ export function useTerminalLifecycle(
     // streaming in, and resizing mid-replay corrupts the scroll position. The
     // empty-write callback fires only once the queued writes have drained, so we
     // fit + resize against a settled buffer.
-    // Track the hidden -> visible transition the attention grace is measured
-    // from (see `viewedPing.ts`). This listener is now ONLY that: the grace
-    // timer that used to fire an extra ping at the boundary is gone (the beat
-    // runs every 2s while this device is owner-and-visible, and the heartbeat
-    // RETIMES itself on the boundary through its own visibility listener rather
-    // than waiting out a gap armed under the slow cadence, so the flag drops
-    // within one fast cadence of the boundary without a second timer), and the
-    // resize half of a return moved to `pty.onOpen`, where the socket is known
-    // to be alive.
+    // Track the hidden-to-visible transition used by the attention grace. The
+    // heartbeat owns retiming, and `pty.onOpen` owns the return resize.
     const noteVisibility = () => {
       const nowVisible = document.visibilityState === "visible"
       const returning = nowVisible && !prevVisibleRef.current

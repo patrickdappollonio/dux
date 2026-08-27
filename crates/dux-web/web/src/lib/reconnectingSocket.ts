@@ -11,14 +11,6 @@ import type { ConnState } from "./types"
 // (`[server] reconnect_backoff_cap_seconds`) and then staying there, forever,
 // while the page is visible. There is no attempt budget and no give-up state.
 //
-// The budget this replaces looked prudent and was not. It was never actually
-// spent: every successful open refilled it, so a flapping mobile connection
-// cycled open-and-closed indefinitely without ever reaching the give-up state
-// (measured: 21 consecutive cycles, no `failed`). What it did do was promise a
-// Reconnect affordance for the one case it could not detect, a socket that opens
-// and stays healthy while nothing useful crosses it. That case is now covered
-// where it belongs, by the pane's replay wait (`lib/attachCover.ts`).
-//
 // `failed` is therefore reserved for a TERMINAL close code, decided by
 // `shouldReconnect`: a provider that will not launch, a deleted tab's route that
 // will 404 forever. Those are facts about the far end, not about the network.
@@ -162,17 +154,8 @@ export abstract class ReconnectingSocket {
     this.reconnectDelay = RECONNECT_MIN_MS
     this.clearRetryTimer()
     this.attachWakeSignals()
-    // THE GATE BINDS HERE TOO, and for a while it did not. `connect()` is the
-    // mount attach, the take-over bounce, the heal bounce and the Reconnect
-    // button, so a gate that only guarded automatic retries was not guarding the
-    // gestures that matter: tapping an agent while the run-identity probe was
-    // still in flight against a RESTARTED server attached and force-launched its
-    // provider on the new run, which is the exact thing the gate exists to stop.
-    //
-    // Held rather than refused. The backoff reset above still stands (this is a
-    // deliberate re-entry, and it deserves a fresh schedule), and the timer
-    // re-arms itself while the gate stays shut, so the attach happens on its own
-    // the moment the check resolves. Nothing is lost, only deferred.
+    // Explicit connects obey the same identity gate as automatic retries. A
+    // closed gate defers the attach and polls without growing the fresh backoff.
     if (!this.policy.canRetry()) {
       this.armRetryTimer({ grow: false })
       return
@@ -194,18 +177,8 @@ export abstract class ReconnectingSocket {
     // is exactly the harm this method exists to avoid.
     if (this.ws !== null) return
     this.attachWakeSignals()
-    // A PARKING SOCKET NEVER OPENS HIDDEN, whichever signal asked. Chromium
-    // fires `resume` while `document.visibilityState` is still "hidden", and
-    // `pageshow` and `focus` can both land ahead of the page actually being on
-    // screen. An open that lands hidden is an attach nothing can finish: the
-    // pane deliberately asserts no size while hidden, because a resize frame is
-    // a claim, so the socket attaches as a watcher of a pty nobody owns and no
-    // later signal re-asks the question. The pane keeps its terminal and loses
-    // its keyboard, silently and for good.
-    //
-    // Deferring costs nothing and needs no bookkeeping: this is the same rule
-    // the parked retry path has always followed, and the visibility wake that
-    // ends the hidden period calls straight back in here.
+    // Resume signals can precede visibility. A parking socket waits until the
+    // page is visible so its first resize can establish PTY ownership.
     if (this.parked()) return
     this.closedByUser = false
     if (!this.policy.canRetry()) {
@@ -213,14 +186,8 @@ export abstract class ReconnectingSocket {
       // opening: a return signal is not permission to attach to a server whose
       // identity has not been confirmed.
       //
-      // AND IT COSTS NOTHING. A wake against a shut gate used to clear the armed
-      // timer and arm a new one, spending a doubling every time; a phone coming
-      // back fires three or four of these signals in the same tick, and
-      // `clearServerValidated` shuts the gate on exactly the drop that return
-      // follows, so the four idempotent signals the module doc promises turned a
-      // 500ms reattach into eight seconds (measured: ten signals reached the
-      // 10s cap). An already-armed timer is left exactly as it is, and a fresh
-      // one is armed at the current delay without growing it.
+      // Repeated wake signals leave an armed timer unchanged and never grow the
+      // delay while the gate remains shut.
       if (this.reconnectTimer === null) this.armRetryTimer({ grow: false })
       return
     }
@@ -239,12 +206,8 @@ export abstract class ReconnectingSocket {
   // consumers that react to a drop see the same event they see for a drop the
   // network caused.
   //
-  // ONLY AGAINST AN OPEN SOCKET. "This connection has gone quiet" is a statement
-  // about a connection that exists; against an attempt that is still CONNECTING
-  // it is an abort, and it restarts the reconnect this method's own retry path
-  // had already begun. The heartbeat no longer times a socket that is refusing
-  // frames, so this is the second half of one guard rather than a substitute for
-  // it.
+  // Only an open socket can be declared quiet; closing a connecting attempt
+  // would restart a retry already in progress.
   dropForRetry(): void {
     const ws = this.ws
     if (ws === null) return

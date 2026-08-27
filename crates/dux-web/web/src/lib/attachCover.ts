@@ -1,21 +1,5 @@
-// WHAT COVERS THE TERMINAL, decided once, in one pure function.
-//
-// The bug this replaces was a hole between two conditions rather than a wrong
-// condition. The pane cleared its reconnect cue at WebSocket OPEN, but the
-// picture only exists once the server's replay frame has been PARSED, and
-// between those two moments it drew nothing at all: no card, no spinner, no
-// Reconnect box, no compose bar. Measured in the preview container, the blank
-// ran from 113ms to the end of a 40 second run whenever the socket opened and
-// stayed healthy but the binary replay never landed.
-//
-// So the cover clears on the APPLIED replay and never on the socket opening,
-// and the exhaustiveness test beside this file pins the property that makes the
-// blank unreachable: this function never answers `none` while the replay for the
-// current attach epoch is unapplied.
-//
-// A wait with no answer is bounded rather than blank. Past `replay_wait_seconds`
-// of VISIBLE time (see `visibleClock.ts` for why visible and not wall) the
-// spinner becomes a Reconnect box that says what is missing.
+// The cover remains until the current attach replay is applied. A visible-time
+// replay timeout becomes an explicit reconnect affordance rather than a blank pane.
 import type { ConnState } from "./types"
 
 /// Everything the decision reads. Each is a fact somebody else owns: the socket

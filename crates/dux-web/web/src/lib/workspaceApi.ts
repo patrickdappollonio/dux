@@ -5,10 +5,8 @@
 // `projects.changed` / `sessions.changed` events over `/ws/events` tell the
 // client WHEN to re-GET.
 //
-// These three fields used to ride the broadcast `ViewModel`; they are volatile
-// workspace state but are now read on demand over REST rather than re-broadcast
-// to every client on every change. The server is authoritative: it projects the
-// live projects/sessions plus the core sidebar model into this single document.
+// The authoritative document projects live projects, sessions, terminals, and
+// the core sidebar model into one on-demand REST response.
 // A non-2xx is thrown as a `WorkspaceFetchError` carrying the HTTP status so the
 // caller can branch.
 //
@@ -27,8 +25,7 @@ import type {
   TerminalView,
 } from "./types"
 
-// The spine document. Field names/types mirror the server's JSON and the values
-// the legacy ViewModel carried, so consumers move over without a shape change.
+// The spine document mirrors the server's JSON.
 export interface Spine {
   /** The server's monotonic revision of this document, minted where the server
    * rebuilds its cached serialization. It is embedded in the document itself,
@@ -45,8 +42,7 @@ export interface Spine {
   sessions: SessionView[]
   /** EVERY companion terminal, of every owner, as one flat collection ordered by
    * the manual `sort_order`. Each entry carries its own tagged `owner`, so the
-   * client no longer rebuilds this list by walking two nested collections and
-   * inferring ownership from which one it was in. An older server that predates
+   * client does not infer ownership by walking nested collections. An older server that predates
    * the flat shape nests its terminals instead; `fetchWorkspace` flattens those and
    * tags each with the owner it was nested under (see `ingestTerminals`). */
   terminals: TerminalView[]
@@ -281,11 +277,6 @@ type LegacyTerminal = Omit<RawTerminal, "owner">
 // The flat field wins whenever it is present, even when empty: a new server with
 // no terminals sends `[]` and means it.
 //
-// The OTHER direction cannot be repaired from here: a client old enough to want
-// nested arrays, talking to a server that no longer sends them, sees no
-// terminals, and dux has no mechanism that would make such a tab reload. The
-// only reload path in the client is reactive, `ChunkBoundary` catching a failed
-// lazy-chunk import after the assets it wants have gone.
 function ingestTerminals(raw: {
   terminals?: RawTerminal[]
   sessions: ReadonlyArray<{ id: string; terminals?: LegacyTerminal[] }>

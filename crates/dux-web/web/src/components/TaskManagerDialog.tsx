@@ -552,10 +552,7 @@ function DesktopRow({
               <td className="py-0.5 pr-2 text-right tabular-nums">
                 {child.pid}
               </td>
-              {/* A child process has no process count of its own (it IS one
-                  process): render this cell empty rather than inventing a "1",
-                  and never put the pid here, which is the bug being fixed
-                  (a child's pid was previously rendered under Procs). */}
+              {/* A child is one process, so its Procs cell is intentionally empty. */}
               <td className="py-0.5 pr-2 text-right tabular-nums" />
               <td className="py-0.5 pr-2 text-right tabular-nums">
                 {formatCpu(child.cpu_percent)}
@@ -646,10 +643,7 @@ function MobileRow({
                   </span>
                 ) : null}
               </span>
-              {/* The phone layout is cards, not a table: there is no PID
-                  column to put this in, so it is labelled inline rather than
-                  presented as a bare number that could be misread as a
-                  process count (the bug being fixed on desktop). */}
+              {/* Cards label the PID inline because they have no PID column. */}
               <span className="shrink-0 tabular-nums">
                 pid {child.pid} · {formatCpu(child.cpu_percent)} ·{" "}
                 {formatBytes(child.rss_bytes)}

@@ -600,15 +600,8 @@ impl Engine {
                 success_message,
             } => match crate::git::commit(&worktree_path, &message) {
                 Ok(_) => Ok(EventReaction::Status(StatusUpdate::info(success_message))),
-                // Deliberately NOT sticky, and the reasoning is worth keeping
-                // because the first pass got it wrong twice. `git commit` does
-                // not partially apply, so a failure leaves the index exactly as
-                // it was; and the web dialog keeps the typed message on failure
-                // (it only closes on success), so nothing is lost either. The
-                // usual causes are a rejected pre-commit hook or nothing staged,
-                // where the recovery is pressing the button again, inside the UI.
-                // It is also a FREQUENT failure, and marking frequent failures
-                // sticky is how the budget gets spent on the wrong ones.
+                // Commit failures leave the index and typed message intact, so
+                // recovery stays inside the UI and does not require a sticky status.
                 Err(e) => Ok(EventReaction::Status(StatusUpdate::error(format!(
                     "Commit failed: {e}"
                 )))),

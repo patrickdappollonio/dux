@@ -611,11 +611,8 @@ pub enum LaunchOutcome {
     Missing,
 }
 
-/// Map a [`LaunchOutcome`] to its final user message. The single source shared
-/// by the web reconnect/force-restart op resolver and the anonymous fallback
-/// path (`drive_web_launch_followup`), AND by the TUI's reconnect ops, so the
-/// wording is authored exactly once. (Previously the TUI carried a byte-identical
-/// `reconnect_final` copy.)
+/// Map a [`LaunchOutcome`] to the final wording shared by web and TUI reconnect
+/// operations.
 pub fn launch_outcome_final(o: &LaunchOutcome) -> Final {
     match o {
         LaunchOutcome::Ready { status_message } => Final::info(status_message.clone()),
@@ -4601,13 +4598,8 @@ impl Engine {
 }
 
 /// The outcome of [`Engine::reconnect_plan`]: everything a surface needs to
-/// relaunch (or refuse to relaunch) an agent, with the resume decision and the
-/// status message computed ONCE in core. Both the TUI's
-/// `reconnect_selected_session`/`force_reconnect_agent` and the web wire
-/// `reconnect_session` build from this so neither recomputes the resume
-/// decision (which used to diverge: the TUI announced resume via the
-/// collision-blind `should_resume_session` while the dispatch re-gated via
-/// `tab_resume_decision`).
+/// relaunch (or refuse to relaunch) an agent. Core computes the resume decision
+/// and status once for both the TUI and web surfaces.
 ///
 /// A `Launch` plan has already applied the pre-dispatch mutations (force teardown
 /// and any conflicting-worktree detach); the caller only dispatches `request`.

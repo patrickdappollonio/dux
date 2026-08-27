@@ -16,31 +16,8 @@ const DUX_ART = `       ░██
 ░██   ░███ ░██   ░███  ░██  ░██
  ░█████░██  ░█████░██ ░██    ░██ `
 
-// The app-wide "the events socket is down" modal. It mirrors the installed-PWA
-// offline page (`public/offline.html`) but lives inside the running SPA: when the
-// connection drops mid-session there is no navigation for the service worker to
-// intercept, so this React surface stands in for it.
-//
-// Driven by the sticky `offline` flag (see `store.ts`), NOT the raw `conn`, so a
-// reconnect attempt re-entering `connecting` between drops does not flicker it
-// off.
-//
-// THERE IS NO GIVE-UP COPY ANY MORE. This used to switch to "dux is unreachable"
-// once the retry budget was spent, and the budget is gone: reconnecting is
-// indefinite while the page is visible, and parked (not abandoned) while it is
-// hidden. Saying the server is unreachable while the app is in fact still trying
-// every few seconds was telling the user to act on a state they were not in. The
-// copy says what is true instead, and names the two things that are usually
-// wrong, so a user who can act still knows what to check.
-//
-// The Retry button stays, and it is now a BACKOFF RESET rather than a rescue:
-// `reconnect()` stops waiting out the current gap and attempts immediately.
-//
-// Rendered through a body portal at a high z-index so it sits above every pane,
-// dialog, and toast. Its `backdrop-grayscale` desaturates the whole app behind
-// it — the running UI stays visible but drains to black-and-white, leaving the
-// full-color modal as the only live thing on screen. `bg-background/40` adds a
-// light dim without hiding the grayscaled app the user asked to keep in view.
+// The sticky offline state avoids flicker between retries. Reconnection is
+// indefinite while visible and parked while hidden; Retry resets the backoff.
 export function OfflineOverlay() {
   const { offline } = useDux()
   if (!offline) return null
