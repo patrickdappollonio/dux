@@ -10540,7 +10540,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::components::{ButtonPressedTarget, PressedButton};
-    use super::{DOUBLE_CLICK_THRESHOLD, MOUSE_WHEEL_LINES};
+    use super::{DOUBLE_CLICK_THRESHOLD, MOUSE_WHEEL_LINES, MouseTarget, PromptMouseTarget};
     use super::{
         LinkPressDecision, TerminalPressAction, decide_terminal_press, link_release_opens,
     };
@@ -10731,6 +10731,130 @@ mod tests {
             commit_area: Some(Rect::new(77, 14, 23, 6)),
             commit_text_area: Some(Rect::new(78, 15, 21, 4)),
         };
+    }
+
+    #[test]
+    fn prompt_hit_testing_preserves_overlapping_control_precedence() {
+        let mut app = test_app(default_bindings());
+        let hit = Rect::new(10, 10, 5, 3);
+        let checkbox = OverlayCheckbox {
+            id: OverlayCheckboxId::DeleteAgentWorktree,
+            rect: hit,
+        };
+
+        app.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
+            cancel_button: hit,
+            delete_button: hit,
+            checkbox: Some(checkbox),
+        };
+        assert_eq!(
+            app.prompt_mouse_target(11, 11),
+            Some(PromptMouseTarget::Checkbox(
+                OverlayCheckboxId::DeleteAgentWorktree
+            ))
+        );
+
+        app.overlay_layout.active = OverlayMouseLayout::ConfirmNonDefaultBranch {
+            cancel_button: hit,
+            add_button: hit,
+            checkbox: Some(OverlayCheckbox {
+                id: OverlayCheckboxId::NonDefaultBranchCheckoutDefault,
+                rect: hit,
+            }),
+        };
+        assert_eq!(
+            app.prompt_mouse_target(11, 11),
+            Some(PromptMouseTarget::ConfirmNonDefaultBranchCancel)
+        );
+
+        app.overlay_layout.active = OverlayMouseLayout::EditMacros {
+            name_input: hit,
+            text_input: hit,
+            surface_options: [hit; 3],
+            cancel_button: hit,
+            save_button: hit,
+        };
+        assert_eq!(
+            app.prompt_mouse_target(11, 11),
+            Some(PromptMouseTarget::MacroNameInput)
+        );
+    }
+
+    #[test]
+    fn main_mouse_target_preserves_surface_precedence_and_fullscreen_isolation() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+
+        app.mouse_layout.terminal_list = app.mouse_layout.left_list;
+        assert_eq!(app.mouse_target(2, 1), Some(MouseTarget::LeftRow(0)));
+
+        let overlap = Rect::new(40, 4, 8, 4);
+        app.mouse_layout.left_list = Rect::default();
+        app.mouse_layout.left = Rect::default();
+        app.mouse_layout.unstaged_list = Some(overlap);
+        app.mouse_layout.staged_list = Some(overlap);
+        app.mouse_layout.commit_area = Some(overlap);
+        app.mouse_layout.commit_text_area = Some(overlap);
+        app.mouse_layout.right = overlap;
+        app.mouse_layout.center = overlap;
+        app.engine.unstaged_files.push(ChangedFile {
+            path: "unstaged.txt".into(),
+            status: "M".into(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        });
+        app.engine.staged_files.push(ChangedFile {
+            path: "staged.txt".into(),
+            status: "M".into(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        });
+        assert_eq!(
+            app.mouse_target(overlap.x, overlap.y),
+            Some(MouseTarget::UnstagedFile(Some(0)))
+        );
+        app.mouse_layout.unstaged_list = None;
+        assert_eq!(
+            app.mouse_target(overlap.x, overlap.y),
+            Some(MouseTarget::StagedFile(Some(0)))
+        );
+        app.mouse_layout.staged_list = None;
+        assert_eq!(
+            app.mouse_target(overlap.x, overlap.y),
+            Some(MouseTarget::CommitText)
+        );
+        app.mouse_layout.commit_text_area = None;
+        assert_eq!(
+            app.mouse_target(overlap.x, overlap.y),
+            Some(MouseTarget::CommitChrome)
+        );
+        app.mouse_layout.commit_area = None;
+        assert_eq!(
+            app.mouse_target(overlap.x, overlap.y),
+            Some(MouseTarget::FilesPane)
+        );
+
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.mouse_layout.agent_term = Some(Rect::new(60, 5, 5, 5));
+        assert_eq!(app.mouse_target(61, 6), Some(MouseTarget::Center));
+        assert_eq!(app.mouse_target(overlap.x, overlap.y), None);
+    }
+
+    #[test]
+    fn out_of_range_macro_surface_click_moves_focus_without_changing_value() {
+        let mut app = app_with_two_macros();
+        open_macro_editor(&mut app);
+        let before = macro_edit(&app).surface;
+
+        assert!(!app.dispatch_prompt_target_action(
+            PromptMouseTarget::MacroSurfaceOption(usize::MAX),
+            mouse(MouseEventKind::Down(MouseButton::Left), 0, 0),
+        ));
+
+        assert_eq!(macro_focus(&app), MacroEditFocus::Surface);
+        assert_eq!(macro_edit(&app).surface, before);
     }
 
     fn install_command_overlay(app: &mut App, items: usize) {
