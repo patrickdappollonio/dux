@@ -1,6 +1,6 @@
 use super::components::{
-    Button, ButtonKind, ButtonPressedTarget, Checkbox, CheckboxState, Hint, button_state_for,
-    button_width_for, modal_hint_line, render_scroll_marker, shared_button_width,
+    Button, ButtonKind, ButtonPressedTarget, Checkbox, CheckboxState, Hint, Modal,
+    button_state_for, button_width_for, modal_hint_line, render_scroll_marker, shared_button_width,
     wrap_styled_lines,
 };
 use super::*;
@@ -4611,20 +4611,6 @@ impl App {
     fn render_help(&mut self, frame: &mut Frame) {
         self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
-        let isolation = Rect::new(
-            area.x.saturating_sub(1),
-            area.y.saturating_sub(1),
-            area.width.saturating_add(2),
-            area.height.saturating_add(2),
-        )
-        .intersection(self.dim_overlay_area(frame.area()));
-        Clear.render(isolation, frame.buffer_mut());
-        frame.buffer_mut().set_style(
-            isolation,
-            Style::default()
-                .fg(self.theme.overlay_dim_fg)
-                .bg(self.theme.overlay_dim_bg),
-        );
         self.clear_overlay_area(frame, area);
 
         let outer_block = self.themed_overlay_block("Help");
@@ -10121,15 +10107,7 @@ impl App {
     fn render_fullscreen_agent(&mut self, frame: &mut Frame) {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
-        Clear.render(area, frame.buffer_mut());
-        // Clear leaves cells at Color::Reset (terminal default). Repaint
-        // with app_bg so the fullscreen agent surface — borders, the
-        // loading card area, the gap above the hint bar — tracks the
-        // active theme instead of falling through to the user's terminal
-        // default.
-        frame
-            .buffer_mut()
-            .set_style(area, Style::default().bg(self.theme.app_bg));
+        self.paint_modal_surface(frame, area, self.theme.app_bg);
         let title = match self.selected_session() {
             Some(session) => {
                 // Reflect the focused tab's provider in the fullscreen title.
@@ -10158,12 +10136,7 @@ impl App {
     fn render_fullscreen_terminal(&mut self, frame: &mut Frame) {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
-        Clear.render(area, frame.buffer_mut());
-        // Same reasoning as render_fullscreen_agent — fill with app_bg so
-        // the fullscreen terminal surface follows the active theme.
-        frame
-            .buffer_mut()
-            .set_style(area, Style::default().bg(self.theme.app_bg));
+        self.paint_modal_surface(frame, area, self.theme.app_bg);
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Terminal;
         self.render_agent_terminal(frame, area, " Terminal ", true);
@@ -10173,10 +10146,7 @@ impl App {
     fn render_fullscreen_startup_log(&mut self, frame: &mut Frame) {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
-        Clear.render(area, frame.buffer_mut());
-        frame
-            .buffer_mut()
-            .set_style(area, Style::default().bg(self.theme.app_bg));
+        self.paint_modal_surface(frame, area, self.theme.app_bg);
 
         let title = self
             .startup_log_viewer
@@ -10531,7 +10501,19 @@ impl App {
     /// modal of its own.
     pub(super) fn clear_overlay_area(&self, frame: &mut Frame, area: Rect) {
         self.overlay_layout.frame.set(Some(area));
-        self.clear_overlay_bar_area(frame, area);
+        self.paint_modal_surface(frame, area, self.theme.overlay_bg);
+    }
+
+    fn paint_modal_surface(&self, frame: &mut Frame, area: Rect, surface_bg: Color) {
+        let surface_style = Style::default().bg(surface_bg);
+        let isolation_style = Style::default()
+            .fg(self.theme.overlay_dim_fg)
+            .bg(self.theme.overlay_dim_bg);
+        Modal::new(surface_style, isolation_style).render(
+            area,
+            self.dim_overlay_area(frame.area()),
+            frame.buffer_mut(),
+        );
     }
 
     /// Paint `area` as a modal surface WITHOUT claiming it as the topmost
@@ -17316,12 +17298,12 @@ mod tests {
             }
         }
         if area.x > frame.x {
-            for y in area.y..area.bottom() {
+            for y in area.y.max(frame.y)..area.bottom().min(frame.bottom()) {
                 ring.push((area.x - 1, y));
             }
         }
         if area.right() < frame.right() {
-            for y in area.y..area.bottom() {
+            for y in area.y.max(frame.y)..area.bottom().min(frame.bottom()) {
                 ring.push((area.right(), y));
             }
         }
@@ -17619,7 +17601,7 @@ mod tests {
         let frame = Rect::new(0, 0, 100, 30);
         let (app, buf) = palette_frame((frame.width, frame.height), "", 0);
         let area = app.overlay_layout.frame.get().expect("palette area");
-        let ring = isolation_ring(area, frame);
+        let ring = isolation_ring(area, app.dim_overlay_area(frame));
 
         assert!(
             ring.iter().all(|&position| buf[position].symbol() == " "),
@@ -17647,11 +17629,16 @@ mod tests {
             .draw(|frame| app.render(frame))
             .expect("render frame");
         let buf = terminal.backend().buffer();
-        let ring = isolation_ring(area, frame);
+        let ring = isolation_ring(area, app.dim_overlay_area(frame));
 
+        let occupied: Vec<_> = ring
+            .iter()
+            .copied()
+            .filter(|&position| buf[position].symbol() != " ")
+            .collect();
         assert!(
-            ring.iter().all(|&position| buf[position].symbol() == " "),
-            "the fullscreen agent is not isolated from workspace chrome"
+            occupied.is_empty(),
+            "the fullscreen agent gap is occupied at {occupied:?}"
         );
         assert!(
             ring.iter()
