@@ -2255,6 +2255,23 @@ mod tests {
         }
     }
 
+    fn wait_until_terminal_ready(engine: &crate::engine::Engine, id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !engine
+            .companion_terminals
+            .get(id)
+            .expect("terminal present")
+            .client
+            .has_output()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "terminal sigterm-ignorer never signalled ready"
+            );
+            sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn shutdown_ptys_reports_clean_exit() {
         let (mut engine, _tmp) = test_engine();
@@ -2572,6 +2589,157 @@ mod tests {
             );
             sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn shutdown_ptys_zero_grace_tallies_agent_and_terminal_as_forced() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        engine
+            .providers
+            .insert("s1".to_string(), spawn_sigterm_ignorer(worktree.path()));
+        wait_until_ready(&engine, "s1");
+        engine.config.terminal.command = "sh".to_string();
+        engine.config.terminal.args = vec![
+            "-c".to_string(),
+            "trap '' TERM HUP; echo ready; while true; do :; done".to_string(),
+        ];
+        let (terminal_id, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("create companion terminal");
+        wait_until_terminal_ready(&engine, &terminal_id);
+
+        let report = engine.shutdown_ptys(Duration::ZERO);
+
+        assert_eq!(report.agents_total, 1);
+        assert_eq!(report.terminals_total, 1);
+        assert_eq!(report.agents_exited, 0);
+        assert_eq!(report.terminals_exited, 0);
+        assert!(report.timed_out);
+        assert!(report.elapsed < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn shutdown_ptys_pre_set_abort_skips_wait_and_force_kills() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.providers.insert(
+            "straggler".to_string(),
+            spawn_sigterm_ignorer(worktree.path()),
+        );
+        wait_until_ready(&engine, "straggler");
+        let abort = std::sync::atomic::AtomicBool::new(true);
+
+        let report = engine.shutdown_ptys_interruptible(Duration::from_secs(30), Some(&abort));
+
+        assert_eq!(report.agents_total, 1);
+        assert_eq!(report.agents_exited, 0);
+        assert!(report.timed_out);
+        assert!(report.elapsed < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn shutdown_ptys_tallies_clean_and_forced_agents_and_terminals() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        engine
+            .providers
+            .insert("clean-agent".to_string(), spawn_cat(worktree.path()));
+        engine.providers.insert(
+            "forced-agent".to_string(),
+            spawn_sigterm_ignorer(worktree.path()),
+        );
+        wait_until_ready(&engine, "forced-agent");
+
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args.clear();
+        engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("create clean terminal");
+        engine.config.terminal.command = "sh".to_string();
+        engine.config.terminal.args = vec![
+            "-c".to_string(),
+            "trap '' TERM HUP; echo ready; while true; do :; done".to_string(),
+        ];
+        let (forced_terminal_id, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("create forced terminal");
+        wait_until_terminal_ready(&engine, &forced_terminal_id);
+
+        let report = engine.shutdown_ptys(Duration::from_millis(300));
+
+        assert_eq!(report.agents_total, 2);
+        assert_eq!(report.terminals_total, 2);
+        assert_eq!(report.agents_exited, 1);
+        assert_eq!(report.terminals_exited, 1);
+        assert!(report.timed_out);
+        assert!(report.elapsed >= Duration::from_millis(300));
+    }
+
+    #[test]
+    fn shutdown_ptys_detaches_and_persists_session_owned_only_by_extra_tab() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        session.status = SessionStatus::Active;
+        session.desired_running = true;
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine
+            .agent_tabs
+            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+        engine
+            .providers
+            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+
+        let report = engine.shutdown_ptys(Duration::from_secs(2));
+
+        assert_eq!(report.agents_exited, 1);
+        let session = engine.sessions.iter().find(|item| item.id == "s1").unwrap();
+        assert_eq!(session.status, SessionStatus::Detached);
+        assert!(session.desired_running);
+        let stored = engine
+            .session_store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == "s1")
+            .expect("persisted session");
+        assert_eq!(stored.status, SessionStatus::Detached);
+        assert!(stored.desired_running);
     }
 
     #[test]
