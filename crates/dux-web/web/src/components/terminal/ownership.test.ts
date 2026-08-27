@@ -142,7 +142,7 @@ describe("a handover", () => {
   })
 })
 
-// SITE 4. The handshake is now what decides, and the foreground guess survives
+// The handshake decides ownership, and the foreground guess survives
 // only for an UNOWNED pty. Without this a phone opening a desktop-driven agent
 // would sit under typing surfaces whose every keystroke the server drops, with
 // no card, forever: a refused claim is silent by design.
@@ -351,7 +351,7 @@ describe("taking over", () => {
   })
 })
 
-// SITE 5. The driver's socket closed and the server broadcast an owner-cleared
+// The driver's socket closed and the server broadcast an owner-cleared
 // `pty.owner`. LOSING OWNERSHIP IS STICKY: the broadcast re-titles the card and
 // claims nothing, whatever this pane's visibility is. Sitting on an open card
 // must never win the pty back, because that passive path is exactly what let an

@@ -6107,8 +6107,8 @@ mod tests {
 
     #[test]
     fn do_delete_session_soft_returns_when_async_worker_in_flight() {
-        // Fix #9: the in-flight guard must hold in release builds. If an
-        // async delete worker is already running for this session, the
+        // The in-flight guard must hold in release builds. If an async delete
+        // worker is already running for this session, the
         // synchronous path must NOT proceed to `git::remove_worktree` or
         // touch in-memory state — otherwise the two paths would race on
         // the worktree.
@@ -6450,7 +6450,7 @@ mod tests {
     // status-message formatting is trivial and exercised end-to-end by the
     // App-level startup-command-log open flow.
 
-    // ── spawn_pr_check_for_session rate-limit (fix #1) ─────────────────────
+    // ── spawn_pr_check_for_session rate limit ───────────────────────────────
 
     #[test]
     fn spawn_pr_check_for_session_skips_when_recently_checked() {
