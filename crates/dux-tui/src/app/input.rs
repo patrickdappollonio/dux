@@ -6076,6 +6076,149 @@ impl App {
         (index < items).then_some(index)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn searchable_overlay_target(
+        input: Option<Rect>,
+        list: Rect,
+        items: usize,
+        offset: usize,
+        input_target: PromptMouseTarget,
+        item_target: fn(usize) -> PromptMouseTarget,
+        column: u16,
+        row: u16,
+    ) -> Option<PromptMouseTarget> {
+        if input.is_some_and(|rect| contains_point(rect, column, row)) {
+            Some(input_target)
+        } else {
+            Self::overlay_row_at(list, offset, items, column, row).map(item_target)
+        }
+    }
+
+    fn checkbox_before_buttons_target(
+        checkbox: Option<OverlayCheckbox>,
+        buttons: &[(Rect, PromptMouseTarget)],
+        column: u16,
+        row: u16,
+    ) -> Option<PromptMouseTarget> {
+        if let Some(checkbox) = checkbox
+            && contains_point(checkbox.rect, column, row)
+        {
+            return Some(PromptMouseTarget::Checkbox(checkbox.id));
+        }
+        click_target(buttons, column, row)
+    }
+
+    fn startup_command_logs_target(
+        input: Option<Rect>,
+        list: Rect,
+        items: usize,
+        offset: usize,
+        close_button: Rect,
+        column: u16,
+        row: u16,
+    ) -> Option<PromptMouseTarget> {
+        if input.is_some_and(|rect| contains_point(rect, column, row)) {
+            return Some(PromptMouseTarget::StartupCommandLogsInput);
+        }
+        if contains_point(close_button, column, row) {
+            return Some(PromptMouseTarget::StartupCommandLogsClose);
+        }
+        Self::overlay_row_at_sized(list, offset, items, STARTUP_LOG_ROW_HEIGHT, column, row)
+            .map(PromptMouseTarget::StartupCommandLogItem)
+    }
+
+    fn macro_editor_target(
+        name_input: Rect,
+        text_input: Rect,
+        surface_options: [Rect; 3],
+        cancel_button: Rect,
+        save_button: Rect,
+        column: u16,
+        row: u16,
+    ) -> Option<PromptMouseTarget> {
+        click_target(
+            &[
+                (name_input, PromptMouseTarget::MacroNameInput),
+                (text_input, PromptMouseTarget::MacroTextInput),
+                (cancel_button, PromptMouseTarget::MacroCancel),
+                (save_button, PromptMouseTarget::MacroSave),
+            ],
+            column,
+            row,
+        )
+        .or_else(|| {
+            surface_options
+                .iter()
+                .position(|rect| contains_point(*rect, column, row))
+                .map(PromptMouseTarget::MacroSurfaceOption)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn kill_running_target(
+        input: Option<Rect>,
+        list: Rect,
+        items: usize,
+        offset: usize,
+        cancel_button: Rect,
+        hovered_button: Rect,
+        selected_button: Rect,
+        visible_button: Rect,
+        column: u16,
+        row: u16,
+    ) -> Option<PromptMouseTarget> {
+        if let Some(target) = Self::searchable_overlay_target(
+            input,
+            list,
+            items,
+            offset,
+            PromptMouseTarget::RuntimeKillInput,
+            PromptMouseTarget::RuntimeKillItem,
+            column,
+            row,
+        ) {
+            return Some(target);
+        }
+        click_target(
+            &[
+                (cancel_button, PromptMouseTarget::RuntimeKillCancel),
+                (hovered_button, PromptMouseTarget::RuntimeKillHovered),
+                (selected_button, PromptMouseTarget::RuntimeKillSelected),
+                (visible_button, PromptMouseTarget::RuntimeKillVisible),
+            ],
+            column,
+            row,
+        )
+    }
+
+    fn name_new_agent_target(
+        input: Rect,
+        checkbox: Option<OverlayCheckbox>,
+        copy_checkbox: Option<OverlayCheckbox>,
+        column: u16,
+        row: u16,
+    ) -> Option<PromptMouseTarget> {
+        for checkbox in [checkbox, copy_checkbox].into_iter().flatten() {
+            if contains_point(checkbox.rect, column, row) {
+                return Some(PromptMouseTarget::Checkbox(checkbox.id));
+            }
+        }
+        contains_point(input, column, row).then_some(PromptMouseTarget::NameNewAgentInput)
+    }
+
+    fn pull_request_input_target(
+        input: Rect,
+        choose_project: Option<Rect>,
+        column: u16,
+        row: u16,
+    ) -> Option<PromptMouseTarget> {
+        if choose_project.is_some_and(|button| contains_point(button, column, row)) {
+            Some(PromptMouseTarget::PullRequestChooseProject)
+        } else {
+            contains_point(input, column, row).then_some(PromptMouseTarget::PullRequestInput)
+        }
+    }
+
     fn prompt_mouse_target(&self, column: u16, row: u16) -> Option<PromptMouseTarget> {
         match self.overlay_layout.active {
             OverlayMouseLayout::None | OverlayMouseLayout::Help => None,
@@ -6085,28 +6228,32 @@ impl App {
                 items,
                 offset,
                 ..
-            } => {
-                if contains_point(input, column, row) {
-                    Some(PromptMouseTarget::CommandInput)
-                } else {
-                    Self::overlay_row_at(list, offset, items, column, row)
-                        .map(PromptMouseTarget::CommandItem)
-                }
-            }
+            } => Self::searchable_overlay_target(
+                Some(input),
+                list,
+                items,
+                offset,
+                PromptMouseTarget::CommandInput,
+                PromptMouseTarget::CommandItem,
+                column,
+                row,
+            ),
             OverlayMouseLayout::BrowseProjects {
                 input,
                 list,
                 items,
                 offset,
                 ..
-            } => {
-                if input.is_some_and(|rect| contains_point(rect, column, row)) {
-                    Some(PromptMouseTarget::BrowseProjectInput)
-                } else {
-                    Self::overlay_row_at(list, offset, items, column, row)
-                        .map(PromptMouseTarget::BrowseProjectItem)
-                }
-            }
+            } => Self::searchable_overlay_target(
+                input,
+                list,
+                items,
+                offset,
+                PromptMouseTarget::BrowseProjectInput,
+                PromptMouseTarget::BrowseProjectItem,
+                column,
+                row,
+            ),
             OverlayMouseLayout::PickEditor {
                 list,
                 items,
@@ -6132,30 +6279,36 @@ impl App {
                 cancel_button,
                 delete_button,
                 checkbox,
-            } => {
-                if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
-                    checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
-                } else if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmDeleteWorktreeCancel)
-                } else if contains_point(delete_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmDeleteWorktreeConfirm)
-                } else {
-                    None
-                }
-            }
+            } => Self::checkbox_before_buttons_target(
+                checkbox,
+                &[
+                    (
+                        cancel_button,
+                        PromptMouseTarget::ConfirmDeleteWorktreeCancel,
+                    ),
+                    (
+                        delete_button,
+                        PromptMouseTarget::ConfirmDeleteWorktreeConfirm,
+                    ),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::PickProject {
                 input,
                 list,
                 items,
                 offset,
-            } => {
-                if input.is_some_and(|rect| contains_point(rect, column, row)) {
-                    Some(PromptMouseTarget::PickProjectInput)
-                } else {
-                    Self::overlay_row_at(list, offset, items, column, row)
-                        .map(PromptMouseTarget::PickProjectItem)
-                }
-            }
+            } => Self::searchable_overlay_target(
+                input,
+                list,
+                items,
+                offset,
+                PromptMouseTarget::PickProjectInput,
+                PromptMouseTarget::PickProjectItem,
+                column,
+                row,
+            ),
             OverlayMouseLayout::ResourceMonitor { .. } => None,
             OverlayMouseLayout::StartupCommandLogs {
                 input,
@@ -6164,24 +6317,15 @@ impl App {
                 offset,
                 close_button,
                 ..
-            } => {
-                if input.is_some_and(|rect| contains_point(rect, column, row)) {
-                    Some(PromptMouseTarget::StartupCommandLogsInput)
-                } else if contains_point(close_button, column, row) {
-                    Some(PromptMouseTarget::StartupCommandLogsClose)
-                } else {
-                    // Two rows per run: the file name, then its timestamp.
-                    Self::overlay_row_at_sized(
-                        list,
-                        offset,
-                        items,
-                        STARTUP_LOG_ROW_HEIGHT,
-                        column,
-                        row,
-                    )
-                    .map(PromptMouseTarget::StartupCommandLogItem)
-                }
-            }
+            } => Self::startup_command_logs_target(
+                input,
+                list,
+                items,
+                offset,
+                close_button,
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfigureStartupCommand {
                 input,
                 cancel_button,
@@ -6207,22 +6351,15 @@ impl App {
                 surface_options,
                 cancel_button,
                 save_button,
-            } => {
-                if contains_point(name_input, column, row) {
-                    Some(PromptMouseTarget::MacroNameInput)
-                } else if contains_point(text_input, column, row) {
-                    Some(PromptMouseTarget::MacroTextInput)
-                } else if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::MacroCancel)
-                } else if contains_point(save_button, column, row) {
-                    Some(PromptMouseTarget::MacroSave)
-                } else {
-                    surface_options
-                        .iter()
-                        .position(|rect| contains_point(*rect, column, row))
-                        .map(PromptMouseTarget::MacroSurfaceOption)
-                }
-            }
+            } => Self::macro_editor_target(
+                name_input,
+                text_input,
+                surface_options,
+                cancel_button,
+                save_button,
+                column,
+                row,
+            ),
             OverlayMouseLayout::ChangeTheme {
                 list,
                 items,
@@ -6263,298 +6400,265 @@ impl App {
                 hovered_button,
                 selected_button,
                 visible_button,
-            } => {
-                if input.is_some_and(|rect| contains_point(rect, column, row)) {
-                    Some(PromptMouseTarget::RuntimeKillInput)
-                } else if let Some(index) = Self::overlay_row_at(list, offset, items, column, row) {
-                    Some(PromptMouseTarget::RuntimeKillItem(index))
-                } else if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::RuntimeKillCancel)
-                } else if contains_point(hovered_button, column, row) {
-                    Some(PromptMouseTarget::RuntimeKillHovered)
-                } else if contains_point(selected_button, column, row) {
-                    Some(PromptMouseTarget::RuntimeKillSelected)
-                } else if contains_point(visible_button, column, row) {
-                    Some(PromptMouseTarget::RuntimeKillVisible)
-                } else {
-                    None
-                }
-            }
+            } => Self::kill_running_target(
+                input,
+                list,
+                items,
+                offset,
+                cancel_button,
+                hovered_button,
+                selected_button,
+                visible_button,
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmKillRunning {
                 cancel_button,
                 kill_button,
-            } => {
-                if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmKillCancel)
-                } else if contains_point(kill_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmKillConfirm)
-                } else {
-                    None
-                }
-            }
+            } => click_target(
+                &[
+                    (cancel_button, PromptMouseTarget::ConfirmKillCancel),
+                    (kill_button, PromptMouseTarget::ConfirmKillConfirm),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmDeleteAgent {
                 cancel_button,
                 delete_button,
                 checkbox,
-            } => {
-                if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
-                    checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
-                } else if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmDeleteCancel)
-                } else if contains_point(delete_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmDeleteConfirm)
-                } else {
-                    None
-                }
-            }
+            } => Self::checkbox_before_buttons_target(
+                checkbox,
+                &[
+                    (cancel_button, PromptMouseTarget::ConfirmDeleteCancel),
+                    (delete_button, PromptMouseTarget::ConfirmDeleteConfirm),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmDeleteTerminal {
                 cancel_button,
                 delete_button,
-            } => {
-                if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmDeleteTerminalCancel)
-                } else if contains_point(delete_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmDeleteTerminalConfirm)
-                } else {
-                    None
-                }
-            }
+            } => click_target(
+                &[
+                    (
+                        cancel_button,
+                        PromptMouseTarget::ConfirmDeleteTerminalCancel,
+                    ),
+                    (
+                        delete_button,
+                        PromptMouseTarget::ConfirmDeleteTerminalConfirm,
+                    ),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmCloseTab {
                 cancel_button,
                 confirm_button,
-            } => {
-                if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmCloseTabCancel)
-                } else if contains_point(confirm_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmCloseTabConfirm)
-                } else {
-                    None
-                }
-            }
+            } => click_target(
+                &[
+                    (cancel_button, PromptMouseTarget::ConfirmCloseTabCancel),
+                    (confirm_button, PromptMouseTarget::ConfirmCloseTabConfirm),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmDeleteMacro {
                 cancel_button,
                 delete_button,
-            } => {
-                if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmDeleteMacroCancel)
-                } else if contains_point(delete_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmDeleteMacroConfirm)
-                } else {
-                    None
-                }
-            }
+            } => click_target(
+                &[
+                    (cancel_button, PromptMouseTarget::ConfirmDeleteMacroCancel),
+                    (delete_button, PromptMouseTarget::ConfirmDeleteMacroConfirm),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmQuit {
                 cancel_button,
                 quit_button,
-            } => {
-                if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmQuitCancel)
-                } else if contains_point(quit_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmQuitConfirm)
-                } else {
-                    None
-                }
-            }
+            } => click_target(
+                &[
+                    (cancel_button, PromptMouseTarget::ConfirmQuitCancel),
+                    (quit_button, PromptMouseTarget::ConfirmQuitConfirm),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmDiscardFile {
                 cancel_button,
                 discard_button,
-            } => {
-                if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmDiscardCancel)
-                } else if contains_point(discard_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmDiscardConfirm)
-                } else {
-                    None
-                }
-            }
+            } => click_target(
+                &[
+                    (cancel_button, PromptMouseTarget::ConfirmDiscardCancel),
+                    (discard_button, PromptMouseTarget::ConfirmDiscardConfirm),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmCreateInitialCommit {
                 cancel_button,
                 create_button,
-            } => {
-                if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmCreateInitialCommitCancel)
-                } else if contains_point(create_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmCreateInitialCommitConfirm)
-                } else {
-                    None
-                }
-            }
+            } => click_target(
+                &[
+                    (
+                        cancel_button,
+                        PromptMouseTarget::ConfirmCreateInitialCommitCancel,
+                    ),
+                    (
+                        create_button,
+                        PromptMouseTarget::ConfirmCreateInitialCommitConfirm,
+                    ),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmInitRepo {
                 cancel_button,
                 init_button,
-            } => {
-                if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmInitRepoCancel)
-                } else if contains_point(init_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmInitRepoConfirm)
-                } else {
-                    None
-                }
-            }
+            } => click_target(
+                &[
+                    (cancel_button, PromptMouseTarget::ConfirmInitRepoCancel),
+                    (init_button, PromptMouseTarget::ConfirmInitRepoConfirm),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmNonDefaultBranch {
                 cancel_button,
                 add_button,
                 checkbox,
-            } => {
-                if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmNonDefaultBranchCancel)
-                } else if contains_point(add_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmNonDefaultBranchAdd)
-                } else if checkbox
-                    .is_some_and(|checkbox| contains_point(checkbox.rect, column, row))
-                {
-                    checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
-                } else {
-                    None
-                }
-            }
+            } => click_target(
+                &[
+                    (
+                        cancel_button,
+                        PromptMouseTarget::ConfirmNonDefaultBranchCancel,
+                    ),
+                    (add_button, PromptMouseTarget::ConfirmNonDefaultBranchAdd),
+                ],
+                column,
+                row,
+            )
+            .or_else(|| {
+                checkbox
+                    .filter(|checkbox| contains_point(checkbox.rect, column, row))
+                    .map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
+            }),
             OverlayMouseLayout::ConfirmUseExistingBranch {
                 cancel_button,
                 use_button,
-            } => {
-                if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmUseExistingBranchCancel)
-                } else if contains_point(use_button, column, row) {
-                    Some(PromptMouseTarget::ConfirmUseExistingBranchUse)
-                } else {
-                    None
-                }
-            }
+            } => click_target(
+                &[
+                    (
+                        cancel_button,
+                        PromptMouseTarget::ConfirmUseExistingBranchCancel,
+                    ),
+                    (use_button, PromptMouseTarget::ConfirmUseExistingBranchUse),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfigReloadFailed {
                 close_button,
                 apply_button,
                 checkbox,
-            } => {
-                if contains_point(checkbox.rect, column, row) {
-                    Some(PromptMouseTarget::Checkbox(checkbox.id))
-                } else if contains_point(close_button, column, row) {
-                    Some(PromptMouseTarget::ConfigReloadFailedClose)
-                } else if contains_point(apply_button, column, row) {
-                    Some(PromptMouseTarget::ConfigReloadFailedApply)
-                } else {
-                    None
-                }
-            }
-            OverlayMouseLayout::AddProjectFailed { ok_button } => {
-                if contains_point(ok_button, column, row) {
-                    Some(PromptMouseTarget::AddProjectFailedOk)
-                } else {
-                    None
-                }
-            }
-            OverlayMouseLayout::AgentInfo { close_button } => {
-                if contains_point(close_button, column, row) {
-                    Some(PromptMouseTarget::AgentInfoClose)
-                } else {
-                    None
-                }
-            }
+            } => Self::checkbox_before_buttons_target(
+                Some(checkbox),
+                &[
+                    (close_button, PromptMouseTarget::ConfigReloadFailedClose),
+                    (apply_button, PromptMouseTarget::ConfigReloadFailedApply),
+                ],
+                column,
+                row,
+            ),
+            OverlayMouseLayout::AddProjectFailed { ok_button } => click_target(
+                &[(ok_button, PromptMouseTarget::AddProjectFailedOk)],
+                column,
+                row,
+            ),
+            OverlayMouseLayout::AgentInfo { close_button } => click_target(
+                &[(close_button, PromptMouseTarget::AgentInfoClose)],
+                column,
+                row,
+            ),
             OverlayMouseLayout::FirstLoad {
                 primary_button,
                 secondary_button,
-            } => {
-                if contains_point(primary_button, column, row) {
-                    Some(PromptMouseTarget::FirstLoadPrimary)
-                } else if contains_point(secondary_button, column, row) {
-                    Some(PromptMouseTarget::FirstLoadSecondary)
-                } else {
-                    None
-                }
-            }
+            } => click_target(
+                &[
+                    (primary_button, PromptMouseTarget::FirstLoadPrimary),
+                    (secondary_button, PromptMouseTarget::FirstLoadSecondary),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::PullRequestInput {
                 input,
                 choose_project,
-            } => {
-                if let Some(button) = choose_project
-                    && contains_point(button, column, row)
-                {
-                    return Some(PromptMouseTarget::PullRequestChooseProject);
-                }
-                contains_point(input, column, row).then_some(PromptMouseTarget::PullRequestInput)
-            }
+            } => Self::pull_request_input_target(input, choose_project, column, row),
             OverlayMouseLayout::AttachPullRequestInput { input } => {
                 contains_point(input, column, row)
                     .then_some(PromptMouseTarget::AttachPullRequestInput)
             }
             OverlayMouseLayout::RenameSession { input, checkbox } => {
-                // Published click rects in priority order; the caller focuses
-                // the hit control and then acts on it (see `modal::click_target`).
-                let mut targets = Vec::with_capacity(2);
-                if let Some(checkbox) = checkbox {
-                    targets.push((checkbox.rect, PromptMouseTarget::Checkbox(checkbox.id)));
-                }
-                targets.push((input, PromptMouseTarget::RenameInput));
-                click_target(&targets, column, row)
+                Self::checkbox_before_buttons_target(
+                    checkbox,
+                    &[(input, PromptMouseTarget::RenameInput)],
+                    column,
+                    row,
+                )
             }
             OverlayMouseLayout::NameNewAgent {
                 input,
                 checkbox,
                 copy_checkbox,
-            } => {
-                if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
-                    checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
-                } else if copy_checkbox
-                    .is_some_and(|checkbox| contains_point(checkbox.rect, column, row))
-                {
-                    copy_checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
-                } else {
-                    contains_point(input, column, row)
-                        .then_some(PromptMouseTarget::NameNewAgentInput)
-                }
-            }
+            } => Self::name_new_agent_target(input, checkbox, copy_checkbox, column, row),
         }
     }
 
-    fn mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
-        if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
-            return self
-                .mouse_layout
-                .agent_term
-                .filter(|rect| contains_point(*rect, column, row))
-                .map(|_| MouseTarget::Center);
-        }
+    fn fullscreen_mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
+        self.mouse_layout
+            .agent_term
+            .filter(|rect| contains_point(*rect, column, row))
+            .map(|_| MouseTarget::Center)
+    }
 
-        if contains_point(self.mouse_layout.left_list, column, row) {
-            if self.left_items().is_empty() {
-                return Some(MouseTarget::LeftPane);
-            }
-            // Agent rows are two lines tall, so map the clicked screen row to an
-            // item through the reverse map rebuilt each render (a click on either
-            // line of an agent selects that agent).
-            let rel = usize::from(row.saturating_sub(self.mouse_layout.left_list.y));
-            let Some(&index) = self.mouse_layout.left_row_to_item.get(rel) else {
-                return Some(MouseTarget::LeftPane);
-            };
-            if index < self.left_items().len() {
-                if !self.is_selectable_left_item(index) {
-                    return Some(MouseTarget::LeftPane);
-                }
-                return Some(MouseTarget::LeftRow(index));
-            }
+    fn left_list_mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
+        if !contains_point(self.mouse_layout.left_list, column, row) {
+            return None;
+        }
+        if self.left_items().is_empty() {
             return Some(MouseTarget::LeftPane);
         }
 
+        let relative_row = usize::from(row.saturating_sub(self.mouse_layout.left_list.y));
+        let Some(&index) = self.mouse_layout.left_row_to_item.get(relative_row) else {
+            return Some(MouseTarget::LeftPane);
+        };
+        if index >= self.left_items().len() || !self.is_selectable_left_item(index) {
+            return Some(MouseTarget::LeftPane);
+        }
+        Some(MouseTarget::LeftRow(index))
+    }
+
+    fn terminal_list_mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
+        let list = self.mouse_layout.terminal_list;
+        if list.width == 0 || list.height == 0 || !contains_point(list, column, row) {
+            return None;
+        }
+
+        let screen_row = usize::from(row.saturating_sub(list.y));
+        let terminal_count = self.terminal_items().len();
+        if let Some(&index) = self.mouse_layout.terminal_row_to_item.get(screen_row)
+            && index < terminal_count
         {
-            let tl = self.mouse_layout.terminal_list;
-            if tl.width > 0 && tl.height > 0 && contains_point(tl, column, row) {
-                // Terminal rows are three lines tall, so a click row maps to an
-                // item through the reverse map rebuilt each render (see
-                // `render::left_row_to_item`), not 1:1.
-                let screen_row = usize::from(row.saturating_sub(tl.y));
-                let term_count = self.terminal_items().len();
-                if let Some(&index) = self.mouse_layout.terminal_row_to_item.get(screen_row)
-                    && index < term_count
-                {
-                    return Some(MouseTarget::TerminalRow(index));
-                }
-                return Some(MouseTarget::TerminalPane);
-            }
+            return Some(MouseTarget::TerminalRow(index));
         }
+        Some(MouseTarget::TerminalPane)
+    }
 
-        if contains_point(self.mouse_layout.left, column, row) {
-            return Some(MouseTarget::LeftPane);
-        }
-
+    fn files_mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
         if let Some(area) = self.mouse_layout.unstaged_list
             && contains_point(area, column, row)
         {
@@ -6562,7 +6666,6 @@ impl App {
             let file_index = (index < self.engine.unstaged_files.len()).then_some(index);
             return Some(MouseTarget::UnstagedFile(file_index));
         }
-
         if let Some(area) = self.mouse_layout.staged_list
             && contains_point(area, column, row)
         {
@@ -6570,29 +6673,41 @@ impl App {
             let file_index = (index < self.engine.staged_files.len()).then_some(index);
             return Some(MouseTarget::StagedFile(file_index));
         }
-
         if let Some(area) = self.mouse_layout.commit_area
             && contains_point(area, column, row)
         {
-            if self
+            let target = if self
                 .mouse_layout
                 .commit_text_area
                 .is_some_and(|text_area| contains_point(text_area, column, row))
             {
-                return Some(MouseTarget::CommitText);
-            }
-            return Some(MouseTarget::CommitChrome);
+                MouseTarget::CommitText
+            } else {
+                MouseTarget::CommitChrome
+            };
+            return Some(target);
+        }
+        contains_point(self.mouse_layout.right, column, row).then_some(MouseTarget::FilesPane)
+    }
+
+    fn mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
+        if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
+            return self.fullscreen_mouse_target(column, row);
         }
 
-        if contains_point(self.mouse_layout.right, column, row) {
-            return Some(MouseTarget::FilesPane);
+        if let Some(target) = self.left_list_mouse_target(column, row) {
+            return Some(target);
         }
-
-        if contains_point(self.mouse_layout.center, column, row) {
-            return Some(MouseTarget::Center);
+        if let Some(target) = self.terminal_list_mouse_target(column, row) {
+            return Some(target);
         }
-
-        None
+        if contains_point(self.mouse_layout.left, column, row) {
+            return Some(MouseTarget::LeftPane);
+        }
+        if let Some(target) = self.files_mouse_target(column, row) {
+            return Some(target);
+        }
+        contains_point(self.mouse_layout.center, column, row).then_some(MouseTarget::Center)
     }
 
     fn resize_drag_at_mouse(&self, column: u16, row: u16) -> Option<ResizeDragState> {
@@ -8359,11 +8474,171 @@ impl App {
         }
     }
 
-    /// Dispatch on-Down behavior for non-button prompt targets — text
-    /// inputs (cursor placement), list rows (selection + double-click
-    /// activation), and checkboxes (toggle). These keep their original
-    /// semantics since users expect immediate feedback for cursor moves
-    /// and instant toggles.
+    fn click_command_palette_item(&mut self, index: usize) {
+        if self.palette_command_index_at_visual_row(index).is_none() {
+            self.last_mouse_click = None;
+            return;
+        }
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        self.set_command_palette_selection_from_visual_row(index);
+        if double_click {
+            self.execute_selected_command_palette();
+        }
+    }
+
+    fn click_browse_project_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        self.set_browser_selection(index);
+        if double_click {
+            self.open_selected_browser_entry();
+        }
+    }
+
+    fn click_editor_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        self.set_pick_editor_selection(index);
+        if double_click {
+            self.open_selected_pick_editor();
+        }
+    }
+
+    fn click_project_worktree_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        self.set_project_worktree_selection_from_visual_row(index);
+        if double_click && let Err(err) = self.open_selected_project_worktree_agent_prompt() {
+            self.set_error(format!("{err:#}"));
+        }
+    }
+
+    fn click_manage_worktree_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        let landed = self.set_manage_worktree_selection_from_visual_row(index);
+        if landed
+            && double_click
+            && let Err(err) = self.confirm_delete_selected_worktree()
+        {
+            self.set_error(format!("{err:#}"));
+        }
+    }
+
+    fn click_project_picker_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        if let PromptState::PickProject { entries, list, .. } = &mut self.prompt {
+            let visible_items = list.visible_indices(entries, pick_project_matches).len();
+            if index < visible_items {
+                list.selected = index;
+            }
+        }
+        if double_click && let Err(err) = self.confirm_project_chooser_selection() {
+            self.set_error(format!("{err:#}"));
+        }
+    }
+
+    fn click_startup_command_log_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
+            prompt.focus = StartupCommandLogFocus::List;
+        }
+        self.select_startup_command_log_visual_index(index);
+        if double_click {
+            self.open_selected_startup_command_log();
+        }
+    }
+
+    fn click_tailscale_mode_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        if let PromptState::SetTailscaleMode(prompt) = &mut self.prompt
+            && index < prompt.options.len()
+        {
+            prompt.selected = index;
+        }
+        if double_click {
+            self.apply_set_tailscale_mode();
+        }
+    }
+
+    fn click_theme_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        let mut moved = false;
+        if let PromptState::ChangeTheme(prompt) = &mut self.prompt
+            && index < prompt.options.len()
+            && prompt.selected != index
+        {
+            prompt.selected = index;
+            moved = true;
+        }
+        if moved {
+            self.preview_change_theme_selection();
+        }
+        if double_click && let Err(err) = self.apply_change_theme() {
+            self.set_error(format!("{err:#}"));
+        }
+    }
+
+    fn click_agent_provider_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        self.set_change_agent_provider_selection(index);
+        if double_click && let Err(err) = self.apply_change_agent_provider() {
+            self.set_error(format!("{err:#}"));
+        }
+    }
+
+    fn click_default_provider_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        self.set_change_default_provider_selection(index);
+        if double_click && let Err(err) = self.apply_change_default_provider() {
+            self.set_error(format!("{err:#}"));
+        }
+    }
+
+    fn click_project_default_provider_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        self.set_change_project_default_provider_selection(index);
+        if double_click && let Err(err) = self.apply_change_project_default_provider() {
+            self.set_error(format!("{err:#}"));
+        }
+    }
+
+    fn click_startup_command_input(&mut self, mouse: MouseEvent) {
+        let double_click = self.register_mouse_click(MouseClickTarget::StartupCommandInput, None);
+        self.focus_configure_control(ConfigureFieldFocus::Input);
+        self.set_startup_command_cursor_from_mouse(mouse.column, mouse.row);
+        if double_click {
+            self.input_target = InputTarget::StartupCommand;
+        }
+    }
+
+    fn click_macro_text_input(&mut self, mouse: MouseEvent) {
+        let double_click = self.register_mouse_click(MouseClickTarget::MacroTextInput, None);
+        self.focus_macro_edit_control(MacroEditFocus::Text);
+        self.set_macro_text_cursor_from_mouse(mouse.column, mouse.row);
+        if double_click {
+            self.input_target = InputTarget::MacroText;
+        }
+    }
+
+    fn click_macro_list_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        self.set_macro_list_selection(index);
+        if double_click {
+            self.open_selected_macro_for_edit();
+        }
+    }
+
+    fn click_macro_surface_option(&mut self, index: usize) {
+        self.focus_macro_edit_control(MacroEditFocus::Surface);
+        let picked = [
+            MacroSurface::Agent,
+            MacroSurface::Terminal,
+            MacroSurface::Both,
+        ]
+        .get(index)
+        .copied();
+        if let (Some(picked), Some(state)) = (picked, self.macro_edit_state_mut()) {
+            state.surface = picked;
+        }
+    }
+
     fn dispatch_prompt_target_action(
         &mut self,
         target: PromptMouseTarget,
@@ -8374,21 +8649,7 @@ impl App {
                 self.set_command_palette_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::CommandItem(index) => {
-                // Resolve the row BEFORE recording the click: a press on the
-                // divider is not a click on anything, so it must neither
-                // select nor prime the next press to count as a double click.
-                // Filtering can put a command at that same visual index a
-                // keystroke later.
-                if self.palette_command_index_at_visual_row(index).is_none() {
-                    self.last_mouse_click = None;
-                } else {
-                    let double_click =
-                        self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                    self.set_command_palette_selection_from_visual_row(index);
-                    if double_click {
-                        self.execute_selected_command_palette();
-                    }
-                }
+                self.click_command_palette_item(index);
             }
             PromptMouseTarget::BrowseProjectInput => {
                 self.set_browser_input_cursor_from_mouse(mouse.column);
@@ -8400,127 +8661,37 @@ impl App {
                 self.set_startup_command_logs_filter_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::BrowseProjectItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                self.set_browser_selection(index);
-                if double_click {
-                    self.open_selected_browser_entry();
-                }
+                self.click_browse_project_item(index);
             }
             PromptMouseTarget::PickEditorItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                self.set_pick_editor_selection(index);
-                if double_click {
-                    self.open_selected_pick_editor();
-                }
+                self.click_editor_item(index);
             }
             PromptMouseTarget::PickProjectWorktreeItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                self.set_project_worktree_selection_from_visual_row(index);
-                if double_click && let Err(err) = self.open_selected_project_worktree_agent_prompt()
-                {
-                    self.set_error(format!("{err:#}"));
-                }
+                self.click_project_worktree_item(index);
             }
             PromptMouseTarget::ManageWorktreeItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                // A row the click half refuses (a header, a spacer, a worktree
-                // an agent holds) leaves the selection where it was, so
-                // confirming here would open a destructive dialog for a
-                // different worktree than the one under the pointer.
-                let landed = self.set_manage_worktree_selection_from_visual_row(index);
-                if landed
-                    && double_click
-                    && let Err(err) = self.confirm_delete_selected_worktree()
-                {
-                    self.set_error(format!("{err:#}"));
-                }
+                self.click_manage_worktree_item(index);
             }
             PromptMouseTarget::PickProjectItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                if let PromptState::PickProject { entries, list, .. } = &mut self.prompt {
-                    // `index` is a visible-row index (the list renders filtered
-                    // rows), and `list.selected` indexes that same visible list.
-                    let vis_len = list.visible_indices(entries, pick_project_matches).len();
-                    if index < vis_len {
-                        list.selected = index;
-                    }
-                }
-                if double_click && let Err(err) = self.confirm_project_chooser_selection() {
-                    self.set_error(format!("{err:#}"));
-                }
+                self.click_project_picker_item(index);
             }
             PromptMouseTarget::StartupCommandLogItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                // Focus follows the click BEFORE the click acts, so the next
-                // keystroke lands on the region the user just pointed at
-                // rather than on whatever held focus a moment ago.
-                if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
-                    prompt.focus = StartupCommandLogFocus::List;
-                }
-                self.select_startup_command_log_visual_index(index);
-                if double_click {
-                    self.open_selected_startup_command_log();
-                }
+                self.click_startup_command_log_item(index);
             }
             PromptMouseTarget::SetTailscaleModeItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                if let PromptState::SetTailscaleMode(prompt) = &mut self.prompt
-                    && index < prompt.options.len()
-                {
-                    prompt.selected = index;
-                }
-                if double_click {
-                    self.apply_set_tailscale_mode();
-                }
+                self.click_tailscale_mode_item(index);
             }
             PromptMouseTarget::ChangeThemeItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                let mut moved = false;
-                if let PromptState::ChangeTheme(prompt) = &mut self.prompt
-                    && index < prompt.options.len()
-                    && prompt.selected != index
-                {
-                    prompt.selected = index;
-                    moved = true;
-                }
-                if moved {
-                    self.preview_change_theme_selection();
-                }
-                if double_click && let Err(err) = self.apply_change_theme() {
-                    self.set_error(format!("{err:#}"));
-                }
+                self.click_theme_item(index);
             }
             PromptMouseTarget::ChangeAgentProviderItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                self.set_change_agent_provider_selection(index);
-                if double_click && let Err(err) = self.apply_change_agent_provider() {
-                    self.set_error(format!("{err:#}"));
-                }
+                self.click_agent_provider_item(index);
             }
             PromptMouseTarget::ChangeDefaultProviderItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                self.set_change_default_provider_selection(index);
-                if double_click && let Err(err) = self.apply_change_default_provider() {
-                    self.set_error(format!("{err:#}"));
-                }
+                self.click_default_provider_item(index);
             }
             PromptMouseTarget::ChangeProjectDefaultProviderItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                self.set_change_project_default_provider_selection(index);
-                if double_click && let Err(err) = self.apply_change_project_default_provider() {
-                    self.set_error(format!("{err:#}"));
-                }
+                self.click_project_default_provider_item(index);
             }
             PromptMouseTarget::RuntimeKillInput => {
                 self.set_kill_running_search_cursor_from_mouse(mouse.column);
@@ -8544,70 +8715,23 @@ impl App {
             PromptMouseTarget::AttachPullRequestInput => {
                 self.set_attach_pull_request_cursor_from_mouse(mouse.column);
             }
-            // The button targets are armed on mouse-down and fired on release
-            // by the press machinery (`activate_button`), so nothing happens
-            // here; the arm exists so a new button cannot be forgotten.
             PromptMouseTarget::PullRequestChooseProject => {}
             PromptMouseTarget::StartupCommandInput => {
-                // Single click focuses, double click engages, the same two-step
-                // the macro body uses. Focusing FIRST is the load-bearing half:
-                // without it the visible focus ring stays on whichever button
-                // last had it, and the next confirm key runs that button instead
-                // of the field, silently discarding everything just typed.
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::StartupCommandInput, None);
-                self.focus_configure_control(ConfigureFieldFocus::Input);
-                self.set_startup_command_cursor_from_mouse(mouse.column, mouse.row);
-                if double_click {
-                    self.input_target = InputTarget::StartupCommand;
-                }
+                self.click_startup_command_input(mouse);
             }
             PromptMouseTarget::MacroNameInput => {
                 self.focus_macro_edit_control(MacroEditFocus::Name);
                 self.set_macro_name_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::MacroTextInput => {
-                // Single click focuses, double click engages — the same two-step
-                // the startup-command and commit inputs use, so a stray click on
-                // a body full of text cannot start swallowing keystrokes.
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::MacroTextInput, None);
-                self.focus_macro_edit_control(MacroEditFocus::Text);
-                self.set_macro_text_cursor_from_mouse(mouse.column, mouse.row);
-                if double_click {
-                    self.input_target = InputTarget::MacroText;
-                }
+                self.click_macro_text_input(mouse);
             }
             PromptMouseTarget::MacroListItem(index) => {
-                // The picker idiom: one click moves the selection cursor, a
-                // double click opens the row. Same as the theme and provider
-                // pickers, which is why it reuses their click registry slot.
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                self.set_macro_list_selection(index);
-                if double_click {
-                    self.open_selected_macro_for_edit();
-                }
+                self.click_macro_list_item(index);
             }
             PromptMouseTarget::MacroSurfaceOption(index) => {
-                self.focus_macro_edit_control(MacroEditFocus::Surface);
-                // Clicking picks the option under the cursor rather than
-                // advancing the cycle: a click names its target.
-                let picked = [
-                    MacroSurface::Agent,
-                    MacroSurface::Terminal,
-                    MacroSurface::Both,
-                ]
-                .get(index)
-                .copied();
-                if let (Some(picked), Some(state)) = (picked, self.macro_edit_state_mut()) {
-                    state.surface = picked;
-                }
+                self.click_macro_surface_option(index);
             }
-            // Button targets are handled by `activate_button` and never
-            // reach this path — `from_prompt_target` returns `Some(_)`
-            // for all of them, sending mouse-down through the press
-            // flow instead.
             PromptMouseTarget::RuntimeKillCancel
             | PromptMouseTarget::RuntimeKillHovered
             | PromptMouseTarget::RuntimeKillSelected
