@@ -3515,6 +3515,7 @@ impl App {
                 .fg(to_ratatui_color(cell.fg))
                 .bg(to_ratatui_color(cell.bg))
                 .add_modifier(to_ratatui_modifier(cell.modifier));
+            let symbol = visible_terminal_symbol(&cell.symbol, cell.col, term_area.width);
             let link_uri = self
                 .engine
                 .config
@@ -3522,15 +3523,16 @@ impl App {
                 .hyperlinks
                 .then_some(cell.link)
                 .flatten()
-                .and_then(|index| self.snapshot_buf.links.get(index as usize));
+                .and_then(|index| self.snapshot_buf.links.get(index as usize))
+                .filter(|_| symbol == cell.symbol.as_str());
             if let Some(uri) = link_uri {
-                let width = cell.symbol.as_str().cell_width().max(1);
+                let width = symbol.cell_width().max(1);
                 let forced = std::num::NonZeroU16::new(width).expect("cell width is at least 1");
                 ratatui_cell
-                    .set_symbol(&osc8_wrap_symbol(&cell.symbol, uri))
+                    .set_symbol(&osc8_wrap_symbol(symbol, uri))
                     .set_diff_option(CellDiffOption::ForcedWidth(forced));
             } else {
-                ratatui_cell.set_symbol(&cell.symbol);
+                ratatui_cell.set_symbol(symbol);
             }
             ratatui_cell.set_style(style);
             if let Some(selection) = &self.terminal_selection
