@@ -141,14 +141,23 @@ export function tabPtyUrl(sessionId: string, tabId: string): string {
   )}/tabs/${encodeURIComponent(tabId)}/pty`
 }
 
-// A grid off a wire frame, or null when the frame does not carry one. Both
-// dimensions must be real numbers: half a grid is not a grid, and a partial
-// read would be worse than none, because the comparison it feeds would then be
-// against a number nobody sent.
-function readGrid(frame: {
+interface PtyControlFrame {
+  event?: string
+  n?: number
+  id?: string
+  gen?: number
+  owner?: string | null
+  owner_epoch?: number
+  owner_device?: string
   rows?: number | null
   cols?: number | null
-}): { rows: number; cols: number } | null {
+  seq?: number
+  grid_seq?: number
+}
+
+// A partial grid is unusable because its comparison would be against a size
+// the server never reported.
+function readGrid(frame: PtyControlFrame): { rows: number; cols: number } | null {
   return typeof frame.rows === "number" && typeof frame.cols === "number"
     ? { rows: frame.rows, cols: frame.cols }
     : null
@@ -336,102 +345,65 @@ export class PtySocket extends ReconnectingSocket {
   protected onSocketOpen(): void {}
 
   protected handleMessage(event: MessageEvent): void {
-    // Binary frames carry PTY bytes (the scrollback replay arrives as an ordinary
-    // Binary frame too). The ONLY Text frame the server sends is the opening
-    // `connected` handshake carrying this socket's connection id; record it for
-    // the ownership comparison and notify the consumer.
     if (event.data instanceof ArrayBuffer) {
       this.bytesCb(new Uint8Array(event.data))
       return
     }
-    if (typeof event.data === "string") {
-      try {
-        const frame = JSON.parse(event.data) as {
-          event?: string
-          n?: number
-          id?: string
-          gen?: number
-          owner?: string | null
-          owner_epoch?: number
-          owner_device?: string
-          rows?: number | null
-          cols?: number | null
-          seq?: number
-          grid_seq?: number
-        }
-        // The answer to one of our beats. Handled first because it is by far the
-        // most frequent text frame on a quiet socket.
-        if (frame.event === "beat") {
-          if (typeof frame.n === "number") this.onBeat(frame.n)
-          return
-        }
-        // A grid change on a PTY somebody else is driving. Handled before the
-        // handshake branch because the two are told apart by `event` alone.
-        if (frame.event === "size") {
-          const grid = readGrid(frame)
-          if (grid) {
-            // Drop a stale announcement: one whose seq is at or below the
-            // newest applied (the handshake's seed included, so a broadcast
-            // buffered from before the handshake cannot regress the grid the
-            // handshake just reported). An event with no seq is an old
-            // server, which never stamped an order to enforce.
-            if (typeof frame.seq === "number") {
-              if (this.lastGridSeq !== null && frame.seq <= this.lastGridSeq) {
-                return
-              }
-              this.lastGridSeq = frame.seq
-            }
-            this.ptyGrid = grid
-            this.onPtyGrid(grid, false)
-          }
-          return
-        }
-        if (frame.event === "connected" && typeof frame.id === "string") {
-          this.connId = frame.id
-          // Record the replay generation for the Binary frame that follows. A frame
-          // without `gen` (older server) leaves it null, which the guard reads as
-          // "always apply" so the change is backward-safe.
-          this.replayGen = typeof frame.gen === "number" ? frame.gen : null
-          // ABSENT and NULL are different answers here, so this reads the KEY,
-          // not the value: `owner: null` means "nobody is driving, claim it if
-          // you are foregrounded", while a missing key means "this server does
-          // not say" and the client must not read that as unowned.
-          this.connectedOwner =
-            "owner" in frame ? (frame.owner ?? null) : undefined
-          // The epoch travels with `owner`: a server that answers the owner
-          // question stamps the snapshot, and an old server omits both keys
-          // together, so an absent epoch is the same mixed-version signal.
-          this.connectedOwnerEpoch =
-            typeof frame.owner_epoch === "number" ? frame.owner_epoch : undefined
-          // The owner's device label. Absent (not null) whenever there is no
-          // name to give, so a bare presence check is enough; only a string is
-          // ever accepted.
-          this.connectedOwnerDevice =
-            typeof frame.owner_device === "string"
-              ? frame.owner_device
-              : undefined
-          // The grid this attach is joining. A server that cannot answer sends
-          // explicit nulls (and an older one omits the keys), and both land
-          // here as null: "nothing known", never "it matches".
-          this.ptyGrid = readGrid(frame)
-          // Seed the seq filter from the handshake: the server read `grid_seq`
-          // before the grid, so the grid above is at least as new as this
-          // mark, and any `size` event at or below it is stale. Absent on an
-          // old server, which leaves the filter off.
-          this.lastGridSeq =
-            typeof frame.grid_seq === "number" ? frame.grid_seq : null
-          this.onConnected(
-            frame.id,
-            this.connectedOwner,
-            this.connectedOwnerEpoch,
-            this.connectedOwnerDevice,
-          )
-          this.onPtyGrid(this.ptyGrid, true)
-        }
-      } catch {
-        // A malformed control frame is not fatal to the byte stream; ignore it.
-      }
+    if (typeof event.data !== "string") return
+
+    try {
+      this.handleControlFrame(JSON.parse(event.data) as PtyControlFrame)
+    } catch {
+      // A malformed control frame is not fatal to the byte stream.
     }
+  }
+
+  private handleControlFrame(frame: PtyControlFrame): void {
+    if (frame.event === "beat") {
+      if (typeof frame.n === "number") this.onBeat(frame.n)
+      return
+    }
+    if (frame.event === "size") {
+      this.handleSizeFrame(frame)
+      return
+    }
+    if (frame.event === "connected" && typeof frame.id === "string") {
+      this.handleConnectedFrame(frame, frame.id)
+    }
+  }
+
+  private handleSizeFrame(frame: PtyControlFrame): void {
+    const grid = readGrid(frame)
+    if (!grid) return
+
+    if (typeof frame.seq === "number") {
+      if (this.lastGridSeq !== null && frame.seq <= this.lastGridSeq) return
+      this.lastGridSeq = frame.seq
+    }
+    this.ptyGrid = grid
+    this.onPtyGrid(grid, false)
+  }
+
+  private handleConnectedFrame(frame: PtyControlFrame, id: string): void {
+    this.connId = id
+    this.replayGen = typeof frame.gen === "number" ? frame.gen : null
+    // A missing owner means the server does not report ownership; null means
+    // the server reports that nobody owns the PTY.
+    this.connectedOwner = "owner" in frame ? (frame.owner ?? null) : undefined
+    this.connectedOwnerEpoch =
+      typeof frame.owner_epoch === "number" ? frame.owner_epoch : undefined
+    this.connectedOwnerDevice =
+      typeof frame.owner_device === "string" ? frame.owner_device : undefined
+    this.ptyGrid = readGrid(frame)
+    this.lastGridSeq =
+      typeof frame.grid_seq === "number" ? frame.grid_seq : null
+    this.onConnected(
+      id,
+      this.connectedOwner,
+      this.connectedOwnerEpoch,
+      this.connectedOwnerDevice,
+    )
+    this.onPtyGrid(this.ptyGrid, true)
   }
 
   // A hard stop, not a transient drop, in two cases; otherwise reconnect normally
