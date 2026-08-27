@@ -256,6 +256,21 @@ pub struct KeyedStatusController {
     retention: StatusRetention,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusTickAction {
+    Keep,
+    Clear,
+    Purge,
+    Upgrade,
+}
+
+#[derive(Default)]
+struct KeyedTickActions {
+    clear: Vec<String>,
+    purge: Vec<String>,
+    upgrade: Vec<String>,
+}
+
 impl KeyedStatusController {
     /// A controller that RETAINS finals: the historical behaviour, and what the
     /// TUI wants. Its single status line shows the last message until something
@@ -450,149 +465,181 @@ impl KeyedStatusController {
     /// Returns the set of changes the caller must broadcast.
     pub fn tick(&mut self, now: Instant, busy_timeout: Duration) -> StatusTickChanges {
         let mut changes = StatusTickChanges::default();
-        let emit = self.retention == StatusRetention::Emit;
+        self.tick_anonymous(now, busy_timeout, &mut changes);
+        let actions = self.keyed_tick_actions(now, busy_timeout);
+        self.clear_keyed_finals(actions.clear, &mut changes);
+        self.purge_keyed_finals(actions.purge, &mut changes);
+        self.upgrade_keyed_busys(actions.upgrade, now, &mut changes);
 
-        // Check the anonymous slot. Under `Emit` the question is not "has this
-        // been on screen long enough" but "is it still worth replaying", so
-        // every tone of final ages out on the same fixed window and no cleared
-        // key is reported (see `StatusRetention::Emit`).
-        let anon_expired = self.anon.as_ref().is_some_and(|a| {
-            if emit {
-                a.tone != StatusTone::Busy && now.duration_since(a.since) >= FINAL_REPLAY_WINDOW
-            } else {
-                !self.anon_pinned
-                    && !a.sticky
-                    && !self.clear_after.is_zero()
-                    && a.tone.clear_windows().is_some_and(|windows| {
-                        now.duration_since(a.since) >= self.clear_after * windows
-                    })
-            }
-        });
-        if anon_expired {
+        changes
+    }
+
+    fn tick_anonymous(
+        &mut self,
+        now: Instant,
+        busy_timeout: Duration,
+        changes: &mut StatusTickChanges,
+    ) {
+        if self.anonymous_final_expired(now) {
             self.anon = None;
-            if emit {
-                changes.purged += 1;
-            } else {
-                changes.cleared_keys.push(None);
-            }
+            self.record_anonymous_expiry(changes);
         }
+        if self.anonymous_busy_timed_out(now, busy_timeout) {
+            self.upgrade_anonymous_busy(now, changes);
+        }
+    }
 
-        // A stale anonymous Busy is a leak too: an unkeyed pending status whose
-        // producer never posted a final. Unlike a keyed entry it would otherwise
-        // never expire (most-recent-wins keeps it until the next `set`), so
-        // upgrade it to a timed-out Warning and log it, mirroring the keyed path.
-        let anon_busy_timed_out = self.anon.as_ref().is_some_and(|a| {
+    fn anonymous_final_expired(&self, now: Instant) -> bool {
+        let Some(entry) = self.anon.as_ref() else {
+            return false;
+        };
+        if self.retention == StatusRetention::Emit {
+            return entry.tone != StatusTone::Busy
+                && now.duration_since(entry.since) >= FINAL_REPLAY_WINDOW;
+        }
+        !self.anon_pinned
+            && !entry.sticky
+            && !self.clear_after.is_zero()
+            && entry.tone.clear_windows().is_some_and(|windows| {
+                now.duration_since(entry.since) >= self.clear_after * windows
+            })
+    }
+
+    fn record_anonymous_expiry(&self, changes: &mut StatusTickChanges) {
+        if self.retention == StatusRetention::Emit {
+            changes.purged += 1;
+        } else {
+            changes.cleared_keys.push(None);
+        }
+    }
+
+    fn anonymous_busy_timed_out(&self, now: Instant, busy_timeout: Duration) -> bool {
+        self.anon.as_ref().is_some_and(|entry| {
             !self.anon_pinned
-                && a.tone == StatusTone::Busy
-                && now.duration_since(a.since) >= busy_timeout
+                && entry.tone == StatusTone::Busy
+                && now.duration_since(entry.since) >= busy_timeout
+        })
+    }
+
+    fn upgrade_anonymous_busy(&mut self, now: Instant, changes: &mut StatusTickChanges) {
+        let Some(anon) = self.anon.as_mut() else {
+            return;
+        };
+        crate::logger::warn(&format!(
+            "anonymous status left Busy with no final (\"{}\"); upgrading to a timed-out warning",
+            anon.message
+        ));
+        anon.tone = StatusTone::Warning;
+        anon.message = "timed out — check dux.log".to_string();
+        anon.since = now;
+        anon.generation = Generation(self.next_gen);
+        anon.seq = self.next_seq;
+        self.next_gen += 1;
+        self.next_seq += 1;
+        changes.upgraded.push(KeyedWireStatus {
+            key: None,
+            tone: StatusTone::Warning.as_wire().to_string(),
+            message: "timed out — check dux.log".to_string(),
+            scope: anon.scope.clone(),
+            sticky: false,
         });
-        if anon_busy_timed_out && let Some(anon) = self.anon.as_mut() {
-            crate::logger::warn(&format!(
-                "anonymous status left Busy with no final (\"{}\"); upgrading to a timed-out warning",
-                anon.message
-            ));
-            anon.tone = StatusTone::Warning;
-            anon.message = "timed out — check dux.log".to_string();
-            anon.since = now;
-            anon.generation = Generation(self.next_gen);
-            anon.seq = self.next_seq;
-            self.next_gen += 1;
-            self.next_seq += 1;
-            changes.upgraded.push(KeyedWireStatus {
-                key: None,
-                tone: StatusTone::Warning.as_wire().to_string(),
-                message: "timed out — check dux.log".to_string(),
-                scope: anon.scope.clone(),
-                // A timeout says only that dux stopped hearing about an
-                // operation. Nothing is known to be lost, so it is not sticky.
-                sticky: false,
-            });
-            // The upgrade produced a final, and `since` was just restamped, so
-            // under `Emit` it now ages out on the ordinary replay window above
-            // rather than being dropped on the spot. That matters: a tab that
-            // dropped while the operation hung reconnects to the timed-out
-            // warning instead of to an empty snapshot and a spinner nothing
-            // will ever stop.
-        }
+    }
 
-        // Collect keys to operate on; three passes to avoid borrow issues.
-        // `to_clear` is the Retain path (removed AND announced); `to_purge` is
-        // the Emit path (removed and NOT announced).
-        let mut to_clear: Vec<String> = Vec::new();
-        let mut to_purge: Vec<String> = Vec::new();
-        let mut to_upgrade: Vec<String> = Vec::new();
-
+    fn keyed_tick_actions(&self, now: Instant, busy_timeout: Duration) -> KeyedTickActions {
+        let mut actions = KeyedTickActions::default();
         for (key, entry) in &self.entries {
-            let age = now.duration_since(entry.since);
-            if entry.tone == StatusTone::Busy {
-                if age >= busy_timeout {
-                    to_upgrade.push(key.clone());
-                }
-                continue;
-            }
-            // Everything below is a final.
-            if emit {
-                if age >= FINAL_REPLAY_WINDOW {
-                    to_purge.push(key.clone());
-                }
-            } else if !entry.sticky
-                && !self.clear_after.is_zero()
-                && let Some(windows) = entry.tone.clear_windows()
-                && age >= self.clear_after * windows
-            {
-                to_clear.push(key.clone());
+            match self.keyed_tick_action(entry, now, busy_timeout) {
+                StatusTickAction::Keep => {}
+                StatusTickAction::Clear => actions.clear.push(key.clone()),
+                StatusTickAction::Purge => actions.purge.push(key.clone()),
+                StatusTickAction::Upgrade => actions.upgrade.push(key.clone()),
             }
         }
+        actions
+    }
 
-        for key in to_clear {
+    fn keyed_tick_action(
+        &self,
+        entry: &KeyedStatus,
+        now: Instant,
+        busy_timeout: Duration,
+    ) -> StatusTickAction {
+        let age = now.duration_since(entry.since);
+        if entry.tone == StatusTone::Busy {
+            return if age >= busy_timeout {
+                StatusTickAction::Upgrade
+            } else {
+                StatusTickAction::Keep
+            };
+        }
+        if self.retention == StatusRetention::Emit {
+            return if age >= FINAL_REPLAY_WINDOW {
+                StatusTickAction::Purge
+            } else {
+                StatusTickAction::Keep
+            };
+        }
+        if !entry.sticky
+            && !self.clear_after.is_zero()
+            && let Some(windows) = entry.tone.clear_windows()
+            && age >= self.clear_after * windows
+        {
+            return StatusTickAction::Clear;
+        }
+        StatusTickAction::Keep
+    }
+
+    fn clear_keyed_finals(&mut self, keys: Vec<String>, changes: &mut StatusTickChanges) {
+        for key in keys {
             self.entries.swap_remove(&key);
             changes.cleared_keys.push(Some(key));
         }
+    }
 
-        // Silent, by design: the entry is leaving the REPLAY snapshot, not the
-        // user's screen. Announcing it would send `status_cleared` and dismiss
-        // the toast wherever it is showing, including the `sticky` ones that
-        // exist precisely to wait for the user.
-        for key in to_purge {
+    fn purge_keyed_finals(&mut self, keys: Vec<String>, changes: &mut StatusTickChanges) {
+        // Replay expiry is silent so it cannot dismiss a toast still shown by a client.
+        for key in keys {
             self.entries.shift_remove(&key);
             changes.purged += 1;
         }
+    }
 
-        for key in to_upgrade {
-            if let Some(entry) = self.entries.get_mut(&key) {
-                // A keyed Busy that reaches the timeout is a leak: its producer
-                // emitted a pending status but never the paired final. Log the
-                // key and the original message so the unpaired operation is
-                // diagnosable in dux.log instead of vanishing into a generic
-                // "timed out" warning. (See the StatusOp design: every Busy must
-                // be followed by a success/error/clear on the same key.)
-                crate::logger::warn(&format!(
-                    "status key \"{key}\" left Busy with no final (\"{}\"); upgrading to a timed-out warning",
-                    entry.message
-                ));
-                let generation = Generation(self.next_gen);
-                let seq = self.next_seq;
-                self.next_gen += 1;
-                self.next_seq += 1;
-                entry.tone = StatusTone::Warning;
-                entry.message = "timed out — check dux.log".to_string();
-                // See the anonymous path: a timeout reports lost contact, not
-                // lost work.
-                entry.sticky = false;
-                entry.generation = generation;
-                entry.since = now;
-                entry.seq = seq;
-                changes.upgraded.push(KeyedWireStatus {
-                    key: Some(key.clone()),
-                    tone: StatusTone::Warning.as_wire().to_string(),
-                    message: entry.message.clone(),
-                    scope: entry.scope.clone(),
-                    sticky: entry.sticky,
-                });
+    fn upgrade_keyed_busys(
+        &mut self,
+        keys: Vec<String>,
+        now: Instant,
+        changes: &mut StatusTickChanges,
+    ) {
+        for key in keys {
+            if let Some(upgraded) = self.upgrade_keyed_busy(&key, now) {
+                changes.upgraded.push(upgraded);
             }
         }
+    }
 
-        changes
+    fn upgrade_keyed_busy(&mut self, key: &str, now: Instant) -> Option<KeyedWireStatus> {
+        let entry = self.entries.get_mut(key)?;
+        crate::logger::warn(&format!(
+            "status key \"{key}\" left Busy with no final (\"{}\"); upgrading to a timed-out warning",
+            entry.message
+        ));
+        let generation = Generation(self.next_gen);
+        let seq = self.next_seq;
+        self.next_gen += 1;
+        self.next_seq += 1;
+        entry.tone = StatusTone::Warning;
+        entry.message = "timed out — check dux.log".to_string();
+        entry.sticky = false;
+        entry.generation = generation;
+        entry.since = now;
+        entry.seq = seq;
+        Some(KeyedWireStatus {
+            key: Some(key.to_string()),
+            tone: StatusTone::Warning.as_wire().to_string(),
+            message: entry.message.clone(),
+            scope: entry.scope.clone(),
+            sticky: entry.sticky,
+        })
     }
 
     /// All open statuses (anonymous slot first if present, then keyed entries
