@@ -4746,7 +4746,14 @@ impl App {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
                 self.clear_overlay_area(frame, popup);
-                let commands = self.filtered_palette_commands(&input.text);
+                let (direct, other) = self.palette_command_tiers(&input.text);
+                let divider_at = (!other.is_empty()).then_some(direct.len());
+                let mut commands = direct;
+                commands.extend(other);
+                let visual_rows = palette_visual_rows(
+                    divider_at.unwrap_or(commands.len()),
+                    divider_at.map_or(0, |at| commands.len() - at),
+                );
                 let items = if commands.is_empty() {
                     vec![ListItem::new("No matching commands.")]
                 } else {
@@ -4757,9 +4764,24 @@ impl App {
                         .unwrap_or(0);
                     let inner_w = popup.width as usize - 3;
                     let gap = 2usize;
-                    commands
+                    visual_rows
                         .iter()
-                        .map(|binding| {
+                        .map(|row| {
+                            let index = match row {
+                                PaletteVisualRow::Divider => {
+                                    // The one non-selectable row, in the same
+                                    // tone the worktree manager's section
+                                    // headers use.
+                                    return ListItem::new(Line::from(Span::styled(
+                                        " Other matches",
+                                        Style::default()
+                                            .fg(self.theme.help_section_header_fg)
+                                            .add_modifier(Modifier::BOLD),
+                                    )));
+                                }
+                                PaletteVisualRow::Command(index) => *index,
+                            };
+                            let binding = commands[index];
                             let name = binding.palette_name.unwrap();
                             let name_padded = format!("{name:name_col$}");
                             let mut spans = vec![Span::styled(
@@ -4785,8 +4807,14 @@ impl App {
                         })
                         .collect::<Vec<_>>()
                 };
-                let mut state = ListState::default()
-                    .with_selected(Some((*selected).min(commands.len().saturating_sub(1))));
+                // `selected` counts commands; the list counts rows, and the
+                // divider is a row with no command behind it.
+                let selected_command = (*selected).min(commands.len().saturating_sub(1));
+                let selected_visual = visual_rows
+                    .iter()
+                    .position(|row| *row == PaletteVisualRow::Command(selected_command))
+                    .unwrap_or(0);
+                let mut state = ListState::default().with_selected(Some(selected_visual));
                 let [input_area, list_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Length(3), Constraint::Min(3)])
@@ -4845,20 +4873,22 @@ impl App {
                 // offset counts whole items and never clips the top one, so the
                 // unit here is items — `state.offset()` (read AFTER the render,
                 // which is what scrolls it to the selection), the list viewport
-                // in rows (one row per item here), and the command count.
+                // in rows (one row per item here), and the VISUAL row count,
+                // which counts the divider: it occupies a row and has to be
+                // scrolled past like any other.
                 render_scroll_marker(
                     frame,
                     list_area,
                     list_inner,
                     state.offset(),
                     list_inner.height as usize,
-                    commands.len(),
+                    visual_rows.len(),
                     self.theme.hint_key_fg,
                 );
                 self.overlay_layout.active = OverlayMouseLayout::Command {
                     input: input_inner,
                     list: list_inner,
-                    items: commands.len(),
+                    items: visual_rows.len(),
                     offset: state.offset(),
                 };
             }
@@ -17366,6 +17396,105 @@ mod tests {
         let (app, buf) = palette_frame((120, 40), "", items - 1);
         let (_, border_column) = palette_rects(&app);
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↑"));
+    }
+
+    /// The palette list's rows as trimmed strings, in order.
+    fn palette_list_rows(app: &App, buf: &ratatui::buffer::Buffer) -> Vec<String> {
+        let (list, _) = palette_rects(app);
+        (0..list.height)
+            .map(|row| row_text(buf, list, row).trim_end().to_string())
+            .filter(|row| !row.trim().is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn the_palette_draws_an_other_matches_divider_between_the_two_tiers() {
+        // `agent tab` is a phrase in two commands and two loose words in a
+        // third, so the answer needs the boundary drawn.
+        let (app, buf) = palette_frame((160, 30), "agent tab", 0);
+        assert_eq!(
+            palette_list_rows(&app, &buf),
+            vec![
+                "new-agent-tab            Add a tab to the selected agent, choosing its provider",
+                "toggle-always-show-tabs  Toggle always showing the agent tab strip, even with a single tab",
+                " Other matches",
+                "toggle-tab-to-agent      Toggle whether Tab reaches the agent instead of moving between panes",
+                "close-tab                Close the focused tab of the selected agent",
+            ],
+            "rendered palette rows"
+        );
+    }
+
+    #[test]
+    fn the_palette_draws_no_divider_without_a_second_tier() {
+        for query in ["", "toggle-github", "agent"] {
+            let (app, buf) = palette_frame((100, 20), query, 0);
+            assert!(
+                !palette_list_rows(&app, &buf)
+                    .iter()
+                    .any(|row| row.contains("Other matches")),
+                "query {query:?} must not draw a divider"
+            );
+        }
+    }
+
+    #[test]
+    fn the_divider_is_the_first_row_when_nothing_matches_the_phrase() {
+        // Nothing is named or described `new tab`, so the whole answer is the
+        // looser tier and the divider is what labels it.
+        let (app, buf) = palette_frame((100, 20), "new tab", 0);
+        let rows = palette_list_rows(&app, &buf);
+        assert_eq!(rows.first().map(String::as_str), Some(" Other matches"));
+        assert!(
+            rows[1].starts_with("new-agent-tab"),
+            "the one loose match must follow the divider: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_divider_is_drawn_in_the_section_header_tone_and_never_highlighted() {
+        let (app, buf) = palette_frame((100, 20), "agent tab", 0);
+        let (list, _) = palette_rects(&app);
+        let divider_row = (0..list.height)
+            .find(|row| row_text(&buf, list, *row).contains("Other matches"))
+            .expect("divider row");
+        let cell = &buf[(list.x + 1, list.y + divider_row)];
+        assert_eq!(cell.fg, app.theme.help_section_header_fg);
+        assert_ne!(
+            cell.bg,
+            app.theme.selection_style().bg.unwrap_or(cell.bg),
+            "the divider must never render as the selected row"
+        );
+    }
+
+    #[test]
+    fn the_palette_marker_counts_the_divider_as_a_row() {
+        // A two-row viewport over four commands and the divider: the marker
+        // has to be told the list is five rows, not four.
+        let (app, buf) = palette_frame((160, 16), "agent tab", 0);
+        let (list, border_column) = palette_rects(&app);
+        let items = match app.overlay_layout.active {
+            OverlayMouseLayout::Command { items, .. } => items,
+            _ => unreachable!(),
+        };
+        assert_eq!(items, 5, "four commands plus the divider");
+        assert_eq!(list.height, 2, "fixture must overflow its viewport");
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
+
+        // Selecting the last command scrolls the divider off the top.
+        let (app, buf) = palette_frame((160, 16), "agent tab", 3);
+        let (list, border_column) = palette_rects(&app);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↑"));
+        assert!(
+            !palette_list_rows(&app, &buf)
+                .iter()
+                .any(|row| row.contains("Other matches")),
+            "the divider has scrolled above the viewport"
+        );
+        assert!(
+            row_text(&buf, list, list.height - 1).contains("close-tab"),
+            "the last command must be on screen"
+        );
     }
 
     #[test]

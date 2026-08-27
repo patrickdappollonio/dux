@@ -1918,12 +1918,57 @@ impl RuntimeBindings {
         sections
     }
 
-    /// All palette-visible bindings matching a filter string.
+    /// All palette-visible bindings matching a filter string, in two tiers.
     ///
-    /// Matching is case-insensitive and treats runs of whitespace and dashes
-    /// as interchangeable separators, so a query like `open current pr` still
-    /// matches the dashed command name `open-current-pr`.
+    /// `direct` is the palette's original rule, unchanged: case-insensitive,
+    /// runs of whitespace and dashes interchangeable, and the whole query has
+    /// to appear CONTIGUOUSLY in the command name or, failing that, in its
+    /// description. It is a phrase match, so `open current pr` finds
+    /// `open-current-pr` but `new tab` finds nothing.
+    ///
+    /// `other` is the looser tier the divider sits above: the words in any
+    /// order, each of them possibly partial, ranked by
+    /// [`dux_core::palette::search`], with everything already in `direct`
+    /// removed. It can only ever be non-empty for a MULTI-token query, because
+    /// a single token that prefixes a document token is by construction a
+    /// substring of that same text and so is already a direct hit.
+    pub fn palette_matches(&self, input: &str) -> PaletteMatches<'_> {
+        let direct = self.direct_palette_matches(input);
+        let other = dux_core::palette::search::ranked_matches(input)
+            .into_iter()
+            .map(|hit| dux_core::palette::PALETTE_COMMANDS[hit.index].name)
+            .filter(|name| {
+                !direct
+                    .iter()
+                    .any(|binding| binding.palette_name == Some(*name))
+            })
+            .filter_map(|name| {
+                self.bindings
+                    .iter()
+                    .find(|binding| binding.palette_name == Some(name))
+            })
+            .collect();
+        PaletteMatches { direct, other }
+    }
+
+    /// Both tiers of [`RuntimeBindings::palette_matches`] as one flat list,
+    /// the direct hits first. Callers that need to draw the boundary between
+    /// them ask for the tiers instead; this is the convenience for everyone
+    /// who just wants the matches.
+    ///
+    /// The app itself asks for the tiers, because it draws the boundary and
+    /// availability-filters each side separately; this stays as the shape
+    /// every other caller (and the binding tests) wants.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn filtered_palette(&self, input: &str) -> Vec<&RuntimeBinding> {
+        let matches = self.palette_matches(input);
+        let mut flat = matches.direct;
+        flat.extend(matches.other);
+        flat
+    }
+
+    /// The contiguous-phrase tier, which is the palette's original matching.
+    fn direct_palette_matches(&self, input: &str) -> Vec<&RuntimeBinding> {
         let needle = normalize_palette_match(input);
         if needle.is_empty() {
             return self
@@ -1948,6 +1993,18 @@ impl RuntimeBindings {
         name_matches.extend(desc_matches);
         name_matches
     }
+}
+
+/// The palette's matches, split at the boundary the "Other matches" divider
+/// is drawn on. Two tiers rather than one merged ranking because the looser
+/// hits are meant to sit visibly BELOW the exact ones, not to be interleaved
+/// with them by a score.
+pub struct PaletteMatches<'a> {
+    /// Contiguous-phrase matches, in the palette's canonical table order.
+    pub direct: Vec<&'a RuntimeBinding>,
+    /// Looser matches (words in any order, partial words), best first, with
+    /// the direct hits removed.
+    pub other: Vec<&'a RuntimeBinding>,
 }
 
 /// Lowercase `s` and collapse any run of whitespace or dash characters into a
@@ -2706,6 +2763,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn palette_names<'a>(bindings: &[&'a RuntimeBinding]) -> Vec<&'a str> {
+        bindings
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect()
+    }
+
+    #[test]
+    fn palette_matches_puts_a_reordered_query_in_the_second_tier() {
+        let bindings = default_bindings();
+        let matches = bindings.palette_matches("new tab");
+        assert!(
+            matches.direct.is_empty(),
+            "`new tab` is not a contiguous phrase anywhere: {:?}",
+            palette_names(&matches.direct)
+        );
+        assert_eq!(palette_names(&matches.other), vec!["new-agent-tab"]);
+    }
+
+    #[test]
+    fn palette_matches_never_repeats_a_direct_hit_in_the_second_tier() {
+        let bindings = default_bindings();
+        let matches = bindings.palette_matches("sort agents");
+        assert!(
+            palette_names(&matches.direct).contains(&"sort-agents"),
+            "the phrase tier must still own this one: {:?}",
+            palette_names(&matches.direct)
+        );
+        assert!(
+            !palette_names(&matches.other).contains(&"sort-agents"),
+            "a direct hit must not be repeated below the divider"
+        );
+    }
+
+    #[test]
+    fn palette_matches_has_no_second_tier_for_an_empty_or_single_word_query() {
+        let bindings = default_bindings();
+        let empty = bindings.palette_matches("");
+        assert!(!empty.direct.is_empty());
+        assert!(
+            empty.other.is_empty(),
+            "an empty query lists everything once"
+        );
+
+        // A single token that prefixes a document token is by construction a
+        // substring of that same text, so it is always a direct hit already.
+        for query in ["agent", "wor", "pr", "toggle"] {
+            let matches = bindings.palette_matches(query);
+            assert!(
+                matches.other.is_empty(),
+                "single-token query {query:?} produced a second tier: {:?}",
+                palette_names(&matches.other)
+            );
+        }
+    }
+
+    #[test]
+    fn filtered_palette_is_both_tiers_flattened_in_order() {
+        let bindings = default_bindings();
+        let matches = bindings.palette_matches("agent tab");
+        let mut expected = palette_names(&matches.direct);
+        expected.extend(palette_names(&matches.other));
+        assert_eq!(
+            palette_names(&bindings.filtered_palette("agent tab")),
+            expected
+        );
+        assert!(
+            !matches.direct.is_empty() && !matches.other.is_empty(),
+            "fixture must exercise both tiers"
+        );
     }
 
     #[test]
