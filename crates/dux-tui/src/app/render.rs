@@ -9111,10 +9111,8 @@ impl App {
             ]),
             Line::from(""),
         ];
-        // The FOLDER target is handled before this match (it needs
-        // `&mut self` for the shared frame renderer, which the borrow
-        // here would not allow), so only the managed shape reaches this
-        // arm.
+        // Folder targets render first because they need `&mut self`; only managed
+        // targets reach this borrowed match.
         let Some((branch_name, initial_branch, branch_provenance, worktree_shared)) = managed
         else {
             return;

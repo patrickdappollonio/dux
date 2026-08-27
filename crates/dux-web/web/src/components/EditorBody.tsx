@@ -734,13 +734,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     setBuffers,
   })
 
-  // Monaco model disposal: dispose a path's model once no tab holds it open
-  // anymore. Diffs by the SET OF OPEN PATHS (not tab ids), see the
-  // `prevOpenPathsRef` comment above for why that's required for a
-  // preview-replace's OLD path to get disposed too.
-  //
-  // This tick also prunes the component-owned buffer and preview caches. The
-  // file and diff hooks prune their request tokens against the same tab list.
+  // Dispose and prune by the set of open paths so preview replacement and every
+  // tab-scoped cache observe the same snapshot.
   useEffect(() => {
     const currentPaths = new Set(tabs.map((t) => t.path))
     const mon = monacoRef.current
