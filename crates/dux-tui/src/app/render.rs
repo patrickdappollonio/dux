@@ -14492,6 +14492,46 @@ mod tests {
             .join("\n")
     }
 
+    #[test]
+    fn deleting_agent_row_keeps_attention_shape_but_uses_deletion_style() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::List;
+
+        let mut app = test_app(default_bindings());
+        app.engine.sessions[0].status = crate::model::SessionStatus::Active;
+        let session = app.engine.sessions[0].clone();
+        app.engine.config.ui.attention_indicator = true;
+        app.engine.pending_deletions.insert(session.id.clone());
+        app.engine.needs_attention.insert(session.id.clone());
+        app.engine
+            .pty_activity
+            .insert(session.id.clone(), Instant::now());
+        app.start_time = Instant::now() - Duration::from_millis(1500);
+
+        let item = app.render_agent_row(&session, 60);
+        let mut terminal = Terminal::new(TestBackend::new(60, 3)).expect("terminal");
+        terminal
+            .draw(|frame| frame.render_widget(List::new(vec![item]), frame.area()))
+            .expect("render row");
+        let buf = terminal.backend().buffer();
+
+        assert_eq!(buf[(0, 0)].symbol(), crate::theme::ATTENTION_GLYPH);
+        for cell in [&buf[(0, 0)], &buf[(2, 0)]] {
+            assert_eq!(cell.fg, app.theme.session_deleting);
+            assert!(cell.modifier.contains(Modifier::ITALIC));
+        }
+        let state_x = (0..=51)
+            .find(|x| {
+                (0..9)
+                    .map(|offset| buf[(x + offset, 1)].symbol())
+                    .collect::<String>()
+                    == "Needs you"
+            })
+            .expect("attention state word");
+        assert_eq!(buf[(state_x, 1)].fg, app.theme.session_deleting);
+    }
+
     /// Render the strip and return the label row's cells as
     /// `(symbol, fg, modifier)`.
     fn tab_strip_label_row(app: &mut App, width: u16) -> Vec<(String, Color, Modifier)> {
@@ -16423,6 +16463,57 @@ mod tests {
     }
 
     #[test]
+    fn new_macro_editor_titles_and_marks_the_both_surface() {
+        let mut app = test_app(default_bindings());
+        app.open_edit_macros();
+        let new_key = app
+            .bindings
+            .first_key_reaching(Action::NewMacro, |_| true)
+            .expect("new macro binding");
+        app.handle_key(press(new_key)).expect("open new macro");
+        match &mut app.prompt {
+            PromptState::EditMacros {
+                editing: Some(state),
+                ..
+            } => {
+                state.surface = MacroSurface::Both;
+                state.focus = MacroEditFocus::Surface;
+            }
+            other => panic!("expected a new macro editor, got {other:?}"),
+        }
+
+        let buf = draw(&mut app);
+        let title = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|row| row.contains("New Macro"))
+            .expect("new editor title");
+        assert!(!title.contains("Edit Macro:"));
+
+        let OverlayMouseLayout::EditMacros {
+            surface_options, ..
+        } = app.overlay_layout.active
+        else {
+            panic!("expected macro editor layout");
+        };
+        assert_eq!(
+            buf[(surface_options[0].x, surface_options[0].y)].symbol(),
+            "○"
+        );
+        assert_eq!(
+            buf[(surface_options[1].x, surface_options[1].y)].symbol(),
+            "○"
+        );
+        assert_eq!(
+            buf[(surface_options[2].x, surface_options[2].y)].symbol(),
+            "●"
+        );
+    }
+
+    #[test]
     fn macro_editor_focused_control_renders_differently_from_the_unfocused_ones() {
         use super::MacroEditFocus;
 
@@ -16737,6 +16828,43 @@ mod tests {
     #[test]
     fn truncate_status_text_empty_input() {
         assert_eq!(truncate_status_text("", 10), "");
+    }
+
+    #[test]
+    fn footer_marks_hint_overflow_and_preserves_warning_tone() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.status.set(
+            Instant::now(),
+            None,
+            StatusTone::Warning,
+            "abcdefghijklmnopqrstuvwxyz",
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(9, 3)).expect("terminal");
+        terminal
+            .draw(|frame| app.render_footer(frame, frame.area()))
+            .expect("render footer");
+        let buf = terminal.backend().buffer();
+        let hint_row = (0..9).map(|x| buf[(x, 0)].symbol()).collect::<String>();
+        assert!(
+            hint_row.contains('…'),
+            "overflow marker missing: {hint_row:?}"
+        );
+
+        let (dot, dot_color) = app.theme.status_dot(StatusTone::Warning);
+        assert_eq!(buf[(1, 1)].symbol(), dot);
+        assert_eq!(buf[(1, 1)].fg, dot_color);
+        assert_eq!(buf[(0, 1)].bg, app.theme.status_info_bg);
+        let message_cell = (1..3)
+            .flat_map(|y| (0..9).map(move |x| (x, y)))
+            .map(|pos| &buf[pos])
+            .find(|cell| cell.symbol() == "a")
+            .expect("warning message cell");
+        assert_eq!(message_cell.fg, app.theme.warning_fg);
     }
 
     fn spans_width(spans: &[Span<'static>]) -> u16 {
