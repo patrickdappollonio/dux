@@ -14916,6 +14916,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn agent_terminal_loading_frame_publishes_the_grid_it_resizes_and_hints() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let client = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            std::path::Path::new("."),
+            5,
+            40,
+            100,
+        )
+        .expect("spawn pty");
+        assert!(!client.has_output(), "test setup: the PTY is still loading");
+        app.engine.providers.insert(session_id.clone(), client);
+        app.session_surface = SessionSurface::Agent;
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Left;
+        app.input_target = InputTarget::None;
+
+        let area = Rect::new(3, 2, 70, 14);
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+        terminal
+            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", false))
+            .expect("render frame");
+
+        let expected_grid = Rect::new(4, 3, 68, 10);
+        assert_eq!(app.mouse_layout.agent_term, Some(expected_grid));
+        assert_eq!(
+            app.last_pty_size,
+            (expected_grid.height, expected_grid.width)
+        );
+        assert_eq!(
+            app.last_pty_resize_target.as_deref(),
+            Some(session_id.as_str())
+        );
+        let rendered = buffer_rows(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("Starting"), "loading card: {rendered}");
+        assert!(
+            rendered.contains("focus and type"),
+            "non-interactive live-agent hint: {rendered}"
+        );
+    }
+
+    #[test]
+    fn dormant_support_tab_uses_the_terminal_grid_without_restoring_the_logo() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_render_tab(&mut app, &session_id, "dormant-tab", "codex", 1);
+        app.set_focused_tab(&session_id, "dormant-tab");
+        app.session_surface = SessionSurface::Agent;
+        app.welcome_logo_visible = true;
+
+        let area = Rect::new(3, 2, 70, 14);
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+        terminal
+            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", false))
+            .expect("render frame");
+
+        assert_eq!(app.mouse_layout.agent_term, Some(Rect::new(4, 3, 68, 10)));
+        assert!(!app.welcome_logo_visible);
+        let rendered = buffer_rows(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("Tab not running"),
+            "dormant card: {rendered}"
+        );
+        assert!(
+            rendered.contains("Press Enter to start a fresh session."),
+            "dormant action: {rendered}"
+        );
+    }
+
     /// Regression test for issue #258: while the interactive agent terminal is
     /// rendered, the real (hardware) terminal cursor must be moved onto the
     /// embedded PTY cursor cell. IME composition popups (e.g. a Korean IME) are
