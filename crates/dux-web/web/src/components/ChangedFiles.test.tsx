@@ -620,6 +620,73 @@ describe("the changes pane's multi-select", () => {
       screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
     ).toBeNull()
   })
+
+  it("scopes checked paths to their session and restores them on return", () => {
+    const view = render(<ChangedFiles />)
+    check("a.ts")
+
+    const second = withFiles([], [["other.ts", "M"]])
+    mockState = {
+      ...second,
+      selectedSessionId: "s2",
+      changes: { ...second.changes, sessionId: "s2" },
+    }
+    view.rerender(<ChangedFiles />)
+
+    expect(
+      screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
+    ).toBeNull()
+    expect(screen.getByLabelText("Select other.ts").getAttribute("aria-checked")).toBe(
+      "false",
+    )
+
+    mockState = withFiles(
+      [["staged.ts", "M"]],
+      [["a.ts", "M"], ["b.ts", "??"]],
+    )
+    view.rerender(<ChangedFiles />)
+
+    expect(screen.getByLabelText("Select a.ts").getAttribute("aria-checked")).toBe(
+      "true",
+    )
+    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+  })
+
+  it("drops every attempted path after a partial bulk result", async () => {
+    stageMany.mockResolvedValueOnce({ done: ["a.ts"], refused: ["b.ts"] })
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("b.ts")
+
+    fireEvent.click(bar().getByRole("button", { name: "Stage 2" }))
+    await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
+
+    expect(
+      screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
+    ).toBeNull()
+    expect(notifyWarning).toHaveBeenCalledWith(
+      "1 file staged. 1 file had already left the list, starting with b.ts.",
+    )
+  })
+
+  it("keeps the selection and releases busy state after a bulk request error", async () => {
+    stageMany.mockRejectedValueOnce("offline")
+    render(<ChangedFiles />)
+    check("a.ts")
+
+    fireEvent.click(bar().getByRole("button", { name: "Stage 1" }))
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(notifyError).toHaveBeenCalledWith("could not stage the files")
+    expect(screen.getByLabelText("Select a.ts").getAttribute("aria-checked")).toBe(
+      "true",
+    )
+    const button = bar().getByRole("button", { name: "Stage 1" })
+    expect(button.getAttribute("aria-busy")).toBe("false")
+    expect(button.hasAttribute("disabled")).toBe(false)
+  })
 })
 
 describe("the changes pane's selection on a touch screen", () => {
@@ -705,6 +772,36 @@ describe("the bulk bar's Select all toggle", () => {
     fireEvent.click(bar().getByRole("button", { name: "Select all" }))
 
     expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+  })
+
+  it("changes visible rows across sections without touching hidden rows", () => {
+    mockState = withFiles(
+      [["visible-staged.ts", "M"], ["hidden-staged.ts", "M"]],
+      [["visible-unstaged.ts", "M"], ["hidden-unstaged.ts", "M"]],
+    )
+    render(<ChangedFiles />)
+    check("hidden-staged.ts")
+    fireEvent.change(screen.getByLabelText("Filter changed files"), {
+      target: { value: "visible" },
+    })
+
+    fireEvent.click(bar().getByRole("button", { name: "Select all" }))
+    fireEvent.change(screen.getByLabelText("Filter changed files"), {
+      target: { value: "" },
+    })
+
+    expect(
+      screen.getByLabelText("Select visible-staged.ts").getAttribute("aria-checked"),
+    ).toBe("true")
+    expect(
+      screen.getByLabelText("Select visible-unstaged.ts").getAttribute("aria-checked"),
+    ).toBe("true")
+    expect(
+      screen.getByLabelText("Select hidden-staged.ts").getAttribute("aria-checked"),
+    ).toBe("true")
+    expect(
+      screen.getByLabelText("Select hidden-unstaged.ts").getAttribute("aria-checked"),
+    ).toBe("false")
   })
 
   // Select none acts on what is on screen, so a checked row the filter hides
