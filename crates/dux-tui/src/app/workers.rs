@@ -1846,6 +1846,17 @@ mod tests {
         app.center_mode = CenterMode::Agent;
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.terminal_selection = Some(TerminalSelection {
+            anchor: TermGridPos { row: 0, col: 0 },
+            end: TermGridPos { row: 0, col: 1 },
+            dragging: true,
+            origin: app.snapshot_selection_origin(),
+        });
+        app.raw_input_parser
+            .feed_sequences(crate::raw_input::BRACKET_PASTE_START);
+        app.in_bracket_paste = true;
+        app.raw_input_buf = b"pending".to_vec();
+        app.loading_input_buf = b"loading".to_vec();
 
         // Wait for END OF INPUT *and* a reaped exit status, then let a single
         // drain_events observe it. See `wait_for_pty_eof`: a PTY missing either
@@ -1860,6 +1871,16 @@ mod tests {
             "the exited tab should have been pruned"
         );
         app
+    }
+
+    fn assert_agent_input_cleared(app: &crate::app::App) {
+        assert_eq!(app.input_target, InputTarget::None);
+        assert!(app.terminal_selection.is_none());
+        assert!(!app.in_bracket_paste);
+        assert!(app.raw_input_buf.is_empty());
+        assert!(app.raw_input_parser.pending().is_empty());
+        assert!(!app.raw_input_parser.in_bracket_paste());
+        assert!(app.loading_input_buf.is_empty());
     }
 
     /// #1 regression: the TUI exit-prune teardown must clear EVERY runtime map
@@ -1933,7 +1954,7 @@ mod tests {
             !app.engine.agent_tabs.contains_key("tab-x"),
             "a clean exit must close the tab (delete its row)"
         );
-        assert_eq!(app.input_target, InputTarget::None);
+        assert_agent_input_cleared(&app);
         assert_eq!(
             app.fullscreen_overlay,
             FullscreenOverlay::None,
@@ -1957,11 +1978,7 @@ mod tests {
             app.engine.agent_tabs.contains_key("tab-x"),
             "a crash must keep the tab row for diagnosis/relaunch"
         );
-        assert_eq!(
-            app.input_target,
-            InputTarget::None,
-            "interactive input must drop the moment the focused tab's CLI exits"
-        );
+        assert_agent_input_cleared(&app);
         assert_eq!(
             app.fullscreen_overlay,
             FullscreenOverlay::Agent,
