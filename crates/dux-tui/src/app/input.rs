@@ -15214,6 +15214,76 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn mouse_click_staged_row_focuses_and_selects_that_section() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.engine.staged_files = vec![
+            ChangedFile {
+                path: "a.txt".into(),
+                status: "M".into(),
+                additions: 1,
+                deletions: 0,
+                binary: false,
+            },
+            ChangedFile {
+                path: "b.txt".into(),
+                status: "M".into(),
+                additions: 2,
+                deletions: 1,
+                binary: false,
+            },
+        ];
+        app.focus = FocusPane::Center;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 10));
+
+        assert_eq!(app.focus, FocusPane::Files);
+        assert_eq!(app.right_section, RightSection::Staged);
+        assert_eq!(app.files_index, 1);
+    }
+
+    #[test]
+    fn mouse_wheel_routes_through_the_staged_file_section() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.engine.staged_files = (0..3)
+            .map(|index| ChangedFile {
+                path: format!("{index}.txt").into(),
+                status: "M".into(),
+                additions: 1,
+                deletions: 0,
+                binary: false,
+            })
+            .collect();
+        app.files_index = 0;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 79, 10));
+
+        assert_eq!(app.focus, FocusPane::Files);
+        assert_eq!(app.right_section, RightSection::Staged);
+        assert_eq!(app.files_index, 1);
+    }
+
+    #[test]
+    fn mouse_click_terminal_row_selects_the_terminal_section() {
+        let mut app = test_app(default_bindings());
+        app.show_companion_terminal().expect("launch terminal");
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+        install_mouse_layout(&mut app);
+        app.mouse_layout.terminal_list = Rect::new(1, 12, 18, 3);
+        app.mouse_layout.terminal_row_to_item = vec![0, 0, 0];
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 13));
+
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.left_section, LeftSection::Terminals);
+        assert_eq!(app.selected_terminal_index, 0);
+        assert_eq!(app.input_target, InputTarget::None);
+    }
+
+    #[test]
     fn mouse_click_right_pane_chrome_focuses_files_pane() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
