@@ -1488,11 +1488,12 @@ function loadBootstrap(): void {
     })
 }
 
-// Apply a freshly fetched bootstrap. Also reconciles the optimistic Changes-pane
-// override: the toggle persists to config, the server emits `config.changed`,
-// the refetched bootstrap carries the
-// confirmed `show_changes_pane`, and the override is dropped once it matches so
-// config becomes the single source of truth across every client.
+function reconcileConfirmedOverride<T>(override: T | null, configured: T): T | null {
+  return override !== null && override === configured ? null : override
+}
+
+// Applies fresh config and retires optimistic overrides once the server confirms
+// them, leaving config as the shared source of truth.
 function applyBootstrap(b: Bootstrap): void {
   // Publish the user's auto-clear window to the one raiser, which reads it on
   // the way past on every notification. Nothing downstream captures it, so
@@ -1506,24 +1507,21 @@ function applyBootstrap(b: Bootstrap): void {
   publishConnectionTiming(b)
   setState({
     bootstrap: b,
-    changesPaneOverride:
-      state.changesPaneOverride !== null &&
-      state.changesPaneOverride === b.show_changes_pane
-        ? null
-        : state.changesPaneOverride,
+    changesPaneOverride: reconcileConfirmedOverride(
+      state.changesPaneOverride,
+      b.show_changes_pane,
+    ),
     // Same reconcile for the two mobile-bar overrides: drop each optimistic
     // override once the refetched config confirms it, so config becomes the
     // single source of truth across every connected client.
-    mobileTopBarOverride:
-      state.mobileTopBarOverride !== null &&
-      state.mobileTopBarOverride === (b.mobile_top_bar ?? true)
-        ? null
-        : state.mobileTopBarOverride,
-    mobileAccessoryBarOverride:
-      state.mobileAccessoryBarOverride !== null &&
-      state.mobileAccessoryBarOverride === (b.mobile_accessory_bar ?? true)
-        ? null
-        : state.mobileAccessoryBarOverride,
+    mobileTopBarOverride: reconcileConfirmedOverride(
+      state.mobileTopBarOverride,
+      b.mobile_top_bar ?? true,
+    ),
+    mobileAccessoryBarOverride: reconcileConfirmedOverride(
+      state.mobileAccessoryBarOverride,
+      b.mobile_accessory_bar ?? true,
+    ),
     // Same reconcile as changesPaneOverride: drop the optimistic sort override once
     // the refetched config confirms it, so config.ui.agent_sort is the single truth.
     agentSort:

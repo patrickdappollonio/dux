@@ -1059,6 +1059,34 @@ pub struct WireCommandOutcome {
     pub created_op_id: Option<String>,
 }
 
+impl WireCommandOutcome {
+    fn with_status(status: WireStatus) -> Self {
+        Self {
+            status: Some(status),
+            ..Self::default()
+        }
+    }
+
+    fn with_optional_status(status: Option<WireStatus>) -> Self {
+        Self {
+            status,
+            ..Self::default()
+        }
+    }
+
+    fn with_detached(status: WireStatus, detached: bool) -> Self {
+        Self {
+            status: Some(status),
+            detached: Some(detached),
+            created_op_id: None,
+        }
+    }
+
+    fn quiet() -> Self {
+        Self::default()
+    }
+}
+
 /// Statuses produced by a web `drive_*_followup`, plus any keyed busies the
 /// followup resolved to a `Final::Clear`. A `WireStatus` cannot represent a
 /// clear (it has no "clear" tone — clearing is a separate `StatusEmitter::clear`
@@ -1274,76 +1302,43 @@ impl Engine {
     }
 
     fn apply_wire_inner(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
-        // Rename and Reconnect need `&mut self` and don't map cleanly onto a
-        // single `Command`, so they're handled directly here rather than via
-        // `wire_to_command`/`apply`.
+        // Commands with direct engine methods or custom output shaping return
+        // here; the rest use the shared `wire_to_command`/`apply` tail.
         match command {
             WireCommand::RenameSession { session_id, title } => {
                 let status = self.rename_session(&session_id, &title)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::ReconnectSession { session_id, force } => {
                 let status = self.reconnect_session(&session_id, force)?;
-                return Ok(WireCommandOutcome {
-                    status,
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_optional_status(status));
             }
             WireCommand::RerunStartupCommand { session_id } => {
                 let status = self.rerun_startup_command(&session_id)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::CheckoutProjectDefaultBranch { project_id } => {
                 let status = self.checkout_project_default_branch(&project_id)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::AddProjectCheckoutDefault { path, name } => {
                 let status = self.add_project_checkout_default(&path, name)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::AddProjectCreateInitialCommit { path, name } => {
                 let status = self.add_project_create_initial_commit(&path, name)?;
-                return Ok(WireCommandOutcome {
-                    status,
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_optional_status(status));
             }
             WireCommand::AddProjectInitRepo { path, name } => {
                 let status = self.add_project_init_repo(&path, name)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::ChangeAgentProvider {
                 session_id,
                 provider,
             } => {
                 let status = self.change_agent_provider_wire(&session_id, &provider)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::CreateAgentFromPr {
                 project_id,
@@ -1351,105 +1346,55 @@ impl Engine {
                 name,
             } => {
                 let status = self.create_agent_from_pr(&project_id, &pr, name)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::SetChangesPaneVisible { visible } => {
                 let status = self.set_changes_pane_visible(visible);
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::SetInstanceIdentity { title, favicon } => {
                 let status = self.set_instance_identity(title, favicon)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::SetSettings(patch) => {
                 // `set_settings` decides its own status presence: a quiet
                 // mobile-bar-only patch succeeds with `None` (no toast).
                 let status = self.set_settings(patch)?;
-                return Ok(WireCommandOutcome {
-                    status,
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_optional_status(status));
             }
             WireCommand::ToggleRandomizedPetNameDefault {} => {
                 let status = self.toggle_randomized_pet_name_default();
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::TogglePrBannerPosition {} => {
                 let status = self.toggle_pr_banner_position();
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::SetAgentSort { sort } => {
                 let status = self.set_agent_sort(&sort);
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::ToggleCopyOnSelect {} => {
                 let status = self.toggle_copy_on_select();
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::ToggleAlwaysShowTabStrip {} => {
                 let status = self.toggle_always_show_tab_strip();
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::ToggleTabReachesAgent {} => {
                 let status = self.toggle_tab_reaches_agent();
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::SetTailscaleMode { mode } => {
                 self.set_tailscale_mode(&mode)?;
-                // No status: the sentence a user sees names what happened to the
-                // LISTENER, which the caller learns from the serve layer after
-                // this write. Saying "saved" here and "detached" a moment later
-                // would be two toasts for one gesture.
-                return Ok(WireCommandOutcome {
-                    status: None,
-                    detached: None,
-                    created_op_id: None,
-                });
+                // The serve layer reports the listener outcome; a status here
+                // would produce two toasts for one gesture.
+                return Ok(WireCommandOutcome::quiet());
             }
             WireCommand::ToggleGithubIntegration {} => {
                 let status = self.toggle_github_integration();
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::AttachPullRequest {
                 session_id,
@@ -1469,51 +1414,33 @@ impl Engine {
                     &state,
                     &url,
                 )?;
-                return Ok(WireCommandOutcome {
-                    status: Some(WireStatus::new("info", message)),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(WireStatus::new(
+                    "info", message,
+                )));
             }
             WireCommand::ClearPullRequestOverride { session_id } => {
                 let message = self.clear_pull_request_override(&session_id)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(WireStatus::new("info", message)),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(WireStatus::new(
+                    "info", message,
+                )));
             }
             WireCommand::ResumePullRequestAutodetection { session_id } => {
                 let message = self.resume_pr_autodetection(&session_id)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(WireStatus::new("info", message)),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(WireStatus::new(
+                    "info", message,
+                )));
             }
             WireCommand::KillSessionPty { session_id } => {
                 let (status, detached) = self.kill_session_pty(&session_id)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: Some(detached),
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_detached(status, detached));
             }
             WireCommand::DetachAgent { session_id } => {
                 let status = self.detach_agent(&session_id)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::CloseAgentTab { session_id, tab_id } => {
                 let (status, detached) = self.close_agent_tab_wire(&session_id, &tab_id)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: Some(detached),
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_detached(status, detached));
             }
             WireCommand::ChangeAgentTabProvider {
                 session_id,
@@ -1521,32 +1448,17 @@ impl Engine {
                 provider,
             } => {
                 let status = self.change_tab_provider_wire(&session_id, &tab_id, &provider)?;
-                return Ok(WireCommandOutcome {
-                    status: Some(status),
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::SetLastFocusedTab { session_id, tab_id } => {
                 self.set_last_focused_tab(&session_id, tab_id.as_deref())?;
-                // Silent: focus changes are high-frequency and user-paced, so no
-                // toast/status is surfaced (see J3 in the tab-focus-memory plan).
-                return Ok(WireCommandOutcome {
-                    status: None,
-                    detached: None,
-                    created_op_id: None,
-                });
+                // Focus changes are high-frequency and user-paced, so they do
+                // not surface a toast or status.
+                return Ok(WireCommandOutcome::quiet());
             }
             WireCommand::AddProject { .. } => {
-                // The direct add (no branch-checkout step) is the primary web add
-                // path. Like the inline checkout-add in `drive_add_project_followup`,
-                // the Add is now synchronous: success returns
-                // `ProjectPersistenceOutcome(Added)` (whose status_message is NOT a
-                // `Status` reaction, so the generic `wire_status_from_reaction` tail
-                // would drop it and leave the user with no confirmation), and a
-                // config-write/DB failure returns an error-toned `Status` (the add
-                // was rolled back). Surface the Added success message explicitly and
-                // relay any other reaction (including the rollback error) verbatim.
+                // Add returns ProjectPersistenceOutcome rather than Status.
+                // Surface Added explicitly and relay rollback errors verbatim.
                 let core = self.wire_to_command(command)?;
                 let reaction = self.apply(core)?;
                 let status = match &reaction {
@@ -1558,11 +1470,7 @@ impl Engine {
                     },
                     _ => wire_status_from_reaction(&reaction),
                 };
-                return Ok(WireCommandOutcome {
-                    status,
-                    detached: None,
-                    created_op_id: None,
-                });
+                return Ok(WireCommandOutcome::with_optional_status(status));
             }
             _ => {}
         }
@@ -1572,11 +1480,7 @@ impl Engine {
         if status.is_none() {
             status = self.drive_delete_followup(&reaction).into_iter().next();
         }
-        Ok(WireCommandOutcome {
-            status,
-            detached: None,
-            created_op_id: None,
-        })
+        Ok(WireCommandOutcome::with_optional_status(status))
     }
 
     /// Persist the Changes (git) pane's visibility to `config.toml`

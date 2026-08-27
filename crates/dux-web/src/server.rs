@@ -3020,16 +3020,8 @@ async fn apply_events_frame(
     engine: &EngineHandle,
     bus: &EventBus,
 ) -> NewSubscriptions {
-    // Process unsubscribes FIRST — they only ever shrink state, so they are always
-    // safe to honor (even on an otherwise-rejected oversized frame) and a frame
-    // carrying both makes room under the cap before the subscribes run.
-    for topic in &frame.unsubscribe {
-        if subscribed.remove(topic) && event_bus::session_id_from_changes_topic(topic).is_some() {
-            bus.drop_interest(topic);
-        }
-    }
+    unsubscribe_event_topics(&frame.unsubscribe, subscribed, bus);
 
-    // Only AFTER honoring unsubscribes, reject an oversized subscribe set.
     if frame.subscribe.len() > MAX_EVENT_TOPICS_PER_FRAME {
         dux_core::logger::warn(&format!(
             "/ws/events subscribe frame rejected: {} topics exceeds the {MAX_EVENT_TOPICS_PER_FRAME} cap",
@@ -3048,51 +3040,76 @@ async fn apply_events_frame(
             ));
             break;
         }
-        // Bound a single topic's length before inserting it or using it for a
-        // (possibly expensive) session lookup.
-        if topic.chars().count() > MAX_TOPIC_LEN {
-            dux_core::logger::debug(&format!(
-                "/ws/events ignoring an over-long topic ({} chars exceeds {MAX_TOPIC_LEN})",
-                topic.chars().count()
-            ));
-            continue;
-        }
-        match event_bus::session_id_from_changes_topic(topic) {
-            // A fine session-changes topic.
-            Some(sid) => {
-                // Already held → O(1), skip the `session_worktree` round-trip.
-                if subscribed.contains(topic) {
-                    continue;
-                }
-                // Validate the session exists before registering interest; drop a
-                // phantom-session subscription with a breadcrumb (the other
-                // rejections log, so this one shouldn't be silent).
-                if engine.session_worktree(sid.to_string()).await.is_none() {
-                    dux_core::logger::debug(&format!(
-                        "/ws/events ignoring subscription to unknown session {sid:?}"
-                    ));
-                    continue;
-                }
-                if subscribed.insert(topic.clone()) {
-                    bus.add_interest(topic);
-                    // Collect for the per-subscribe catch-up emitted at the
-                    // caller, closing the race window between a REST refetch
-                    // and the subscription registering.
-                    new.fine.push(topic.clone());
-                }
-            }
-            // A coarse topic (sessions/projects/config): tracked for forwarding,
-            // but it carries no poll interest.
-            None => {
-                if subscribed.insert(topic.clone()) && (topic == "sessions" || topic == "projects")
-                {
-                    new.workspace = true;
-                }
-            }
+        match subscribe_event_topic(topic, subscribed, engine, bus).await {
+            Some(AddedEventTopic::Fine(topic)) => new.fine.push(topic),
+            Some(AddedEventTopic::Coarse { workspace }) => new.workspace |= workspace,
+            None => {}
         }
     }
 
     new
+}
+
+fn unsubscribe_event_topics(
+    topics: &[String],
+    subscribed: &mut std::collections::HashSet<String>,
+    bus: &EventBus,
+) {
+    for topic in topics {
+        if !subscribed.remove(topic) {
+            continue;
+        }
+        if event_bus::session_id_from_changes_topic(topic).is_some() {
+            bus.drop_interest(topic);
+        }
+    }
+}
+
+enum AddedEventTopic {
+    Fine(String),
+    Coarse { workspace: bool },
+}
+
+async fn subscribe_event_topic(
+    topic: &str,
+    subscribed: &mut std::collections::HashSet<String>,
+    engine: &EngineHandle,
+    bus: &EventBus,
+) -> Option<AddedEventTopic> {
+    let topic_len = topic.chars().count();
+    if topic_len > MAX_TOPIC_LEN {
+        dux_core::logger::debug(&format!(
+            "/ws/events ignoring an over-long topic ({topic_len} chars exceeds {MAX_TOPIC_LEN})"
+        ));
+        return None;
+    }
+    if subscribed.contains(topic) {
+        return None;
+    }
+
+    let session_id = event_bus::session_id_from_changes_topic(topic);
+    if let Some(session_id) = session_id
+        && engine
+            .session_worktree(session_id.to_string())
+            .await
+            .is_none()
+    {
+        dux_core::logger::debug(&format!(
+            "/ws/events ignoring subscription to unknown session {session_id:?}"
+        ));
+        return None;
+    }
+
+    subscribed.insert(topic.to_owned());
+    match session_id {
+        Some(_) => {
+            bus.add_interest(topic);
+            Some(AddedEventTopic::Fine(topic.to_owned()))
+        }
+        None => Some(AddedEventTopic::Coarse {
+            workspace: matches!(topic, "sessions" | "projects"),
+        }),
+    }
 }
 
 /// What one subscribe frame newly registered, and therefore what the connection
@@ -6058,6 +6075,111 @@ mod tests {
                 .workspace,
             "the config topic must not drag the workspace document along"
         );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_subscribe_batch_still_applies_unsubscribes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        let topic = event_bus::changes_topic("s1");
+        let mut subscribed = std::collections::HashSet::from([topic.clone()]);
+        bus.add_interest(&topic);
+
+        let frame = EventsClientFrame {
+            subscribe: (0..=MAX_EVENT_TOPICS_PER_FRAME)
+                .map(|n| format!("topic-{n}"))
+                .collect(),
+            unsubscribe: vec![topic.clone()],
+        };
+        let new = apply_events_frame(&frame, &mut subscribed, &handle, &bus).await;
+
+        assert!(new.fine.is_empty());
+        assert!(!new.workspace);
+        assert!(!subscribed.contains(&topic));
+        assert!(!bus.has_interest(&topic));
+        assert!(
+            subscribed.is_empty(),
+            "an oversized subscribe batch must add no topics"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unsubscribe_makes_room_before_the_connection_cap_is_checked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        let removed = "topic-0".to_string();
+        let mut subscribed: std::collections::HashSet<String> = (0..MAX_EVENT_TOPICS_PER_CONN)
+            .map(|n| format!("topic-{n}"))
+            .collect();
+
+        let frame = EventsClientFrame {
+            subscribe: vec!["sessions".to_string()],
+            unsubscribe: vec![removed.clone()],
+        };
+        let new = apply_events_frame(&frame, &mut subscribed, &handle, &bus).await;
+
+        assert!(!subscribed.contains(&removed));
+        assert!(subscribed.contains("sessions"));
+        assert_eq!(subscribed.len(), MAX_EVENT_TOPICS_PER_CONN);
+        assert!(
+            new.workspace,
+            "the replacement coarse topic must request a workspace replay"
+        );
+    }
+
+    #[tokio::test]
+    async fn fine_topic_subscriptions_are_validated_and_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        let valid = event_bus::changes_topic("s1");
+        let unknown = event_bus::changes_topic("missing");
+        let mut subscribed = std::collections::HashSet::new();
+
+        let frame = EventsClientFrame {
+            subscribe: vec![unknown.clone(), valid.clone(), valid.clone()],
+            unsubscribe: vec![],
+        };
+        let new = apply_events_frame(&frame, &mut subscribed, &handle, &bus).await;
+
+        assert_eq!(new.fine, vec![valid.clone()]);
+        assert_eq!(subscribed, std::collections::HashSet::from([valid.clone()]));
+        assert!(!bus.has_interest(&unknown));
+        assert!(bus.has_interest(&valid));
+
+        let unsubscribe = EventsClientFrame {
+            subscribe: vec![],
+            unsubscribe: vec![valid.clone()],
+        };
+        apply_events_frame(&unsubscribe, &mut subscribed, &handle, &bus).await;
+        assert!(
+            !bus.has_interest(&valid),
+            "one unsubscribe balances the hold"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_overlong_topic_does_not_block_a_later_valid_topic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        let overlong = "x".repeat(MAX_TOPIC_LEN + 1);
+        let mut subscribed = std::collections::HashSet::new();
+
+        let frame = EventsClientFrame {
+            subscribe: vec![overlong.clone(), "projects".to_string()],
+            unsubscribe: vec![],
+        };
+        let new = apply_events_frame(&frame, &mut subscribed, &handle, &bus).await;
+
+        assert!(!subscribed.contains(&overlong));
+        assert_eq!(
+            subscribed,
+            std::collections::HashSet::from(["projects".into()])
+        );
+        assert!(new.workspace);
     }
 
     /// Subscribing when the cache is cold (`peek_rev` returns `None`) still
