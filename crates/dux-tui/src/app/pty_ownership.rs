@@ -2831,9 +2831,14 @@ mod tests {
             card_columns(title_row + 2)
         );
         assert!(
-            !card_columns(button.y - 1).trim().is_empty(),
-            "the button sits directly under the prose, with no gap: {:?}",
+            card_columns(button.y - 1).trim().is_empty(),
+            "one blank row separates the prose from the button: {:?}",
             card_columns(button.y - 1)
+        );
+        assert!(
+            !card_columns(button.y - 2).trim().is_empty(),
+            "and the prose ends right above that gap: {:?}",
+            card_columns(button.y - 2)
         );
     }
 

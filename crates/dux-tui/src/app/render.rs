@@ -3177,14 +3177,15 @@ impl App {
         // One blank row under the title border, matching the blank row above the
         // button: the card's body sits inside a ring of space rather than
         // starting hard against the line that names the device.
-        // One blank row under the title, the prose, then the button sitting
-        // directly on the frame's bottom edge: the card is a notice with one
-        // act, not a form, so it carries no gap before the button.
+        // One blank row under the title, the prose, one blank row, then the
+        // button sitting on the frame's bottom edge, the spacing the other
+        // modals use between their prose and their buttons.
         const TOP_PADDING: u16 = 1;
+        const PROSE_GAP: u16 = 1;
         let available_h = area.height.saturating_sub(2);
         let (show_prose, inner_h) =
-            if available_h >= prose_rows.saturating_add(TOP_PADDING + button_h) {
-                (true, TOP_PADDING + prose_rows + button_h)
+            if available_h >= prose_rows.saturating_add(TOP_PADDING + PROSE_GAP + button_h) {
+                (true, TOP_PADDING + prose_rows + PROSE_GAP + button_h)
             } else if available_h >= button_h {
                 // The BUTTON is the way out, so it is the half that survives a pane
                 // too short to carry the sentence as well.
@@ -3220,7 +3221,7 @@ impl App {
                     Rect::new(inner.x + SIDE_PADDING, y, prose_w, prose_rows),
                     frame.buffer_mut(),
                 );
-            y += prose_rows;
+            y += prose_rows + PROSE_GAP;
         }
         let button_w = button_w.min(inner.width);
         self.render_takeover_button(
