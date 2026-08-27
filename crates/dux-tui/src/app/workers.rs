@@ -1136,6 +1136,168 @@ impl App {
         true
     }
 
+    fn apply_project_persistence_failure(
+        &mut self,
+        action: ProjectPersistenceAction,
+        error: String,
+        status_op_id: &Option<String>,
+    ) {
+        if self.resolve_persist_op(status_op_id, PersistFinalOutcome::DbFailed(error.clone())) {
+            return;
+        }
+        self.set_error(project_persistence_failure_message(action, &error));
+    }
+
+    fn apply_added_project(&mut self, status_message: String) {
+        self.rebuild_left_items();
+        self.reload_changed_files();
+        // Add already saves config inline with database rollback; saving here would write twice.
+        self.set_info(status_message);
+    }
+
+    fn apply_removed_project(&mut self, project_name: String, status_op_id: &Option<String>) {
+        self.rebuild_left_items();
+        self.ensure_selectable_left_item();
+        self.reload_changed_files();
+        self.save_runtime_projects_and_finish_status(
+            status_op_id,
+            "Project was removed from the database, but config.toml could not be updated",
+            format!("Removed project \"{project_name}\" from app"),
+        );
+    }
+
+    fn apply_deleted_project(&mut self, project_name: String, status_op_id: &Option<String>) {
+        self.rebuild_left_items();
+        self.ensure_selectable_left_item();
+        self.reload_changed_files();
+        self.save_runtime_projects_and_finish_status(
+            status_op_id,
+            "Project was deleted from the database, but config.toml could not be updated",
+            format!("Deleted project \"{project_name}\" and all its agents"),
+        );
+    }
+
+    fn apply_default_provider_update(
+        &mut self,
+        project_name: String,
+        provider: Option<ProviderKind>,
+        global_default: ProviderKind,
+        status_op_id: &Option<String>,
+    ) {
+        self.rebuild_left_items();
+        let success_message = match provider {
+            Some(provider) => format!(
+                "Project provider for \"{}\" changed to {}. Future agents in this project will use it; existing agents keep their current provider.",
+                project_name,
+                provider.as_str(),
+            ),
+            None => format!(
+                "\"{}\" now inherits the global default provider ({}). Future agents in this project will use it; existing agents keep their current provider.",
+                project_name,
+                global_default.as_str(),
+            ),
+        };
+        self.save_runtime_projects_and_finish_status(
+            status_op_id,
+            &format!(
+                "Provider preference saved to the database for \"{project_name}\", but config.toml could not be updated"
+            ),
+            success_message,
+        );
+    }
+
+    fn apply_auto_reopen_update(
+        &mut self,
+        project_name: String,
+        auto_reopen_agents: Option<bool>,
+        status_op_id: &Option<String>,
+    ) {
+        let enabled = auto_reopen_agents.unwrap_or(true);
+        self.save_runtime_projects_and_finish_status(
+            status_op_id,
+            &format!(
+                "Auto-reopen preference saved to the database for \"{project_name}\", but config.toml could not be updated"
+            ),
+            format!(
+                "Startup auto-reopen {} for project \"{}\".",
+                if enabled { "enabled" } else { "disabled" },
+                project_name,
+            ),
+        );
+    }
+
+    fn apply_startup_command_update(
+        &mut self,
+        project_name: String,
+        startup_command: Option<String>,
+        status_op_id: &Option<String>,
+    ) {
+        let success_message = match startup_command {
+            Some(command) => {
+                format!("Startup command for project \"{project_name}\" set to: {command}")
+            }
+            None => format!("Startup command cleared for project \"{project_name}\"."),
+        };
+        self.save_runtime_projects_and_finish_status(
+            status_op_id,
+            &format!(
+                "Startup command saved to the database for \"{project_name}\", but config.toml could not be updated"
+            ),
+            success_message,
+        );
+    }
+
+    fn apply_env_update(
+        &mut self,
+        project_name: String,
+        env_count: usize,
+        status_op_id: &Option<String>,
+    ) {
+        let success_message = if env_count == 0 {
+            format!("Environment variables cleared for project \"{project_name}\".")
+        } else {
+            format!(
+                "Saved {env_count} environment variable(s) for project \"{project_name}\". New agents and terminals will receive them."
+            )
+        };
+        self.save_runtime_projects_and_finish_status(
+            status_op_id,
+            &format!(
+                "Environment variables saved to the database for \"{project_name}\", but config.toml could not be updated"
+            ),
+            success_message,
+        );
+    }
+
+    fn save_runtime_projects_and_finish_status(
+        &mut self,
+        status_op_id: &Option<String>,
+        config_error_prefix: &str,
+        success_message: String,
+    ) {
+        self.update_config_projects_from_runtime();
+        match self
+            .engine
+            .config_writer
+            .save_eager(self.engine.config.clone())
+        {
+            Ok(()) => {
+                if !self.resolve_persist_op(status_op_id, PersistFinalOutcome::Saved) {
+                    self.set_info(success_message);
+                }
+            }
+            Err(error) => {
+                let error = error.to_string();
+                if !self.resolve_persist_op(
+                    status_op_id,
+                    PersistFinalOutcome::ConfigWriteFailed(error.clone()),
+                ) {
+                    self.set_error(format!("{config_error_prefix}: {error}"));
+                }
+            }
+        }
+    }
+
     pub(crate) fn apply_project_persistence_outcome(&mut self, outcome: ProjectPersistenceOutcome) {
         let ProjectPersistenceOutcome {
             action,
@@ -1145,276 +1307,49 @@ impl App {
 
         match view {
             ProjectPersistenceView::PersistenceFailed { error } => {
-                // The op (when present) encapsulates the per-action db-failure
-                // message; resolve it so the keyed busy is replaced. Fall back to
-                // the legacy direct set for the Add inline / web paths.
-                if self
-                    .resolve_persist_op(&status_op_id, PersistFinalOutcome::DbFailed(error.clone()))
-                {
-                    return;
-                }
-                let msg = match action {
-                    ProjectPersistenceAction::Add { project, .. } => format!(
-                        "Could not save project \"{}\" to the database: {error}",
-                        project.name,
-                    ),
-                    ProjectPersistenceAction::Remove { project_name, .. } => format!(
-                        "Could not remove project \"{project_name}\" from the database: {error}"
-                    ),
-                    ProjectPersistenceAction::Delete { project_name, .. } => format!(
-                        "Could not finish deleting project \"{project_name}\" from the database: {error}"
-                    ),
-                    ProjectPersistenceAction::UpdateDefaultProvider { project_name, .. } => {
-                        format!(
-                            "Could not save the provider change for project \"{project_name}\": {error}"
-                        )
-                    }
-                    ProjectPersistenceAction::UpdateAutoReopen { project_name, .. } => format!(
-                        "Could not save the auto-reopen change for project \"{project_name}\": {error}"
-                    ),
-                    ProjectPersistenceAction::UpdateStartupCommand { project_name, .. } => format!(
-                        "Could not save the startup command for project \"{project_name}\": {error}"
-                    ),
-                    ProjectPersistenceAction::UpdateEnv { project_name, .. } => format!(
-                        "Could not save environment variables for project \"{project_name}\": {error}"
-                    ),
-                };
-                self.set_error(msg);
+                self.apply_project_persistence_failure(action, error, &status_op_id);
             }
-
             ProjectPersistenceView::Added {
-                project_id,
+                project_id: _,
                 status_message,
             } => {
-                self.rebuild_left_items();
-                // A freshly added project has no agents, so it contributes no row to
-                // the flat list — there is nothing to select. (Its first agent is
-                // created via the project chooser.) `project_id` is unused now.
-                let _ = &project_id;
-                // Refresh the right-pane file lists so the previously selected
-                // project's changed files don't linger and look like they belong to
-                // the brand-new project.
-                self.reload_changed_files();
-                // Add is INLINE: the engine handler already wrote config.toml
-                // through the eager queue (with SQLite rollback on failure). Do
-                // NOT write it a second time here — that would be a double write.
-                // The other arms route their config write through save_eager via
-                // update_config_projects_from_runtime.
-                self.set_info(status_message);
+                self.apply_added_project(status_message);
             }
-
             ProjectPersistenceView::Removed { project_name } => {
-                // An agent-less project contributes zero rows, so removing it
-                // must not move the cursor; a project WITH agents removes many
-                // rows via cascade, which `rebuild_left_items` (via
-                // `ensure_selectable_left_item`) re-clamps. No decrement.
-                self.rebuild_left_items();
-                self.ensure_selectable_left_item();
-                // Selection moved to a different item; refresh the right-pane
-                // file lists so they match the new selection instead of the
-                // removed project's stale changes.
-                self.reload_changed_files();
-                self.update_config_projects_from_runtime();
-                if let Err(err) = self
-                    .engine
-                    .config_writer
-                    .save_eager(self.engine.config.clone())
-                {
-                    let err = err.to_string();
-                    if self.resolve_persist_op(
-                        &status_op_id,
-                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
-                    ) {
-                        return;
-                    }
-                    self.set_error(format!(
-                        "Project was removed from the database, but config.toml could not be updated: {err}"
-                    ));
-                    return;
-                }
-                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
-                    return;
-                }
-                self.set_info(format!("Removed project \"{project_name}\" from app"));
+                self.apply_removed_project(project_name, &status_op_id);
             }
-
             ProjectPersistenceView::Deleted { project_name } => {
-                // The cascade already removed this project's agent rows from
-                // `engine.sessions`; rebuild + re-clamp handles the selection.
-                // No decrement (it double-adjusted the cursor).
-                self.rebuild_left_items();
-                self.ensure_selectable_left_item();
-                self.reload_changed_files();
-                self.update_config_projects_from_runtime();
-                if let Err(err) = self
-                    .engine
-                    .config_writer
-                    .save_eager(self.engine.config.clone())
-                {
-                    let err = err.to_string();
-                    if self.resolve_persist_op(
-                        &status_op_id,
-                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
-                    ) {
-                        return;
-                    }
-                    self.set_error(format!(
-                        "Project was deleted from the database, but config.toml could not be updated: {err}"
-                    ));
-                    return;
-                }
-                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
-                    return;
-                }
-                self.set_info(format!(
-                    "Deleted project \"{project_name}\" and all its agents"
-                ));
+                self.apply_deleted_project(project_name, &status_op_id);
             }
-
             ProjectPersistenceView::DefaultProviderUpdated {
                 project_name,
                 provider,
                 global_default,
             } => {
-                self.rebuild_left_items();
-                self.update_config_projects_from_runtime();
-                if let Err(err) = self
-                    .engine
-                    .config_writer
-                    .save_eager(self.engine.config.clone())
-                {
-                    let err = err.to_string();
-                    if self.resolve_persist_op(
-                        &status_op_id,
-                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
-                    ) {
-                        return;
-                    }
-                    self.set_error(format!(
-                        "Provider preference saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
-                    ));
-                    return;
-                }
-                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
-                    return;
-                }
-                let message = match provider {
-                    Some(provider) => format!(
-                        "Project provider for \"{}\" changed to {}. Future agents in this project will use it; existing agents keep their current provider.",
-                        project_name,
-                        provider.as_str(),
-                    ),
-                    None => format!(
-                        "\"{}\" now inherits the global default provider ({}). Future agents in this project will use it; existing agents keep their current provider.",
-                        project_name,
-                        global_default.as_str(),
-                    ),
-                };
-                self.set_info(message);
+                self.apply_default_provider_update(
+                    project_name,
+                    provider,
+                    global_default,
+                    &status_op_id,
+                );
             }
-
             ProjectPersistenceView::AutoReopenUpdated {
                 project_name,
                 auto_reopen_agents,
             } => {
-                self.update_config_projects_from_runtime();
-                if let Err(err) = self
-                    .engine
-                    .config_writer
-                    .save_eager(self.engine.config.clone())
-                {
-                    let err = err.to_string();
-                    if self.resolve_persist_op(
-                        &status_op_id,
-                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
-                    ) {
-                        return;
-                    }
-                    self.set_error(format!(
-                        "Auto-reopen preference saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
-                    ));
-                    return;
-                }
-                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
-                    return;
-                }
-                let enabled = auto_reopen_agents.unwrap_or(true);
-                self.set_info(format!(
-                    "Startup auto-reopen {} for project \"{}\".",
-                    if enabled { "enabled" } else { "disabled" },
-                    project_name,
-                ));
+                self.apply_auto_reopen_update(project_name, auto_reopen_agents, &status_op_id);
             }
-
             ProjectPersistenceView::StartupCommandUpdated {
                 project_name,
                 startup_command,
             } => {
-                self.update_config_projects_from_runtime();
-                if let Err(err) = self
-                    .engine
-                    .config_writer
-                    .save_eager(self.engine.config.clone())
-                {
-                    let err = err.to_string();
-                    if self.resolve_persist_op(
-                        &status_op_id,
-                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
-                    ) {
-                        return;
-                    }
-                    self.set_error(format!(
-                        "Startup command saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
-                    ));
-                    return;
-                }
-                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
-                    return;
-                }
-                match startup_command {
-                    Some(command) => self.set_info(format!(
-                        "Startup command for project \"{project_name}\" set to: {command}"
-                    )),
-                    None => self.set_info(format!(
-                        "Startup command cleared for project \"{project_name}\"."
-                    )),
-                }
+                self.apply_startup_command_update(project_name, startup_command, &status_op_id);
             }
-
             ProjectPersistenceView::EnvUpdated {
                 project_name,
                 env_count,
             } => {
-                self.update_config_projects_from_runtime();
-                if let Err(err) = self
-                    .engine
-                    .config_writer
-                    .save_eager(self.engine.config.clone())
-                {
-                    let err = err.to_string();
-                    if self.resolve_persist_op(
-                        &status_op_id,
-                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
-                    ) {
-                        return;
-                    }
-                    self.set_error(format!(
-                        "Environment variables saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
-                    ));
-                    return;
-                }
-                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
-                    return;
-                }
-                if env_count == 0 {
-                    self.set_info(format!(
-                        "Environment variables cleared for project \"{project_name}\"."
-                    ));
-                } else {
-                    self.set_info(format!(
-                        "Saved {env_count} environment variable(s) for project \"{project_name}\". New agents and terminals will receive them.",
-                    ));
-                }
+                self.apply_env_update(project_name, env_count, &status_op_id);
             }
         }
     }
@@ -1643,6 +1578,33 @@ impl App {
                     self.set_info(String::new());
                 }
             }
+        }
+    }
+}
+
+fn project_persistence_failure_message(action: ProjectPersistenceAction, error: &str) -> String {
+    match action {
+        ProjectPersistenceAction::Add { project, .. } => format!(
+            "Could not save project \"{}\" to the database: {error}",
+            project.name,
+        ),
+        ProjectPersistenceAction::Remove { project_name, .. } => {
+            format!("Could not remove project \"{project_name}\" from the database: {error}")
+        }
+        ProjectPersistenceAction::Delete { project_name, .. } => format!(
+            "Could not finish deleting project \"{project_name}\" from the database: {error}"
+        ),
+        ProjectPersistenceAction::UpdateDefaultProvider { project_name, .. } => {
+            format!("Could not save the provider change for project \"{project_name}\": {error}")
+        }
+        ProjectPersistenceAction::UpdateAutoReopen { project_name, .. } => {
+            format!("Could not save the auto-reopen change for project \"{project_name}\": {error}")
+        }
+        ProjectPersistenceAction::UpdateStartupCommand { project_name, .. } => {
+            format!("Could not save the startup command for project \"{project_name}\": {error}")
+        }
+        ProjectPersistenceAction::UpdateEnv { project_name, .. } => {
+            format!("Could not save environment variables for project \"{project_name}\": {error}")
         }
     }
 }
