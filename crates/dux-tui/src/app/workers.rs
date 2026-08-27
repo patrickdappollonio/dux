@@ -529,63 +529,14 @@ impl App {
             }
 
             EventReaction::BrowserEntriesArrived { dir, entries } => {
-                if let PromptState::BrowseProjects {
-                    current_dir,
-                    entries: current_entries,
-                    loading,
-                    selected,
-                    ..
-                } = &mut self.prompt
-                    && *current_dir == dir
-                {
-                    *current_entries = entries;
-                    *loading = false;
-                    *selected = 0;
-                }
+                self.apply_browser_entries(dir, entries);
             }
             EventReaction::ProjectWorktreesArrived {
                 project_id,
                 result,
                 status_op_id,
             } => {
-                // The final depends on whether the picker is still open and
-                // matching when the worktrees arrive, a fact the worker can't
-                // see; resolve the HandlerStatusOp against that handler-computed
-                // outcome. The op (when present) encapsulates each final message
-                // declared at dispatch; the keyed `Dismissed` clear removes only
-                // this op's busy, so a newer message from another action is never
-                // clobbered.
-                let mut outcome: Option<WorktreesFinalOutcome> = None;
-                if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt
-                    && prompt.project.id == project_id
-                {
-                    prompt.loading = false;
-                    match result {
-                        Ok(entries) => {
-                            prompt.selected = selectable_project_worktree_indices(&entries)
-                                .into_iter()
-                                .next();
-                            prompt.entries = entries;
-                            prompt.error = None;
-                            outcome = Some(WorktreesFinalOutcome::Loaded);
-                        }
-                        Err(error) => {
-                            prompt.entries.clear();
-                            prompt.selected = None;
-                            prompt.error = Some(error.clone());
-                            outcome = Some(WorktreesFinalOutcome::Failed(error));
-                        }
-                    }
-                }
-                // The picker was dismissed or switched before its worktrees
-                // loaded, so nothing consumed the result.
-                let outcome = outcome.unwrap_or(WorktreesFinalOutcome::Dismissed);
-                if let Some(id) = status_op_id
-                    && let Some(op) = self.pending_worktree_ops.remove(&id)
-                {
-                    let resolved = op.resolve(&outcome);
-                    self.apply_reaction(resolved.into_reaction());
-                }
+                self.apply_project_worktrees_arrived(project_id, result, status_op_id);
             }
 
             EventReaction::ManageableWorktreesArrived {
@@ -593,154 +544,31 @@ impl App {
                 result,
                 status_op_id,
             } => {
-                // Same three-way shape as the adopt picker's listing: the final
-                // depends on whether the manager is still open and matching,
-                // which the worker cannot see, so it is resolved here.
-                let mut outcome: Option<WorktreesFinalOutcome> = None;
-                if let PromptState::ManageWorktrees(prompt) = &mut self.prompt
-                    && prompt.project.id == project_id
-                {
-                    prompt.loading = false;
-                    match result {
-                        Ok(entries) => {
-                            prompt.selected =
-                                removable_worktree_indices(&entries).into_iter().next();
-                            prompt.entries = entries;
-                            prompt.error = None;
-                            outcome = Some(WorktreesFinalOutcome::Loaded);
-                        }
-                        Err(error) => {
-                            prompt.entries.clear();
-                            prompt.selected = None;
-                            prompt.error = Some(error.clone());
-                            outcome = Some(WorktreesFinalOutcome::Failed(error));
-                        }
-                    }
-                }
-                let outcome = outcome.unwrap_or(WorktreesFinalOutcome::Dismissed);
-                if let Some(id) = status_op_id
-                    && let Some(op) = self.pending_worktree_ops.remove(&id)
-                {
-                    let resolved = op.resolve(&outcome);
-                    self.apply_reaction(resolved.into_reaction());
-                }
+                self.apply_manageable_worktrees_arrived(project_id, result, status_op_id);
             }
 
             EventReaction::OpenNewAgentPromptForPr {
                 pr,
                 status_op_id: _,
             } => {
-                let pr = *pr;
-                let request = CreateAgentRequest::PullRequest {
-                    project: pr.project.clone(),
-                    host: pr.host.clone(),
-                    owner_repo: pr.owner_repo.clone(),
-                    number: pr.number,
-                    title: pr.title.clone(),
-                    state: pr.state.clone(),
-                    head_branch: pr.head_ref_name.clone(),
-                    custom_name: Some(pr.head_ref_name.clone()),
-                    use_existing_branch: false,
-                };
-                if let Err(err) = self.open_name_new_agent_prompt(request) {
-                    self.set_error(format!("{err:#}"));
-                } else {
-                    self.set_info(format!(
-                        "Resolved PR #{}: {}. Confirm or edit the branch name.",
-                        pr.number, pr.title
-                    ));
-                }
+                self.apply_open_new_agent_prompt_for_pr(*pr);
             }
             EventReaction::WorktreeRemoveSucceeded {
                 session_id,
                 branches,
                 our_busy_message: _,
             } => {
-                // The "Removing worktree …" busy now rides a keyed
-                // `HandlerStatusOp` stashed in `pending_delete_ops`, so the keyed
-                // final replaces exactly that spinner without comparing it against
-                // the anonymous status line — concurrent operations can never
-                // clobber it. Pop the op and resolve it against the handler-known
-                // outcome; the message wording is unchanged.
-                let op = self.pending_delete_ops.remove(&session_id);
-                if self.engine.sessions.iter().any(|s| s.id == session_id) {
-                    // Cleanup still runs (in-memory + view side); pass
-                    // `update_status=false`: the op owns the final message.
-                    if let Err(e) = self.finish_delete_session(
-                        &session_id,
-                        WorktreeRemoval::Performed {
-                            branches: branches.clone(),
-                        },
-                        false,
-                    ) {
-                        self.set_error(format!(
-                            "Worktree removed but session cleanup failed: {e:#}"
-                        ));
-                    } else if let Some(op) = op {
-                        self.apply_reaction(
-                            op.resolve(&TuiDeleteOutcome::SucceededPresent { branches })
-                                .into_reaction(),
-                        );
-                    }
-                } else if let Some(op) = op {
-                    // Session removed by another path. The keyed op can't clobber
-                    // unrelated statuses, but preserve the legacy suppression:
-                    // emit "Worktree removal finished." only when our busy is still
-                    // the anonymous status, otherwise clear with no message.
-                    let our_busy_still_showing = self
-                        .status
-                        .anon_busy_matches(op.pending_status().message.as_str());
-                    self.apply_reaction(
-                        op.resolve(&TuiDeleteOutcome::SucceededGone {
-                            our_busy_still_showing,
-                        })
-                        .into_reaction(),
-                    );
-                }
+                self.apply_worktree_remove_succeeded(session_id, branches);
             }
             EventReaction::WorktreeRemoveFailed {
                 session_id,
                 message,
             } => {
-                // Session record is normally still present because we
-                // deferred cleanup until git succeeded. The keyed op's resolver
-                // captured the session label at dispatch; whether the session is
-                // still present at completion selects the named vs bare wording.
-                let session_present = self.engine.sessions.iter().any(|s| s.id == session_id);
-                if let Some(op) = self.pending_delete_ops.remove(&session_id) {
-                    let outcome = if session_present {
-                        TuiDeleteOutcome::FailedNamed { message }
-                    } else {
-                        TuiDeleteOutcome::FailedBare { message }
-                    };
-                    self.apply_reaction(op.resolve(&outcome).into_reaction());
-                }
+                self.apply_worktree_remove_failed(session_id, message);
             }
 
             EventReaction::ResourceStatsArrived(stats, was_baseline) => {
-                if let PromptState::ResourceMonitor {
-                    rows,
-                    selected_row,
-                    expanded,
-                    last_refresh,
-                    short_window_sample,
-                    ..
-                } = &mut self.prompt
-                {
-                    *rows = stats;
-                    *last_refresh = Instant::now();
-                    // Reflects what THIS sample actually did (see
-                    // `ResourceCollector::sample`), not merely whether this is
-                    // the first sample delivered since the overlay opened: a
-                    // reopen inside `STALE_BASELINE` does not re-baseline.
-                    *short_window_sample = was_baseline;
-                    // Clamp cursor to the (possibly changed) visual row count.
-                    let visual = build_visual_rows(rows, expanded);
-                    let max_row = visual.len().saturating_sub(1);
-                    if *selected_row > max_row {
-                        *selected_row = max_row;
-                    }
-                }
+                self.apply_resource_stats(stats, was_baseline);
             }
 
             EventReaction::AddProjectAfterBranchCheckout {
@@ -750,27 +578,12 @@ impl App {
                 leading_branch,
                 status_op_id: _,
             } => {
-                let display_name = if name.trim().is_empty() {
-                    std::path::Path::new(&path)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("project")
-                        .to_string()
-                } else {
-                    name.trim().to_string()
-                };
-                let status_message = format!(
-                    "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
-                );
-                if let Err(e) = self.finish_add_project_with_status(
+                self.apply_add_project_after_branch_checkout(
                     path,
                     name,
-                    target_branch.clone(),
+                    target_branch,
                     leading_branch,
-                    status_message,
-                ) {
-                    self.set_error(format!("{e:#}"));
-                }
+                );
             }
 
             EventReaction::AddProjectAfterInitialCommit {
@@ -783,107 +596,29 @@ impl App {
                 seed_warning,
                 status_op_id: _,
             } => {
-                let display_name = if name.trim().is_empty() {
-                    std::path::Path::new(&path)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("project")
-                        .to_string()
-                } else {
-                    name.trim().to_string()
-                };
-                let status_message = if initialized_repo && seeded_gitignore {
-                    format!(
-                        "Initialized a git repository, seeded a starter .gitignore, created an initial commit, and added project \"{display_name}\" to workspace."
-                    )
-                } else if initialized_repo {
-                    format!(
-                        "Initialized a git repository, created an initial commit, and added project \"{display_name}\" to workspace."
-                    )
-                } else {
-                    format!(
-                        "Created an initial commit and added project \"{display_name}\" to workspace."
-                    )
-                };
-                if let Err(e) = self.finish_add_project_with_status(
+                self.apply_add_project_after_initial_commit(
                     path,
                     name,
                     branch,
                     leading_branch,
-                    status_message,
-                ) {
-                    self.set_error(format!("{e:#}"));
-                }
-                // Surface a non-fatal seed failure AFTER the success status so
-                // the warning is what the user reads, not the success it
-                // qualifies. The project was still added, so it leaves on the
-                // ordinary warning window.
-                if let Some(warning) = seed_warning {
-                    self.set_warning(warning);
-                }
+                    (initialized_repo, seeded_gitignore, seed_warning),
+                );
             }
 
             EventReaction::ContinueCreateAgentAfterInspection {
                 project,
                 inspection,
             } => {
-                let project_name = project.name.clone();
-                match self.sync_projects_to_store_and_update_config() {
-                    Ok(()) => {
-                        if let Err(err) = self
-                            .engine
-                            .config_writer
-                            .save_eager(self.engine.config.clone())
-                        {
-                            self.set_error(format!(
-                                "Project branch was detected, but config.toml could not be updated: {err}"
-                            ));
-                        }
-                    }
-                    Err(err) => {
-                        self.set_error(format!(
-                            "Project branch was detected, but config.toml could not be updated: {err:#}"
-                        ));
-                    }
-                }
-                if let Err(err) =
-                    self.continue_create_agent_after_branch_inspection(project, inspection)
-                {
-                    self.set_error(format!("{err:#}"));
-                } else {
-                    self.set_info(format!(
-                        "Branch check complete for \"{project_name}\". Confirm or edit the agent name to continue."
-                    ));
-                }
+                self.apply_continue_create_agent_after_inspection(project, inspection);
             }
             EventReaction::DispatchProjectDefaultBranchCheckout {
                 project,
                 default_branch,
                 status_op_id,
             } => {
-                // The checkout-default chain: ONE op spans worker 1 (inspection)
-                // and worker 2 (the switch). Re-emit the carried op's busy with
-                // worker 2's text via `progress` (same opaque id, so the spinner is
-                // continuous), then forward the id so worker 2's completion resolves
-                // exactly this op. If no op rode along (e.g. a future caller passes
-                // `None`), fall back to minting a fresh op inside the dispatch.
-                let path = NonDefaultBranchAction::CheckoutProjectDefault {
-                    project: project.clone(),
-                }
-                .repo_path()
-                .to_string();
-                if let Some(id) = &status_op_id
-                    && let Some(op) = self.pending_checkout_inspect_ops.get(id)
-                {
-                    let progress = op.progress(format!(
-                        "Checking out \"{default_branch}\" in {path} for the selected project..."
-                    ));
-                    self.apply_reaction(EventReaction::Status(progress));
-                }
-                self.dispatch_non_default_branch_checkout(
-                    NonDefaultBranchAction::CheckoutProjectDefault { project },
+                self.apply_dispatch_project_default_branch_checkout(
+                    project,
                     default_branch,
-                    "for the selected project".to_string(),
                     status_op_id,
                 );
             }
@@ -892,65 +627,10 @@ impl App {
                 self.apply_tailscale_mode_outcome(mode, outcome);
             }
             EventReaction::ApplyReloadedConfig(boxed) => {
-                // Compared before the swap, while `engine.config` still holds the
-                // running values. A listener binds once, so a `[server]` change
-                // needs a restart on this surface exactly as it does on the web,
-                // and the terminal UI is often the only one watching. The BIND
-                // set only: the console settings reach the `dux server` process
-                // alone, and neither way of serving from here builds a console.
-                let bind_settings_changed = dux_core::config::server_bind_settings_changed(
-                    &self.engine.config.server,
-                    &boxed.server,
-                );
-                // Resolve the TUI's keyed reload busy op (if one rode along) into
-                // its keyed final, REPLACING the legacy `set_info`/`set_error` with
-                // byte-identical messages. The shared engine reload logic is
-                // untouched. Fall back to the legacy calls if no op was stashed.
-                let outcome = match self.apply_reloaded_config(*boxed) {
-                    Err(err) => TuiConfigReloadOutcome::ApplyFailed(format!("{err:#}")),
-                    Ok(()) => TuiConfigReloadOutcome::Applied,
-                };
-                let applied = matches!(outcome, TuiConfigReloadOutcome::Applied);
-                // Post-apply, and only on success: the two live `[server]` limits
-                // the routes read must move with the config the engine actually
-                // adopted, never with one whose apply failed.
-                if applied && let Some(companion) = self.companion.as_mut() {
-                    companion.note_config_applied(&self.engine.config.server);
-                }
-                if let Some(op) = self.pending_config_reload_op.take() {
-                    self.apply_reaction(op.resolve(&outcome).into_reaction());
-                } else {
-                    match outcome {
-                        TuiConfigReloadOutcome::Applied => {
-                            self.set_info("Configuration reloaded. New settings are active now.");
-                        }
-                        TuiConfigReloadOutcome::ApplyFailed(err) => {
-                            self.set_error(format!(
-                                "Config validation passed, but applying it failed: {err}"
-                            ));
-                        }
-                        TuiConfigReloadOutcome::ValidationFailed => {}
-                    }
-                }
-                // Last, so it is the line left on screen: the reload succeeded and
-                // this is the part of it that has not happened yet. A failed apply
-                // has a more urgent thing to say and keeps the line. Pinned,
-                // because the restart is still owed until the user performs it.
-                if applied && bind_settings_changed {
-                    let serving = self.background_server_is_serving();
-                    self.set_pinned_warning(server_restart_warning(serving));
-                }
+                self.apply_reloaded_config_reaction(*boxed);
             }
             EventReaction::OpenConfigReloadFailedModal(message) => {
-                self.open_config_reload_failed_modal(message);
-                if let Some(op) = self.pending_config_reload_op.take() {
-                    self.apply_reaction(
-                        op.resolve(&TuiConfigReloadOutcome::ValidationFailed)
-                            .into_reaction(),
-                    );
-                } else {
-                    self.set_error("Config reload failed. Review the modal before retrying.");
-                }
+                self.apply_open_config_reload_failed_modal(message);
             }
 
             EventReaction::ProjectPersistenceOutcome(boxed) => {
@@ -961,29 +641,7 @@ impl App {
                 scope_label,
                 listing,
             } => {
-                // The picker, not the viewer: the newest run is preselected and
-                // its output is already loaded, so "see the last log" is
-                // satisfied on open and "choose an older" is one keypress away.
-                // The fullscreen viewer is still there, promoted from here.
-                self.input_target = InputTarget::None;
-                self.terminal_selection = None;
-                self.startup_log_selection = None;
-                self.fullscreen_overlay = FullscreenOverlay::None;
-                self.startup_log_viewer = None;
-                self.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
-                    scope_label,
-                    entries: listing.entries,
-                    selected: 0,
-                    filter: TextInput::new(),
-                    searching: false,
-                    content: listing.content,
-                    scroll_offset: 0,
-                    wrap_width: 0,
-                    focus: StartupCommandLogFocus::List,
-                });
-                // Domain only: the overlay is now up. The "Opened N startup
-                // command log run(s)…" confirmation (resolving the busy) rides
-                // the StatusOp's separate StatusOpCompleted event.
+                self.apply_startup_logs_arrived(scope_label, listing);
             }
 
             EventReaction::StartupLogContentArrived { path, result } => {
@@ -991,167 +649,506 @@ impl App {
             }
 
             EventReaction::FinishDeleteSessionView(view) => {
-                let FinishDeleteSessionView {
-                    session_id,
-                    outcome,
-                    removal,
-                    update_status,
-                } = *view;
-                self.apply_finish_delete_session_outcome(
-                    &session_id,
-                    outcome,
-                    removal,
-                    update_status,
-                );
+                self.apply_finish_delete_session_view(*view);
             }
 
             EventReaction::DoDeleteSessionView(view) => {
-                let DoDeleteSessionView {
-                    session_id,
-                    outcome,
-                } = *view;
-                self.apply_finish_delete_session_outcome(
-                    &session_id,
-                    outcome.finish,
-                    outcome.removal,
-                    true,
-                );
+                self.apply_do_delete_session_view(*view);
             }
 
             EventReaction::BeginDeleteSessionView(view) => {
-                let BeginDeleteSessionView {
-                    session_id,
-                    outcome,
-                } = *view;
-                match outcome {
-                    BeginDeleteSessionOutcome::AlreadyInFlight => {
-                        self.set_error(
-                            "Deletion already in progress for this agent. Wait for it to finish.",
-                        );
-                    }
-                    BeginDeleteSessionOutcome::TabLaunching => {
-                        self.set_error(
-                            "A tab is still launching for this agent. Try again in a moment.",
-                        );
-                    }
-                    BeginDeleteSessionOutcome::NotFound => {}
-                    // The delete did not happen: the caller asked dux to remove
-                    // a standalone agent's folder, which it never does.
-                    BeginDeleteSessionOutcome::Refused { message } => {
-                        self.set_error(message);
-                    }
-                    BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
-                        // The agent PTY + its terminals are already SIGTERMed and
-                        // held for a background reap. Vanish the session now
-                        // (update_status=false: the worktree busy op below is the
-                        // only status until the removal completes), then mint a
-                        // keyed HandlerStatusOp so the deferred worktree removal's
-                        // `WorktreeRemoveCompleted` resolves exactly this spinner.
-                        if let Err(e) = self.finish_delete_session(
-                            &session_id,
-                            // Placeholder: the session is vanished NOW; the real
-                            // branch report arrives with the deferred removal,
-                            // which authors the final message.
-                            WorktreeRemoval::Performed {
-                                branches: dux_core::engine::RemovedBranches::Deleted(
-                                    dux_core::git::RemoveResult::default(),
-                                ),
-                            },
-                            false,
-                        ) {
-                            self.set_error(format!("Failed to delete agent: {e:#}"));
-                        } else {
-                            let op = self.build_delete_status_op(&session_id, busy_message);
-                            self.apply_reaction(EventReaction::Status(op.pending_status()));
-                            self.pending_delete_ops.insert(session_id.clone(), op);
-                        }
-                    }
-                    BeginDeleteSessionOutcome::Inline { removal } => {
-                        if let Err(e) = self.finish_delete_session(&session_id, removal, true) {
-                            self.set_error(format!("{e:#}"));
-                        }
-                    }
-                }
+                self.apply_begin_delete_session_view(*view);
             }
 
             EventReaction::DispatchAgentLaunchView(view) => {
-                let DispatchAgentLaunchView {
-                    session_id: _,
-                    tab_id: _,
-                    launched: _,
-                    status,
-                } = *view;
-                if let Some(status) = status {
-                    self.apply_reaction(EventReaction::Status(status));
-                }
-                // The `launched` bool is consumed by the App wrapper before
-                // `apply_reaction` is called; `session_id` is currently only
-                // useful to downstream observers (web layer).
+                self.apply_dispatch_agent_launch_view(*view);
             }
 
             EventReaction::DeleteTerminalView(view) => {
-                let DeleteTerminalView { terminal_id, label } = *view;
-                if self.active_terminal_id.as_deref() == Some(terminal_id.as_str()) {
-                    self.active_terminal_id = None;
-                }
-                self.clamp_terminal_cursor();
-                // A deleted project terminal can change the sidebar grouping.
-                self.rebuild_left_items();
-                if let Some(label) = label {
-                    self.set_info(format!("Deleted terminal \"{label}\""));
-                }
+                self.apply_delete_terminal_view(*view);
             }
 
             EventReaction::ServerFlipPreflightReady { result, warning } => {
-                // The worker has reported back: clear the in-flight guard on BOTH
-                // arms so a later (legitimate) retry can spawn a fresh pre-flight.
-                self.server_flip_preflight_pending = false;
-                // The flip's keyed busy op was stashed at dispatch; resolve/advance
-                // it here so its spinner is never stranded. Plain success re-emits
-                // the busy with the serve URLs via `progress` (same id) and LEAVES
-                // the op stashed — the spinner shows until the run loop flips; the
-                // warning/error arms resolve the op into a keyed final (byte-
-                // identical to the legacy `set_warning`/`set_error`).
-                match result {
-                    Ok((listeners, urls)) => {
-                        // Surface the warning (if any) first, then announce the
-                        // serve URLs; the flip happens on the next loop iteration.
-                        let url_list = urls.join(", ");
-                        match warning {
-                            Some(warn) => {
-                                if let Some(op) = self.pending_server_flip_op.take() {
-                                    self.apply_reaction(
-                                        op.resolve(&TuiServerFlipOutcome::Warned(format!(
-                                            "{warn} Starting the web server on {url_list} — your agents keep running."
-                                        )))
-                                        .into_reaction(),
-                                    );
-                                }
-                            }
-                            None => {
-                                if let Some(op) = &self.pending_server_flip_op {
-                                    let progress = op.progress(format!(
-                                        "Starting the web server on {url_list} — your agents keep running."
-                                    ));
-                                    self.apply_reaction(EventReaction::Status(progress));
-                                }
-                            }
-                        }
-                        self.pending_server_flip = Some((listeners, urls));
-                    }
-                    Err(err) => {
-                        if let Some(op) = self.pending_server_flip_op.take() {
-                            self.apply_reaction(
-                                op.resolve(&TuiServerFlipOutcome::Failed(err))
-                                    .into_reaction(),
-                            );
-                        }
-                    }
-                }
+                self.apply_server_flip_preflight(result, warning);
             }
 
             EventReaction::BackgroundServerPreflightReady { result, warning } => {
                 self.apply_background_server_preflight(result, warning);
+            }
+        }
+    }
+
+    fn apply_add_project_after_branch_checkout(
+        &mut self,
+        path: String,
+        name: String,
+        target_branch: String,
+        leading_branch: String,
+    ) {
+        let display_name = project_display_name(&path, &name);
+        let status_message = format!(
+            "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
+        );
+        if let Err(error) = self.finish_add_project_with_status(
+            path,
+            name,
+            target_branch.clone(),
+            leading_branch,
+            status_message,
+        ) {
+            self.set_error(format!("{error:#}"));
+        }
+    }
+
+    fn apply_add_project_after_initial_commit(
+        &mut self,
+        path: String,
+        name: String,
+        branch: String,
+        leading_branch: String,
+        setup: (bool, bool, Option<String>),
+    ) {
+        let (initialized_repo, seeded_gitignore, seed_warning) = setup;
+        let display_name = project_display_name(&path, &name);
+        let status_message =
+            initial_commit_project_status(&display_name, initialized_repo, seeded_gitignore);
+        if let Err(error) =
+            self.finish_add_project_with_status(path, name, branch, leading_branch, status_message)
+        {
+            self.set_error(format!("{error:#}"));
+        }
+        if let Some(warning) = seed_warning {
+            self.set_warning(warning);
+        }
+    }
+
+    fn apply_continue_create_agent_after_inspection(
+        &mut self,
+        project: Project,
+        inspection: CreateAgentBranchInspection,
+    ) {
+        let project_name = project.name.clone();
+        match self.sync_projects_to_store_and_update_config() {
+            Ok(()) => {
+                if let Err(error) = self
+                    .engine
+                    .config_writer
+                    .save_eager(self.engine.config.clone())
+                {
+                    self.set_error(format!(
+                        "Project branch was detected, but config.toml could not be updated: {error}"
+                    ));
+                }
+            }
+            Err(error) => self.set_error(format!(
+                "Project branch was detected, but config.toml could not be updated: {error:#}"
+            )),
+        }
+        if let Err(error) = self.continue_create_agent_after_branch_inspection(project, inspection)
+        {
+            self.set_error(format!("{error:#}"));
+        } else {
+            self.set_info(format!(
+                "Branch check complete for \"{project_name}\". Confirm or edit the agent name to continue."
+            ));
+        }
+    }
+
+    fn apply_dispatch_project_default_branch_checkout(
+        &mut self,
+        project: Project,
+        default_branch: String,
+        status_op_id: Option<String>,
+    ) {
+        let action = NonDefaultBranchAction::CheckoutProjectDefault {
+            project: project.clone(),
+        };
+        let path = action.repo_path().to_string();
+        if let Some(id) = &status_op_id
+            && let Some(op) = self.pending_checkout_inspect_ops.get(id)
+        {
+            let progress = op.progress(format!(
+                "Checking out \"{default_branch}\" in {path} for the selected project..."
+            ));
+            self.apply_reaction(EventReaction::Status(progress));
+        }
+        self.dispatch_non_default_branch_checkout(
+            NonDefaultBranchAction::CheckoutProjectDefault { project },
+            default_branch,
+            "for the selected project".to_string(),
+            status_op_id,
+        );
+    }
+
+    fn apply_reloaded_config_reaction(&mut self, config: Config) {
+        let bind_settings_changed = dux_core::config::server_bind_settings_changed(
+            &self.engine.config.server,
+            &config.server,
+        );
+        let outcome = match self.apply_reloaded_config(config) {
+            Err(error) => TuiConfigReloadOutcome::ApplyFailed(format!("{error:#}")),
+            Ok(()) => TuiConfigReloadOutcome::Applied,
+        };
+        let applied = matches!(outcome, TuiConfigReloadOutcome::Applied);
+        if applied && let Some(companion) = self.companion.as_mut() {
+            companion.note_config_applied(&self.engine.config.server);
+        }
+        if let Some(op) = self.pending_config_reload_op.take() {
+            self.apply_reaction(op.resolve(&outcome).into_reaction());
+        } else {
+            self.apply_unkeyed_config_reload_outcome(&outcome);
+        }
+        if applied && bind_settings_changed {
+            let serving = self.background_server_is_serving();
+            self.set_pinned_warning(server_restart_warning(serving));
+        }
+    }
+
+    fn apply_unkeyed_config_reload_outcome(&mut self, outcome: &TuiConfigReloadOutcome) {
+        match outcome {
+            TuiConfigReloadOutcome::Applied => {
+                self.set_info("Configuration reloaded. New settings are active now.");
+            }
+            TuiConfigReloadOutcome::ApplyFailed(error) => self.set_error(format!(
+                "Config validation passed, but applying it failed: {error}"
+            )),
+            TuiConfigReloadOutcome::ValidationFailed => {}
+        }
+    }
+
+    fn apply_open_config_reload_failed_modal(&mut self, message: String) {
+        self.open_config_reload_failed_modal(message);
+        if let Some(op) = self.pending_config_reload_op.take() {
+            self.apply_reaction(
+                op.resolve(&TuiConfigReloadOutcome::ValidationFailed)
+                    .into_reaction(),
+            );
+        } else {
+            self.set_error("Config reload failed. Review the modal before retrying.");
+        }
+    }
+
+    fn apply_server_flip_preflight(
+        &mut self,
+        result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
+        warning: Option<String>,
+    ) {
+        self.server_flip_preflight_pending = false;
+        match result {
+            Ok((listeners, urls)) => {
+                self.apply_server_flip_preflight_success(listeners, urls, warning)
+            }
+            Err(error) => {
+                if let Some(op) = self.pending_server_flip_op.take() {
+                    self.apply_reaction(
+                        op.resolve(&TuiServerFlipOutcome::Failed(error))
+                            .into_reaction(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn apply_server_flip_preflight_success(
+        &mut self,
+        listeners: Vec<std::net::TcpListener>,
+        urls: Vec<String>,
+        warning: Option<String>,
+    ) {
+        let url_list = urls.join(", ");
+        if let Some(warning) = warning {
+            if let Some(op) = self.pending_server_flip_op.take() {
+                self.apply_reaction(
+                    op.resolve(&TuiServerFlipOutcome::Warned(format!(
+                        "{warning} Starting the web server on {url_list} — your agents keep running."
+                    )))
+                    .into_reaction(),
+                );
+            }
+        } else if let Some(op) = &self.pending_server_flip_op {
+            let progress = op.progress(format!(
+                "Starting the web server on {url_list} — your agents keep running."
+            ));
+            self.apply_reaction(EventReaction::Status(progress));
+        }
+        self.pending_server_flip = Some((listeners, urls));
+    }
+
+    fn apply_browser_entries(&mut self, dir: PathBuf, entries: Vec<BrowserEntry>) {
+        if let PromptState::BrowseProjects {
+            current_dir,
+            entries: current_entries,
+            loading,
+            selected,
+            ..
+        } = &mut self.prompt
+            && *current_dir == dir
+        {
+            *current_entries = entries;
+            *loading = false;
+            *selected = 0;
+        }
+    }
+
+    fn apply_worktree_remove_succeeded(
+        &mut self,
+        session_id: String,
+        branches: dux_core::engine::RemovedBranches,
+    ) {
+        let op = self.pending_delete_ops.remove(&session_id);
+        if self.engine.sessions.iter().any(|s| s.id == session_id) {
+            let cleanup = self.finish_delete_session(
+                &session_id,
+                WorktreeRemoval::Performed {
+                    branches: branches.clone(),
+                },
+                false,
+            );
+            if let Err(error) = cleanup {
+                self.set_error(format!(
+                    "Worktree removed but session cleanup failed: {error:#}"
+                ));
+            } else if let Some(op) = op {
+                self.apply_reaction(
+                    op.resolve(&TuiDeleteOutcome::SucceededPresent { branches })
+                        .into_reaction(),
+                );
+            }
+            return;
+        }
+        if let Some(op) = op {
+            let our_busy_still_showing = self
+                .status
+                .anon_busy_matches(op.pending_status().message.as_str());
+            self.apply_reaction(
+                op.resolve(&TuiDeleteOutcome::SucceededGone {
+                    our_busy_still_showing,
+                })
+                .into_reaction(),
+            );
+        }
+    }
+
+    fn apply_worktree_remove_failed(&mut self, session_id: String, message: String) {
+        let session_present = self.engine.sessions.iter().any(|s| s.id == session_id);
+        if let Some(op) = self.pending_delete_ops.remove(&session_id) {
+            let outcome = if session_present {
+                TuiDeleteOutcome::FailedNamed { message }
+            } else {
+                TuiDeleteOutcome::FailedBare { message }
+            };
+            self.apply_reaction(op.resolve(&outcome).into_reaction());
+        }
+    }
+
+    fn apply_begin_delete_session_view(&mut self, view: BeginDeleteSessionView) {
+        let BeginDeleteSessionView {
+            session_id,
+            outcome,
+        } = view;
+        match outcome {
+            BeginDeleteSessionOutcome::AlreadyInFlight => {
+                self.set_error(
+                    "Deletion already in progress for this agent. Wait for it to finish.",
+                );
+            }
+            BeginDeleteSessionOutcome::TabLaunching => {
+                self.set_error("A tab is still launching for this agent. Try again in a moment.");
+            }
+            BeginDeleteSessionOutcome::NotFound => {}
+            BeginDeleteSessionOutcome::Refused { message } => self.set_error(message),
+            BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
+                let removal = WorktreeRemoval::Performed {
+                    branches: dux_core::engine::RemovedBranches::Deleted(
+                        dux_core::git::RemoveResult::default(),
+                    ),
+                };
+                if let Err(error) = self.finish_delete_session(&session_id, removal, false) {
+                    self.set_error(format!("Failed to delete agent: {error:#}"));
+                } else {
+                    let op = self.build_delete_status_op(&session_id, busy_message);
+                    self.apply_reaction(EventReaction::Status(op.pending_status()));
+                    self.pending_delete_ops.insert(session_id, op);
+                }
+            }
+            BeginDeleteSessionOutcome::Inline { removal } => {
+                if let Err(error) = self.finish_delete_session(&session_id, removal, true) {
+                    self.set_error(format!("{error:#}"));
+                }
+            }
+        }
+    }
+
+    fn apply_finish_delete_session_view(&mut self, view: FinishDeleteSessionView) {
+        self.apply_finish_delete_session_outcome(
+            &view.session_id,
+            view.outcome,
+            view.removal,
+            view.update_status,
+        );
+    }
+
+    fn apply_do_delete_session_view(&mut self, view: DoDeleteSessionView) {
+        self.apply_finish_delete_session_outcome(
+            &view.session_id,
+            view.outcome.finish,
+            view.outcome.removal,
+            true,
+        );
+    }
+
+    fn apply_startup_logs_arrived(
+        &mut self,
+        scope_label: String,
+        listing: dux_core::startup::StartupCommandLogListing,
+    ) {
+        self.input_target = InputTarget::None;
+        self.terminal_selection = None;
+        self.startup_log_selection = None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.startup_log_viewer = None;
+        self.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+            scope_label,
+            entries: listing.entries,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            content: listing.content,
+            scroll_offset: 0,
+            wrap_width: 0,
+            focus: StartupCommandLogFocus::List,
+        });
+    }
+
+    fn apply_dispatch_agent_launch_view(&mut self, view: DispatchAgentLaunchView) {
+        if let Some(status) = view.status {
+            self.apply_reaction(EventReaction::Status(status));
+        }
+    }
+
+    fn apply_delete_terminal_view(&mut self, view: DeleteTerminalView) {
+        if self.active_terminal_id.as_deref() == Some(view.terminal_id.as_str()) {
+            self.active_terminal_id = None;
+        }
+        self.clamp_terminal_cursor();
+        self.rebuild_left_items();
+        if let Some(label) = view.label {
+            self.set_info(format!("Deleted terminal \"{label}\""));
+        }
+    }
+
+    fn apply_project_worktrees_arrived(
+        &mut self,
+        project_id: String,
+        result: Result<Vec<ProjectWorktreeEntry>, String>,
+        status_op_id: Option<String>,
+    ) {
+        let outcome = if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt
+            && prompt.project.id == project_id
+        {
+            prompt.loading = false;
+            match result {
+                Ok(entries) => {
+                    prompt.selected = selectable_project_worktree_indices(&entries)
+                        .into_iter()
+                        .next();
+                    prompt.entries = entries;
+                    prompt.error = None;
+                    WorktreesFinalOutcome::Loaded
+                }
+                Err(error) => {
+                    prompt.entries.clear();
+                    prompt.selected = None;
+                    prompt.error = Some(error.clone());
+                    WorktreesFinalOutcome::Failed(error)
+                }
+            }
+        } else {
+            WorktreesFinalOutcome::Dismissed
+        };
+        self.resolve_worktree_listing_op(status_op_id, outcome);
+    }
+
+    fn apply_manageable_worktrees_arrived(
+        &mut self,
+        project_id: String,
+        result: Result<Vec<dux_core::worktree_manager::ManagedWorktree>, String>,
+        status_op_id: Option<String>,
+    ) {
+        let outcome = if let PromptState::ManageWorktrees(prompt) = &mut self.prompt
+            && prompt.project.id == project_id
+        {
+            prompt.loading = false;
+            match result {
+                Ok(entries) => {
+                    prompt.selected = removable_worktree_indices(&entries).into_iter().next();
+                    prompt.entries = entries;
+                    prompt.error = None;
+                    WorktreesFinalOutcome::Loaded
+                }
+                Err(error) => {
+                    prompt.entries.clear();
+                    prompt.selected = None;
+                    prompt.error = Some(error.clone());
+                    WorktreesFinalOutcome::Failed(error)
+                }
+            }
+        } else {
+            WorktreesFinalOutcome::Dismissed
+        };
+        self.resolve_worktree_listing_op(status_op_id, outcome);
+    }
+
+    fn resolve_worktree_listing_op(
+        &mut self,
+        status_op_id: Option<String>,
+        outcome: WorktreesFinalOutcome,
+    ) {
+        if let Some(id) = status_op_id
+            && let Some(op) = self.pending_worktree_ops.remove(&id)
+        {
+            self.apply_reaction(op.resolve(&outcome).into_reaction());
+        }
+    }
+
+    fn apply_open_new_agent_prompt_for_pr(&mut self, pr: dux_core::worker::ResolvedPullRequest) {
+        let request = CreateAgentRequest::PullRequest {
+            project: pr.project.clone(),
+            host: pr.host.clone(),
+            owner_repo: pr.owner_repo.clone(),
+            number: pr.number,
+            title: pr.title.clone(),
+            state: pr.state.clone(),
+            head_branch: pr.head_ref_name.clone(),
+            custom_name: Some(pr.head_ref_name.clone()),
+            use_existing_branch: false,
+        };
+        if let Err(err) = self.open_name_new_agent_prompt(request) {
+            self.set_error(format!("{err:#}"));
+        } else {
+            self.set_info(format!(
+                "Resolved PR #{}: {}. Confirm or edit the branch name.",
+                pr.number, pr.title
+            ));
+        }
+    }
+
+    fn apply_resource_stats(&mut self, stats: Vec<ResourceStats>, was_baseline: bool) {
+        if let PromptState::ResourceMonitor {
+            rows,
+            selected_row,
+            expanded,
+            last_refresh,
+            short_window_sample,
+            ..
+        } = &mut self.prompt
+        {
+            *rows = stats;
+            *last_refresh = Instant::now();
+            *short_window_sample = was_baseline;
+            let max_row = build_visual_rows(rows, expanded).len().saturating_sub(1);
+            if *selected_row > max_row {
+                *selected_row = max_row;
             }
         }
     }
@@ -1686,6 +1683,36 @@ impl App {
                 }
             }
         }
+    }
+}
+
+fn project_display_name(path: &str, name: &str) -> String {
+    if name.trim().is_empty() {
+        Path::new(path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("project")
+            .to_string()
+    } else {
+        name.trim().to_string()
+    }
+}
+
+fn initial_commit_project_status(
+    display_name: &str,
+    initialized_repo: bool,
+    seeded_gitignore: bool,
+) -> String {
+    if initialized_repo && seeded_gitignore {
+        format!(
+            "Initialized a git repository, seeded a starter .gitignore, created an initial commit, and added project \"{display_name}\" to workspace."
+        )
+    } else if initialized_repo {
+        format!(
+            "Initialized a git repository, created an initial commit, and added project \"{display_name}\" to workspace."
+        )
+    } else {
+        format!("Created an initial commit and added project \"{display_name}\" to workspace.")
     }
 }
 
