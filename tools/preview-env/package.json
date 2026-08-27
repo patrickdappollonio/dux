@@ -1,8 +1,9 @@
 {
   "name": "dux-preview-shot",
   "private": true,
-  "description": "Host-side screenshot tool for the dux preview container",
+  "description": "Host-side web and TUI screenshot tools for the dux preview container",
   "dependencies": {
+    "@xterm/xterm": "^6.0.0",
     "puppeteer-core": "^23.0.0"
   }
 }

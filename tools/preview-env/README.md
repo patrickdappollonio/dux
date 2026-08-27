@@ -82,6 +82,30 @@ a second thing to learn that still could not click half the UI. Driving the
 app over REST (`/api/v1/...`) is often faster than clicking; see the routes in
 `crates/dux-web/src/`.
 
+## TUI screenshots
+
+`tui-shot.sh` runs the real terminal UI in a disposable Docker container at a
+fixed terminal grid. It drives a small journey script, captures the styled terminal
+cells, and renders them with the bundled Dux font in headless Chromium. The
+capture has its own `DUX_HOME`, repositories, and process lock, so it can run
+while the web preview is up.
+
+```bash
+./tui-shot.sh tui-journey.example.js shots/tui-workspace.png
+./tui-shot.sh palette.tmp.js shots/tui-palette.png --cols 160 --rows 45
+./tui-shot.sh narrow.tmp.js shots/tui-narrow.png --cols 100 --rows 30
+```
+
+Each run writes four artifacts beside the requested PNG: the image, styled ANSI
+cells, a plain-text grid, and JSON capture details. The example journey does not use
+the network. Their repositories, commit dates, project names, provider output,
+theme, and terminal size are controlled by the harness.
+
+`tui-journey.example.js` shows the journey contract. For a special capture,
+copy it to a throwaway `*.tmp.js` file and use the supplied `createAgent`,
+`sendKeys`, `sendText`, `captureText`, `sleep`, and `waitFor` helpers. Throwaway
+scripts are ignored by Git, matching the web screenshot workflow.
+
 ## Logs / teardown
 
 ```bash
@@ -118,9 +142,12 @@ host (`BASE_IMAGE=<image> ./up.sh`) or use the in-container build.
 
 | File | Role |
 | --- | --- |
-| `Dockerfile` | Runtime image (glibc/git/node + claude/codex CLIs). |
+| `Dockerfile` | Runtime image (glibc/git/node/tmux + claude/codex CLIs). |
 | `entrypoint.sh` | Seeds config + demo repos, then serves the web UI. |
-| `fake-agent.sh` | Streaming provider for working-state visuals. |
-| `compose.yml` | Mounts the host binary + volumes, publishes loopback port. |
+| `fake-agent.sh` | Fake provider with live preview output and deterministic capture fixtures. |
+| `compose.yml` | Defines the isolated web preview and opt-in TUI capture service. |
 | `up.sh` | Host: build binary + start/restart the container. |
 | `shot.sh` / `shot.js` | Host: screenshot one page of the running preview; also the boilerplate reference for throwaway interaction scripts. |
+| `tui-shot.sh` / `tui-shot.js` | Host: run a deterministic TUI scene and render its captured cells as a PNG. |
+| `tui-driver.js` | Container: seed disposable state, run one journey, and export capture artifacts. |
+| `tui-journey.example.js` | Minimal example that agents copy into ignored, task-specific journeys. |

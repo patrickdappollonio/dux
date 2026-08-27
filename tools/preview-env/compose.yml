@@ -1,10 +1,10 @@
 # Isolated dux preview stack. Brought up by ./up.sh, which builds the dux binary
 # on the host and exports DUX_BIN before invoking compose.
 #
-# Isolation: the binary is the ONLY thing shared with the host, and read-only.
-# Config + sessions live in the dux-data volume (DUX_HOME=/data/dux); repos live
-# in dux-repos. Nothing here can reach the host's ~/.config/dux. Every published
-# port is loopback only.
+# Isolation: the long-running preview shares only the read-only binary. Its
+# config, sessions, and repos live in Docker volumes. The opt-in capture profile
+# additionally mounts one journey read-only and its output directory. Neither
+# service can reach the host's ~/.config/dux. Every published port is loopback.
 services:
   dux:
     build:
@@ -36,6 +36,28 @@ services:
     # give it a tty/stdin so any diagnostic that expects one behaves.
     tty: true
     stdin_open: true
+
+  tui-shot:
+    profiles: ["capture"]
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-archlinux:latest}
+    image: dux-preview
+    entrypoint: ["node", "/usr/local/bin/tui-driver.js"]
+    working_dir: /
+    environment:
+      - DUX_HOME=/capture/dux
+      - TERM=xterm-256color
+      - COLORTERM=truecolor
+      - LANG=C.UTF-8
+      - TZ=UTC
+    volumes:
+      - ${DUX_BIN:?set DUX_BIN to the built dux binary (tui-shot.sh does this)}:/usr/local/bin/dux:ro
+      - ${DUX_TUI_OUTPUT_DIR:?set DUX_TUI_OUTPUT_DIR (tui-shot.sh does this)}:/output
+      - ${DUX_TUI_JOURNEY:?set DUX_TUI_JOURNEY (tui-shot.sh does this)}:/journey.js:ro
+    tmpfs:
+      - /capture
 
 volumes:
   dux-data:

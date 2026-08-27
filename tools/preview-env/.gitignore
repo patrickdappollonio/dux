@@ -5,3 +5,6 @@ shots/
 # it); only the committed screenshot tool is tracked.
 *.js
 !shot.js
+!tui-driver.js
+!tui-journey.example.js
+!tui-shot.js
