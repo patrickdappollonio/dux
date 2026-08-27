@@ -3671,24 +3671,8 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<RunExit> {
-        self.engine.spawn_changed_files_poller();
-        self.engine.spawn_branch_sync_worker();
-        self.engine.spawn_project_branch_status_checks();
-        self.engine.spawn_gh_status_check();
-        // `[server] serve_while_tui` decides whether dux comes up serving. Started
-        // AFTER the global workers, because the background server asserts they are
-        // already running rather than spawning them itself: one runner per
-        // process, and this surface is it.
-        if self.engine.config.server.serve_while_tui && !self.background_server_is_serving() {
-            self.start_background_server();
-        }
+        self.start_run_services();
         let mut terminal = ratatui::init();
-        // EnableFocusChange (DEC mode 1004) so the host reports window focus,
-        // gating the per-tick "viewed" stamp. EnableBracketedPaste (DEC mode
-        // 2004) so a host paste arrives as one `Event::Paste` instead of a
-        // burst of key events (`App::handle_paste` routes it to whichever
-        // surface owns typing). All three are enabled/disabled symmetrically
-        // at every terminal-mode lifecycle site below.
         execute!(
             stdout(),
             EnableMouseCapture,
@@ -3696,238 +3680,10 @@ impl App {
             EnableBracketedPaste
         )?;
 
-        let result: RunExit = {
-            'main: loop {
-                // A SIGTERM/SIGINT/SIGHUP arrived (e.g. the terminal closed, a
-                // system shutdown, or `kill`): quit cleanly so the teardown below
-                // SIGTERMs the agents and gives them a grace window, instead of
-                // letting the process die straight to the hard SIGKILL on drop.
-                if self.shutdown_flag.load(Ordering::Relaxed) {
-                    break 'main RunExit::Quit;
-                }
+        let result = self.run_loop(&mut terminal);
 
-                self.drain_events();
-                // Lend the engine to the background web server, if one is
-                // serving: resolve its pending subscribes, check the spine, drain
-                // its queued requests. This loop is its engine servicer, which is
-                // why the poll interval below is capped while it runs. Placed
-                // after `drain_events` so a request it handles sees this
-                // iteration's worker results, and before the render so a browser
-                // mutation shows up in the same frame.
-                self.service_companion();
-                self.engine.poll_pty_activity();
-                // Drain attention/progress signals: keeps the "working" override
-                // truthful and maintains the per-tab attention flag. Must run
-                // after `poll_pty_activity` so a progress report and the activity
-                // it also produced are observed in the same tick. Stamp the tab
-                // the user is looking at first so the poll suppresses/clears it.
-                self.note_focused_agent_viewed();
-                self.engine.poll_agent_signals();
-                self.tick_count = self.tick_count.wrapping_add(1);
-                // Scroll mode is the user's, but the child can pull the grid
-                // back to the live edge underneath them. Check every tick, not
-                // only on a keystroke, so the "your keys are going nowhere" cue
-                // and the status message that retires it land in the same frame
-                // the view unfroze rather than on the user's next key.
-                self.reconcile_scroll_mode();
-                // Expire a transient status (e.g. a success confirmation) after
-                // its configured lifetime. Busy entries older than BUSY_TIMEOUT
-                // are upgraded to Warning. Wall-clock, not tick count.
-                self.status.tick(Instant::now(), BUSY_TIMEOUT);
-
-                // Check SIGWINCH — needed when bypassing crossterm's event
-                // reader (which would otherwise deliver Resize events).
-                if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
-                    // The interactive path never sees a crossterm Resize, so
-                    // this is where a reflowed grid retires a withheld press
-                    // there: the cell it was aimed at has moved.
-                    self.retire_pending_link_click();
-                    if let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
-                    {
-                        self.report_runtime_error("terminal resize failed", &err);
-                    }
-                }
-
-                if self.force_redraw {
-                    self.force_redraw = false;
-                    if let Err(err) = terminal.clear() {
-                        self.report_runtime_error("force redraw failed", &err);
-                    }
-                    // Re-enable mouse capture, focus reporting, and bracketed
-                    // paste: terminal.clear() resets terminal state which
-                    // drops all three.
-                    let _ = execute!(
-                        stdout(),
-                        EnableMouseCapture,
-                        EnableFocusChange,
-                        EnableBracketedPaste
-                    );
-                }
-
-                if let Err(err) = terminal.draw(|frame| self.render(frame)) {
-                    self.report_runtime_error("terminal draw failed", &err);
-                    thread::sleep(Duration::from_millis(100));
-                    continue;
-                }
-
-                // Forward any captured agent passthrough sequences (notifications,
-                // progress, clipboard writes) to the host terminal. Done AFTER a
-                // successful draw and only here on the single-threaded run loop, so
-                // nothing interleaves mid-frame. Every whitelisted sequence was
-                // validated control-free at capture (C0 bytes are rejected, see
-                // attention.rs), so a forwarded sequence is non-printing and
-                // non-positional and cannot corrupt the frame.
-                let focused_tab = if matches!(self.center_mode, CenterMode::Agent)
-                    && self.active_terminal_id.is_none()
-                {
-                    self.selected_session().map(|s| self.focused_tab_id(&s.id))
-                } else {
-                    None
-                };
-                let under_tmux = self.engine.host_under_tmux();
-                // Prepend any bytes carried over from a previous tick's cap, then
-                // append this tick's fresh capture.
-                let mut fwd = std::mem::take(&mut self.host_forward_carry);
-                fwd.extend_from_slice(
-                    &self
-                        .engine
-                        .take_host_passthrough(focused_tab.as_deref(), under_tmux),
-                );
-                if !fwd.is_empty() {
-                    // Bound the bytes written this tick so a large burst cannot
-                    // stall the run loop on one write_all; the remainder rides the
-                    // carry to the next tick. Splitting at the cap is safe because
-                    // the host stdout is a single continuous byte stream.
-                    if fwd.len() > HOST_FORWARD_MAX_PER_TICK {
-                        self.host_forward_carry = fwd.split_off(HOST_FORWARD_MAX_PER_TICK);
-                    }
-                    let mut out = stdout();
-                    if let Err(err) = out.write_all(&fwd).and_then(|()| out.flush()) {
-                        // A failing host stdout is unusual and would otherwise be
-                        // silently swallowed; log it, throttled so a persistent
-                        // failure does not spam once per tick.
-                        let now = Instant::now();
-                        let should_log = self
-                            .host_forward_error_logged_at
-                            .is_none_or(|at| at.elapsed() >= HOST_FORWARD_ERROR_LOG_INTERVAL);
-                        if should_log {
-                            self.host_forward_error_logged_at = Some(now);
-                            logger::warn(&format!(
-                                "failed to forward agent passthrough sequences to the host \
-                                 terminal: {err}"
-                            ));
-                        }
-                    }
-                }
-
-                // The `StartWebServer` palette action stashes a pre-bound
-                // listener (its pre-flight already succeeded) and we break here,
-                // after one more draw so the "Starting the web server…" Busy
-                // status is visible for the brief remainder. Teardown below runs
-                // identically to the quit path, then the binary takes over.
-                if let Some((listeners, urls)) = self.pending_server_flip.take() {
-                    break 'main RunExit::FlipToServer { listeners, urls };
-                }
-
-                if self.should_poll_raw_input() {
-                    // Interactive mode: read raw stdin and forward to PTY.
-                    // crossterm's event reader is not called — all bytes
-                    // (keyboard, mouse, paste) go to the child process
-                    // except intercepted bindings.
-                    let should_exit = match self.poll_and_forward_raw_input() {
-                        Ok(should_exit) => should_exit,
-                        Err(err) => {
-                            self.report_runtime_error(
-                                "interactive input failed; staying in the current session",
-                                err.as_ref(),
-                            );
-                            false
-                        }
-                    };
-                    if should_exit {
-                        break 'main RunExit::Quit;
-                    }
-                } else {
-                    // Normal UI mode: use crossterm's structured event reader.
-                    // Block up to 100ms for the first event, then drain any
-                    // remaining queued events before rendering so that
-                    // intermediate events (Up, scroll, etc.) don't each cost
-                    // a full render cycle.  This keeps double-click timestamps
-                    // close to wall-clock time.
-                    // Poll faster while a row animates (spinner + name shimmer +
-                    // attention blink) so those render smoothly (~30fps); stay on
-                    // the lazy 100ms cadence otherwise to keep idle CPU low.
-                    // Capped while the background server is on: this poll IS a
-                    // browser's request latency, so the lazy idle cadence would
-                    // put a remote keystroke behind it (see `App::max_poll_ms`).
-                    let idle_poll_ms: u64 = if self.any_row_animating() { 33 } else { 100 };
-                    let poll_ms = idle_poll_ms.min(self.max_poll_ms());
-                    let ready = match crate::io_retry::retry_on_interrupt(|| {
-                        event::poll(Duration::from_millis(poll_ms))
-                    }) {
-                        Ok(ready) => ready,
-                        Err(err) => {
-                            self.report_runtime_error(
-                                "event polling failed; input handling was skipped",
-                                &err,
-                            );
-                            false
-                        }
-                    };
-                    if ready {
-                        let mut should_exit = false;
-                        loop {
-                            let event = match crate::io_retry::retry_on_interrupt(event::read) {
-                                Ok(event) => event,
-                                Err(err) => {
-                                    self.report_runtime_error(
-                                        "event read failed; input handling was skipped",
-                                        &err,
-                                    );
-                                    break;
-                                }
-                            };
-                            should_exit = self.handle_terminal_event(event);
-
-                            // Stop draining if exit was requested.
-                            if should_exit {
-                                break;
-                            }
-
-                            // Stop draining if we switched to interactive
-                            // mode — remaining events must go through the
-                            // raw stdin path.
-                            if matches!(
-                                self.input_target,
-                                InputTarget::Agent | InputTarget::Terminal
-                            ) {
-                                break;
-                            }
-
-                            // Check for more queued events without blocking.
-                            match crate::io_retry::retry_on_interrupt(|| {
-                                event::poll(Duration::ZERO)
-                            }) {
-                                Ok(true) => continue,
-                                _ => break,
-                            }
-                        }
-                        if should_exit {
-                            break 'main RunExit::Quit;
-                        }
-                    }
-                }
-            }
-        };
-
-        // Leaving the terminal UI ends the background serve, whichever way we are
-        // leaving. Explicit rather than left to drop: stopping trips the PTY
-        // forwarders' teardown flag FIRST, and the forwarders are parked on
-        // channels the engine still owns, so an implicit drop of the serve's
-        // runtime would block on tasks that never notice. Done before the terminal
-        // is restored so the wind-down happens while dux still owns the screen.
+        // Stop PTY forwarders while the engine and terminal screen are still owned here.
         self.stop_background_server_quietly();
-
         let _ = execute!(
             stdout(),
             DisableMouseCapture,
@@ -3936,15 +3692,198 @@ impl App {
         );
         ratatui::restore();
 
-        // On a real quit, wind the agents and companion terminals down
-        // gracefully: SIGTERM each child and wait briefly so it can save state
-        // for a later resume before `PtyClient::drop` hard-kills any straggler.
-        // On a flip the engine (and its live PTYs) is handed to the server, so
-        // it must NOT be touched here; `into_engine` moves it out intact.
         if matches!(result, RunExit::Quit) {
             self.shutdown_agents_gracefully();
         }
         Ok(result)
+    }
+
+    fn start_run_services(&mut self) {
+        self.engine.spawn_changed_files_poller();
+        self.engine.spawn_branch_sync_worker();
+        self.engine.spawn_project_branch_status_checks();
+        self.engine.spawn_gh_status_check();
+        // The background server assumes these process-wide workers are already running.
+        if self.engine.config.server.serve_while_tui && !self.background_server_is_serving() {
+            self.start_background_server();
+        }
+    }
+
+    fn run_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> RunExit {
+        loop {
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                return RunExit::Quit;
+            }
+
+            self.prepare_run_tick();
+            self.refresh_run_terminal(terminal);
+            if !self.draw_run_frame(terminal) {
+                continue;
+            }
+            self.forward_host_passthrough();
+
+            if let Some((listeners, urls)) = self.pending_server_flip.take() {
+                return RunExit::FlipToServer { listeners, urls };
+            }
+            if self.poll_run_input() {
+                return RunExit::Quit;
+            }
+        }
+    }
+
+    fn prepare_run_tick(&mut self) {
+        self.drain_events();
+        // Browser requests observe this tick's worker results and render in the same frame.
+        self.service_companion();
+        self.engine.poll_pty_activity();
+        // Mark the visible tab before signals can raise or clear its attention state.
+        self.note_focused_agent_viewed();
+        self.engine.poll_agent_signals();
+        self.tick_count = self.tick_count.wrapping_add(1);
+        self.reconcile_scroll_mode();
+        self.status.tick(Instant::now(), BUSY_TIMEOUT);
+    }
+
+    fn refresh_run_terminal(&mut self, terminal: &mut ratatui::DefaultTerminal) {
+        if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
+            self.retire_pending_link_click();
+            if let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize()) {
+                self.report_runtime_error("terminal resize failed", &err);
+            }
+        }
+
+        if !self.force_redraw {
+            return;
+        }
+        self.force_redraw = false;
+        if let Err(err) = terminal.clear() {
+            self.report_runtime_error("force redraw failed", &err);
+        }
+        let _ = execute!(
+            stdout(),
+            EnableMouseCapture,
+            EnableFocusChange,
+            EnableBracketedPaste
+        );
+    }
+
+    fn draw_run_frame(&mut self, terminal: &mut ratatui::DefaultTerminal) -> bool {
+        if let Err(err) = terminal.draw(|frame| self.render(frame)) {
+            self.report_runtime_error("terminal draw failed", &err);
+            thread::sleep(Duration::from_millis(100));
+            return false;
+        }
+        true
+    }
+
+    fn focused_host_passthrough_tab(&self) -> Option<String> {
+        if !matches!(self.center_mode, CenterMode::Agent) || self.active_terminal_id.is_some() {
+            return None;
+        }
+        self.selected_session()
+            .map(|session| self.focused_tab_id(&session.id))
+    }
+
+    fn forward_host_passthrough(&mut self) {
+        let focused_tab = self.focused_host_passthrough_tab();
+        let under_tmux = self.engine.host_under_tmux();
+        let mut bytes = std::mem::take(&mut self.host_forward_carry);
+        bytes.extend_from_slice(
+            &self
+                .engine
+                .take_host_passthrough(focused_tab.as_deref(), under_tmux),
+        );
+        if bytes.is_empty() {
+            return;
+        }
+        if bytes.len() > HOST_FORWARD_MAX_PER_TICK {
+            // The carry bounds each stdout write without splitting the continuous byte stream.
+            self.host_forward_carry = bytes.split_off(HOST_FORWARD_MAX_PER_TICK);
+        }
+
+        let mut out = stdout();
+        let Err(err) = out.write_all(&bytes).and_then(|()| out.flush()) else {
+            return;
+        };
+        let now = Instant::now();
+        let should_log = self
+            .host_forward_error_logged_at
+            .is_none_or(|at| at.elapsed() >= HOST_FORWARD_ERROR_LOG_INTERVAL);
+        if should_log {
+            self.host_forward_error_logged_at = Some(now);
+            logger::warn(&format!(
+                "failed to forward agent passthrough sequences to the host terminal: {err}"
+            ));
+        }
+    }
+
+    fn poll_run_input(&mut self) -> bool {
+        if self.should_poll_raw_input() {
+            return self.poll_raw_run_input();
+        }
+        self.poll_structured_run_input()
+    }
+
+    fn poll_raw_run_input(&mut self) -> bool {
+        match self.poll_and_forward_raw_input() {
+            Ok(should_exit) => should_exit,
+            Err(err) => {
+                self.report_runtime_error(
+                    "interactive input failed; staying in the current session",
+                    err.as_ref(),
+                );
+                false
+            }
+        }
+    }
+
+    fn poll_structured_run_input(&mut self) -> bool {
+        let idle_poll_ms = if self.any_row_animating() { 33 } else { 100 };
+        let poll_ms = idle_poll_ms.min(self.max_poll_ms());
+        let ready = match crate::io_retry::retry_on_interrupt(|| {
+            event::poll(Duration::from_millis(poll_ms))
+        }) {
+            Ok(ready) => ready,
+            Err(err) => {
+                self.report_runtime_error("event polling failed; input handling was skipped", &err);
+                false
+            }
+        };
+        if !ready {
+            return false;
+        }
+        self.drain_terminal_input()
+    }
+
+    fn drain_terminal_input(&mut self) -> bool {
+        loop {
+            let event = match crate::io_retry::retry_on_interrupt(event::read) {
+                Ok(event) => event,
+                Err(err) => {
+                    self.report_runtime_error(
+                        "event read failed; input handling was skipped",
+                        &err,
+                    );
+                    return false;
+                }
+            };
+            if self.handle_terminal_event(event) {
+                return true;
+            }
+            if matches!(
+                self.input_target,
+                InputTarget::Agent | InputTarget::Terminal
+            ) {
+                // Remaining stdin bytes now belong to the raw-input path.
+                return false;
+            }
+            if !matches!(
+                crate::io_retry::retry_on_interrupt(|| event::poll(Duration::ZERO)),
+                Ok(true)
+            ) {
+                return false;
+            }
+        }
     }
 
     /// SIGTERM every running agent/terminal PTY and wait up to the configured
