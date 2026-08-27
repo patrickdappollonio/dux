@@ -635,85 +635,7 @@ impl Engine {
                 target,
                 busy_message,
                 already_running_message,
-            } => {
-                let repo_key = repo_path.to_string_lossy().into_owned();
-                // Clones for the panic event closure; the job closure
-                // consumes the originals.
-                let repo_key_for_panic = repo_key.clone();
-                let target_for_panic = target.clone();
-                // Build the correlation key for the busy→final pair. Both ends
-                // must use the same key so the web layer can dismiss the busy
-                // toast when the completion arrives.
-                // Build the tri-state op: the success/failure messages are
-                // declared here alongside the pending, correlated by the op's own
-                // opaque id. The worker resolves the matching closure and carries
-                // the result back on PullCompleted; the completion handler keeps
-                // the domain mutations.
-                let op = match &target {
-                    PullTarget::Project { project_name, .. } => {
-                        project_refresh_status_op(busy_message, project_name)
-                    }
-                    PullTarget::Session => {
-                        crate::engine::status_op(busy_message)
-                            .on_success(|_: &PullOutcome| {
-                                crate::engine::Final::info(
-                                    "Pulled latest changes from remote successfully. Local branch is up to date.",
-                                )
-                            })
-                            .on_failure(|e: &String| {
-                                crate::engine::Final::error(format!("Pull from remote failed: {e}"))
-                            })
-                    }
-                };
-                let pending = op.pending_status();
-                let panic_key = op.key().to_string();
-                // Capture the command origin BEFORE the worker spawns: by the
-                // time the deferred final lands, `current_origin` has been reset.
-                // `All` for the TUI/tests, so behaviour is unchanged there.
-                let origin = self.current_origin.clone();
-                let origin_for_panic = origin.clone();
-                Ok(self.spawn_command_worker(
-                    CommandWorkerSpec {
-                        label: format!("pull:{repo_key}"),
-                        in_flight_key: Some(InFlightKey::Pull(repo_key.clone())),
-                        busy_status: Some(pending),
-                        already_running_status: Some(StatusUpdate::warning(
-                            already_running_message,
-                        )),
-                        panic_event: Some(Box::new(move |reason| WorkerEvent::PullCompleted {
-                            repo_path: repo_key_for_panic,
-                            target: target_for_panic,
-                            result: Err(format!("Pull worker panicked: {reason}")),
-                            status: crate::engine::ResolvedFinal::error(
-                                panic_key,
-                                format!("Pull worker panicked: {reason}"),
-                            )
-                            .with_scope(origin_for_panic.clone()),
-                        })),
-                    },
-                    move |tx| {
-                        let result = match &target {
-                            PullTarget::Project { leading_branch, .. } => {
-                                run_project_refresh(&repo_path, leading_branch.clone())
-                            }
-                            PullTarget::Session => crate::git::pull_current_branch(&repo_path)
-                                .map(|_| PullOutcome::Pulled {
-                                    current_branch: None,
-                                })
-                                .map_err(|e| e.to_string()),
-                        };
-                        // Resolve the tri-state op where the typed result is in
-                        // scope; the message rides back with the domain result.
-                        let status = op.resolve(&result).with_scope(origin.clone());
-                        let _ = tx.send(WorkerEvent::PullCompleted {
-                            repo_path: repo_key,
-                            target,
-                            result,
-                            status,
-                        });
-                    },
-                ))
-            }
+            } => Ok(self.dispatch_pull(repo_path, target, busy_message, already_running_message)),
 
             Command::OpenPath { path, target } => {
                 let display = path.display().to_string();
@@ -915,6 +837,73 @@ impl Engine {
                 Ok(EventReaction::Nothing)
             }
         }
+    }
+
+    fn dispatch_pull(
+        &mut self,
+        repo_path: PathBuf,
+        target: PullTarget,
+        busy_message: String,
+        already_running_message: String,
+    ) -> EventReaction {
+        let repo_key = repo_path.to_string_lossy().into_owned();
+        let repo_key_for_panic = repo_key.clone();
+        let target_for_panic = target.clone();
+        let op = match &target {
+            PullTarget::Project { project_name, .. } => {
+                project_refresh_status_op(busy_message, project_name)
+            }
+            PullTarget::Session => crate::engine::status_op(busy_message)
+                .on_success(|_: &PullOutcome| {
+                    crate::engine::Final::info(
+                        "Pulled latest changes from remote successfully. Local branch is up to date.",
+                    )
+                })
+                .on_failure(|error: &String| {
+                    crate::engine::Final::error(format!("Pull from remote failed: {error}"))
+                }),
+        };
+        let pending = op.pending_status();
+        let panic_key = op.key().to_string();
+        let origin = self.current_origin.clone();
+        let origin_for_panic = origin.clone();
+        self.spawn_command_worker(
+            CommandWorkerSpec {
+                label: format!("pull:{repo_key}"),
+                in_flight_key: Some(InFlightKey::Pull(repo_key.clone())),
+                busy_status: Some(pending),
+                already_running_status: Some(StatusUpdate::warning(already_running_message)),
+                panic_event: Some(Box::new(move |reason| WorkerEvent::PullCompleted {
+                    repo_path: repo_key_for_panic,
+                    target: target_for_panic,
+                    result: Err(format!("Pull worker panicked: {reason}")),
+                    status: crate::engine::ResolvedFinal::error(
+                        panic_key,
+                        format!("Pull worker panicked: {reason}"),
+                    )
+                    .with_scope(origin_for_panic.clone()),
+                })),
+            },
+            move |tx| {
+                let result = match &target {
+                    PullTarget::Project { leading_branch, .. } => {
+                        run_project_refresh(&repo_path, leading_branch.clone())
+                    }
+                    PullTarget::Session => crate::git::pull_current_branch(&repo_path)
+                        .map(|_| PullOutcome::Pulled {
+                            current_branch: None,
+                        })
+                        .map_err(|error| error.to_string()),
+                };
+                let status = op.resolve(&result).with_scope(origin.clone());
+                let _ = tx.send(WorkerEvent::PullCompleted {
+                    repo_path: repo_key,
+                    target,
+                    result,
+                    status,
+                });
+            },
+        )
     }
 
     fn remove_project_keep_worktrees(
