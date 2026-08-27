@@ -5845,6 +5845,56 @@ mod tests {
     }
 
     #[test]
+    fn begin_delete_session_refuses_to_remove_a_standalone_directory() {
+        let (mut engine, _tmp) = test_engine();
+        let session = crate::engine::test_support::sample_standalone_session(
+            "standalone",
+            "/tmp/existing-folder",
+        );
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine.begin_delete_session("standalone", true);
+
+        assert!(matches!(
+            outcome,
+            BeginDeleteSessionOutcome::Refused { ref message }
+                if message.contains("dux never removes it")
+                    && message.contains("existing-folder")
+        ));
+        assert!(!engine.pending_deletions.contains("standalone"));
+        assert!(!engine.closing_sessions.contains("standalone"));
+        assert!(
+            engine
+                .sessions
+                .iter()
+                .any(|session| session.id == "standalone")
+        );
+    }
+
+    #[test]
+    fn begin_delete_session_keeps_standalone_record_deletion_inline() {
+        let (mut engine, _tmp) = test_engine();
+        let session = crate::engine::test_support::sample_standalone_session(
+            "standalone",
+            "/tmp/existing-folder",
+        );
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine.begin_delete_session("standalone", false);
+
+        assert!(matches!(
+            outcome,
+            BeginDeleteSessionOutcome::Inline {
+                removal: WorktreeRemoval::NothingToRemove { ref folder_label }
+            } if folder_label.ends_with("existing-folder")
+        ));
+        assert!(!engine.pending_deletions.contains("standalone"));
+        assert!(!engine.closing_sessions.contains("standalone"));
+    }
+
+    #[test]
     fn begin_delete_session_inline_when_no_worktree_removal_needed() {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/tmp/p1"));
