@@ -1300,6 +1300,17 @@ mod tests {
     }
 
     #[test]
+    fn oversized_pull_request_numbers_keep_their_current_spelling_semantics() {
+        let too_large = "18446744073709551616";
+        assert!(parse_typed_reference(too_large).is_err());
+        assert!(parse_typed_reference(&format!("acme/widget#{too_large}")).is_err());
+        assert_eq!(
+            parsed(&format!("https://github.com/acme/widget/pull/{too_large}")).number,
+            None
+        );
+    }
+
+    #[test]
     fn a_malformed_authority_is_refused_rather_than_read_as_a_host() {
         for input in [
             "https://[::1/acme/widget",
