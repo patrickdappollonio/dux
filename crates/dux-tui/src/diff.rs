@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use similar::{ChangeTag, TextDiff};
+use similar::{Change, ChangeTag, TextDiff};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -31,6 +31,110 @@ pub struct DiffOutput {
     /// Display-column width of the gutter (line numbers + separator + prefix).
     /// Zero when line numbers are disabled.
     pub gutter_width: usize,
+}
+
+fn diff_line_number_width(text_diff: &TextDiff<'_, '_, str>, enabled: bool) -> usize {
+    if !enabled {
+        return 0;
+    }
+
+    let mut maximum = 1;
+    for hunk in text_diff.unified_diff().context_radius(3).iter_hunks() {
+        for change in hunk.iter_changes() {
+            maximum = maximum.max(change.old_index().map_or(0, |index| index + 1));
+            maximum = maximum.max(change.new_index().map_or(0, |index| index + 1));
+        }
+    }
+    maximum.to_string().len()
+}
+
+fn change_line_numbers(change: &Change<&str>, tag: ChangeTag, width: usize) -> String {
+    let old = match tag {
+        ChangeTag::Delete | ChangeTag::Equal => {
+            format!("{:>width$}", change.old_index().unwrap_or(0) + 1)
+        }
+        ChangeTag::Insert => " ".repeat(width),
+    };
+    let new = match tag {
+        ChangeTag::Insert | ChangeTag::Equal => {
+            format!("{:>width$}", change.new_index().unwrap_or(0) + 1)
+        }
+        ChangeTag::Delete => " ".repeat(width),
+    };
+    format!("{old} {new} ")
+}
+
+struct ChangeRenderContext<'a> {
+    theme: &'a AppTheme,
+    cache: &'a SyntaxCache,
+    show_line_numbers: bool,
+    line_number_width: usize,
+    tab_width: u16,
+}
+
+fn render_change_line<'a>(
+    change: &Change<&str>,
+    context: &ChangeRenderContext<'_>,
+    old_highlighter: &mut HighlightLines<'a>,
+    new_highlighter: &mut HighlightLines<'a>,
+) -> Line<'static> {
+    let theme = context.theme;
+    let tag = change.tag();
+    let (prefix, base_fg, background, highlighter) = match tag {
+        ChangeTag::Delete => (
+            "-",
+            theme.diff_remove,
+            Some(theme.diff_remove_bg),
+            old_highlighter,
+        ),
+        ChangeTag::Insert => (
+            "+",
+            theme.diff_add,
+            Some(theme.diff_add_bg),
+            new_highlighter,
+        ),
+        ChangeTag::Equal => (" ", Color::Reset, None, new_highlighter),
+    };
+    let content = expand_tabs(change.value().trim_end_matches('\n'), context.tab_width);
+    let mut spans = Vec::new();
+    if context.show_line_numbers {
+        spans.push(Span::styled(
+            change_line_numbers(change, tag, context.line_number_width),
+            Style::default().fg(theme.diff_line_number_fg),
+        ));
+        spans.push(Span::styled(
+            "│",
+            Style::default().fg(theme.diff_line_number_sep),
+        ));
+    }
+
+    match highlighter.highlight_line(&content, &context.cache.syntax_set) {
+        Ok(ranges) if tag == ChangeTag::Equal => {
+            spans.push(Span::styled(prefix, Style::default().fg(base_fg)));
+            spans.extend(
+                ranges
+                    .into_iter()
+                    .map(|(style, text)| Span::styled(text.to_string(), syntect_to_ratatui(style))),
+            );
+        }
+        Ok(ranges) => {
+            let background = background.unwrap_or(Color::Reset);
+            spans.push(Span::styled(
+                prefix,
+                Style::default().fg(base_fg).bg(background),
+            ));
+            spans.extend(ranges.into_iter().map(|(style, text)| {
+                Span::styled(text.to_string(), syntect_to_ratatui(style).bg(background))
+            }));
+        }
+        Err(_) => spans.push(Span::styled(
+            format!("{prefix}{content}"),
+            Style::default()
+                .fg(base_fg)
+                .bg(background.unwrap_or(Color::Reset)),
+        )),
+    }
+    Line::from(spans)
 }
 
 /// Compute a syntax-highlighted, unified diff for a single file.
@@ -85,26 +189,17 @@ pub fn diff_file(
     let text_diff = TextDiff::from_lines(&old_text, &new_text);
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Compute gutter width from the maximum line number across all hunks.
-    let ln_width = if show_line_numbers {
-        let mut max_ln: usize = 1;
-        for hunk in text_diff.unified_diff().context_radius(3).iter_hunks() {
-            for change in hunk.iter_changes() {
-                if let Some(idx) = change.old_index() {
-                    max_ln = max_ln.max(idx + 1);
-                }
-                if let Some(idx) = change.new_index() {
-                    max_ln = max_ln.max(idx + 1);
-                }
-            }
-        }
-        max_ln.to_string().len()
-    } else {
-        0
-    };
+    let ln_width = diff_line_number_width(&text_diff, show_line_numbers);
 
     let gutter_style = Style::default().fg(theme.diff_line_number_fg);
     let sep_style = Style::default().fg(theme.diff_line_number_sep);
+    let change_context = ChangeRenderContext {
+        theme,
+        cache,
+        show_line_numbers,
+        line_number_width: ln_width,
+        tab_width: diff_tab_width,
+    };
 
     // File header.
     lines.push(Line::from(Span::styled(
@@ -143,78 +238,12 @@ pub fn diff_file(
         let mut hl_new = HighlightLines::new(syntax, syn_theme);
 
         for change in hunk.iter_changes() {
-            let tag = change.tag();
-            let text = change.value();
-
-            let (prefix, base_fg, bg, highlighter) = match tag {
-                ChangeTag::Delete => (
-                    "-",
-                    theme.diff_remove,
-                    Some(theme.diff_remove_bg),
-                    &mut hl_old,
-                ),
-                ChangeTag::Insert => ("+", theme.diff_add, Some(theme.diff_add_bg), &mut hl_new),
-                ChangeTag::Equal => (" ", Color::Reset, None, &mut hl_new),
-            };
-
-            // Attempt syntax highlighting; fall back to plain coloring.
-            let content = expand_tabs(text.trim_end_matches('\n'), diff_tab_width);
-            let mut spans: Vec<Span<'static>> = Vec::new();
-
-            // Line-number gutter.
-            if show_line_numbers {
-                let old_ln = match tag {
-                    ChangeTag::Delete | ChangeTag::Equal => {
-                        format!("{:>w$}", change.old_index().unwrap_or(0) + 1, w = ln_width)
-                    }
-                    ChangeTag::Insert => " ".repeat(ln_width),
-                };
-                let new_ln = match tag {
-                    ChangeTag::Insert | ChangeTag::Equal => {
-                        format!("{:>w$}", change.new_index().unwrap_or(0) + 1, w = ln_width)
-                    }
-                    ChangeTag::Delete => " ".repeat(ln_width),
-                };
-                spans.push(Span::styled(format!("{old_ln} {new_ln} "), gutter_style));
-                spans.push(Span::styled("│", sep_style));
-            }
-
-            match highlighter.highlight_line(&content, &cache.syntax_set) {
-                Ok(ranges) if tag == ChangeTag::Equal => {
-                    // Context lines: full syntax colors, no background tint.
-                    spans.push(Span::styled(
-                        prefix.to_string(),
-                        Style::default().fg(base_fg),
-                    ));
-                    spans.extend(
-                        ranges
-                            .into_iter()
-                            .map(|(s, t)| Span::styled(t.to_string(), syntect_to_ratatui(s))),
-                    );
-                }
-                Ok(ranges) => {
-                    // Added/removed lines: syntax colors + tinted background.
-                    spans.push(Span::styled(
-                        prefix.to_string(),
-                        Style::default().fg(base_fg).bg(bg.unwrap_or(Color::Reset)),
-                    ));
-                    spans.extend(ranges.into_iter().map(|(s, t)| {
-                        let mut style = syntect_to_ratatui(s);
-                        if let Some(bg_color) = bg {
-                            style = style.bg(bg_color);
-                        }
-                        Span::styled(t.to_string(), style)
-                    }));
-                }
-                Err(_) => {
-                    // Fallback: no syntax highlighting.
-                    spans.push(Span::styled(
-                        format!("{prefix}{content}"),
-                        Style::default().fg(base_fg).bg(bg.unwrap_or(Color::Reset)),
-                    ));
-                }
-            };
-            lines.push(Line::from(spans));
+            lines.push(render_change_line(
+                &change,
+                &change_context,
+                &mut hl_old,
+                &mut hl_new,
+            ));
         }
     }
 
