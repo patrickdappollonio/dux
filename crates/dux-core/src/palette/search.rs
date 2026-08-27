@@ -2,16 +2,19 @@
 //!
 //! ## Why this exists
 //!
-//! The palette's own matching (`RuntimeBindings::filtered_palette`) is a
-//! contiguous phrase match: the query, with whitespace and dashes collapsed to
-//! one `-`, must appear as a substring of the command name or, failing that,
-//! of its description. That is precise and predictable, and it is the tier the
-//! user sees first. It also answers nothing at all for `new tab`,
-//! `toggle banner` or `kill agent`, because those words are real but not
-//! adjacent in that order.
+//! The palette's own matching (the direct tier of
+//! `RuntimeBindings::palette_matches`) is a contiguous phrase match: the
+//! query, with whitespace and dashes collapsed to one `-`, must appear as a
+//! substring of the command name or, failing that, of its description. That is
+//! precise and predictable, and it is the tier the user sees first. It also
+//! answers nothing at all for `new tab`, `toggle banner` or `kill agent`,
+//! because those words are real but not adjacent in that order.
 //!
 //! This module is the second tier: every query token must PREFIX-match some
-//! token of the command, in any order, and the hits are ranked. It is a
+//! token of the command, in any order, and the hits are ranked. Mostly that
+//! catches multi-word queries, but not only: the two tiers tokenize
+//! differently, so a single word can land here too (the apostrophe rule
+//! below is one way in). It is a
 //! deliberately small BM25-shaped rule rather than a crate: at 77 records the
 //! ranking cost is irrelevant, and every candidate crate would still have
 //! needed custom splitting, prefix-AND semantics, field weights, subtraction of

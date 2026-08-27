@@ -1929,9 +1929,11 @@ impl RuntimeBindings {
     /// `other` is the looser tier the divider sits above: the words in any
     /// order, each of them possibly partial, ranked by
     /// [`dux_core::palette::search`], with everything already in `direct`
-    /// removed. It can only ever be non-empty for a MULTI-token query, because
-    /// a single token that prefixes a document token is by construction a
-    /// substring of that same text and so is already a direct hit.
+    /// removed. It is usually a multi-word query that lands here, but not
+    /// only: the two tiers tokenize differently, and a single word can reach
+    /// the second tier through that gap. The scorer strips apostrophes, so
+    /// `agents` reaches a description that says `agent's` while the phrase
+    /// tier, which matches the text as written, does not.
     pub fn palette_matches(&self, input: &str) -> PaletteMatches<'_> {
         let direct = self.direct_palette_matches(input);
         let other = dux_core::palette::search::ranked_matches(input)
@@ -1952,14 +1954,10 @@ impl RuntimeBindings {
     }
 
     /// Both tiers of [`RuntimeBindings::palette_matches`] as one flat list,
-    /// the direct hits first. Callers that need to draw the boundary between
-    /// them ask for the tiers instead; this is the convenience for everyone
-    /// who just wants the matches.
-    ///
-    /// The app itself asks for the tiers, because it draws the boundary and
-    /// availability-filters each side separately; this stays as the shape
-    /// every other caller (and the binding tests) wants.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// the direct hits first. The app itself asks for the tiers, because it
+    /// draws the boundary between them and availability-filters each side
+    /// separately; this is the shape the binding tests match on.
+    #[cfg(test)]
     pub fn filtered_palette(&self, input: &str) -> Vec<&RuntimeBinding> {
         let matches = self.palette_matches(input);
         let mut flat = matches.direct;
@@ -2809,8 +2807,8 @@ mod tests {
             "an empty query lists everything once"
         );
 
-        // A single token that prefixes a document token is by construction a
-        // substring of that same text, so it is always a direct hit already.
+        // A single token that already appears as a substring is never
+        // demoted: the phrase tier owns it and the second tier stays empty.
         for query in ["agent", "wor", "pr", "toggle"] {
             let matches = bindings.palette_matches(query);
             assert!(
@@ -2819,6 +2817,35 @@ mod tests {
                 palette_names(&matches.other)
             );
         }
+    }
+
+    #[test]
+    fn a_single_word_reaches_the_second_tier_through_an_apostrophe() {
+        // The two tiers tokenize differently and that gap is deliberate: the
+        // scorer drops apostrophes, so `agents` finds the descriptions that
+        // say `agent's`, which the phrase tier cannot see.
+        let bindings = default_bindings();
+        let matches = bindings.palette_matches("agents");
+        assert!(
+            palette_names(&matches.direct).contains(&"sort-agents"),
+            "the plural is a substring of several names, so the phrase tier \
+             still leads: {:?}",
+            palette_names(&matches.direct)
+        );
+        assert_eq!(
+            palette_names(&matches.other),
+            vec![
+                "rerun-startup-command-on-agent",
+                "copy-path",
+                "open-worktree",
+                "open-worktree-with",
+                "open-current-pr",
+                "detach-pull-request",
+                "resume-pull-request-autodetection",
+                "agent-info",
+                "refresh-changes",
+            ]
+        );
     }
 
     #[test]
