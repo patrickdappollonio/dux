@@ -1463,189 +1463,190 @@ impl App {
         Ok(())
     }
 
-    fn handle_center_key(&mut self, key: KeyEvent) -> Result<()> {
-        let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
-        if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
-            match action {
-                Action::FocusAgent if !in_diff => {
-                    if self.center_typeable() {
-                        // A live, typeable pane types Enter (any typing-owned
-                        // default is already encoded by the `handle_key`
-                        // bypass; this arm is reached only while scrolled
-                        // back, where typing is suppressed, or under a chord
-                        // rebind at the live edge).
-                        if !self.scroll_mode_active() {
-                            self.forward_typing_key_to_center(&key);
-                        }
-                    } else {
-                        // Dormant or exited: the explicit activate action
-                        // launches, landing focused-but-minimized on
-                        // completion.
-                        self.activate_center_agent(true, false)?;
-                    }
-                }
-                Action::ToggleFullscreen if !in_diff => {
-                    if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
-                        // The toggle's down half: a non-interactive agent
-                        // fullscreen (the dormant relaunch screen) minimizes
-                        // without launching anything.
-                        self.close_top_overlay();
-                    } else {
-                        // The up half: maximize a live tab, or launch a
-                        // dormant one seeking fullscreen (fullscreen-seeking
-                        // launches land fullscreen).
-                        self.activate_center_agent(true, true)?;
-                    }
-                }
-                Action::OpenMacroBar if !in_diff => {
-                    // The macro chord works over the minimized
-                    // pane too. Mirror the fullscreen intercept's gates: no
-                    // bar while scrolled back (the scroll vocabulary owns the
-                    // pane), and no bar without a live surface, because the
-                    // send would silently go nowhere.
-                    if self.scroll_mode_active() {
-                        // Suppressed, like the fullscreen intercept while scrolled back.
-                    } else if self.selected_terminal_surface_client().is_none() {
-                        let focus_key = self.bindings.label_for(Action::FocusAgent);
-                        self.set_error(format!(
-                            "No running agent or terminal in this pane to send macros to. Press {focus_key} to launch the focused tab first."
-                        ));
-                    } else {
-                        self.open_macro_bar();
-                    }
-                }
-                Action::ShowTerminal if !in_diff => self.show_or_open_first_terminal()?,
-                Action::NextTab if !in_diff => self.focus_tab_relative(true),
-                Action::PrevTab if !in_diff => self.focus_tab_relative(false),
-                Action::NewTab if !in_diff => self.open_new_tab_provider_prompt()?,
-                Action::CloseTab if !in_diff => self.close_focused_tab_prompt(),
-                Action::SelectTab1 if !in_diff => self.focus_tab_index(0),
-                Action::SelectTab2 if !in_diff => self.focus_tab_index(1),
-                Action::SelectTab3 if !in_diff => self.focus_tab_index(2),
-                Action::SelectTab4 if !in_diff => self.focus_tab_index(3),
-                Action::SelectTab5 if !in_diff => self.focus_tab_index(4),
-                Action::SelectTab6 if !in_diff => self.focus_tab_index(5),
-                Action::SelectTab7 if !in_diff => self.focus_tab_index(6),
-                Action::SelectTab8 if !in_diff => self.focus_tab_index(7),
-                Action::SelectTab9 if !in_diff => self.focus_tab_index(8),
-                Action::DeleteSession if !in_diff => self.confirm_delete_selected_session()?,
-                Action::RenameSession if !in_diff => self.open_rename_session()?,
-                Action::OpenAgentInfo if !in_diff => self.open_agent_info()?,
-                Action::OpenCurrentPullRequest if !in_diff && self.current_pr_info().is_some() => {
-                    self.open_current_pr_in_browser()
-                }
-                Action::ReconnectAgent if !in_diff => {
-                    // Delegate to the shared focused-tab logic: enter interactive
-                    // mode on a live tab, launch a dormant extra tab fresh, or
-                    // relaunch a dormant session-slot tab — resolving the FOCUSED tab so
-                    // this never acts on the session-slot tab while an extra tab is shown.
-                    // Not fullscreen-seeking by itself; a reconnect initiated
-                    // from the fullscreen relaunch screen still lands
-                    // fullscreen via `launch_seeks_fullscreen`.
-                    self.activate_center_agent(true, false)?;
-                }
-                Action::ScrollPageUp => {
-                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-                        let page = self.last_diff_height.max(1);
-                        *scroll = scroll.saturating_sub(page);
-                    } else if self.center_typeable() && self.should_forward_center_page() {
-                        // Typeable pane, page-owning child: forward the page
-                        // key's bytes exactly as fullscreen does;
-                        // an alt-screen child has no host scrollback to move.
-                        self.forward_typing_key_to_center(&key);
-                    } else if self.last_pty_size.0 > 0 {
-                        self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
-                    }
-                }
-                Action::ScrollPageDown => {
-                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-                        let page = self.last_diff_height.max(1);
-                        let max_scroll = self
-                            .last_diff_visual_lines
-                            .saturating_sub(self.last_diff_height.max(1));
-                        *scroll = (*scroll + page).min(max_scroll);
-                    } else if self.center_typeable() && self.should_forward_center_page() {
-                        self.forward_typing_key_to_center(&key);
-                    } else if self.last_pty_size.0 > 0 {
-                        self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
-                    }
-                }
-                // The line-scroll and snap keys are gated by context in a
-                // typeable pane (the line-scroll gating tenet): they scroll
-                // only when the pane is already scrolled back; at the live
-                // edge they fall through to the encoder like any other typed
-                // key. In a non-typeable pane (dormant or exited agent) there
-                // is no competing use, so they scroll unconditionally as
-                // before. With the default bindings these keys are
-                // typing-owned and never reach this match while typeable at
-                // the live edge (the `handle_key` bypass grabs them first);
-                // the gate here covers rebinds onto chords.
-                Action::ScrollLineUp => {
-                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-                        *scroll = scroll.saturating_sub(1);
-                    } else if !self.center_scroll_keys_gated() {
-                        if self.last_pty_size.0 > 0 {
-                            self.scroll_pty(ScrollDirection::Up, 1);
-                        }
-                    } else {
-                        self.forward_typing_key_to_center(&key);
-                    }
-                }
-                Action::ScrollLineDown => {
-                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-                        let max_scroll = self
-                            .last_diff_visual_lines
-                            .saturating_sub(self.last_diff_height.max(1));
-                        *scroll = (*scroll + 1).min(max_scroll);
-                    } else if !self.center_scroll_keys_gated() {
-                        if self.last_pty_size.0 > 0 {
-                            self.scroll_pty(ScrollDirection::Down, 1);
-                        }
-                    } else {
-                        self.forward_typing_key_to_center(&key);
-                    }
-                }
-                Action::ScrollToBottom => {
-                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-                        let max_scroll = self
-                            .last_diff_visual_lines
-                            .saturating_sub(self.last_diff_height.max(1));
-                        *scroll = max_scroll;
-                    } else if !self.center_scroll_keys_gated() {
-                        self.reset_pty_scrollback();
-                    } else {
-                        self.forward_typing_key_to_center(&key);
-                    }
-                }
-                Action::ScrollToTop => {
-                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-                        *scroll = 0;
-                    } else if !self.center_scroll_keys_gated() {
-                        self.set_pty_scrollback_max();
-                    } else {
-                        self.forward_typing_key_to_center(&key);
-                    }
-                }
-                _ => {}
-            }
-        } else if !in_diff {
-            // No binding claimed the key. When the pane is typeable and at the
-            // live edge, encode it for the focused surface's PTY (an unbound
-            // chord like Alt-b or an unclaimed Ctrl combo belongs to the agent
-            // once dux has passed on it; the encoder silently drops what the
-            // legacy protocol cannot represent). Scrolled back, the keystroke
-            // is suppressed instead, mirroring the raw path's scroll-mode
-            // suppression: a frozen view must not type invisibly into the
-            // live edge below it. A non-typeable pane (dormant or exited
-            // agent, no live PTY) ignores the key entirely; the hint bar says
-            // how to relaunch.
-            if self.center_typeable() && !self.scroll_mode_active() {
+    fn focus_or_activate_center(&mut self, key: KeyEvent) -> Result<()> {
+        if self.center_typeable() {
+            if !self.scroll_mode_active() {
                 self.forward_typing_key_to_center(&key);
             }
+        } else {
+            self.activate_center_agent(true, false)?;
         }
         Ok(())
     }
 
+    fn toggle_center_fullscreen(&mut self) -> Result<()> {
+        if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
+            self.close_top_overlay();
+        } else {
+            self.activate_center_agent(true, true)?;
+        }
+        Ok(())
+    }
+
+    fn open_center_macro_bar(&mut self) {
+        if self.scroll_mode_active() {
+            return;
+        }
+        if self.selected_terminal_surface_client().is_none() {
+            let focus_key = self.bindings.label_for(Action::FocusAgent);
+            self.set_error(format!(
+                "No running agent or terminal in this pane to send macros to. Press {focus_key} to launch the focused tab first."
+            ));
+            return;
+        }
+        self.open_macro_bar();
+    }
+
+    fn handle_center_tab_action(&mut self, action: Action) -> Result<bool> {
+        match action {
+            Action::NextTab => self.focus_tab_relative(true),
+            Action::PrevTab => self.focus_tab_relative(false),
+            Action::NewTab => self.open_new_tab_provider_prompt()?,
+            Action::CloseTab => self.close_focused_tab_prompt(),
+            Action::SelectTab1 => self.focus_tab_index(0),
+            Action::SelectTab2 => self.focus_tab_index(1),
+            Action::SelectTab3 => self.focus_tab_index(2),
+            Action::SelectTab4 => self.focus_tab_index(3),
+            Action::SelectTab5 => self.focus_tab_index(4),
+            Action::SelectTab6 => self.focus_tab_index(5),
+            Action::SelectTab7 => self.focus_tab_index(6),
+            Action::SelectTab8 => self.focus_tab_index(7),
+            Action::SelectTab9 => self.focus_tab_index(8),
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn handle_center_agent_action(&mut self, action: Action, key: KeyEvent) -> Result<()> {
+        if self.handle_center_tab_action(action)? {
+            return Ok(());
+        }
+        match action {
+            Action::FocusAgent => self.focus_or_activate_center(key)?,
+            Action::ToggleFullscreen => self.toggle_center_fullscreen()?,
+            Action::OpenMacroBar => self.open_center_macro_bar(),
+            Action::ShowTerminal => self.show_or_open_first_terminal()?,
+            Action::DeleteSession => self.confirm_delete_selected_session()?,
+            Action::RenameSession => self.open_rename_session()?,
+            Action::OpenAgentInfo => self.open_agent_info()?,
+            Action::OpenCurrentPullRequest if self.current_pr_info().is_some() => {
+                self.open_current_pr_in_browser()
+            }
+            Action::ReconnectAgent => self.activate_center_agent(true, false)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn scroll_center_page_up(&mut self, key: &KeyEvent) {
+        if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+            let page = self.last_diff_height.max(1);
+            *scroll = scroll.saturating_sub(page);
+        } else if self.center_typeable() && self.should_forward_center_page() {
+            self.forward_typing_key_to_center(key);
+        } else if self.last_pty_size.0 > 0 {
+            self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
+        }
+    }
+
+    fn scroll_center_page_down(&mut self, key: &KeyEvent) {
+        if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+            let page = self.last_diff_height.max(1);
+            let max_scroll = self
+                .last_diff_visual_lines
+                .saturating_sub(self.last_diff_height.max(1));
+            *scroll = (*scroll + page).min(max_scroll);
+        } else if self.center_typeable() && self.should_forward_center_page() {
+            self.forward_typing_key_to_center(key);
+        } else if self.last_pty_size.0 > 0 {
+            self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+        }
+    }
+
+    fn scroll_center_line_up(&mut self, key: &KeyEvent) {
+        if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+            *scroll = scroll.saturating_sub(1);
+        } else if !self.center_scroll_keys_gated() {
+            if self.last_pty_size.0 > 0 {
+                self.scroll_pty(ScrollDirection::Up, 1);
+            }
+        } else {
+            self.forward_typing_key_to_center(key);
+        }
+    }
+
+    fn scroll_center_line_down(&mut self, key: &KeyEvent) {
+        if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+            let max_scroll = self
+                .last_diff_visual_lines
+                .saturating_sub(self.last_diff_height.max(1));
+            *scroll = (*scroll + 1).min(max_scroll);
+        } else if !self.center_scroll_keys_gated() {
+            if self.last_pty_size.0 > 0 {
+                self.scroll_pty(ScrollDirection::Down, 1);
+            }
+        } else {
+            self.forward_typing_key_to_center(key);
+        }
+    }
+
+    fn scroll_center_to_bottom(&mut self, key: &KeyEvent) {
+        if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+            let max_scroll = self
+                .last_diff_visual_lines
+                .saturating_sub(self.last_diff_height.max(1));
+            *scroll = max_scroll;
+        } else if !self.center_scroll_keys_gated() {
+            self.reset_pty_scrollback();
+        } else {
+            self.forward_typing_key_to_center(key);
+        }
+    }
+
+    fn scroll_center_to_top(&mut self, key: &KeyEvent) {
+        if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+            *scroll = 0;
+        } else if !self.center_scroll_keys_gated() {
+            self.set_pty_scrollback_max();
+        } else {
+            self.forward_typing_key_to_center(key);
+        }
+    }
+
+    fn handle_center_scroll_action(&mut self, action: Action, key: &KeyEvent) -> bool {
+        match action {
+            Action::ScrollPageUp => self.scroll_center_page_up(key),
+            Action::ScrollPageDown => self.scroll_center_page_down(key),
+            Action::ScrollLineUp => self.scroll_center_line_up(key),
+            Action::ScrollLineDown => self.scroll_center_line_down(key),
+            Action::ScrollToBottom => self.scroll_center_to_bottom(key),
+            Action::ScrollToTop => self.scroll_center_to_top(key),
+            _ => return false,
+        }
+        true
+    }
+
+    fn forward_unbound_center_key(&mut self, key: &KeyEvent, in_diff: bool) {
+        if !in_diff && self.center_typeable() && !self.scroll_mode_active() {
+            self.forward_typing_key_to_center(key);
+        }
+    }
+
+    fn handle_center_key(&mut self, key: KeyEvent) -> Result<()> {
+        let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
+        let Some(action) = self.bindings.lookup(&key, BindingScope::Center) else {
+            self.forward_unbound_center_key(&key, in_diff);
+            return Ok(());
+        };
+
+        if self.handle_center_scroll_action(action, &key) {
+            return Ok(());
+        }
+        if !in_diff {
+            self.handle_center_agent_action(action, key)?;
+        }
+        Ok(())
+    }
     /// Whether the Center-scope scroll bindings are GATED by minimized typing:
     /// the pane is typeable and sitting at the live edge, so a scroll key has
     /// nothing to scroll and falls through to the encoder instead. False in
