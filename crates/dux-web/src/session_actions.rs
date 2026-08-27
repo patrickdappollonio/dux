@@ -208,6 +208,60 @@ impl CreateSessionBody {
     }
 }
 
+fn parse_create_session_body(raw: serde_json::Value) -> Result<CreateSessionBody, String> {
+    serde_json::from_value(raw).map_err(|error| format!("invalid create body: {error}"))
+}
+
+async fn replay_created_session(state: &AppState, key: &str) -> Option<Response> {
+    let previous_id = state.idempotency.get(key)?;
+    let (session, terminals) = state.engine.session(previous_id).await??;
+    Some(
+        (
+            StatusCode::OK,
+            Json(crate::workspace_routes::SessionWithTerminals::new(
+                session, terminals,
+            )),
+        )
+            .into_response(),
+    )
+}
+
+async fn existing_branch_conflict(state: &AppState, body: &CreateSessionBody) -> Option<Response> {
+    let CreateSessionBody::New {
+        project_id,
+        name,
+        use_existing_branch,
+        ..
+    } = body
+    else {
+        return None;
+    };
+    let name = name.trim();
+    if *use_existing_branch || name.is_empty() {
+        return None;
+    }
+    let plan = state
+        .engine
+        .create_agent_branch_plan(project_id.clone(), name.to_string())
+        .await?;
+    let dux_core::git::CreateAgentBranchPlan::ExistingBranch { location } = plan else {
+        return None;
+    };
+    let location = match location {
+        dux_core::git::BranchLocation::Local => "local",
+        dux_core::git::BranchLocation::Remote => "remote",
+    };
+    Some(
+        (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "existing_branch": { "name": name, "location": location }
+            })),
+        )
+            .into_response(),
+    )
+}
+
 async fn create_session(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -215,29 +269,18 @@ async fn create_session(
 ) -> Response {
     // Parse the discriminated body ourselves so a malformed/unknown shape is a
     // clean 400 (axum's typed `Json` rejection would be a 422).
-    let body: CreateSessionBody = match serde_json::from_value(raw) {
-        Ok(b) => b,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("invalid create body: {e}")).into_response();
-        }
+    let body = match parse_create_session_body(raw) {
+        Ok(body) => body,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
 
     // Idempotency replay: if this key already produced a session that still
     // exists, return it without creating another.
     let key = idempotency_key(&headers);
     if let Some(key) = &key
-        && let Some(prev_id) = state.idempotency.get(key)
-        && let Some(Some((session, terminals))) = state.engine.session(prev_id).await
+        && let Some(response) = replay_created_session(&state, key).await
     {
-        // The same nested shape the per-session read serves, so a replay and a
-        // later GET of the same session agree field for field.
-        return (
-            StatusCode::OK,
-            Json(crate::workspace_routes::SessionWithTerminals::new(
-                session, terminals,
-            )),
-        )
-            .into_response();
+        return response;
     }
 
     // Existing-branch consent (the "no silent attach" tenet): for a `new` create
@@ -247,29 +290,8 @@ async fn create_session(
     // confirmation and re-POSTs with `use_existing_branch: true` rather than
     // silently adopting that branch's history. (The wire command enforces the
     // same refusal as defense in depth for a client that skips this dialog.)
-    if let CreateSessionBody::New {
-        project_id,
-        name,
-        use_existing_branch: false,
-        ..
-    } = &body
-        && !name.trim().is_empty()
-        && let Some(dux_core::git::CreateAgentBranchPlan::ExistingBranch { location }) = state
-            .engine
-            .create_agent_branch_plan(project_id.clone(), name.trim().to_string())
-            .await
-    {
-        let location = match location {
-            dux_core::git::BranchLocation::Local => "local",
-            dux_core::git::BranchLocation::Remote => "remote",
-        };
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "existing_branch": { "name": name.trim(), "location": location }
-            })),
-        )
-            .into_response();
+    if let Some(response) = existing_branch_conflict(&state, &body).await {
+        return response;
     }
 
     // The from-PR create resolves differently: its create op is minted later
