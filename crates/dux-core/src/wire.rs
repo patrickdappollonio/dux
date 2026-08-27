@@ -3962,6 +3962,111 @@ impl Engine {
         })
     }
 
+    fn fork_session_command(&self, session_id: String, name: String) -> anyhow::Result<Command> {
+        let managed = self
+            .branch_git_workspace(
+                &session_id,
+                "fork",
+                crate::engine::STANDALONE_ADD_AS_PROJECT_REMEDY,
+            )?
+            .clone();
+        let source_session = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.id == managed.project_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown project: {}", managed.project_id))?;
+        let source_label = source_session.display_label();
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("Agent name cannot be empty.");
+        }
+        if !crate::git::is_valid_agent_name(trimmed) {
+            anyhow::bail!(
+                "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
+                 underscores and slashes; it must start with a letter or digit, must \
+                 not contain \"//\", and must not end with \"/\"."
+            );
+        }
+        let name = trimmed.to_string();
+        let busy_message = format!(
+            "Forking agent \"{source_label}\" as \"{name}\" by cloning its current \
+             worktree contents into a fresh session...",
+        );
+        let request = CreateAgentRequest::ForkSession {
+            project,
+            source_session: Box::new(source_session),
+            source_label,
+            custom_name: Some(name),
+        };
+        Ok(Command::DispatchCreateAgentRequest {
+            request: Box::new(request),
+            busy_message,
+            term_size: (80, 24),
+        })
+    }
+
+    fn adopt_worktree_command(
+        &self,
+        project_id: String,
+        worktree_path: String,
+        name: String,
+    ) -> anyhow::Result<Command> {
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
+        let requested =
+            crate::project_browser::canonical_or_original(std::path::Path::new(&worktree_path));
+        let entry = self
+            .adoptable_managed_worktrees(&project)?
+            .into_iter()
+            .find(|entry| entry.path == requested)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Worktree \"{worktree_path}\" is not an adoptable managed worktree for \
+                     project \"{}\". Refresh the list and pick a worktree that has no agent yet.",
+                    project.name
+                )
+            })?;
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("Agent name cannot be empty.");
+        }
+        if !crate::git::is_valid_agent_name(trimmed) {
+            anyhow::bail!(
+                "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
+                 underscores and slashes; it must start with a letter or digit, must \
+                 not contain \"//\", and must not end with \"/\"."
+            );
+        }
+        let display_name = trimmed.to_string();
+        let busy_message = format!(
+            "Starting agent \"{display_name}\" in existing worktree {} for project \"{}\"...",
+            entry.path.display(),
+            project.name
+        );
+        let request = CreateAgentRequest::ExistingManagedWorktree {
+            project,
+            worktree_path: entry.path.clone(),
+            branch_name: entry.branch_name.clone(),
+            custom_name: Some(display_name),
+        };
+        Ok(Command::DispatchCreateAgentRequest {
+            request: Box::new(request),
+            busy_message,
+            term_size: (80, 24),
+        })
+    }
+
     fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
         let command = match self.map_changes_command(command)? {
             WireCommandMapping::Mapped(command) => return Ok(command),
@@ -4011,141 +4116,13 @@ impl Engine {
                 use_existing_branch,
             )?,
             WireCommand::ForkSession { session_id, name } => {
-                // THE FORK REFUSAL, at the ForkSession arm: forking copies a
-                // managed worktree onto a new branch, and a standalone agent
-                // has neither. There is deliberately no fork for standalone
-                // agents, so this is a refusal and not a fallback.
-                let managed = self
-                    .branch_git_workspace(
-                        &session_id,
-                        "fork",
-                        crate::engine::STANDALONE_ADD_AS_PROJECT_REMEDY,
-                    )?
-                    .clone();
-                let source_session = self
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == session_id)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
-                let project = self
-                    .projects
-                    .iter()
-                    .find(|p| p.id == managed.project_id)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("unknown project: {}", managed.project_id))?;
-                // `source_label` mirrors the TUI's `session_label`: the custom
-                // title if set, otherwise the branch name.
-                let source_label = source_session.display_label();
-                let trimmed = name.trim();
-                // Unlike CreateAgent, a fork REQUIRES a name: the create-agent
-                // worker rejects a `None` custom_name with "Forking an agent
-                // requires choosing a name first.", and the TUI's name prompt
-                // refuses an empty name for every request kind. Mirror the
-                // prompt's rejection here so the failure is immediate and clear
-                // rather than surfacing later from the worker.
-                if trimmed.is_empty() {
-                    anyhow::bail!("Agent name cannot be empty.");
-                }
-                // Same backstop as CreateAgent: reject names git would refuse as
-                // a ref before dispatching the worker.
-                if !crate::git::is_valid_agent_name(trimmed) {
-                    anyhow::bail!(
-                        "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
-                         underscores and slashes; it must start with a letter or digit, must \
-                         not contain \"//\", and must not end with \"/\"."
-                    );
-                }
-                let name = trimmed.to_string();
-                // Mirror the TUI's fork busy copy (input.rs NameNewAgent confirm).
-                let busy_message = format!(
-                    "Forking agent \"{source_label}\" as \"{name}\" by cloning its current \
-                     worktree contents into a fresh session...",
-                );
-                let request = CreateAgentRequest::ForkSession {
-                    project,
-                    source_session: Box::new(source_session),
-                    source_label,
-                    custom_name: Some(name),
-                };
-                Command::DispatchCreateAgentRequest {
-                    request: Box::new(request),
-                    busy_message,
-                    term_size: (80, 24),
-                }
+                self.fork_session_command(session_id, name)?
             }
             WireCommand::CreateAgentFromWorktree {
                 project_id,
                 worktree_path,
                 name,
-            } => {
-                let project = self
-                    .projects
-                    .iter()
-                    .find(|p| p.id == project_id)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
-
-                // Re-validate the path server-side: never trust the client's
-                // list. Re-run classification for this project and require the
-                // requested path to come back as a currently-adoptable MANAGED
-                // worktree. This rejects stale paths (a session was created on it
-                // since the listing), foreign paths (outside the project), the
-                // project checkout itself, and external worktrees (those are the
-                // TUI's separate `ForkExternalWorktree` flow, not L2's
-                // managed-adoption path).
-                let requested = crate::project_browser::canonical_or_original(
-                    std::path::Path::new(&worktree_path),
-                );
-                let entry = self
-                    .adoptable_managed_worktrees(&project)?
-                    .into_iter()
-                    .find(|entry| entry.path == requested)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Worktree \"{worktree_path}\" is not an adoptable managed worktree for \
-                             project \"{}\". Refresh the list and pick a worktree that has no agent yet.",
-                            project.name
-                        )
-                    })?;
-
-                // Mirror the TUI's display-name prompt for ExistingManagedWorktree:
-                // the name cannot be empty and is validated with the SAME
-                // `is_valid_agent_name` rules the prompt enforces (input.rs
-                // NameNewAgent confirm). The branch already exists, so this is a
-                // display name only — it never becomes a git ref.
-                let trimmed = name.trim();
-                if trimmed.is_empty() {
-                    anyhow::bail!("Agent name cannot be empty.");
-                }
-                if !crate::git::is_valid_agent_name(trimmed) {
-                    anyhow::bail!(
-                        "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
-                         underscores and slashes; it must start with a letter or digit, must \
-                         not contain \"//\", and must not end with \"/\"."
-                    );
-                }
-                let display_name = trimmed.to_string();
-
-                // Busy copy mirrors the TUI's ExistingManagedWorktree message
-                // (input.rs NameNewAgent confirm).
-                let busy_message = format!(
-                    "Starting agent \"{display_name}\" in existing worktree {} for project \"{}\"...",
-                    entry.path.display(),
-                    project.name
-                );
-                let request = CreateAgentRequest::ExistingManagedWorktree {
-                    project,
-                    worktree_path: entry.path.clone(),
-                    branch_name: entry.branch_name.clone(),
-                    custom_name: Some(display_name),
-                };
-                Command::DispatchCreateAgentRequest {
-                    request: Box::new(request),
-                    busy_message,
-                    term_size: (80, 24),
-                }
-            }
+            } => self.adopt_worktree_command(project_id, worktree_path, name)?,
             // Rename, Reconnect, CheckoutProjectDefaultBranch, and
             // ChangeAgentProvider are NOT reconstructible into a single
             // `Command` — all need `&mut self` (rename persists in place;
