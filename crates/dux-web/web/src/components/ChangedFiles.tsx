@@ -20,7 +20,7 @@ import {
   TriangleAlert,
   Undo2,
 } from "lucide-react"
-import { notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
+import { notifyError } from "@/lib/notify"
 import { git } from "@/lib/git"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
@@ -65,8 +65,6 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import {
   fileStatusMeta,
-  filterChangedFiles,
-  reconcileSelection,
   type ChangedFileSelection,
 } from "@/lib/changedFiles"
 import {
@@ -83,8 +81,11 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 import type { ChangedFileView, SessionView } from "@/lib/types"
 import { agentRoot } from "@/lib/editorRoot"
-
-const fileCount = (n: number) => `${n} file${n === 1 ? "" : "s"}`
+import {
+  useChangedFilesController,
+  type ChangesBulkVerb,
+  type ChangesBusyAction,
+} from "@/components/useChangedFilesController"
 
 // One height for every control in the bulk bar; they differ in width only.
 const BULK_CONTROL = "h-9 max-md:h-11"
@@ -497,10 +498,10 @@ function ChangesHeader({
 
 interface BulkToolbarProps {
   selected: ChangedFileSelection
-  busy: "stage" | "unstage" | "discard" | null
+  busy: ChangesBusyAction
   visibleCount: number
   allVisibleChecked: boolean
-  onRunBulk: (verb: "stage" | "unstage") => void
+  onRunBulk: (verb: ChangesBulkVerb) => void
   onDiscard: () => void
   onToggleVisible: () => void
   onClear: () => void
@@ -754,29 +755,7 @@ export function ChangedFiles() {
   // The hide-pane action is desktop-only: the mobile hub reaches Changes through
   // its own nav, so there's no panel to hide there.
   const isMobile = useIsMobile()
-
-  // Changed-files search filter (frontend-only). The query is stored alongside
-  // the session id it belongs to, so switching sessions yields an empty filter
-  // without a set-state-in-effect: a stale entry (different session) reads as "".
-  const [search, setSearch] = useState<{ sessionId: string; query: string }>({
-    sessionId: "",
-    query: "",
-  })
-  const query = search.sessionId === selectedSessionId ? search.query : ""
-  const setQuery = (next: string) =>
-    setSearch({ sessionId: selectedSessionId ?? "", query: next })
-
-  // Checked paths, per section, stored against the session they belong to so a
-  // session switch reads as an empty selection without an effect. The state is
-  // local: leaving the mobile Changes screen, or hiding the pane, unmounts this
-  // component and drops the selection. Accepted.
-  const [selection, setSelection] = useState<
-    { sessionId: string } & ChangedFileSelection
-  >({ sessionId: "", staged: new Set(), unstaged: new Set() })
-  // Which verb is in flight, so its button can say so and no second request can
-  // start behind it.
-  const [busy, setBusy] = useState<"stage" | "unstage" | "discard" | null>(null)
-  const [discarding, setDiscarding] = useState(false)
+  const controller = useChangedFilesController(selectedSessionId, changes)
 
   const selectedSession = spine?.sessions.find(
     (session) => session.id === selectedSessionId,
@@ -792,153 +771,28 @@ export function ChangedFiles() {
   const branchGit = selectedSession
     ? supportsBranchGit(selectedSession.workspace)
     : true
-  const slice = changes.sessionId === selectedSessionId ? changes : null
-  const changed = { staged: slice?.staged ?? [], unstaged: slice?.unstaged ?? [] }
-  const hasChanges = changed.staged.length > 0 || changed.unstaged.length > 0
-
-  const filtering = query.trim() !== ""
-  const filteredStaged = filterChangedFiles(changed.staged, query)
-  const filteredUnstaged = filterChangedFiles(changed.unstaged, query)
-
-  // The honest selection: a path that left its section is no longer checked.
-  // Derived at render, so a refresh keeps it truthful with no effect.
-  const selected = reconcileSelection(
-    selection.sessionId === selectedSessionId
-      ? selection
-      : { staged: new Set<string>(), unstaged: new Set<string>() },
+  const {
     changed,
-  )
-  const anySelected = selected.staged.size > 0 || selected.unstaged.size > 0
-
-  // The Select all / Select none universe: every row the FILTER currently
-  // shows, across BOTH sections. A collapsed section is still part of it:
-  // collapsing hides rows from view, but the filter is what decides which
-  // files the pane is talking about.
-  const visibleStaged = filteredStaged.map((f) => f.path)
-  const visibleUnstaged = filteredUnstaged.map((f) => f.path)
-  const visibleCount = visibleStaged.length + visibleUnstaged.length
-  const allVisibleChecked =
-    visibleCount > 0 &&
-    visibleStaged.every((p) => selected.staged.has(p)) &&
-    visibleUnstaged.every((p) => selected.unstaged.has(p))
-  // Narrowed once here so the async handlers below see a plain string.
+    filtered,
+    query,
+    filtering,
+    selected,
+    anySelected,
+    visibleCount,
+    allVisibleChecked,
+    busy,
+    discarding,
+    setQuery,
+    toggleOne,
+    toggleVisible,
+    clearSelection,
+    openDiscard: openDiscardMany,
+    closeDiscard: closeDiscardMany,
+    runBulk,
+    runDiscardMany,
+  } = controller
+  const hasChanges = changed.staged.length > 0 || changed.unstaged.length > 0
   const sessionId: string = selectedSessionId
-
-  const writeSelection = (next: ChangedFileSelection) =>
-    setSelection({ sessionId: selectedSessionId, ...next })
-
-  // Every edit reads the CURRENT sets rather than the ones this render closed
-  // over: a request in flight resolves into a selection the user has meanwhile
-  // changed, and writing the old sets back would untick what they just ticked.
-  // A set belonging to another session reads as empty, the same rule the render
-  // above applies.
-  const editSelection = (
-    mutate: (next: { staged: Set<string>; unstaged: Set<string> }) => void,
-  ) =>
-    setSelection((prev) => {
-      const base =
-        prev.sessionId === sessionId
-          ? prev
-          : { staged: new Set<string>(), unstaged: new Set<string>() }
-      const next = {
-        staged: new Set(base.staged),
-        unstaged: new Set(base.unstaged),
-      }
-      mutate(next)
-      return { sessionId, ...next }
-    })
-
-  function toggleOne(section: "staged" | "unstaged", path: string) {
-    editSelection((next) => {
-      if (next[section].has(path)) next[section].delete(path)
-      else next[section].add(path)
-    })
-  }
-
-  function dropActed(section: "staged" | "unstaged", paths: string[]) {
-    editSelection((next) => {
-      for (const path of paths) next[section].delete(path)
-    })
-  }
-
-  // Select all / Select none over the visible universe. Unlike Clear, it only
-  // touches the rows on screen: a checked file the filter hides keeps its tick,
-  // so the bar stays up and the label flips back to "Select all".
-  function toggleVisible() {
-    const wanted = !allVisibleChecked
-    editSelection((next) => {
-      for (const path of visibleStaged) {
-        if (wanted) next.staged.add(path)
-        else next.staged.delete(path)
-      }
-      for (const path of visibleUnstaged) {
-        if (wanted) next.unstaged.add(path)
-        else next.unstaged.delete(path)
-      }
-    })
-  }
-
-  // One request, one toast. The acted paths leave the selection as soon as the
-  // server has answered, so the bar cannot fire twice at files that have
-  // already moved, whatever the broadcast does next.
-  async function runBulk(verb: "stage" | "unstage") {
-    const section = verb === "stage" ? "unstaged" : "staged"
-    const paths = [...selected[section]]
-    if (busy !== null || paths.length === 0) return
-    setBusy(verb)
-    try {
-      const result =
-        verb === "stage"
-          ? await git.stageMany(sessionId, paths)
-          : await git.unstageMany(sessionId, paths)
-      dropActed(section, paths)
-      const past = verb === "stage" ? "staged" : "unstaged"
-      if (result.refused.length === 0) {
-        notifySuccess(`${fileCount(result.done.length)} ${past}.`)
-      } else {
-        notifyWarning(
-          `${fileCount(result.done.length)} ${past}. ${fileCount(
-            result.refused.length,
-          )} had already left the list, starting with ${result.refused[0]}.`,
-        )
-      }
-    } catch (err) {
-      notifyError(
-        err instanceof Error ? err.message : `could not ${verb} the files`,
-      )
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  // Discard runs file by file, so a refusal on one ("unstage it first") cannot
-  // block the rest; the outcomes are aggregated into a single toast.
-  async function runDiscardMany(paths: string[]) {
-    setDiscarding(false)
-    if (busy !== null || paths.length === 0) return
-    setBusy("discard")
-    try {
-      const result = await git.discardMany(sessionId, paths)
-      dropActed("unstaged", paths)
-      if (result.failed.length === 0) {
-        notifySuccess(`Discarded the changes to ${fileCount(result.done.length)}.`)
-      } else if (result.done.length === 0) {
-        notifyError(
-          `Nothing was discarded. ${result.failed[0]!.path}: ${result.failed[0]!.message}`,
-        )
-      } else {
-        notifyWarning(
-          `Discarded the changes to ${fileCount(result.done.length)}. ${fileCount(
-            result.failed.length,
-          )} could not be discarded, starting with ${result.failed[0]!.path}: ${
-            result.failed[0]!.message
-          }`,
-        )
-      }
-    } finally {
-      setBusy(null)
-    }
-  }
 
   return (
     <>
@@ -972,16 +826,14 @@ export function ChangedFiles() {
               visibleCount={visibleCount}
               allVisibleChecked={allVisibleChecked}
               onRunBulk={(verb) => void runBulk(verb)}
-              onDiscard={() => setDiscarding(true)}
+              onDiscard={openDiscardMany}
               onToggleVisible={toggleVisible}
-              onClear={() =>
-                writeSelection({ staged: new Set(), unstaged: new Set() })
-              }
+              onClear={clearSelection}
             />
           ) : null}
           <ChangesList
             changed={changed}
-            filtered={{ staged: filteredStaged, unstaged: filteredUnstaged }}
+            filtered={filtered}
             selected={selected}
             sessionId={sessionId}
             query={query}
@@ -995,7 +847,7 @@ export function ChangedFiles() {
         open={discarding}
         paths={[...selected.unstaged]}
         unstaged={changed.unstaged}
-        onCancel={() => setDiscarding(false)}
+        onCancel={closeDiscardMany}
         onConfirm={(paths) => void runDiscardMany(paths)}
       />
     </>
