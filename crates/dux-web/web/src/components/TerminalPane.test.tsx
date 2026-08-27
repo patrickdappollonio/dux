@@ -4037,6 +4037,20 @@ describe("TerminalPane long-press text selection", () => {
     expect(term().textarea.value).toBe("")
   })
 
+  it("retires the context-menu paste guard when the pane unmounts", () => {
+    const mounted = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    const detachedContainer = container()
+    const detachedTerm = term()
+    mounted.unmount()
+    detachedTerm.textarea.value = "detached selection"
+
+    fireEvent.contextMenu(detachedContainer)
+
+    expect(detachedTerm.textarea.value).toBe("detached selection")
+  })
+
   it("suppresses the platform callout and context menu on the terminal", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     // iOS raises its own magnifier and share menu over a long press unless the
