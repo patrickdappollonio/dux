@@ -1548,6 +1548,59 @@ impl Engine {
         }))
     }
 
+    fn begin_session_tab_shutdown(
+        &mut self,
+        session: &AgentSession,
+        worktree_removal: Option<super::DeferredWorktreeRemoval>,
+    ) {
+        let live_tabs: Vec<String> = self
+            .tab_ids_for_session(&session.id)
+            .into_iter()
+            .filter(|id| self.providers.contains_key(id))
+            .collect();
+        let already_terminating: Vec<String> = self
+            .terminating_ptys
+            .iter()
+            .filter(|terminal| terminal.kind == crate::engine::PrunedPtyKind::Agent)
+            .filter(|terminal| {
+                self.owning_session_for_tab(&terminal.id).as_deref() == Some(session.id.as_str())
+            })
+            .map(|terminal| terminal.id.clone())
+            .collect();
+
+        match worktree_removal {
+            Some(removal) if live_tabs.is_empty() && already_terminating.is_empty() => {
+                let _ = self.dispatch_deferred_worktree_removal(removal);
+            }
+            Some(removal) if live_tabs.len() == 1 && already_terminating.is_empty() => {
+                let unhandled = self.begin_close_provider(
+                    &live_tabs[0],
+                    session.display_label(),
+                    Some(removal),
+                );
+                if let Some(removal) = unhandled {
+                    let _ = self.dispatch_deferred_worktree_removal(removal);
+                }
+            }
+            Some(removal) => {
+                for id in &live_tabs {
+                    let _ = self.begin_close_provider(id, session.display_label(), None);
+                }
+                let pending_ids = live_tabs.into_iter().chain(already_terminating).collect();
+                self.pending_group_removals
+                    .push(super::GroupWorktreeRemoval {
+                        pending_ids,
+                        removal,
+                    });
+            }
+            None => {
+                for id in &live_tabs {
+                    let _ = self.begin_close_provider(id, session.display_label(), None);
+                }
+            }
+        }
+    }
+
     /// Engine half of the modal "begin delete" action. Branches between the
     /// async path (spawns `git::remove_worktree` worker, posts
     /// `WorktreeRemoveCompleted` back to `worker_tx`) and the inline path
@@ -1603,38 +1656,19 @@ impl Engine {
             s.id != session.id
                 && crate::project_browser::same_directory(s.directory(), session.directory())
         });
-        // A standalone agent's directory is the user's folder, so deletion
-        // removes dux's record of the agent and nothing else, ever. The named
-        // question answers that; the removal payload below cannot even be built
-        // without a managed workspace, so this is a guard and a restatement.
         let should_remove_worktree = delete_worktree
             && session.workspace.deletion_may_remove_directory()
             && !other_sessions_on_worktree
             && project.is_some();
 
-        // Mark the session "closing" synchronously, for the whole grace window
-        // (until `WorktreeRemoveCompleted`). While set, `create_tab`/`launch_agent`
-        // refuse to spawn a fresh provider into the worktree that is about to be
-        // removed. `pending_deletions` alone is insufficient: it isn't set until
-        // the removal worker is actually dispatched, which for a live agent only
-        // happens after its PTYs reap — leaving a create-race window open.
+        // Block new tab launches throughout the PTY grace period;
+        // `pending_deletions` starts only when the removal worker is dispatched.
         if should_remove_worktree {
             self.closing_sessions.insert(session.id.clone());
         }
 
-        // Graceful, non-blocking close: SIGTERM the agent PTY and its companion
-        // terminals and move them to the terminating set for a background reap,
-        // instead of dropping them here (an immediate hard SIGKILL). The caller
-        // vanishes the session from the UI next (`finish_delete_session`), so this
-        // is snappy. For a worktree-removing delete, the removal is captured on
-        // the agent's terminating entry and dispatched by `reap_terminating_ptys`
-        // only AFTER the agent has actually exited — files are never deleted out
-        // from under a live process (which also avoids git-lock failures).
-        // The payload carries the MANAGED workspace itself rather than four
-        // loose git fields, so a standalone agent cannot produce one: there is
-        // no value of the right type to put in it. That is the structural half
-        // of "nothing deletes the folder"; `should_remove_worktree` above is
-        // the readable half, and the two cannot drift apart.
+        // The typed managed payload keeps standalone folders out of the deferred
+        // removal pipeline.
         let worktree_removal = match (
             should_remove_worktree,
             session.workspace.as_managed(),
@@ -1653,78 +1687,7 @@ impl Engine {
         };
         let busy_message = worktree_removal.as_ref().map(|r| r.busy_message.clone());
 
-        // Gracefully close EVERY live tab PTY of this agent (the session-slot tab and any
-        // extra tabs), not just the Main provider — an extra tab left running
-        // would be orphaned and, for a worktree-removing delete, keep writing into
-        // a worktree about to be removed.
-        let live_tabs: Vec<String> = self
-            .tab_ids_for_session(&session.id)
-            .into_iter()
-            .filter(|id| self.providers.contains_key(id))
-            .collect();
-        // A tab closed moments earlier (e.g. via `close_tab`) is already out of
-        // `providers` and parked in `terminating_ptys` under its own SIGTERM grace
-        // period — it is still alive (a child process) but invisible to the
-        // `live_tabs` check above. Without counting it, `git::remove_worktree`
-        // could fire while that straggler is still using the worktree as its cwd
-        // (a git-lock/corruption race). Fold it into the barrier the same way a
-        // still-live tab is, without re-issuing `begin_close_provider` for it (it
-        // already has its own terminating entry in flight).
-        let already_terminating: Vec<String> = self
-            .terminating_ptys
-            .iter()
-            .filter(|t| t.kind == crate::engine::PrunedPtyKind::Agent)
-            .filter(|t| self.owning_session_for_tab(&t.id).as_deref() == Some(session.id.as_str()))
-            .map(|t| t.id.clone())
-            .collect();
-        match worktree_removal {
-            // No live or already-terminating tab PTY to wait for (the agent
-            // already fully exited): remove the worktree now — there is nothing
-            // to reap, and the reaper would never see it.
-            Some(removal) if live_tabs.is_empty() && already_terminating.is_empty() => {
-                let _ = self.dispatch_deferred_worktree_removal(removal);
-            }
-            // Exactly one live tab and no already-terminating stragglers: carry
-            // the removal on its terminating entry; `reap_terminating_ptys`
-            // dispatches it when that PTY reaps.
-            Some(removal) if live_tabs.len() == 1 && already_terminating.is_empty() => {
-                let unhandled = self.begin_close_provider(
-                    &live_tabs[0],
-                    session.display_label(),
-                    Some(removal),
-                );
-                if let Some(req) = unhandled {
-                    let _ = self.dispatch_deferred_worktree_removal(req);
-                }
-            }
-            // Multiple tabs to wait for (live and/or already-terminating): close
-            // each still-live tab with no per-entry removal and park a GROUP
-            // barrier listing every one of them — including the already-terminating
-            // stragglers — so the removal fires exactly once, only after the LAST
-            // tab PTY has reaped (clean exit or force-kill), never out from under a
-            // still-running sibling or straggler tab.
-            Some(removal) => {
-                for id in &live_tabs {
-                    let _ = self.begin_close_provider(id, session.display_label(), None);
-                }
-                let pending_ids: std::collections::HashSet<String> = live_tabs
-                    .iter()
-                    .cloned()
-                    .chain(already_terminating.iter().cloned())
-                    .collect();
-                self.pending_group_removals
-                    .push(super::GroupWorktreeRemoval {
-                        pending_ids,
-                        removal,
-                    });
-            }
-            // Keep-worktree delete: gracefully close every live tab, nothing deferred.
-            None => {
-                for id in &live_tabs {
-                    let _ = self.begin_close_provider(id, session.display_label(), None);
-                }
-            }
-        }
+        self.begin_session_tab_shutdown(&session, worktree_removal);
         self.begin_close_session_terminals(&session.id);
 
         match busy_message {
