@@ -585,10 +585,9 @@ function RowLineTwo({ children }: { children: ReactNode }) {
 // The row's state word (Working / Typing / Idle / Detached / …), shared by both
 // row kinds so the two can never drift in tone or in motion. Keyed on the label
 // by the caller so a state change remounts the span and replays the one-shot
-// swap instead of snapping the text. The swap is a fade and ONLY a fade: it
-// used to rise 3px, which left the word sitting below its own line for the
-// first fraction of a second after every state change, and a busy agent flips
-// state often enough that this is what you see in a screenshot.
+// swap instead of snapping the text. The swap is a fade and ONLY a fade: any
+// vertical motion drops the word below line two's baseline for a frame, and a
+// busy agent changes state often enough that a screenshot will catch it.
 function RowStateWord({ word }: { word: StateWord }) {
   return (
     <span

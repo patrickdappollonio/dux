@@ -809,9 +809,9 @@ mod tests {
         );
     }
 
-    /// AMENDMENT 8, both halves. The take-over transfers ownership in epoch
-    /// order, and it clears the resize dedupe so a take-over at the geometry the
-    /// pane already had still sends the resize that carries the claim.
+    /// The take-over transfers ownership in epoch order, and it clears the
+    /// resize dedupe so a take-over at the geometry the pane already had still
+    /// sends the resize that carries the claim.
     #[test]
     fn a_take_over_transfers_in_epoch_order_and_clears_the_resize_dedupe() {
         let (mut app, recorded, seat) = serving_app();
@@ -879,7 +879,7 @@ mod tests {
         assert!(seat.owners.is_owner("s1", seat.conn_id));
     }
 
-    /// AMENDMENT 8's ordering, end to end across the two surfaces. A browser's
+    /// The epoch ordering holds end to end across the two surfaces. A browser's
     /// resize is stamped first and applied later; this surface's take-over is
     /// stamped later and applied at once. The queued one must be dropped when it
     /// finally arrives, or the child ends up sized for a device that no longer
@@ -1350,10 +1350,10 @@ mod tests {
         }
     }
 
-    /// AMENDMENT 3. The hardware cursor is the caret, and there is nothing to
-    /// type into under the card, so it must not be parked on a cell the card is
-    /// painted over: the IME anchor and the "your keys land here" cue both point
-    /// at a pane that is refusing every key.
+    /// The hardware cursor is the caret, and there is nothing to type into
+    /// under the card, so it must not be parked on a cell the card is painted
+    /// over: the IME anchor and the "your keys land here" cue both point at a
+    /// pane that is refusing every key.
     #[test]
     fn the_card_leaves_the_hardware_cursor_at_the_origin() {
         use ratatui::Terminal;
@@ -1391,9 +1391,9 @@ mod tests {
         terminal.backend_mut().assert_cursor_position((0u16, 0u16));
     }
 
-    /// AMENDMENT 9. Scroll mode is a way of reading a pane; the card covers the
-    /// pane, so there is nothing left to read and the mode ends with it. Left on,
-    /// the hint bar would be the scroll cue and the card would have no line of
+    /// Scroll mode is a way of reading a pane; the card covers the pane, so
+    /// there is nothing left to read and the mode ends with it. Left on, the
+    /// hint bar would be the scroll cue and the card would have no line of
     /// its own.
     #[test]
     fn the_card_ends_scroll_mode_and_owns_the_hint_line() {
@@ -1660,7 +1660,7 @@ mod tests {
         );
     }
 
-    /// AMENDMENT 5. The FocusAgent binding presses the button, and so does Space:
+    /// The FocusAgent binding presses the button, and so does Space:
     /// activating the focused control is the universal convention and the card
     /// has exactly one control.
     #[test]
@@ -1783,9 +1783,9 @@ mod tests {
         );
     }
 
-    /// AMENDMENT 6. In fullscreen the keyboard is a raw byte stream, so the
-    /// binding's own BYTES are what press the button; a literal CR would be a
-    /// hardcoded key by another name.
+    /// In fullscreen the keyboard is a raw byte stream, so the binding's own
+    /// BYTES are what press the button; a literal CR would be a hardcoded key
+    /// by another name.
     #[test]
     fn the_focus_keys_bytes_press_the_button_on_the_raw_fullscreen_path() {
         let (mut app, recorded, seat) = app_with_the_card_up();
@@ -1895,7 +1895,7 @@ mod tests {
         );
     }
 
-    /// AMENDMENT 8. The button is a click target like any other: pressing it and
+    /// The button is a click target like any other: pressing it and
     /// releasing inside it takes the terminal over, and a click anywhere else on
     /// the covered pane does not.
     #[test]
@@ -2024,9 +2024,9 @@ mod tests {
         assert_eq!(app.takeover_press, None);
     }
 
-    /// AMENDMENT 4. There is nothing readable under the card, so a press inside
-    /// the pane starts no selection: a highlight the user cannot see, over text
-    /// they cannot see, that copies the child's cells on release.
+    /// There is nothing readable under the card, so a press inside the pane
+    /// starts no selection: a highlight the user cannot see, over text they
+    /// cannot see, that copies the child's cells on release.
     ///
     /// Driven through the interactive raw path, because that is the one path
     /// that starts a terminal selection at all.

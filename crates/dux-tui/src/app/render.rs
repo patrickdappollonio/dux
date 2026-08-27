@@ -3378,10 +3378,9 @@ impl App {
             // exists because the mode can die with nothing on screen to say so,
             // and here the card IS what says so.
             //
-            // Through the same snap the live-edge key uses, because the OFFSET
-            // has to go home too. Retiring the mode on its own left the pane
-            // parked on old history with the cue that said so gone, and the
-            // first keystroke after a take-over typing into a frozen view.
+            // Through the same snap the live-edge key uses: the offset must go
+            // home with the mode, or the pane sits parked on old history with
+            // no cue saying so, and the next keystroke types into a frozen view.
             self.reset_pty_scrollback();
         }
 

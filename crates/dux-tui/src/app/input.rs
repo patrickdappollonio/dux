@@ -19649,8 +19649,8 @@ not_a_real_action = ["x"]
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
 
-        // Enter used to read the stale index, miss the end of the list and
-        // fall back to running the typed text, which is not a command name.
+        // Enter must resolve against the clamped list, not the stale index,
+        // or it falls back to running the typed text as a command name.
         let status = app.status.most_recent_tui().expect("a status");
         assert!(
             !status.1.contains("Unknown command"),

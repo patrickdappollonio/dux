@@ -171,11 +171,9 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     /* One-shot fade for the row's state word (Working / Idle / Detached / …) so
        it transitions on change instead of snapping. Replayed by keying the span
        on the label, which remounts it each time the state changes. A FADE and
-       nothing else: the swap used to rise 3px, which put the word below the rest
-       of line two for the first fraction of a second after every change, and a
-       busy agent changes state often enough that this is what a screenshot
-       catches. Line two is baseline-aligned, so nothing on it may move
-       vertically. */
+       nothing else: line two is baseline-aligned, so any vertical motion drops
+       the word below the rest of the line for a frame, and a busy agent
+       changes state often enough that a screenshot will catch it. */
     --animate-state-word: state-word-swap 0.28s ease-out;
     /* The typing caret's slow blink. Pure opacity so reduced motion can drop it
        wholesale (`motion-reduce:animate-none` on the caret, which then rests

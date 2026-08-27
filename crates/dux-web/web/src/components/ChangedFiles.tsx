@@ -569,9 +569,8 @@ export function ChangedFiles() {
   const anySelected = selected.staged.size > 0 || selected.unstaged.size > 0
 
   // The Select all / Select none universe: every row the FILTER currently
-  // shows, across BOTH sections, which is the union of what the two
-  // per-section select-alls used to cover. A collapsed section is still part of
-  // it: collapsing hides rows from view, but the filter is what decides which
+  // shows, across BOTH sections. A collapsed section is still part of it:
+  // collapsing hides rows from view, but the filter is what decides which
   // files the pane is talking about.
   const visibleStaged = filteredStaged.map((f) => f.path)
   const visibleUnstaged = filteredUnstaged.map((f) => f.path)
