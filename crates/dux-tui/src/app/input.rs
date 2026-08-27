@@ -9749,11 +9749,7 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
-        // A prompt that opened MID-DRAG would consume the release below and
-        // strand the forwarded button on the child (a stuck button, exactly
-        // what `finish_center_mouse_forward` exists to prevent). Deliver the
-        // clamped release first; the prompt still sees the event afterwards.
+    fn route_prompt_mouse(&mut self, mouse: MouseEvent) -> Option<bool> {
         if !matches!(self.prompt, PromptState::None)
             && self.center_mouse_forward.is_some()
             && matches!(mouse.kind, MouseEventKind::Up(_))
@@ -9761,87 +9757,71 @@ impl App {
             self.finish_center_mouse_forward(&mouse);
         }
         if !matches!(self.prompt, PromptState::None) {
-            return self.handle_prompt_mouse(mouse);
+            return Some(self.handle_prompt_mouse(mouse));
         }
-        // Watchdog: a press can only be set inside `handle_prompt_mouse`,
-        // but the modal that armed it may have been closed by an
-        // unrelated path (key handler, action callback). Drop any stale
-        // press the moment we see a non-prompt mouse event so it cannot
-        // outlive its dialog.
-        self.pressed_button = None;
+        None
+    }
 
-        if self.help_scroll.is_some() {
-            // A press outside the help page closes it, like every modal the
-            // click-outside engine covers. Help is not a `PromptState` variant,
-            // so `outside_click_policy` cannot reach it; what IS reused is the
-            // engine's geometry rule (left-press-only, and fail-closed when no
-            // rect was recorded this frame) and its recorded rect, which
-            // `render_help` already stores through `clear_overlay_area`.
-            //
-            // Safe HERE and nowhere earlier: this branch already returns for
-            // every mouse event while help is open, so no click reaching it can
-            // belong to anything else — help has no controls, and the handlers
-            // below (fullscreen overlays, panes, the tab strip) are all
-            // unreachable while it is up. Left-press-only is also what keeps
-            // the wheel arms below intact.
-            if overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), &mouse) {
-                self.close_help_overlay(false);
-                return false;
-            }
-        }
-        if let Some(ref mut scroll) = self.help_scroll {
-            let max_help = self
-                .last_help_lines
-                .saturating_sub(self.last_help_height.max(1));
-            match mouse.kind {
-                MouseEventKind::ScrollDown => {
-                    *scroll = (*scroll + MOUSE_WHEEL_LINES as u16).min(max_help)
-                }
-                MouseEventKind::ScrollUp => {
-                    *scroll = scroll.saturating_sub(MOUSE_WHEEL_LINES as u16)
-                }
-                _ => {}
-            }
+    fn route_help_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.help_scroll.is_none() {
             return false;
         }
-
-        if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
-            let inside_log = self
-                .mouse_layout
-                .agent_term
-                .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row));
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left)
-                | MouseEventKind::Drag(MouseButton::Left)
-                | MouseEventKind::Up(MouseButton::Left)
-                    if inside_log
-                        || self
-                            .terminal_selection
-                            .as_ref()
-                            .is_some_and(|selection| selection.dragging) =>
-                {
-                    self.handle_terminal_selection_mouse(mouse);
-                }
-                MouseEventKind::Down(MouseButton::Left) if !inside_log => {
-                    self.close_top_overlay();
-                }
-                MouseEventKind::ScrollDown if inside_log => {
-                    self.terminal_selection = None;
-                    self.scroll_startup_log_viewer(MOUSE_WHEEL_LINES as i16);
-                }
-                MouseEventKind::ScrollUp if inside_log => {
-                    self.terminal_selection = None;
-                    self.scroll_startup_log_viewer(-(MOUSE_WHEEL_LINES as i16));
-                }
-                _ => {}
-            }
-            return false;
+        if overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), &mouse) {
+            self.close_help_overlay(false);
+            return true;
         }
 
-        // A left-click outside a (non-interactive) fullscreen agent/terminal
-        // surface dismisses it — matching the click-outside dismiss the
-        // interactive raw-input path already provides. Interactive mode never
-        // reaches this handler (its mouse bytes go through raw stdin).
+        let scroll = self.help_scroll.as_mut().expect("checked above");
+        let max_help = self
+            .last_help_lines
+            .saturating_sub(self.last_help_height.max(1));
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                *scroll = (*scroll + MOUSE_WHEEL_LINES as u16).min(max_help)
+            }
+            MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(MOUSE_WHEEL_LINES as u16),
+            _ => {}
+        }
+        true
+    }
+
+    fn route_startup_log_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if !matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
+            return false;
+        }
+        let inside_log = self
+            .mouse_layout
+            .agent_term
+            .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row));
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left)
+            | MouseEventKind::Drag(MouseButton::Left)
+            | MouseEventKind::Up(MouseButton::Left)
+                if inside_log
+                    || self
+                        .terminal_selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.dragging) =>
+            {
+                self.handle_terminal_selection_mouse(mouse);
+            }
+            MouseEventKind::Down(MouseButton::Left) if !inside_log => {
+                self.close_top_overlay();
+            }
+            MouseEventKind::ScrollDown if inside_log => {
+                self.terminal_selection = None;
+                self.scroll_startup_log_viewer(MOUSE_WHEEL_LINES as i16);
+            }
+            MouseEventKind::ScrollUp if inside_log => {
+                self.terminal_selection = None;
+                self.scroll_startup_log_viewer(-(MOUSE_WHEEL_LINES as i16));
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn dismiss_noninteractive_fullscreen_mouse(&mut self, mouse: &MouseEvent) -> bool {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && !self
@@ -9850,197 +9830,187 @@ impl App {
                 .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row))
         {
             self.close_top_overlay();
-            return false;
+            return true;
         }
+        false
+    }
 
-        // A maximized surface covers the windowed layout, but that layout is
-        // still computed (and its rects still recorded) underneath every
-        // frame. Neither of the two questions below makes sense while it is
-        // up, and asking them let a click INSIDE the maximized surface act on
-        // chrome that is not on screen: grab an invisible pane divider, or hit
-        // a tab rect the maximized renderer never drew. Both are gated on
-        // there being no fullscreen overlay. (The wheel arms are deliberately
-        // NOT gated — a wheel over the maximized surface must keep reaching
-        // the child; see `handle_center_mouse_wheel`.)
-        let windowed = matches!(self.fullscreen_overlay, FullscreenOverlay::None);
-
-        // THE TAKE-OVER CARD, ordered before every pane target below: while it
-        // covers the grid, a click there belongs to the card and never to the
-        // child, the selection or the tab strip underneath it. Scoped to the
-        // agent surface, because the startup-log viewer publishes the same rect
-        // and has no ownership question of its own.
+    fn intercept_mouse_before_targets(&mut self, mouse: &MouseEvent) -> bool {
         if matches!(self.center_mode, CenterMode::Agent)
             && !matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog)
-            && self.handle_takeover_card_mouse(&mouse)
+            && self.handle_takeover_card_mouse(mouse)
         {
-            return false;
+            return true;
         }
-
-        // The release (and any drag) belonging to a press dux took an interest
-        // in. This is where an open actually happens. Ordered before every arm
-        // below so nothing downstream can hand half a withheld click to the
-        // child, and after the card, which owns its own area outright.
-        if self.handle_pending_link_mouse(&mouse) {
-            return false;
+        if self.handle_pending_link_mouse(mouse) {
+            return true;
         }
+        self.handle_pending_pr_banner_mouse(mouse)
+    }
 
-        // The banner's own release, beside the link lane's for the same reason:
-        // the gesture was armed before any of the arms below existed for it.
-        if self.handle_pending_pr_banner_mouse(&mouse) {
-            return false;
+    fn handle_pr_banner_press(&mut self, mouse: &MouseEvent, windowed: bool) -> bool {
+        if windowed
+            && let Some(band) = self.mouse_layout.pr_banner
+            && contains_point(band, mouse.column, mouse.row)
+        {
+            self.last_mouse_click = None;
+            self.pending_pr_banner_press = Some(band);
+            return true;
         }
+        false
+    }
 
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                if windowed && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
-                    self.mouse_drag = Some(drag);
-                    self.update_dragged_panes(mouse.column, mouse.row);
-                    return false;
-                }
-
-                // Agent tab strip: click a tab to focus it, or `+` to add one.
-                if windowed && self.handle_agent_tab_strip_click(mouse.column, mouse.row) {
-                    return false;
-                }
-
-                // The pull-request banner, beside the tab strip because it is
-                // the same kind of thing: dux's own chrome in a lane of its
-                // own, outside the pane, which the child never painted. So
-                // there is no modifier rule and nothing to forward: any left
-                // press on the coloured band arms the gesture, whatever
-                // modifiers the host let through, the way the web banner is one
-                // link across the whole strip.
-                //
-                // The press only ARMS it. The plan's decision said a press
-                // opens; the web banner is an anchor, and a browser opens an
-                // anchor on the release, so parity is press-decides,
-                // release-acts, which is also the idiom the link click beside
-                // this one already uses. `handle_pending_pr_banner_mouse` is
-                // where an open actually happens.
-                //
-                // The rect exists only while the band is painted, which is what
-                // keeps a maximized surface (whose overlay covers the lane)
-                // from having a click target hidden behind it.
-                if windowed
-                    && let Some(band) = self.mouse_layout.pr_banner
-                    && contains_point(band, mouse.column, mouse.row)
-                {
-                    // A consumed press is not half of a double click: leaving
-                    // the record standing would let a pane click either side of
-                    // this one read as a pair and maximize the surface.
-                    self.last_mouse_click = None;
-                    self.pending_pr_banner_press = Some(band);
-                    return false;
-                }
-
-                // After the divider and tab-strip short-circuits (the mouse
-                // "dux wins" rule): a plain click inside the windowed agent
-                // surface of a mouse-aware child is the child's, so it is
-                // focused AND forwarded. Skipping the
-                // double-click bookkeeping below is deliberate: with a
-                // mouse-mode child a double click is just two forwarded
-                // clicks, never a maximize.
-                //
-                // The link question comes first: a plain press on a linked cell
-                // is dux's, whatever the child would have done with it.
-                if self.handle_center_link_press(&mouse) {
-                    return false;
-                }
-
-                if self.begin_center_mouse_forward(&mouse) {
-                    return false;
-                }
-
-                match self.mouse_target(mouse.column, mouse.row) {
-                    Some(MouseTarget::LeftPane) => {
-                        self.focus = FocusPane::Left;
-                        self.input_target = InputTarget::None;
-                        self.fullscreen_overlay = FullscreenOverlay::None;
-                    }
-                    Some(MouseTarget::LeftRow(index)) => {
-                        let double_click =
-                            self.register_mouse_click(MouseClickTarget::LeftPane, Some(index));
-                        self.left_section = LeftSection::Projects;
-                        self.set_left_selection(index);
-                        if double_click {
-                            self.activate_selected_left_item_from_mouse();
-                        }
-                    }
-                    Some(MouseTarget::TerminalRow(index)) => {
-                        let double_click =
-                            self.register_mouse_click(MouseClickTarget::LeftPane, Some(index));
-                        self.focus = FocusPane::Left;
-                        self.left_section = LeftSection::Terminals;
-                        self.selected_terminal_index = index;
-                        self.input_target = InputTarget::None;
-                        self.fullscreen_overlay = FullscreenOverlay::None;
-                        if double_click {
-                            let _ = self.open_terminal_from_terminal_list();
-                        }
-                    }
-                    Some(MouseTarget::TerminalPane) => {
-                        self.focus = FocusPane::Left;
-                        self.left_section = LeftSection::Terminals;
-                        self.input_target = InputTarget::None;
-                        self.fullscreen_overlay = FullscreenOverlay::None;
-                    }
-                    Some(MouseTarget::Center) => {
-                        let double_click =
-                            self.register_mouse_click(MouseClickTarget::CenterPane, None);
-                        self.focus = FocusPane::Center;
-                        if double_click {
-                            self.activate_center_agent_from_mouse();
-                        }
-                    }
-                    Some(MouseTarget::FilesPane) => {
-                        self.focus = FocusPane::Files;
-                        self.input_target = InputTarget::None;
-                        self.fullscreen_overlay = FullscreenOverlay::None;
-                    }
-                    Some(MouseTarget::UnstagedFile(index)) => {
-                        self.set_file_selection(RightSection::Unstaged, index);
-                        if index.is_some() {
-                            let double_click =
-                                self.register_mouse_click(MouseClickTarget::UnstagedPane, index);
-                            if double_click {
-                                self.open_selected_file_diff_from_mouse();
-                            }
-                        }
-                    }
-                    Some(MouseTarget::StagedFile(index)) => {
-                        self.set_file_selection(RightSection::Staged, index);
-                        if index.is_some() {
-                            let double_click =
-                                self.register_mouse_click(MouseClickTarget::StagedPane, index);
-                            if double_click {
-                                self.open_selected_file_diff_from_mouse();
-                            }
-                        }
-                    }
-                    Some(MouseTarget::CommitChrome) => {
-                        self.set_file_selection(RightSection::CommitInput, None);
-                    }
-                    Some(MouseTarget::CommitText) => {
-                        let ready_to_edit = self.focus == FocusPane::Files
-                            && self.right_section == RightSection::CommitInput
-                            && self.input_target != InputTarget::CommitMessage;
-                        if ready_to_edit || self.input_target == InputTarget::CommitMessage {
-                            self.engage_commit_input();
-                            self.set_commit_cursor_from_mouse(mouse.column, mouse.row);
-                        } else {
-                            self.set_file_selection(RightSection::CommitInput, None);
-                        }
-                    }
-                    None => {}
+    fn handle_left_pointer_target(&mut self, target: MouseTarget) -> bool {
+        match target {
+            MouseTarget::LeftPane => {
+                self.focus = FocusPane::Left;
+                self.input_target = InputTarget::None;
+                self.fullscreen_overlay = FullscreenOverlay::None;
+            }
+            MouseTarget::LeftRow(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::LeftPane, Some(index));
+                self.left_section = LeftSection::Projects;
+                self.set_left_selection(index);
+                if double_click {
+                    self.activate_selected_left_item_from_mouse();
                 }
             }
-            // Middle/right presses forward exactly like left ones (SGR codes
-            // 1 and 2); when the gates refuse (no mouse-mode child, modifier
-            // held, outside the pane) they keep doing nothing, as before.
-            MouseEventKind::Down(MouseButton::Middle | MouseButton::Right) => {
-                if self.begin_center_mouse_forward(&mouse) {
-                    return false;
+            MouseTarget::TerminalRow(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::LeftPane, Some(index));
+                self.focus = FocusPane::Left;
+                self.left_section = LeftSection::Terminals;
+                self.selected_terminal_index = index;
+                self.input_target = InputTarget::None;
+                self.fullscreen_overlay = FullscreenOverlay::None;
+                if double_click {
+                    let _ = self.open_terminal_from_terminal_list();
                 }
+            }
+            MouseTarget::TerminalPane => {
+                self.focus = FocusPane::Left;
+                self.left_section = LeftSection::Terminals;
+                self.input_target = InputTarget::None;
+                self.fullscreen_overlay = FullscreenOverlay::None;
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn handle_files_pointer_target(&mut self, target: MouseTarget, mouse: &MouseEvent) -> bool {
+        match target {
+            MouseTarget::FilesPane => {
+                self.focus = FocusPane::Files;
+                self.input_target = InputTarget::None;
+                self.fullscreen_overlay = FullscreenOverlay::None;
+            }
+            MouseTarget::UnstagedFile(index) => {
+                self.set_file_selection(RightSection::Unstaged, index);
+                if index.is_some() {
+                    let double_click =
+                        self.register_mouse_click(MouseClickTarget::UnstagedPane, index);
+                    if double_click {
+                        self.open_selected_file_diff_from_mouse();
+                    }
+                }
+            }
+            MouseTarget::StagedFile(index) => {
+                self.set_file_selection(RightSection::Staged, index);
+                if index.is_some() {
+                    let double_click =
+                        self.register_mouse_click(MouseClickTarget::StagedPane, index);
+                    if double_click {
+                        self.open_selected_file_diff_from_mouse();
+                    }
+                }
+            }
+            MouseTarget::CommitChrome => {
+                self.set_file_selection(RightSection::CommitInput, None);
+            }
+            MouseTarget::CommitText => {
+                let ready_to_edit = self.focus == FocusPane::Files
+                    && self.right_section == RightSection::CommitInput
+                    && self.input_target != InputTarget::CommitMessage;
+                if ready_to_edit || self.input_target == InputTarget::CommitMessage {
+                    self.engage_commit_input();
+                    self.set_commit_cursor_from_mouse(mouse.column, mouse.row);
+                } else {
+                    self.set_file_selection(RightSection::CommitInput, None);
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn handle_pointer_target(&mut self, target: MouseTarget, mouse: &MouseEvent) {
+        if self.handle_left_pointer_target(target) {
+            return;
+        }
+        if target == MouseTarget::Center {
+            let double_click = self.register_mouse_click(MouseClickTarget::CenterPane, None);
+            self.focus = FocusPane::Center;
+            if double_click {
+                self.activate_center_agent_from_mouse();
+            }
+            return;
+        }
+        self.handle_files_pointer_target(target, mouse);
+    }
+
+    fn handle_primary_mouse_down(&mut self, mouse: &MouseEvent, windowed: bool) {
+        if windowed && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
+            self.mouse_drag = Some(drag);
+            self.update_dragged_panes(mouse.column, mouse.row);
+            return;
+        }
+        if windowed && self.handle_agent_tab_strip_click(mouse.column, mouse.row) {
+            return;
+        }
+        if self.handle_pr_banner_press(mouse, windowed) {
+            return;
+        }
+        if self.handle_center_link_press(mouse) {
+            return;
+        }
+        if self.begin_center_mouse_forward(mouse) {
+            return;
+        }
+        if let Some(target) = self.mouse_target(mouse.column, mouse.row) {
+            self.handle_pointer_target(target, mouse);
+        }
+    }
+
+    fn route_mouse_wheel(&mut self, mouse: MouseEvent, down: bool) {
+        match self.mouse_target(mouse.column, mouse.row) {
+            Some(MouseTarget::LeftRow(_)) => {
+                self.handle_left_mouse_wheel(down, mouse.column, mouse.row)
+            }
+            Some(MouseTarget::Center) => self.handle_center_mouse_wheel(mouse),
+            Some(MouseTarget::UnstagedFile(_)) => {
+                self.scroll_file_selection(RightSection::Unstaged, down)
+            }
+            Some(MouseTarget::StagedFile(_)) => {
+                self.scroll_file_selection(RightSection::Staged, down)
+            }
+            Some(MouseTarget::CommitChrome | MouseTarget::CommitText) => {
+                self.focus = FocusPane::Files;
+                self.right_section = RightSection::CommitInput;
+                self.scroll_commit_input(down);
+            }
+            _ => {}
+        }
+    }
+
+    fn dispatch_mouse_event(&mut self, mouse: MouseEvent, windowed: bool) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_primary_mouse_down(&mouse, windowed)
+            }
+            MouseEventKind::Down(MouseButton::Middle | MouseButton::Right) => {
+                self.begin_center_mouse_forward(&mouse);
             }
             MouseEventKind::Drag(_) if self.center_mouse_forward.is_some() => {
                 self.continue_center_mouse_forward(&mouse);
@@ -10054,47 +10024,35 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) if self.mouse_drag.take().is_some() => {
                 self.persist_pane_widths();
             }
-            MouseEventKind::ScrollDown => match self.mouse_target(mouse.column, mouse.row) {
-                Some(MouseTarget::LeftRow(_)) => {
-                    self.handle_left_mouse_wheel(true, mouse.column, mouse.row)
-                }
-                Some(MouseTarget::Center) => self.handle_center_mouse_wheel(mouse),
-                Some(MouseTarget::UnstagedFile(_)) => {
-                    self.scroll_file_selection(RightSection::Unstaged, true)
-                }
-                Some(MouseTarget::StagedFile(_)) => {
-                    self.scroll_file_selection(RightSection::Staged, true)
-                }
-                Some(MouseTarget::CommitChrome | MouseTarget::CommitText) => {
-                    self.focus = FocusPane::Files;
-                    self.right_section = RightSection::CommitInput;
-                    self.scroll_commit_input(true);
-                }
-                _ => {}
-            },
-            MouseEventKind::ScrollUp => match self.mouse_target(mouse.column, mouse.row) {
-                Some(MouseTarget::LeftRow(_)) => {
-                    self.handle_left_mouse_wheel(false, mouse.column, mouse.row)
-                }
-                Some(MouseTarget::Center) => self.handle_center_mouse_wheel(mouse),
-                Some(MouseTarget::UnstagedFile(_)) => {
-                    self.scroll_file_selection(RightSection::Unstaged, false)
-                }
-                Some(MouseTarget::StagedFile(_)) => {
-                    self.scroll_file_selection(RightSection::Staged, false)
-                }
-                Some(MouseTarget::CommitChrome | MouseTarget::CommitText) => {
-                    self.focus = FocusPane::Files;
-                    self.right_section = RightSection::CommitInput;
-                    self.scroll_commit_input(false);
-                }
-                _ => {}
-            },
+            MouseEventKind::ScrollDown => self.route_mouse_wheel(mouse, true),
+            MouseEventKind::ScrollUp => self.route_mouse_wheel(mouse, false),
             _ => {}
         }
-        false
     }
 
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if let Some(should_exit) = self.route_prompt_mouse(mouse) {
+            return should_exit;
+        }
+        self.pressed_button = None;
+
+        if self.route_help_mouse(mouse) {
+            return false;
+        }
+        if self.route_startup_log_mouse(mouse) {
+            return false;
+        }
+        if self.dismiss_noninteractive_fullscreen_mouse(&mouse) {
+            return false;
+        }
+
+        let windowed = matches!(self.fullscreen_overlay, FullscreenOverlay::None);
+        if self.intercept_mouse_before_targets(&mouse) {
+            return false;
+        }
+        self.dispatch_mouse_event(mouse, windowed);
+        false
+    }
     // -- Terminal text selection helpers --
 
     /// Map screen coordinates to terminal grid position.
