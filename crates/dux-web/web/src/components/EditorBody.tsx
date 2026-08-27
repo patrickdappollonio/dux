@@ -1373,6 +1373,285 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     )
   }
 
+  function renderStatusIndicators(): React.ReactNode {
+    return (
+      <>
+        {dirty && (
+          <>
+            <SimpleTooltip content="Unsaved changes">
+              <span className="shrink-0 text-primary" aria-hidden="true">
+                ●
+              </span>
+            </SimpleTooltip>
+            <span className="sr-only">unsaved changes</span>
+          </>
+        )}
+        {readOnly && activeTab?.mode === "file" && (
+          <SimpleTooltip content="This file is read-only — it is a symlink to an external file or a .git path">
+            <span className="shrink-0 text-xs text-muted-foreground">
+              read-only
+            </span>
+          </SimpleTooltip>
+        )}
+      </>
+    )
+  }
+
+  function renderDesktopViewActions(): React.ReactNode {
+    return (
+      <>
+        {activeTab && !isImageTab && hasDiff && (
+          <div
+            className="flex shrink-0 items-center gap-0.5 rounded-md border p-0.5 max-md:hidden"
+            role="group"
+            aria-label="View mode"
+          >
+            <Button
+              size="sm"
+              variant={activeTab.mode === "file" ? "default" : "ghost"}
+              aria-pressed={activeTab.mode === "file"}
+              onClick={() => editorSetTabMode(root, activeTab.id, "file")}
+            >
+              <FileText />
+              File
+            </Button>
+            <Button
+              size="sm"
+              variant={activeTab.mode === "diff" ? "default" : "ghost"}
+              aria-pressed={activeTab.mode === "diff"}
+              onClick={() => editorSetTabMode(root, activeTab.id, "diff")}
+            >
+              <GitCompare />
+              Diff
+            </Button>
+          </div>
+        )}
+        {hasDiff && activeTab?.mode === "diff" && diffStale && (
+          <SimpleTooltip content="This file changed on disk — reload the diff">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-amber-500 max-md:hidden"
+              aria-label="Reload diff — the file changed on disk"
+              onClick={refreshDiff}
+            >
+              <CircleAlert />
+              Reload
+            </Button>
+          </SimpleTooltip>
+        )}
+        {canPreview && (
+          <Button
+            size="sm"
+            variant={showPreview ? "default" : "ghost"}
+            className="max-md:hidden"
+            aria-pressed={showPreview}
+            onClick={togglePreview}
+          >
+            {showPreview && activeTab?.mode === "file" ? <Pencil /> : <Eye />}
+            {showPreview && activeTab?.mode === "file" ? "Edit" : "Preview"}
+          </Button>
+        )}
+        {showLanguagePicker && (
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="max-md:hidden"
+                  aria-label={`Syntax language: ${activeLanguageLabel}`}
+                />
+              }
+            >
+              <Code2 />
+              {activeLanguageLabel}
+              <ChevronDown />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {languagePickerItems()}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+      </>
+    )
+  }
+
+  function renderLocalEditorAction(): React.ReactNode {
+    if (activeTab === null) return null
+    return (
+      <SimpleTooltip
+        content={
+          localAccess
+            ? undefined
+            : "Only available when dux is opened locally — not over a remote URL."
+        }
+      >
+        <span className="inline-flex max-md:hidden">
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={!localAccess || openingEditor}
+                  aria-busy={openingEditor}
+                />
+              }
+            >
+              {openingEditor ? (
+                <Loader2 className="motion-safe:animate-spin" />
+              ) : (
+                <Laptop />
+              )}
+              Open local editor
+              <ChevronDown />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {OPEN_IN_EDITORS.map((editor) => (
+                <DropdownMenuItem
+                  key={editor.key}
+                  onClick={() => openInEditorAction(editor.key)}
+                >
+                  <EditorIcon editorKey={editor.key} />
+                  {editor.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </span>
+      </SimpleTooltip>
+    )
+  }
+
+  function renderSaveAction(): React.ReactNode {
+    if (activeTab?.mode !== "file" || isImageTab) return null
+    return (
+      <Button
+        size="sm"
+        className="max-md:min-h-10"
+        disabled={!dirty || isSaving || readOnly}
+        aria-busy={isSaving}
+        onClick={save}
+      >
+        {isSaving ? <Loader2 className="motion-safe:animate-spin" /> : <Save />}
+        Save
+      </Button>
+    )
+  }
+
+  function renderMobileActions(): React.ReactNode {
+    if (activeTab === null) return null
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              className="shrink-0 md:hidden max-md:size-10"
+              aria-label="More editor actions"
+            />
+          }
+        >
+          <Ellipsis />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {!isImageTab && hasDiff && (
+            <>
+              <DropdownMenuItem
+                aria-current={activeTab.mode === "file" ? "true" : undefined}
+                onClick={() => editorSetTabMode(root, activeTab.id, "file")}
+              >
+                <FileText />
+                File view
+                {activeTab.mode === "file" && <Check className="ml-auto" />}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                aria-current={activeTab.mode === "diff" ? "true" : undefined}
+                onClick={() => editorSetTabMode(root, activeTab.id, "diff")}
+              >
+                <GitCompare />
+                Diff view
+                {activeTab.mode === "diff" && <Check className="ml-auto" />}
+              </DropdownMenuItem>
+            </>
+          )}
+          {hasDiff && activeTab.mode === "diff" && diffStale && (
+            <DropdownMenuItem onClick={refreshDiff}>
+              <CircleAlert />
+              Reload diff
+            </DropdownMenuItem>
+          )}
+          {canPreview && (
+            <DropdownMenuItem onClick={togglePreview}>
+              {showPreview && activeTab.mode === "file" ? <Pencil /> : <Eye />}
+              {showPreview ? "Hide preview" : "Show preview"}
+            </DropdownMenuItem>
+          )}
+          {showLanguagePicker && (
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Code2 />
+                {activeLanguageLabel}
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                {languagePickerItems()}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          )}
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger disabled={!localAccess || openingEditor}>
+              <Laptop />
+              Open local editor
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              {OPEN_IN_EDITORS.map((editor) => (
+                <DropdownMenuItem
+                  key={editor.key}
+                  onClick={() => openInEditorAction(editor.key)}
+                >
+                  <EditorIcon editorKey={editor.key} />
+                  {editor.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    )
+  }
+
+  function renderStandaloneActions(): React.ReactNode {
+    if (standalone) return null
+    return (
+      <>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="shrink-0 max-md:min-h-10"
+          render={
+            <a
+              href={standaloneEditorHash(
+                root,
+                activeTab ? { mode: activeTab.mode, path: activeTab.path } : null,
+              )}
+              target="_blank"
+              rel="noopener"
+            />
+          }
+        >
+          <ExternalLink />
+          Open in new tab
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => closeEditor()}>
+          <X />
+          Close
+        </Button>
+      </>
+    )
+  }
+
   function renderHeader(): React.ReactNode {
     return (
       <>
@@ -1417,335 +1696,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">
           <bdi dir="ltr">{openPath ?? "Select a file"}</bdi>
         </span>
-        {/* Dirty dot kept OUTSIDE the truncating span so it can't be clipped on
-            a long path; sr-only text announces the state to screen readers. */}
-        {dirty && (
-          <>
-            <SimpleTooltip content="Unsaved changes">
-              <span className="shrink-0 text-primary" aria-hidden="true">
-                ●
-              </span>
-            </SimpleTooltip>
-            <span className="sr-only">unsaved changes</span>
-          </>
-        )}
-        {/* Read-only badge — shown when the server flagged the file as
-            read-only (external symlink or .git/ path). */}
-        {readOnly && activeTab?.mode === "file" && (
-          <SimpleTooltip content="This file is read-only — it is a symlink to an external file or a .git path">
-            <span className="shrink-0 text-xs text-muted-foreground">
-              read-only
-            </span>
-          </SimpleTooltip>
-        )}
-        {/* File / Diff view toggle — a segmented control. Hidden until a file
-            is open (nothing to view otherwise), and hidden for image tabs
-            (no text to diff; the store coerces image opens to file mode, so
-            offering the switch would only reach the binary-diff dead end).
-            Sets the ACTIVE TAB's mode. */}
-        {activeTab && !isImageTab && hasDiff && (
-          // max-md:hidden: on phones (only the standalone surface — the
-          // overlay is desktop-only) the header folds every secondary
-          // control into the one ⋯ menu at the row's end, per the
-          // row-actions tenet; only the explorer toggle and Save stay
-          // inline. Desktop keeps the inline layout exactly.
-          <div
-            className="flex shrink-0 items-center gap-0.5 rounded-md border p-0.5 max-md:hidden"
-            role="group"
-            aria-label="View mode"
-          >
-            <Button
-              size="sm"
-              variant={activeTab.mode === "file" ? "default" : "ghost"}
-              aria-pressed={activeTab.mode === "file"}
-              onClick={() => editorSetTabMode(root, activeTab.id, "file")}
-            >
-              <FileText />
-              File
-            </Button>
-            <Button
-              size="sm"
-              variant={activeTab.mode === "diff" ? "default" : "ghost"}
-              aria-pressed={activeTab.mode === "diff"}
-              onClick={() => editorSetTabMode(root, activeTab.id, "diff")}
-            >
-              <GitCompare />
-              Diff
-            </Button>
-          </div>
-        )}
-        {/* "File changed underneath you" reload — shown in diff mode when the
-            changed-files broadcast indicates the open file moved since the diff was
-            loaded. We don't auto-refetch (avoids churn); the user reloads on click. */}
-        {hasDiff && activeTab?.mode === "diff" && diffStale && (
-          <SimpleTooltip content="This file changed on disk — reload the diff">
-            <Button
-              size="sm"
-              variant="ghost"
-              className="text-amber-500 max-md:hidden"
-              aria-label="Reload diff — the file changed on disk"
-              onClick={refreshDiff}
-            >
-              <CircleAlert />
-              Reload
-            </Button>
-          </SimpleTooltip>
-        )}
-        {/* Markdown/SVG preview toggle — both modes. In file mode the label
-            swaps to "Edit" while previewing (the toggle returns to the
-            editor); in diff mode toggling off returns to the READ-ONLY diff,
-            so "Edit" would lie — the label stays "Preview" and aria-pressed
-            plus the variant carry the state. */}
-        {canPreview && (
-          <Button
-            size="sm"
-            variant={showPreview ? "default" : "ghost"}
-            className="max-md:hidden"
-            aria-pressed={showPreview}
-            onClick={togglePreview}
-          >
-            {showPreview && activeTab?.mode === "file" ? <Pencil /> : <Eye />}
-            {showPreview && activeTab?.mode === "file" ? "Edit" : "Preview"}
-          </Button>
-        )}
-        {/* Language picker. Monaco's own inference from the file's URI is
-            still the default (dux ships no filename table; a ".lock" opens
-            as plain text), and this is the escape hatch for the file it
-            guesses wrong. The trigger NAMES the language in force, so it is
-            also the only place the editor says what it decided. Same cluster
-            idiom as Open local editor: size="sm" ghost with a trailing
-            chevron. The menu carries ~82 rows and scrolls on the content's
-            own max-h-(--available-height) + overflow-y-auto. */}
-        {showLanguagePicker && (
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="max-md:hidden"
-                  aria-label={`Syntax language: ${activeLanguageLabel}`}
-                />
-              }
-            >
-              <Code2 />
-              {activeLanguageLabel}
-              <ChevronDown />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {languagePickerItems()}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-        {/* Open in a local GUI editor — a menu of supported editors. A disabled
-            trigger swallows hover events (pointer-events:none), so the tooltip
-            lives on a wrapping span that always receives them. */}
-        {activeTab && (
-          <SimpleTooltip
-            content={
-              localAccess
-                ? undefined
-                : "Only available when dux is opened locally — not over a remote URL."
-            }
-          >
-            <span className="inline-flex max-md:hidden">
-              <DropdownMenu>
-                <DropdownMenuTrigger
-                  render={
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={!localAccess || openingEditor}
-                      aria-busy={openingEditor}
-                    />
-                  }
-                >
-                  {openingEditor ? (
-                    <Loader2 className="motion-safe:animate-spin" />
-                  ) : (
-                    // A LAPTOP, not an external-link arrow. This spawns a GUI
-                    // editor on the machine dux runs on; "Open in new tab" two
-                    // controls along is the one that opens a link, and it keeps
-                    // the arrow because that is the web's convention for it.
-                    // Sharing one glyph between two adjacent controls that do
-                    // different things made the pair unreadable at a glance.
-                    <Laptop />
-                  )}
-                  Open local editor
-                  <ChevronDown />
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  {OPEN_IN_EDITORS.map((editor) => (
-                    <DropdownMenuItem
-                      key={editor.key}
-                      onClick={() => openInEditorAction(editor.key)}
-                    >
-                      <EditorIcon editorKey={editor.key} />
-                      {editor.label}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </span>
-          </SimpleTooltip>
-        )}
-        {/* Save — file mode only (diff is read-only), and never for an image
-            tab (no buffer exists for it to act on). */}
-        {activeTab?.mode === "file" && !isImageTab && (
-          <Button
-            size="sm"
-            className="max-md:min-h-10"
-            disabled={!dirty || isSaving || readOnly}
-            aria-busy={isSaving}
-            onClick={save}
-          >
-            {isSaving ? <Loader2 className="motion-safe:animate-spin" /> : <Save />}
-            Save
-          </Button>
-        )}
-        {/* The phone fold (md:hidden): every secondary header control in ONE
-            ⋯ menu, per the row-actions tenet — the mode switch, the stale-
-            diff reload, the preview toggle, and Open local editor. Items
-            keep their leading lucide icons; none carries a trailing "…"
-            because none opens a dialog. The active view mode is marked with
-            a trailing check AND aria-current so it reads to assistive tech.
-            Only the explorer toggle and Save stay inline on a phone. */}
-        {activeTab && (
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  className="shrink-0 md:hidden max-md:size-10"
-                  aria-label="More editor actions"
-                />
-              }
-            >
-              <Ellipsis />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {!isImageTab && hasDiff && (
-                <>
-                  <DropdownMenuItem
-                    aria-current={activeTab.mode === "file" ? "true" : undefined}
-                    onClick={() =>
-                      editorSetTabMode(root, activeTab.id, "file")
-                    }
-                  >
-                    <FileText />
-                    File view
-                    {activeTab.mode === "file" && <Check className="ml-auto" />}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    aria-current={activeTab.mode === "diff" ? "true" : undefined}
-                    onClick={() =>
-                      editorSetTabMode(root, activeTab.id, "diff")
-                    }
-                  >
-                    <GitCompare />
-                    Diff view
-                    {activeTab.mode === "diff" && <Check className="ml-auto" />}
-                  </DropdownMenuItem>
-                </>
-              )}
-              {hasDiff && activeTab.mode === "diff" && diffStale && (
-                <DropdownMenuItem onClick={refreshDiff}>
-                  <CircleAlert />
-                  Reload diff
-                </DropdownMenuItem>
-              )}
-              {canPreview && (
-                <DropdownMenuItem onClick={togglePreview}>
-                  {showPreview && activeTab.mode === "file" ? (
-                    <Pencil />
-                  ) : (
-                    <Eye />
-                  )}
-                  {showPreview ? "Hide preview" : "Show preview"}
-                </DropdownMenuItem>
-              )}
-              {/* The language picker, folded like every other secondary
-                  control. This is the one submenu in the app long enough to
-                  need a scroll cap, and it already has one:
-                  DropdownMenuSubContent renders DropdownMenuContent, whose
-                  base classes carry max-h-(--available-height) plus
-                  overflow-y-auto. Repeating them here bought nothing. */}
-              {showLanguagePicker && (
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>
-                    <Code2 />
-                    {activeLanguageLabel}
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent>
-                    {languagePickerItems()}
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-              )}
-              {/* Present for image tabs too, matching the inline control. */}
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger disabled={!localAccess || openingEditor}>
-                  {/* Same laptop as the desktop trigger: one action, one
-                      glyph, whichever surface it is reached from. */}
-                  <Laptop />
-                  Open local editor
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
-                  {OPEN_IN_EDITORS.map((editor) => (
-                    <DropdownMenuItem
-                      key={editor.key}
-                      onClick={() => openInEditorAction(editor.key)}
-                    >
-                      <EditorIcon editorKey={editor.key} />
-                      {editor.label}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-        {/* Open this editor as its own browser tab (the standalone surface).
-            A real anchor, not a click handler, so middle-click and
-            ctrl/cmd-click keep their native new-tab semantics; the href
-            carries the active file so the new tab opens on it. Absent on the
-            standalone surface itself, which already is that tab. */}
-        {!standalone && (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="shrink-0 max-md:min-h-10"
-            render={
-              <a
-                href={standaloneEditorHash(
-                  root,
-                  activeTab
-                    ? { mode: activeTab.mode, path: activeTab.path }
-                    : null,
-                )}
-                target="_blank"
-                rel="noopener"
-              />
-            }
-          >
-            <ExternalLink />
-            {/* A visible label, not an icon-only button: an unlabeled
-                external-link glyph reads as "some link", and this header's
-                idiom is icon + text (Save, Close). The text also makes the
-                tooltip redundant, so there is none. */}
-            Open in new tab
-          </Button>
-        )}
-        {/* Closes immediately, dirty tabs included: nothing is lost (tabs
-            live in the store, drafts in the module cache), so there is no
-            dialog to ask with. Standalone has no overlay to close; its way
-            out is the shell's open-in-dux link. */}
-        {!standalone && (
-          <Button size="sm" variant="ghost" onClick={() => closeEditor()}>
-            <X />
-            Close
-          </Button>
-        )}
+        {renderStatusIndicators()}
+        {renderDesktopViewActions()}
+        {renderLocalEditorAction()}
+        {renderSaveAction()}
+        {renderMobileActions()}
+        {renderStandaloneActions()}
       </div>
       </>
     )
