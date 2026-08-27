@@ -27,6 +27,7 @@ use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 
 use dux_core::statusline::{KeyedWireStatus, StatusScope};
+use dux_core::wire::WireStatus;
 
 use crate::changes::ChangesService;
 use crate::console::Console;
@@ -2650,9 +2651,9 @@ async fn handle_events_socket(
         id: connection_id.clone(),
         registry: Arc::clone(&connections),
     };
-    let (sink, mut stream) = socket.split();
+    let (sink, stream) = socket.split();
     let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
-    let mut bus_rx = bus.subscribe();
+    let bus_rx = bus.subscribe();
 
     // First frame: hand the client its connection id (the `X-Connection-Id` REST
     // mutations echo back so their status toasts scope to this connection only).
@@ -2674,8 +2675,8 @@ async fn handle_events_socket(
     // so a status/clear emitted in the gap (notably during a snapshot
     // `send_event().await`) would be lost. Subscribing first buffers it for this
     // receiver; any overlap with the snapshot is a harmless duplicate.
-    let mut status_rx = engine.subscribe_status();
-    let mut status_clear_rx = engine.subscribe_status_clears();
+    let status_rx = engine.subscribe_status();
+    let status_clear_rx = engine.subscribe_status_clears();
 
     // The pushed workspace document. A cloned `watch` receiver copies the
     // SOURCE receiver's seen-version (the handle's long-lived receiver, which
@@ -2685,8 +2686,8 @@ async fn handle_events_socket(
     // once one is held the replay/dedup-by-rev absorbs the duplicate. `workspace_alive` retires the arm if the engine goes away: a
     // `watch` whose sender is dropped returns `Err` from `changed()` forever,
     // which would spin this select loop.
-    let mut workspace_rx = engine.workspace_docs();
-    let mut workspace_alive = true;
+    let workspace_rx = engine.workspace_docs();
+    let workspace_alive = true;
 
     // Initial statuses: a client connecting mid-operation sees ALL active toasts
     // (keyed and anonymous) immediately, scoped to itself. An empty/fully-filtered
@@ -2703,245 +2704,265 @@ async fn handle_events_socket(
     // task cancellation (a runtime shutdown drops this future at an `.await`), not
     // just the normal loop break. Leaking interest would keep the poller computing
     // for a gone connection forever.
-    let mut interest = InterestGuard {
+    let interest = InterestGuard {
         subscribed: std::collections::HashSet::new(),
         bus: Arc::clone(&bus),
     };
+    let mut connection = EventsSocketLoop {
+        sink,
+        stream,
+        engine,
+        bus,
+        changes,
+        bus_rx,
+        status_rx,
+        status_clear_rx,
+        workspace_rx,
+        workspace_alive,
+        interest,
+        connection_id,
+        peer_ip,
+    };
+    let _ = connection.run().await;
+    drop(connection);
+    console.client_disconnected(peer_ip);
+}
 
-    // Liveness ping (every connection). The first interval tick fires immediately;
-    // consume it so the first real ping waits a full period.
-    let mut ping = tokio::time::interval(WS_LIVENESS_PING_PERIOD);
-    ping.tick().await;
+struct EventsSocketLoop {
+    sink: SharedSink,
+    stream: futures_util::stream::SplitStream<WebSocket>,
+    engine: EngineHandle,
+    bus: Arc<EventBus>,
+    changes: Arc<ChangesService>,
+    bus_rx: tokio::sync::broadcast::Receiver<Event>,
+    status_rx: tokio::sync::broadcast::Receiver<WireStatus>,
+    status_clear_rx: tokio::sync::broadcast::Receiver<Option<String>>,
+    workspace_rx: tokio::sync::watch::Receiver<Option<Arc<WorkspaceDoc>>>,
+    workspace_alive: bool,
+    interest: InterestGuard,
+    connection_id: String,
+    peer_ip: IpAddr,
+}
 
-    loop {
-        tokio::select! {
-            // Liveness ping: a failed send means a dead/half-open peer — break so
-            // the socket tears down and its permit + registry slot are freed.
-            _ = ping.tick() => {
-                if send_ping(&sink).await.is_err() {
-                    break;
+enum EventsLoopInput {
+    Ping,
+    Workspace(Result<(), tokio::sync::watch::error::RecvError>),
+    Resource(Result<Event, tokio::sync::broadcast::error::RecvError>),
+    Status(Result<WireStatus, tokio::sync::broadcast::error::RecvError>),
+    StatusCleared(Result<Option<String>, tokio::sync::broadcast::error::RecvError>),
+    Client(Option<Result<Message, axum::Error>>),
+}
+
+impl EventsLoopInput {
+    async fn apply(self, connection: &mut EventsSocketLoop) -> Result<(), ()> {
+        match self {
+            Self::Ping => send_ping(&connection.sink).await,
+            Self::Workspace(changed) => connection.handle_workspace_change(changed).await,
+            Self::Resource(event) => connection.handle_resource_event(event).await,
+            Self::Status(status) => connection.handle_status(status).await,
+            Self::StatusCleared(cleared) => connection.handle_status_clear(cleared).await,
+            Self::Client(next) => connection.handle_client_message(next).await,
+        }
+    }
+}
+
+impl EventsSocketLoop {
+    async fn run(&mut self) -> Result<(), ()> {
+        let mut ping = tokio::time::interval(WS_LIVENESS_PING_PERIOD);
+        ping.tick().await;
+
+        loop {
+            let input = tokio::select! {
+                _ = ping.tick() => EventsLoopInput::Ping,
+                changed = self.workspace_rx.changed(), if self.workspace_alive => {
+                    EventsLoopInput::Workspace(changed)
                 }
-            }
-            // The workspace document changed: push it to this connection if it
-            // asked for the coarse topics. Every events socket wakes once per
-            // change and then filters, which is bounded by the connection cap
-            // and far cheaper than the N full GETs it replaces.
-            changed = workspace_rx.changed(), if workspace_alive => match changed {
-                Ok(()) => {
-                    // `borrow_and_update`, not `borrow`: `borrow` leaves this
-                    // receiver marked as unseen, so `changed()` would return
-                    // immediately forever and hot-loop a connection that holds
-                    // neither coarse topic.
-                    let doc = workspace_rx.borrow_and_update().clone();
-                    if let Some(doc) = doc
-                        && holds_workspace_topic(&interest.subscribed)
-                        && send_text(&sink, workspace_frame_text(&doc)).await.is_err()
-                    {
-                        break;
-                    }
+                event = self.bus_rx.recv() => EventsLoopInput::Resource(event),
+                status = self.status_rx.recv() => EventsLoopInput::Status(status),
+                cleared = self.status_clear_rx.recv() => {
+                    EventsLoopInput::StatusCleared(cleared)
                 }
-                // The engine is gone. The status broadcasts will close too and
-                // break this loop; retire the arm so it cannot spin first.
-                Err(_) => workspace_alive = false,
-            },
-            ev = bus_rx.recv() => match ev {
-                Ok(Event::Resource {
-                    event,
-                    id,
-                    rev,
-                    owner,
-                    epoch,
-                    device,
-                }) => {
-                    // Forward a resource event only if this connection holds the
-                    // topic it is delivered on. `session.changes` rides the fine
-                    // per-session `session:<id>:changes` topic; `config.changed`
-                    // rides the coarse `config` topic (no id/rev — a plain refetch
-                    // signal for `/api/v1/bootstrap`).
-                    let deliver = match (event.as_str(), &id) {
-                        ("session.changes", Some(sid)) => {
-                            interest.subscribed.contains(&event_bus::changes_topic(sid))
-                        }
-                        ("config.changed", _) => interest.subscribed.contains("config"),
-                        // Coarse workspace signals ride their own coarse topics
-                        // (no id/rev). The document they announce is pushed on
-                        // the watch arm above; these remain for a page too old
-                        // to read that, which refetches `/api/v1/workspace`.
-                        ("projects.changed", _) => interest.subscribed.contains("projects"),
-                        ("sessions.changed", _) => interest.subscribed.contains("sessions"),
-                        // A PTY ownership handover rides the coarse `sessions` topic
-                        // (held by every client). Coarse delivery is fine: only the
-                        // client(s) actually viewing that pty id react to it.
-                        ("pty.owner", _) => interest.subscribed.contains("sessions"),
-                        _ => false,
-                    };
-                    if deliver {
-                        let frame = WireEvent {
-                            event,
-                            id,
-                            rev,
-                            owner,
-                            epoch,
-                            device,
-                        };
-                        if send_event(&sink, &frame).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    dux_core::logger::warn(&format!(
-                        "WebSocket events client {peer_ip} lagged behind the event bus; \
-                         dropped {n} event(s); synthesizing catch-up"
-                    ));
-                    // Write a synthetic catch-up DIRECTLY to this connection's sink
-                    // (never back onto the broadcast bus). The whole set is built by
-                    // one shared, tested function; the current workspace document is
-                    // read here because a `watch` borrow must not be held across the
-                    // sends below.
-                    let doc = workspace_rx.borrow_and_update().clone();
-                    let mut sink_dead = false;
-                    for text in
-                        lagged_catchup_texts(&interest.subscribed, &changes, doc.as_deref())
-                    {
-                        if send_text(&sink, text).await.is_err() {
-                            sink_dead = true;
-                            break;
-                        }
-                    }
-                    if sink_dead {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            },
-            // Live status broadcast. Per-connection scope filter: an `All` status
-            // reaches everyone; a `Connection(id)` status reaches only that
-            // connection — one client's operation toasts stop leaking to others.
-            status = status_rx.recv() => match status {
-                Ok(status) => {
-                    if scope_delivers(&status.scope, &connection_id) {
-                        let ev = WireStatusEvent {
-                            event: "status",
-                            key: status.key,
-                            tone: status.tone,
-                            message: status.message,
-                            scope: status.scope,
-                            sticky: status.sticky,
-                        };
-                        if send_status_event(&sink, &ev).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    dux_core::logger::warn(&format!(
-                        "WebSocket events client {peer_ip} lagged behind the status \
-                         broadcast; dropped {n} update(s); resending scoped snapshot"
-                    ));
-                    // Re-send the current scoped snapshot: every operation still
-                    // in flight, plus any outcome recent enough to be inside
-                    // `FINAL_REPLAY_WINDOW`. The client replaces its toast per
-                    // key, so a dropped update for one of those is healed. It is
-                    // NOT a full recovery and must not be described as one: an
-                    // outcome older than the window is gone, and so is any
-                    // dismissal, since the snapshot carries no way to say that
-                    // something ended.
-                    if resend_status_snapshot(&sink, &engine, &connection_id)
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            },
-            // Keyed-status clears: when a keyed op resolves or expires, dismiss the
-            // matching toast immediately. `None` clears the anonymous slot.
-            cleared = status_clear_rx.recv() => match cleared {
-                Ok(key) => {
-                    let ev = WireStatusClearedEvent {
-                        event: "status_cleared",
-                        key,
-                    };
-                    if send_status_cleared_event(&sink, &ev).await.is_err() {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    dux_core::logger::warn(&format!(
-                        "WebSocket events client {peer_ip} lagged behind the status-clear \
-                         broadcast; dropped {n} clear(s); resending scoped snapshot"
-                    ));
-                    // A dropped clear cannot be recovered. The client shows a
-                    // toast per `status` frame and dismisses on `status_cleared`;
-                    // it does NOT reconcile itself to the snapshot as a set, so
-                    // re-sending cannot retract a toast whose dismissal was
-                    // missed. What the resend does buy is that anything still
-                    // open, or finished within `FINAL_REPLAY_WINDOW`, is
-                    // re-asserted with its current tone and message, so the
-                    // client is at least not left showing a stale spinner for an
-                    // operation that has since resolved.
-                    if resend_status_snapshot(&sink, &engine, &connection_id)
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            },
-            next = stream.next() => match next {
-                Some(Ok(Message::Text(text))) => {
-                    if let Ok(frame) = serde_json::from_str::<EventsClientFrame>(text.as_str()) {
-                        let new_topics =
-                            apply_events_frame(&frame, &mut interest.subscribed, &engine, &bus)
-                                .await;
-                        // Replay the current workspace document to a connection
-                        // that JUST asked for it, so it starts from the truth
-                        // instead of from whatever its boot fetch returned. Skip
-                        // it before the engine has published anything (the
-                        // pre-first-build `None`): there is nothing truthful to
-                        // send, and the client's boot fetch covers that window.
-                        if new_topics.workspace {
-                            let doc = workspace_rx.borrow_and_update().clone();
-                            if let Some(doc) = doc
-                                && send_text(&sink, workspace_frame_text(&doc)).await.is_err()
-                            {
-                                break;
-                            }
-                        }
-                        let new_fine = new_topics.fine;
-                        // Per-subscribe catch-up: for each newly-registered fine
-                        // topic, send a `session.changes` frame immediately so the
-                        // client does not miss an event that landed between its REST
-                        // refetch and this subscription registering. `peek_rev`
-                        // returns `None` for a cold cache, which serialises to an
-                        // absent `rev` field; the client treats that as a
-                        // force-refetch — correct.
-                        let mut sink_dead = false;
-                        for frame in catchup_frames(&new_fine, &changes) {
-                            if send_event(&sink, &frame).await.is_err() {
-                                sink_dead = true;
-                                break;
-                            }
-                        }
-                        if sink_dead {
-                            break;
-                        }
-                    }
-                }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                // Ignore binary/ping/pong on the events socket.
-                Some(Ok(_)) => {}
-            },
+                next = self.stream.next() => EventsLoopInput::Client(next),
+            };
+
+            input.apply(self).await?;
         }
     }
 
-    // `interest` (the Drop guard) drains all held fine-topic interests when it
-    // goes out of scope here — on the normal break above AND on task cancellation.
-    drop(interest);
-    console.client_disconnected(peer_ip);
+    async fn handle_workspace_change(
+        &mut self,
+        changed: Result<(), tokio::sync::watch::error::RecvError>,
+    ) -> Result<(), ()> {
+        if changed.is_err() {
+            self.workspace_alive = false;
+            return Ok(());
+        }
+
+        // Mark the current revision as seen before sending so this receiver does
+        // not wake repeatedly for the same document.
+        let doc = self.workspace_rx.borrow_and_update().clone();
+        if let Some(doc) = doc
+            && holds_workspace_topic(&self.interest.subscribed)
+        {
+            send_text(&self.sink, workspace_frame_text(&doc)).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_resource_event(
+        &mut self,
+        event: Result<Event, tokio::sync::broadcast::error::RecvError>,
+    ) -> Result<(), ()> {
+        match event {
+            Ok(event) => {
+                if let Some(frame) = subscribed_resource_frame(event, &self.interest.subscribed) {
+                    send_event(&self.sink, &frame).await?;
+                }
+                Ok(())
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                dux_core::logger::warn(&format!(
+                    "WebSocket events client {} lagged behind the event bus; \
+                     dropped {n} event(s); synthesizing catch-up",
+                    self.peer_ip
+                ));
+                let doc = self.workspace_rx.borrow_and_update().clone();
+                for text in
+                    lagged_catchup_texts(&self.interest.subscribed, &self.changes, doc.as_deref())
+                {
+                    send_text(&self.sink, text).await?;
+                }
+                Ok(())
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(()),
+        }
+    }
+
+    async fn handle_status(
+        &self,
+        status: Result<WireStatus, tokio::sync::broadcast::error::RecvError>,
+    ) -> Result<(), ()> {
+        match status {
+            Ok(status) if scope_delivers(&status.scope, &self.connection_id) => {
+                send_status_event(
+                    &self.sink,
+                    &WireStatusEvent {
+                        event: "status",
+                        key: status.key,
+                        tone: status.tone,
+                        message: status.message,
+                        scope: status.scope,
+                        sticky: status.sticky,
+                    },
+                )
+                .await
+            }
+            Ok(_) => Ok(()),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                dux_core::logger::warn(&format!(
+                    "WebSocket events client {} lagged behind the status broadcast; \
+                     dropped {n} update(s); resending scoped snapshot",
+                    self.peer_ip
+                ));
+                resend_status_snapshot(&self.sink, &self.engine, &self.connection_id).await
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(()),
+        }
+    }
+
+    async fn handle_status_clear(
+        &self,
+        cleared: Result<Option<String>, tokio::sync::broadcast::error::RecvError>,
+    ) -> Result<(), ()> {
+        match cleared {
+            Ok(key) => {
+                send_status_cleared_event(
+                    &self.sink,
+                    &WireStatusClearedEvent {
+                        event: "status_cleared",
+                        key,
+                    },
+                )
+                .await
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                dux_core::logger::warn(&format!(
+                    "WebSocket events client {} lagged behind the status-clear broadcast; \
+                     dropped {n} clear(s); resending scoped snapshot",
+                    self.peer_ip
+                ));
+                resend_status_snapshot(&self.sink, &self.engine, &self.connection_id).await
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(()),
+        }
+    }
+
+    async fn handle_client_message(
+        &mut self,
+        next: Option<Result<Message, axum::Error>>,
+    ) -> Result<(), ()> {
+        match next {
+            Some(Ok(Message::Text(text))) => {
+                let Ok(frame) = serde_json::from_str::<EventsClientFrame>(text.as_str()) else {
+                    return Ok(());
+                };
+                let new = apply_events_frame(
+                    &frame,
+                    &mut self.interest.subscribed,
+                    &self.engine,
+                    &self.bus,
+                )
+                .await;
+                self.replay_new_subscriptions(new).await
+            }
+            Some(Ok(Message::Close(_))) | None | Some(Err(_)) => Err(()),
+            Some(Ok(_)) => Ok(()),
+        }
+    }
+
+    async fn replay_new_subscriptions(&mut self, new: NewSubscriptions) -> Result<(), ()> {
+        if new.workspace {
+            let doc = self.workspace_rx.borrow_and_update().clone();
+            if let Some(doc) = doc {
+                send_text(&self.sink, workspace_frame_text(&doc)).await?;
+            }
+        }
+        for frame in catchup_frames(&new.fine, &self.changes) {
+            send_event(&self.sink, &frame).await?;
+        }
+        Ok(())
+    }
+}
+
+fn subscribed_resource_frame(
+    event: Event,
+    subscribed: &std::collections::HashSet<String>,
+) -> Option<WireEvent> {
+    let Event::Resource {
+        event,
+        id,
+        rev,
+        owner,
+        epoch,
+        device,
+    } = event;
+    let deliver = match (event.as_str(), &id) {
+        ("session.changes", Some(session_id)) => {
+            subscribed.contains(&event_bus::changes_topic(session_id))
+        }
+        ("config.changed", _) => subscribed.contains("config"),
+        ("projects.changed", _) => subscribed.contains("projects"),
+        ("sessions.changed" | "pty.owner", _) => subscribed.contains("sessions"),
+        _ => false,
+    };
+    deliver.then_some(WireEvent {
+        event,
+        id,
+        rev,
+        owner,
+        epoch,
+        device,
+    })
 }
 
 /// Drains a `/ws/events` connection's held fine-topic interests on Drop, so the
