@@ -808,6 +808,93 @@ mod tests {
     }
 
     #[test]
+    fn tick_reports_retirements_and_keyed_upgrades_in_slot_order() {
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(1));
+        c.set(t0, None, StatusTone::Info, "anonymous final");
+        c.set(t0, Some("clear-a".into()), StatusTone::Info, "final a");
+        c.set(t0, Some("upgrade-a".into()), StatusTone::Busy, "busy a");
+        c.set(t0, Some("clear-b".into()), StatusTone::Info, "final b");
+        c.set(t0, Some("upgrade-b".into()), StatusTone::Busy, "busy b");
+
+        let changes = c.tick(t0 + BUSY_TIMEOUT, BUSY_TIMEOUT);
+
+        assert_eq!(
+            changes.cleared_keys,
+            vec![None, Some("clear-a".into()), Some("clear-b".into())]
+        );
+        assert_eq!(
+            changes
+                .upgraded
+                .iter()
+                .map(|status| status.key.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("upgrade-a"), Some("upgrade-b")]
+        );
+        assert_eq!(c.entries["upgrade-a"].generation, super::Generation(5));
+        assert_eq!(c.entries["upgrade-a"].seq, 5);
+        assert_eq!(c.entries["upgrade-b"].generation, super::Generation(6));
+        assert_eq!(c.entries["upgrade-b"].seq, 6);
+    }
+
+    #[test]
+    fn tick_upgrades_anonymous_before_keyed_and_keeps_its_stored_sticky_flag() {
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(1));
+        c.set_scoped(
+            t0,
+            None,
+            StatusTone::Busy,
+            "anonymous busy",
+            super::StatusScope::Connection("anon".into()),
+            true,
+        );
+        c.set_scoped(
+            t0,
+            Some("keyed".into()),
+            StatusTone::Busy,
+            "keyed busy",
+            super::StatusScope::Connection("keyed".into()),
+            true,
+        );
+
+        let changes = c.tick(t0 + BUSY_TIMEOUT, BUSY_TIMEOUT);
+
+        assert_eq!(
+            changes
+                .upgraded
+                .iter()
+                .map(|status| status.key.as_deref())
+                .collect::<Vec<_>>(),
+            vec![None, Some("keyed")]
+        );
+        assert!(changes.upgraded.iter().all(|status| !status.sticky));
+        let anon = c.anon.as_ref().expect("anonymous upgrade");
+        assert_eq!(anon.generation, super::Generation(2));
+        assert_eq!(anon.seq, 2);
+        assert!(anon.sticky, "the anonymous stored entry keeps its flag");
+        let keyed = &c.entries["keyed"];
+        assert_eq!(keyed.generation, super::Generation(3));
+        assert_eq!(keyed.seq, 3);
+        assert!(!keyed.sticky, "the keyed stored entry clears its flag");
+    }
+
+    #[test]
+    fn pinned_anonymous_busy_stays_busy_under_both_retention_policies() {
+        let t0 = Instant::now();
+        let retain = KeyedStatusController::with_clear_after(Duration::from_secs(1));
+        let emit = KeyedStatusController::emitting_finals();
+
+        for mut c in [retain, emit] {
+            c.set(t0, None, StatusTone::Busy, "still running");
+            c.pin();
+            let changes = c.tick(t0 + Duration::from_secs(3600), BUSY_TIMEOUT);
+            assert!(changes.upgraded.is_empty());
+            assert_eq!(c.snapshot()[0].tone, "busy");
+        }
+    }
+
+    #[test]
     fn a_warning_clears_after_three_windows_and_an_error_never_does() {
         let t0 = Instant::now();
         let window = Duration::from_secs(6);
@@ -1104,6 +1191,30 @@ mod tests {
                 "leaving the replay snapshot must not dismiss anyone's toast, got {:?}",
                 changes.cleared_keys
             );
+        }
+    }
+
+    #[test]
+    fn emit_silently_purges_pinned_or_sticky_anonymous_finals() {
+        let t0 = Instant::now();
+        for (sticky, pinned) in [(true, false), (false, true)] {
+            let mut c = KeyedStatusController::emitting_finals();
+            c.set_scoped(
+                t0,
+                None,
+                StatusTone::Warning,
+                "final",
+                super::StatusScope::All,
+                sticky,
+            );
+            if pinned {
+                c.pin();
+            }
+
+            let changes = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
+            assert_eq!(changes.purged, 1);
+            assert!(changes.cleared_keys.is_empty());
+            assert!(c.snapshot().is_empty());
         }
     }
 
