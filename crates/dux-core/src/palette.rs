@@ -27,6 +27,8 @@
 //! that reasoning. The exhaustiveness test in `keybindings.rs` guarantees
 //! every command in this table is listed by the TUI palette exactly once.
 
+pub mod search;
+
 use crate::action::Action;
 
 /// One row of the palette registry.
