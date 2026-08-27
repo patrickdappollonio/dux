@@ -3878,12 +3878,7 @@ impl App {
         }
     }
 
-    fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
-        // Any keystroke during a held mouse-press cancels the press —
-        // mouse-up will see no pending press and will not fire an
-        // action. This keeps the press visual from outliving its trigger
-        // when the user reaches for the keyboard mid-click.
-        self.pressed_button = None;
+    fn handle_resource_monitor_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
         if let PromptState::ResourceMonitor {
             scroll_offset,
             selected_row,
@@ -3892,41 +3887,29 @@ impl App {
             ..
         } = &mut self.prompt
         {
-            // The footer names `Action::CloseOverlay`, so the handler has to
-            // answer to it: a hardcoded `Esc` here meant the modal advertised
-            // one key and obeyed another the moment anyone rebound it. `Esc`
-            // stays wired unconditionally as well, the same escape hatch the
-            // input debugger keeps, so a broken rebind cannot trap the user.
+            // Resolve the advertised close action, while Escape remains an
+            // unconditional way out if the configured binding is unusable.
             let action = self
                 .bindings
                 .lookup(&key, BindingScope::Dialog)
                 .or_else(|| self.bindings.lookup(&key, BindingScope::Palette));
             if key.code == KeyCode::Esc || matches!(action, Some(Action::CloseOverlay)) {
                 self.prompt = PromptState::None;
-                return Ok(false);
+                return Some(false);
             }
             let visual = build_visual_rows(rows, expanded);
             let max_row = visual.len().saturating_sub(1);
-            // The row cursor is a SELECTION, so it answers to the movement
-            // bindings, exactly like every other list in dux. Hardcoding
-            // `Up`/`k` here left this one modal deaf to a rebind while its
-            // close and expand keys already honoured one. `MoveUp`/`MoveDown`
-            // live in the Palette scope, which the lookup above already falls
-            // back to.
-            //
-            // `PageUp`/`PageDown`/`Home`/`End` stay literal below: dux has no
-            // Dialog- or Palette-scoped binding for page or extreme movement
-            // (`ScrollPageUp`/`ScrollPageDown` are Center/Interactive/Help),
-            // so there is nothing to resolve them through yet.
+            // Row movement follows picker bindings. Paging and extremes remain
+            // literal because no dialog or palette actions represent them.
             if matches!(action, Some(Action::MoveUp)) {
                 *selected_row = selected_row.saturating_sub(1);
                 *scroll_offset = (*selected_row).saturating_sub(5) as u16;
-                return Ok(false);
+                return Some(false);
             }
             if matches!(action, Some(Action::MoveDown)) {
                 *selected_row = (*selected_row + 1).min(max_row);
                 *scroll_offset = (*selected_row).saturating_sub(5) as u16;
-                return Ok(false);
+                return Some(false);
             }
             match key.code {
                 KeyCode::PageUp => {
@@ -3946,11 +3929,8 @@ impl App {
                 {
                     if let Some(VisualRow::Parent(idx)) = visual.get(*selected_row) {
                         let stat = &rows[*idx];
-                        // `has_breakdown()`, not `!children.is_empty()`: a leaf
-                        // row's only child is the root itself, so expanding it
-                        // would show a duplicate of this very row. Gate the
-                        // toggle as well as the indicator, or Enter still
-                        // expands a row that renders no caret.
+                        // A leaf's only child is itself; only a real breakdown
+                        // may expand, matching the rendered affordance.
                         if let Some(pid) = stat.pid
                             && stat.has_breakdown()
                             && !expanded.remove(&pid)
@@ -3961,26 +3941,29 @@ impl App {
                 }
                 _ => {}
             }
-            // Keep scroll_offset tracking the cursor.
             *scroll_offset = (*selected_row).saturating_sub(5) as u16;
-            return Ok(false);
+            return Some(false);
         }
 
+        None
+    }
+
+    fn handle_debug_input_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
         if let PromptState::DebugInput {
             lines,
             scroll_offset,
         } = &mut self.prompt
         {
-            // Esc always closes — hardcoded so a broken binding can't trap the user.
+            // Escape remains unconditional so an unusable binding cannot trap
+            // the user in the input debugger.
             if key.code == KeyCode::Esc {
                 self.prompt = PromptState::None;
-                return Ok(false);
+                return Some(false);
             }
 
             let kc = crokey::KeyCombination::from(key).normalized();
             let label = crate::keybindings::display_format().to_string(kc);
 
-            // Look up what action this key resolves to in every scope.
             let resolved: Vec<String> = BindingScope::ALL
                 .iter()
                 .filter_map(|&scope| {
@@ -4011,418 +3994,577 @@ impl App {
                 Span::raw(" │ "),
                 Span::styled(action_text, Style::default().add_modifier(Modifier::DIM)),
             ]));
+            *scroll_offset = lines.len() as u16;
 
-            // Auto-scroll: keep the view pinned to the bottom.
-            let total = lines.len() as u16;
-            *scroll_offset = total;
-
-            return Ok(false);
+            return Some(false);
         }
 
-        if matches!(self.prompt, PromptState::Command { .. }) {
-            // Availability may have moved under the open palette since the
-            // last keystroke, so reconcile the cursor before anything reads it.
-            self.clamp_command_palette_selection();
-            // The palette and the macro bar are the deliberate exception to the
-            // filterable-modal Escape ladder (leave search and clear the query on
-            // the first press, close on the second). Their search cannot be turned
-            // OFF: the input IS the modal, there is no unfiltered list underneath
-            // to return to, so there is no mode to exit and one press correctly
-            // closes them. That is the principled line between the two groups, not
-            // an inconsistency to iron out.
-            //
-            // Plain character keys always go to TextInput so j/k etc. can be
-            // typed without conflicting with navigation bindings.
-            let is_plain_char = matches!(key.code, KeyCode::Char(_))
-                && !key.modifiers.contains(KeyModifiers::CONTROL);
-            let action = if is_plain_char {
-                None
-            } else {
-                self.bindings.lookup(&key, BindingScope::Palette)
-            };
+        None
+    }
 
-            match action {
-                Some(Action::CloseOverlay) => {
-                    self.prompt = PromptState::None;
-                }
-                Some(Action::MoveDown) => {
-                    let count = match &self.prompt {
-                        PromptState::Command { input, .. } => {
-                            self.filtered_palette_commands(&input.text).len()
-                        }
-                        _ => 0,
-                    };
-                    if let PromptState::Command { selected, .. } = &mut self.prompt
-                        && *selected + 1 < count
-                    {
-                        *selected += 1;
+    fn selected_command_palette_completion(&self, key: KeyEvent) -> Option<String> {
+        if key.code != KeyCode::Tab {
+            return None;
+        }
+        match &self.prompt {
+            PromptState::Command {
+                input, selected, ..
+            } => self
+                .palette_command_at(&input.text, *selected)
+                .and_then(|binding| binding.palette_name)
+                .map(str::to_string),
+            _ => None,
+        }
+    }
+
+    fn handle_command_palette_text_key(&mut self, key: KeyEvent) {
+        let completion = self.selected_command_palette_completion(key);
+        if let PromptState::Command {
+            input, selected, ..
+        } = &mut self.prompt
+        {
+            if let Some(command) = completion {
+                input.set_text(command);
+                *selected = 0;
+            } else if key.code == KeyCode::Tab {
+                // A tab with no completion leaves the query unchanged.
+            } else if input.handle_key(key) {
+                *selected = 0;
+            }
+        }
+    }
+
+    fn handle_command_palette_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if !matches!(self.prompt, PromptState::Command { .. }) {
+            return None;
+        }
+
+        self.clamp_command_palette_selection();
+
+        // The palette is always searchable, so close dismisses it immediately.
+        // Plain characters belong to its text field, not navigation bindings.
+        let is_plain_char =
+            matches!(key.code, KeyCode::Char(_)) && !key.modifiers.contains(KeyModifiers::CONTROL);
+        let action = if is_plain_char {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::Palette)
+        };
+
+        match action {
+            Some(Action::CloseOverlay) => {
+                self.prompt = PromptState::None;
+            }
+            Some(Action::MoveDown) => {
+                let count = match &self.prompt {
+                    PromptState::Command { input, .. } => {
+                        self.filtered_palette_commands(&input.text).len()
                     }
-                }
-                Some(Action::MoveUp) => {
-                    if let PromptState::Command { selected, .. } = &mut self.prompt
-                        && *selected > 0
-                    {
-                        *selected -= 1;
-                    }
-                }
-                Some(Action::Confirm) => {
-                    self.execute_selected_command_palette();
-                }
-                _ => {
-                    // Text input fallback: Tab (autocomplete), then delegate to TextInput.
-                    let tab_completion = if key.code == KeyCode::Tab {
-                        match &self.prompt {
-                            PromptState::Command {
-                                input, selected, ..
-                            } => self
-                                .palette_command_at(&input.text, *selected)
-                                .and_then(|binding| binding.palette_name)
-                                .map(str::to_string),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-                    if let PromptState::Command {
-                        input, selected, ..
-                    } = &mut self.prompt
-                    {
-                        if let Some(command) = tab_completion {
-                            input.set_text(command);
-                            *selected = 0;
-                        } else if key.code == KeyCode::Tab {
-                            // No completion matched; leave the command text unchanged.
-                        } else if input.handle_key(key) {
-                            *selected = 0;
-                        }
-                    }
+                    _ => 0,
+                };
+                if let PromptState::Command { selected, .. } = &mut self.prompt
+                    && *selected + 1 < count
+                {
+                    *selected += 1;
                 }
             }
-            return Ok(false);
-        }
-
-        if matches!(self.prompt, PromptState::KillRunning(..)) {
-            let is_searching = matches!(
-                self.prompt,
-                PromptState::KillRunning(KillRunningPrompt {
-                    list: SearchableList {
-                        searching: true,
-                        ..
-                    },
-                    ..
-                })
-            );
-            let action = if binding_lookup_is_suppressed(key, is_searching) {
-                None
-            } else {
-                self.bindings.lookup(&key, BindingScope::RuntimeKill)
-            };
-
-            match action {
-                Some(Action::CloseOverlay) => {
-                    let mut closed = false;
-                    if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                        // One press leaves search AND drops the query.
-                        if prompt.list.exit_search_clearing_filter() {
-                            Self::clamp_kill_running_prompt(prompt);
-                        } else {
-                            closed = true;
-                        }
-                    }
-                    if closed {
-                        self.prompt = PromptState::None;
-                        self.set_info("Closed Kill Running. No agents or terminals were killed.");
-                    }
-                }
-                Some(Action::SearchToggle) if !is_searching => {
-                    if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                        prompt.list.begin_search();
-                        prompt.focus = KillRunningFocus::List;
-                    }
-                }
-                Some(Action::MoveDown) => {
-                    if let PromptState::KillRunning(prompt) = &mut self.prompt
-                        && matches!(prompt.focus, KillRunningFocus::List)
-                    {
-                        let count = Self::visible_kill_running_indices(prompt).len();
-                        prompt.list.move_down(count);
-                    }
-                }
-                Some(Action::MoveUp) => {
-                    if let PromptState::KillRunning(prompt) = &mut self.prompt
-                        && matches!(prompt.focus, KillRunningFocus::List)
-                    {
-                        prompt.list.move_up();
-                    }
-                }
-                Some(Action::FocusNext) => {
-                    if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                        prompt.focus = match prompt.focus {
-                            KillRunningFocus::List => {
-                                Self::next_kill_running_footer_action(prompt, None, true)
-                            }
-                            KillRunningFocus::Footer(action) => {
-                                Self::next_kill_running_footer_action(prompt, Some(action), true)
-                            }
-                        };
-                    }
-                }
-                Some(Action::FocusPrev) => {
-                    if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                        prompt.focus = match prompt.focus {
-                            KillRunningFocus::List => {
-                                Self::next_kill_running_footer_action(prompt, None, false)
-                            }
-                            KillRunningFocus::Footer(action) => {
-                                Self::next_kill_running_footer_action(prompt, Some(action), false)
-                            }
-                        };
-                    }
-                }
-                Some(Action::ToggleMarked) => {
-                    self.toggle_hovered_kill_running_selection();
-                }
-                Some(Action::Confirm) => {
-                    // The confirm key acts on the highlighted row whether or
-                    // not the search row is up: search never intercepts it.
-                    // Here "picking" a row means MARKING it, and search stays
-                    // on so the user can keep narrowing and marking.
-                    let focus = match &self.prompt {
-                        PromptState::KillRunning(prompt) => prompt.focus,
-                        _ => KillRunningFocus::List,
-                    };
-                    match focus {
-                        KillRunningFocus::List => self.toggle_hovered_kill_running_selection(),
-                        KillRunningFocus::Footer(action) => {
-                            self.execute_kill_running_footer_action(action)?;
-                        }
-                    }
-                }
-                _ => {
-                    if is_searching && let PromptState::KillRunning(prompt) = &mut self.prompt {
-                        if prompt.list.filter.handle_key(key) {
-                            prompt.list.selected = 0;
-                        }
-                        Self::clamp_kill_running_prompt(prompt);
-                    }
+            Some(Action::MoveUp) => {
+                if let PromptState::Command { selected, .. } = &mut self.prompt
+                    && *selected > 0
+                {
+                    *selected -= 1;
                 }
             }
-            return Ok(false);
+            Some(Action::Confirm) => self.execute_selected_command_palette(),
+            _ => self.handle_command_palette_text_key(key),
         }
 
-        if matches!(self.prompt, PromptState::BrowseProjects { .. }) {
-            // Check sub-mode states and do binding lookup before mutable borrow.
-            let is_editing_path = matches!(
-                self.prompt,
-                PromptState::BrowseProjects {
-                    editing_path: true,
-                    ..
-                }
-            );
-            let is_searching = matches!(
-                self.prompt,
-                PromptState::BrowseProjects {
+        Some(false)
+    }
+
+    fn handle_kill_running_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+        if !matches!(self.prompt, PromptState::KillRunning(..)) {
+            return Ok(None);
+        }
+
+        let is_searching = matches!(
+            self.prompt,
+            PromptState::KillRunning(KillRunningPrompt {
+                list: SearchableList {
                     searching: true,
                     ..
-                }
-            );
-            let is_plain_char = matches!(key.code, KeyCode::Char(_))
-                && !key.modifiers.contains(KeyModifiers::CONTROL);
+                },
+                ..
+            })
+        );
+        let action = if binding_lookup_is_suppressed(key, is_searching) {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::RuntimeKill)
+        };
 
-            // Path editor keeps text editing local, with one browser-scoped
-            // escape hatch back to directory browsing.
-            if is_editing_path {
-                let path_editor_action = if is_plain_char {
-                    None
-                } else {
-                    self.bindings.lookup(&key, BindingScope::Browser)
-                };
-                let mut add_path: Option<String> = None;
-                let mut refresh_completions = false;
-                if let PromptState::BrowseProjects {
-                    editing_path,
-                    path_input,
-                    tab_completions,
-                    tab_index,
-                    ..
-                } = &mut self.prompt
+        match action {
+            Some(Action::CloseOverlay) => {
+                let mut closed = false;
+                if let PromptState::KillRunning(prompt) = &mut self.prompt {
+                    if prompt.list.exit_search_clearing_filter() {
+                        Self::clamp_kill_running_prompt(prompt);
+                    } else {
+                        closed = true;
+                    }
+                }
+                if closed {
+                    self.prompt = PromptState::None;
+                    self.set_info("Closed Kill Running. No agents or terminals were killed.");
+                }
+            }
+            Some(Action::SearchToggle) if !is_searching => {
+                if let PromptState::KillRunning(prompt) = &mut self.prompt {
+                    prompt.list.begin_search();
+                    prompt.focus = KillRunningFocus::List;
+                }
+            }
+            Some(Action::MoveDown) => {
+                if let PromptState::KillRunning(prompt) = &mut self.prompt
+                    && matches!(prompt.focus, KillRunningFocus::List)
                 {
-                    match path_editor_action {
-                        Some(Action::ExitPathEditorOnProjectAdd) => {
+                    let count = Self::visible_kill_running_indices(prompt).len();
+                    prompt.list.move_down(count);
+                }
+            }
+            Some(Action::MoveUp) => {
+                if let PromptState::KillRunning(prompt) = &mut self.prompt
+                    && matches!(prompt.focus, KillRunningFocus::List)
+                {
+                    prompt.list.move_up();
+                }
+            }
+            Some(Action::FocusNext) => {
+                if let PromptState::KillRunning(prompt) = &mut self.prompt {
+                    prompt.focus = match prompt.focus {
+                        KillRunningFocus::List => {
+                            Self::next_kill_running_footer_action(prompt, None, true)
+                        }
+                        KillRunningFocus::Footer(action) => {
+                            Self::next_kill_running_footer_action(prompt, Some(action), true)
+                        }
+                    };
+                }
+            }
+            Some(Action::FocusPrev) => {
+                if let PromptState::KillRunning(prompt) = &mut self.prompt {
+                    prompt.focus = match prompt.focus {
+                        KillRunningFocus::List => {
+                            Self::next_kill_running_footer_action(prompt, None, false)
+                        }
+                        KillRunningFocus::Footer(action) => {
+                            Self::next_kill_running_footer_action(prompt, Some(action), false)
+                        }
+                    };
+                }
+            }
+            Some(Action::ToggleMarked) => {
+                self.toggle_hovered_kill_running_selection();
+            }
+            Some(Action::Confirm) => {
+                // Confirm marks the highlighted row without leaving search, or
+                // activates the focused footer action.
+                let focus = match &self.prompt {
+                    PromptState::KillRunning(prompt) => prompt.focus,
+                    _ => KillRunningFocus::List,
+                };
+                match focus {
+                    KillRunningFocus::List => self.toggle_hovered_kill_running_selection(),
+                    KillRunningFocus::Footer(action) => {
+                        self.execute_kill_running_footer_action(action)?;
+                    }
+                }
+            }
+            _ => {
+                if is_searching && let PromptState::KillRunning(prompt) = &mut self.prompt {
+                    if prompt.list.filter.handle_key(key) {
+                        prompt.list.selected = 0;
+                    }
+                    Self::clamp_kill_running_prompt(prompt);
+                }
+            }
+        }
+
+        Ok(Some(false))
+    }
+
+    fn handle_project_browser_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if !matches!(self.prompt, PromptState::BrowseProjects { .. }) {
+            return None;
+        }
+
+        let is_editing_path = matches!(
+            self.prompt,
+            PromptState::BrowseProjects {
+                editing_path: true,
+                ..
+            }
+        );
+        let is_searching = matches!(
+            self.prompt,
+            PromptState::BrowseProjects {
+                searching: true,
+                ..
+            }
+        );
+        let is_plain_char =
+            matches!(key.code, KeyCode::Char(_)) && !key.modifiers.contains(KeyModifiers::CONTROL);
+
+        if is_editing_path {
+            let path_editor_action = if is_plain_char {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::Browser)
+            };
+            let mut add_path: Option<String> = None;
+            let mut refresh_completions = false;
+            if let PromptState::BrowseProjects {
+                editing_path,
+                path_input,
+                tab_completions,
+                tab_index,
+                ..
+            } = &mut self.prompt
+            {
+                match path_editor_action {
+                    Some(Action::ExitPathEditorOnProjectAdd) => {
+                        *editing_path = false;
+                        path_input.clear();
+                        tab_completions.clear();
+                        *tab_index = 0;
+                    }
+                    _ => match key.code {
+                        KeyCode::Esc => {
                             *editing_path = false;
                             path_input.clear();
                             tab_completions.clear();
                             *tab_index = 0;
                         }
-                        _ => match key.code {
-                            KeyCode::Esc => {
-                                *editing_path = false;
-                                path_input.clear();
-                                tab_completions.clear();
+                        KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
+                            if tab_completions.is_empty() {
+                                *tab_completions =
+                                    Self::path_editor_completion_candidates(&path_input.text);
                                 *tab_index = 0;
-                            }
-                            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
-                                if tab_completions.is_empty() {
-                                    *tab_completions =
-                                        Self::path_editor_completion_candidates(&path_input.text);
-                                    *tab_index = 0;
-                                } else if key.code == KeyCode::Up || is_reverse_tab(key) {
-                                    if *tab_index == 0 {
-                                        *tab_index = tab_completions.len().saturating_sub(1);
-                                    } else {
-                                        *tab_index -= 1;
-                                    }
-                                } else if key.code == KeyCode::Down {
-                                    *tab_index = (*tab_index + 1) % tab_completions.len();
+                            } else if key.code == KeyCode::Up || is_reverse_tab(key) {
+                                if *tab_index == 0 {
+                                    *tab_index = tab_completions.len().saturating_sub(1);
+                                } else {
+                                    *tab_index -= 1;
                                 }
-                                if key.code == KeyCode::Tab
-                                    && !is_reverse_tab(key)
-                                    && let Some(completion) = tab_completions.get(*tab_index)
-                                {
-                                    path_input.set_text(completion.clone());
-                                    refresh_completions = true;
-                                }
+                            } else if key.code == KeyCode::Down {
+                                *tab_index = (*tab_index + 1) % tab_completions.len();
                             }
-                            KeyCode::Enter => {
-                                add_path = Some(path_input.text.trim().to_string());
+                            if key.code == KeyCode::Tab
+                                && !is_reverse_tab(key)
+                                && let Some(completion) = tab_completions.get(*tab_index)
+                            {
+                                path_input.set_text(completion.clone());
+                                refresh_completions = true;
                             }
-                            _ => {
-                                if path_input.handle_key(key) {
-                                    refresh_completions = true;
-                                }
+                        }
+                        KeyCode::Enter => {
+                            add_path = Some(path_input.text.trim().to_string());
+                        }
+                        _ => {
+                            if path_input.handle_key(key) {
+                                refresh_completions = true;
                             }
-                        },
-                    }
+                        }
+                    },
                 }
-                if refresh_completions {
-                    self.refresh_path_editor_completions();
-                }
-                if let Some(path) = add_path {
-                    self.add_project_from_browser_path(path);
-                }
-                return Ok(false);
             }
+            if refresh_completions {
+                self.refresh_path_editor_completions();
+            }
+            if let Some(path) = add_path {
+                self.add_project_from_browser_path(path);
+            }
+            return Some(false);
+        }
 
-            // Browser normal/search mode — use binding lookup.
-            let action = if binding_lookup_is_suppressed(key, is_searching) {
-                None
-            } else {
-                self.bindings.lookup(&key, BindingScope::Browser)
-            };
+        let action = if binding_lookup_is_suppressed(key, is_searching) {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::Browser)
+        };
 
-            match action {
+        match action {
+            Some(Action::CloseOverlay) => {
+                if let PromptState::BrowseProjects {
+                    searching,
+                    filter,
+                    selected,
+                    ..
+                } = &mut self.prompt
+                {
+                    if exit_search_clearing_filter(searching, filter) {
+                        *selected = 0;
+                    } else {
+                        self.prompt = PromptState::None;
+                    }
+                }
+            }
+            Some(Action::SearchToggle) if !is_searching => {
+                if let PromptState::BrowseProjects {
+                    filter, searching, ..
+                } = &mut self.prompt
+                {
+                    filter.move_end();
+                    *searching = true;
+                }
+            }
+            Some(Action::MoveDown) => {
+                if let PromptState::BrowseProjects {
+                    entries,
+                    selected,
+                    filter,
+                    ..
+                } = &mut self.prompt
+                {
+                    let filtered_len = if filter.is_empty() {
+                        entries.len()
+                    } else {
+                        let needle = filter.text.to_lowercase();
+                        entries
+                            .iter()
+                            .filter(|entry| entry.label.to_lowercase().contains(&needle))
+                            .count()
+                    };
+                    if *selected + 1 < filtered_len {
+                        *selected += 1;
+                    }
+                }
+            }
+            Some(Action::MoveUp) => {
+                if let PromptState::BrowseProjects { selected, .. } = &mut self.prompt
+                    && *selected > 0
+                {
+                    *selected -= 1;
+                }
+            }
+            Some(Action::GoToPath) if !is_searching => {
+                if let PromptState::BrowseProjects {
+                    current_dir,
+                    editing_path,
+                    path_input,
+                    ..
+                } = &mut self.prompt
+                {
+                    *editing_path = true;
+                    let mut path = current_dir.to_string_lossy().to_string();
+                    if !path.ends_with('/') {
+                        path.push('/');
+                    }
+                    path_input.set_text(path);
+                }
+                self.refresh_path_editor_completions();
+            }
+            // Search suppresses the keys that belong to its caret before this
+            // confirm action is resolved.
+            Some(Action::OpenEntry) => {
+                self.open_selected_browser_entry();
+            }
+            Some(Action::AddCurrentDir) if !is_searching => {
+                if let PromptState::BrowseProjects {
+                    purpose,
+                    current_dir,
+                    ..
+                } = &self.prompt
+                {
+                    let path = current_dir.to_string_lossy().to_string();
+                    match purpose {
+                        BrowsePurpose::AddProject => {
+                            self.add_project_from_browser_path(path);
+                        }
+                        BrowsePurpose::StandaloneAgent => {
+                            self.create_standalone_agent_in(path);
+                        }
+                    }
+                }
+            }
+            _ => {
+                if is_searching
+                    && let PromptState::BrowseProjects {
+                        filter, selected, ..
+                    } = &mut self.prompt
+                    && filter.handle_key(key)
+                {
+                    *selected = 0;
+                }
+            }
+        }
+
+        Some(false)
+    }
+
+    fn handle_startup_logs_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
+            return None;
+        };
+
+        let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
+        let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+        let center_action = self.bindings.lookup(&key, BindingScope::Center);
+        let help_action = self.bindings.lookup(&key, BindingScope::Help);
+        let startup_logs_action = self.bindings.lookup(&key, BindingScope::StartupCommandLogs);
+        let body = match self.overlay_layout.active {
+            OverlayMouseLayout::StartupCommandLogs { body, .. } if body.height > 0 => Some(body),
+            _ => None,
+        };
+        let page = body.map(|body| body.height.max(1)).unwrap_or(10) as i16;
+
+        // Search owns text and caret keys; unconsumed navigation continues
+        // through the picker ladder below against the filtered entries.
+        if prompt.searching {
+            let mut select_after_filter = None;
+            let mut handled = true;
+            match startup_logs_action.or(dialog_action) {
                 Some(Action::CloseOverlay) => {
-                    if let PromptState::BrowseProjects {
-                        searching,
-                        filter,
-                        selected,
-                        ..
-                    } = &mut self.prompt
-                    {
-                        // One press leaves search AND drops the query.
-                        if exit_search_clearing_filter(searching, filter) {
-                            *selected = 0;
-                        } else {
-                            self.prompt = PromptState::None;
-                        }
-                    }
+                    // Clearing the query restores the full list while its
+                    // absolute entry selection remains valid.
+                    exit_search_clearing_filter(&mut prompt.searching, &mut prompt.filter);
                 }
-                Some(Action::SearchToggle) if !is_searching => {
-                    if let PromptState::BrowseProjects {
-                        filter, searching, ..
-                    } = &mut self.prompt
-                    {
-                        filter.move_end();
-                        *searching = true;
-                    }
-                }
-                Some(Action::MoveDown) => {
-                    if let PromptState::BrowseProjects {
-                        entries,
-                        selected,
-                        filter,
-                        ..
-                    } = &mut self.prompt
-                    {
-                        let filtered_len = if filter.is_empty() {
-                            entries.len()
-                        } else {
-                            let needle = filter.text.to_lowercase();
-                            entries
-                                .iter()
-                                .filter(|e| e.label.to_lowercase().contains(&needle))
-                                .count()
-                        };
-                        if *selected + 1 < filtered_len {
-                            *selected += 1;
-                        }
-                    }
-                }
-                Some(Action::MoveUp) => {
-                    if let PromptState::BrowseProjects { selected, .. } = &mut self.prompt
-                        && *selected > 0
-                    {
-                        *selected -= 1;
-                    }
-                }
-                Some(Action::GoToPath) if !is_searching => {
-                    if let PromptState::BrowseProjects {
-                        current_dir,
-                        editing_path,
-                        path_input,
-                        ..
-                    } = &mut self.prompt
-                    {
-                        *editing_path = true;
-                        let mut p = current_dir.to_string_lossy().to_string();
-                        if !p.ends_with('/') {
-                            p.push('/');
-                        }
-                        path_input.set_text(p);
-                    }
-                    self.refresh_path_editor_completions();
-                }
-                // `OpenEntry` is the browser's confirm, and it opens the
-                // highlighted entry whether or not the search row is up. Its
-                // other default keys (the right arrow, `l`) belong to the caret
-                // and to typing while searching, and never get here: the
-                // suppression gate above already withheld them.
-                Some(Action::OpenEntry) => {
-                    self.open_selected_browser_entry();
-                }
-                Some(Action::AddCurrentDir) if !is_searching => {
-                    // THE ONE PLACE the browse purpose is consulted. Everything
-                    // above this is navigation, identical either way.
-                    if let PromptState::BrowseProjects {
-                        purpose,
-                        current_dir,
-                        ..
-                    } = &self.prompt
-                    {
-                        let path = current_dir.to_string_lossy().to_string();
-                        match purpose {
-                            BrowsePurpose::AddProject => {
-                                self.add_project_from_browser_path(path);
-                            }
-                            BrowsePurpose::StandaloneAgent => {
-                                self.create_standalone_agent_in(path);
-                            }
-                        }
-                    }
+                Some(Action::SearchToggle) => {
+                    prompt.searching = false;
                 }
                 _ => {
-                    // Text input fallback for search mode.
-                    if is_searching
-                        && let PromptState::BrowseProjects {
-                            filter, selected, ..
-                        } = &mut self.prompt
-                        && filter.handle_key(key)
-                    {
-                        *selected = 0;
+                    let before = prompt.filter.text.clone();
+                    if prompt.filter.handle_key(key) {
+                        if prompt.filter.text != before {
+                            select_after_filter =
+                                Self::startup_command_log_filtered_indices(prompt)
+                                    .first()
+                                    .copied();
+                        }
+                    } else {
+                        handled = false;
                     }
                 }
             }
-            return Ok(false);
+            if let Some(index) = select_after_filter {
+                self.select_startup_command_log(index);
+            }
+            if handled {
+                return Some(false);
+            }
+        }
+
+        let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
+            return Some(false);
+        };
+        // Space activates the focused Close button. With the list focused it
+        // remains available to the Center scope's scrolling action.
+        if !prompt.searching
+            && key.code == KeyCode::Char(' ')
+            && prompt.focus == StartupCommandLogFocus::Close
+        {
+            self.prompt = PromptState::None;
+            self.startup_log_selection = None;
+            return Some(false);
+        }
+        match startup_logs_action
+            .or(palette_action)
+            .or(dialog_action)
+            .or(center_action)
+            .or(help_action)
+        {
+            Some(Action::CloseOverlay) => {
+                self.prompt = PromptState::None;
+                self.startup_log_selection = None;
+            }
+            // Focus movement resolves through dialog bindings; search has
+            // already consumed horizontal caret movement when active.
+            Some(Action::ToggleSelection) => {
+                prompt.focus = next_focus(
+                    &StartupCommandLogFocus::RING,
+                    prompt.focus,
+                    !focus_move_is_reverse(key),
+                );
+            }
+            Some(Action::SearchToggle) => {
+                prompt.searching = true;
+            }
+            Some(Action::MoveDown) => {
+                let visible = Self::startup_command_log_filtered_indices(prompt);
+                let visual =
+                    Self::startup_command_log_selected_visual_index(prompt, &visible).unwrap_or(0);
+                if let Some(selected) = visible.get(visual + 1).copied() {
+                    self.select_startup_command_log(selected);
+                }
+            }
+            Some(Action::MoveUp) => {
+                let visible = Self::startup_command_log_filtered_indices(prompt);
+                let visual =
+                    Self::startup_command_log_selected_visual_index(prompt, &visible).unwrap_or(0);
+                if visual > 0
+                    && let Some(selected) = visible.get(visual - 1).copied()
+                {
+                    self.select_startup_command_log(selected);
+                }
+            }
+            Some(Action::ScrollPageDown) => {
+                scroll_startup_command_log(prompt, body, page);
+            }
+            Some(Action::ScrollPageUp) => {
+                scroll_startup_command_log(prompt, body, -page);
+            }
+            Some(Action::ScrollLineDown) => {
+                scroll_startup_command_log(prompt, body, 1);
+            }
+            Some(Action::ScrollLineUp) => {
+                scroll_startup_command_log(prompt, body, -1);
+            }
+            // Confirm promotes the selected run while the list has focus, or
+            // activates Close when the footer has focus.
+            Some(Action::OpenEntry | Action::Confirm) => match prompt.focus {
+                StartupCommandLogFocus::List => {
+                    self.promote_startup_command_log_to_fullscreen();
+                }
+                StartupCommandLogFocus::Close => {
+                    self.prompt = PromptState::None;
+                    self.startup_log_selection = None;
+                }
+            },
+            Some(Action::OpenStartupCommandLogFile) => {
+                self.open_selected_startup_command_log();
+            }
+            Some(Action::OpenStartupCommandLogFolder) => {
+                self.open_selected_startup_command_log_folder();
+            }
+            _ => {}
+        }
+
+        Some(false)
+    }
+
+    fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Any keystroke cancels a held mouse press, preventing its release from
+        // firing an action after the user has switched to the keyboard.
+        self.pressed_button = None;
+
+        if let Some(should_exit) = self.handle_resource_monitor_prompt_key(key) {
+            return Ok(should_exit);
+        }
+
+        if let Some(should_exit) = self.handle_debug_input_prompt_key(key) {
+            return Ok(should_exit);
+        }
+
+        if let Some(should_exit) = self.handle_command_palette_prompt_key(key) {
+            return Ok(should_exit);
+        }
+
+        if let Some(should_exit) = self.handle_kill_running_prompt_key(key)? {
+            return Ok(should_exit);
+        }
+
+        if let Some(should_exit) = self.handle_project_browser_prompt_key(key) {
+            return Ok(should_exit);
         }
 
         if let PromptState::PickEditor {
@@ -4709,169 +4851,8 @@ impl App {
             return self.handle_configure_modal_key(key, focus);
         }
 
-        if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
-            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
-            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
-            let center_action = self.bindings.lookup(&key, BindingScope::Center);
-            let help_action = self.bindings.lookup(&key, BindingScope::Help);
-            let startup_logs_action = self.bindings.lookup(&key, BindingScope::StartupCommandLogs);
-            let body = match self.overlay_layout.active {
-                OverlayMouseLayout::StartupCommandLogs { body, .. } if body.height > 0 => {
-                    Some(body)
-                }
-                _ => None,
-            };
-            let page = body.map(|body| body.height.max(1)).unwrap_or(10) as i16;
-            // The search row owns typing and the caret keys; everything else
-            // falls through to the same ladder the unfiltered list uses, so the
-            // vertical keys walk the FILTERED results and the confirm key opens
-            // the highlighted log. Only the two search-specific keys are
-            // handled here.
-            if prompt.searching {
-                let mut select_after_filter = None;
-                let mut handled = true;
-                match startup_logs_action.or(dialog_action) {
-                    Some(Action::CloseOverlay) => {
-                        // One press leaves search AND drops the query. The
-                        // selection is an ABSOLUTE entry index here, so
-                        // restoring the full list leaves it pointing at the
-                        // same log; there is nothing to reset.
-                        exit_search_clearing_filter(&mut prompt.searching, &mut prompt.filter);
-                    }
-                    Some(Action::SearchToggle) => {
-                        // Leaving search by its own toggle KEEPS the query, so
-                        // the narrowed list stays up to be navigated.
-                        prompt.searching = false;
-                    }
-                    // Same rule as the fullscreen viewer's search row: the set
-                    // the field owns IS the set `TextInput::handle_key`
-                    // consumes, asked rather than hand-listed, so `Home`, `End`
-                    // and the word-erase chord cannot fall out of it again. A
-                    // single-line field consumes none of the vertical or paging
-                    // keys, so those still reach the ladder below.
-                    _ => {
-                        let before = prompt.filter.text.clone();
-                        if prompt.filter.handle_key(key) {
-                            // Only a changed QUERY re-aims the selection; a
-                            // caret move is consumed but must leave it alone.
-                            if prompt.filter.text != before {
-                                select_after_filter =
-                                    Self::startup_command_log_filtered_indices(prompt)
-                                        .first()
-                                        .copied();
-                            }
-                        } else {
-                            handled = false;
-                        }
-                    }
-                }
-                if let Some(index) = select_after_filter {
-                    self.select_startup_command_log(index);
-                }
-                if handled {
-                    return Ok(false);
-                }
-            }
-
-            let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
-                return Ok(false);
-            };
-            // Space acts on whatever holds focus (the hardcoded accessibility
-            // convention, not a binding). Only the Close button is a control
-            // Space can act ON; with the list focused there is nothing to
-            // activate, so Space keeps falling through to the Center scope's
-            // scroll, which is what it has always done here.
-            if !prompt.searching
-                && key.code == KeyCode::Char(' ')
-                && prompt.focus == StartupCommandLogFocus::Close
-            {
-                self.prompt = PromptState::None;
-                self.startup_log_selection = None;
-                return Ok(false);
-            }
-            match startup_logs_action
-                .or(palette_action)
-                .or(dialog_action)
-                .or(center_action)
-                .or(help_action)
-            {
-                Some(Action::CloseOverlay) => {
-                    self.prompt = PromptState::None;
-                    self.startup_log_selection = None;
-                }
-                // Movement moves FOCUS and nothing else. The action resolves
-                // through the Dialog scope, so it is whatever the user has
-                // bound (Tab/Shift-Tab and the horizontal keys by default) and
-                // never a hardcoded key. While the search row is up the field
-                // has already claimed the horizontal keys for its caret, so
-                // only the Tab pair reaches here, exactly as in a text-field
-                // modal.
-                Some(Action::ToggleSelection) => {
-                    prompt.focus = next_focus(
-                        &StartupCommandLogFocus::RING,
-                        prompt.focus,
-                        !focus_move_is_reverse(key),
-                    );
-                }
-                Some(Action::SearchToggle) => {
-                    prompt.searching = true;
-                }
-                Some(Action::MoveDown) => {
-                    let visible = Self::startup_command_log_filtered_indices(prompt);
-                    let visual = Self::startup_command_log_selected_visual_index(prompt, &visible)
-                        .unwrap_or(0);
-                    if let Some(selected) = visible.get(visual + 1).copied() {
-                        self.select_startup_command_log(selected);
-                    }
-                }
-                Some(Action::MoveUp) => {
-                    let visible = Self::startup_command_log_filtered_indices(prompt);
-                    let visual = Self::startup_command_log_selected_visual_index(prompt, &visible)
-                        .unwrap_or(0);
-                    if visual > 0
-                        && let Some(selected) = visible.get(visual - 1).copied()
-                    {
-                        self.select_startup_command_log(selected);
-                    }
-                }
-                Some(Action::ScrollPageDown) => {
-                    scroll_startup_command_log(prompt, body, page);
-                }
-                Some(Action::ScrollPageUp) => {
-                    scroll_startup_command_log(prompt, body, -page);
-                }
-                Some(Action::ScrollLineDown) => {
-                    scroll_startup_command_log(prompt, body, 1);
-                }
-                Some(Action::ScrollLineUp) => {
-                    scroll_startup_command_log(prompt, body, -1);
-                }
-                // A Picker's confirm key acts on the SELECTION while the list
-                // holds focus. Here that means promoting the highlighted run
-                // to the fullscreen viewer for full-screen reading. The
-                // separate "open file" binding still hands the run to the OS
-                // opener; the two are different destinations and must not
-                // share a key. With the footer button focused, confirm
-                // activates that button instead, which is the whole reason the
-                // ring exists.
-                Some(Action::OpenEntry | Action::Confirm) => match prompt.focus {
-                    StartupCommandLogFocus::List => {
-                        self.promote_startup_command_log_to_fullscreen();
-                    }
-                    StartupCommandLogFocus::Close => {
-                        self.prompt = PromptState::None;
-                        self.startup_log_selection = None;
-                    }
-                },
-                Some(Action::OpenStartupCommandLogFile) => {
-                    self.open_selected_startup_command_log();
-                }
-                Some(Action::OpenStartupCommandLogFolder) => {
-                    self.open_selected_startup_command_log_folder();
-                }
-                _ => {}
-            }
-            return Ok(false);
+        if let Some(should_exit) = self.handle_startup_logs_prompt_key(key) {
+            return Ok(should_exit);
         }
 
         if matches!(self.prompt, PromptState::ConfigReloadFailed { .. }) {
@@ -19968,6 +19949,53 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn command_palette_navigation_and_close_follow_palette_bindings() {
+        let mut app = test_app(bindings_with_overrides(&[
+            (Action::MoveDown, &["ctrl-n"]),
+            (Action::MoveUp, &["ctrl-e"]),
+            (Action::CloseOverlay, &["ctrl-q"]),
+        ]));
+        app.prompt = PromptState::Command {
+            input: TextInput::new(),
+            selected: 0,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .expect("move down");
+        let PromptState::Command { selected, .. } = &app.prompt else {
+            panic!("expected command palette");
+        };
+        assert_eq!(*selected, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+            .expect("move up");
+        let PromptState::Command { selected, .. } = &app.prompt else {
+            panic!("expected command palette");
+        };
+        assert_eq!(*selected, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL))
+            .expect("close command palette");
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn command_palette_tab_completes_the_selected_command() {
+        let mut app = test_app(default_bindings());
+        let mut input = TextInput::new();
+        input.set_text("resource-mon".to_string());
+        app.prompt = PromptState::Command { input, selected: 0 };
+
+        tap(&mut app, KeyCode::Tab);
+
+        let PromptState::Command { input, selected } = &app.prompt else {
+            panic!("expected command palette");
+        };
+        assert_eq!(input.text, "resource-monitor");
+        assert_eq!(*selected, 0);
+    }
+
+    #[test]
     fn command_palette_hides_current_pr_command_without_known_pr() {
         let app = test_app(default_bindings());
         let commands = app.filtered_palette_commands("open-current-pr");
@@ -32699,6 +32727,35 @@ cyan = "#00ffff"
             last_refresh: std::time::Instant::now(),
             short_window_sample: false,
         }
+    }
+
+    #[test]
+    fn debug_input_records_a_key_then_escape_closes_it() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::DebugInput {
+            lines: Vec::new(),
+            scroll_offset: 0,
+        };
+
+        tap(&mut app, KeyCode::Char('x'));
+        let PromptState::DebugInput {
+            lines,
+            scroll_offset,
+        } = &app.prompt
+        else {
+            panic!("expected the input debugger");
+        };
+        assert_eq!(lines.len(), 1);
+        assert_eq!(*scroll_offset, 1);
+        let recorded = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(recorded.contains('x'));
+
+        tap(&mut app, KeyCode::Esc);
+        assert!(matches!(app.prompt, PromptState::None));
     }
 
     #[test]
