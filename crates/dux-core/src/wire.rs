@@ -1283,6 +1283,162 @@ enum WireCommandMapping {
     Unhandled(WireCommand),
 }
 
+struct SettingsUiBehaviorPatch {
+    copy_on_select: Option<bool>,
+    compose_bar: Option<String>,
+    mobile_top_bar: Option<bool>,
+    mobile_accessory_bar: Option<bool>,
+    upload_write_gitignore: Option<bool>,
+    upload_pasted_text_chars: Option<usize>,
+    auto_reopen_agents: Option<bool>,
+    show_changes_pane: Option<bool>,
+    always_show_tab_strip: Option<bool>,
+    tab_reaches_agent: Option<bool>,
+}
+
+impl SettingsUiBehaviorPatch {
+    fn apply_to(self, config: &mut crate::config::Config) {
+        if let Some(value) = self.copy_on_select {
+            config.ui.copy_on_select = value;
+        }
+        if let Some(value) = self.compose_bar {
+            config.ui.compose_bar = value;
+        }
+        if let Some(value) = self.mobile_top_bar {
+            config.ui.mobile_top_bar = value;
+        }
+        if let Some(value) = self.mobile_accessory_bar {
+            config.ui.mobile_accessory_bar = value;
+        }
+        if let Some(value) = self.upload_write_gitignore {
+            config.ui.upload_write_gitignore = value;
+        }
+        if let Some(value) = self.upload_pasted_text_chars {
+            config.ui.upload_pasted_text_chars =
+                crate::config::normalized_upload_pasted_text_chars(value);
+        }
+        if let Some(value) = self.auto_reopen_agents {
+            config.ui.auto_reopen_agents = value;
+        }
+        if let Some(value) = self.show_changes_pane {
+            config.ui.show_changes_pane = value;
+        }
+        if let Some(value) = self.always_show_tab_strip {
+            config.ui.always_show_tab_strip = value;
+        }
+        if let Some(value) = self.tab_reaches_agent {
+            config.ui.tab_reaches_agent = value;
+        }
+    }
+}
+
+struct SettingsUiDisplayPatch {
+    status_clear_seconds: Option<u16>,
+    attention_grace_seconds: Option<u64>,
+    attention_indicator: Option<bool>,
+    attention_on_bell: Option<bool>,
+    pr_banner_position: Option<String>,
+    disable_automated_welcome_screen: Option<bool>,
+    disable_release_notes: Option<bool>,
+    terminal_font_family: Option<String>,
+    terminal_font_size: Option<u16>,
+}
+
+impl SettingsUiDisplayPatch {
+    fn apply_to(self, config: &mut crate::config::Config) {
+        if let Some(value) = self.status_clear_seconds {
+            config.ui.status_clear_seconds =
+                clamp_nonzero(value, crate::config::MAX_STATUS_CLEAR_SECONDS);
+        }
+        if let Some(value) = self.attention_grace_seconds {
+            config.ui.attention_grace_seconds =
+                clamp_nonzero(value, crate::config::MAX_ATTENTION_GRACE_SECONDS);
+        }
+        if let Some(value) = self.attention_indicator {
+            config.ui.attention_indicator = value;
+        }
+        if let Some(value) = self.attention_on_bell {
+            config.ui.attention_on_bell = value;
+        }
+        if let Some(value) = self.pr_banner_position {
+            config.ui.pr_banner_position = value;
+        }
+        if let Some(value) = self.disable_automated_welcome_screen {
+            config.ui.disable_automated_welcome_screen = value;
+        }
+        if let Some(value) = self.disable_release_notes {
+            config.ui.disable_release_notes = value;
+        }
+        if let Some(value) = self.terminal_font_family {
+            config.ui.terminal_font_family = sanitize_terminal_font_family(&value);
+        }
+        if let Some(value) = self.terminal_font_size {
+            config.ui.terminal_font_size = crate::config::normalized_terminal_font_size(value);
+        }
+    }
+}
+
+struct SettingsDefaultsPatch {
+    enable_randomized_pet_name_by_default: Option<bool>,
+    default_provider: Option<String>,
+}
+
+impl SettingsDefaultsPatch {
+    fn apply_to(self, config: &mut crate::config::Config) {
+        if let Some(value) = self.enable_randomized_pet_name_by_default {
+            config.defaults.enable_randomized_pet_name_by_default = value;
+        }
+        if let Some(value) = self.default_provider {
+            config.defaults.provider = value;
+        }
+    }
+}
+
+struct SettingsCapabilitiesPatch {
+    web_notifications: Option<bool>,
+    hyperlinks: Option<bool>,
+}
+
+impl SettingsCapabilitiesPatch {
+    fn apply_to(self, config: &mut crate::config::Config) {
+        if let Some(value) = self.web_notifications {
+            config.capabilities.web_notifications = value;
+        }
+        if let Some(value) = self.hyperlinks {
+            config.capabilities.hyperlinks = value;
+        }
+    }
+}
+
+fn validate_settings_patch(
+    mut patch: SettingsPatch,
+    config: &crate::config::Config,
+) -> anyhow::Result<SettingsPatch> {
+    patch.pr_banner_position = patch
+        .pr_banner_position
+        .map(|raw| {
+            normalize_pr_banner_position(&raw)
+                .ok_or_else(|| anyhow::anyhow!("unknown PR banner position \"{raw}\""))
+        })
+        .transpose()?;
+    patch.compose_bar = patch
+        .compose_bar
+        .map(|raw| {
+            crate::config::ComposeBarMode::parse(&raw)
+                .map(|mode| mode.as_str().to_string())
+                .ok_or_else(|| anyhow::anyhow!("unknown compose bar mode \"{raw}\""))
+        })
+        .transpose()?;
+    if let Some(provider) = &patch.default_provider
+        && !config.providers.commands.contains_key(provider.as_str())
+    {
+        anyhow::bail!(
+            "Provider \"{provider}\" is not configured. Pick one of the configured providers."
+        );
+    }
+    Ok(patch)
+}
+
 impl Engine {
     /// Reconstruct and dispatch a wire command, returning a wire-safe outcome.
     pub fn apply_wire(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
@@ -1598,12 +1754,9 @@ impl Engine {
             return Ok(info(WireStatus::new("info", "Nothing to update.")));
         }
 
-        // LOAD-BEARING: this destructure is exhaustive with no `..` on purpose.
-        // It is what makes the compiler reject a field added to `SettingsPatch`
-        // but never mapped onto the candidate below, which is the only field
-        // list left on this path. Do not "tidy" it with `..`. `quiet` is the
-        // one deliberate non-candidate binding: it is a presentation flag,
-        // already consumed above, and maps onto no config field.
+        let patch = validate_settings_patch(patch, &self.config)?;
+        // The exhaustive destructure keeps a newly-added settings field from
+        // compiling until it is assigned to one of the domain patches below.
         let SettingsPatch {
             quiet: _,
             copy_on_select,
@@ -1631,110 +1784,42 @@ impl Engine {
             terminal_font_size,
         } = patch;
 
-        // Validate enums BEFORE mutating the candidate, so a rejected value
-        // leaves nothing partially applied.
-        let pr_banner_position = pr_banner_position
-            .map(|raw| {
-                normalize_pr_banner_position(&raw)
-                    .ok_or_else(|| anyhow::anyhow!("unknown PR banner position \"{raw}\""))
-            })
-            .transpose()?;
-        // Rejected rather than degraded to "auto", the `pr_banner_position`
-        // rule: this validates a CLIENT-supplied string, where a 400 is more
-        // useful than silently saving something the user did not choose. The
-        // warn-and-degrade path is for a value already on disk.
-        let compose_bar = compose_bar
-            .map(|raw| {
-                crate::config::ComposeBarMode::parse(&raw)
-                    .map(|mode| mode.as_str().to_string())
-                    .ok_or_else(|| anyhow::anyhow!("unknown compose bar mode \"{raw}\""))
-            })
-            .transpose()?;
-        // Validate against the configured provider list, the same source
-        // `BootstrapView::available_providers` is built from, so a forged or
-        // stale provider name from the client is rejected rather than silently
-        // written (mirrors `change_tab_provider_wire`'s validation).
-        if let Some(raw) = &default_provider
-            && !self.config.providers.commands.contains_key(raw.as_str())
-        {
-            anyhow::bail!(
-                "Provider \"{raw}\" is not configured. Pick one of the configured providers."
-            );
-        }
-
         let mut candidate = self.config.clone();
-        if let Some(v) = copy_on_select {
-            candidate.ui.copy_on_select = v;
+        SettingsUiBehaviorPatch {
+            copy_on_select,
+            compose_bar,
+            mobile_top_bar,
+            mobile_accessory_bar,
+            upload_write_gitignore,
+            upload_pasted_text_chars,
+            auto_reopen_agents,
+            show_changes_pane,
+            always_show_tab_strip,
+            tab_reaches_agent,
         }
-        if let Some(v) = compose_bar {
-            candidate.ui.compose_bar = v;
+        .apply_to(&mut candidate);
+        SettingsUiDisplayPatch {
+            status_clear_seconds,
+            attention_grace_seconds,
+            attention_indicator,
+            attention_on_bell,
+            pr_banner_position,
+            disable_automated_welcome_screen,
+            disable_release_notes,
+            terminal_font_family,
+            terminal_font_size,
         }
-        if let Some(v) = mobile_top_bar {
-            candidate.ui.mobile_top_bar = v;
+        .apply_to(&mut candidate);
+        SettingsDefaultsPatch {
+            enable_randomized_pet_name_by_default,
+            default_provider,
         }
-        if let Some(v) = mobile_accessory_bar {
-            candidate.ui.mobile_accessory_bar = v;
+        .apply_to(&mut candidate);
+        SettingsCapabilitiesPatch {
+            web_notifications,
+            hyperlinks,
         }
-        if let Some(v) = upload_write_gitignore {
-            candidate.ui.upload_write_gitignore = v;
-        }
-        if let Some(v) = upload_pasted_text_chars {
-            candidate.ui.upload_pasted_text_chars =
-                crate::config::normalized_upload_pasted_text_chars(v);
-        }
-        if let Some(v) = auto_reopen_agents {
-            candidate.ui.auto_reopen_agents = v;
-        }
-        if let Some(v) = enable_randomized_pet_name_by_default {
-            candidate.defaults.enable_randomized_pet_name_by_default = v;
-        }
-        if let Some(v) = show_changes_pane {
-            candidate.ui.show_changes_pane = v;
-        }
-        if let Some(v) = web_notifications {
-            candidate.capabilities.web_notifications = v;
-        }
-        if let Some(v) = always_show_tab_strip {
-            candidate.ui.always_show_tab_strip = v;
-        }
-        if let Some(v) = tab_reaches_agent {
-            candidate.ui.tab_reaches_agent = v;
-        }
-        if let Some(v) = status_clear_seconds {
-            candidate.ui.status_clear_seconds =
-                clamp_nonzero(v, crate::config::MAX_STATUS_CLEAR_SECONDS);
-        }
-        if let Some(v) = attention_grace_seconds {
-            candidate.ui.attention_grace_seconds =
-                clamp_nonzero(v, crate::config::MAX_ATTENTION_GRACE_SECONDS);
-        }
-        if let Some(v) = attention_indicator {
-            candidate.ui.attention_indicator = v;
-        }
-        if let Some(v) = attention_on_bell {
-            candidate.ui.attention_on_bell = v;
-        }
-        if let Some(v) = pr_banner_position {
-            candidate.ui.pr_banner_position = v;
-        }
-        if let Some(v) = hyperlinks {
-            candidate.capabilities.hyperlinks = v;
-        }
-        if let Some(v) = default_provider {
-            candidate.defaults.provider = v;
-        }
-        if let Some(v) = disable_automated_welcome_screen {
-            candidate.ui.disable_automated_welcome_screen = v;
-        }
-        if let Some(v) = disable_release_notes {
-            candidate.ui.disable_release_notes = v;
-        }
-        if let Some(v) = terminal_font_family {
-            candidate.ui.terminal_font_family = sanitize_terminal_font_family(&v);
-        }
-        if let Some(v) = terminal_font_size {
-            candidate.ui.terminal_font_size = crate::config::normalized_terminal_font_size(v);
-        }
+        .apply_to(&mut candidate);
 
         // Idempotent: skip the write (and the fan-out) when nothing changed
         // after clamping/normalization. `candidate` is a clone of `self.config`
