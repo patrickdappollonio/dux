@@ -1,11 +1,6 @@
-// HTTP client for agent provider-tab lifecycle (create / close / retarget),
-// mirroring `terminalsApi.ts`. Tab byte I/O rides the dedicated per-tab PTY
-// socket (`tabPtyUrl` in `lib/ptySocket.ts`); the lifecycle rides these scoped
-// REST verbs. Like the other REST clients: `credentials: "same-origin"`, a JSON
-// body where one is needed, and the per-connection id stamped as
-// `X-Connection-Id` so the server can scope operation toasts back to this client.
-// A non-2xx is thrown as a typed `TabsApiError` carrying the HTTP status + parsed
-// message; the caller surfaces it as a sonner toast.
+// Scoped REST client for provider-tab lifecycle. PTY bytes use the dedicated
+// socket; these requests carry the connection id for status routing and surface
+// failures as `TabsApiError`.
 
 import { createJsonRequest } from "./jsonRequest"
 

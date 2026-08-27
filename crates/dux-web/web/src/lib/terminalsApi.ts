@@ -1,12 +1,6 @@
-// HTTP client for companion-terminal lifecycle (create/delete). Live terminal
-// byte I/O rides the dedicated PTY socket (`lib/ptySocket.ts`); lifecycle rides
-// these scoped REST verbs.
-//
-// Mirrors `sessionsApi.ts`: `credentials: "same-origin"`, JSON body, and the
-// per-connection id stamped as `X-Connection-Id` so the server can scope any
-// operation toasts (which still arrive over `/ws`) back to this client. A non-2xx
-// is thrown as a typed `TerminalsApiError` carrying the HTTP status + parsed
-// message; the caller surfaces it as a sonner toast.
+// Scoped REST client for companion-terminal lifecycle. PTY bytes use the
+// dedicated socket; these requests carry the connection id for status routing
+// and surface failures as `TerminalsApiError`.
 
 import { createJsonRequest } from "./jsonRequest"
 

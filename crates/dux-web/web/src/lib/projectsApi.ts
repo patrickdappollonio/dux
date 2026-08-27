@@ -1,16 +1,6 @@
-// HTTP client for mutating project operations (add — with an optional
-// check-out-default-branch-first variant, remove, update per-project settings,
-// reorder, refresh source checkout, check out the default branch). These used to
-// ride the fire-and-forget `/ws` `sendCommand` channel; they are now scoped,
-// programmable REST verbs so the server can authorize each one and route its
-// operation toasts back to the initiating client.
-//
-// Like `git.ts` and `sessionsApi.ts`, every request is `credentials:
-// "same-origin"` with a JSON body and stamps the per-connection id as
-// `X-Connection-Id` (every endpoint reads it) so the server can scope the
-// busy/success/error toasts — which still arrive over `/ws` — back to this
-// client. A non-2xx is thrown as a typed `ProjectsApiError` carrying the HTTP
-// status + the parsed server message; the caller surfaces it as a sonner toast.
+// Scoped REST client for project mutations. Requests include the connection id
+// so server-side operation status is routed back to the initiating client;
+// failures surface as `ProjectsApiError`.
 
 import { createJsonRequest } from "./jsonRequest"
 import type { DeleteWorktreeReply } from "./worktreeDelete"
