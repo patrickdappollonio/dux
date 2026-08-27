@@ -981,6 +981,20 @@ mod tests {
             .unwrap()
     }
 
+    #[tokio::test]
+    async fn create_rejects_an_unknown_body_shape_as_bad_request() {
+        let (_tmp, app) = router_no_auth();
+        let response = post_create(
+            &app,
+            serde_json::json!({ "kind": "mystery", "name": "agent" }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).starts_with("invalid create body:"));
+    }
+
     /// #10: an unconfirmed create whose name matches an existing branch is
     /// REFUSED with a confirmable 409 carrying the branch info, instead of
     /// silently attaching to that branch's history.
