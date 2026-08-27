@@ -3104,7 +3104,11 @@ impl App {
         };
         let button_label = "Take over";
         let button_h: u16 = 3;
-        let button_w = button_width_for(button_label);
+        // Sized to the label rather than `button_width_for`'s dialog minimum:
+        // one column of padding each side plus the borders leaves an odd inner
+        // width around the nine-character label, so it centres exactly instead
+        // of leaning one cell to the left the way a sixteen-column button does.
+        let button_w = u16::try_from(button_label.chars().count()).unwrap_or(u16::MAX) + 6;
         // A pane with no room for the card's border ring AND the button inside
         // it drops the ring: two columns of chrome are worth more as label than
         // as outline, and the button is the whole point of the card. The cleared
@@ -3173,11 +3177,14 @@ impl App {
         // One blank row under the title border, matching the blank row above the
         // button: the card's body sits inside a ring of space rather than
         // starting hard against the line that names the device.
+        // One blank row under the title, the prose, then the button sitting
+        // directly on the frame's bottom edge: the card is a notice with one
+        // act, not a form, so it carries no gap before the button.
         const TOP_PADDING: u16 = 1;
         let available_h = area.height.saturating_sub(2);
         let (show_prose, inner_h) =
-            if available_h >= prose_rows.saturating_add(TOP_PADDING + 1 + button_h) {
-                (true, TOP_PADDING + prose_rows + 1 + button_h)
+            if available_h >= prose_rows.saturating_add(TOP_PADDING + button_h) {
+                (true, TOP_PADDING + prose_rows + button_h)
             } else if available_h >= button_h {
                 // The BUTTON is the way out, so it is the half that survives a pane
                 // too short to carry the sentence as well.
@@ -3196,7 +3203,11 @@ impl App {
         // unreachable here: it is armed only by an outside click on a modal that
         // refuses to be dismissed, and this card is neither a modal nor
         // dismissible.
-        let block = self.themed_overlay_block(&title);
+        // The title is centred, unlike a dialog's: the card names a state of
+        // the pane rather than the dialog it is not.
+        let block = self
+            .themed_overlay_block(&title)
+            .title_alignment(ratatui::layout::Alignment::Center);
         let inner = block.inner(card);
         block.render(card, frame.buffer_mut());
 
@@ -3209,7 +3220,7 @@ impl App {
                     Rect::new(inner.x + SIDE_PADDING, y, prose_w, prose_rows),
                     frame.buffer_mut(),
                 );
-            y += prose_rows + 1;
+            y += prose_rows;
         }
         let button_w = button_w.min(inner.width);
         self.render_takeover_button(

@@ -2831,8 +2831,8 @@ mod tests {
             card_columns(title_row + 2)
         );
         assert!(
-            card_columns(button.y - 1).trim().is_empty(),
-            "the blank row above the button is still there: {:?}",
+            !card_columns(button.y - 1).trim().is_empty(),
+            "the button sits directly under the prose, with no gap: {:?}",
             card_columns(button.y - 1)
         );
     }
