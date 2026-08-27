@@ -42,8 +42,11 @@ class TermStub {
   // (`moveTextAreaUnderMouseCursor`), so the pane's guard has to wipe the value
   // or it leaks back into the PTY as a paste, and hand focus back on touch or
   // the soft keyboard rises over the selection.
+  textareaAttributes = new Map<string, string>()
   textarea = {
-    setAttribute() {},
+    setAttribute: (name: string, value: string) => {
+      this.textareaAttributes.set(name, value)
+    },
     focused: false,
     blur() {
       this.focused = false
@@ -119,9 +122,10 @@ class TermStub {
   }
   // The pane registers a parser-level OSC 8 gate directly on the terminal (the
   // hyperlink on/off gate), so the stub must expose registerOscHandler.
+  oscHandlerDispose = vi.fn()
   parser = {
-    registerOscHandler() {
-      return { dispose() {} }
+    registerOscHandler: () => {
+      return { dispose: this.oscHandlerDispose }
     },
   }
   // Real xterm hands itself to an addon through `activate`; mirroring that lets
@@ -271,7 +275,7 @@ class TermStub {
   write(_data: unknown, cb?: () => void) {
     cb?.()
   }
-  dispose() {}
+  dispose = vi.fn()
 }
 
 class FitStub {
@@ -399,10 +403,11 @@ vi.mock("@/lib/suppressViewerReports", async (importOriginal) => {
   return { ...actual, suppressViewerReports: () => {} }
 })
 const notifyRegistrations: { title: () => string }[] = []
+const disposeAgentNotifications = vi.fn()
 vi.mock("@/lib/agentNotifications", () => ({
   registerAgentNotifications: (_term: unknown, opts: { title: () => string }) => {
     notifyRegistrations.push(opts)
-    return () => {}
+    return disposeAgentNotifications
   },
 }))
 // A marker stand-in rather than null so the floating-trigger suite below can
@@ -549,6 +554,7 @@ beforeEach(() => {
   FitStub.fits = 0
   FitStub.nextDims = null
   notifyRegistrations.length = 0
+  disposeAgentNotifications.mockClear()
   toastError.mockClear()
   toastCalls.length = 0
   copied.length = 0
@@ -1360,6 +1366,63 @@ describe("TerminalPane ownership reporting into the store", () => {
     // A successful reopen restores the live verdict.
     pty.emit("open")
     expect(store.getSnapshot().ptyOwnership["s1"]).toBe("mine")
+  })
+})
+
+describe("TerminalPane terminal lifecycle resources", () => {
+  it("constructs the terminal against the resolved host background and hardens its input", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const term = TermStub.instances.at(-1)!
+    const container = screen.getByTestId("terminal-container")
+
+    expect(term.options.theme).toEqual({ background: "#000000" })
+    expect(container.parentElement?.style.background).toBe("rgb(0, 0, 0)")
+    expect(Object.fromEntries(term.textareaAttributes)).toEqual({
+      autocomplete: "off",
+      autocorrect: "off",
+      autocapitalize: "off",
+      spellcheck: "false",
+    })
+  })
+
+  it("retires the previous connection identity as soon as the socket reopens", async () => {
+    const store = await import("@/lib/store")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+
+    act(() => pty.onConnected("connection-before-reopen"))
+    expect(store.getSnapshot().ownPtyConnIds["connection-before-reopen"]).toBe(
+      true,
+    )
+    act(() => pty.onOpen())
+    expect(
+      store.getSnapshot().ownPtyConnIds["connection-before-reopen"],
+    ).toBeUndefined()
+  })
+
+  it("disposes its terminal resources and stops page events at unmount", async () => {
+    const { getActivePtySocket } = await import("@/lib/ptySocket")
+    const mounted = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    const pty = last()
+    const term = TermStub.instances.at(-1)!
+
+    expect(getActivePtySocket()).toBe(pty)
+    expect(term.resizeListeners.length).toBeGreaterThan(0)
+    mounted.unmount()
+
+    expect(pty.dispose).toHaveBeenCalledTimes(1)
+    expect(term.dispose).toHaveBeenCalledTimes(1)
+    expect(term.oscHandlerDispose).toHaveBeenCalledTimes(1)
+    expect(disposeAgentNotifications).toHaveBeenCalledTimes(1)
+    expect(term.resizeListeners).toEqual([])
+    expect(getActivePtySocket()).toBeNull()
+
+    window.dispatchEvent(new Event("pageshow"))
+    window.dispatchEvent(new Event("freeze"))
+    expect(pty.resumeNow).not.toHaveBeenCalled()
+    expect(pty.park).not.toHaveBeenCalled()
   })
 })
 
