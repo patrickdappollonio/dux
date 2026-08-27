@@ -38,6 +38,20 @@ struct AgentTerminalContext {
     session_active: bool,
 }
 
+struct TerminalSidebarRow {
+    id: String,
+    display_title: Option<String>,
+    owner_name: String,
+    standalone: bool,
+}
+
+struct SidebarListGeometry {
+    search_area: Option<Rect>,
+    content: Rect,
+    body: Rect,
+    top_pad_y: Option<u16>,
+}
+
 /// The index of the first tab the strip draws, chosen so the focused tab is
 /// visible within `avail` display columns.
 ///
@@ -1738,176 +1752,238 @@ impl App {
         }
     }
 
-    fn render_left(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = self.focus == FocusPane::Left;
-
-        if self.left_collapsed {
-            self.mouse_layout.left_list = self.themed_block("", focused).inner(area);
-            let collapsed_left_items = self.left_items();
-            let items = collapsed_left_items
-                .iter()
-                .map(|item| match item {
-                    LeftItem::Session(index) => {
-                        let Some(session) = self.engine.sessions.get(*index) else {
-                            return ListItem::new(Line::from(""));
-                        };
-                        // Flat icon rail: a single status dot per agent (no tree
-                        // connectors). Spinner while streaming (any-tab), else the
-                        // steady status dot.
-                        let (dot, dot_color) =
-                            if matches!(session.status, crate::model::SessionStatus::Active)
-                                && self.engine.session_is_streaming(&session.id)
-                            {
-                                (
-                                    crate::theme::SPINNER_FRAMES[self.spinner_frame_index()]
-                                        .to_string(),
-                                    self.theme.session_active,
-                                )
-                            } else {
-                                let (glyph, color) = self.theme.session_dot(&session.status);
-                                (glyph.to_string(), color)
-                            };
-                        // Surface a warning glyph in the narrow rail too, when the
-                        // agent's project has a missing path or its record is gone.
-                        // A standalone agent has no project, so no project
-                        // warning can apply to it: `agent_row_owner_tag` takes
-                        // the folder arm and the glyph is skipped.
-                        let found = session.project_id().and_then(|project_id| {
-                            self.engine.projects.iter().find(|p| p.id == project_id)
-                        });
-                        let mut spans = vec![Span::styled(dot, Style::default().fg(dot_color))];
-                        if matches!(
-                            agent_row_owner_tag(session, found),
-                            AgentRowOwnerTag::Project(
-                                ProjectTagKind::PathMissing | ProjectTagKind::Orphan,
-                                _
-                            )
-                        ) {
-                            spans.push(Span::styled(
-                                "⚠",
-                                Style::default().fg(self.theme.project_missing_fg),
-                            ));
-                        }
-                        ListItem::new(Line::from(spans))
-                    }
-                    LeftItem::InactiveToggle => ListItem::new(Line::from(Span::styled(
-                        "─",
-                        Style::default().fg(self.theme.header_separator_fg),
-                    ))),
-                })
-                .collect::<Vec<_>>();
-            let mut state = ListState::default().with_selected(Some(self.selected_left));
-            StatefulWidget::render(
-                List::new(items)
-                    .block(self.themed_block("", focused))
-                    .highlight_style(self.theme.selection_style()),
-                area,
-                frame.buffer_mut(),
-                &mut state,
-            );
-            // Icon-rail rows are one line each, so the map is a plain per-item
-            // walk from the scroll offset (kept uniform with the expanded path so
-            // hit-testing goes through one code path).
-            let heights = vec![1u16; collapsed_left_items.len()];
-            self.mouse_layout.left_row_to_item =
-                left_row_to_item(state.offset(), &heights, self.mouse_layout.left_list.height);
-            return;
-        }
-
-        // The VISIBLE terminals: sorted, then pruned by the live sidebar query
-        // exactly as the agent list above is. Every index below (the rows, the
-        // selection, the mouse map) is an index into this list.
-        let terminal_items = self.terminal_items();
-        let has_terminals = !terminal_items.is_empty();
-        // The whole list, for the two questions that are not about what is on
-        // screen: which terminals a running one has to disambiguate its title
-        // against (a "(#2)" that renumbered as the user typed a query would be
-        // worse than useless), and how many terminals exist at all (the pane's
-        // "visible / total" count). The count is taken as a plain number rather
-        // than kept borrowed, because the title is built well after this pane
-        // has started writing its mouse layout back into `self`.
-        let all_terminals = self.sorted_terminal_items();
-        let total_terminal_count = all_terminals.len();
-
-        // Split area vertically: projects on top, terminals on bottom (if any).
-        let (projects_area, terminals_area) = if has_terminals {
-            let pct = self.terminal_pane_height_pct.clamp(10, 80);
-            let projects_pct = 100u16.saturating_sub(pct).max(20);
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(projects_pct),
-                    Constraint::Percentage(pct),
-                ])
-                .split(area);
-            (chunks[0], Some(chunks[1]))
-        } else {
-            (area, None)
-        };
-
-        // Collect terminal display info for rendering.
-        // The middle field is the resolved DISPLAY TITLE (None when idle -> the row
-        // reads a plain "Terminal"): the foreground app name, normalized and
-        // collision-disambiguated ("vim (#N)") through the shared core rule
-        // `terminal_title` so the sidebar, the Kill overlay, and the web all agree
-        // when two same-owner terminals run the same app.
-        // Each row carries an owner-derived display name (the agent's branch or
-        // the project's name) so a generic engine label like "Terminal 3" is
-        // never ambiguous between an agent terminal and a project terminal.
-        let terminal_render_data: Vec<(String, Option<String>, String, bool)> = terminal_items
+    fn render_collapsed_left(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
+        self.mouse_layout.left_list = self.themed_block("", focused).inner(area);
+        let collapsed_left_items = self.left_items();
+        let items = collapsed_left_items
             .iter()
-            .map(|(id, t)| {
-                // The owner element, resolved by the one shared rule the sidebar
-                // filter also matches against, so a row can never say one thing
-                // and be searched by another.
-                let owner_name = self.terminal_owner_label(t);
-                // Whether the row wears the standalone star instead of the
-                // owned-by arrow. Exhaustive, so a new owner kind must decide
-                // its marker here before this compiles.
-                let standalone = match t.owner.as_ref() {
+            .map(|item| match item {
+                LeftItem::Session(index) => {
+                    let Some(session) = self.engine.sessions.get(*index) else {
+                        return ListItem::new(Line::from(""));
+                    };
+                    // Flat icon rail: a single status dot per agent (no tree
+                    // connectors). Spinner while streaming (any-tab), else the
+                    // steady status dot.
+                    let (dot, dot_color) =
+                        if matches!(session.status, crate::model::SessionStatus::Active)
+                            && self.engine.session_is_streaming(&session.id)
+                        {
+                            (
+                                crate::theme::SPINNER_FRAMES[self.spinner_frame_index()]
+                                    .to_string(),
+                                self.theme.session_active,
+                            )
+                        } else {
+                            let (glyph, color) = self.theme.session_dot(&session.status);
+                            (glyph.to_string(), color)
+                        };
+                    // Surface a warning glyph in the narrow rail too, when the
+                    // agent's project has a missing path or its record is gone.
+                    // A standalone agent has no project, so no project
+                    // warning can apply to it: `agent_row_owner_tag` takes
+                    // the folder arm and the glyph is skipped.
+                    let found = session.project_id().and_then(|project_id| {
+                        self.engine.projects.iter().find(|p| p.id == project_id)
+                    });
+                    let mut spans = vec![Span::styled(dot, Style::default().fg(dot_color))];
+                    if matches!(
+                        agent_row_owner_tag(session, found),
+                        AgentRowOwnerTag::Project(
+                            ProjectTagKind::PathMissing | ProjectTagKind::Orphan,
+                            _
+                        )
+                    ) {
+                        spans.push(Span::styled(
+                            "⚠",
+                            Style::default().fg(self.theme.project_missing_fg),
+                        ));
+                    }
+                    ListItem::new(Line::from(spans))
+                }
+                LeftItem::InactiveToggle => ListItem::new(Line::from(Span::styled(
+                    "─",
+                    Style::default().fg(self.theme.header_separator_fg),
+                ))),
+            })
+            .collect::<Vec<_>>();
+        let mut state = ListState::default().with_selected(Some(self.selected_left));
+        StatefulWidget::render(
+            List::new(items)
+                .block(self.themed_block("", focused))
+                .highlight_style(self.theme.selection_style()),
+            area,
+            frame.buffer_mut(),
+            &mut state,
+        );
+        // Icon-rail rows are one line each, so the map is a plain per-item
+        // walk from the scroll offset (kept uniform with the expanded path so
+        // hit-testing goes through one code path).
+        let heights = vec![1u16; collapsed_left_items.len()];
+        self.mouse_layout.left_row_to_item =
+            left_row_to_item(state.offset(), &heights, self.mouse_layout.left_list.height);
+    }
+
+    fn left_sidebar_areas(&self, area: Rect, has_terminals: bool) -> (Rect, Option<Rect>) {
+        if !has_terminals {
+            return (area, None);
+        }
+        let terminals_pct = self.terminal_pane_height_pct.clamp(10, 80);
+        let projects_pct = 100u16.saturating_sub(terminals_pct).max(20);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(projects_pct),
+                Constraint::Percentage(terminals_pct),
+            ])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    }
+
+    fn terminal_sidebar_rows(
+        &self,
+        visible: &[(&String, &CompanionTerminal)],
+        all: &[(&String, &CompanionTerminal)],
+    ) -> Vec<TerminalSidebarRow> {
+        visible
+            .iter()
+            .map(|(id, terminal)| {
+                let standalone = match terminal.owner.as_ref() {
                     dux_core::model::TerminalOwnerRef::Standalone => true,
                     dux_core::model::TerminalOwnerRef::Session(_)
                     | dux_core::model::TerminalOwnerRef::Project(_) => false,
                 };
-                // Idle (foreground normalizes to nothing) -> None -> "Terminal".
-                // Running -> the collision-resolved title, disambiguated against
-                // the OTHER same-owner terminals' foregrounds.
-                let display_title = if dux_core::terminal_title::terminal_foreground_display(
-                    t.foreground_cmd.as_deref(),
+                let display_title = dux_core::terminal_title::terminal_foreground_display(
+                    terminal.foreground_cmd.as_deref(),
                 )
-                .is_some()
-                {
-                    let siblings: Vec<Option<&str>> = all_terminals
+                .map(|_| {
+                    let siblings = all
                         .iter()
-                        .filter(|(other_id, other)| other_id != id && other.owner == t.owner)
+                        .filter(|(other_id, other)| other_id != id && other.owner == terminal.owner)
                         .map(|(_, other)| other.foreground_cmd.as_deref())
-                        .collect();
-                    Some(dux_core::terminal_title::terminal_title(
-                        &t.label,
-                        t.foreground_cmd.as_deref(),
+                        .collect::<Vec<_>>();
+                    dux_core::terminal_title::terminal_title(
+                        &terminal.label,
+                        terminal.foreground_cmd.as_deref(),
                         &siblings,
-                    ))
-                } else {
-                    None
-                };
-                ((*id).clone(), display_title, owner_name, standalone)
+                    )
+                });
+                TerminalSidebarRow {
+                    id: (*id).clone(),
+                    display_title,
+                    owner_name: self.terminal_owner_label(terminal),
+                    standalone,
+                }
+            })
+            .collect()
+    }
+
+    fn agent_sidebar_title(&self, left_items: &[LeftItem]) -> String {
+        let total = self.engine.sessions.len();
+        if self.agent_filter.is_none() {
+            return format!("Agents ({total})");
+        }
+        let visible = left_items
+            .iter()
+            .filter(|item| matches!(item, LeftItem::Session(_)))
+            .count();
+        format!("Agents ({visible}/{total})")
+    }
+
+    fn agent_sidebar_items(
+        &self,
+        left_items: &[LeftItem],
+        has_active: bool,
+        row_text_width: u16,
+    ) -> (Vec<ListItem<'static>>, Vec<u16>) {
+        let items = left_items
+            .iter()
+            .map(|item| match item {
+                LeftItem::InactiveToggle => {
+                    let icon = if self.inactive_collapsed {
+                        "▸"
+                    } else {
+                        "▾"
+                    };
+                    let label = Line::from(Span::styled(
+                        format!("{icon} Inactive ({})", self.visible_inactive_count()),
+                        Style::default().fg(self.theme.provider_label_fg),
+                    ));
+                    if has_active {
+                        ListItem::new(vec![Line::from(""), label, Line::from("")])
+                    } else {
+                        ListItem::new(vec![label, Line::from("")])
+                    }
+                }
+                LeftItem::Session(index) => self
+                    .engine
+                    .sessions
+                    .get(*index)
+                    .map(|session| self.render_agent_row(session, row_text_width))
+                    .unwrap_or_else(|| {
+                        ListItem::new(vec![Line::from(""), Line::from(""), Line::from("")])
+                    }),
             })
             .collect();
+        let heights = left_items
+            .iter()
+            .map(|item| match item {
+                LeftItem::Session(_) => 3,
+                LeftItem::InactiveToggle if has_active => 3,
+                LeftItem::InactiveToggle => 2,
+            })
+            .collect();
+        (items, heights)
+    }
 
+    fn agent_sidebar_geometry(
+        inner: Rect,
+        show_filter: bool,
+        has_active: bool,
+    ) -> SidebarListGeometry {
+        let (search_area, list_inner) = if show_filter && inner.height >= 3 {
+            let [search, list] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(2), Constraint::Min(1)])
+                .areas(inner);
+            (Some(search), list)
+        } else {
+            (None, inner)
+        };
+        let top_margin = u16::from(has_active && list_inner.height >= 4);
+        let content = Rect {
+            y: list_inner.y + top_margin,
+            height: list_inner.height - top_margin,
+            ..list_inner
+        };
+        let body = Rect {
+            x: content.x + LEFT_PANE_GUTTER,
+            width: content.width.saturating_sub(LEFT_PANE_GUTTER * 2),
+            ..content
+        };
+        SidebarListGeometry {
+            search_area,
+            content,
+            body,
+            top_pad_y: (top_margin == 1).then_some(list_inner.y),
+        }
+    }
+
+    fn sidebar_body_will_dim(&self) -> bool {
+        self.help_scroll.is_some()
+            || !matches!(self.prompt, PromptState::None)
+            || !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
+    }
+
+    fn render_agent_sidebar_section(
+        &mut self,
+        frame: &mut Frame,
+        projects_area: Rect,
+        focused: bool,
+    ) -> bool {
         let left_items = self.left_items();
         let projects_focused = focused && self.left_section == LeftSection::Projects;
-        // While filtering, show the visible-over-total count (e.g. "Agents (2/7)")
-        // so the pruned list is not mistaken for the whole roster.
-        let total_agents = self.engine.sessions.len();
-        let title = if self.agent_filter.is_some() {
-            let visible_agents = left_items
-                .iter()
-                .filter(|item| matches!(item, LeftItem::Session(_)))
-                .count();
-            format!("Agents ({visible_agents}/{total_agents})")
-        } else {
-            format!("Agents ({total_agents})")
-        };
+        let title = self.agent_sidebar_title(left_items);
         // Active agents always sort ahead of the Inactive toggle, so the list
         // leads with a Session iff any agent is active. The toggle only earns a
         // leading spacer row (separating it from the active agents) when there is
@@ -1918,99 +1994,12 @@ impl App {
         let block = self.themed_block(&title, projects_focused);
         let inner = block.inner(projects_area);
         let row_text_width = inner.width.saturating_sub(LEFT_PANE_GUTTER * 2);
-        let items = left_items
-            .iter()
-            .map(|item| match item {
-                LeftItem::InactiveToggle => {
-                    // Count only the inactive rows visible under the current
-                    // filter, so the toggle matches what expanding reveals.
-                    let count = self.visible_inactive_count();
-                    let icon = if self.inactive_collapsed {
-                        "▸"
-                    } else {
-                        "▾"
-                    };
-                    let label = Line::from(vec![Span::styled(
-                        format!("{icon} Inactive ({count})"),
-                        Style::default().fg(self.theme.provider_label_fg),
-                    )]);
-                    // Layout: an optional leading separator (a plain unused row,
-                    // never highlighted, present only when active agents sit above),
-                    // the label, then a trailing spacer that serves as the boundary
-                    // row for the first inactive agent's top padding.
-                    if has_active {
-                        ListItem::new(vec![Line::from(""), label, Line::from("")])
-                    } else {
-                        ListItem::new(vec![label, Line::from("")])
-                    }
-                }
-                LeftItem::Session(index) => {
-                    let Some(session) = self.engine.sessions.get(*index) else {
-                        // Keep the fallback the same height the row map assumes for
-                        // a Session item (three lines).
-                        return ListItem::new(vec![Line::from(""), Line::from(""), Line::from("")]);
-                    };
-                    self.render_agent_row(session, row_text_width)
-                }
-            })
-            .collect::<Vec<_>>();
-        // Each item's rendered height, kept in lockstep with the arms above: an
-        // agent row is three lines (name, metadata, trailing spacer) and the
-        // Inactive toggle is three (leading separator + label + trailing spacer)
-        // when active agents precede it, else two (label + trailing spacer).
-        // Computed here, while `left_items` is still borrowed and before any
-        // mutable `self` access, then consumed after render to rebuild the map.
-        let item_heights: Vec<u16> = left_items
-            .iter()
-            .map(|it| match it {
-                LeftItem::Session(_) => 3,
-                LeftItem::InactiveToggle => {
-                    if has_active {
-                        3
-                    } else {
-                        2
-                    }
-                }
-            })
-            .collect();
-        // Reserve a one-line search input at the TOP of the pane while filtering.
-        // It carries a `/` affordance plus the live query and a block cursor, and is
-        // themed through the same input-cursor tokens as the other pane inputs.
-        let (search_area, list_inner) = if self.agent_filter.is_some() && inner.height >= 3 {
-            let [sa, la] = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(2), Constraint::Min(1)])
-                .areas(inner);
-            (Some(sa), la)
-        } else {
-            (None, inner)
-        };
-        // Two reservations for the framed selection:
-        //  - a one-row top margin (only when active agents lead the list) so the
-        //    first agent's `▄` top edge has a row to paint into; and
-        //  - a one-column gutter on each side, so the tinted selection frame has a
-        //    margin and the text sits evenly padded left and right.
-        // `list_content` is the click surface and the origin for the frame edges;
-        // the list itself renders into `list_body`, inset by a gutter on each side.
-        let top_margin: u16 = if has_active && list_inner.height >= 4 {
-            1
-        } else {
-            0
-        };
-        let top_pad_y = (top_margin == 1).then_some(list_inner.y);
-        let list_content = Rect {
-            y: list_inner.y + top_margin,
-            height: list_inner.height - top_margin,
-            ..list_inner
-        };
-        let list_body = Rect {
-            x: list_content.x + LEFT_PANE_GUTTER,
-            width: list_content.width.saturating_sub(LEFT_PANE_GUTTER * 2),
-            ..list_content
-        };
-        self.mouse_layout.left_list = list_content;
+        let (items, item_heights) =
+            self.agent_sidebar_items(left_items, has_active, row_text_width);
+        let geometry = Self::agent_sidebar_geometry(inner, self.agent_filter.is_some(), has_active);
+        self.mouse_layout.left_list = geometry.content;
         block.render(projects_area, frame.buffer_mut());
-        if let Some(search_area) = search_area {
+        if let Some(search_area) = geometry.search_area {
             let (text, cursor) = self
                 .agent_filter
                 .as_ref()
@@ -2041,29 +2030,187 @@ impl App {
         // bar plus a faint tint) so it keeps each row's text colors and leaves the
         // Inactive separator row untouched — neither of which a whole-cell List
         // highlight can do. Rendered into the gutter-shifted body.
-        StatefulWidget::render(List::new(items), list_body, frame.buffer_mut(), &mut state);
+        StatefulWidget::render(
+            List::new(items),
+            geometry.body,
+            frame.buffer_mut(),
+            &mut state,
+        );
         // Agent rows are three lines tall, so a click row no longer maps 1:1 to a
         // list item. Rebuild the reverse map from the post-render scroll offset
         // and each item's rendered height (computed above).
         self.mouse_layout.left_row_to_item =
-            left_row_to_item(state.offset(), &item_heights, list_content.height);
+            left_row_to_item(state.offset(), &item_heights, geometry.content.height);
         // When an overlay is about to grayscale the body (a modal, the help page,
         // or a fullscreen view), skip the hand-painted selection: its half-height
         // blocks are drawn in the foreground, so `render_dim_overlay` would leave
         // them as visible grey strips instead of letting the selection blend into
         // the dim like every other row. The widget-highlight era got this for free
         // because the selection was a background that dimmed to the overlay color.
-        let body_will_dim = self.help_scroll.is_some()
-            || !matches!(self.prompt, PromptState::None)
-            || !matches!(self.fullscreen_overlay, FullscreenOverlay::None);
+        let body_will_dim = self.sidebar_body_will_dim();
         if self.left_section == LeftSection::Projects && !body_will_dim {
-            self.paint_left_selection(frame.buffer_mut(), list_content, top_pad_y);
+            self.paint_left_selection(frame.buffer_mut(), geometry.content, geometry.top_pad_y);
         }
         // A dim rule runs from the end of the "Inactive" label to the right edge,
         // but only while the toggle is not the current selection.
         if !body_will_dim {
-            self.paint_inactive_rule(frame.buffer_mut(), list_content);
+            self.paint_inactive_rule(frame.buffer_mut(), geometry.content);
         }
+
+        body_will_dim
+    }
+
+    fn render_terminal_sidebar_section(
+        &mut self,
+        frame: &mut Frame,
+        term_area: Rect,
+        focused: bool,
+        terminal_render_data: &[TerminalSidebarRow],
+        total_terminal_count: usize,
+        body_will_dim: bool,
+    ) {
+        let terminals_focused = focused && self.left_section == LeftSection::Terminals;
+        let term_count = terminal_render_data.len();
+        // The same visible-over-total count the Agents title carries while a
+        // query is live, for the same reason: a pruned list must not read as
+        // the whole roster.
+        let term_title = if self.agent_filter.is_some() {
+            format!("Terminals ({term_count}/{total_terminal_count})")
+        } else {
+            format!("Terminals ({term_count})")
+        };
+        let term_block = self.themed_block(&term_title, terminals_focused);
+        let term_inner = term_block.inner(term_area);
+        // Two reservations for the framed selection, matching the agent path:
+        //  - a one-row top margin (only with room and at least one terminal)
+        //    so the first terminal's `▄` top edge has a row to paint into; and
+        //  - a one-column gutter on each side, so the tinted frame has a margin
+        //    and the text sits evenly padded left and right.
+        // `term_content` is the click surface and the origin for the frame
+        // edges; the list itself renders into `term_body`, inset by a gutter.
+        let term_top_margin: u16 = if term_count > 0 && term_inner.height >= 4 {
+            1
+        } else {
+            0
+        };
+        let term_top_pad_y = (term_top_margin == 1).then_some(term_inner.y);
+        let term_content = Rect {
+            y: term_inner.y + term_top_margin,
+            height: term_inner.height - term_top_margin,
+            ..term_inner
+        };
+        let term_body = Rect {
+            x: term_content.x + LEFT_PANE_GUTTER,
+            width: term_content.width.saturating_sub(LEFT_PANE_GUTTER * 2),
+            ..term_content
+        };
+        self.mouse_layout.terminal_list = term_content;
+        let term_text_width = term_body.width;
+        let spinner = crate::theme::SPINNER_FRAMES[self.spinner_frame_index()];
+        // A terminal row's owner element is a searched field, so a live hit
+        // inside it gets the same emphasis an agent row's project and branch
+        // get. Same style, same per-field range on the exact fitted text.
+        let term_highlight = self.agent_filter.as_ref().and_then(|input| {
+            let query = input.text.as_str();
+            (!dux_core::agent_search::normalize_query(query).is_empty()).then(|| {
+                (
+                    query,
+                    Style::default()
+                        .fg(self.theme.search_match_fg)
+                        .add_modifier(Modifier::BOLD),
+                )
+            })
+        });
+        let term_items: Vec<ListItem> = terminal_render_data
+            .iter()
+            .map(|row| {
+                // A terminal is either alive or gone (never detached / needs
+                // you), so the state reduces to typing -> working -> idle. It
+                // is Working when streaming output OR running a foreground app
+                // (busy while quiet), via the shared `terminal_is_working`; a
+                // terminal id (`term-N`) keys both engine predicates.
+                let typing = self.engine.is_typing(&row.id);
+                let working = self.engine.terminal_is_working(&row.id);
+                let (line1, line2) = terminal_row_lines(
+                    &self.theme,
+                    typing,
+                    working,
+                    spinner,
+                    row.display_title.as_deref(),
+                    &row.owner_name,
+                    row.standalone,
+                    term_text_width,
+                    self.start_time.elapsed().as_millis(),
+                    term_highlight,
+                );
+                // Same three-line row shape as the agents (see `framed_row_item`).
+                framed_row_item(line1, line2)
+            })
+            .collect();
+        // Every terminal row is exactly three lines tall; keep the height
+        // vector in lockstep so the post-render mouse map lands on the right
+        // row even after the list scrolls.
+        let term_heights: Vec<u16> = vec![3; term_count];
+        // No widget highlight: the selection is hand-painted below. The widget
+        // selection is still set (when focused) purely so the list scrolls to
+        // keep the selected terminal visible, exactly as the agent list does.
+        let mut term_state =
+            ListState::default().with_selected(if self.left_section == LeftSection::Terminals {
+                Some(self.selected_terminal_index)
+            } else {
+                None
+            });
+        term_block.render(term_area, frame.buffer_mut());
+        StatefulWidget::render(
+            List::new(term_items),
+            term_body,
+            frame.buffer_mut(),
+            &mut term_state,
+        );
+        // Rebuild the reverse map from the post-render scroll offset, the
+        // three-tall heights, and the content height (mirrors the agent path).
+        self.mouse_layout.terminal_row_to_item =
+            left_row_to_item(term_state.offset(), &term_heights, term_content.height);
+        // Hand-paint the framed selection into the content surface, reusing the
+        // same `body_will_dim` gate the agent path computed above.
+        if self.left_section == LeftSection::Terminals && !body_will_dim {
+            self.paint_framed_row_selection(
+                frame.buffer_mut(),
+                term_content,
+                &self.mouse_layout.terminal_row_to_item,
+                self.selected_terminal_index,
+                term_top_pad_y,
+            );
+        }
+    }
+
+    fn render_left(&mut self, frame: &mut Frame, area: Rect) {
+        let focused = self.focus == FocusPane::Left;
+
+        if self.left_collapsed {
+            self.render_collapsed_left(frame, area, focused);
+            return;
+        }
+
+        // The VISIBLE terminals: sorted, then pruned by the live sidebar query
+        // exactly as the agent list above is. Every index below (the rows, the
+        // selection, the mouse map) is an index into this list.
+        let terminal_items = self.terminal_items();
+        let has_terminals = !terminal_items.is_empty();
+        // The whole list, for the two questions that are not about what is on
+        // screen: which terminals a running one has to disambiguate its title
+        // against (a "(#2)" that renumbered as the user typed a query would be
+        // worse than useless), and how many terminals exist at all (the pane's
+        // "visible / total" count). The count is taken as a plain number rather
+        // than kept borrowed, because the title is built well after this pane
+        // has started writing its mouse layout back into `self`.
+        let all_terminals = self.sorted_terminal_items();
+        let total_terminal_count = all_terminals.len();
+
+        let (projects_area, terminals_area) = self.left_sidebar_areas(area, has_terminals);
+        let terminal_render_data = self.terminal_sidebar_rows(&terminal_items, &all_terminals);
+
+        let body_will_dim = self.render_agent_sidebar_section(frame, projects_area, focused);
 
         // Render terminals section if any terminals exist. This mirrors the agent
         // path above exactly: the block draws the border, and the list renders
@@ -2071,120 +2218,14 @@ impl App {
         // framed selection hand-painted (no widget highlight) so a terminal row
         // and an agent row are pixel-identical in framing, spacing, and selection.
         if let Some(term_area) = terminals_area {
-            let terminals_focused = focused && self.left_section == LeftSection::Terminals;
-            let term_count = terminal_render_data.len();
-            // The same visible-over-total count the Agents title carries while a
-            // query is live, for the same reason: a pruned list must not read as
-            // the whole roster.
-            let term_title = if self.agent_filter.is_some() {
-                format!("Terminals ({term_count}/{total_terminal_count})")
-            } else {
-                format!("Terminals ({term_count})")
-            };
-            let term_block = self.themed_block(&term_title, terminals_focused);
-            let term_inner = term_block.inner(term_area);
-            // Two reservations for the framed selection, matching the agent path:
-            //  - a one-row top margin (only with room and at least one terminal)
-            //    so the first terminal's `▄` top edge has a row to paint into; and
-            //  - a one-column gutter on each side, so the tinted frame has a margin
-            //    and the text sits evenly padded left and right.
-            // `term_content` is the click surface and the origin for the frame
-            // edges; the list itself renders into `term_body`, inset by a gutter.
-            let term_top_margin: u16 = if term_count > 0 && term_inner.height >= 4 {
-                1
-            } else {
-                0
-            };
-            let term_top_pad_y = (term_top_margin == 1).then_some(term_inner.y);
-            let term_content = Rect {
-                y: term_inner.y + term_top_margin,
-                height: term_inner.height - term_top_margin,
-                ..term_inner
-            };
-            let term_body = Rect {
-                x: term_content.x + LEFT_PANE_GUTTER,
-                width: term_content.width.saturating_sub(LEFT_PANE_GUTTER * 2),
-                ..term_content
-            };
-            self.mouse_layout.terminal_list = term_content;
-            let term_text_width = term_body.width;
-            let spinner = crate::theme::SPINNER_FRAMES[self.spinner_frame_index()];
-            // A terminal row's owner element is a searched field, so a live hit
-            // inside it gets the same emphasis an agent row's project and branch
-            // get. Same style, same per-field range on the exact fitted text.
-            let term_highlight = self.agent_filter.as_ref().and_then(|input| {
-                let query = input.text.as_str();
-                (!dux_core::agent_search::normalize_query(query).is_empty()).then(|| {
-                    (
-                        query,
-                        Style::default()
-                            .fg(self.theme.search_match_fg)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                })
-            });
-            let term_items: Vec<ListItem> = terminal_render_data
-                .iter()
-                .map(|(term_id, fg_cmd, owner_name, standalone)| {
-                    // A terminal is either alive or gone (never detached / needs
-                    // you), so the state reduces to typing -> working -> idle. It
-                    // is Working when streaming output OR running a foreground app
-                    // (busy while quiet), via the shared `terminal_is_working`; a
-                    // terminal id (`term-N`) keys both engine predicates.
-                    let typing = self.engine.is_typing(term_id);
-                    let working = self.engine.terminal_is_working(term_id);
-                    let (line1, line2) = terminal_row_lines(
-                        &self.theme,
-                        typing,
-                        working,
-                        spinner,
-                        fg_cmd.as_deref(),
-                        owner_name,
-                        *standalone,
-                        term_text_width,
-                        self.start_time.elapsed().as_millis(),
-                        term_highlight,
-                    );
-                    // Same three-line row shape as the agents (see `framed_row_item`).
-                    framed_row_item(line1, line2)
-                })
-                .collect();
-            // Every terminal row is exactly three lines tall; keep the height
-            // vector in lockstep so the post-render mouse map lands on the right
-            // row even after the list scrolls.
-            let term_heights: Vec<u16> = vec![3; term_count];
-            // No widget highlight: the selection is hand-painted below. The widget
-            // selection is still set (when focused) purely so the list scrolls to
-            // keep the selected terminal visible, exactly as the agent list does.
-            let mut term_state = ListState::default().with_selected(
-                if self.left_section == LeftSection::Terminals {
-                    Some(self.selected_terminal_index)
-                } else {
-                    None
-                },
+            self.render_terminal_sidebar_section(
+                frame,
+                term_area,
+                focused,
+                &terminal_render_data,
+                total_terminal_count,
+                body_will_dim,
             );
-            term_block.render(term_area, frame.buffer_mut());
-            StatefulWidget::render(
-                List::new(term_items),
-                term_body,
-                frame.buffer_mut(),
-                &mut term_state,
-            );
-            // Rebuild the reverse map from the post-render scroll offset, the
-            // three-tall heights, and the content height (mirrors the agent path).
-            self.mouse_layout.terminal_row_to_item =
-                left_row_to_item(term_state.offset(), &term_heights, term_content.height);
-            // Hand-paint the framed selection into the content surface, reusing the
-            // same `body_will_dim` gate the agent path computed above.
-            if self.left_section == LeftSection::Terminals && !body_will_dim {
-                self.paint_framed_row_selection(
-                    frame.buffer_mut(),
-                    term_content,
-                    &self.mouse_layout.terminal_row_to_item,
-                    self.selected_terminal_index,
-                    term_top_pad_y,
-                );
-            }
         } else {
             self.mouse_layout.terminal_list = Rect::default();
             self.mouse_layout.terminal_row_to_item.clear();
