@@ -99,6 +99,16 @@ const diffMock = vi.fn(async () => ({
   modified: "",
   binary: false,
 }))
+
+function pending<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
+type MockDiff = Awaited<ReturnType<typeof diffMock>>
 // The mutation calls, captured so the toast tests can resolve or reject them
 // and read what the editor said afterwards. `vi.clearAllMocks` clears calls
 // and keeps implementations, so these keep resolving across tests.
@@ -920,6 +930,81 @@ describe("a deleted file in the editor", () => {
     fireEvent.click(screen.getByRole("button", { name: /retry/i }))
     await screen.findByTestId("diff-viewer")
     expect(diffMock.mock.calls.length).toBeGreaterThan(callsAfterSettle)
+  })
+
+  it("does not duplicate an unresolved diff request on an unrelated rerender", async () => {
+    const request = pending<MockDiff>()
+    diffMock.mockReturnValue(request.promise)
+    const { rerender } = await mountWithTab("src/pending.txt", "diff")
+    await waitFor(() => expect(diffMock).toHaveBeenCalledTimes(1))
+
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    mockState = { ...mockState, offline: !mockState.offline }
+    rerender(<EditorOverlay />)
+    expect(diffMock).toHaveBeenCalledTimes(1)
+
+    request.resolve({
+      path: "src/pending.txt",
+      original: "pending at HEAD\n",
+      modified: "pending on disk\n",
+      binary: false,
+    })
+    await screen.findByTestId("diff-viewer")
+  })
+
+  it("ignores a late diff result after the tab moves to another path", async () => {
+    const first = pending<MockDiff>()
+    const second = pending<MockDiff>()
+    diffMock
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    const { rerender } = await mountWithTab("src/a.txt", "diff")
+    await waitFor(() => expect(diffMock).toHaveBeenCalledTimes(1))
+
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [rootKey(agentRoot(SESSION))]: {
+          tabs: [
+            {
+              id: TAB_ID,
+              path: "src/b.txt",
+              dirty: false,
+              preview: true,
+              mode: "diff",
+            },
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    rerender(<EditorOverlay />)
+    await waitFor(() => expect(diffMock).toHaveBeenCalledTimes(2))
+
+    second.resolve({
+      path: "src/b.txt",
+      original: "b at HEAD\n",
+      modified: "b on disk\n",
+      binary: false,
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("diff-viewer").getAttribute("data-original")).toBe(
+        "b at HEAD\n",
+      ),
+    )
+
+    first.resolve({
+      path: "src/a.txt",
+      original: "late a at HEAD\n",
+      modified: "late a on disk\n",
+      binary: false,
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("diff-viewer").getAttribute("data-original")).toBe(
+        "b at HEAD\n",
+      ),
+    )
   })
 
   it("preview-replacing a diff tab onto another path loads the new diff", async () => {
