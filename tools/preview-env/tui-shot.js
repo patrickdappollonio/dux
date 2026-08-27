@@ -18,7 +18,13 @@ if (!chrome) {
 }
 
 const ansi = fs.readFileSync(ansiPath, "utf8").replace(/\n$/, "")
-const font = fs.readFileSync(fontPath).toString("base64")
+const fontDir = path.dirname(fontPath)
+const fonts = Object.fromEntries(
+  ["regular", "bold", "symbols", "fill"].map((face) => [
+    face,
+    fs.readFileSync(path.join(fontDir, `dux-mono-${face}.woff2`)).toString("base64"),
+  ]),
+)
 const xtermJs = require.resolve("@xterm/xterm")
 const packageRoot = path.dirname(path.dirname(xtermJs))
 const xtermCss = fs.readFileSync(path.join(packageRoot, "css", "xterm.css"), "utf8")
@@ -37,7 +43,10 @@ const xtermCss = fs.readFileSync(path.join(packageRoot, "css", "xterm.css"), "ut
   })
   await page.setContent('<main id="capture"><div id="terminal"></div></main>')
   await page.addStyleTag({ content: `${xtermCss}
-    @font-face { font-family: "Dux Mono"; src: url(data:font/woff2;base64,${font}) format("woff2"); font-weight: 400; }
+    @font-face { font-family: "Dux Mono Symbols"; src: url(data:font/woff2;base64,${fonts.symbols}) format("woff2"); font-weight: 400; unicode-range: U+2190-21FF, U+2300-23FF, U+2500-25FF, U+2600-27BF, U+2800-28FF, U+E0A0-E0D7; }
+    @font-face { font-family: "Dux Mono"; src: url(data:font/woff2;base64,${fonts.regular}) format("woff2"); font-weight: 400; }
+    @font-face { font-family: "Dux Mono"; src: url(data:font/woff2;base64,${fonts.bold}) format("woff2"); font-weight: 700; }
+    @font-face { font-family: "Dux Mono Fill"; src: url(data:font/woff2;base64,${fonts.fill}) format("woff2"); font-weight: 400; unicode-range: U+2000-2BFF, U+2E00-2E7F, U+1F000-1FBFF; }
     * { box-sizing: border-box; }
     html, body { margin: 0; background: #0d1117; }
     #capture { display: inline-block; padding: 18px; background: #0d1117; }
@@ -45,6 +54,7 @@ const xtermCss = fs.readFileSync(path.join(packageRoot, "css", "xterm.css"), "ut
     .xterm { padding: 0; }
   ` })
   await page.addScriptTag({ path: xtermJs })
+  await page.evaluate(() => document.fonts.ready)
   await page.evaluate(
     ({ ansi, cols, rows }) => new Promise((resolve) => {
       const terminal = new window.Terminal({
@@ -55,9 +65,9 @@ const xtermCss = fs.readFileSync(path.join(packageRoot, "css", "xterm.css"), "ut
         cursorBlink: false,
         cursorInactiveStyle: "none",
         disableStdin: true,
-        fontFamily: '"Dux Mono", monospace',
+        fontFamily: '"Dux Mono Symbols", "Dux Mono", "Dux Mono Fill", monospace',
         fontSize: 14,
-        lineHeight: 1.08,
+        lineHeight: 1,
         scrollback: 0,
         theme: { background: "#0d1117" },
       })
@@ -66,7 +76,6 @@ const xtermCss = fs.readFileSync(path.join(packageRoot, "css", "xterm.css"), "ut
     }),
     { ansi, cols, rows },
   )
-  await page.evaluate(() => document.fonts.ready)
   await new Promise((resolve) => setTimeout(resolve, 100))
   const capture = await page.$("#capture")
   await capture.screenshot({ path: pngPath, omitBackground: false })

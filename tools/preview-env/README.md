@@ -86,9 +86,12 @@ app over REST (`/api/v1/...`) is often faster than clicking; see the routes in
 
 `tui-shot.sh` runs the real terminal UI in a disposable Docker container at a
 fixed terminal grid. It drives a small journey script, captures the styled terminal
-cells, and renders them with the bundled Dux font in headless Chromium. The
+cells, and renders them with the bundled Dux terminal font stack in headless Chromium. The
 capture has its own `DUX_HOME`, repositories, and process lock, so it can run
 while the web preview is up.
+
+The default 160×45 grid renders 2760 pixels wide at 2× scale and is the desktop
+baseline. Use `--cols` and `--rows` only for a different terminal class.
 
 ```bash
 ./tui-shot.sh tui-journey.example.js shots/tui-workspace.png
