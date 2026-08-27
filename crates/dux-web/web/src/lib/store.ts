@@ -4942,15 +4942,9 @@ export function setPendingPrReference(reference: string | null): void {
   setState({ pendingPrReference: reference })
 }
 
-// Editing either field of the reference-first dialog retires whatever resolve
-// is out for it, exactly as cancelling, retargeting and resubmitting already
-// do. The reply carries the reference and the name AS THEY WERE AT SUBMIT, so
-// letting it land after an edit creates the agent from text the user has
-// already replaced and then closes the dialog on them. Nothing can recall a
-// request in flight, so the reply has to arrive on a generation nobody is
-// waiting for. Returns the patch to fold into the caller's own write, and
-// nothing at all when no resolve is out, so an ordinary keystroke writes
-// exactly what it used to.
+// Editing either field retires the active resolve generation so its response
+// cannot create an agent from stale submitted text. Return the cancellation
+// patch for the caller to fold into the same state write.
 function retireInFlightPrResolve(): Partial<DuxState> {
   if (state.createAgentPrRequestId === null) return {}
   return { createAgentPrRequestId: null, createAgentPrResolving: false }
