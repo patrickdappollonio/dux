@@ -1770,6 +1770,69 @@ describe("when the file changes on disk underneath the editor", () => {
     await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
   })
 
+  it("deduplicates freshness triggers while one check is in flight", async () => {
+    const view = await mountOne()
+    let releaseInfo: (() => void) | null = null
+    const held = new Promise<void>((resolve) => {
+      releaseInfo = resolve
+    })
+    infoMock.mockImplementationOnce(async () => {
+      await held
+      const entry = disk.get(PATH)!
+      return {
+        path: PATH,
+        kind: "file" as const,
+        size: entry.size,
+        modified: entry.modified,
+        mode: "644",
+        permissions: "rw-r--r--",
+        symlink_target: null,
+        git: { state: "clean" as const },
+      }
+    })
+
+    fireEvent(window, new Event("focus"))
+    fireEvent(window, new Event("focus"))
+    setTabs([tab(TAB_ID, PATH)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await waitFor(() => expect(infoMock).toHaveBeenCalledTimes(1))
+
+    releaseInfo!()
+    await waitFor(() => expect(editor().value).toBe(ON_DISK))
+  })
+
+  it("ignores a late freshness result after the tab moves to another path", async () => {
+    const view = await mountOne()
+    let releaseInfo: (() => void) | null = null
+    const held = new Promise<void>((resolve) => {
+      releaseInfo = resolve
+    })
+    infoMock.mockImplementationOnce(async () => {
+      await held
+      return {
+        path: PATH,
+        kind: "file" as const,
+        size: AGENT_TEXT.length,
+        modified: "2026-02-02T00:00:00+00:00",
+        mode: "644",
+        permissions: "rw-r--r--",
+        symlink_target: null,
+        git: { state: "clean" as const },
+      }
+    })
+
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(infoMock).toHaveBeenCalledTimes(1))
+    setTabs([tab(TAB_ID, OTHER)], TAB_ID)
+    view.rerender(<Overlay />)
+    await waitFor(() => expect(editor().value).toBe("other file\n"))
+
+    releaseInfo!()
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull())
+    expect(editor().value).toBe("other file\n")
+    expect(readMock).toHaveBeenCalledTimes(2)
+  })
+
   // The terminal-root case, measured rather than assumed: it gets no
   // changed-files broadcast at all, so if the other two triggers depended on
   // the slice, a terminal editor would never notice a file moving under it.
