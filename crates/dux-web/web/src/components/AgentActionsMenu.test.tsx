@@ -106,12 +106,15 @@ function seed(session: SessionView, ghAvailable: boolean) {
   } as unknown as DuxState
 }
 
-function openMenu(session: SessionView) {
+function openMenu(
+  session: SessionView,
+  context: "hub" | "terminal" = "hub",
+) {
   render(
     <DropdownMenu>
       <DropdownMenuTrigger>open</DropdownMenuTrigger>
       <DropdownMenuContent>
-        <AgentActionsMenu session={session} />
+        <AgentActionsMenu session={session} context={context} />
       </DropdownMenuContent>
     </DropdownMenu>,
   )
@@ -267,6 +270,60 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
       { "tab-2": "elsewhere" }
     await openMenu(session)
     expect(itemFor("Delete agent…").getAttribute("aria-disabled")).toBe("true")
+  })
+})
+
+describe("AgentActionsMenu context and tab availability", () => {
+  const desktopWidth = window.innerWidth
+
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  it("offers terminal-screen bar toggles only from a phone terminal menu", async () => {
+    const session = makeSession({ id: "s1" })
+    seed(session, true)
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+
+    await openMenu(session, "terminal")
+    expect(screen.getByText("Hide terminal keys")).toBeTruthy()
+    expect(screen.getByText("Hide top bar")).toBeTruthy()
+
+    cleanup()
+    await openMenu(session, "hub")
+    expect(screen.queryByText("Hide terminal keys")).toBeNull()
+    expect(screen.queryByText("Hide top bar")).toBeNull()
+  })
+
+  it("keeps the new-tab submenu disabled at the configured tab cap", async () => {
+    const session = makeSession({
+      id: "s1",
+      tabs: [
+        { id: "s1", provider: "claude", order: 0 },
+      ] as unknown as SessionView["tabs"],
+    })
+    seed(session, true)
+    ;(
+      mockState.bootstrap as NonNullable<DuxState["bootstrap"]>
+    ).agent_tabs_max = 1
+
+    await openMenu(session)
+    const trigger = screen
+      .getByText(/New agent tab for/)
+      .closest('[role="menuitem"]')
+    expect(trigger?.getAttribute("aria-disabled")).toBe("true")
+    expect(
+      screen
+        .getByText("Rename agent…")
+        .closest('[role="menuitem"]')
+        ?.getAttribute("aria-disabled"),
+    ).not.toBe("true")
   })
 })
 

@@ -1129,6 +1129,32 @@ describe("FlatAgentList empty state", () => {
     expect(openAddProjectMock).toHaveBeenCalledOnce()
     expect(openNewAgentPickerMock).not.toHaveBeenCalled()
   })
+
+  it("keeps the onboarding state ahead of an empty search result", () => {
+    mockState = {
+      ...emptyState([{ id: "p1", name: "Repo" }]),
+      agentSearch: "missing",
+    } as DuxState
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.getByText("No agents yet")).toBeTruthy()
+    expect(screen.queryByText(/Nothing matches/)).toBeNull()
+  })
+})
+
+describe("FlatAgentList search result state", () => {
+  it("replaces all sortable sections with the unmatched-query message", () => {
+    mockState = {
+      ...makeState("name"),
+      agentSearch: "definitely absent",
+    } as DuxState
+    render(<FlatAgentList handlers={handlers} />)
+    expect(
+      screen.getByText("Nothing matches “definitely absent”."),
+    ).toBeTruthy()
+    expect(screen.queryByText("Terminals")).toBeNull()
+    expect(screen.queryByText("Inactive")).toBeNull()
+    expect(dragEndHandlers).toHaveLength(0)
+  })
 })
 
 // Line two carries text in two faces (a mono folder label beside sans state
