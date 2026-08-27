@@ -1155,25 +1155,19 @@ impl App {
         self.set_info(status_message);
     }
 
-    fn apply_removed_project(&mut self, project_name: String, status_op_id: &Option<String>) {
+    fn apply_project_removal(
+        &mut self,
+        status_op_id: &Option<String>,
+        config_error_prefix: &'static str,
+        success_message: String,
+    ) {
         self.rebuild_left_items();
         self.ensure_selectable_left_item();
         self.reload_changed_files();
         self.save_runtime_projects_and_finish_status(
             status_op_id,
-            "Project was removed from the database, but config.toml could not be updated",
-            format!("Removed project \"{project_name}\" from app"),
-        );
-    }
-
-    fn apply_deleted_project(&mut self, project_name: String, status_op_id: &Option<String>) {
-        self.rebuild_left_items();
-        self.ensure_selectable_left_item();
-        self.reload_changed_files();
-        self.save_runtime_projects_and_finish_status(
-            status_op_id,
-            "Project was deleted from the database, but config.toml could not be updated",
-            format!("Deleted project \"{project_name}\" and all its agents"),
+            config_error_prefix,
+            success_message,
         );
     }
 
@@ -1316,10 +1310,18 @@ impl App {
                 self.apply_added_project(status_message);
             }
             ProjectPersistenceView::Removed { project_name } => {
-                self.apply_removed_project(project_name, &status_op_id);
+                self.apply_project_removal(
+                    &status_op_id,
+                    "Project was removed from the database, but config.toml could not be updated",
+                    format!("Removed project \"{project_name}\" from app"),
+                );
             }
             ProjectPersistenceView::Deleted { project_name } => {
-                self.apply_deleted_project(project_name, &status_op_id);
+                self.apply_project_removal(
+                    &status_op_id,
+                    "Project was deleted from the database, but config.toml could not be updated",
+                    format!("Deleted project \"{project_name}\" and all its agents"),
+                );
             }
             ProjectPersistenceView::DefaultProviderUpdated {
                 project_name,

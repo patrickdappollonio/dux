@@ -2657,7 +2657,7 @@ async fn handle_events_socket(
 
     // First frame: hand the client its connection id (the `X-Connection-Id` REST
     // mutations echo back so their status toasts scope to this connection only).
-    let _ = send_event(
+    let _ = send_json(
         &sink,
         &WireEvent {
             event: "connected".to_string(),
@@ -2673,7 +2673,7 @@ async fn handle_events_socket(
     // Subscribe to the live status + status-clear broadcasts BEFORE reading the
     // snapshot: the broadcast does not replay to a receiver created after a send,
     // so a status/clear emitted in the gap (notably during a snapshot
-    // `send_event().await`) would be lost. Subscribing first buffers it for this
+    // `send_json().await`) would be lost. Subscribing first buffers it for this
     // receiver; any overlap with the snapshot is a harmless duplicate.
     let status_rx = engine.subscribe_status();
     let status_clear_rx = engine.subscribe_status_clears();
@@ -2693,7 +2693,7 @@ async fn handle_events_socket(
     // (keyed and anonymous) immediately, scoped to itself. An empty/fully-filtered
     // snapshot sends nothing.
     for ev in status_events(&engine.status_snapshot(), &connection_id) {
-        if send_status_event(&sink, &ev).await.is_err() {
+        if send_json(&sink, &ev).await.is_err() {
             console.client_disconnected(peer_ip);
             return;
         }
@@ -2816,7 +2816,7 @@ impl EventsSocketLoop {
         match event {
             Ok(event) => {
                 if let Some(frame) = subscribed_resource_frame(event, &self.interest.subscribed) {
-                    send_event(&self.sink, &frame).await?;
+                    send_json(&self.sink, &frame).await?;
                 }
                 Ok(())
             }
@@ -2844,7 +2844,7 @@ impl EventsSocketLoop {
     ) -> Result<(), ()> {
         match status {
             Ok(status) if scope_delivers(&status.scope, &self.connection_id) => {
-                send_status_event(
+                send_json(
                     &self.sink,
                     &WireStatusEvent {
                         event: "status",
@@ -2876,7 +2876,7 @@ impl EventsSocketLoop {
     ) -> Result<(), ()> {
         match cleared {
             Ok(key) => {
-                send_status_cleared_event(
+                send_json(
                     &self.sink,
                     &WireStatusClearedEvent {
                         event: "status_cleared",
@@ -2928,7 +2928,7 @@ impl EventsSocketLoop {
             }
         }
         for frame in catchup_frames(&new.fine, &self.changes) {
-            send_event(&self.sink, &frame).await?;
+            send_json(&self.sink, &frame).await?;
         }
         Ok(())
     }
@@ -3206,28 +3206,10 @@ async fn send_text(sink: &SharedSink, text: String) -> Result<(), ()> {
     guard.send(Message::Text(text.into())).await.map_err(|_| ())
 }
 
-/// Serialize and send one `/ws/events` resource frame as a text message.
-async fn send_event(sink: &SharedSink, ev: &WireEvent) -> Result<(), ()> {
-    let text = serde_json::to_string(ev).map_err(|_| ())?;
-    let mut guard = sink.lock().await;
-    guard.send(Message::Text(text.into())).await.map_err(|_| ())
-}
-
-/// Serialize and send one `/ws/events` status event as a text message.
-async fn send_status_event(sink: &SharedSink, ev: &WireStatusEvent) -> Result<(), ()> {
-    let text = serde_json::to_string(ev).map_err(|_| ())?;
-    let mut guard = sink.lock().await;
-    guard.send(Message::Text(text.into())).await.map_err(|_| ())
-}
-
-/// Serialize and send one `/ws/events` status-clear event as a text message.
-async fn send_status_cleared_event(
-    sink: &SharedSink,
-    ev: &WireStatusClearedEvent,
-) -> Result<(), ()> {
-    let text = serde_json::to_string(ev).map_err(|_| ())?;
-    let mut guard = sink.lock().await;
-    guard.send(Message::Text(text.into())).await.map_err(|_| ())
+/// Serialize and send one `/ws/events` frame as a text message.
+async fn send_json<T: serde::Serialize + ?Sized>(sink: &SharedSink, value: &T) -> Result<(), ()> {
+    let text = serde_json::to_string(value).map_err(|_| ())?;
+    send_text(sink, text).await
 }
 
 /// Whether a status of the given [`StatusScope`] is delivered to the connection
@@ -3259,7 +3241,7 @@ async fn resend_status_snapshot(
     connection_id: &str,
 ) -> Result<(), ()> {
     for ev in status_events(&engine.status_snapshot(), connection_id) {
-        send_status_event(sink, &ev).await?;
+        send_json(sink, &ev).await?;
     }
     Ok(())
 }
