@@ -2272,6 +2272,587 @@ impl Engine {
         }
     }
 
+    fn process_branch_rename_completed(
+        &mut self,
+        session_id: String,
+        new_branch: String,
+        previous_title: Option<String>,
+        result: Result<(), String>,
+        status: ResolvedFinal,
+    ) -> EventReaction {
+        match &result {
+            Ok(()) => {
+                if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+                    let label = session.display_label();
+                    if let Some(managed) = session.workspace.as_managed_mut() {
+                        let previous = managed.branch_name.clone();
+                        let original = managed.initial_branch.clone();
+                        logger::info(&branch_rename_log_line(
+                            &session.id,
+                            &label,
+                            &new_branch,
+                            &previous,
+                            &original,
+                        ));
+                        managed.branch_name = new_branch.clone();
+                    }
+                    session.updated_at = Utc::now();
+                    if let Err(err) = self.session_store.upsert_session(session) {
+                        logger::error(&format!(
+                            "failed to persist branch rename for {} (new branch: {}): {err}",
+                            session.id, new_branch,
+                        ));
+                    }
+                }
+                self.update_branch_sync_sessions();
+            }
+            Err(err) => {
+                logger::warn(&format!(
+                    "[{session_id}] agent rename to {new_branch} failed: {err}"
+                ));
+                if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+                    session.title = previous_title;
+                    session.updated_at = Utc::now();
+                    if let Err(err) = self.session_store.upsert_session(session) {
+                        logger::error(&format!(
+                            "failed to persist branch-rename revert for {}: {err}",
+                            session.id,
+                        ));
+                    }
+                }
+            }
+        }
+        self.clear_in_flight(&InFlightKey::BranchRename(session_id.clone()));
+        self.rename_expected.remove(&session_id);
+        EventReaction::Multi(vec![
+            EventReaction::RebuildLeftItems,
+            status.into_reaction(),
+        ])
+    }
+
+    fn process_gh_status_checked(
+        &mut self,
+        generation: u64,
+        outcome: crate::gh::GhProbe,
+    ) -> EventReaction {
+        if generation != self.gh_probe.generation {
+            logger::debug(&format!(
+                "[gh-integration] discarding a stale host probe result \
+                 (generation {generation}, current {})",
+                self.gh_probe.generation,
+            ));
+            return EventReaction::Nothing;
+        }
+        let decisive = !matches!(outcome, crate::gh::GhProbe::Transient(_));
+        let status = match outcome {
+            crate::gh::GhProbe::NotInstalled => {
+                self.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
+                GhStatus::NotInstalled
+            }
+            crate::gh::GhProbe::Transient(reason) => {
+                logger::info(&format!(
+                    "[gh-integration] gh host probe did not decide ({reason}); \
+                     keeping the last known host policy",
+                ));
+                if matches!(self.gh_status, GhStatus::Unknown) {
+                    GhStatus::NotAuthenticated
+                } else {
+                    self.gh_status
+                }
+            }
+            crate::gh::GhProbe::Decided { available, policy } => {
+                self.set_github_host_policy(policy);
+                if available {
+                    GhStatus::Available
+                } else {
+                    GhStatus::NotAuthenticated
+                }
+            }
+        };
+        self.gh_status = status;
+        if matches!(status, GhStatus::Available) && self.github_integration_enabled {
+            logger::info(&format!(
+                "[gh-integration] gh CLI is available; host policy: {:?}",
+                self.github_host_policy(),
+            ));
+            self.seed_pr_statuses_from_store();
+            self.update_pr_sync_sessions();
+            self.spawn_refs_watcher();
+            self.spawn_pr_sync_worker();
+            self.spawn_initial_pr_refresh();
+        } else {
+            logger::info(&format!(
+                "[gh-integration] gh status: {:?}, integration enabled: {}",
+                status, self.github_integration_enabled,
+            ));
+            if decisive {
+                self.disarm_pr_sync();
+            }
+        }
+        EventReaction::Nothing
+    }
+
+    fn pr_status_result_is_current(
+        &mut self,
+        session_id: &str,
+        maybe_pr: &Option<crate::model::PrInfo>,
+        checked_at: Instant,
+    ) -> bool {
+        self.clear_in_flight(&InFlightKey::PrCheck(session_id.to_string()));
+        if !self.sessions.iter().any(|session| session.id == session_id) {
+            logger::debug(&format!(
+                "[gh-integration] dropping PR result for deleted session {session_id}",
+            ));
+            return false;
+        }
+        self.pr_last_checked
+            .insert(session_id.to_string(), checked_at);
+        if self.pr_suppressions.contains(session_id) && !self.pr_overrides.contains_key(session_id)
+        {
+            logger::debug(&format!(
+                "[gh-integration] dropping PR result for detached session {session_id}",
+            ));
+            return false;
+        }
+        if let Some(pin) = self.pr_overrides.get(session_id) {
+            let matches_pin = maybe_pr.as_ref().is_some_and(|pr| {
+                pr.number == pin.pr_number
+                    && pr.owner_repo.eq_ignore_ascii_case(&pin.owner_repo)
+                    && pr.host.eq_ignore_ascii_case(&pin.host)
+            });
+            if !matches_pin {
+                logger::debug(&format!(
+                    "[gh-integration] dropping PR result for pinned session \
+                     {session_id} (does not match the pin, PR #{})",
+                    pin.pr_number,
+                ));
+                return false;
+            }
+        }
+        true
+    }
+
+    fn apply_pr_status_result(
+        &mut self,
+        session_id: String,
+        maybe_pr: Option<crate::model::PrInfo>,
+    ) -> bool {
+        Self::log_pr_badge_change(
+            self.sessions
+                .iter()
+                .find(|session| session.id == session_id),
+            self.pr_statuses.get(&session_id),
+            maybe_pr.as_ref(),
+        );
+        match maybe_pr {
+            Some(pr) => {
+                let state = match pr.state {
+                    PrState::Open => "OPEN",
+                    PrState::Merged => "MERGED",
+                    PrState::Closed => "CLOSED",
+                };
+                let pr_number = pr.number;
+                let row = StoredPr {
+                    session_id: session_id.clone(),
+                    pr_number,
+                    host: pr.host.clone(),
+                    owner_repo: pr.owner_repo.clone(),
+                    state: state.to_string(),
+                    title: pr.title.clone(),
+                    url: pr.url.clone(),
+                };
+                if self.pr_overrides.contains_key(&session_id) {
+                    if let Err(err) = self.session_store.upsert_pr_override(&row) {
+                        logger::error(&format!(
+                            "failed to refresh pinned PR for {session_id}: {err}",
+                        ));
+                    }
+                    self.pr_overrides.insert(session_id.clone(), row);
+                } else if let Err(err) = self.session_store.upsert_pr(&row) {
+                    logger::error(&format!(
+                        "failed to persist PR status for {session_id} (PR #{pr_number}): {err}",
+                    ));
+                }
+                self.pr_statuses.insert(session_id, pr);
+                true
+            }
+            None => self.pr_statuses.remove(&session_id).is_some(),
+        }
+    }
+
+    fn process_pr_status_ready(
+        &mut self,
+        results: Vec<(String, Option<crate::model::PrInfo>)>,
+    ) -> EventReaction {
+        let checked_at = Instant::now();
+        let mut changed = false;
+        for (session_id, maybe_pr) in results {
+            if self.pr_status_result_is_current(&session_id, &maybe_pr, checked_at) {
+                changed |= self.apply_pr_status_result(session_id, maybe_pr);
+            }
+        }
+        if !changed {
+            return EventReaction::Nothing;
+        }
+        self.update_pr_sync_sessions();
+        EventReaction::RebuildLeftItems
+    }
+
+    fn process_create_agent_branch_inspected(
+        &mut self,
+        project: Project,
+        result: Result<CreateAgentBranchInspection, String>,
+    ) -> EventReaction {
+        match result {
+            Ok(inspection) => {
+                if let Some(existing) = self.projects.iter_mut().find(|item| item.id == project.id)
+                {
+                    existing.current_branch = inspection.current_branch.clone();
+                    existing.leading_branch = Some(inspection.leading_branch.clone());
+                    existing.branch_status = if existing.current_branch == inspection.leading_branch
+                    {
+                        ProjectBranchStatus::Leading
+                    } else {
+                        ProjectBranchStatus::NotLeading
+                    };
+                }
+                EventReaction::ContinueCreateAgentAfterInspection {
+                    project,
+                    inspection,
+                }
+            }
+            Err(error) => EventReaction::Status(StatusUpdate::error(error)),
+        }
+    }
+
+    fn process_project_branch_status_ready(
+        &mut self,
+        project_id: String,
+        result: Result<(String, ProjectBranchStatus), String>,
+    ) -> EventReaction {
+        match result {
+            Ok((current_branch, branch_status)) => {
+                if let Some(project) = self.projects.iter_mut().find(|item| item.id == project_id) {
+                    project.current_branch = current_branch;
+                    project.branch_status = branch_status;
+                }
+            }
+            Err(error) => logger::debug(&format!(
+                "project branch status inspection failed for {project_id}: {error}"
+            )),
+        }
+        EventReaction::Nothing
+    }
+
+    fn process_initial_commit_created(
+        &mut self,
+        add: crate::worker::InitialCommitAdd,
+        result: Result<(), String>,
+        status_op_id: Option<String>,
+    ) -> EventReaction {
+        self.clear_in_flight(&InFlightKey::InitialCommit(add.path.clone()));
+        match result {
+            Ok(()) => EventReaction::AddProjectAfterInitialCommit {
+                path: add.path,
+                name: add.name,
+                branch: add.branch,
+                leading_branch: add.leading_branch,
+                initialized_repo: add.initialized_repo,
+                seeded_gitignore: add.seeded_gitignore,
+                seed_warning: add.seed_warning,
+                status_op_id,
+            },
+            Err(error) => {
+                logger::error(&format!("initial commit failed for {}: {error}", add.path));
+                let seed_warning = add
+                    .seed_warning
+                    .clone()
+                    .map(|warning| EventReaction::Status(StatusUpdate::warning(warning)));
+                let error_final = if let Some(id) = status_op_id
+                    && let Some(op) = self.pending_web_add_project_ops.remove(&id)
+                {
+                    op.resolve(&crate::engine::WebAddProjectOutcome::AddFailed { message: error })
+                        .into_reaction()
+                } else {
+                    EventReaction::Status(StatusUpdate::error(error))
+                };
+                match seed_warning {
+                    Some(warning) => EventReaction::Multi(vec![warning, error_final]),
+                    None => error_final,
+                }
+            }
+        }
+    }
+
+    fn process_checkout_project_default_branch_inspected(
+        &mut self,
+        project: Project,
+        result: Result<(String, Option<BranchWarningKind>), String>,
+        status_op_id: Option<String>,
+    ) -> EventReaction {
+        match result {
+            Ok((current_branch, warning_kind)) => match warning_kind {
+                Some(BranchWarningKind::Known { default_branch }) => {
+                    let mut project = project;
+                    project.current_branch = current_branch;
+                    EventReaction::DispatchProjectDefaultBranchCheckout {
+                        project,
+                        default_branch,
+                        status_op_id,
+                    }
+                }
+                Some(BranchWarningKind::Heuristic) => {
+                    if let Some(id) = status_op_id
+                        && let Some(op) = self.pending_web_checkout_ops.remove(&id)
+                    {
+                        op.resolve(&crate::engine::WebCheckoutOutcome::Heuristic { current_branch })
+                            .into_reaction()
+                    } else {
+                        EventReaction::Status(StatusUpdate::error(format!(
+                            "Can't determine the default branch for project \"{}\" while it is on \"{}\". Resolve the default branch in your terminal and retry.",
+                            project.name, current_branch
+                        )))
+                    }
+                }
+                None => {
+                    if let Some(existing) =
+                        self.projects.iter_mut().find(|item| item.id == project.id)
+                    {
+                        existing.current_branch = current_branch.clone();
+                        existing.branch_status = ProjectBranchStatus::Leading;
+                    }
+                    if let Some(id) = status_op_id
+                        && let Some(op) = self.pending_web_checkout_ops.remove(&id)
+                    {
+                        op.resolve(&crate::engine::WebCheckoutOutcome::AlreadyLeading {
+                            current_branch,
+                        })
+                        .into_reaction()
+                    } else {
+                        EventReaction::Status(StatusUpdate::info(format!(
+                            "Project \"{}\" is already on the leading branch \"{}\".",
+                            project.name, current_branch
+                        )))
+                    }
+                }
+            },
+            Err(error) => {
+                if let Some(id) = status_op_id
+                    && let Some(op) = self.pending_web_checkout_ops.remove(&id)
+                {
+                    op.resolve(&crate::engine::WebCheckoutOutcome::InspectFailed { error })
+                        .into_reaction()
+                } else {
+                    EventReaction::Status(StatusUpdate::error(format!(
+                        "Couldn't inspect the default branch for project \"{}\": {error}",
+                        project.name
+                    )))
+                }
+            }
+        }
+    }
+
+    fn process_non_default_branch_checkout_completed(
+        &mut self,
+        action: NonDefaultBranchAction,
+        target_branch: String,
+        result: Result<(), String>,
+        status_op_id: Option<String>,
+    ) -> EventReaction {
+        match result {
+            Ok(()) => match action {
+                NonDefaultBranchAction::AddProject {
+                    path,
+                    name,
+                    leading_branch,
+                } => EventReaction::AddProjectAfterBranchCheckout {
+                    path,
+                    name,
+                    target_branch,
+                    leading_branch,
+                    status_op_id,
+                },
+                NonDefaultBranchAction::CheckoutProjectDefault { project } => {
+                    if let Some(existing) =
+                        self.projects.iter_mut().find(|item| item.id == project.id)
+                    {
+                        existing.current_branch = target_branch.clone();
+                        existing.branch_status = ProjectBranchStatus::Leading;
+                    }
+                    if let Some(id) = status_op_id
+                        && let Some(op) = self.pending_web_checkout_ops.remove(&id)
+                    {
+                        op.resolve(&crate::engine::WebCheckoutOutcome::Ok { target_branch })
+                            .into_reaction()
+                    } else {
+                        EventReaction::Status(StatusUpdate::info(format!(
+                            "Checked out \"{target_branch}\" for project \"{}\".",
+                            project.name
+                        )))
+                    }
+                }
+            },
+            Err(error) => {
+                let path = action.repo_path().to_string();
+                logger::error(&format!(
+                    "non-default branch checkout failed for {path}: {error}"
+                ));
+                if let Some(id) = status_op_id {
+                    match action {
+                        NonDefaultBranchAction::CheckoutProjectDefault { .. } => {
+                            if let Some(op) = self.pending_web_checkout_ops.remove(&id) {
+                                return op
+                                    .resolve(&crate::engine::WebCheckoutOutcome::Failed {
+                                        target_branch,
+                                        repo_path: path,
+                                    })
+                                    .into_reaction();
+                            }
+                        }
+                        NonDefaultBranchAction::AddProject { .. } => {
+                            if let Some(op) = self.pending_web_add_project_ops.remove(&id) {
+                                return op
+                                    .resolve(&crate::engine::WebAddProjectOutcome::SwitchFailed {
+                                        target_branch,
+                                        repo_path: path,
+                                    })
+                                    .into_reaction();
+                            }
+                        }
+                    }
+                }
+                EventReaction::Status(StatusUpdate::error(format!(
+                    "Couldn't check out \"{target_branch}\" in {path} — resolve in your terminal and retry."
+                )))
+            }
+        }
+    }
+
+    fn process_pull_request_resolved(
+        &mut self,
+        result: Result<ResolvedPullRequest, String>,
+        purpose: crate::worker::PrLookupPurpose,
+        status_op_id: Option<String>,
+    ) -> EventReaction {
+        match purpose {
+            crate::worker::PrLookupPurpose::CreateAgent => match result {
+                Ok(pr) => EventReaction::OpenNewAgentPromptForPr {
+                    pr: Box::new(pr),
+                    status_op_id,
+                },
+                Err(message) => {
+                    if let Some(id) = status_op_id
+                        && let Some(op) = self.pending_web_pr_lookup_ops.remove(&id)
+                    {
+                        op.resolve(&crate::engine::WebPrLookupOutcome::Failed { message })
+                            .into_reaction()
+                    } else {
+                        EventReaction::Status(StatusUpdate::error(message))
+                    }
+                }
+            },
+            crate::worker::PrLookupPurpose::Attach { session_id } => {
+                self.clear_in_flight(&InFlightKey::PrAttach(session_id.clone()));
+                let outcome = match result {
+                    Ok(pr) => {
+                        if !self.sessions.iter().any(|session| session.id == session_id) {
+                            crate::engine::PrAttachOutcome::Failed {
+                                message: format!(
+                                    "The agent was deleted while PR #{} was being resolved; \
+                                     nothing was attached.",
+                                    pr.number,
+                                ),
+                            }
+                        } else {
+                            match self.apply_pr_attach(
+                                &session_id,
+                                &pr.host,
+                                &pr.owner_repo,
+                                pr.number,
+                                &pr.title,
+                                &pr.state,
+                                "",
+                            ) {
+                                Ok(message) => crate::engine::PrAttachOutcome::Attached { message },
+                                Err(error) => crate::engine::PrAttachOutcome::Failed {
+                                    message: format!(
+                                        "Failed to attach PR #{}: {error:#}",
+                                        pr.number
+                                    ),
+                                },
+                            }
+                        }
+                    }
+                    Err(message) => crate::engine::PrAttachOutcome::Failed { message },
+                };
+                let attached = matches!(outcome, crate::engine::PrAttachOutcome::Attached { .. });
+                let final_reaction = if let Some(id) = status_op_id
+                    && let Some(op) = self.pending_pr_attach_ops.remove(&id)
+                {
+                    op.resolve(&outcome).into_reaction()
+                } else {
+                    match outcome {
+                        crate::engine::PrAttachOutcome::Attached { message } => {
+                            EventReaction::Status(StatusUpdate::info(message))
+                        }
+                        crate::engine::PrAttachOutcome::Failed { message } => {
+                            EventReaction::Status(StatusUpdate::error(message))
+                        }
+                    }
+                };
+                if attached {
+                    EventReaction::Multi(vec![final_reaction, EventReaction::RebuildLeftItems])
+                } else {
+                    final_reaction
+                }
+            }
+        }
+    }
+
+    fn process_create_agent_progress(
+        &self,
+        status_op_id: String,
+        message: String,
+    ) -> EventReaction {
+        match self.pending_create_ops.get(&status_op_id) {
+            Some(op) => EventReaction::Status(op.progress(message)),
+            None => EventReaction::Nothing,
+        }
+    }
+
+    fn process_create_agent_failed(
+        &mut self,
+        status_op_id: String,
+        message: String,
+    ) -> EventReaction {
+        self.clear_in_flight(&InFlightKey::CreateAgent);
+        match self.pending_create_ops.remove(&status_op_id) {
+            Some(op) => op
+                .resolve(&CreateLaunchOutcome::Failed { message })
+                .into_reaction(),
+            None => EventReaction::Status(StatusUpdate::error(message).with_key(status_op_id)),
+        }
+    }
+
+    fn process_folder_repo_status_ready(
+        &mut self,
+        session_id: String,
+        status: crate::git::FolderRepoStatus,
+    ) -> EventReaction {
+        self.clear_in_flight(&InFlightKey::FolderRepoProbe(session_id.clone()));
+        if !self.sessions.iter().any(|session| session.id == session_id) {
+            return EventReaction::Nothing;
+        }
+        let changed = self.folder_repo_statuses.insert(session_id.clone(), status) != Some(status);
+        if !changed || self.watched_session_id.as_deref() != Some(session_id.as_str()) {
+            return EventReaction::Nothing;
+        }
+        if let Some(worktree) = self.set_watched_session(Some(&session_id)) {
+            self.spawn_changed_files_refresh(worktree);
+        }
+        EventReaction::ClampFilesCursor
+    }
+
     /// Process a `WorkerEvent`: perform engine-side mutations and return the
     /// view follow-up the App caller should apply.
     ///
@@ -2283,34 +2864,11 @@ impl Engine {
             WorkerEvent::CreateAgentProgress {
                 status_op_id,
                 message,
-            } => {
-                // Re-emit an updated busy on the SAME opaque id via the op's
-                // `progress`, without consuming the op (the eventual final still
-                // resolves it). If the op is already gone the create has
-                // resolved, so this progress tick is stale — drop it. (A busy can
-                // only be born from a StatusOp; there is no hand-keyed fallback.)
-                match self.pending_create_ops.get(&status_op_id) {
-                    Some(op) => EventReaction::Status(op.progress(message)),
-                    None => EventReaction::Nothing,
-                }
-            }
+            } => self.process_create_agent_progress(status_op_id, message),
             WorkerEvent::CreateAgentFailed {
                 status_op_id,
                 message,
-            } => {
-                self.clear_in_flight(&InFlightKey::CreateAgent);
-                // The create worker failed before any launch was attempted (e.g.
-                // worktree creation failed). Resolve the shared create op to its
-                // keyed error final so both surfaces replace the busy in place.
-                match self.pending_create_ops.remove(&status_op_id) {
-                    Some(op) => op
-                        .resolve(&CreateLaunchOutcome::Failed { message })
-                        .into_reaction(),
-                    None => {
-                        EventReaction::Status(StatusUpdate::error(message).with_key(status_op_id))
-                    }
-                }
-            }
+            } => self.process_create_agent_failed(status_op_id, message),
             WorkerEvent::AgentLaunchReady(boxed) => {
                 let (outcome, create_final) = self.process_agent_launch_ready(*boxed);
                 Self::launch_view_with_final(
@@ -2329,28 +2887,7 @@ impl Engine {
                 self.process_changed_files_ready(outcome, worktree)
             }
             WorkerEvent::FolderRepoStatusReady { session_id, status } => {
-                self.clear_in_flight(&InFlightKey::FolderRepoProbe(session_id.clone()));
-                // A verdict for an agent deleted while its probe was in
-                // flight is dropped rather than stored: nothing would ever read
-                // it, and nothing would ever remove it (the delete has already
-                // run its own prune of this map).
-                if !self.sessions.iter().any(|s| s.id == session_id) {
-                    return EventReaction::Nothing;
-                }
-                let changed =
-                    self.folder_repo_statuses.insert(session_id.clone(), status) != Some(status);
-                // Re-enrol (or drop) the changed-files watch when the verdict
-                // for the agent currently on screen actually moved. A folder
-                // that just became a repository gets its panel; one that
-                // stopped being one goes quiet, instead of the poller running
-                // git in it every cycle and reporting "the repository is busy".
-                if changed && self.watched_session_id.as_deref() == Some(session_id.as_str()) {
-                    if let Some(worktree) = self.set_watched_session(Some(&session_id)) {
-                        self.spawn_changed_files_refresh(worktree);
-                    }
-                    return EventReaction::ClampFilesCursor;
-                }
-                EventReaction::Nothing
+                self.process_folder_repo_status_ready(session_id, status)
             }
             WorkerEvent::StatusOpCompleted { resolved } => resolved.into_reaction(),
             WorkerEvent::PullCompleted {
@@ -2374,303 +2911,19 @@ impl Engine {
                 previous_title,
                 result,
                 status,
-            } => {
-                // Domain work depends on the outcome; the user-facing message was
-                // resolved at dispatch by the StatusOp and rides in `status`.
-                match &result {
-                    Ok(()) => {
-                        // A standalone agent has no branch to rename, so a
-                        // rename can never have been dispatched for one, and
-                        // asking the workspace is the structural restatement:
-                        // this arm has no field to write when there is no
-                        // branch.
-                        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
-                        {
-                            let label = session.display_label();
-                            if let Some(managed) = session.workspace.as_managed_mut() {
-                                // Log lineage before mutating: new, previous, and
-                                // the immutable original branch. `initial_branch`
-                                // is never touched here.
-                                let previous = managed.branch_name.clone();
-                                let original = managed.initial_branch.clone();
-                                logger::info(&branch_rename_log_line(
-                                    &session.id,
-                                    &label,
-                                    &new_branch,
-                                    &previous,
-                                    &original,
-                                ));
-                                managed.branch_name = new_branch.clone();
-                            }
-                            session.updated_at = Utc::now();
-                            if let Err(err) = self.session_store.upsert_session(session) {
-                                logger::error(&format!(
-                                    "failed to persist branch rename for {} (new branch: {}): {err}",
-                                    session.id, new_branch,
-                                ));
-                            }
-                        }
-                        self.update_branch_sync_sessions();
-                    }
-                    Err(err) => {
-                        logger::warn(&format!(
-                            "[{session_id}] agent rename to {new_branch} failed: {err}"
-                        ));
-                        // Revert the title so the session doesn't stay in a mixed
-                        // state where the display name changed but the branch
-                        // didn't.
-                        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
-                        {
-                            session.title = previous_title;
-                            session.updated_at = Utc::now();
-                            if let Err(err) = self.session_store.upsert_session(session) {
-                                logger::error(&format!(
-                                    "failed to persist branch-rename revert for {}: {err}",
-                                    session.id,
-                                ));
-                            }
-                        }
-                    }
-                }
-                // Clear the in-flight-rename guard set at dispatch, on BOTH
-                // outcomes: the rename is over, so a subsequent `BranchSyncReady`
-                // should resume classifying real external drift for this session.
-                self.clear_in_flight(&InFlightKey::BranchRename(session_id.clone()));
-                self.rename_expected.remove(&session_id);
-                EventReaction::Multi(vec![
-                    EventReaction::RebuildLeftItems,
-                    status.into_reaction(),
-                ])
-            }
+            } => self.process_branch_rename_completed(
+                session_id,
+                new_branch,
+                previous_title,
+                result,
+                status,
+            ),
             WorkerEvent::BranchSyncReady(updates) => self.process_branch_sync_ready(updates),
             WorkerEvent::GhStatusChecked {
                 generation,
                 outcome,
-            } => {
-                // Discard a stale result FIRST: before the status changes,
-                // before the host policy changes, before it is logged, and
-                // before it can start the pull-request workers. Two probes
-                // launched close together can finish out of order, and an older
-                // answer overwriting a newer one presents as intermittent.
-                if generation != self.gh_probe.generation {
-                    // Logged so this pairs with anything the worker itself wrote
-                    // on its way here (the spawn primitive records a panic at
-                    // error level before the synthesised result is built, and it
-                    // is right to: the panic happened whether or not its answer
-                    // is used). Debug rather than warn: overlapping probes are
-                    // expected, not a fault.
-                    logger::debug(&format!(
-                        "[gh-integration] discarding a stale host probe result \
-                         (generation {generation}, current {})",
-                        self.gh_probe.generation,
-                    ));
-                    return EventReaction::Nothing;
-                }
-                // A probe that DECIDED may tear armed work down; a transient one
-                // may not, because it decided nothing.
-                let decisive = !matches!(outcome, crate::gh::GhProbe::Transient(_));
-                let status = match outcome {
-                    crate::gh::GhProbe::NotInstalled => {
-                        // Deny all rather than preserving the last known set:
-                        // `gh` is gone, so dux can reach none of those hosts.
-                        self.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
-                        GhStatus::NotInstalled
-                    }
-                    crate::gh::GhProbe::Transient(reason) => {
-                        logger::info(&format!(
-                            "[gh-integration] gh host probe did not decide ({reason}); \
-                             keeping the last known host policy",
-                        ));
-                        // The previously computed value stands unchanged. The one
-                        // exception is the very first probe: it must still move
-                        // the status off Unknown to an unavailable one, so the
-                        // interface reports something rather than rendering as
-                        // neither available nor unavailable.
-                        if matches!(self.gh_status, GhStatus::Unknown) {
-                            GhStatus::NotAuthenticated
-                        } else {
-                            self.gh_status
-                        }
-                    }
-                    crate::gh::GhProbe::Decided { available, policy } => {
-                        self.set_github_host_policy(policy);
-                        if available {
-                            GhStatus::Available
-                        } else {
-                            GhStatus::NotAuthenticated
-                        }
-                    }
-                };
-                self.gh_status = status;
-                if matches!(status, GhStatus::Available) && self.github_integration_enabled {
-                    logger::info(&format!(
-                        "[gh-integration] gh CLI is available; host policy: {:?}",
-                        self.github_host_policy(),
-                    ));
-                    // This completion is the ONE place pull-request work is
-                    // armed. Every off-to-on site launches the probe and stops
-                    // there, so an enable produces exactly one refresh, and
-                    // `spawn_pr_sync_worker` is single-instance so it produces
-                    // at most one poller however often this runs.
-                    //
-                    // Re-seed from the store FIRST: a toggle-off cleared
-                    // `pr_statuses`, and a manually attached PR must get its
-                    // badge back the moment the integration re-arms rather
-                    // than waiting for the first sync cycle. Idempotent (the
-                    // stored rows are refreshed on every accepted result).
-                    self.seed_pr_statuses_from_store();
-                    self.update_pr_sync_sessions();
-                    self.spawn_refs_watcher();
-                    self.spawn_pr_sync_worker();
-                    self.spawn_initial_pr_refresh();
-                } else {
-                    logger::info(&format!(
-                        "[gh-integration] gh status: {:?}, integration enabled: {}",
-                        status, self.github_integration_enabled,
-                    ));
-                    if decisive {
-                        // `gh` answered, and the answer is that nothing works
-                        // here (or the integration is off). Work armed from an
-                        // older, better answer must not keep polling while the
-                        // interface says GitHub is unavailable. A TRANSIENT
-                        // result never reaches this: it decided nothing, so the
-                        // last known good state stands.
-                        self.disarm_pr_sync();
-                    }
-                }
-                EventReaction::Nothing
-            }
-            WorkerEvent::PrStatusReady(results) => {
-                let now = Instant::now();
-                let mut changed = false;
-                for (session_id, maybe_pr) in results {
-                    // Clear any one-shot PR-check in-flight guard for this session
-                    // (a no-op for batched-loop results, which set no key).
-                    self.clear_in_flight(&InFlightKey::PrCheck(session_id.clone()));
-                    // The check is async, so its result can land AFTER the
-                    // session was deleted. Drop such a result whole: the
-                    // sqlite upsert would fail the sessions FOREIGN KEY (an
-                    // ERROR log on every delete-with-open-PR), and the map
-                    // inserts would resurrect in-memory PR state for a
-                    // session that no longer exists.
-                    if !self.sessions.iter().any(|s| s.id == session_id) {
-                        logger::debug(&format!(
-                            "[gh-integration] dropping PR result for deleted session {session_id}",
-                        ));
-                        continue;
-                    }
-                    self.pr_last_checked.insert(session_id.clone(), now);
-                    // Suppression guard, the in-flight race's answer. A check
-                    // dispatched before the user detached can land after it,
-                    // and re-badging an agent one tick after it was detached
-                    // is exactly the bug the detach exists to fix. Dropped
-                    // here, BEFORE `upsert_pr` and the `pr_statuses` insert,
-                    // so nothing durable is written either. A pin is exempt:
-                    // an attach lifts the suppression, so a session holding
-                    // both is impossible, and the pin refresh path must keep
-                    // working if one ever arose.
-                    if self.pr_suppressions.contains(&session_id)
-                        && !self.pr_overrides.contains_key(&session_id)
-                    {
-                        logger::debug(&format!(
-                            "[gh-integration] dropping PR result for detached session \
-                             {session_id}",
-                        ));
-                        continue;
-                    }
-                    // Identity guard for pinned sessions. This is deliberately
-                    // NOT a `None`-only guard: several paths can still produce
-                    // `Some(other_pr)` for a pinned session (a one-shot check
-                    // racing the attach, or an early-return path answering
-                    // from a stale `known_pr`), and a `None` from discovery
-                    // must not clear a pin either. While an override exists,
-                    // only a result matching the pin's (host, owner_repo,
-                    // number) may touch `pr_statuses` or `upsert_pr`.
-                    if let Some(pin) = self.pr_overrides.get(&session_id) {
-                        let matches_pin = maybe_pr.as_ref().is_some_and(|pr| {
-                            pr.number == pin.pr_number
-                                && pr.owner_repo.eq_ignore_ascii_case(&pin.owner_repo)
-                                && pr.host.eq_ignore_ascii_case(&pin.host)
-                        });
-                        if !matches_pin {
-                            logger::debug(&format!(
-                                "[gh-integration] dropping PR result for pinned session \
-                                 {session_id} (does not match the pin, PR #{})",
-                                pin.pr_number,
-                            ));
-                            continue;
-                        }
-                    }
-                    // The badge is about to move (or not): say so, once, at the
-                    // one place a result actually reaches the user. The
-                    // comparison is against the LIVE badge rather than the
-                    // stored row, so a row whose state string this build cannot
-                    // decode cannot log the same change on every cycle.
-                    Self::log_pr_badge_change(
-                        self.sessions.iter().find(|s| s.id == session_id),
-                        self.pr_statuses.get(&session_id),
-                        maybe_pr.as_ref(),
-                    );
-                    match maybe_pr {
-                        Some(pr) => {
-                            let state_str = match pr.state {
-                                PrState::Open => "OPEN",
-                                PrState::Merged => "MERGED",
-                                PrState::Closed => "CLOSED",
-                            };
-                            let pr_number = pr.number;
-                            let row = StoredPr {
-                                session_id: session_id.clone(),
-                                pr_number,
-                                host: pr.host.clone(),
-                                owner_repo: pr.owner_repo.clone(),
-                                state: state_str.to_string(),
-                                title: pr.title.clone(),
-                                url: pr.url.clone(),
-                            };
-                            if self.pr_overrides.contains_key(&session_id) {
-                                // A PINNED session's accepted result refreshes
-                                // the override row (its durable cache) and
-                                // deliberately NEVER touches `session_prs`: a
-                                // pin can live on a FORK, and a fork row in
-                                // `session_prs` would become the post-detach
-                                // `known_pr`, making the next cycle query the
-                                // session's OWN repo with the fork's number.
-                                if let Err(err) = self.session_store.upsert_pr_override(&row) {
-                                    logger::error(&format!(
-                                        "failed to refresh pinned PR for {session_id}: {err}",
-                                    ));
-                                }
-                                self.pr_overrides.insert(session_id.clone(), row);
-                            } else {
-                                // Persist the autodetected association
-                                // (including state) so it survives restarts
-                                // and squash-merge branch deletions.
-                                if let Err(err) = self.session_store.upsert_pr(&row) {
-                                    logger::error(&format!(
-                                        "failed to persist PR status for {session_id} (PR #{pr_number}): {err}",
-                                    ));
-                                }
-                            }
-                            self.pr_statuses.insert(session_id, pr);
-                            changed = true;
-                        }
-                        None => {
-                            if self.pr_statuses.remove(&session_id).is_some() {
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-                if changed {
-                    // Refresh the sync entries so the worker has updated
-                    // known_pr data.
-                    self.update_pr_sync_sessions();
-                    EventReaction::RebuildLeftItems
-                } else {
-                    EventReaction::Nothing
-                }
-            }
+            } => self.process_gh_status_checked(generation, outcome),
+            WorkerEvent::PrStatusReady(results) => self.process_pr_status_ready(results),
             WorkerEvent::PrCheckAborted(session_id) => {
                 // The one-shot check worker panicked; clear its guard so the next
                 // trigger can retry. The badge is left untouched.
@@ -2688,100 +2941,8 @@ impl Engine {
             WorkerEvent::PullRequestResolved {
                 result,
                 status_op_id,
-                purpose: crate::worker::PrLookupPurpose::CreateAgent,
-            } => match result {
-                Ok(pr) => EventReaction::OpenNewAgentPromptForPr {
-                    pr: Box::new(pr),
-                    status_op_id,
-                },
-                Err(message) => {
-                    // Web path: resolve the PR-lookup op into a keyed error so the
-                    // busy is replaced (closes the previously-documented gap where
-                    // a failed lookup stranded its busy to the timeout warning).
-                    // TUI path (`status_op_id == None`) keeps the unkeyed error.
-                    if let Some(id) = status_op_id
-                        && let Some(op) = self.pending_web_pr_lookup_ops.remove(&id)
-                    {
-                        op.resolve(&crate::engine::WebPrLookupOutcome::Failed { message })
-                            .into_reaction()
-                    } else {
-                        EventReaction::Status(StatusUpdate::error(message))
-                    }
-                }
-            },
-            WorkerEvent::PullRequestResolved {
-                result,
-                status_op_id,
-                purpose: crate::worker::PrLookupPurpose::Attach { session_id },
-            } => {
-                // The one clear point for the mutual block. Keyed on the
-                // purpose's session id rather than the status op id, so the
-                // fallback below (no keyed op, or an op the map no longer
-                // holds) unblocks the agent too. It runs before anything that
-                // can return early, so success, failure, a session deleted
-                // mid-lookup, and a panicking worker all end the block.
-                self.clear_in_flight(&crate::engine::InFlightKey::PrAttach(session_id.clone()));
-                // The attach application is engine-side and surface-agnostic:
-                // this arm is the real vanished-session guard for BOTH
-                // surfaces. The lookup is async, so a delete can land first,
-                // and an unguarded apply would write an override row for a
-                // dead id, exactly the orphan the storage cleanup defends
-                // against. (`apply_pr_attach` re-checks too; the explicit
-                // check here exists to say WHY nothing was attached.)
-                let outcome = match result {
-                    Ok(pr) => {
-                        if !self.sessions.iter().any(|s| s.id == session_id) {
-                            crate::engine::PrAttachOutcome::Failed {
-                                message: format!(
-                                    "The agent was deleted while PR #{} was being resolved; \
-                                     nothing was attached.",
-                                    pr.number,
-                                ),
-                            }
-                        } else {
-                            match self.apply_pr_attach(
-                                &session_id,
-                                &pr.host,
-                                &pr.owner_repo,
-                                pr.number,
-                                &pr.title,
-                                &pr.state,
-                                "",
-                            ) {
-                                Ok(message) => crate::engine::PrAttachOutcome::Attached { message },
-                                Err(err) => crate::engine::PrAttachOutcome::Failed {
-                                    message: format!("Failed to attach PR #{}: {err:#}", pr.number),
-                                },
-                            }
-                        }
-                    }
-                    Err(message) => crate::engine::PrAttachOutcome::Failed { message },
-                };
-                let attached = matches!(outcome, crate::engine::PrAttachOutcome::Attached { .. });
-                let final_reaction = if let Some(id) = status_op_id
-                    && let Some(op) = self.pending_pr_attach_ops.remove(&id)
-                {
-                    op.resolve(&outcome).into_reaction()
-                } else {
-                    // No keyed op (a defensive fallback): still surface the
-                    // outcome rather than swallowing it.
-                    match outcome {
-                        crate::engine::PrAttachOutcome::Attached { message } => {
-                            EventReaction::Status(StatusUpdate::info(message))
-                        }
-                        crate::engine::PrAttachOutcome::Failed { message } => {
-                            EventReaction::Status(StatusUpdate::error(message))
-                        }
-                    }
-                };
-                if attached {
-                    // The badge changed; the TUI sidebar re-derives from
-                    // `pr_statuses` on rebuild (the web refetches the spine).
-                    EventReaction::Multi(vec![final_reaction, EventReaction::RebuildLeftItems])
-                } else {
-                    final_reaction
-                }
-            }
+                purpose,
+            } => self.process_pull_request_resolved(result, purpose, status_op_id),
             WorkerEvent::RefsChanged(session_id) => {
                 logger::debug(&format!(
                     "[gh-integration] refs watcher: triggering PR check for session {}",
@@ -2823,259 +2984,36 @@ impl Engine {
                 target_branch,
                 result,
                 status_op_id,
-            } => {
-                match result {
-                    Ok(()) => match action {
-                        NonDefaultBranchAction::AddProject {
-                            path,
-                            name,
-                            leading_branch,
-                        } => EventReaction::AddProjectAfterBranchCheckout {
-                            path,
-                            name,
-                            target_branch,
-                            leading_branch,
-                            // The SUCCESS message is built in `drive_add_project_followup`
-                            // after the inline add, so the op is resolved there, not here.
-                            status_op_id,
-                        },
-                        NonDefaultBranchAction::CheckoutProjectDefault { project } => {
-                            if let Some(existing) =
-                                self.projects.iter_mut().find(|p| p.id == project.id)
-                            {
-                                existing.current_branch = target_branch.clone();
-                                existing.branch_status = ProjectBranchStatus::Leading;
-                            }
-                            // Web path: resolve the checkout op into its keyed info
-                            // final (same message). TUI path keeps the unkeyed Status.
-                            if let Some(id) = status_op_id
-                                && let Some(op) = self.pending_web_checkout_ops.remove(&id)
-                            {
-                                op.resolve(&crate::engine::WebCheckoutOutcome::Ok { target_branch })
-                                    .into_reaction()
-                            } else {
-                                EventReaction::Status(StatusUpdate::info(format!(
-                                    "Checked out \"{target_branch}\" for project \"{}\".",
-                                    project.name
-                                )))
-                            }
-                        }
-                    },
-                    Err(err) => {
-                        // Preserve the full git stderr in the log so debugging
-                        // stays possible after the status line summary is
-                        // overwritten by the next message.
-                        let path = action.repo_path().to_string();
-                        logger::error(&format!(
-                            "non-default branch checkout failed for {path}: {err}"
-                        ));
-                        // Web path: resolve the matching op into a keyed error (same
-                        // message). The op kind depends on the action: a checkout-default
-                        // failure resolves the checkout op, an add-project switch failure
-                        // resolves the add-project op. TUI path keeps the unkeyed Status.
-                        if let Some(id) = status_op_id {
-                            match action {
-                                NonDefaultBranchAction::CheckoutProjectDefault { .. } => {
-                                    if let Some(op) = self.pending_web_checkout_ops.remove(&id) {
-                                        return op
-                                            .resolve(&crate::engine::WebCheckoutOutcome::Failed {
-                                                target_branch,
-                                                repo_path: path,
-                                            })
-                                            .into_reaction();
-                                    }
-                                }
-                                NonDefaultBranchAction::AddProject { .. } => {
-                                    if let Some(op) = self.pending_web_add_project_ops.remove(&id) {
-                                        return op
-                                        .resolve(&crate::engine::WebAddProjectOutcome::SwitchFailed {
-                                            target_branch,
-                                            repo_path: path,
-                                        })
-                                        .into_reaction();
-                                    }
-                                }
-                            }
-                        }
-                        EventReaction::Status(StatusUpdate::error(format!(
-                            "Couldn't check out \"{target_branch}\" in {path} — resolve in your terminal and retry."
-                        )))
-                    }
-                }
-            }
+            } => self.process_non_default_branch_checkout_completed(
+                action,
+                target_branch,
+                result,
+                status_op_id,
+            ),
             WorkerEvent::InitialCommitCreated {
                 add,
                 result,
                 status_op_id,
-            } => {
-                // Release the per-path serialization gate now that the commit
-                // attempt is done (success or failure).
-                self.clear_in_flight(&InFlightKey::InitialCommit(add.path.clone()));
-                match result {
-                    Ok(()) => EventReaction::AddProjectAfterInitialCommit {
-                        path: add.path,
-                        name: add.name,
-                        branch: add.branch,
-                        leading_branch: add.leading_branch,
-                        initialized_repo: add.initialized_repo,
-                        seeded_gitignore: add.seeded_gitignore,
-                        seed_warning: add.seed_warning,
-                        // SUCCESS message is built in `drive_add_project_followup`
-                        // after the inline add (web); the TUI builds it in its
-                        // `AddProjectAfterInitialCommit` view handler.
-                        status_op_id,
-                    },
-                    Err(err) => {
-                        logger::error(&format!("initial commit failed for {}: {err}", add.path));
-                        // A non-fatal seed failure must not be swallowed by a
-                        // commit failure: the error's own recovery advice sends
-                        // the user through the commit-only rung, which never
-                        // seeds, so the warning is the only thing standing
-                        // between them and an agent copying node_modules. Emit
-                        // it as its own persistent warning ALONGSIDE the error
-                        // final (the web shows both toasts; the TUI's single
-                        // status line is documented-lossy and shows the last
-                        // item, the error, whose advice is the primary next
-                        // step).
-                        let seed_warning = add
-                            .seed_warning
-                            .clone()
-                            .map(|w| EventReaction::Status(StatusUpdate::warning(w)));
-                        // Web path: resolve the keyed add-project op into its error
-                        // final. TUI path (op map empty here) keeps the unkeyed Status.
-                        let error_final = if let Some(id) = status_op_id
-                            && let Some(op) = self.pending_web_add_project_ops.remove(&id)
-                        {
-                            op.resolve(&crate::engine::WebAddProjectOutcome::AddFailed {
-                                message: err,
-                            })
-                            .into_reaction()
-                        } else {
-                            EventReaction::Status(StatusUpdate::error(err))
-                        };
-                        match seed_warning {
-                            Some(warning) => EventReaction::Multi(vec![warning, error_final]),
-                            None => error_final,
-                        }
-                    }
-                }
-            }
+            } => self.process_initial_commit_created(add, result, status_op_id),
             WorkerEvent::CreateAgentBranchInspected {
                 project,
                 result,
                 // The TUI resolves its keyed busy in `drain_events` (the op is
                 // App-side); the engine keeps its unkeyed `Status`/view reactions.
                 status_op_id: _,
-            } => match result {
-                Ok(inspection) => {
-                    if let Some(existing) = self.projects.iter_mut().find(|p| p.id == project.id) {
-                        existing.current_branch = inspection.current_branch.clone();
-                        existing.leading_branch = Some(inspection.leading_branch.clone());
-                        existing.branch_status =
-                            if existing.current_branch == inspection.leading_branch {
-                                ProjectBranchStatus::Leading
-                            } else {
-                                ProjectBranchStatus::NotLeading
-                            };
-                    }
-                    EventReaction::ContinueCreateAgentAfterInspection {
-                        project,
-                        inspection,
-                    }
-                }
-                Err(err) => EventReaction::Status(StatusUpdate::error(err)),
-            },
-            WorkerEvent::ProjectBranchStatusReady { project_id, result } => match result {
-                Ok((current_branch, branch_status)) => {
-                    if let Some(project) = self.projects.iter_mut().find(|p| p.id == project_id) {
-                        project.current_branch = current_branch;
-                        project.branch_status = branch_status;
-                    }
-                    EventReaction::Nothing
-                }
-                Err(err) => {
-                    logger::debug(&format!(
-                        "project branch status inspection failed for {project_id}: {err}"
-                    ));
-                    EventReaction::Nothing
-                }
-            },
+            } => self.process_create_agent_branch_inspected(project, result),
+            WorkerEvent::ProjectBranchStatusReady { project_id, result } => {
+                self.process_project_branch_status_ready(project_id, result)
+            }
             WorkerEvent::CheckoutProjectDefaultBranchInspected {
                 project,
                 result,
                 status_op_id,
-            } => {
-                // Web path: every terminal outcome of worker 1 must resolve the
-                // checkout op's busy. The Known case forwards the id to worker 2
-                // (which resolves later); the short-circuit cases (already-leading,
-                // heuristic, inspect-failed) resolve it here. Helper closure pops
-                // the op (if any) so the byte-identical message can be re-emitted
-                // either keyed (web) or unkeyed (TUI).
-                match result {
-                    Ok((current_branch, warning_kind)) => match warning_kind {
-                        Some(BranchWarningKind::Known { default_branch }) => {
-                            let mut project = project;
-                            project.current_branch = current_branch;
-                            EventReaction::DispatchProjectDefaultBranchCheckout {
-                                project,
-                                default_branch,
-                                status_op_id,
-                            }
-                        }
-                        Some(BranchWarningKind::Heuristic) => {
-                            if let Some(id) = status_op_id
-                                && let Some(op) = self.pending_web_checkout_ops.remove(&id)
-                            {
-                                op.resolve(&crate::engine::WebCheckoutOutcome::Heuristic {
-                                    current_branch,
-                                })
-                                .into_reaction()
-                            } else {
-                                EventReaction::Status(StatusUpdate::error(format!(
-                                    "Can't determine the default branch for project \"{}\" while it is on \"{}\". Resolve the default branch in your terminal and retry.",
-                                    project.name, current_branch
-                                )))
-                            }
-                        }
-                        None => {
-                            if let Some(existing) =
-                                self.projects.iter_mut().find(|p| p.id == project.id)
-                            {
-                                existing.current_branch = current_branch.clone();
-                                existing.branch_status = ProjectBranchStatus::Leading;
-                            }
-                            if let Some(id) = status_op_id
-                                && let Some(op) = self.pending_web_checkout_ops.remove(&id)
-                            {
-                                op.resolve(&crate::engine::WebCheckoutOutcome::AlreadyLeading {
-                                    current_branch,
-                                })
-                                .into_reaction()
-                            } else {
-                                EventReaction::Status(StatusUpdate::info(format!(
-                                    "Project \"{}\" is already on the leading branch \"{}\".",
-                                    project.name, current_branch
-                                )))
-                            }
-                        }
-                    },
-                    Err(err) => {
-                        if let Some(id) = status_op_id
-                            && let Some(op) = self.pending_web_checkout_ops.remove(&id)
-                        {
-                            op.resolve(&crate::engine::WebCheckoutOutcome::InspectFailed {
-                                error: err,
-                            })
-                            .into_reaction()
-                        } else {
-                            EventReaction::Status(StatusUpdate::error(format!(
-                                "Couldn't inspect the default branch for project \"{}\": {err}",
-                                project.name
-                            )))
-                        }
-                    }
-                }
-            }
+            } => self.process_checkout_project_default_branch_inspected(
+                project,
+                result,
+                status_op_id,
+            ),
             WorkerEvent::ConfigReloadReady(result) => self.process_config_reload_ready(*result),
             WorkerEvent::ProjectPersistenceCompleted {
                 action,
@@ -4364,6 +4302,40 @@ mod tests {
     }
 
     #[test]
+    fn branch_rename_completed_success_updates_branch_and_clears_guards() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "old-branch");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.mark_in_flight(InFlightKey::BranchRename("s1".into()));
+        engine.rename_expected.insert(
+            "s1".into(),
+            crate::engine::RenameExpectation {
+                old_branch: "old-branch".into(),
+                new_branch: "new-branch".into(),
+            },
+        );
+
+        let reaction = engine.process_worker_event(WorkerEvent::BranchRenameCompleted {
+            session_id: "s1".into(),
+            new_branch: "new-branch".into(),
+            previous_title: None,
+            result: Ok(()),
+            status: crate::engine::ResolvedFinal::new(
+                "rename:s1",
+                crate::engine::Final::info("renamed"),
+            ),
+        });
+
+        assert!(matches!(reaction, EventReaction::Multi(_)));
+        assert!(!engine.is_in_flight(&InFlightKey::BranchRename("s1".into())));
+        assert!(!engine.rename_expected.contains_key("s1"));
+        assert_eq!(engine.sessions[0].branch_name(), Some("new-branch"));
+        let stored = engine.session_store.load_sessions().unwrap();
+        assert_eq!(stored[0].branch_name(), Some("new-branch"));
+    }
+
+    #[test]
     fn branch_rename_completed_error_clears_marker_and_expected_and_reverts_title() {
         // The Err arm (also the shape the panic_event synthesises) must revert
         // the title AND clear both the in-flight marker and the expected-branch
@@ -4556,6 +4528,191 @@ mod tests {
     }
 
     // ── PrStatusReady ────────────────────────────────────────────────────
+
+    #[test]
+    fn pr_status_ready_batch_applies_live_results_and_drops_deleted_ones() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("live", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let pr = PrInfo {
+            number: 17,
+            state: PrState::Open,
+            title: "Live PR".into(),
+            host: "github.com".into(),
+            owner_repo: "o/r".into(),
+            url: "https://github.com/o/r/pull/17".into(),
+        };
+
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
+            ("deleted".into(), Some(pr.clone())),
+            ("live".into(), Some(pr)),
+        ]));
+
+        assert!(matches!(reaction, EventReaction::RebuildLeftItems));
+        assert!(!engine.pr_statuses.contains_key("deleted"));
+        assert!(!engine.pr_last_checked.contains_key("deleted"));
+        assert_eq!(engine.pr_statuses.get("live").map(|pr| pr.number), Some(17));
+        assert!(engine.pr_last_checked.contains_key("live"));
+    }
+
+    #[test]
+    fn gh_status_checked_not_installed_denies_all_hosts() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Available;
+        engine.set_github_host_policy(crate::gh::GithubHostPolicy::Hosts(
+            ["git.example.com".to_string()].into_iter().collect(),
+        ));
+
+        let reaction = engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: crate::gh::GhProbe::NotInstalled,
+        });
+
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(engine.gh_status, GhStatus::NotInstalled);
+        assert_eq!(
+            engine.github_host_policy(),
+            crate::gh::GithubHostPolicy::DenyAll
+        );
+    }
+
+    #[test]
+    fn project_setup_inspection_events_preserve_branch_state_and_followups() {
+        let (mut engine, _tmp) = test_engine();
+        let project = sample_project("p1", "/tmp/p1");
+        engine.projects.push(project.clone());
+
+        let reaction = engine.process_worker_event(WorkerEvent::CreateAgentBranchInspected {
+            project: project.clone(),
+            result: Ok(CreateAgentBranchInspection {
+                current_branch: "feature".into(),
+                leading_branch: "main".into(),
+            }),
+            status_op_id: None,
+        });
+        assert!(matches!(
+            reaction,
+            EventReaction::ContinueCreateAgentAfterInspection { .. }
+        ));
+        assert_eq!(engine.projects[0].current_branch, "feature");
+        assert_eq!(
+            engine.projects[0].branch_status,
+            ProjectBranchStatus::NotLeading
+        );
+
+        let reaction = engine.process_worker_event(WorkerEvent::ProjectBranchStatusReady {
+            project_id: "p1".into(),
+            result: Ok(("main".into(), ProjectBranchStatus::Leading)),
+        });
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(engine.projects[0].current_branch, "main");
+
+        let reaction =
+            engine.process_worker_event(WorkerEvent::CheckoutProjectDefaultBranchInspected {
+                project,
+                result: Ok((
+                    "feature".into(),
+                    Some(BranchWarningKind::Known {
+                        default_branch: "main".into(),
+                    }),
+                )),
+                status_op_id: None,
+            });
+        assert!(matches!(
+            reaction,
+            EventReaction::DispatchProjectDefaultBranchCheckout { .. }
+        ));
+    }
+
+    #[test]
+    fn project_setup_completion_events_release_gates_and_update_projects() {
+        let (mut engine, _tmp) = test_engine();
+        let path = "/tmp/new-project".to_string();
+        engine.mark_in_flight(InFlightKey::InitialCommit(path.clone()));
+        let reaction = engine.process_worker_event(WorkerEvent::InitialCommitCreated {
+            add: crate::worker::InitialCommitAdd {
+                path: path.clone(),
+                name: "new".into(),
+                branch: "main".into(),
+                leading_branch: "main".into(),
+                initialized_repo: true,
+                seeded_gitignore: true,
+                seed_warning: None,
+            },
+            result: Ok(()),
+            status_op_id: None,
+        });
+        assert!(matches!(
+            reaction,
+            EventReaction::AddProjectAfterInitialCommit { .. }
+        ));
+        assert!(!engine.is_in_flight(&InFlightKey::InitialCommit(path)));
+
+        let project = sample_project("p1", "/tmp/p1");
+        engine.projects.push(project.clone());
+        let reaction =
+            engine.process_worker_event(WorkerEvent::NonDefaultBranchCheckoutCompleted {
+                action: NonDefaultBranchAction::CheckoutProjectDefault { project },
+                target_branch: "main".into(),
+                result: Ok(()),
+                status_op_id: None,
+            });
+        assert!(matches!(reaction, EventReaction::Status(_)));
+        assert_eq!(engine.projects[0].current_branch, "main");
+        assert_eq!(
+            engine.projects[0].branch_status,
+            ProjectBranchStatus::Leading
+        );
+    }
+
+    #[test]
+    fn pull_request_attach_resolution_for_deleted_session_clears_guard() {
+        let (mut engine, _tmp) = test_engine();
+        engine.mark_in_flight(InFlightKey::PrAttach("deleted".into()));
+        let reaction = engine.process_worker_event(WorkerEvent::PullRequestResolved {
+            result: Ok(ResolvedPullRequest {
+                project: sample_project("p1", "/tmp/p1"),
+                host: "github.com".into(),
+                owner_repo: "o/r".into(),
+                number: 12,
+                title: "Gone".into(),
+                state: "OPEN".into(),
+                head_ref_name: "feat".into(),
+                custom_name: None,
+            }),
+            purpose: crate::worker::PrLookupPurpose::Attach {
+                session_id: "deleted".into(),
+            },
+            status_op_id: None,
+        });
+
+        assert!(!engine.is_in_flight(&InFlightKey::PrAttach("deleted".into())));
+        assert!(matches!(
+            reaction,
+            EventReaction::Status(StatusUpdate {
+                tone: StatusTone::Error,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn folder_repo_status_for_deleted_session_clears_probe_without_residue() {
+        let (mut engine, _tmp) = test_engine();
+        let key = InFlightKey::FolderRepoProbe("deleted".into());
+        engine.mark_in_flight(key.clone());
+
+        let reaction = engine.process_worker_event(WorkerEvent::FolderRepoStatusReady {
+            session_id: "deleted".into(),
+            status: crate::git::FolderRepoStatus::WorkingRepo,
+        });
+
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert!(!engine.is_in_flight(&key));
+        assert!(!engine.folder_repo_statuses.contains_key("deleted"));
+    }
 
     #[test]
     fn pr_status_ready_with_pr_upserts_and_records_timestamp() {
