@@ -11,6 +11,7 @@ use crate::engine::events::{
     StatusUpdate, WorktreeRemoval,
 };
 use crate::engine::{CommandWorkerSpec, Engine, InFlightKey};
+use crate::model::Project;
 use crate::worker::{
     AgentLaunchFailedData, AgentLaunchRequest, CreateAgentRequest, ProjectPersistenceAction,
     PullOutcome, PullTarget, WorkerEvent,
@@ -354,119 +355,7 @@ impl Engine {
             Command::PersistProject {
                 action,
                 status_op_id,
-            } => {
-                if let ProjectPersistenceAction::Add {
-                    project,
-                    status_message,
-                } = *action
-                {
-                    // Idempotent on path — the single chokepoint that guards
-                    // against a duplicate registration. `validate_project_add_path`
-                    // rejects a duplicate at request time, but a race can slip two
-                    // adds for the same path past it (e.g. the initial-commit
-                    // born-race fast path registering while a sibling worker's
-                    // followup is still in flight) before either reaches here. If
-                    // the path is already registered, report success against the
-                    // existing project instead of pushing a second record.
-                    if let Some(existing) = self.projects.iter().find(|p| p.path == project.path) {
-                        let existing_id = existing.id.clone();
-                        // Report the TRUTH (already registered), not the losing
-                        // caller's own narrative — the winner may have registered a
-                        // different name than this request intended.
-                        let message = format!(
-                            "Project at this path is already in the workspace as \"{}\"; nothing new was added.",
-                            existing.name
-                        );
-                        return Ok(EventReaction::ProjectPersistenceOutcome(Box::new(
-                            ProjectPersistenceOutcome {
-                                // NOTE: `action.project` is the un-persisted input
-                                // (fresh id), NOT the registered project that
-                                // `view.project_id` points at — the dedup fired. No
-                                // consumer reads `action` for the `Added` view.
-                                action: ProjectPersistenceAction::Add {
-                                    project,
-                                    status_message: message.clone(),
-                                },
-                                view: ProjectPersistenceView::Added {
-                                    project_id: existing_id,
-                                    status_message: message,
-                                },
-                                status_op_id: None,
-                            },
-                        )));
-                    }
-                    // Insert the project into SQLite inline so we can roll back
-                    // the row if the subsequent config write fails.
-                    self.session_store
-                        .upsert_project(&crate::config::ProjectConfig {
-                            id: project.id.clone(),
-                            path: project.path.clone(),
-                            name: Some(project.name.clone()),
-                            default_provider: project
-                                .explicit_default_provider
-                                .as_ref()
-                                .map(|p| p.as_str().to_string()),
-                            leading_branch: project.leading_branch.clone(),
-                            auto_reopen_agents: project.auto_reopen_agents,
-                            startup_command: project.startup_command.clone(),
-                            env: project.env.clone(),
-                        })?;
-                    let id = project.id.clone();
-                    // Snapshot config.projects BEFORE persist_projects_to_config
-                    // rewrites it. On failure we restore this so the phantom
-                    // project can't resurrect on the next unrelated eager save.
-                    let prev_config_projects = self.config.projects.clone();
-                    // Add to in-memory list before the config write.
-                    self.projects.push(project.clone());
-                    match self.persist_projects_to_config() {
-                        Ok(()) => Ok(EventReaction::ProjectPersistenceOutcome(Box::new(
-                            ProjectPersistenceOutcome {
-                                action: ProjectPersistenceAction::Add {
-                                    project,
-                                    status_message: status_message.clone(),
-                                },
-                                view: ProjectPersistenceView::Added {
-                                    project_id: id,
-                                    status_message,
-                                },
-                                // Add is inline with its own final at dispatch; it
-                                // never drives a handler-resolved status op.
-                                status_op_id: None,
-                            },
-                        ))),
-                        Err(e) => {
-                            // Config write failed — roll back the in-memory project,
-                            // the SQLite row, and self.config.projects so the state
-                            // stays consistent. Without restoring config.projects the
-                            // phantom would resurrect on the next unrelated eager save.
-                            self.projects.retain(|p| p.id != id);
-                            self.config.projects = prev_config_projects;
-                            if let Err(db_err) = self.session_store.delete_project(&id) {
-                                // STICKY: the rollback itself failed, so dux is
-                                // knowingly leaving a half-removed project behind
-                                // and says it may come back on restart. Recovery
-                                // is in config.toml and the database, outside any
-                                // toast.
-                                return Ok(EventReaction::Status(
-                                    StatusUpdate::error(format!(
-                                        "Project add failed and couldn't be cleaned up, it may \
-                                         reappear on restart. Config error: {e:#}. DB cleanup \
-                                         error: {db_err:#}"
-                                    ))
-                                    .sticky(),
-                                ));
-                            }
-                            Ok(EventReaction::Status(StatusUpdate::error(format!(
-                                "Project add failed and was rolled back; config.toml could \
-                                 not be updated: {e:#}"
-                            ))))
-                        }
-                    }
-                } else {
-                    self.spawn_project_persistence(*action, status_op_id);
-                    Ok(EventReaction::Nothing)
-                }
-            }
+            } => self.apply_project_persistence(*action, status_op_id),
 
             Command::RemoveProject {
                 project_id,
@@ -1156,6 +1045,88 @@ impl Engine {
         }
     }
 
+    fn apply_project_persistence(
+        &mut self,
+        action: ProjectPersistenceAction,
+        status_op_id: Option<String>,
+    ) -> anyhow::Result<EventReaction> {
+        match action {
+            ProjectPersistenceAction::Add {
+                project,
+                status_message,
+            } => self.add_project_inline(project, status_message),
+            action => {
+                self.spawn_project_persistence(action, status_op_id);
+                Ok(EventReaction::Nothing)
+            }
+        }
+    }
+
+    fn add_project_inline(
+        &mut self,
+        project: Project,
+        status_message: String,
+    ) -> anyhow::Result<EventReaction> {
+        if let Some((project_id, project_name)) = self
+            .projects
+            .iter()
+            .find(|existing| existing.path == project.path)
+            .map(|existing| (existing.id.clone(), existing.name.clone()))
+        {
+            let message = format!(
+                "Project at this path is already in the workspace as \"{project_name}\"; nothing new was added."
+            );
+            return Ok(project_added_reaction(project, project_id, message));
+        }
+
+        self.session_store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                name: Some(project.name.clone()),
+                default_provider: project
+                    .explicit_default_provider
+                    .as_ref()
+                    .map(|provider| provider.as_str().to_string()),
+                leading_branch: project.leading_branch.clone(),
+                auto_reopen_agents: project.auto_reopen_agents,
+                startup_command: project.startup_command.clone(),
+                env: project.env.clone(),
+            })?;
+        let project_id = project.id.clone();
+        let previous_config_projects = self.config.projects.clone();
+        self.projects.push(project.clone());
+        match self.persist_projects_to_config() {
+            Ok(()) => Ok(project_added_reaction(project, project_id, status_message)),
+            Err(error) => {
+                Ok(self.rollback_project_add(&project_id, previous_config_projects, error))
+            }
+        }
+    }
+
+    fn rollback_project_add(
+        &mut self,
+        project_id: &str,
+        previous_config_projects: Vec<crate::config::ProjectConfig>,
+        config_error: anyhow::Error,
+    ) -> EventReaction {
+        self.projects.retain(|project| project.id != project_id);
+        self.config.projects = previous_config_projects;
+        if let Err(database_error) = self.session_store.delete_project(project_id) {
+            return EventReaction::Status(
+                StatusUpdate::error(format!(
+                    "Project add failed and couldn't be cleaned up, it may reappear on restart. \
+                     Config error: {config_error:#}. DB cleanup error: {database_error:#}"
+                ))
+                .sticky(),
+            );
+        }
+        EventReaction::Status(StatusUpdate::error(format!(
+            "Project add failed and was rolled back; config.toml could not be updated: \
+             {config_error:#}"
+        )))
+    }
+
     /// Run a configured text macro against a live PTY target. Mirrors the TUI's
     /// macro bar: resolve the macro by name, gate it by the target's surface,
     /// translate newlines via the shared core transform, and write to the PTY.
@@ -1315,6 +1286,24 @@ impl Engine {
         self.session_store.set_global_session_order(&ids)?;
         Ok(())
     }
+}
+
+fn project_added_reaction(
+    project: Project,
+    project_id: String,
+    status_message: String,
+) -> EventReaction {
+    EventReaction::ProjectPersistenceOutcome(Box::new(ProjectPersistenceOutcome {
+        action: ProjectPersistenceAction::Add {
+            project,
+            status_message: status_message.clone(),
+        },
+        view: ProjectPersistenceView::Added {
+            project_id,
+            status_message,
+        },
+        status_op_id: None,
+    }))
 }
 
 /// Strict reorder validation: `requested` must be a permutation of `current`
