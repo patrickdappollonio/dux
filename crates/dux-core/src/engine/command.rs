@@ -290,8 +290,8 @@ pub enum Command {
 impl Engine {
     /// Single dispatch point for every engine-affecting operation. The
     /// TUI's input layer calls this with a `Command` translated from key
-    /// events; the web layer (sub-project #3) will call it with `Command`s
-    /// deserialized from WebSocket messages. Returns an `EventReaction`
+    /// events; the web layer calls it with `Command`s deserialized from
+    /// WebSocket messages. Returns an `EventReaction`
     /// the caller routes through its view-applier.
     #[allow(deprecated)] // blessed sync-direct: Command::RecoverConfig quiesces the writer and writes directly
     pub fn apply(&mut self, command: Command) -> anyhow::Result<EventReaction> {
@@ -1312,8 +1312,7 @@ fn reorder_in_place<T>(items: &mut Vec<T>, position: impl Fn(&T) -> Option<usize
         .collect();
 }
 
-/// The tri-state status op for a `PullTarget::Project` refresh. Extracted so
-/// the tone mapping is unit-testable without a worker thread: a pulled or
+/// The tri-state status op for a `PullTarget::Project` refresh: a pulled or
 /// no-origin refresh is an info final, and a FAILED refresh is a WARNING (the
 /// refresh is best-effort; the project keeps working from local branch state,
 /// and the user is told so).
@@ -1339,9 +1338,8 @@ fn project_refresh_status_op(
         })
 }
 
-/// Body of the `PullTarget::Project` refresh worker, extracted so tests can
-/// exercise it without a worker thread. A dirty checkout never gates the
-/// refresh: git itself refuses a fast-forward only when it would clobber a
+/// Body of the `PullTarget::Project` refresh worker. A dirty checkout never
+/// gates the refresh: git itself refuses a fast-forward only when it would clobber a
 /// locally edited file, which surfaces through the error path.
 fn run_project_refresh(
     repo_path: &std::path::Path,
@@ -2327,7 +2325,7 @@ mod tests {
         // Keep-and-report: a failed write means the on-disk file can't be updated,
         // but the new macros stay active for the session AND the existing config
         // file is left intact (the atomic temp-file-then-rename primitive never
-        // truncates or partially-writes the real file on failure — F14).
+        // truncates or partially-writes the real file on failure).
         let (mut engine, _tmp) = test_engine();
 
         // Seed a known-good, parseable config on disk so we can prove a failed

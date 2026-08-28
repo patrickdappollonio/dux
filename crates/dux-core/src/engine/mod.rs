@@ -840,9 +840,8 @@ fn attention_engaged(
             .is_some_and(|t| now.duration_since(*t) < AGENT_INPUT_SUPPRESSION_WINDOW)
 }
 
-/// The pure per-tick attention decision, factored out of
-/// [`Engine::poll_agent_signals`] so it is testable without a live PTY. Given the
-/// tabs whose attention signal fired this tick (`fired`, already gated by the
+/// The pure per-tick attention decision behind [`Engine::poll_agent_signals`].
+/// Given the tabs whose attention signal fired this tick (`fired`, already gated by the
 /// `attention_on_bell` preference at drain time), whether the feature is enabled,
 /// and an `engaged` predicate, it updates `needs_attention` in place:
 ///
@@ -6788,7 +6787,7 @@ mod tests {
     /// A test `ConfigSurface` whose `reload` posts a config carrying a known,
     /// distinguishing marker (`defaults.provider`) so a test can prove the
     /// reloaded config actually landed (and is not just `Config::default()`).
-    /// Drives completion through `ReloadCompletionGuard`, the real F5-safe path.
+    /// Drives completion through the real `ReloadCompletionGuard` path.
     struct MarkerReloadSurface {
         provider: String,
     }
@@ -6919,7 +6918,7 @@ mod tests {
     }
 
     /// A test `ConfigSurface` whose `reload` reports a validation FAILURE (posts an
-    /// `Err` completion) through the F5-safe guard.
+    /// `Err` completion) through `ReloadCompletionGuard`.
     struct FailingReloadSurface;
 
     impl crate::engine::ConfigSurface for FailingReloadSurface {
@@ -6939,7 +6938,7 @@ mod tests {
 
     #[test]
     fn failed_reload_still_drains_deferred_and_surfaces_the_failure() {
-        // F6 + the failure-with-deferral ordering: when a reload FAILS while
+        // The failure-with-deferral ordering: when a reload FAILS while
         // commands were deferred, the deferred commands must still be applied
         // against the unchanged (current) config rather than dropped, AND the
         // reload-failed reaction must be the LAST element so its error wins the
@@ -7364,8 +7363,7 @@ mod tests {
         );
     }
 
-    // -- change_agent_provider (the extracted engine half of the TUI's
-    //    apply_change_agent_provider) ----------------------------------------
+    // -- change_agent_provider ------------------------------------------------
 
     #[test]
     fn change_agent_provider_swaps_and_persists_when_stopped() {
@@ -7445,7 +7443,7 @@ mod tests {
         );
     }
 
-    /// #5: seeding populates `pr_statuses` from the SQLite `latest_prs` rows via
+    /// Seeding populates `pr_statuses` from the SQLite `latest_prs` rows via
     /// the shared `gh::reconstruct_pr_from_stored`, so both startups (the TUI and
     /// `dux serve`) show persisted PR badges immediately, before any network poll.
     #[test]

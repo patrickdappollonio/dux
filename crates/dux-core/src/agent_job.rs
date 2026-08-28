@@ -1037,10 +1037,9 @@ fn launch_managed_create(
     } else {
         Vec::new()
     };
-    // Hoisted so the startup command below can be handed a ManagedWorkspace
-    // without unwrapping one back out of the session. Every arm of this
-    // function provisions a worktree, so the managed shape is the only one this
-    // tail can produce; the standalone path never reaches here at all.
+    // Every arm of this function provisions a worktree, so the managed shape is
+    // the only one this tail can produce; the standalone path never reaches
+    // here at all.
     let managed = ManagedWorkspace {
         project_id: project.id.clone(),
         project_path: Some(project.path.clone()),

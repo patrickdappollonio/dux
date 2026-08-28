@@ -1220,9 +1220,8 @@ impl Engine {
     /// one-line change here rather than a comment-enforced convention spread
     /// across three files.
     ///
-    /// `retry_resume_fallback` used to name three of these maps itself, and
-    /// every other one leaked whenever the relaunch it dispatched then failed.
-    /// Do not go back to naming maps at a call site.
+    /// Never name these maps at a call site: a partial list leaks every map it
+    /// omits whenever the relaunch that call site dispatched then fails.
     pub fn clear_tab_runtime(&mut self, tab_id: &str) {
         self.providers.remove(tab_id);
         self.running_provider_pins.remove(tab_id);
@@ -1945,7 +1944,7 @@ impl Engine {
     /// follow-up: drop the writer quiesce guard, clear `reloading`, and drain
     /// any commands that were deferred while the reload was in flight.
     ///
-    /// Ordering matters (see F1): on success the engine first applies the
+    /// Ordering matters: on success the engine first applies the
     /// reloaded config to its own state, then clears the barrier flags, then
     /// drains the deferred commands — each of which re-mutates the now-current
     /// config and eager-writes. The deferred command's write is therefore the
@@ -2023,7 +2022,7 @@ impl Engine {
                     // If applying it FAILS, do not pretend the reload worked: open
                     // the reload-failed modal and leave `self.config` as-is (the
                     // deferred commands below still re-apply against the current
-                    // config, so they are never dropped — F6).
+                    // config, so they are never dropped).
                     if let Err(err) = self.apply_reloaded_config(config) {
                         failure = Some(EventReaction::OpenConfigReloadFailedModal(format!(
                             "Config validated but could not be applied: {err:#}"
@@ -3582,9 +3581,9 @@ mod tests {
         assert!(engine.agent_tabs.contains_key("v-tab"));
     }
 
-    /// Two spellings of one directory are one directory. The comparison used to
-    /// be a raw string compare, so a symlinked path let a second agent launch a
-    /// provider in a worktree another agent was already running in, which is the
+    /// Two spellings of one directory are one directory. Under a raw string
+    /// compare a symlinked path lets a second agent launch a provider in a
+    /// worktree another agent is already running in, which is the
     /// shared-conversation hazard every other same-directory check in dux
     /// compares canonically to avoid.
     #[test]
@@ -4720,10 +4719,10 @@ mod tests {
     #[test]
     fn pr_status_ready_skips_results_for_deleted_sessions() {
         // The PR check is async: its result can land AFTER the session was
-        // deleted. Applying it anyway used to (a) attempt an sqlite upsert
-        // that failed the sessions FOREIGN KEY, logging a scary ERROR on
-        // every delete-with-open-PR, and (b) re-insert in-memory PR status
-        // and a poll timestamp for a session that no longer exists.
+        // deleted. Applying it anyway would (a) attempt an sqlite upsert that
+        // fails the sessions FOREIGN KEY, logging a scary ERROR on every
+        // delete-with-open-PR, and (b) re-insert in-memory PR status and a poll
+        // timestamp for a session that does not exist.
         let (mut engine, _tmp) = test_engine();
         let pr = PrInfo {
             number: 7,

@@ -5442,7 +5442,7 @@ mod tests {
         );
     }
 
-    /// #10: the create-agent branch preflight (the single-source decision both
+    /// The create-agent branch preflight (the single-source decision both
     /// surfaces consume): a name matching no existing branch is Fresh, and a
     /// name matching a local branch is ExistingBranch (so the surface can ask
     /// for consent before attaching to that branch's history).

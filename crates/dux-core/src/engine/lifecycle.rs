@@ -1703,10 +1703,9 @@ mod tests {
 
     #[test]
     fn prune_fires_a_pr_recheck_when_the_agent_exits() {
-        // #25: the shared exit handling (used by the web) must re-check the agent's
-        // PR the moment it exits, because an exit commonly follows a merge and the
-        // badge would otherwise stay stale until the next background sync. The TUI
-        // already fires this from its own exit loop; this closes the web gap.
+        // The shared exit handling (used by the web) must re-check the agent's PR
+        // the moment it exits, because an exit commonly follows a merge and the
+        // badge would otherwise stay stale until the next background sync.
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         engine.gh_status = crate::model::GhStatus::Available;
@@ -2077,11 +2076,10 @@ mod tests {
         );
     }
 
-    /// #12 regression: closing an extra tab while a SIBLING has an in-flight
-    /// launch must report `detached: false`. The core outcome uses
-    /// `any_tab_active` (in-flight-aware); the web previously re-derived this
-    /// from `has_live_process` (a `providers` lookup only), which misses the
-    /// in-flight launch and wrongly reported the agent detached.
+    /// Closing an extra tab while a SIBLING has an in-flight launch must report
+    /// `detached: false`. The core outcome uses `any_tab_active`, which is
+    /// in-flight-aware; a `has_live_process` (`providers`-only) derivation
+    /// misses the in-flight launch and wrongly reports the agent detached.
     #[test]
     fn close_tab_reports_not_detached_when_a_sibling_launch_is_in_flight() {
         let (mut engine, _tmp, _worktree) = auto_reopen_fixture();

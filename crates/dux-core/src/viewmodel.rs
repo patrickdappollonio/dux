@@ -582,10 +582,9 @@ pub struct SessionView {
     /// is NO pull request to hang it off: it is what lets a surface offer the
     /// way back.
     pub pr_autodetect_suppressed: bool,
-    /// Provider tabs for this session, **Main first** (`tabs[0]`, `id ==
-    /// session id`) then extra tabs in creation order. Always non-empty. The
-    /// client shows the tab strip only when `tabs.len() >= 2`; with one tab the
-    /// pane looks exactly as it did before tabs existed.
+    /// Provider tabs for this session: the session-slot tab (`tabs[0]`, `id ==
+    /// session id`) first, then extra tabs in creation order. Always non-empty.
+    /// The client shows the tab strip only when `tabs.len() >= 2`.
     pub tabs: Vec<AgentTabView>,
     /// Whether the session's PTY has emitted any output yet. The web UI shows a
     /// readiness spinner until this is true.
@@ -1189,11 +1188,11 @@ impl Engine {
     }
 
     /// Project a single session into its [`SessionView`], looking up its PR
-    /// status, output, and streaming flag exactly as [`Engine::spine`] does.
-    /// Factored out so the per-session REST read (`GET /api/v1/sessions/:id`)
-    /// can project ONLY the requested session instead of building the whole spine.
+    /// status, output, and streaming flag exactly as [`Engine::spine`] does, so
+    /// the per-session REST read (`GET /api/v1/sessions/:id`) can project ONLY
+    /// the requested session instead of building the whole spine.
     ///
-    /// A session no longer carries its terminals: they live in the spine's one
+    /// A session does not carry its terminals: they live in the spine's one
     /// flat [`SpineView::terminals`] collection, each tagged with its owner.
     fn project_session(
         &self,
