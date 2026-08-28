@@ -2670,8 +2670,9 @@ mod tests {
         );
         assert!(
             flat.contains(
-                "The device driving this agent disconnected, so it kept running in the \
-                 background. Take over to drive it from here."
+                "The device driving this agent disconnected, so we kept the agent \
+                 running in the background to avoid losing any progress. Take over to \
+                 drive it from here."
             ),
             "the description is the web's, word for word: {flat}"
         );
@@ -2718,8 +2719,9 @@ mod tests {
         let flat = flowed(&render_rows(&mut app, 160, 40));
         assert!(
             flat.contains(
-                "The device driving this terminal disconnected, so it kept running in \
-                 the background. Take over to drive it from here."
+                "The device driving this terminal disconnected, so we kept the terminal \
+                 running in the background to avoid losing any progress. Take over to \
+                 drive it from here."
             ),
             "a terminal's card names a terminal: {flat}"
         );

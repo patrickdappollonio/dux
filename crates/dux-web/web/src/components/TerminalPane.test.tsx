@@ -697,7 +697,7 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
         ?.textContent?.replace(/\s+/g, " ")
         .trim(),
     ).toBe(
-      "The device driving this agent disconnected, so it kept running in the background. Take over to drive it from here.",
+      "The device driving this agent disconnected, so we kept the agent running in the background to avoid losing any progress. Take over to drive it from here.",
     )
     expect(pty.sendResize).not.toHaveBeenCalled()
   })

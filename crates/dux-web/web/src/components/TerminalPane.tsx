@@ -1238,8 +1238,10 @@ function TakeoverCard({
             ) : (
               <>
                 The device driving this {kind === "agent" ? "agent" : "terminal"}{" "}
-                disconnected, so it kept running in the background. Take over to
-                drive it from here.
+                disconnected, so we kept the{" "}
+                {kind === "agent" ? "agent" : "terminal"} running in the
+                background to avoid losing any progress. Take over to drive it
+                from here.
               </>
             )}
           </CardDescription>

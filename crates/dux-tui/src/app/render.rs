@@ -3299,8 +3299,9 @@ impl App {
             crate::app::pty_ownership::PtyTakeoverCard::Free => (
                 " Running in the background ".to_string(),
                 format!(
-                    "The device driving this {target} disconnected, so it kept running in \
-                     the background. Take over to drive it from here."
+                    "The device driving this {target} disconnected, so we kept the \
+                     {target} running in the background to avoid losing any progress. \
+                     Take over to drive it from here."
                 ),
             ),
         };
