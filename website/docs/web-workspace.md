@@ -346,7 +346,7 @@ by line. Full details in [Managing Macros](/docs/macros).
 
 Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one thumb:
 
-![The dux home screen on a phone, listing agents and terminals with their state, and the New agent button along the bottom.](/screens/phone-hub.png)
+![The dux home screen on a phone, listing agents with their state: one waiting on you, the rest working.](/screens/phone-hub.png)
 
 - The **home** screen is the hub: your projects and sessions with the same `⋯` menus as
   desktop, the same launcher pair along the bottom, and a **cog** button that opens the
