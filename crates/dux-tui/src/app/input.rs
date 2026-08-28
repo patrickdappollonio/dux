@@ -10039,6 +10039,12 @@ impl App {
     /// on a row that cannot be reordered (the Inactive tail, its toggle) arms
     /// nothing and clears any gesture a previous press left behind.
     fn arm_row_drag(&mut self, list: RowDragList, index: usize) {
+        if self.left_collapsed {
+            // The collapsed rail is a column of glyphs: there is no room to show a
+            // row being carried or a gap opening, so it does not drag.
+            self.row_drag = None;
+            return;
+        }
         self.row_drag = self.row_drag_id(list, index).map(|source_id| RowDragState {
             list,
             source: index,
@@ -10070,39 +10076,48 @@ impl App {
     /// about its OWN list, so a drag that wanders into the other section finds no
     /// target there.
     fn row_drag_target(&self, list: RowDragList, mouse: &MouseEvent) -> Option<(usize, String)> {
-        let index = match (list, self.mouse_target(mouse.column, mouse.row)) {
-            (RowDragList::Agents, Some(MouseTarget::LeftRow(index))) => index,
-            (RowDragList::Terminals, Some(MouseTarget::TerminalRow(index))) => index,
-            _ => return None,
-        };
+        let index = self.row_drag_target_row(list, mouse)?;
         self.row_drag_id(list, index).map(|id| (index, id))
+    }
+
+    /// The row of `list` the pointer is over, drop target or not. This is the
+    /// promotion threshold's question ("is the pointer still on the row it pressed
+    /// on?"), which is about the rect and not about whether a drop there would
+    /// mean anything.
+    fn row_drag_target_row(&self, list: RowDragList, mouse: &MouseEvent) -> Option<usize> {
+        match (list, self.mouse_target(mouse.column, mouse.row)) {
+            (RowDragList::Agents, Some(MouseTarget::LeftRow(index))) => Some(index),
+            (RowDragList::Terminals, Some(MouseTarget::TerminalRow(index))) => Some(index),
+            _ => None,
+        }
     }
 
     /// Track the pointer while a row drag is armed.
     ///
-    /// The promotion threshold is a whole row rather than a cell count: the
-    /// gesture stays a click until the pointer resolves to a DIFFERENT
-    /// reorderable row, so the two or three cells of vertical travel a heavy
-    /// hand adds to a click land inside the three-row-tall source row and change
-    /// nothing. Once promoted, `hover` follows the pointer and is `None`
-    /// wherever a drop would mean nothing: over the source row itself, over the
-    /// Inactive tail, over empty space, or outside the sidebar.
+    /// The promotion threshold is the source row's own rect: the gesture stays a
+    /// click for as long as the pointer is still on the row it pressed, whichever
+    /// way it wanders inside it, and becomes a drag the moment it leaves in any
+    /// direction. An agent row is three screen rows tall, so the two or three
+    /// cells of travel a heavy hand adds to a click change nothing, while a pull
+    /// out of the list is a drag even before it finds somewhere to land. Once
+    /// promoted, `hover` follows the pointer and is `None` wherever a drop would
+    /// mean nothing: over the source row itself, over the Inactive tail, over
+    /// empty space, or outside the sidebar.
     fn continue_row_drag(&mut self, mouse: &MouseEvent) {
         let Some(mut drag) = self.row_drag.clone() else {
             return;
         };
         let over = self.row_drag_target(drag.list, mouse);
         if !drag.moved {
-            match &over {
-                Some((index, _)) if *index != drag.source => {
-                    drag.moved = true;
-                    // The press is a drag now, so it can no longer be the first
-                    // half of a double click: a release that reorders must not
-                    // also count as a click the next press can pair with.
-                    self.last_mouse_click = None;
-                }
-                _ => return,
+            let still_home = self.row_drag_target_row(drag.list, mouse) == Some(drag.source);
+            if still_home {
+                return;
             }
+            drag.moved = true;
+            // The press is a drag now, so it can no longer be the first half of a
+            // double click: a release that reorders must not also count as a click
+            // the next press can pair with.
+            self.last_mouse_click = None;
         }
         let target = over.filter(|(index, _)| *index != drag.source);
         drag.hover = target.as_ref().map(|(index, _)| *index);
@@ -11791,6 +11806,86 @@ mod tests {
             "the survivors keep their order; no row the gesture never named is moved",
         );
         assert_eq!(app.engine.config.ui.agent_sort, "active");
+    }
+
+    #[test]
+    fn leaving_the_source_row_promotes_the_gesture_even_with_nothing_under_it() {
+        let mut app = drag_test_app();
+        let x = app.mouse_layout.left_list.x;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        // Straight onto the Inactive toggle, which is not a drop target: the
+        // gesture is a drag now, it just has nowhere to land.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 3),
+        ));
+
+        let drag = app.row_drag.as_ref().expect("gesture still live");
+        assert!(drag.moved, "the pointer left the row it pressed on");
+        assert_eq!(drag.hover, None, "there is nothing there to drop onto");
+        assert!(
+            app.last_mouse_click.is_none(),
+            "a promoted press can no longer pair into a double click",
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            left_row_y(&app, 3),
+        ));
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["s1", "s2", "s3", "s4"],
+            "a drop on nothing moves nothing"
+        );
+    }
+
+    #[test]
+    fn leaving_the_sidebar_entirely_promotes_the_gesture() {
+        let mut app = drag_test_app();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            app.mouse_layout.left_list.x,
+            left_row_y(&app, 0),
+        ));
+        let center = app.mouse_layout.center;
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            center.x + 2,
+            center.y + 2,
+        ));
+
+        let drag = app.row_drag.as_ref().expect("gesture still live");
+        assert!(
+            drag.moved,
+            "the pointer left the row in a direction with no rows"
+        );
+        assert_eq!(drag.hover, None);
+    }
+
+    #[test]
+    fn the_collapsed_rail_arms_no_drag() {
+        let mut app = drag_test_app();
+        app.left_collapsed = true;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            app.mouse_layout.left_list.x,
+            left_row_y(&app, 0),
+        ));
+
+        assert!(
+            app.row_drag.is_none(),
+            "the rail is too narrow to show a row moving, so it does not drag",
+        );
     }
 
     #[test]
