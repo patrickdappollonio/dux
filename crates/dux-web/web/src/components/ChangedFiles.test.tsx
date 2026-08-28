@@ -738,8 +738,8 @@ describe("the bulk bar's Select all toggle", () => {
     )
   })
 
-  // The universe is every row the filter shows, across BOTH sections, which is
-  // the union of what the two per-section select-alls used to cover.
+  // The universe is every row the filter shows, across BOTH sections, never one
+  // section at a time.
   it("reads Select all while a visible row is unchecked, and checks every section", () => {
     render(<ChangedFiles />)
     check("a.ts")

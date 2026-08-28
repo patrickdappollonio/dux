@@ -3167,9 +3167,9 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
   })
 
   it("still re-asserts an UNCHANGED size when the socket REOPENS (the dedupe bypass)", () => {
-    // The foreground resync moved from the visibility listener to `pty.onOpen`:
-    // it used to run on every visibility signal, which meant it could fire at a
-    // DEAD socket and book a size as delivered that never went out.
+    // The foreground resync rides `pty.onOpen`, not the visibility listener: a
+    // visibility signal can arrive at a DEAD socket, where the resync would book
+    // a size as delivered that never went out.
     const pty = mountSettled()
     pty.sendResize.mockClear()
     act(() => {

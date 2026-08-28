@@ -222,9 +222,9 @@ export function useTerminalOwnership(
   const takeoverDeviceOwnerRef = useRef<string | null>(null)
   // The name as of NOW, rather than as of the render whose closure a socket
   // callback happens to be holding. `seedFromConnected` runs from the PTY
-  // socket, which was wired on the mount render, so reading the state variable
-  // there pins it to that render forever: the superseded branch then saw a
-  // permanently null prior name and downgraded a perfectly good "Active on Chrome
+  // socket, which is wired on the mount render, so reading the state variable
+  // there would pin it to that render forever: the superseded branch would see a
+  // permanently null prior name and downgrade a perfectly good "Active on Chrome
   // on macOS" to the generic title. Refs are how every other read in this file
   // crosses that boundary.
   const takeoverDeviceRef = useRef<string | null>(null)

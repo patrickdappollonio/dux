@@ -1,8 +1,7 @@
 // The editor BODY: the header row, the tab strip, the explorer panel, and
-// the Monaco/diff/preview panes, extracted from EditorOverlay so two shells
-// can compose it: the desktop overlay Dialog (EditorOverlay.tsx) and the
-// standalone whole-tab surface (StandaloneEditor.tsx). Exactly one of the
-// two mounts it at a time (the overlay stands down while the tab is the
+// the Monaco/diff/preview panes. Two shells compose it: the desktop overlay
+// Dialog (EditorOverlay.tsx) and the standalone whole-tab surface
+// (StandaloneEditor.tsx). Exactly one of the two mounts it at a time (the overlay stands down while the tab is the
 // standalone surface), so there is never a second Monaco model set or a
 // second buffer map over the same files.
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
