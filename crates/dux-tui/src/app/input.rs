@@ -11579,7 +11579,8 @@ mod tests {
 
         // A real drag, and then no release: the release landed somewhere that
         // swallowed it (the take-over card covering the center pane is the case
-        // this really happens in; see the pty ownership test of the same name).
+        // this really happens in, covered by
+        // `a_release_swallowed_by_the_card_cannot_reorder_later`).
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             x,
