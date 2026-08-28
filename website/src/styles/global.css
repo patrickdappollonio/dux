@@ -521,7 +521,12 @@
     height: auto;
     border-radius: 0.5rem;
     margin: 1.25rem 0;
-  }
+    /* Centered by default: most screenshots are narrower than the column,
+     and a left-hugging image reads as a layout accident. The alignment
+     hashes below still override. */
+    margin-inline: auto;
+    display: block;
+}
   /* Image layout helpers for prose. The classes are applied from Markdown via
      a URL-hash convention (`![alt](/img.png#right)`) handled by the
      rehype-prose-images plugin — never hand-written HTML. `full-width` fills
