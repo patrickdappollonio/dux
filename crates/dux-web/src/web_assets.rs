@@ -59,19 +59,16 @@ pub enum UiBuildState {
     StaleReuse,
 }
 
-/// Map the build-script marker onto a state. Split out from [`ui_build_state`]
-/// so it can be tested; `option_env!` is fixed at compile time and cannot be
-/// varied from a test.
+/// Map the build-script marker onto a state. Its own function because
+/// `option_env!` is fixed at compile time and cannot be varied from a test.
 ///
 /// ONE marker with three values, not two booleans, and not because it is tidier.
 /// `option_env!` reads the AMBIENT rustc environment as well as what the build
 /// script emits, and a `cargo:rustc-env` ALWAYS wins over an ambient value of the
-/// same name (measured with a throwaway crate, not assumed). The previous scheme
-/// emitted nothing at all on the SUCCESS path, so nothing overrode an ambient
-/// `DUX_UI_BUILD_SKIPPED=1`: setting it as a workflow-level `env:` made every
-/// real-build test print SKIPPED on a completely genuine build, and CI guarded
-/// only `DUX_DISABLE_UI_BUILD`. Emitting this marker on ALL THREE paths closes
-/// that, because there is no path left on which the ambient value survives.
+/// same name (measured with a throwaway crate, not assumed). So `build.rs` must
+/// emit this marker on ALL THREE paths: a path that emits nothing leaves an
+/// ambient value of the same name in force, and a workflow-level `env:` would
+/// then make a completely genuine build report itself as skipped.
 ///
 /// An unrecognised or absent value means Built, which is the safe default here:
 /// the only states that let a test skip are the two spelled out below, so a

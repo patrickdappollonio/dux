@@ -976,7 +976,7 @@ mod tests {
         assert!(String::from_utf8_lossy(&body).starts_with("invalid create body:"));
     }
 
-    /// #10: an unconfirmed create whose name matches an existing branch is
+    /// An unconfirmed create whose name matches an existing branch is
     /// REFUSED with a confirmable 409 carrying the branch info, instead of
     /// silently attaching to that branch's history.
     #[tokio::test]

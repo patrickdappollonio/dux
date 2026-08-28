@@ -5028,12 +5028,11 @@ mod tests {
     }
 
     /// OWNERSHIP RELEASE IS A DROP GUARD, and that is the whole point of this
-    /// test. It used to be a plain statement at the end of the socket handler,
-    /// which a panic unwinding through the handler skipped, leaving the pty
-    /// recorded to a connection that no longer exists for the life of the
-    /// process: a phantom owner nobody can take over from and nobody can type
-    /// into. `_conn_guard` beside it had been a Drop guard all along for exactly
-    /// this reason.
+    /// test. A plain statement at the end of the socket handler is skipped by a
+    /// panic unwinding through it, leaving the pty recorded to a connection that
+    /// does not exist for the life of the process: a phantom owner nobody can
+    /// take over from and nobody can type into. `_conn_guard` beside it is a
+    /// Drop guard for exactly this reason.
     #[test]
     fn a_panicking_socket_still_releases_its_pty_ownership() {
         let owners = Arc::new(PtySizeOwners::default());
@@ -5168,11 +5167,11 @@ mod tests {
         );
     }
 
-    /// THE BEAT ECHO HAS ITS OWN, SHORT BOUND. It used to share the opening
-    /// sends' configurable one, which is a throughput allowance sized for a
-    /// whole scrollback replay; spending it on a twenty-five byte echo parks
-    /// every other write on the socket behind the sink lock, long past the point
-    /// the browser's own answer deadline has dropped the connection.
+    /// THE BEAT ECHO HAS ITS OWN, SHORT BOUND. The opening sends' configurable
+    /// bound is a throughput allowance sized for a whole scrollback replay;
+    /// spending it on a twenty-five byte echo would park every other write on
+    /// the socket behind the sink lock, long past the point the browser's own
+    /// answer deadline has dropped the connection.
     #[test]
     fn the_beat_echo_deadline_is_short_and_independent_of_the_replay_bound() {
         let limits = crate::engine_actor::LiveServerLimits::default();

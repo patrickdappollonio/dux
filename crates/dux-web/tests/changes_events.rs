@@ -797,7 +797,7 @@ async fn mixed_subscription_replays_workspace_before_fine_topic_catchup() {
 }
 
 /// One client's operation toast (a pull busy) is delivered ONLY back to it, not to
-/// a second `/ws/events` client — the F2 leak fix. The operation is triggered via
+/// a second `/ws/events` client. The operation is triggered via
 /// REST scoped to A's connection id (`X-Connection-Id`).
 #[tokio::test]
 async fn status_toast_is_scoped_to_origin_connection() {

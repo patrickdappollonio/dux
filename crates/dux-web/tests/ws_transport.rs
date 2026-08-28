@@ -398,9 +398,9 @@ where
 }
 
 /// Whether the spine's ONE flat `terminals` collection carries `terminal_id`
-/// tagged as owned by a session. Terminals no longer arrive nested inside the
-/// session or project that owns them; they arrive flat, each carrying a tagged
-/// owner, so these two helpers now read the tag instead of the nesting.
+/// tagged as owned by a session. Terminals arrive flat rather than nested
+/// inside the session or project that owns them, each carrying a tagged owner,
+/// so this and its sibling below read the tag instead of the nesting.
 fn spine_has_terminal(spine: &serde_json::Value, terminal_id: &str) -> bool {
     spine_terminal_has_owner_kind(spine, terminal_id, "session")
 }
@@ -1271,9 +1271,6 @@ async fn accumulate_until(
 /// stdin is forwarded from then on. None of it is obvious from the route code,
 /// and a change to any of it would break take-over on the web while every
 /// client-side test stayed green.
-///
-/// Re-scoped at the take-over arc: this test used to assert the OPPOSITE of (2),
-/// pinning the silent steal as if it were the contract.
 #[tokio::test]
 async fn a_second_pty_connection_is_replayed_scrollback_and_claims_only_by_taking_over() {
     let (addr, _tmp) = boot().await;
@@ -3089,17 +3086,10 @@ async fn build_identity_is_stable_within_one_server_run_and_is_never_cached() {
 /// The exact key set of a terminal entry on the documented thin reads, and of
 /// the session object it hangs off.
 ///
-/// `TerminalView` grew an `owner` tag when terminals moved to one flat
-/// collection, so these responses changed. Adding a field is additive and is the
-/// normal way an API grows, and `owner` earns its place because it says what the
-/// terminal belongs to, which the nesting used to say implicitly. What was
-/// actually wrong is that nothing here could have NOTICED: every assertion in
-/// this file checked ids and lengths, so a field appearing or disappearing on a
-/// documented endpoint was invisible until somebody's script broke.
-///
-/// So these are characterisation tests. They are not a claim that the shape must
-/// never change; they are the thing that makes a change to it a decision, taken
-/// in a diff, rather than a surprise.
+/// Every other assertion in this file checks ids and lengths, so a field
+/// appearing or disappearing on a documented endpoint is invisible here until
+/// somebody's script breaks. This key set is not a claim that the shape must
+/// never change; it is what makes a change to it a decision taken in a diff.
 const TERMINAL_KEYS: &[&str] = &[
     "created_at",
     "foreground_cmd",

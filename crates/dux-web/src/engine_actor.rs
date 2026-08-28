@@ -383,10 +383,9 @@ pub enum LoopControl {
     Exit,
 }
 
-/// The loop-side ends of the actor channels, owned by [`run_engine_loop`].
-/// Split out from [`EngineHandle`] (the caller-facing ends) so both the
-/// dedicated-thread path and the in-process flip can build the channels once
-/// and run the same loop body.
+/// The loop-side ends of the actor channels, owned by [`run_engine_loop`], with
+/// [`EngineHandle`] holding the caller-facing ends. The dedicated-thread path
+/// and the in-process flip build the channels once and run the same loop body.
 pub(crate) struct ActorLoopEnds {
     req_rx: mpsc::Receiver<EngineRequest>,
     status_tx: broadcast::Sender<WireStatus>,
