@@ -115,8 +115,8 @@ impl App {
     /// recency) the baseline is the displayed order: the main list as that
     /// comparator arranges it, then the quiet tail. Under MANUAL the stored
     /// order is taken verbatim instead, quiet agents left interleaved where the
-    /// stored order has them, which is exactly how the web's manual drags have
-    /// always computed their move.
+    /// stored order has them, which is how the web's manual drags compute their
+    /// move.
     pub(crate) fn agent_drag_baseline(&self) -> Vec<String> {
         let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
         if mode == AgentSortMode::Manual {
