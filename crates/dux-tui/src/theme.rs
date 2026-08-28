@@ -13,6 +13,10 @@ use dux_core::theme::DEFAULT_THEME_NAME;
 /// Broken-circle frames for spinner animations. Shared by the loading card,
 /// status line, and left-pane streaming indicator.
 pub const SPINNER_FRAMES: &[char] = &['◜', '◠', '◝', '◞', '◡', '◟'];
+/// Wall-clock milliseconds each spinner frame stays on screen: six frames, so
+/// one turn every 450ms. The event loop polls every 33ms while anything
+/// animates, which is what keeps this cadence honest.
+pub const SPINNER_FRAME_MS: u128 = 75;
 
 /// The single shared solid-dot glyph used everywhere dux needs a round dot:
 /// the attention indicator, status dots, and the tab strip's active-tab

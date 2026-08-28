@@ -14559,15 +14559,40 @@ mod tests {
             .collect()
     }
 
+    /// The spinner advances one frame every `SPINNER_FRAME_MS` of wall-clock
+    /// time and completes a turn after six, whatever the event loop is doing.
+    #[test]
+    fn spinner_advances_one_frame_per_cadence_and_turns_in_six() {
+        let frame = crate::theme::SPINNER_FRAME_MS as u64;
+        let index_at = |elapsed_ms: u64| {
+            let mut app = test_app(default_bindings());
+            app.start_time = Instant::now() - Duration::from_millis(elapsed_ms);
+            app.spinner_frame_index()
+        };
+        assert_eq!(index_at(0), 0);
+        assert_eq!(
+            index_at(frame - 10),
+            0,
+            "still the first frame just before the boundary"
+        );
+        assert_eq!(index_at(frame + 5), 1, "the second frame right after it");
+        assert_eq!(index_at(frame * 5 + 5), 5, "the last frame of the turn");
+        assert_eq!(
+            index_at(frame * 6 + 5),
+            0,
+            "one full turn wraps to the start"
+        );
+    }
+
     /// The slot is per TAB, not per session: stamping tab 2 leaves tab 1 blank,
     /// and the reverse. An idle tab shows a space, a working one the shared
     /// spinner frame for this instant, a flagged one the attention dot in the
     /// attention accent.
     #[test]
     fn each_pill_carries_its_own_tabs_activity_glyph() {
-        // 800ms into the cycle: the blink holds visible for another 1.2s and
-        // the spinner frame has 80ms of life left, so the assertions below are
-        // not racing the clock.
+        // 800ms into the cycle: the blink holds visible for another 1.2s, and
+        // the spinner is asserted by frame membership below, so the frame
+        // boundary does not matter.
         let (mut app, session_id) = tab_activity_app(800);
 
         // Idle: both slots blank.
@@ -14582,7 +14607,7 @@ mod tests {
 
         // Only tab 2 works. The frame is asserted by MEMBERSHIP, not identity:
         // the render reads the wall clock itself, so pinning the frame this test
-        // computed a moment earlier would race the 80ms frame boundary.
+        // computed a moment earlier would race the frame boundary.
         app.engine
             .pty_activity
             .insert("tab-2".to_string(), Instant::now());

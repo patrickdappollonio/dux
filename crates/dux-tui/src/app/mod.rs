@@ -4213,10 +4213,10 @@ impl App {
     }
 
     /// Returns the current arc spinner frame index based on wall-clock time
-    /// (100ms per frame). Unlike `tick_count`, this stays constant-speed
-    /// regardless of event loop frequency.
+    /// (`SPINNER_FRAME_MS` per frame). Unlike `tick_count`, this stays
+    /// constant-speed regardless of event loop frequency.
     pub(crate) fn spinner_frame_index(&self) -> usize {
-        ((self.start_time.elapsed().as_millis() / 100) as usize)
+        ((self.start_time.elapsed().as_millis() / crate::theme::SPINNER_FRAME_MS) as usize)
             % crate::theme::SPINNER_FRAMES.len()
     }
 
