@@ -10037,19 +10037,11 @@ impl App {
         }
     }
 
-    /// The row of `list` under the pointer, as an index and the id standing in it,
-    /// or `None` when the pointer is over anything else. A gesture only ever asks
-    /// about its OWN list, so a drag that wanders into the other section finds no
-    /// target there.
-    fn row_drag_target(&self, list: RowDragList, mouse: &MouseEvent) -> Option<(usize, String)> {
-        let index = self.row_drag_target_row(list, mouse)?;
-        self.row_drag_id(list, index).map(|id| (index, id))
-    }
-
-    /// The row of `list` the pointer is over, drop target or not. This is the
-    /// promotion threshold's question ("is the pointer still on the row it pressed
-    /// on?"), which is about the rect and not about whether a drop there would
-    /// mean anything.
+    /// The row of `list` the pointer is over, drop target or not. A gesture only
+    /// ever asks about its OWN list, so a drag that wanders into the other
+    /// section finds no row there. This is the promotion threshold's question
+    /// ("is the pointer still on the row it pressed on?"), which is about the
+    /// rect and not about whether a drop there would mean anything.
     fn row_drag_target_row(&self, list: RowDragList, mouse: &MouseEvent) -> Option<usize> {
         match (list, self.mouse_target(mouse.column, mouse.row)) {
             (RowDragList::Agents, Some(MouseTarget::LeftRow(index))) => Some(index),
@@ -10073,9 +10065,9 @@ impl App {
         let Some(mut drag) = self.row_drag.clone() else {
             return;
         };
-        let over = self.row_drag_target(drag.list, mouse);
+        let over_row = self.row_drag_target_row(drag.list, mouse);
         if !drag.moved {
-            let still_home = self.row_drag_target_row(drag.list, mouse) == Some(drag.source);
+            let still_home = over_row == Some(drag.source);
             if still_home {
                 return;
             }
@@ -10085,7 +10077,9 @@ impl App {
             // the next press can pair with.
             self.last_mouse_click = None;
         }
-        let target = over.filter(|(index, _)| *index != drag.source);
+        let target = over_row
+            .filter(|index| *index != drag.source)
+            .and_then(|index| self.row_drag_id(drag.list, index).map(|id| (index, id)));
         drag.hover = target.as_ref().map(|(index, _)| *index);
         drag.hover_id = target.map(|(_, id)| id);
         self.row_drag = Some(drag);
