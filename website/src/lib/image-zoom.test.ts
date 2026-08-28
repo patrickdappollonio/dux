@@ -4,12 +4,15 @@ import {
   MAX_SCALE,
   MIN_SCALE,
   ZOOM_STEP,
+  boundsFor,
   clampOffset,
   clampScale,
   distanceBetween,
+  fitScale,
   formatZoom,
   midpoint,
   pinchScale,
+  sameScale,
   shouldArm,
   stepScale,
   toggleScale,
@@ -43,6 +46,41 @@ describe("stepScale", () => {
     expect(stepScale(stepScale(1, 1), 1)).toBeCloseTo(ZOOM_STEP * ZOOM_STEP)
   })
 
+  it("snaps to natural size when a step up would cross it", () => {
+    // 0.8 * 1.5 = 1.2, which would skip the one scale that means something.
+    expect(stepScale(0.8, 1)).toBe(1)
+    expect(stepScale(0.7, 1)).toBe(1)
+  })
+
+  it("snaps to natural size when a step down would cross it", () => {
+    // 1.2 / 1.5 = 0.8.
+    expect(stepScale(1.2, -1)).toBe(1)
+    expect(stepScale(1.4, -1)).toBe(1)
+  })
+
+  it("steps away from natural size without sticking to it", () => {
+    expect(stepScale(1, 1)).toBeCloseTo(1.5)
+    expect(stepScale(1, -1)).toBeCloseTo(1 / 1.5)
+  })
+
+  it("reaches natural size from a fitted view in a few presses, exactly", () => {
+    const bounds = boundsFor(0.26)
+    let scale = 0.26
+    const ladder: number[] = []
+    for (let i = 0; i < 6 && scale !== 1; i++) {
+      scale = stepScale(scale, 1, bounds)
+      ladder.push(scale)
+    }
+    expect(ladder).toContain(1)
+    expect(scale).toBe(1)
+  })
+
+  it("steps below the default floor when the fitted view is below it", () => {
+    const bounds = boundsFor(0.14)
+    expect(stepScale(0.21, -1, bounds)).toBeCloseTo(0.14)
+    expect(stepScale(0.14, -1, bounds)).toBe(0.14)
+  })
+
   it("never leaves the range", () => {
     expect(stepScale(MAX_SCALE, 1)).toBe(MAX_SCALE)
     expect(stepScale(MIN_SCALE, -1)).toBe(MIN_SCALE)
@@ -50,14 +88,69 @@ describe("stepScale", () => {
 })
 
 describe("toggleScale", () => {
-  it("goes to 2x from 1x", () => {
-    expect(toggleScale(1)).toBe(2)
+  it("goes from the fitted view to natural size", () => {
+    expect(toggleScale(0.26, 0.26)).toBe(1)
   })
 
-  it("comes back to 1x from anywhere else", () => {
-    expect(toggleScale(2)).toBe(1)
-    expect(toggleScale(0.5)).toBe(1)
-    expect(toggleScale(6)).toBe(1)
+  it("comes back to the fitted view from natural size", () => {
+    expect(toggleScale(1, 0.26)).toBe(0.26)
+  })
+
+  it("returns to natural size from any other scale", () => {
+    expect(toggleScale(4, 0.26)).toBe(1)
+    expect(toggleScale(0.5, 0.26)).toBe(1)
+  })
+
+  it("magnifies instead when the image already fits at natural size", () => {
+    expect(toggleScale(1, 1)).toBe(2)
+    expect(toggleScale(2, 1)).toBe(1)
+  })
+})
+
+describe("fitScale", () => {
+  it("scales a large image down until the whole of it is visible", () => {
+    // 2880x1800 in a 1408x772 box: height is the binding dimension.
+    expect(fitScale(2880, 1800, 1408, 772)).toBeCloseTo(772 / 1800)
+    // A wide, short image is bound by width instead.
+    expect(fitScale(2880, 400, 1408, 772)).toBeCloseTo(1408 / 2880)
+  })
+
+  it("never scales an image up above natural size", () => {
+    expect(fitScale(726, 108, 1408, 772)).toBe(1)
+    expect(fitScale(100, 100, 4000, 4000)).toBe(1)
+  })
+
+  it("fits exactly when the image is exactly the size of the box", () => {
+    expect(fitScale(800, 600, 800, 600)).toBe(1)
+  })
+
+  it("falls back to natural size when a dimension is unknown", () => {
+    expect(fitScale(0, 1800, 1408, 772)).toBe(1)
+    expect(fitScale(2880, 1800, 0, 772)).toBe(1)
+    expect(fitScale(2880, 1800, 1408, 0)).toBe(1)
+  })
+})
+
+describe("boundsFor", () => {
+  it("keeps the ordinary floor when the image fits comfortably", () => {
+    expect(boundsFor(1)).toEqual({ min: MIN_SCALE, max: MAX_SCALE })
+    expect(boundsFor(0.6)).toEqual({ min: MIN_SCALE, max: MAX_SCALE })
+  })
+
+  it("drops the floor to the fit when a huge image fits below it", () => {
+    expect(boundsFor(0.13)).toEqual({ min: 0.13, max: MAX_SCALE })
+  })
+
+  it("lets clampScale hold a fitted view that is below the default floor", () => {
+    expect(clampScale(0.13, boundsFor(0.13))).toBe(0.13)
+    expect(clampScale(0.13)).toBe(MIN_SCALE)
+  })
+})
+
+describe("sameScale", () => {
+  it("treats a rounding difference as the same scale", () => {
+    expect(sameScale(0.26, 0.2600001)).toBe(true)
+    expect(sameScale(1, 1.2)).toBe(false)
   })
 })
 
@@ -124,6 +217,21 @@ describe("zoomAtPoint", () => {
       MAX_SCALE,
     )
   })
+
+  it("honours a floor lowered for a fitted view", () => {
+    expect(
+      zoomAtPoint({ scale: 1, x: 0, y: 0 }, 0.01, { x: 0, y: 0 }, boundsFor(0.13)).scale,
+    ).toBe(0.13)
+  })
+
+  it("holds the anchor still when a double click drops back to the fitted view", () => {
+    const before = { scale: 1, x: 0, y: 0 }
+    const anchor = { x: -220, y: 90 }
+    const after = zoomAtPoint(before, 0.26, anchor, boundsFor(0.26))
+    const contentX = (anchor.x - before.x) / before.scale
+    expect(after.scale).toBe(0.26)
+    expect(after.x + contentX * after.scale).toBeCloseTo(anchor.x)
+  })
 })
 
 describe("pinchScale", () => {
@@ -134,6 +242,10 @@ describe("pinchScale", () => {
 
   it("survives a zero starting distance", () => {
     expect(pinchScale(1.5, 0, 200)).toBe(1.5)
+  })
+
+  it("cannot pinch below the fitted view", () => {
+    expect(pinchScale(0.13, 200, 20, boundsFor(0.13))).toBe(0.13)
   })
 })
 
@@ -149,5 +261,9 @@ describe("formatZoom", () => {
     expect(formatZoom(1)).toBe("100%")
     expect(formatZoom(2.25)).toBe("225%")
     expect(formatZoom(0.5)).toBe("50%")
+  })
+
+  it("reports a fitted view as its real fraction of natural size", () => {
+    expect(formatZoom(fitScale(2880, 1800, 1408, 772))).toBe("43%")
   })
 })

@@ -4,10 +4,11 @@
 // A screenshot the prose column had to SHRINK is the only one worth opening:
 // there are pixels the reader cannot see. Those images (and only those) get
 // wrapped in a real <button> with a zoom-in cursor and a corner affordance, and
-// a click opens the one <dialog> below with the image at its natural size, pan
-// and zoom included. An image that already fits at 1:1 is left exactly as it
-// was: no cursor change, no affordance, no click behaviour, because there is
-// nothing to reveal.
+// a click opens the one <dialog> below FITTED, showing the whole screenshot,
+// with the readout naming the real percentage of natural size and natural size
+// a double click (or a snapping zoom step) away. An image that already fits at
+// 1:1 is left exactly as it was: no cursor change, no affordance, no click
+// behaviour, because there is nothing to reveal.
 //
 // The arithmetic lives in src/lib/image-zoom.ts (unit-tested without a
 // browser); the script here is wiring only. Styling is src/styles/image-zoom.css
@@ -84,19 +85,21 @@ import "../styles/image-zoom.css";
 
 <script>
   import {
-    MAX_SCALE,
-    MIN_SCALE,
+    boundsFor,
     clampOffset,
     clampScale,
     distanceBetween,
+    fitScale,
     formatZoom,
     midpoint,
     pinchScale,
+    sameScale,
     shouldArm,
     stepScale,
     toggleScale,
     zoomAtPoint,
     type Point,
+    type ScaleBounds,
     type ViewerTransform,
   } from "../lib/image-zoom";
 
@@ -109,6 +112,7 @@ import "../styles/image-zoom.css";
   const btnOut = document.querySelector<HTMLButtonElement>("[data-izoom-out]");
   const btnReset = document.querySelector<HTMLButtonElement>("[data-izoom-reset]");
   const btnClose = document.querySelector<HTMLButtonElement>("[data-izoom-close]");
+  const bar = document.querySelector<HTMLElement>("[data-izoom-bar]");
 
   // The alignment classes rehype-prose-images puts on the <img>. The trigger
   // takes over the image's box, so it takes over the class that shapes it.
@@ -116,22 +120,48 @@ import "../styles/image-zoom.css";
 
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
-  if (dialog && stage && viewer && level && caption && btnIn && btnOut && btnReset && btnClose) {
+  if (dialog && stage && viewer && level && caption && bar && btnIn && btnOut && btnReset && btnClose) {
     let transform: ViewerTransform = { scale: 1, x: 0, y: 0 };
     let naturalWidth = 0;
     let naturalHeight = 0;
+    let fit = 1;
+    let bounds: ScaleBounds = boundsFor(1);
     let opener: HTMLElement | null = null;
 
     // ── Viewer ────────────────────────────────────────────────────────────
+    // The space a fitted image has to live in: the stage, less the toolbar it
+    // would otherwise slide under and the caption below it. Both are measured
+    // rather than guessed, so an empty caption (an image with no alt) gives its
+    // room back.
+    const FIT_GAP = 16;
+    const availableBox = () => {
+      const box = stage.getBoundingClientRect();
+      return {
+        width: Math.max(1, box.width - FIT_GAP * 2),
+        height: Math.max(
+          1,
+          box.height - bar.offsetHeight - caption.offsetHeight - FIT_GAP * 4,
+        ),
+      };
+    };
+
+    const recomputeFit = () => {
+      const room = availableBox();
+      fit = fitScale(naturalWidth, naturalHeight, room.width, room.height);
+      bounds = boundsFor(fit);
+    };
+
     const apply = (animated = true) => {
       const box = stage.getBoundingClientRect();
       transform.x = clampOffset(transform.x, naturalWidth * transform.scale, box.width);
       transform.y = clampOffset(transform.y, naturalHeight * transform.scale, box.height);
       viewer.dataset.animated = animated && !reduceMotion.matches ? "true" : "false";
       viewer.style.transform = `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`;
+      // A percentage of NATURAL size, never of the fitted view: the number is
+      // there to say whether these are real pixels.
       level.textContent = formatZoom(transform.scale);
-      btnIn.disabled = transform.scale >= MAX_SCALE - 0.0001;
-      btnOut.disabled = transform.scale <= MIN_SCALE + 0.0001;
+      btnIn.disabled = transform.scale >= bounds.max - 0.0001;
+      btnOut.disabled = transform.scale <= bounds.min + 0.0001;
       const pannable =
         naturalWidth * transform.scale > box.width + 1 ||
         naturalHeight * transform.scale > box.height + 1;
@@ -149,13 +179,16 @@ import "../styles/image-zoom.css";
     };
 
     const zoomTo = (scale: number, anchor: Point, animated = true) => {
-      transform = zoomAtPoint(transform, scale, anchor);
+      transform = zoomAtPoint(transform, scale, anchor, bounds);
       apply(animated);
     };
 
-    const reset = () => {
-      transform = { scale: 1, x: 0, y: 0 };
-      apply(false);
+    // Reset is "show me the whole thing again", which is where the viewer
+    // opened; it is not a jump to 100%.
+    const reset = (animated = false) => {
+      recomputeFit();
+      transform = { scale: fit, x: 0, y: 0 };
+      apply(animated);
     };
 
     const measure = () => {
@@ -203,9 +236,13 @@ import "../styles/image-zoom.css";
     });
 
     btnClose.addEventListener("click", () => dialog.close());
-    btnIn.addEventListener("click", () => zoomTo(stepScale(transform.scale, 1), { x: 0, y: 0 }));
-    btnOut.addEventListener("click", () => zoomTo(stepScale(transform.scale, -1), { x: 0, y: 0 }));
-    btnReset.addEventListener("click", reset);
+    btnIn.addEventListener("click", () =>
+      zoomTo(stepScale(transform.scale, 1, bounds), { x: 0, y: 0 }),
+    );
+    btnOut.addEventListener("click", () =>
+      zoomTo(stepScale(transform.scale, -1, bounds), { x: 0, y: 0 }),
+    );
+    btnReset.addEventListener("click", () => reset(true));
 
     stage.addEventListener(
       "wheel",
@@ -219,7 +256,7 @@ import "../styles/image-zoom.css";
 
     viewer.addEventListener("dblclick", (event: MouseEvent) => {
       event.preventDefault();
-      zoomTo(toggleScale(transform.scale), anchorFor(event.clientX, event.clientY));
+      zoomTo(toggleScale(transform.scale, fit), anchorFor(event.clientX, event.clientY));
     });
 
     // ── Drag to pan, two fingers to pinch ─────────────────────────────────
@@ -260,7 +297,7 @@ import "../styles/image-zoom.css";
         const centre = midpoint(a, b);
         moved = true;
         zoomTo(
-          pinchScale(pinch.scale, pinch.distance, distanceBetween(a, b)),
+          pinchScale(pinch.scale, pinch.distance, distanceBetween(a, b), bounds),
           anchorFor(centre.x, centre.y),
           false,
         );
@@ -299,7 +336,15 @@ import "../styles/image-zoom.css";
     });
 
     window.addEventListener("resize", () => {
-      if (dialog.open && naturalWidth) apply(false);
+      if (!dialog.open || !naturalWidth) return;
+      // A reader who was looking at the whole image still wants the whole
+      // image after a rotate or a window drag; one who had zoomed in keeps the
+      // scale they chose.
+      const wasFitted = sameScale(transform.scale, fit);
+      recomputeFit();
+      if (wasFitted) transform.scale = fit;
+      transform.scale = clampScale(transform.scale, bounds);
+      apply(false);
     });
 
     // ── Arming ────────────────────────────────────────────────────────────
