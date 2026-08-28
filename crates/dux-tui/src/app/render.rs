@@ -4834,14 +4834,7 @@ impl App {
         self.render_dim_overlay(frame);
         let popup = centered_rect(72, 40, frame.area());
         self.clear_overlay_area(frame, popup);
-        let (direct, other) = self.palette_command_tiers(&input.text);
-        let divider_at = (!other.is_empty()).then_some(direct.len());
-        let mut commands = direct;
-        commands.extend(other);
-        let visual_rows = palette_visual_rows(
-            divider_at.unwrap_or(commands.len()),
-            divider_at.map_or(0, |at| commands.len() - at),
-        );
+        let commands = self.filtered_palette_commands(&input.text);
         let items = if commands.is_empty() {
             vec![ListItem::new("No matching commands.")]
         } else {
@@ -4852,21 +4845,9 @@ impl App {
                 .unwrap_or(0);
             let inner_width = popup.width as usize - 3;
             let gap = 2usize;
-            visual_rows
+            commands
                 .iter()
-                .map(|row| {
-                    let index = match row {
-                        PaletteVisualRow::Divider => {
-                            return ListItem::new(Line::from(Span::styled(
-                                " Other matches",
-                                Style::default()
-                                    .fg(self.theme.help_section_header_fg)
-                                    .add_modifier(Modifier::BOLD),
-                            )));
-                        }
-                        PaletteVisualRow::Command(index) => *index,
-                    };
-                    let binding = commands[index];
+                .map(|binding| {
                     let name = binding.palette_name.unwrap();
                     let name_padded = format!("{name:name_col$}");
                     let mut spans = vec![Span::styled(
@@ -4893,14 +4874,10 @@ impl App {
                 })
                 .collect::<Vec<_>>()
         };
-        // The stored selection counts commands; the rendered list also counts
-        // its non-selectable divider row.
+        // `selected` is stored state and the match list is recomputed on
+        // every draw, so availability can shrink it out from under the cursor.
         let selected_command = (*selected).min(commands.len().saturating_sub(1));
-        let selected_visual = visual_rows
-            .iter()
-            .position(|row| *row == PaletteVisualRow::Command(selected_command))
-            .unwrap_or(0);
-        let mut state = ListState::default().with_selected(Some(selected_visual));
+        let mut state = ListState::default().with_selected(Some(selected_command));
         let [input_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(3)])
@@ -4957,13 +4934,13 @@ impl App {
             list_inner,
             state.offset(),
             list_inner.height as usize,
-            visual_rows.len(),
+            commands.len(),
             self.theme.hint_key_fg,
         );
         self.overlay_layout.active = OverlayMouseLayout::Command {
             input: input_inner,
             list: list_inner,
-            items: visual_rows.len(),
+            items: commands.len(),
             offset: state.offset(),
         };
     }
@@ -18692,13 +18669,13 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_draws_an_other_matches_divider_between_the_two_tiers() {
+    fn the_palette_lists_the_phrase_matches_then_the_looser_ones() {
         // `agent tab` is a phrase in two commands and two loose words in a
-        // third, so the answer needs the boundary drawn.
+        // third, so the answer spans both tiers and must still read as one
+        // plain list.
         let (app, buf) = palette_frame((160, 30), "agent tab", 0);
-        // The leading word of each row: the command names in order, with the
-        // divider between the tiers. Descriptions are the registry's business,
-        // not this test's.
+        // The leading word of each row: the command names in order.
+        // Descriptions are the registry's business, not this test's.
         let rows = palette_list_rows(&app, &buf)
             .into_iter()
             .map(|row| {
@@ -18714,7 +18691,6 @@ mod tests {
             vec![
                 "new-agent-tab",
                 "toggle-always-show-tabs",
-                "Other matches",
                 "toggle-tab-to-agent",
                 "close-tab",
             ],
@@ -18723,74 +18699,27 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_draws_no_divider_without_a_second_tier() {
-        for query in ["", "toggle-github", "agent"] {
-            let (app, buf) = palette_frame((100, 20), query, 0);
+    fn the_palette_draws_no_section_row_whatever_the_query() {
+        for query in ["", "toggle-github", "agent", "agent tab", "new tab"] {
+            let (app, buf) = palette_frame((160, 30), query, 0);
             assert!(
                 !palette_list_rows(&app, &buf)
                     .iter()
                     .any(|row| row.contains("Other matches")),
-                "query {query:?} must not draw a divider"
+                "query {query:?} must draw commands only"
             );
         }
     }
 
     #[test]
-    fn the_divider_is_the_first_row_when_nothing_matches_the_phrase() {
+    fn a_query_only_the_looser_tier_answers_starts_at_the_first_command() {
         // Nothing is named or described `new tab`, so the whole answer is the
-        // looser tier and the divider is what labels it.
+        // looser tier and it takes the top of the list unannounced.
         let (app, buf) = palette_frame((100, 20), "new tab", 0);
         let rows = palette_list_rows(&app, &buf);
-        assert_eq!(rows.first().map(String::as_str), Some(" Other matches"));
         assert!(
-            rows[1].starts_with("new-agent-tab"),
-            "the one loose match must follow the divider: {rows:?}"
-        );
-    }
-
-    #[test]
-    fn the_divider_is_drawn_in_the_section_header_tone_and_never_highlighted() {
-        let (app, buf) = palette_frame((100, 20), "agent tab", 0);
-        let (list, _) = palette_rects(&app);
-        let divider_row = (0..list.height)
-            .find(|row| row_text(&buf, list, *row).contains("Other matches"))
-            .expect("divider row");
-        let cell = &buf[(list.x + 1, list.y + divider_row)];
-        assert_eq!(cell.fg, app.theme.help_section_header_fg);
-        assert_ne!(
-            cell.bg,
-            app.theme.selection_style().bg.unwrap_or(cell.bg),
-            "the divider must never render as the selected row"
-        );
-    }
-
-    #[test]
-    fn the_palette_marker_counts_the_divider_as_a_row() {
-        // A two-row viewport over four commands and the divider: the marker
-        // has to be told the list is five rows, not four.
-        let (app, buf) = palette_frame((160, 16), "agent tab", 0);
-        let (list, border_column) = palette_rects(&app);
-        let items = match app.overlay_layout.active {
-            OverlayMouseLayout::Command { items, .. } => items,
-            _ => unreachable!(),
-        };
-        assert_eq!(items, 5, "four commands plus the divider");
-        assert_eq!(list.height, 2, "fixture must overflow its viewport");
-        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
-
-        // Selecting the last command scrolls the divider off the top.
-        let (app, buf) = palette_frame((160, 16), "agent tab", 3);
-        let (list, border_column) = palette_rects(&app);
-        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↑"));
-        assert!(
-            !palette_list_rows(&app, &buf)
-                .iter()
-                .any(|row| row.contains("Other matches")),
-            "the divider has scrolled above the viewport"
-        );
-        assert!(
-            row_text(&buf, list, list.height - 1).contains("close-tab"),
-            "the last command must be on screen"
+            rows[0].starts_with("new-agent-tab"),
+            "the one loose match must be the first row: {rows:?}"
         );
     }
 

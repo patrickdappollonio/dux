@@ -6836,36 +6836,6 @@ impl App {
         }
     }
 
-    /// Land the palette's cursor on a clicked row, ignoring the "Other
-    /// matches" divider.
-    ///
-    /// Returns whether the click landed on a command, because the double-click
-    /// path needs to know: a second click on the divider must do nothing at
-    /// all rather than run whatever was selected before it.
-    fn set_command_palette_selection_from_visual_row(&mut self, visual_index: usize) -> bool {
-        let Some(command_index) = self.palette_command_index_at_visual_row(visual_index) else {
-            return false;
-        };
-        self.set_command_palette_selection(command_index);
-        true
-    }
-
-    /// The command a visual row carries, or `None` for the divider.
-    fn palette_command_index_at_visual_row(&self, visual_index: usize) -> Option<usize> {
-        match &self.prompt {
-            PromptState::Command { input, .. } => {
-                let (direct, other) = self.palette_command_tiers(&input.text);
-                palette_visual_rows(direct.len(), other.len())
-                    .get(visual_index)
-                    .and_then(|row| match row {
-                        PaletteVisualRow::Command(index) => Some(*index),
-                        PaletteVisualRow::Divider => None,
-                    })
-            }
-            _ => None,
-        }
-    }
-
     fn set_command_palette_cursor_from_mouse(&mut self, column: u16) {
         let input_area = match self.overlay_layout.active {
             OverlayMouseLayout::Command { input, .. } => input,
@@ -8442,12 +8412,8 @@ impl App {
     }
 
     fn click_command_palette_item(&mut self, index: usize) {
-        if self.palette_command_index_at_visual_row(index).is_none() {
-            self.last_mouse_click = None;
-            return;
-        }
         let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-        self.set_command_palette_selection_from_visual_row(index);
+        self.set_command_palette_selection(index);
         if double_click {
             self.execute_selected_command_palette();
         }
@@ -20730,14 +20696,11 @@ not_a_real_action = ["x"]
         app
     }
 
-    fn palette_tier_names(app: &App, filter: &str) -> (Vec<&'static str>, Vec<&'static str>) {
-        let (direct, other) = app.palette_command_tiers(filter);
-        let names = |tier: Vec<&crate::keybindings::RuntimeBinding>| {
-            tier.into_iter()
-                .filter_map(|binding| binding.palette_name)
-                .collect::<Vec<_>>()
-        };
-        (names(direct), names(other))
+    fn palette_names(app: &App, filter: &str) -> Vec<&'static str> {
+        app.filtered_palette_commands(filter)
+            .into_iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect()
     }
 
     fn palette_selection(app: &App) -> usize {
@@ -20806,21 +20769,12 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn the_palette_tiers_split_the_phrase_matches_from_the_loose_ones() {
+    fn the_palette_lists_the_phrase_matches_before_the_loose_ones() {
+        // One flat list, and `selected` indexes it directly: the phrase
+        // matches in table order, then the looser ones by score.
         let app = test_app(default_bindings());
         assert_eq!(
-            palette_tier_names(&app, "agent tab"),
-            (
-                vec!["new-agent-tab", "toggle-always-show-tabs"],
-                vec!["toggle-tab-to-agent", "close-tab"]
-            )
-        );
-        // `selected` indexes the two tiers flattened, in that order.
-        assert_eq!(
-            app.filtered_palette_commands("agent tab")
-                .iter()
-                .filter_map(|binding| binding.palette_name)
-                .collect::<Vec<_>>(),
+            palette_names(&app, "agent tab"),
             vec![
                 "new-agent-tab",
                 "toggle-always-show-tabs",
@@ -20831,9 +20785,8 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn palette_movement_clamps_at_both_ends_and_never_lands_on_the_divider() {
-        // Four commands across the boundary: the cursor is a COMMAND index, so
-        // the divider is not a place it can be.
+    fn palette_movement_clamps_at_both_ends() {
+        // Four commands, and the cursor stops at each end of them.
         let mut app = palette_app("agent tab", 0);
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
@@ -20846,8 +20799,7 @@ not_a_real_action = ["x"]
             app.handle_key(up).unwrap();
             assert_eq!(palette_selection(&app), expected, "moving up");
         }
-        // Crossing the boundary downward lands on the first loose match, not
-        // on the label above it.
+        // Crossing from the phrase matches into the loose ones is one step.
         app.handle_key(down).unwrap();
         app.handle_key(down).unwrap();
         let commands = app.filtered_palette_commands("agent tab");
@@ -20876,31 +20828,7 @@ not_a_real_action = ["x"]
         assert!(matches!(app.prompt, PromptState::None));
         assert_ne!(
             app.engine.config.ui.tab_reaches_agent, before,
-            "Enter on the first row below the divider must run that command"
-        );
-    }
-
-    #[test]
-    fn clicking_the_other_matches_divider_does_nothing_at_all() {
-        let mut app = palette_app("agent tab", 0);
-        install_command_overlay(&mut app, 5);
-        // Rows: two commands, the divider, two more commands.
-        let divider_row = 9 + 2;
-
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            20,
-            divider_row,
-        ));
-        assert_eq!(palette_selection(&app), 0, "the divider selects nothing");
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            20,
-            divider_row,
-        ));
-        assert!(
-            matches!(app.prompt, PromptState::Command { selected: 0, .. }),
-            "a double click on the divider must not run the selected command"
+            "Enter on the first loose match must run that command"
         );
     }
 
@@ -20932,8 +20860,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn clicks_land_on_the_right_command_with_the_divider_below_the_viewport() {
-        // Rows 0 and 1 are the two phrase matches; the divider is at 2.
+    fn clicks_land_on_the_right_command_at_the_top_of_the_list() {
         let (mut app, list, offset) = scrolled_palette("agent tab", 0);
         assert_eq!(offset, 0);
         click_palette_row(&mut app, list, 1);
@@ -20941,95 +20868,45 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn clicks_land_on_the_right_command_with_the_divider_inside_the_viewport() {
-        // Selecting the first loose match scrolls the divider to the top row.
-        let (mut app, list, offset) = scrolled_palette("agent tab", 2);
-        assert_eq!(offset, 2, "the viewport must start on the divider");
-        click_palette_row(&mut app, list, 0);
-        assert_eq!(
-            palette_selection(&app),
-            2,
-            "the divider under the pointer must not move the cursor"
-        );
-        click_palette_row(&mut app, list, 1);
-        assert_eq!(palette_selection(&app), 2);
-        let commands = app.filtered_palette_commands("agent tab");
-        assert_eq!(
-            commands[palette_selection(&app)].palette_name,
-            Some("toggle-tab-to-agent")
-        );
-    }
-
-    #[test]
-    fn clicks_land_on_the_right_command_with_the_divider_above_the_viewport() {
+    fn clicks_land_on_the_right_command_once_the_list_has_scrolled() {
+        // Selecting the last command scrolls the first two off the top, so a
+        // click has to be read through the renderer's own offset.
         let (mut app, list, offset) = scrolled_palette("agent tab", 3);
-        assert_eq!(offset, 3, "the divider has scrolled off the top");
+        assert_eq!(offset, 2, "the fixture must have scrolled");
         click_palette_row(&mut app, list, 0);
-        let commands = app.filtered_palette_commands("agent tab");
         assert_eq!(
-            commands[palette_selection(&app)].palette_name,
-            Some("toggle-tab-to-agent"),
-            "visual row 3 is command 2 once the divider is counted"
+            palette_names(&app, "agent tab")[palette_selection(&app)],
+            "toggle-tab-to-agent"
         );
         click_palette_row(&mut app, list, 1);
-        let commands = app.filtered_palette_commands("agent tab");
         assert_eq!(
-            commands[palette_selection(&app)].palette_name,
-            Some("close-tab")
+            palette_names(&app, "agent tab")[palette_selection(&app)],
+            "close-tab"
         );
     }
 
     #[test]
-    fn a_divider_click_does_not_prime_the_next_click_as_a_double_click() {
-        // Row 2 is the divider for `agent tab`. Clicking it must record
-        // nothing, or a filter change that puts a command at that same visual
-        // index turns the very next press into a double click and runs it.
+    fn clicking_a_palette_row_selects_that_command() {
         let mut app = palette_app("agent tab", 0);
-        install_command_overlay(&mut app, 5);
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 9 + 2));
-        assert!(
-            app.last_mouse_click.is_none(),
-            "the divider must leave no click behind it"
-        );
+        install_command_overlay(&mut app, 4);
 
-        // `agent` has no second tier, so visual row 2 is now a command.
-        if let PromptState::Command { input, .. } = &mut app.prompt {
-            input.set_text("agent".to_string());
-        }
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 9 + 2));
-        assert!(
-            matches!(app.prompt, PromptState::Command { selected: 2, .. }),
-            "the click must only select: {:?}",
-            app.prompt
-        );
-    }
-
-    #[test]
-    fn clicking_the_rows_either_side_of_the_divider_selects_those_commands() {
-        let mut app = palette_app("agent tab", 0);
-        install_command_overlay(&mut app, 5);
-
-        // The last row above the divider is command 1.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 9 + 1));
         assert_eq!(palette_selection(&app), 1);
-        // The first row below it is command 2, one visual row further down.
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 9 + 3));
-        assert_eq!(palette_selection(&app), 2);
-        let commands = app.filtered_palette_commands("agent tab");
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 9 + 2));
         assert_eq!(
-            commands[palette_selection(&app)].palette_name,
-            Some("toggle-tab-to-agent")
+            palette_names(&app, "agent tab")[palette_selection(&app)],
+            "toggle-tab-to-agent"
         );
     }
 
     #[test]
-    fn availability_filters_the_loose_tier_on_its_own() {
+    fn availability_filters_the_loose_matches_too() {
         // `open pr` is nobody's phrase, so every hit is a loose one and the
         // gated command is among them.
         let app = test_app(default_bindings());
         assert_eq!(
-            palette_tier_names(&app, "open pr"),
-            (Vec::new(), vec!["add-project", "new-terminal-for-project"]),
+            palette_names(&app, "open pr"),
+            vec!["add-project", "new-terminal-for-project"],
             "without a pull request, open-current-pr is not offered at all"
         );
 
@@ -21046,26 +20923,18 @@ not_a_real_action = ["x"]
             },
         );
         assert_eq!(
-            palette_tier_names(&app, "open pr"),
-            (
-                Vec::new(),
-                vec!["open-current-pr", "add-project", "new-terminal-for-project"]
-            ),
-            "with one, it leads the loose tier"
+            palette_names(&app, "open pr"),
+            vec!["open-current-pr", "add-project", "new-terminal-for-project"],
+            "with one, it leads the loose matches"
         );
     }
 
     #[test]
-    fn availability_can_empty_the_loose_tier_and_then_there_is_no_divider() {
+    fn availability_can_empty_the_palette_entirely() {
         // `terminal move` reaches the four terminal-move commands and nothing
         // else, and all four are hidden while no terminal exists.
         let app = test_app(default_bindings());
-        let (direct, other) = app.palette_command_tiers("terminal move");
-        assert!(direct.is_empty() && other.is_empty());
-        assert!(
-            crate::app::palette_visual_rows(direct.len(), other.len()).is_empty(),
-            "no rows at all, so no divider standing over nothing"
-        );
+        assert!(app.filtered_palette_commands("terminal move").is_empty());
 
         let mut app = test_app(default_bindings());
         let args: Vec<String> = vec![];
@@ -21089,22 +20958,13 @@ not_a_real_action = ["x"]
             },
         );
         assert_eq!(
-            palette_tier_names(&app, "terminal move"),
-            (
-                Vec::new(),
-                vec![
-                    "move-terminal-up",
-                    "move-terminal-down",
-                    "move-terminal-top",
-                    "move-terminal-bottom"
-                ]
-            )
-        );
-        let (direct, other) = app.palette_command_tiers("terminal move");
-        assert_eq!(
-            crate::app::palette_visual_rows(direct.len(), other.len())[0],
-            crate::app::PaletteVisualRow::Divider,
-            "with an empty phrase tier the divider is the first row"
+            palette_names(&app, "terminal move"),
+            vec![
+                "move-terminal-up",
+                "move-terminal-down",
+                "move-terminal-top",
+                "move-terminal-bottom"
+            ]
         );
     }
 
@@ -21161,12 +21021,6 @@ not_a_real_action = ["x"]
         let commands = app.filtered_palette_commands("open-current-pr");
 
         assert!(commands.is_empty());
-        // Per tier: the phrase tier is where this one would have been, and
-        // gating empties it without leaving anything below the divider.
-        assert_eq!(
-            palette_tier_names(&app, "open-current-pr"),
-            (Vec::new(), Vec::new())
-        );
     }
 
     #[test]
@@ -21188,11 +21042,6 @@ not_a_real_action = ["x"]
 
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].palette_name, Some("open-current-pr"));
-        assert_eq!(
-            palette_tier_names(&app, "open-current-pr"),
-            (vec!["open-current-pr"], Vec::new()),
-            "it is a phrase match, so it belongs above the divider"
-        );
         assert_eq!(
             app.current_pr_url(),
             Some("https://github.com/owner/repo/pull/42")

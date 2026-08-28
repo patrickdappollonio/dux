@@ -1926,8 +1926,8 @@ impl RuntimeBindings {
     /// description. It is a phrase match, so `open current pr` finds
     /// `open-current-pr` but `new tab` finds nothing.
     ///
-    /// `other` is the looser tier the divider sits above: the words in any
-    /// order, each of them possibly partial, ranked by
+    /// `other` is the looser tier, listed after the phrase hits: the words in
+    /// any order, each of them possibly partial, ranked by
     /// [`dux_core::palette::search`], with everything already in `direct`
     /// removed. It is usually a multi-word query that lands here, but not
     /// only: the two tiers tokenize differently, and a single word can reach
@@ -1954,10 +1954,9 @@ impl RuntimeBindings {
     }
 
     /// Both tiers of [`RuntimeBindings::palette_matches`] as one flat list,
-    /// the direct hits first. The app itself asks for the tiers, because it
-    /// draws the boundary between them and availability-filters each side
-    /// separately; this is the shape the binding tests match on.
-    #[cfg(test)]
+    /// the direct hits first. That flat list is what the palette draws and
+    /// what its cursor indexes; the tiers exist to fix the order, not to be
+    /// shown apart.
     pub fn filtered_palette(&self, input: &str) -> Vec<&RuntimeBinding> {
         let matches = self.palette_matches(input);
         let mut flat = matches.direct;
@@ -1993,10 +1992,10 @@ impl RuntimeBindings {
     }
 }
 
-/// The palette's matches, split at the boundary the "Other matches" divider
-/// is drawn on. Two tiers rather than one merged ranking because the looser
-/// hits are meant to sit visibly BELOW the exact ones, not to be interleaved
-/// with them by a score.
+/// The palette's matches in two tiers rather than one merged ranking,
+/// because the looser hits are meant to sit BELOW the exact ones rather than
+/// be interleaved with them by a score. Nothing draws a boundary between
+/// them; the split is only how the flat list gets its order.
 pub struct PaletteMatches<'a> {
     /// Contiguous-phrase matches, in the palette's canonical table order.
     pub direct: Vec<&'a RuntimeBinding>,
@@ -2793,7 +2792,7 @@ mod tests {
         );
         assert!(
             !palette_names(&matches.other).contains(&"sort-agents"),
-            "a direct hit must not be repeated below the divider"
+            "a direct hit must not be repeated in the second tier"
         );
     }
 

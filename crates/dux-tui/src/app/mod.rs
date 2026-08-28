@@ -1567,37 +1567,6 @@ pub(crate) struct StartupLogViewer {
     pub(crate) return_to: Option<Box<StartupCommandLogPrompt>>,
 }
 
-/// One rendered row of the command palette's list.
-///
-/// Same idiom as [`ManageWorktreeVisualRow`], and for the same reason: the
-/// list has a row the cursor must never land on. The palette's `selected`
-/// stays a COMMAND index into the flat match list, so cursor movement, Enter
-/// and Tab completion need no knowledge of the divider at all; only the
-/// renderer and the mouse map between the two coordinate spaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PaletteVisualRow {
-    /// A command, by its index into the flat match list.
-    Command(usize),
-    /// The "Other matches" divider between the phrase tier and the loose one.
-    Divider,
-}
-
-/// The palette's visual rows for `direct` phrase matches followed by `other`
-/// looser ones.
-///
-/// The divider renders whenever the looser tier has anything in it, even when
-/// the phrase tier is empty: there it is the label saying that what follows is
-/// a looser reading of the query, which is exactly when the user most needs
-/// telling.
-pub(crate) fn palette_visual_rows(direct: usize, other: usize) -> Vec<PaletteVisualRow> {
-    let mut rows: Vec<PaletteVisualRow> = (0..direct).map(PaletteVisualRow::Command).collect();
-    if other > 0 {
-        rows.push(PaletteVisualRow::Divider);
-        rows.extend((direct..direct + other).map(PaletteVisualRow::Command));
-    }
-    rows
-}
-
 /// One rendered row of the worktree MANAGER's list. Same shape as the adopt
 /// picker's rows and deliberately a separate type: the two lists group by
 /// different questions (adoptable vs removable) and share no entries.
@@ -4635,44 +4604,21 @@ impl App {
         Ok(())
     }
 
-    /// The palette's two tiers, each availability-filtered on its own.
+    /// The palette's matches, phrase hits first and the looser ones after
+    /// them, with everything the current state cannot run removed.
     ///
-    /// Filtering per tier rather than over the flattened list is what keeps
-    /// the divider honest: availability can empty either tier, and a divider
-    /// standing over nothing would announce looser matches that are not there.
-    pub(crate) fn palette_command_tiers(
-        &self,
-        input: &str,
-    ) -> (
-        Vec<&crate::keybindings::RuntimeBinding>,
-        Vec<&crate::keybindings::RuntimeBinding>,
-    ) {
-        let matches = self.bindings.palette_matches(input);
-        (
-            self.available_palette_commands(matches.direct),
-            self.available_palette_commands(matches.other),
-        )
-    }
-
-    fn available_palette_commands<'a>(
-        &self,
-        bindings: Vec<&'a crate::keybindings::RuntimeBinding>,
-    ) -> Vec<&'a crate::keybindings::RuntimeBinding> {
-        bindings
-            .into_iter()
-            .filter(|binding| self.is_palette_action_available(binding.action))
-            .collect()
-    }
-
-    /// Both palette tiers flattened, which is the coordinate space `selected`
-    /// lives in.
+    /// One flat list, which is the coordinate space `selected` lives in and
+    /// the order the palette draws: there is no boundary row between the two
+    /// tiers, so nothing else needs to know where one ends.
     pub(crate) fn filtered_palette_commands(
         &self,
         input: &str,
     ) -> Vec<&crate::keybindings::RuntimeBinding> {
-        let (mut direct, other) = self.palette_command_tiers(input);
-        direct.extend(other);
-        direct
+        self.bindings
+            .filtered_palette(input)
+            .into_iter()
+            .filter(|binding| self.is_palette_action_available(binding.action))
+            .collect()
     }
 
     pub(crate) fn execute_command(&mut self, command: String) -> Result<()> {
@@ -6776,23 +6722,6 @@ mod tests {
             selected: 0,
         };
         assert!(!app.should_poll_raw_input());
-    }
-
-    #[test]
-    fn palette_visual_rows_place_the_divider_only_above_a_real_second_tier() {
-        use PaletteVisualRow::{Command, Divider};
-        assert_eq!(palette_visual_rows(0, 0), Vec::new());
-        assert_eq!(palette_visual_rows(2, 0), vec![Command(0), Command(1)]);
-        assert_eq!(
-            palette_visual_rows(0, 2),
-            vec![Divider, Command(0), Command(1)],
-            "an empty phrase tier still gets the label"
-        );
-        assert_eq!(
-            palette_visual_rows(1, 2),
-            vec![Command(0), Divider, Command(1), Command(2)],
-            "command indices stay indices into the FLAT match list"
-        );
     }
 
     #[test]
