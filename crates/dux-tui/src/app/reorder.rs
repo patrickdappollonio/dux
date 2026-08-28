@@ -47,6 +47,27 @@ pub(crate) fn move_in_order<T: Clone>(order: &[T], idx: usize, dir: MoveDir) -> 
     out
 }
 
+/// Move `active` to the slot `over` currently occupies, returning the new order.
+/// The cross-language twin of the web's `moveItem` (`lib/reorder.ts`), down to
+/// the no-op cases: identical ids, or an id that is not in `order`, return the
+/// order unchanged. `over`'s slot is its index in the ORIGINAL order, so
+/// dropping downward lands the moved item where the target was standing.
+pub(crate) fn move_to_target<T: Clone + PartialEq>(order: &[T], active: &T, over: &T) -> Vec<T> {
+    let mut out = order.to_vec();
+    if active == over {
+        return out;
+    }
+    let (Some(from), Some(to)) = (
+        order.iter().position(|item| item == active),
+        order.iter().position(|item| item == over),
+    ) else {
+        return out;
+    };
+    let item = out.remove(from);
+    out.insert(to, item);
+    out
+}
+
 impl App {
     /// Move the selected agent within the global agent order and switch the sort
     /// to manual (like the web's drag-to-reorder), keeping the selection on the
@@ -68,6 +89,49 @@ impl App {
         };
         let new_order = move_in_order(&order, idx, dir);
         self.apply_agent_order(&order, new_order, &session_id);
+    }
+
+    /// The COMPLETE agent id order a drop is computed against: the whole roster
+    /// in the order the user is actually looking at.
+    ///
+    /// This is the cross-language twin of the web's `displayedSessionOrder`, and
+    /// it must stay that way: the persisted order is shared, so a drop made on
+    /// either surface has to mean the same thing. Every session is included,
+    /// never just the rows a live query leaves on screen, because the stored
+    /// order is total. Under a computed sort (active first, by name, by
+    /// recency) the baseline is the displayed order: the main list as that
+    /// comparator arranges it, then the quiet tail. Under MANUAL the stored
+    /// order is taken verbatim instead, quiet agents left interleaved where the
+    /// stored order has them, which is exactly how the web's manual drags have
+    /// always computed their move.
+    pub(crate) fn agent_drag_baseline(&self) -> Vec<String> {
+        let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
+        if mode == AgentSortMode::Manual {
+            return self.engine.sessions.iter().map(|s| s.id.clone()).collect();
+        }
+        // The same "working or waiting on you" mask the sidebar builds its rows
+        // with, so the baseline and the screen agree about the active float.
+        let hot: Vec<bool> = self
+            .engine
+            .sessions
+            .iter()
+            .map(|s| {
+                self.engine.session_is_streaming(&s.id)
+                    || self.engine.session_needs_attention(&s.id)
+            })
+            .collect();
+        let order = dux_core::flat_list::order_sessions(
+            &self.engine.sessions,
+            mode.to_flat_sort_mode(),
+            &|i| hot[i],
+            &|_| true,
+        );
+        order
+            .active
+            .into_iter()
+            .chain(order.inactive)
+            .filter_map(|i| self.engine.sessions.get(i).map(|s| s.id.clone()))
+            .collect()
     }
 
     /// Apply a new GLOBAL agent order: flip the sort to manual, persist the
@@ -185,6 +249,34 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `move_to_target` is the twin of the web's `moveItem`; these are its own
+    /// test vectors, so a change to one language that is not mirrored fails here.
+    #[test]
+    fn move_to_target_moves_an_item_forward_to_the_over_slot() {
+        assert_eq!(
+            move_to_target(&["a", "b", "c", "d"], &"a", &"c"),
+            vec!["b", "c", "a", "d"]
+        );
+    }
+
+    #[test]
+    fn move_to_target_moves_an_item_backward_to_the_over_slot() {
+        assert_eq!(
+            move_to_target(&["a", "b", "c", "d"], &"d", &"b"),
+            vec!["a", "d", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn move_to_target_is_a_no_op_for_the_same_item_or_a_missing_one() {
+        assert_eq!(
+            move_to_target(&["a", "b", "c"], &"b", &"b"),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(move_to_target(&["a", "b"], &"x", &"a"), vec!["a", "b"]);
+        assert_eq!(move_to_target(&["a", "b"], &"a", &"x"), vec!["a", "b"]);
+    }
 
     #[test]
     fn move_up_swaps_with_the_previous_item() {

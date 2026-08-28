@@ -10079,10 +10079,31 @@ impl App {
         self.row_drag = Some(drag);
     }
 
-    /// Retire the row drag on release. Returns the gesture that was live, if any,
-    /// so the caller can act on a completed drop.
-    fn finish_row_drag(&mut self) -> Option<RowDragState> {
-        self.row_drag.take()
+    /// Retire the row drag on release and, when it was a real drag that ended on
+    /// a drop target, apply the reorder.
+    ///
+    /// The move is computed the way the web computes a drop: take the COMPLETE
+    /// agent order as the screen shows it, move the dragged agent to the slot the
+    /// row it was dropped on occupies, and hand the whole list to the engine
+    /// (which accepts nothing less than the complete set). An unpromoted gesture,
+    /// or one released with no target under it, reorders nothing and says
+    /// nothing.
+    fn finish_row_drag(&mut self) {
+        let Some(drag) = self.row_drag.take() else {
+            return;
+        };
+        let Some(hover) = drag.hover.filter(|_| drag.moved) else {
+            return;
+        };
+        let (Some(source_id), Some(target_id)) = (
+            self.left_item_session_id(drag.source),
+            self.left_item_session_id(hover),
+        ) else {
+            return;
+        };
+        let baseline = self.agent_drag_baseline();
+        let next = super::reorder::move_to_target(&baseline, &source_id, &target_id);
+        self.apply_agent_order(&baseline, next, &source_id);
     }
 
     fn handle_primary_mouse_down(&mut self, mouse: &MouseEvent, windowed: bool) {
@@ -11124,6 +11145,192 @@ mod tests {
         assert_eq!(drag.source, 2);
         assert!(!drag.moved);
         assert_eq!(drag.hover, None);
+    }
+
+    #[test]
+    fn the_drag_baseline_follows_the_displayed_order_and_stays_verbatim_in_manual() {
+        let mut app = drag_test_app();
+        // Stored order s1, s2, s3, s4 with s4 detached.
+        app.engine.config.ui.agent_sort = "name_desc".to_string();
+        assert_eq!(
+            app.agent_drag_baseline(),
+            vec![
+                "s3".to_string(),
+                "s2".to_string(),
+                "s1".to_string(),
+                "s4".to_string()
+            ],
+            "a computed sort shows the sorted main list, then the quiet tail",
+        );
+
+        app.engine.config.ui.agent_sort = "manual".to_string();
+        assert_eq!(
+            app.agent_drag_baseline(),
+            vec![
+                "s1".to_string(),
+                "s2".to_string(),
+                "s3".to_string(),
+                "s4".to_string()
+            ],
+            "manual takes the stored order verbatim, as the web's drags do",
+        );
+    }
+
+    #[test]
+    fn a_drop_on_another_row_reorders_the_whole_list_and_switches_to_manual() {
+        let mut app = drag_test_app();
+        app.engine.config.ui.agent_sort = "active".to_string();
+        let x = app.mouse_layout.left_list.x;
+
+        // Drag the first agent onto the third row and release there.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 2),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            left_row_y(&app, 2),
+        ));
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["s2", "s3", "s1", "s4"],
+            "the dropped agent takes the target's slot and the quiet agent keeps its place",
+        );
+        assert_eq!(app.engine.config.ui.agent_sort, "manual");
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            Some("Reordered agents. Sorting is now manual.".to_string()),
+        );
+        assert!(app.row_drag.is_none(), "the drop retires the gesture");
+    }
+
+    #[test]
+    fn a_drop_back_on_the_source_row_reorders_nothing_and_says_nothing() {
+        let mut app = drag_test_app();
+        app.engine.config.ui.agent_sort = "active".to_string();
+        let x = app.mouse_layout.left_list.x;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 2),
+        ));
+        // Back home before releasing.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(order, vec!["s1", "s2", "s3", "s4"]);
+        assert_eq!(
+            app.engine.config.ui.agent_sort, "active",
+            "a drop that changes nothing must not take the list off its sort",
+        );
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            None,
+            "nothing happened, so nothing is announced",
+        );
+    }
+
+    #[test]
+    fn a_drop_under_a_live_filter_still_sends_every_agent() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        app.engine.sessions.clear();
+        for id in ["alpha", "zulu", "alto"] {
+            app.engine
+                .sessions
+                .push(filter_test_session(id, id, "p1", now));
+        }
+        let mut quiet = filter_test_session("omega", "omega", "p1", now);
+        quiet.status = crate::model::SessionStatus::Detached;
+        app.engine.sessions.push(quiet);
+        app.engine.config.ui.agent_sort = "active".to_string();
+        // A query that leaves two rows on screen and hides the other two.
+        app.agent_filter = Some(TextInput::with_text("al".to_string()));
+        app.rebuild_left_items();
+        install_mouse_layout(&mut app);
+        assert_eq!(app.left_items().len(), 2, "only alpha and alto are visible");
+
+        let x = app.mouse_layout.left_list.x;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 1),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["alto", "alpha", "zulu", "omega"],
+            "the persisted order is total: the rows the query hides keep their places",
+        );
+    }
+
+    #[test]
+    fn a_drop_in_a_computed_sort_mode_reorders_what_the_screen_shows() {
+        let mut app = drag_test_app();
+        // Name-descending display order is s3, s2, s1 over a stored s1, s2, s3.
+        app.engine.config.ui.agent_sort = "name_desc".to_string();
+        app.rebuild_left_items();
+        let x = app.mouse_layout.left_list.x;
+
+        // Drag the top row (s3 on screen) onto the third row (s1 on screen).
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 2),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            left_row_y(&app, 2),
+        ));
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["s2", "s1", "s3", "s4"],
+            "the move is computed against the displayed order, not the stored one",
+        );
+        assert_eq!(app.engine.config.ui.agent_sort, "manual");
     }
 
     #[test]

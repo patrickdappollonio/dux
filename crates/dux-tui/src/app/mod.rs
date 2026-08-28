@@ -5305,6 +5305,15 @@ impl App {
             .is_some_and(|item| item.is_selectable())
     }
 
+    /// The session id behind agent-list item `index`, or `None` when the item is
+    /// not an agent row (the Inactive toggle) or the index is out of range.
+    pub(crate) fn left_item_session_id(&self, index: usize) -> Option<String> {
+        match self.left_items().get(index) {
+            Some(LeftItem::Session(i)) => self.engine.sessions.get(*i).map(|s| s.id.clone()),
+            _ => None,
+        }
+    }
+
     /// Whether the agent-list item at `index` may be dragged, and dropped onto,
     /// by a mouse reorder: an agent row in the ACTIVE list.
     ///
