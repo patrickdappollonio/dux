@@ -3152,17 +3152,26 @@ pub(crate) enum RowDragList {
     Terminals,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RowDragState {
     /// The list the press landed in. A drop is only ever computed within it.
     pub(crate) list: RowDragList,
     /// The item index the press landed on: the row being moved.
     pub(crate) source: usize,
+    /// WHAT the press landed on: the id of the agent or terminal in the source
+    /// row, captured while the user was looking at it. Row indices are positions
+    /// in a list that is rebuilt whenever an agent attaches, exits or arrives, so
+    /// the index alone is not an identity. The drop moves this id, and refuses
+    /// outright when the source row no longer holds it.
+    pub(crate) source_id: String,
     /// The reorderable row the pointer is over now, or `None` when it is over
     /// something that is not a drop target (the Inactive tail and its toggle, a
     /// pane's empty space, another pane) or back over the source row itself. A
     /// release with no hover drops nothing.
     pub(crate) hover: Option<usize>,
+    /// The id in the hovered row, resolved as the pointer passes over it and kept
+    /// beside the index for the same reason `source_id` is.
+    pub(crate) hover_id: Option<String>,
     /// Whether the pointer has left the source row, promoting the press from a
     /// click into a drag. An unpromoted gesture paints no marker and reorders
     /// nothing.

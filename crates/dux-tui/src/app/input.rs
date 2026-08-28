@@ -10039,35 +10039,43 @@ impl App {
     /// on a row that cannot be reordered (the Inactive tail, its toggle) arms
     /// nothing and clears any gesture a previous press left behind.
     fn arm_row_drag(&mut self, list: RowDragList, index: usize) {
-        self.row_drag = self
-            .is_reorderable_row(list, index)
-            .then_some(RowDragState {
-                list,
-                source: index,
-                hover: None,
-                moved: false,
-            });
+        self.row_drag = self.row_drag_id(list, index).map(|source_id| RowDragState {
+            list,
+            source: index,
+            source_id,
+            hover: None,
+            hover_id: None,
+            moved: false,
+        });
     }
 
-    /// Whether row `index` of `list` may be dragged, and dropped onto. Every
-    /// terminal row is both; the agent list excludes its Inactive tail.
-    fn is_reorderable_row(&self, list: RowDragList, index: usize) -> bool {
+    /// The id of the agent or terminal in row `index` of `list`, when that row is
+    /// one a drag may pick up or drop onto. `None` for every other row, which is
+    /// what makes the tail, the toggle and an out-of-range index unreachable.
+    fn row_drag_id(&self, list: RowDragList, index: usize) -> Option<String> {
         match list {
-            RowDragList::Agents => self.is_reorderable_left_item(index),
-            RowDragList::Terminals => index < self.terminal_items().len(),
+            RowDragList::Agents => self
+                .is_reorderable_left_item(index)
+                .then(|| self.left_item_session_id(index))
+                .flatten(),
+            RowDragList::Terminals => self
+                .terminal_items()
+                .get(index)
+                .map(|(id, _)| (*id).clone()),
         }
     }
 
-    /// The row of `list` under the pointer, or `None` when the pointer is over
-    /// anything else. A gesture only ever asks about its OWN list, so a drag that
-    /// wanders into the other section finds no target there.
-    fn row_drag_target(&self, list: RowDragList, mouse: &MouseEvent) -> Option<usize> {
+    /// The row of `list` under the pointer, as an index and the id standing in it,
+    /// or `None` when the pointer is over anything else. A gesture only ever asks
+    /// about its OWN list, so a drag that wanders into the other section finds no
+    /// target there.
+    fn row_drag_target(&self, list: RowDragList, mouse: &MouseEvent) -> Option<(usize, String)> {
         let index = match (list, self.mouse_target(mouse.column, mouse.row)) {
             (RowDragList::Agents, Some(MouseTarget::LeftRow(index))) => index,
             (RowDragList::Terminals, Some(MouseTarget::TerminalRow(index))) => index,
             _ => return None,
         };
-        self.is_reorderable_row(list, index).then_some(index)
+        self.row_drag_id(list, index).map(|id| (index, id))
     }
 
     /// Track the pointer while a row drag is armed.
@@ -10080,13 +10088,13 @@ impl App {
     /// wherever a drop would mean nothing: over the source row itself, over the
     /// Inactive tail, over empty space, or outside the sidebar.
     fn continue_row_drag(&mut self, mouse: &MouseEvent) {
-        let Some(mut drag) = self.row_drag else {
+        let Some(mut drag) = self.row_drag.clone() else {
             return;
         };
         let over = self.row_drag_target(drag.list, mouse);
         if !drag.moved {
-            match over {
-                Some(index) if index != drag.source => {
+            match &over {
+                Some((index, _)) if *index != drag.source => {
                     drag.moved = true;
                     // The press is a drag now, so it can no longer be the first
                     // half of a double click: a release that reorders must not
@@ -10096,7 +10104,9 @@ impl App {
                 _ => return,
             }
         }
-        drag.hover = over.filter(|&index| index != drag.source);
+        let target = over.filter(|(index, _)| *index != drag.source);
+        drag.hover = target.as_ref().map(|(index, _)| *index);
+        drag.hover_id = target.map(|(_, id)| id);
         self.row_drag = Some(drag);
     }
 
@@ -10116,32 +10126,29 @@ impl App {
         if !drag.moved {
             return;
         }
-        let Some(hover) = drag.hover else {
+        let (Some(hover), Some(target_id)) = (drag.hover, drag.hover_id.clone()) else {
             return;
         };
+        // The list can be rebuilt under a held button: an agent attaches, exits or
+        // arrives and every row shifts. The gesture is keyed by id, so a source
+        // row that no longer holds what the press picked up means the user is
+        // looking at a different list from the one the drag was aimed at, and the
+        // gesture is dropped quietly rather than moving a row nobody grabbed.
+        if self.row_drag_id(drag.list, drag.source).as_deref() != Some(drag.source_id.as_str())
+            || self.row_drag_id(drag.list, hover).as_deref() != Some(target_id.as_str())
+        {
+            return;
+        }
         match drag.list {
             RowDragList::Agents => {
-                let (Some(source_id), Some(target_id)) = (
-                    self.left_item_session_id(drag.source),
-                    self.left_item_session_id(hover),
-                ) else {
-                    return;
-                };
                 let baseline = self.agent_drag_baseline();
-                let next = super::reorder::move_to_target(&baseline, &source_id, &target_id);
-                self.apply_agent_order(&baseline, next, &source_id);
+                let next = super::reorder::move_to_target(&baseline, &drag.source_id, &target_id);
+                self.apply_agent_order(&baseline, next, &drag.source_id);
             }
             RowDragList::Terminals => {
-                let visible = self.terminal_items();
-                let (Some(source_id), Some(target_id)) = (
-                    visible.get(drag.source).map(|(id, _)| (*id).clone()),
-                    visible.get(hover).map(|(id, _)| (*id).clone()),
-                ) else {
-                    return;
-                };
                 let baseline = self.terminal_drag_baseline();
-                let next = super::reorder::move_to_target(&baseline, &source_id, &target_id);
-                self.apply_terminal_order(&baseline, next, &source_id);
+                let next = super::reorder::move_to_target(&baseline, &drag.source_id, &target_id);
+                self.apply_terminal_order(&baseline, next, &drag.source_id);
             }
         }
     }
@@ -11043,7 +11050,7 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), x + 4, y));
 
-        let drag = app.row_drag.expect("gesture still armed");
+        let drag = app.row_drag.as_ref().expect("gesture still armed");
         assert!(!drag.moved, "a move within the row is not a drag");
         assert_eq!(drag.hover, None, "an unpromoted gesture has no drop target");
     }
@@ -11064,7 +11071,7 @@ mod tests {
             left_row_y(&app, 2),
         ));
 
-        let drag = app.row_drag.expect("gesture still live");
+        let drag = app.row_drag.as_ref().expect("gesture still live");
         assert!(drag.moved, "reaching another row promotes the gesture");
         assert_eq!(drag.source, 0);
         assert_eq!(drag.hover, Some(2));
@@ -11095,7 +11102,7 @@ mod tests {
             x,
             left_row_y(&app, 3),
         ));
-        assert_eq!(app.row_drag.expect("live").hover, None);
+        assert_eq!(app.row_drag.as_ref().expect("live").hover, None);
 
         // Back over the source row: dropping there would mean nothing either.
         app.handle_mouse(mouse(
@@ -11103,7 +11110,7 @@ mod tests {
             x,
             left_row_y(&app, 0),
         ));
-        assert_eq!(app.row_drag.expect("live").hover, None);
+        assert_eq!(app.row_drag.as_ref().expect("live").hover, None);
     }
 
     #[test]
@@ -11112,7 +11119,9 @@ mod tests {
         app.row_drag = Some(crate::app::RowDragState {
             list: crate::app::RowDragList::Agents,
             source: 0,
+            source_id: "s1".to_string(),
             hover: Some(1),
+            hover_id: Some("s2".to_string()),
             moved: true,
         });
 
@@ -11127,7 +11136,9 @@ mod tests {
         app.row_drag = Some(crate::app::RowDragState {
             list: crate::app::RowDragList::Agents,
             source: 0,
+            source_id: "s1".to_string(),
             hover: Some(1),
+            hover_id: Some("s2".to_string()),
             moved: true,
         });
 
@@ -11142,7 +11153,9 @@ mod tests {
         app.row_drag = Some(crate::app::RowDragState {
             list: crate::app::RowDragList::Agents,
             source: 0,
+            source_id: "s1".to_string(),
             hover: Some(1),
+            hover_id: Some("s2".to_string()),
             moved: true,
         });
 
@@ -11159,7 +11172,9 @@ mod tests {
         app.row_drag = Some(crate::app::RowDragState {
             list: crate::app::RowDragList::Agents,
             source: 1,
+            source_id: "s2".to_string(),
             hover: Some(2),
+            hover_id: Some("s3".to_string()),
             moved: true,
         });
 
@@ -11182,7 +11197,9 @@ mod tests {
         app.row_drag = Some(crate::app::RowDragState {
             list: crate::app::RowDragList::Agents,
             source: 0,
+            source_id: "s1".to_string(),
             hover: Some(2),
+            hover_id: Some("s3".to_string()),
             moved: true,
         });
 
@@ -11192,7 +11209,10 @@ mod tests {
             left_row_y(&app, 2),
         ));
 
-        let drag = app.row_drag.expect("the new press arms its own gesture");
+        let drag = app
+            .row_drag
+            .as_ref()
+            .expect("the new press arms its own gesture");
         assert_eq!(drag.source, 2);
         assert!(!drag.moved);
         assert_eq!(drag.hover, None);
@@ -11670,6 +11690,107 @@ mod tests {
             app.agent_filter.is_some(),
             "cancelling a live drag does nothing else",
         );
+    }
+
+    #[test]
+    fn an_agent_list_that_changes_under_a_drag_drops_nothing() {
+        let mut app = drag_test_app();
+        app.engine.config.ui.agent_sort = "active".to_string();
+        let x = app.mouse_layout.left_list.x;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 2),
+        ));
+
+        // The list is rebuilt under the pointer while the button is still down
+        // (an agent attaches, exits, or arrives), so every row index the gesture
+        // is holding now names a different agent.
+        app.engine.sessions.swap(0, 1);
+        app.rebuild_left_items();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            left_row_y(&app, 2),
+        ));
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["s2", "s1", "s3", "s4"],
+            "only the change that happened under the drag is in the order",
+        );
+        assert_eq!(
+            app.engine.config.ui.agent_sort, "active",
+            "a refused drop must not take the list off its sort",
+        );
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            None,
+            "a gesture the list outran is dropped quietly",
+        );
+    }
+
+    #[test]
+    fn a_terminal_list_that_changes_under_a_drag_drops_nothing() {
+        let mut app = terminal_drag_test_app();
+        app.engine.config.ui.agent_sort = "active".to_string();
+        // A fourth terminal, so that losing one still leaves every row index the
+        // gesture holds IN range but pointing at a different terminal.
+        let client =
+            crate::pty::PtyClient::spawn("echo", &[], std::path::Path::new("/tmp"), 24, 80, 1000)
+                .expect("spawn a test terminal");
+        app.engine.companion_terminals.insert(
+            "t4".to_string(),
+            crate::app::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Session("s1".to_string()),
+                label: "t4".to_string(),
+                foreground_cmd: None,
+                client,
+                sort_order: 3,
+                created_at: Utc::now(),
+            },
+        );
+        let x = app.mouse_layout.terminal_list.x;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            terminal_row_y(&app, 2),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            terminal_row_y(&app, 0),
+        ));
+
+        // A terminal exits while the button is down, so the rows shift up.
+        app.engine.companion_terminals.remove("t1");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            terminal_row_y(&app, 0),
+        ));
+
+        let order: Vec<String> = app
+            .sorted_terminal_items()
+            .iter()
+            .map(|(id, _)| (*id).clone())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["t2", "t3", "t4"],
+            "the survivors keep their order; no row the gesture never named is moved",
+        );
+        assert_eq!(app.engine.config.ui.agent_sort, "active");
     }
 
     #[test]

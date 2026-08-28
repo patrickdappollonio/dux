@@ -1721,7 +1721,7 @@ impl App {
         map: &[usize],
         top_pad_y: Option<u16>,
     ) {
-        let Some(drag) = self.row_drag.filter(|drag| drag.list == list) else {
+        let Some(drag) = self.row_drag.as_ref().filter(|drag| drag.list == list) else {
             return;
         };
         if !drag.moved {
@@ -4423,7 +4423,7 @@ impl App {
         // Only a promoted gesture does this, so a plain press never flickers the
         // bar. The way out is resolved through the bindings like every other
         // label, never spelled out as a key.
-        if self.row_drag.is_some_and(|drag| drag.moved)
+        if self.row_drag.as_ref().is_some_and(|drag| drag.moved)
             && matches!(
                 ctx,
                 HintContext::LeftProject | HintContext::LeftSession | HintContext::LeftTerminal
@@ -13272,7 +13272,9 @@ mod tests {
         app.row_drag = Some(crate::app::RowDragState {
             list: crate::app::RowDragList::Agents,
             source,
+            source_id: format!("s{source}"),
             hover,
+            hover_id: hover.map(|index| format!("s{index}")),
             moved,
         });
 
@@ -13309,7 +13311,9 @@ mod tests {
         app.row_drag = Some(crate::app::RowDragState {
             list: crate::app::RowDragList::Agents,
             source: 0,
+            source_id: "s0".to_string(),
             hover: Some(1),
+            hover_id: Some("s1".to_string()),
             moved: true,
         });
         let dragging = app.footer_hints_for(HintContext::LeftSession);
@@ -13328,7 +13332,9 @@ mod tests {
         app.row_drag = Some(crate::app::RowDragState {
             list: crate::app::RowDragList::Agents,
             source: 0,
+            source_id: "s0".to_string(),
             hover: None,
+            hover_id: None,
             moved: false,
         });
         assert_eq!(app.footer_hints_for(HintContext::LeftSession), ordinary);
@@ -13435,7 +13441,9 @@ mod tests {
         app.row_drag = Some(crate::app::RowDragState {
             list: crate::app::RowDragList::Terminals,
             source: 0,
+            source_id: "t1".to_string(),
             hover: Some(2),
+            hover_id: Some("t3".to_string()),
             moved: true,
         });
 
