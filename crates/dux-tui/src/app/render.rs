@@ -7946,13 +7946,6 @@ impl App {
         };
     }
 
-    fn render_edit_macros_prompt_overlay(&mut self, frame: &mut Frame) {
-        let PromptState::EditMacros { .. } = &self.prompt else {
-            return;
-        };
-        self.render_edit_macros(frame);
-    }
-
     fn render_resource_monitor_prompt_overlay(&mut self, frame: &mut Frame) {
         let PromptState::ResourceMonitor {
             rows,
@@ -9609,7 +9602,7 @@ impl App {
             | PromptState::ConfigureProjectEnv { .. }
             | PromptState::ConfigureGlobalEnv { .. } => self.render_configure_prompt(frame),
             PromptState::RenameSession { .. } => self.render_rename_session_prompt(frame),
-            PromptState::EditMacros { .. } => self.render_edit_macros_prompt_overlay(frame),
+            PromptState::EditMacros { .. } => self.render_edit_macros(frame),
             PromptState::ResourceMonitor { .. } => {
                 self.render_resource_monitor_prompt_overlay(frame)
             }
