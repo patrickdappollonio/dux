@@ -3755,8 +3755,8 @@ impl App {
     /// the providers (PTYs) and the single-instance lock live in the engine and
     /// must survive the flip, so the engine is moved out wholesale. Neither
     /// `App` nor `Engine` implements `Drop`, so nothing is torn down here.
-    /// PTY-activity tracking now lives on the engine (`pty_activity`), so the
-    /// streaming/"working" state carries across the flip automatically with it.
+    /// PTY-activity tracking lives on the engine (`pty_activity`), so the
+    /// streaming/"working" state carries across the flip with it.
     pub fn into_engine(self) -> Engine {
         // Unregister this App's signal handlers so repeated flip cycles don't
         // pile up orphaned registrations (each resume registers fresh flags;
@@ -4262,11 +4262,10 @@ impl App {
     /// Route one crossterm event to its handler. Returns whether the app should
     /// exit.
     ///
-    /// Extracted from the run loop so the events that are NOT keys or mouse
-    /// presses (a host resize, a focus change) are reachable from a test: each
-    /// of them retires state that a test can then assert on, and a retirement
-    /// that only exists inside an unreachable loop body is a retirement nobody
-    /// can prove.
+    /// The run loop routes every event through here, so the events that are NOT
+    /// keys or mouse presses (a host resize, a focus change) are reachable from
+    /// a test: each of them retires state a test can then assert on, and a
+    /// retirement that only exists inside a loop body is one nobody can prove.
     pub(crate) fn handle_terminal_event(&mut self, event: Event) -> bool {
         match event {
             Event::Key(key) => match self.handle_key(key) {

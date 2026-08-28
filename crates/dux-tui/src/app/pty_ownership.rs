@@ -253,8 +253,8 @@ impl App {
         }
     }
 
-    /// The same gate for a named pty. Split out so a test can name its target and
-    /// so a future write path with an explicit target has somewhere to go.
+    /// The same gate for a pty named explicitly, rather than for whichever pane
+    /// currently has focus.
     pub(crate) fn may_type_into_pty(&mut self, pty_id: &str) -> bool {
         let Some(seat) = self.pty_ownership() else {
             return true;

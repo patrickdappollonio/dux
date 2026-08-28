@@ -1161,10 +1161,9 @@ impl App {
         // takes the slot the project crumb occupies, which is the same fact
         // ("which thing am I in") for the other kind of agent.
         //
-        // Its own arm rather than a hole in the project arm, because the bar
-        // used to wrap its whole body in "a project is selected" and a
-        // project-less agent therefore lost the provider and terminal-count
-        // crumbs too, which it does have.
+        // Its own arm rather than a hole in the project arm: wrapping the bar's
+        // whole body in "a project is selected" would cost a project-less agent
+        // the provider and terminal-count crumbs too, which it does have.
         if let Some(folder) = self
             .selected_session()
             .and_then(|session| session.folder_path())
@@ -4346,11 +4345,10 @@ impl App {
 
     /// The help overlay's content, as unwrapped logical lines.
     ///
-    /// Split out from [`Self::render_help`] so the wrap can be tested against
-    /// ratatui's own `Wrap { trim: false }` on the REAL content: the renderer
-    /// pre-wraps these lines itself (see the call site for why), and the only
-    /// way to know that pre-wrapping did not change the page's appearance is to
-    /// paint both and compare.
+    /// [`Self::render_help`] pre-wraps these lines itself (see the call site for
+    /// why). Exposing them unwrapped is what lets a test paint the same content
+    /// under ratatui's own `Wrap { trim: false }` and compare, which is the only
+    /// way to know that pre-wrapping did not change the page's appearance.
     ///
     /// `content_width` sizes the full-width section banners, nothing else.
     fn help_content_lines(&self, content_width: usize) -> Vec<Line<'static>> {
@@ -7952,7 +7950,6 @@ impl App {
         let PromptState::EditMacros { .. } = &self.prompt else {
             return;
         };
-        // Full rendering implemented in Task #5.
         self.render_edit_macros(frame);
     }
 
@@ -11390,10 +11387,9 @@ fn active_provider_marker_span(is_active: bool, theme: &Theme) -> Span<'static> 
 /// Marks the provider row that is ALREADY in effect, so picking it would do
 /// nothing.
 ///
-/// This cue used to be the Apply button greying out. The button is gone (a
-/// picker confirms by picking, see the `Picker` family in `super::modal`), so
-/// the cue moved onto the row that owns the information. It is a marker IN THE
-/// TEXT rather than a dimmed style on purpose: the moment the cue matters most
+/// There is no Apply button to grey out (a picker confirms by picking, see the
+/// `Picker` family in `super::modal`), so the cue lives on the row that owns the
+/// information. It is a marker IN THE TEXT rather than a dimmed style on purpose: the moment the cue matters most
 /// is when that row is HIGHLIGHTED, and `Theme::selection_style` sets fg, bg
 /// and BOLD, so any style the row set for itself is patched away underneath the
 /// selection. A glyph in the string survives.
@@ -13553,9 +13549,8 @@ mod tests {
         );
     }
 
-    /// The terminal-count chip still renders after being extracted out of the two
-    /// verbatim copies it used to live in. Nothing else in the crate pinned it to a
-    /// frame, so the extraction rested on inspection alone.
+    /// Nothing else in the crate paints the header's terminal-count chip into a
+    /// real frame, so this is the only thing pinning it.
     #[test]
     fn the_header_still_counts_running_terminals() {
         let mut app = app_with_two_terminals();

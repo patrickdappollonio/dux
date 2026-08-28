@@ -1874,12 +1874,12 @@ mod tests {
         assert!(app.loading_input_buf.is_empty());
     }
 
-    /// #1 regression: the TUI exit-prune teardown must clear EVERY runtime map
-    /// keyed by the exited tab via the single-source `clear_tab_runtime`, not a
-    /// hand-enumerated subset. The old loop dropped providers/pins/activity/
-    /// input but LEAKED `needs_attention`, `pty_progress`, and `agent_viewed`;
+    /// The TUI exit-prune teardown must clear EVERY runtime map keyed by the
+    /// exited tab via the single-source `clear_tab_runtime`, not a
+    /// hand-enumerated subset. A subset that drops providers, pins, activity and
+    /// input still leaks `needs_attention`, `pty_progress`, and `agent_viewed`;
     /// on a long-running session that is one stranded entry per exited tab, and
-    /// a stale attention/progress flag could resurface on a recycled id.
+    /// a stale attention or progress flag can resurface on a recycled id.
     #[test]
     fn exit_prune_clears_the_attention_progress_and_viewed_maps() {
         let mut app =

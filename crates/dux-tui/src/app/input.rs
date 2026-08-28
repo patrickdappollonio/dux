@@ -843,8 +843,8 @@ impl App {
     /// The one quit path: ask for confirmation while anything is still running,
     /// otherwise quit outright. Returns whether the run loop should exit.
     ///
-    /// Extracted so the first-load modal's `Ctrl-c` can reach the SAME behavior
-    /// rather than re-deriving the running counts (see `handle_prompt_key`).
+    /// The first-load modal's `Ctrl-c` routes here too rather than re-deriving
+    /// the running counts (see `handle_prompt_key`).
     pub(crate) fn begin_quit(&mut self) -> bool {
         let agent_count = self.engine.providers.len();
         let terminal_count = self.running_companion_terminal_count();
@@ -3544,8 +3544,8 @@ impl App {
 
     /// Process raw bytes that have already been read from stdin.
     ///
-    /// This is the core logic of interactive input handling, split out from
-    /// `poll_and_forward_raw_input` so it can be tested without real stdin I/O.
+    /// `poll_and_forward_raw_input` reads the bytes and calls this; a test can
+    /// call it directly, without real stdin I/O.
     pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> Result<bool> {
         let sequences = self.parse_raw_input_sequences(bytes);
         let plan = self.classify_raw_input_sequences(&sequences);
@@ -10268,9 +10268,8 @@ impl App {
     }
 
     /// Build the text of the active terminal selection from the CURRENT grid.
-    ///
-    /// Split out of [`Self::copy_terminal_selection`] so the extraction can be
-    /// asserted directly, without a clipboard worker thread in the loop.
+    /// [`Self::copy_terminal_selection`] hands the result to the clipboard
+    /// worker; a test can assert on the text without one in the loop.
     pub(crate) fn terminal_selection_text(&mut self) -> String {
         // Refresh snapshot to get current content, then retire the selection if
         // the grid has moved somewhere this can no longer follow it. Both come
