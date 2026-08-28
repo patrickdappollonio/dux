@@ -1704,6 +1704,63 @@ impl App {
         }
     }
 
+    /// Paint the live drag-to-reorder feedback over the agent list: an insertion
+    /// rule at the slot the dragged row would land in, and the row that is moving
+    /// in the muted tone so the reader can see what is being carried.
+    ///
+    /// The rule rides the blank spacer row above the slot (the reserved top
+    /// margin for the very first one), the same boundary row the framed selection
+    /// draws its top edge on, so it never covers a row's text. A gesture that has
+    /// not become a drag yet, or one with no drop target under the pointer,
+    /// paints nothing.
+    fn paint_row_drag_marker(
+        &self,
+        buf: &mut ratatui::buffer::Buffer,
+        list_content: Rect,
+        map: &[usize],
+        top_pad_y: Option<u16>,
+    ) {
+        let Some(drag) = self.row_drag else {
+            return;
+        };
+        if !drag.moved {
+            return;
+        }
+        let x0 = list_content.x;
+        let x1 = list_content.x + list_content.width;
+        // The moving row goes muted across both of its content lines.
+        if let Some(rel) = map.iter().position(|&i| i == drag.source) {
+            for offset in 0..2 {
+                if map.get(rel + offset) != Some(&drag.source) {
+                    break;
+                }
+                let y = list_content.y + (rel + offset) as u16;
+                for x in x0..x1 {
+                    buf[(x, y)].set_fg(self.theme.provider_label_fg);
+                }
+            }
+        }
+        let Some(slot) = drag.hover else {
+            return;
+        };
+        let Some(rel_start) = map.iter().position(|&i| i == slot) else {
+            return;
+        };
+        let marker_y = if rel_start > 0 {
+            Some(list_content.y + rel_start as u16 - 1)
+        } else {
+            top_pad_y
+        };
+        let Some(y) = marker_y else {
+            return;
+        };
+        for x in x0..x1 {
+            buf[(x, y)]
+                .set_symbol("\u{2500}")
+                .set_fg(self.theme.border_focused);
+        }
+    }
+
     /// Draw a dim rule from the end of the "Inactive (N)" label to the right
     /// gutter of the pane (stopping a column short of the edge, matching the row
     /// text padding), but only while the toggle is not the current selection (a
@@ -2042,6 +2099,17 @@ impl App {
         let body_will_dim = self.sidebar_body_will_dim();
         if self.left_section == LeftSection::Projects && !body_will_dim {
             self.paint_left_selection(frame.buffer_mut(), geometry.content, geometry.top_pad_y);
+        }
+        // The drag marker rides on top of the selection: the row being dragged is
+        // usually the selected one, and the insertion rule must read over the
+        // selection tint rather than under it.
+        if !body_will_dim {
+            self.paint_row_drag_marker(
+                frame.buffer_mut(),
+                geometry.content,
+                &self.mouse_layout.left_row_to_item,
+                geometry.top_pad_y,
+            );
         }
         // A dim rule runs from the end of the "Inactive" label to the right edge,
         // but only while the toggle is not the current selection.
@@ -13140,6 +13208,119 @@ mod tests {
         // Typing never applies to a non-Active session.
         assert_eq!(agent_state_word(Detached, false, true, false), "Detached");
         assert_eq!(agent_state_word(Exited, false, true, false), "Exited");
+    }
+
+    /// Render the sidebar with a live drag and return the painted buffer, the
+    /// agent list's content rect, and the row-to-item map the render published.
+    fn render_with_row_drag(
+        source: usize,
+        hover: Option<usize>,
+        moved: bool,
+    ) -> (ratatui::buffer::Buffer, Rect, Vec<usize>) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let base = app.engine.sessions[0].clone();
+        app.engine.sessions.clear();
+        for (index, title) in ["one", "two", "three"].into_iter().enumerate() {
+            let mut session = base.clone();
+            session.id = format!("s{index}");
+            session.title = Some(title.to_string());
+            // Active, so all three are ordinary rows in the main list rather
+            // than folding into the Inactive tail.
+            session.status = crate::model::SessionStatus::Active;
+            app.engine.sessions.push(session);
+        }
+        app.rebuild_left_items();
+        app.left_width_pct = 40;
+        app.row_drag = Some(crate::app::RowDragState {
+            source,
+            hover,
+            moved,
+        });
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buffer = terminal.backend().buffer().clone();
+        (
+            buffer,
+            app.mouse_layout.left_list,
+            app.mouse_layout.left_row_to_item.clone(),
+        )
+    }
+
+    /// The rendered text of one sidebar screen row, trimmed of trailing blanks.
+    fn drag_row_text(buf: &ratatui::buffer::Buffer, area: Rect, y: u16) -> String {
+        let text: String = (area.x..area.x + area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect();
+        text.trim_end().to_string()
+    }
+
+    #[test]
+    fn a_live_drag_paints_an_insertion_rule_above_the_hovered_row() {
+        // Drag the first agent onto the third row.
+        let (buf, area, map) = render_with_row_drag(0, Some(2), true);
+        let rel = map
+            .iter()
+            .position(|&i| i == 2)
+            .expect("the hovered row is on screen");
+        // The list content starts one row below the reserved top margin, which the
+        // map is built over; the marker rides the spacer row above the slot.
+        let marker_y = area.y + rel as u16 - 1;
+        let rule = drag_row_text(&buf, area, marker_y);
+        assert!(
+            rule.chars().all(|c| c == '─') && !rule.is_empty(),
+            "the slot above the drop target is a full rule: {rule:?}",
+        );
+        assert_eq!(
+            buf[(area.x, marker_y)].fg,
+            test_app(default_bindings()).theme.border_focused,
+            "the rule uses the focused border tone",
+        );
+    }
+
+    #[test]
+    fn a_live_drag_mutes_the_row_that_is_moving() {
+        let muted = test_app(default_bindings()).theme.provider_label_fg;
+        let name_row_colors = |hover: Option<usize>, moved: bool| {
+            let (buf, area, map) = render_with_row_drag(0, hover, moved);
+            let rel = map
+                .iter()
+                .position(|&i| i == 0)
+                .expect("the source row is on screen");
+            let y = area.y + rel as u16;
+            let colors: Vec<_> = (area.x..area.x + area.width)
+                .filter(|&x| buf[(x, y)].symbol() != " ")
+                .map(|x| buf[(x, y)].fg)
+                .collect();
+            assert!(!colors.is_empty(), "the source row has text on it");
+            colors
+        };
+
+        assert!(
+            name_row_colors(Some(2), true).iter().all(|fg| *fg == muted),
+            "every painted cell of the moving row is muted",
+        );
+        assert!(
+            name_row_colors(None, false).iter().any(|fg| *fg != muted),
+            "an untouched row keeps its own colors, so the muting is the drag's",
+        );
+    }
+
+    #[test]
+    fn an_unpromoted_gesture_paints_no_marker() {
+        let (buf, area, map) = render_with_row_drag(0, None, false);
+        let rel = map.iter().position(|&i| i == 2).expect("row on screen");
+        let marker_y = area.y + rel as u16 - 1;
+        assert!(
+            !drag_row_text(&buf, area, marker_y).contains('─'),
+            "a press that never left its row paints nothing",
+        );
     }
 
     #[test]
