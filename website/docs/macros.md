@@ -64,6 +64,11 @@ overlay shows the key it is currently bound to. It works whenever the agent or t
 pane has your keys, windowed or fullscreen, so you can fire a macro mid-typing. With no
 macros defined for the current surface, dux says so in the status line and does nothing.
 
+The bar opens at the bottom of the pane, over the agent it will type into, listing only
+the macros that pane can take:
+
+![The terminal UI macro bar open over an agent pane, with a search field above a list of macro names and the text each one sends.](/screens/tui-macro-bar.png)
+
 Once the bar is open:
 
 - **Type** to filter by name or text content. Name matches rank first.
@@ -87,6 +92,8 @@ Every terminal pane, agent or companion terminal, has a macro button in its corn
 Click it for a picker of the macros matching that pane's surface, scoped to the pane you
 clicked rather than whatever is focused. Type to filter, then click a macro or press
 Enter to send it. The text simply appears at the prompt; there is no confirmation toast.
+
+![The macro picker open in the browser above an agent's terminal, listing the macros for that pane with a search field and an Edit macros link at the bottom.](/screens/macro-popover.png)
 
 If a pane has no macros for its surface, the popover says so and points you at the
 editor. With no macros at all, it links straight to **Edit macros**.

@@ -57,12 +57,22 @@ it, punctuation included. Leave it empty (at creation, or when renaming later) a
 names it after the folder rather than
 inventing a pet name.
 
+This is the naming prompt in the terminal UI, with the pet-name checkbox ticked and the
+generated name filled in:
+
+![The terminal UI naming prompt for a new agent, with a generated pet name in the field, a ticked pet-name checkbox, and a ticked checkbox for copying uncommitted changes.](/screens/tui-name-new-agent.png)
+
 ## Creating a new agent from scratch
 
 In the browser, open a project's `⋯` menu and pick **New agent…**. In the terminal UI,
 run `new-agent` and pick a project from the chooser (every project is listed, including
 ones with no agents yet). Either way dux checks that project's
 current branch, then opens the naming prompt.
+
+The terminal UI's chooser lists every project, how many agents each one has, and where it
+lives, and its footer carries the way out to a standalone agent:
+
+![The terminal UI project chooser for a new agent, listing two projects with their agent counts and paths, and a footer key for creating a standalone agent instead.](/screens/tui-new-agent-chooser.png)
 
 On confirmation dux creates a worktree on a new branch, branched from the project's
 leading branch. If the name matches an existing local branch, dux asks whether to attach

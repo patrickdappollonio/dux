@@ -29,6 +29,11 @@ env  = { NODE_ENV = "development", API_KEY = "${MY_API_KEY}" }
 > secrets as references rather than literals and `config.toml` stays safe to commit to
 > your dotfiles.
 
+You do not have to edit the file to change them. In the terminal UI, *configure project
+env* opens the project's variables one per line:
+
+![The terminal UI project environment editor, showing three KEY=value lines for a project with Cancel and Save buttons below them.](/screens/tui-project-env-editor.png)
+
 ### Global environment variables
 
 A top-level `[env]` table applies to every project. Project-level `env` keys override
@@ -77,6 +82,11 @@ ln -sfn "$DUX_PROJECT_PATH/.env.local" .env
 > A startup command that exits non-zero does not block you. dux records the failure in
 > the startup log and launches the agent anyway, so check the log when an agent starts
 > without its dependencies.
+
+Each log names the run, the command, the shell it ran through, how long it took, its exit
+code, and everything it printed. This is the terminal UI's viewer:
+
+![The terminal UI startup command log viewer, listing one run beside its output: the command, exit code, and the lines it printed while preparing the worktree.](/screens/tui-startup-command-log.png)
 
 ### Configuring and running from the app
 
