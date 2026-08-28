@@ -68,6 +68,19 @@ pub(crate) fn move_to_target<T: Clone + PartialEq>(order: &[T], active: &T, over
     out
 }
 
+/// Which gap a drop would land in, as an index into the CURRENT row order: the
+/// gap sits above the row with that index, so `0` is above the first row and
+/// `len` is below the last.
+///
+/// A drop puts the dragged row where the hovered row is standing
+/// ([`move_to_target`]), which means it ends up on the FAR side of that row:
+/// below it when the row is travelling down the list, above it when travelling
+/// up. The insertion marker is painted at this gap, so what the line promises is
+/// what the release does; the two are pinned together by a test.
+pub(crate) fn drop_marker_boundary(source: usize, hover: usize) -> usize {
+    if hover > source { hover + 1 } else { hover }
+}
+
 impl App {
     /// Move the selected agent within the global agent order and switch the sort
     /// to manual (like the web's drag-to-reorder), keeping the selection on the
@@ -275,6 +288,46 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The marker boundary and the drop must agree: for every source/hover pair,
+    /// the row the drop actually lands on the far side of is the row the boundary
+    /// names. This is the pin that keeps the painted line honest about where the
+    /// release will put the row.
+    #[test]
+    fn the_marker_boundary_names_the_gap_the_drop_lands_in() {
+        let ids = vec!["a", "b", "c", "d", "e"];
+        for source in 0..ids.len() {
+            for hover in 0..ids.len() {
+                if hover == source {
+                    continue;
+                }
+                let next = move_to_target(&ids, &ids[source], &ids[hover]);
+                let landed = next
+                    .iter()
+                    .position(|id| *id == ids[source])
+                    .expect("the moved row is still in the list");
+                // The other rows, in their unchanged order: the boundary counts
+                // gaps in the ORIGINAL list, so translate the landing slot into
+                // the same terms by counting how many originals precede it.
+                let boundary = drop_marker_boundary(source, hover);
+                let originals_before = next
+                    .iter()
+                    .take(landed)
+                    .filter(|id| **id != ids[source])
+                    .count();
+                let expected = if boundary > source {
+                    // The source itself sat before the gap in the original list.
+                    originals_before + 1
+                } else {
+                    originals_before
+                };
+                assert_eq!(
+                    boundary, expected,
+                    "source {source} hovering {hover} lands as {next:?}",
+                );
+            }
+        }
+    }
 
     /// `move_to_target` is the twin of the web's `moveItem`; these are its own
     /// test vectors, so a change to one language that is not mirrored fails here.

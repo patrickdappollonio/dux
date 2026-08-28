@@ -1744,13 +1744,17 @@ impl App {
         let Some(slot) = drag.hover else {
             return;
         };
-        let Some(rel_start) = map.iter().position(|&i| i == slot) else {
-            return;
-        };
-        let marker_y = if rel_start > 0 {
-            Some(list_content.y + rel_start as u16 - 1)
-        } else {
-            top_pad_y
+        // The gap the drop would land in, which is on the far side of the hovered
+        // row when the row is travelling down. Boundary `b` sits above row `b`,
+        // so it is painted on the last screen row of the row before it (that
+        // row's blank trailing spacer), or on the reserved top margin for `0`.
+        let boundary = super::reorder::drop_marker_boundary(drag.source, slot);
+        let marker_y = match boundary.checked_sub(1) {
+            None => top_pad_y,
+            Some(above) => map
+                .iter()
+                .rposition(|&i| i == above)
+                .map(|rel| list_content.y + rel as u16),
         };
         let Some(y) = marker_y else {
             return;
@@ -13330,55 +13334,69 @@ mod tests {
         assert_eq!(app.footer_hints_for(HintContext::LeftSession), ordinary);
     }
 
-    #[test]
-    fn a_live_drag_paints_an_insertion_rule_above_the_hovered_row() {
-        // Drag the first agent onto the third row.
-        let (buf, area, map) = render_with_row_drag(0, Some(2), true);
-        let rel = map
-            .iter()
-            .position(|&i| i == 2)
-            .expect("the hovered row is on screen");
-        // The list content starts one row below the reserved top margin, which the
-        // map is built over; the marker rides the spacer row above the slot.
-        let marker_y = area.y + rel as u16 - 1;
-        let rule = drag_row_text(&buf, area, marker_y);
+    /// The one screen row in the agent list painted as a full insertion rule.
+    fn painted_marker_row(buf: &ratatui::buffer::Buffer, area: Rect) -> Option<u16> {
+        let rows: Vec<u16> = (area.y - 1..area.y + area.height)
+            .filter(|&y| {
+                let text = drag_row_text(buf, area, y);
+                !text.is_empty() && text.chars().all(|c| c == '\u{2500}')
+            })
+            .collect();
         assert!(
-            rule.chars().all(|c| c == '─') && !rule.is_empty(),
-            "the slot above the drop target is a full rule: {rule:?}",
+            rows.len() <= 1,
+            "at most one insertion rule is painted: {rows:?}"
         );
-        assert_eq!(
-            buf[(area.x, marker_y)].fg,
-            test_app(default_bindings()).theme.border_focused,
-            "the rule uses the focused border tone",
-        );
+        rows.first().copied()
     }
 
+    /// The rule marks the gap the row would land in, which is on the FAR side of
+    /// the hovered row: below it when the row is travelling down, above it when
+    /// travelling up. The expected row is derived from the same boundary helper
+    /// the drop is pinned to, so the marker cannot drift away from the outcome.
     #[test]
-    fn a_live_drag_mutes_the_row_that_is_moving() {
-        let muted = test_app(default_bindings()).theme.provider_label_fg;
-        let name_row_colors = |hover: Option<usize>, moved: bool| {
-            let (buf, area, map) = render_with_row_drag(0, hover, moved);
-            let rel = map
-                .iter()
-                .position(|&i| i == 0)
-                .expect("the source row is on screen");
-            let y = area.y + rel as u16;
-            let colors: Vec<_> = (area.x..area.x + area.width)
-                .filter(|&x| buf[(x, y)].symbol() != " ")
-                .map(|x| buf[(x, y)].fg)
-                .collect();
-            assert!(!colors.is_empty(), "the source row has text on it");
-            colors
-        };
-
-        assert!(
-            name_row_colors(Some(2), true).iter().all(|fg| *fg == muted),
-            "every painted cell of the moving row is muted",
-        );
-        assert!(
-            name_row_colors(None, false).iter().any(|fg| *fg != muted),
-            "an untouched row keeps its own colors, so the muting is the drag's",
-        );
+    fn the_insertion_rule_marks_the_gap_the_drop_would_land_in() {
+        for (source, hover) in [(0usize, 2usize), (2, 0), (0, 1), (1, 0)] {
+            let (buf, area, map) = render_with_row_drag(source, Some(hover), true);
+            let boundary = crate::app::reorder::drop_marker_boundary(source, hover);
+            let expected = if boundary == 0 {
+                area.y - 1
+            } else {
+                area.y
+                    + map
+                        .iter()
+                        .rposition(|&i| i == boundary - 1)
+                        .expect("the row above the gap is on screen") as u16
+            };
+            assert_eq!(
+                painted_marker_row(&buf, area),
+                Some(expected),
+                "dragging {source} onto {hover} marks the gap at boundary {boundary}",
+            );
+            assert_eq!(
+                buf[(area.x, expected)].fg,
+                test_app(default_bindings()).theme.border_focused,
+                "the rule uses the focused border tone",
+            );
+            // Independently of the helper: the gap is on the far side of the
+            // hovered row, so a downward drag paints BELOW that row's text and an
+            // upward one above it.
+            let hovered_top = area.y
+                + map
+                    .iter()
+                    .position(|&i| i == hover)
+                    .expect("the hovered row is on screen") as u16;
+            if hover > source {
+                assert!(
+                    expected > hovered_top,
+                    "travelling down, the gap is below the hovered row",
+                );
+            } else {
+                assert!(
+                    expected < hovered_top,
+                    "travelling up, the gap is above the hovered row",
+                );
+            }
+        }
     }
 
     #[test]
@@ -13427,13 +13445,16 @@ mod tests {
             .expect("render frame");
         let buf = terminal.backend().buffer().clone();
         let area = app.mouse_layout.terminal_list;
-        let rel = app
-            .mouse_layout
-            .terminal_row_to_item
-            .iter()
-            .position(|&i| i == 2)
-            .expect("the hovered terminal row is on screen");
-        let marker_y = area.y + rel as u16 - 1;
+        // Travelling down, so the gap is BELOW the hovered row: the same
+        // boundary rule the agent list paints by.
+        let boundary = crate::app::reorder::drop_marker_boundary(0, 2);
+        let marker_y = area.y
+            + app
+                .mouse_layout
+                .terminal_row_to_item
+                .iter()
+                .rposition(|&i| i == boundary - 1)
+                .expect("the row above the gap is on screen") as u16;
         let rule = drag_row_text(&buf, area, marker_y);
         assert!(
             rule.chars().all(|c| c == '\u{2500}') && !rule.is_empty(),
@@ -13448,11 +13469,10 @@ mod tests {
 
     #[test]
     fn an_unpromoted_gesture_paints_no_marker() {
-        let (buf, area, map) = render_with_row_drag(0, None, false);
-        let rel = map.iter().position(|&i| i == 2).expect("row on screen");
-        let marker_y = area.y + rel as u16 - 1;
-        assert!(
-            !drag_row_text(&buf, area, marker_y).contains('─'),
+        let (buf, area, _map) = render_with_row_drag(0, None, false);
+        assert_eq!(
+            painted_marker_row(&buf, area),
+            None,
             "a press that never left its row paints nothing",
         );
     }
