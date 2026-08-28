@@ -207,10 +207,9 @@
   }
 
   /* Anchor targets sit on the first content wrapper inside a section, not on
-     the padded section itself, so this only has to clear the sticky header
-     (h-14, 3.5rem, plus its 1px bottom border) and leave a little air. Putting
-     it on the section made its top padding show up as an empty band under the
-     header. */
+     the padded section itself, whose top padding would land as an empty band
+     under the header. So this only has to clear the sticky header (h-14,
+     3.5rem, plus its 1px bottom border) and leave a little air. */
   .anchor-offset {
     scroll-margin-top: 4.5rem;
   }
