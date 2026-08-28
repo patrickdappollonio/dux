@@ -461,8 +461,9 @@ pub struct App {
     pub(crate) mouse_layout: MouseLayoutState,
     pub(crate) overlay_layout: OverlayMouseLayoutState,
     pub(crate) mouse_drag: Option<ResizeDragState>,
-    /// The live drag-to-reorder gesture over the sidebar's agent rows, or `None`
-    /// when no row is being dragged. Armed by a left press on a reorderable row
+    /// The live drag-to-reorder gesture over a sidebar row (an agent's or a
+    /// terminal's), or `None` when no row is being dragged. Armed by a left press
+    /// on a reorderable row
     /// and retired on release, on a host resize, on focus loss, on any keystroke,
     /// and by the next press. See [`RowDragState`] for the click/drag threshold.
     pub(crate) row_drag: Option<RowDragState>,
@@ -3141,8 +3142,20 @@ pub(crate) enum MouseClickTarget {
 /// landed on leaves a click (and a double click) behaving exactly as it did
 /// before drag reordering existed. The first move onto another row promotes the
 /// gesture (`moved`), and from then on the pointer's row is tracked in `hover`.
+/// Which sidebar list a row drag belongs to. The two lists are separate orders
+/// with separate reorder commands, so a gesture that started in one never finds
+/// a drop target in the other: the same rule the web enforces by giving the
+/// agents and the terminals their own drag contexts with disjoint id sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowDragList {
+    Agents,
+    Terminals,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RowDragState {
+    /// The list the press landed in. A drop is only ever computed within it.
+    pub(crate) list: RowDragList,
     /// The item index the press landed on: the row being moved.
     pub(crate) source: usize,
     /// The reorderable row the pointer is over now, or `None` when it is over

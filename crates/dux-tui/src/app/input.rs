@@ -9940,7 +9940,7 @@ impl App {
                     // press of a double click never does: that press has already
                     // activated the row, and arming there would leave a gesture
                     // behind an action the user has finished with.
-                    self.arm_row_drag(index);
+                    self.arm_row_drag(RowDragList::Agents, index);
                 }
             }
             MouseTarget::TerminalRow(index) => {
@@ -9953,6 +9953,8 @@ impl App {
                 self.fullscreen_overlay = FullscreenOverlay::None;
                 if double_click {
                     let _ = self.open_terminal_from_terminal_list();
+                } else {
+                    self.arm_row_drag(RowDragList::Terminals, index);
                 }
             }
             MouseTarget::TerminalPane => {
@@ -10034,14 +10036,36 @@ impl App {
     /// releases where it landed is the same plain click it always was. A press
     /// on a row that cannot be reordered (the Inactive tail, its toggle) arms
     /// nothing and clears any gesture a previous press left behind.
-    fn arm_row_drag(&mut self, index: usize) {
+    fn arm_row_drag(&mut self, list: RowDragList, index: usize) {
         self.row_drag = self
-            .is_reorderable_left_item(index)
+            .is_reorderable_row(list, index)
             .then_some(RowDragState {
+                list,
                 source: index,
                 hover: None,
                 moved: false,
             });
+    }
+
+    /// Whether row `index` of `list` may be dragged, and dropped onto. Every
+    /// terminal row is both; the agent list excludes its Inactive tail.
+    fn is_reorderable_row(&self, list: RowDragList, index: usize) -> bool {
+        match list {
+            RowDragList::Agents => self.is_reorderable_left_item(index),
+            RowDragList::Terminals => index < self.terminal_items().len(),
+        }
+    }
+
+    /// The row of `list` under the pointer, or `None` when the pointer is over
+    /// anything else. A gesture only ever asks about its OWN list, so a drag that
+    /// wanders into the other section finds no target there.
+    fn row_drag_target(&self, list: RowDragList, mouse: &MouseEvent) -> Option<usize> {
+        let index = match (list, self.mouse_target(mouse.column, mouse.row)) {
+            (RowDragList::Agents, Some(MouseTarget::LeftRow(index))) => index,
+            (RowDragList::Terminals, Some(MouseTarget::TerminalRow(index))) => index,
+            _ => return None,
+        };
+        self.is_reorderable_row(list, index).then_some(index)
     }
 
     /// Track the pointer while a row drag is armed.
@@ -10057,12 +10081,7 @@ impl App {
         let Some(mut drag) = self.row_drag else {
             return;
         };
-        let over = match self.mouse_target(mouse.column, mouse.row) {
-            Some(MouseTarget::LeftRow(index)) if self.is_reorderable_left_item(index) => {
-                Some(index)
-            }
-            _ => None,
-        };
+        let over = self.row_drag_target(drag.list, mouse);
         if !drag.moved {
             match over {
                 Some(index) if index != drag.source => {
@@ -10083,11 +10102,11 @@ impl App {
     /// a drop target, apply the reorder.
     ///
     /// The move is computed the way the web computes a drop: take the COMPLETE
-    /// agent order as the screen shows it, move the dragged agent to the slot the
-    /// row it was dropped on occupies, and hand the whole list to the engine
-    /// (which accepts nothing less than the complete set). An unpromoted gesture,
-    /// or one released with no target under it, reorders nothing and says
-    /// nothing.
+    /// order of that list as the screen shows it, move the dragged row to the slot
+    /// the row it was dropped on occupies, and hand the whole list to the engine
+    /// (which accepts nothing less than the complete set). Agents and terminals
+    /// are separate orders and never mix. An unpromoted gesture, or one released
+    /// with no target under it, reorders nothing and says nothing.
     fn finish_row_drag(&mut self) {
         let Some(drag) = self.row_drag.take() else {
             return;
@@ -10095,15 +10114,31 @@ impl App {
         let Some(hover) = drag.hover.filter(|_| drag.moved) else {
             return;
         };
-        let (Some(source_id), Some(target_id)) = (
-            self.left_item_session_id(drag.source),
-            self.left_item_session_id(hover),
-        ) else {
-            return;
-        };
-        let baseline = self.agent_drag_baseline();
-        let next = super::reorder::move_to_target(&baseline, &source_id, &target_id);
-        self.apply_agent_order(&baseline, next, &source_id);
+        match drag.list {
+            RowDragList::Agents => {
+                let (Some(source_id), Some(target_id)) = (
+                    self.left_item_session_id(drag.source),
+                    self.left_item_session_id(hover),
+                ) else {
+                    return;
+                };
+                let baseline = self.agent_drag_baseline();
+                let next = super::reorder::move_to_target(&baseline, &source_id, &target_id);
+                self.apply_agent_order(&baseline, next, &source_id);
+            }
+            RowDragList::Terminals => {
+                let visible = self.terminal_items();
+                let (Some(source_id), Some(target_id)) = (
+                    visible.get(drag.source).map(|(id, _)| (*id).clone()),
+                    visible.get(hover).map(|(id, _)| (*id).clone()),
+                ) else {
+                    return;
+                };
+                let baseline = self.terminal_drag_baseline();
+                let next = super::reorder::move_to_target(&baseline, &source_id, &target_id);
+                self.apply_terminal_order(&baseline, next, &source_id);
+            }
+        }
     }
 
     fn handle_primary_mouse_down(&mut self, mouse: &MouseEvent, windowed: bool) {
@@ -11064,6 +11099,7 @@ mod tests {
     fn a_host_resize_retires_a_live_row_drag() {
         let mut app = drag_test_app();
         app.row_drag = Some(crate::app::RowDragState {
+            list: crate::app::RowDragList::Agents,
             source: 0,
             hover: Some(1),
             moved: true,
@@ -11078,6 +11114,7 @@ mod tests {
     fn focus_loss_retires_a_live_row_drag() {
         let mut app = drag_test_app();
         app.row_drag = Some(crate::app::RowDragState {
+            list: crate::app::RowDragList::Agents,
             source: 0,
             hover: Some(1),
             moved: true,
@@ -11092,6 +11129,7 @@ mod tests {
     fn a_keystroke_retires_a_live_row_drag() {
         let mut app = drag_test_app();
         app.row_drag = Some(crate::app::RowDragState {
+            list: crate::app::RowDragList::Agents,
             source: 0,
             hover: Some(1),
             moved: true,
@@ -11108,6 +11146,7 @@ mod tests {
         let mut app = drag_test_app();
         app.selected_left = 1;
         app.row_drag = Some(crate::app::RowDragState {
+            list: crate::app::RowDragList::Agents,
             source: 1,
             hover: Some(2),
             moved: true,
@@ -11130,6 +11169,7 @@ mod tests {
         let mut app = drag_test_app();
         let x = app.mouse_layout.left_list.x;
         app.row_drag = Some(crate::app::RowDragState {
+            list: crate::app::RowDragList::Agents,
             source: 0,
             hover: Some(2),
             moved: true,
@@ -11331,6 +11371,192 @@ mod tests {
             "the move is computed against the displayed order, not the stored one",
         );
         assert_eq!(app.engine.config.ui.agent_sort, "manual");
+    }
+
+    /// Three terminals in the sidebar's Terminals section, with a mouse layout
+    /// that maps one screen row per terminal (the agents map above is the same
+    /// synthetic shape, for the same reason).
+    fn terminal_drag_test_app() -> App {
+        let mut app = drag_test_app();
+        let now = Utc::now();
+        for (index, id) in ["t1", "t2", "t3"].into_iter().enumerate() {
+            let client = crate::pty::PtyClient::spawn(
+                "echo",
+                &[],
+                std::path::Path::new("/tmp"),
+                24,
+                80,
+                1000,
+            )
+            .expect("spawn a test terminal");
+            app.engine.companion_terminals.insert(
+                id.to_string(),
+                crate::app::CompanionTerminal {
+                    owner: dux_core::model::TerminalOwner::Session("s1".to_string()),
+                    label: id.to_string(),
+                    foreground_cmd: None,
+                    client,
+                    sort_order: index as u64,
+                    created_at: now,
+                },
+            );
+        }
+        app.mouse_layout.terminal_list = Rect::new(1, 12, 18, 6);
+        app.mouse_layout.terminal_row_to_item = (0..6usize).collect();
+        app
+    }
+
+    /// The screen row carrying terminal `index` under the identity map.
+    fn terminal_row_y(app: &App, index: usize) -> u16 {
+        app.mouse_layout.terminal_list.y + index as u16
+    }
+
+    #[test]
+    fn a_drop_on_another_terminal_row_reorders_the_terminals() {
+        let mut app = terminal_drag_test_app();
+        app.engine.config.ui.agent_sort = "active".to_string();
+        let x = app.mouse_layout.terminal_list.x;
+
+        // Drag the third terminal onto the first row.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            terminal_row_y(&app, 2),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            terminal_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            terminal_row_y(&app, 0),
+        ));
+
+        let order: Vec<String> = app
+            .sorted_terminal_items()
+            .iter()
+            .map(|(id, _)| (*id).clone())
+            .collect();
+        assert_eq!(order, vec!["t3", "t1", "t2"]);
+        assert_eq!(app.engine.config.ui.agent_sort, "manual");
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            Some("Reordered terminals. Sorting is now manual.".to_string()),
+        );
+        assert_eq!(
+            app.selected_terminal_index, 0,
+            "the selection follows the terminal that moved",
+        );
+    }
+
+    #[test]
+    fn a_terminal_drag_over_an_agent_row_has_no_drop_target() {
+        let mut app = terminal_drag_test_app();
+        let tx = app.mouse_layout.terminal_list.x;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            tx,
+            terminal_row_y(&app, 2),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            app.mouse_layout.left_list.x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            app.mouse_layout.left_list.x,
+            left_row_y(&app, 0),
+        ));
+
+        let order: Vec<String> = app
+            .sorted_terminal_items()
+            .iter()
+            .map(|(id, _)| (*id).clone())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["t1", "t2", "t3"],
+            "the two lists are separate: a terminal never lands among the agents",
+        );
+        let agents: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(agents, vec!["s1", "s2", "s3", "s4"]);
+    }
+
+    #[test]
+    fn an_agent_drag_over_a_terminal_row_has_no_drop_target() {
+        let mut app = terminal_drag_test_app();
+        let x = app.mouse_layout.left_list.x;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            app.mouse_layout.terminal_list.x,
+            terminal_row_y(&app, 1),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            app.mouse_layout.terminal_list.x,
+            terminal_row_y(&app, 1),
+        ));
+
+        let agents: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(agents, vec!["s1", "s2", "s3", "s4"]);
+        let order: Vec<String> = app
+            .sorted_terminal_items()
+            .iter()
+            .map(|(id, _)| (*id).clone())
+            .collect();
+        assert_eq!(order, vec!["t1", "t2", "t3"]);
+    }
+
+    #[test]
+    fn a_terminal_drop_under_a_live_filter_still_sends_every_terminal() {
+        let mut app = terminal_drag_test_app();
+        app.engine.config.ui.agent_sort = "active".to_string();
+        // Rename the middle terminal out of the query's reach, so the section
+        // shows t1 and t3 while t2 stays in the order underneath.
+        if let Some(middle) = app.engine.companion_terminals.get_mut("t2") {
+            middle.label = "shell".to_string();
+        }
+        app.agent_filter = Some(TextInput::with_text("t".to_string()));
+        app.rebuild_left_items();
+        assert_eq!(app.terminal_items().len(), 2, "t1 and t3 are visible");
+
+        let x = app.mouse_layout.terminal_list.x;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            terminal_row_y(&app, 1),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            terminal_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            terminal_row_y(&app, 0),
+        ));
+
+        let order: Vec<String> = app
+            .sorted_terminal_items()
+            .iter()
+            .map(|(id, _)| (*id).clone())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["t3", "t1", "t2"],
+            "the hidden terminal keeps its place in the total order",
+        );
     }
 
     #[test]

@@ -1716,11 +1716,12 @@ impl App {
     fn paint_row_drag_marker(
         &self,
         buf: &mut ratatui::buffer::Buffer,
+        list: RowDragList,
         list_content: Rect,
         map: &[usize],
         top_pad_y: Option<u16>,
     ) {
-        let Some(drag) = self.row_drag else {
+        let Some(drag) = self.row_drag.filter(|drag| drag.list == list) else {
             return;
         };
         if !drag.moved {
@@ -2106,6 +2107,7 @@ impl App {
         if !body_will_dim {
             self.paint_row_drag_marker(
                 frame.buffer_mut(),
+                RowDragList::Agents,
                 geometry.content,
                 &self.mouse_layout.left_row_to_item,
                 geometry.top_pad_y,
@@ -2231,6 +2233,17 @@ impl App {
                 term_content,
                 &self.mouse_layout.terminal_row_to_item,
                 self.selected_terminal_index,
+                term_top_pad_y,
+            );
+        }
+        // The terminals reorder by drag exactly as the agents do, so they get
+        // the same insertion rule and the same muted moving row.
+        if !body_will_dim {
+            self.paint_row_drag_marker(
+                frame.buffer_mut(),
+                RowDragList::Terminals,
+                term_content,
+                &self.mouse_layout.terminal_row_to_item,
                 term_top_pad_y,
             );
         }
@@ -13235,6 +13248,7 @@ mod tests {
         app.rebuild_left_items();
         app.left_width_pct = 40;
         app.row_drag = Some(crate::app::RowDragState {
+            list: crate::app::RowDragList::Agents,
             source,
             hover,
             moved,
@@ -13309,6 +13323,71 @@ mod tests {
         assert!(
             name_row_colors(None, false).iter().any(|fg| *fg != muted),
             "an untouched row keeps its own colors, so the muting is the drag's",
+        );
+    }
+
+    #[test]
+    fn a_terminal_drag_paints_its_marker_in_the_terminals_section() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let now = chrono::Utc::now();
+        for (index, id) in ["t1", "t2", "t3"].into_iter().enumerate() {
+            let client = crate::pty::PtyClient::spawn(
+                "echo",
+                &[],
+                std::path::Path::new("/tmp"),
+                24,
+                80,
+                1000,
+            )
+            .expect("spawn a test terminal");
+            app.engine.companion_terminals.insert(
+                id.to_string(),
+                crate::app::CompanionTerminal {
+                    owner: dux_core::model::TerminalOwner::Session(
+                        app.engine.sessions[0].id.clone(),
+                    ),
+                    label: id.to_string(),
+                    foreground_cmd: None,
+                    client,
+                    sort_order: index as u64,
+                    created_at: now,
+                },
+            );
+        }
+        app.left_width_pct = 40;
+        app.rebuild_left_items();
+        app.row_drag = Some(crate::app::RowDragState {
+            list: crate::app::RowDragList::Terminals,
+            source: 0,
+            hover: Some(2),
+            moved: true,
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        let area = app.mouse_layout.terminal_list;
+        let rel = app
+            .mouse_layout
+            .terminal_row_to_item
+            .iter()
+            .position(|&i| i == 2)
+            .expect("the hovered terminal row is on screen");
+        let marker_y = area.y + rel as u16 - 1;
+        let rule = drag_row_text(&buf, area, marker_y);
+        assert!(
+            rule.chars().all(|c| c == '\u{2500}') && !rule.is_empty(),
+            "the terminals section paints the same insertion rule: {rule:?}",
+        );
+        assert_eq!(
+            buf[(area.x, marker_y)].fg,
+            app.theme.border_focused,
+            "the rule uses the focused border tone",
         );
     }
 

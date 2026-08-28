@@ -221,8 +221,34 @@ impl App {
             return;
         };
         let new_order = move_in_order(&order, idx, dir);
-        if new_order == order {
-            return; // already at the relevant edge; leave the sort mode as it was
+        self.apply_terminal_order(&order, new_order, &terminal_id);
+    }
+
+    /// The COMPLETE terminal id order a drop is computed against: every
+    /// terminal, whatever its owner, in the order the section shows them. The
+    /// twin of the web's `displayedTerminalOrder`, and total for the same
+    /// reason the agent baseline is: the rows a live query hides still hold
+    /// their places in the order that gets persisted.
+    pub(crate) fn terminal_drag_baseline(&self) -> Vec<String> {
+        self.sorted_terminal_items()
+            .iter()
+            .map(|(id, _)| (*id).clone())
+            .collect()
+    }
+
+    /// Apply a new terminal order: flip the sort to manual, stamp the order,
+    /// and leave the selection on `follow` (the terminal that moved). The
+    /// terminal twin of [`Self::apply_agent_order`], including the baseline
+    /// no-op guard, and runtime-only: terminals have no stored row, so this
+    /// order resets to creation order on restart.
+    pub(crate) fn apply_terminal_order(
+        &mut self,
+        baseline: &[String],
+        new_order: Vec<String>,
+        follow: &str,
+    ) {
+        if new_order == baseline {
+            return;
         }
         self.engine.set_agent_sort("manual");
         match self.engine.apply(Command::ReorderTerminals {
@@ -238,7 +264,7 @@ impl App {
         if let Some(pos) = self
             .terminal_items()
             .iter()
-            .position(|(id, _)| *id == &terminal_id)
+            .position(|(id, _)| id.as_str() == follow)
         {
             self.selected_terminal_index = pos;
         }
