@@ -206,8 +206,13 @@
     text-shadow: 0 0 18px color-mix(in oklab, var(--color-accent) 50%, transparent);
   }
 
+  /* Anchor targets sit on the first content wrapper inside a section, not on
+     the padded section itself, so this only has to clear the sticky header
+     (h-14, 3.5rem, plus its 1px bottom border) and leave a little air. Putting
+     it on the section made its top padding show up as an empty band under the
+     header. */
   .anchor-offset {
-    scroll-margin-top: 5rem;
+    scroll-margin-top: 4.5rem;
   }
 
   /* Recommendation blocks (Recommended tools page). */
