@@ -1119,6 +1119,17 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // A keystroke retires a live row drag: the pointer and the keyboard must
+        // not both be moving the sidebar, and a gesture that outlived the press
+        // would drop a row somewhere the user stopped looking at. The
+        // close-overlay key is the advertised way out, so it is CONSUMED here
+        // (cancelling the drag and nothing else); every other key retires the
+        // drag and then does its own job as usual.
+        if self.row_drag.take().is_some()
+            && self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
+        {
+            return Ok(false);
+        }
         match self.route_key_before_bindings(key)? {
             KeyRoute::Continue => {}
             KeyRoute::Return(should_exit) => return Ok(should_exit),
@@ -9924,6 +9935,12 @@ impl App {
                 self.set_left_selection(index);
                 if double_click {
                     self.activate_selected_left_item_from_mouse();
+                } else {
+                    // A single press on a reorderable row arms a drag. The second
+                    // press of a double click never does: that press has already
+                    // activated the row, and arming there would leave a gesture
+                    // behind an action the user has finished with.
+                    self.arm_row_drag(index);
                 }
             }
             MouseTarget::TerminalRow(index) => {
@@ -10010,6 +10027,64 @@ impl App {
         self.handle_files_pointer_target(target, mouse);
     }
 
+    /// Arm a drag-to-reorder gesture on the agent row the press landed on.
+    ///
+    /// Arming is not yet a drag: the gesture only becomes one when the pointer
+    /// reaches another row (see [`Self::continue_row_drag`]), so a press that
+    /// releases where it landed is the same plain click it always was. A press
+    /// on a row that cannot be reordered (the Inactive tail, its toggle) arms
+    /// nothing and clears any gesture a previous press left behind.
+    fn arm_row_drag(&mut self, index: usize) {
+        self.row_drag = self
+            .is_reorderable_left_item(index)
+            .then_some(RowDragState {
+                source: index,
+                hover: None,
+                moved: false,
+            });
+    }
+
+    /// Track the pointer while a row drag is armed.
+    ///
+    /// The promotion threshold is a whole row rather than a cell count: the
+    /// gesture stays a click until the pointer resolves to a DIFFERENT
+    /// reorderable row, so the two or three cells of vertical travel a heavy
+    /// hand adds to a click land inside the three-row-tall source row and change
+    /// nothing. Once promoted, `hover` follows the pointer and is `None`
+    /// wherever a drop would mean nothing: over the source row itself, over the
+    /// Inactive tail, over empty space, or outside the sidebar.
+    fn continue_row_drag(&mut self, mouse: &MouseEvent) {
+        let Some(mut drag) = self.row_drag else {
+            return;
+        };
+        let over = match self.mouse_target(mouse.column, mouse.row) {
+            Some(MouseTarget::LeftRow(index)) if self.is_reorderable_left_item(index) => {
+                Some(index)
+            }
+            _ => None,
+        };
+        if !drag.moved {
+            match over {
+                Some(index) if index != drag.source => {
+                    drag.moved = true;
+                    // The press is a drag now, so it can no longer be the first
+                    // half of a double click: a release that reorders must not
+                    // also count as a click the next press can pair with.
+                    self.last_mouse_click = None;
+                }
+                _ => return,
+            }
+        }
+        drag.hover = over.filter(|&index| index != drag.source);
+        self.row_drag = Some(drag);
+    }
+
+    /// Retire the row drag on release. Returns the gesture that was live, if any,
+    /// so the caller can act on a completed drop.
+    fn finish_row_drag(&mut self) -> Option<RowDragState> {
+        self.row_drag.take()
+    }
+
     fn handle_primary_mouse_down(&mut self, mouse: &MouseEvent, windowed: bool) {
         if windowed && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
             self.mouse_drag = Some(drag);
@@ -10073,6 +10148,15 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) if self.mouse_drag.take().is_some() => {
                 self.persist_pane_widths();
+            }
+            // The divider drag returns before the sidebar hit-test ever runs, so
+            // a pane resize and a row reorder can never be live at once; these
+            // arms sit after it for exactly that reason.
+            MouseEventKind::Drag(MouseButton::Left) if self.row_drag.is_some() => {
+                self.continue_row_drag(&mouse);
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.row_drag.is_some() => {
+                self.finish_row_drag();
             }
             MouseEventKind::ScrollDown => self.route_mouse_wheel(mouse, true),
             MouseEventKind::ScrollUp => self.route_mouse_wheel(mouse, false),
@@ -10808,6 +10892,238 @@ mod tests {
             commit_area: Some(Rect::new(77, 14, 23, 6)),
             commit_text_area: Some(Rect::new(78, 15, 21, 4)),
         };
+    }
+
+    /// Three active agents and one detached one, so the agent list is three
+    /// reorderable rows followed by the Inactive toggle. With the synthetic
+    /// identity mouse map installed, row `y = left_list.y + i` is item `i`.
+    fn drag_test_app() -> App {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        app.engine.sessions.clear();
+        for id in ["s1", "s2", "s3"] {
+            app.engine
+                .sessions
+                .push(filter_test_session(id, id, "p1", now));
+        }
+        let mut quiet = filter_test_session("s4", "s4", "p1", now);
+        quiet.status = crate::model::SessionStatus::Detached;
+        app.engine.sessions.push(quiet);
+        app.rebuild_left_items();
+        install_mouse_layout(&mut app);
+        app
+    }
+
+    /// The screen row carrying agent-list item `index` under the identity map.
+    fn left_row_y(app: &App, index: usize) -> u16 {
+        app.mouse_layout.left_list.y + index as u16
+    }
+
+    #[test]
+    fn a_press_that_releases_where_it_landed_stays_a_plain_click() {
+        let mut app = drag_test_app();
+        let x = app.mouse_layout.left_list.x;
+        let y = left_row_y(&app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+        assert!(app.row_drag.is_some(), "the press arms a gesture");
+        assert_eq!(app.selected_left, 1, "the press still selects the row");
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), x, y));
+
+        assert!(app.row_drag.is_none(), "the release retires the gesture");
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["s1", "s2", "s3", "s4"],
+            "a click reorders nothing"
+        );
+    }
+
+    #[test]
+    fn the_second_press_of_a_double_click_arms_no_drag() {
+        let mut app = drag_test_app();
+        let x = app.mouse_layout.left_list.x;
+        let y = left_row_y(&app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), x, y));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+
+        assert!(
+            app.row_drag.is_none(),
+            "the activating press must not leave a gesture behind",
+        );
+    }
+
+    #[test]
+    fn a_press_on_the_inactive_toggle_arms_no_drag() {
+        let mut app = drag_test_app();
+        let x = app.mouse_layout.left_list.x;
+        // Item 3 is the Inactive toggle (three active agents above it).
+        let y = left_row_y(&app, 3);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+
+        assert!(app.row_drag.is_none(), "the tail toggle is not draggable");
+    }
+
+    #[test]
+    fn a_move_inside_the_source_row_leaves_the_gesture_a_click() {
+        let mut app = drag_test_app();
+        let x = app.mouse_layout.left_list.x;
+        let y = left_row_y(&app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), x + 4, y));
+
+        let drag = app.row_drag.expect("gesture still armed");
+        assert!(!drag.moved, "a move within the row is not a drag");
+        assert_eq!(drag.hover, None, "an unpromoted gesture has no drop target");
+    }
+
+    #[test]
+    fn a_move_onto_another_row_promotes_the_gesture_and_tracks_the_hover() {
+        let mut app = drag_test_app();
+        let x = app.mouse_layout.left_list.x;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 2),
+        ));
+
+        let drag = app.row_drag.expect("gesture still live");
+        assert!(drag.moved, "reaching another row promotes the gesture");
+        assert_eq!(drag.source, 0);
+        assert_eq!(drag.hover, Some(2));
+        assert!(
+            app.last_mouse_click.is_none(),
+            "a promoted press can no longer pair into a double click",
+        );
+    }
+
+    #[test]
+    fn a_live_drag_over_the_inactive_tail_or_back_home_has_no_drop_target() {
+        let mut app = drag_test_app();
+        let x = app.mouse_layout.left_list.x;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 2),
+        ));
+        // Over the Inactive toggle: not a drop target.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 3),
+        ));
+        assert_eq!(app.row_drag.expect("live").hover, None);
+
+        // Back over the source row: dropping there would mean nothing either.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        assert_eq!(app.row_drag.expect("live").hover, None);
+    }
+
+    #[test]
+    fn a_host_resize_retires_a_live_row_drag() {
+        let mut app = drag_test_app();
+        app.row_drag = Some(crate::app::RowDragState {
+            source: 0,
+            hover: Some(1),
+            moved: true,
+        });
+
+        app.handle_terminal_event(crossterm::event::Event::Resize(80, 24));
+
+        assert!(app.row_drag.is_none());
+    }
+
+    #[test]
+    fn focus_loss_retires_a_live_row_drag() {
+        let mut app = drag_test_app();
+        app.row_drag = Some(crate::app::RowDragState {
+            source: 0,
+            hover: Some(1),
+            moved: true,
+        });
+
+        app.handle_terminal_event(crossterm::event::Event::FocusLost);
+
+        assert!(app.row_drag.is_none());
+    }
+
+    #[test]
+    fn a_keystroke_retires_a_live_row_drag() {
+        let mut app = drag_test_app();
+        app.row_drag = Some(crate::app::RowDragState {
+            source: 0,
+            hover: Some(1),
+            moved: true,
+        });
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .expect("key handled");
+
+        assert!(app.row_drag.is_none());
+    }
+
+    #[test]
+    fn escape_cancels_a_live_row_drag_and_goes_no_further() {
+        let mut app = drag_test_app();
+        app.selected_left = 1;
+        app.row_drag = Some(crate::app::RowDragState {
+            source: 1,
+            hover: Some(2),
+            moved: true,
+        });
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("key handled");
+
+        assert!(app.row_drag.is_none(), "the cancel key retires the gesture");
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["s1", "s2", "s3", "s4"],
+            "cancelling restores nothing because nothing had changed yet",
+        );
+    }
+
+    #[test]
+    fn a_new_press_replaces_a_live_row_drag() {
+        let mut app = drag_test_app();
+        let x = app.mouse_layout.left_list.x;
+        app.row_drag = Some(crate::app::RowDragState {
+            source: 0,
+            hover: Some(2),
+            moved: true,
+        });
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 2),
+        ));
+
+        let drag = app.row_drag.expect("the new press arms its own gesture");
+        assert_eq!(drag.source, 2);
+        assert!(!drag.moved);
+        assert_eq!(drag.hover, None);
     }
 
     #[test]

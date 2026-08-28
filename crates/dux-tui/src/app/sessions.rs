@@ -4459,6 +4459,7 @@ mod tests {
             mouse_layout: MouseLayoutState::default(),
             overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
+            row_drag: None,
             center_mouse_forward: None,
             last_mouse_click: None,
             pressed_button: None,

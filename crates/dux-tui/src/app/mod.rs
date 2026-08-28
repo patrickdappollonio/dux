@@ -461,6 +461,11 @@ pub struct App {
     pub(crate) mouse_layout: MouseLayoutState,
     pub(crate) overlay_layout: OverlayMouseLayoutState,
     pub(crate) mouse_drag: Option<ResizeDragState>,
+    /// The live drag-to-reorder gesture over the sidebar's agent rows, or `None`
+    /// when no row is being dragged. Armed by a left press on a reorderable row
+    /// and retired on release, on a host resize, on focus loss, on any keystroke,
+    /// and by the next press. See [`RowDragState`] for the click/drag threshold.
+    pub(crate) row_drag: Option<RowDragState>,
     /// A mouse button pressed inside the WINDOWED center pane that is being
     /// forwarded to a mouse-aware child: holds the SGR button
     /// code of the pressed button (0 left, 1 middle, 2 right) from press to
@@ -3127,6 +3132,30 @@ pub(crate) enum MouseClickTarget {
     MacroTextInput,
 }
 
+/// A drag-to-reorder gesture over a sidebar row, the TUI's twin of the web
+/// sidebar's drag ordering.
+///
+/// The gesture is armed by a left press on a reorderable row and stays a plain
+/// CLICK until the pointer reaches a DIFFERENT reorderable row: an agent row is
+/// three screen rows tall, so a one-to-three-cell wobble inside the row the press
+/// landed on leaves a click (and a double click) behaving exactly as it did
+/// before drag reordering existed. The first move onto another row promotes the
+/// gesture (`moved`), and from then on the pointer's row is tracked in `hover`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RowDragState {
+    /// The item index the press landed on: the row being moved.
+    pub(crate) source: usize,
+    /// The reorderable row the pointer is over now, or `None` when it is over
+    /// something that is not a drop target (the Inactive tail and its toggle, a
+    /// pane's empty space, another pane) or back over the source row itself. A
+    /// release with no hover drops nothing.
+    pub(crate) hover: Option<usize>,
+    /// Whether the pointer has left the source row, promoting the press from a
+    /// click into a drag. An unpromoted gesture paints no marker and reorders
+    /// nothing.
+    pub(crate) moved: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RecentMouseClick {
     pub(crate) target: MouseClickTarget,
@@ -3640,6 +3669,7 @@ impl App {
             mouse_layout: MouseLayoutState::default(),
             overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
+            row_drag: None,
             center_mouse_forward: None,
             last_mouse_click: None,
             pressed_button: None,
@@ -4280,6 +4310,10 @@ impl App {
                 // The grid the press was aimed at has reflowed, and so has the
                 // cell that carried its link.
                 self.retire_pending_link_click();
+                // The sidebar has reflowed too: the row the drag was aimed at is
+                // no longer under the pointer, so the gesture is retired rather
+                // than dropped somewhere the user did not choose.
+                self.row_drag = None;
                 false
             }
             Event::FocusGained => {
@@ -4290,6 +4324,7 @@ impl App {
                 // The release will land on whatever window took the focus,
                 // never here.
                 self.retire_pending_link_click();
+                self.row_drag = None;
                 self.terminal_focus.on_focus_lost();
                 false
             }
@@ -5268,6 +5303,28 @@ impl App {
         self.left_items()
             .get(index)
             .is_some_and(|item| item.is_selectable())
+    }
+
+    /// Whether the agent-list item at `index` may be dragged, and dropped onto,
+    /// by a mouse reorder: an agent row in the ACTIVE list.
+    ///
+    /// The Inactive tail and its toggle are deliberately not drop targets, as on
+    /// the web: the tail is a derived bucket (a detached agent falls into it and
+    /// an attached one leaves it), so a slot inside it is not a place a user can
+    /// put something. A drag that wanders over one shows no marker and drops
+    /// nothing.
+    pub(crate) fn is_reorderable_left_item(&self, index: usize) -> bool {
+        let items = self.left_items();
+        if !matches!(items.get(index), Some(LeftItem::Session(_))) {
+            return false;
+        }
+        match items
+            .iter()
+            .position(|item| matches!(item, LeftItem::InactiveToggle))
+        {
+            Some(tail) => index < tail,
+            None => true,
+        }
     }
 
     pub(crate) fn next_selectable_left_item_after(&self, index: usize) -> Option<usize> {
