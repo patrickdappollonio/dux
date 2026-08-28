@@ -184,6 +184,8 @@ The palette matches on names and descriptions. Exact phrase matches lead the lis
 anything that matched only loosely follows them, so a half-remembered phrase still finds
 the command.
 
+![The command palette with new tab typed and new-agent-tab as the first result.](/screens/tui-palette-matches.png)
+
 ## Per-project startup commands
 
 A project's `startup_command` runs setup for you when an agent's worktree is created:
