@@ -1,0 +1,368 @@
+---
+// Click-to-maximize for docs screenshots.
+//
+// A screenshot the prose column had to SHRINK is the only one worth opening:
+// there are pixels the reader cannot see. Those images (and only those) get
+// wrapped in a real <button> with a zoom-in cursor and a corner affordance, and
+// a click opens the one <dialog> below with the image at its natural size, pan
+// and zoom included. An image that already fits at 1:1 is left exactly as it
+// was: no cursor change, no affordance, no click behaviour, because there is
+// nothing to reveal.
+//
+// The arithmetic lives in src/lib/image-zoom.ts (unit-tested without a
+// browser); the script here is wiring only. Styling is src/styles/image-zoom.css
+// and reads the site tokens.
+//
+// Rendered by DocsLayout, so it exists once per docs page.
+import "../styles/image-zoom.css";
+---
+
+<dialog class="izoom" data-izoom aria-label="Image viewer">
+  <div class="izoom-stage" data-izoom-stage>
+    <img class="izoom-image" data-izoom-image alt="" draggable="false" />
+  </div>
+
+  <div class="izoom-bar" data-izoom-bar>
+    <button
+      type="button"
+      class="izoom-btn"
+      data-izoom-out
+      aria-label="Zoom out"
+      title="Zoom out"
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"></circle>
+        <path d="m20 20-3.5-3.5"></path>
+        <path d="M8 11h6"></path>
+      </svg>
+    </button>
+    <span class="izoom-level" data-izoom-level aria-live="polite">100%</span>
+    <button
+      type="button"
+      class="izoom-btn"
+      data-izoom-in
+      aria-label="Zoom in"
+      title="Zoom in"
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"></circle>
+        <path d="m20 20-3.5-3.5"></path>
+        <path d="M8 11h6"></path>
+        <path d="M11 8v6"></path>
+      </svg>
+    </button>
+    <span class="izoom-sep" aria-hidden="true"></span>
+    <button
+      type="button"
+      class="izoom-btn"
+      data-izoom-reset
+      aria-label="Reset zoom"
+      title="Reset zoom"
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path>
+        <path d="M3 3v5h5"></path>
+      </svg>
+    </button>
+    <button
+      type="button"
+      class="izoom-btn"
+      data-izoom-close
+      aria-label="Close image viewer"
+      title="Close"
+      autofocus
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18"></path>
+        <path d="m6 6 12 12"></path>
+      </svg>
+    </button>
+  </div>
+
+  <p class="izoom-caption" data-izoom-caption></p>
+</dialog>
+
+<script>
+  import {
+    MAX_SCALE,
+    MIN_SCALE,
+    clampOffset,
+    clampScale,
+    distanceBetween,
+    formatZoom,
+    midpoint,
+    pinchScale,
+    shouldArm,
+    stepScale,
+    toggleScale,
+    zoomAtPoint,
+    type Point,
+    type ViewerTransform,
+  } from "../lib/image-zoom";
+
+  const dialog = document.querySelector<HTMLDialogElement>("[data-izoom]");
+  const stage = document.querySelector<HTMLElement>("[data-izoom-stage]");
+  const viewer = document.querySelector<HTMLImageElement>("[data-izoom-image]");
+  const level = document.querySelector<HTMLElement>("[data-izoom-level]");
+  const caption = document.querySelector<HTMLElement>("[data-izoom-caption]");
+  const btnIn = document.querySelector<HTMLButtonElement>("[data-izoom-in]");
+  const btnOut = document.querySelector<HTMLButtonElement>("[data-izoom-out]");
+  const btnReset = document.querySelector<HTMLButtonElement>("[data-izoom-reset]");
+  const btnClose = document.querySelector<HTMLButtonElement>("[data-izoom-close]");
+
+  // The alignment classes rehype-prose-images puts on the <img>. The trigger
+  // takes over the image's box, so it takes over the class that shapes it.
+  const ALIGN_CLASSES = ["align-left", "align-right", "align-center", "full-width"];
+
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  if (dialog && stage && viewer && level && caption && btnIn && btnOut && btnReset && btnClose) {
+    let transform: ViewerTransform = { scale: 1, x: 0, y: 0 };
+    let naturalWidth = 0;
+    let naturalHeight = 0;
+    let opener: HTMLElement | null = null;
+
+    // ── Viewer ────────────────────────────────────────────────────────────
+    const apply = (animated = true) => {
+      const box = stage.getBoundingClientRect();
+      transform.x = clampOffset(transform.x, naturalWidth * transform.scale, box.width);
+      transform.y = clampOffset(transform.y, naturalHeight * transform.scale, box.height);
+      viewer.dataset.animated = animated && !reduceMotion.matches ? "true" : "false";
+      viewer.style.transform = `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`;
+      level.textContent = formatZoom(transform.scale);
+      btnIn.disabled = transform.scale >= MAX_SCALE - 0.0001;
+      btnOut.disabled = transform.scale <= MIN_SCALE + 0.0001;
+      const pannable =
+        naturalWidth * transform.scale > box.width + 1 ||
+        naturalHeight * transform.scale > box.height + 1;
+      stage.dataset.pannable = pannable ? "true" : "false";
+    };
+
+    // Anchor a gesture: stage pixels measured from the middle of the stage,
+    // which is where the image's transform origin sits.
+    const anchorFor = (clientX: number, clientY: number): Point => {
+      const box = stage.getBoundingClientRect();
+      return {
+        x: clientX - (box.left + box.width / 2),
+        y: clientY - (box.top + box.height / 2),
+      };
+    };
+
+    const zoomTo = (scale: number, anchor: Point, animated = true) => {
+      transform = zoomAtPoint(transform, scale, anchor);
+      apply(animated);
+    };
+
+    const reset = () => {
+      transform = { scale: 1, x: 0, y: 0 };
+      apply(false);
+    };
+
+    const measure = () => {
+      naturalWidth = viewer.naturalWidth;
+      naturalHeight = viewer.naturalHeight;
+      // Pin the layout size to the natural size so scale 1 really is 1:1 and
+      // the rendered width is naturalWidth * scale, whatever the stage does.
+      viewer.style.width = `${naturalWidth}px`;
+      viewer.style.height = `${naturalHeight}px`;
+      reset();
+    };
+
+    const open = (source: HTMLImageElement, trigger: HTMLElement) => {
+      opener = trigger;
+      // Deliberately the <img> src, never the <picture>'s webp <source>: the
+      // viewer exists to show real pixels, so it loads the original raster the
+      // markdown named. (`currentSrc` would hand back the webp the browser
+      // picked for the page.)
+      const src = source.getAttribute("src") ?? source.src;
+      caption.textContent = source.alt ?? "";
+      viewer.alt = source.alt ?? "";
+      naturalWidth = 0;
+      naturalHeight = 0;
+      viewer.removeAttribute("style");
+      if (viewer.src !== new URL(src, location.href).href) {
+        viewer.src = src;
+      } else if (viewer.complete) {
+        measure();
+      }
+      if (!dialog.open) {
+        dialog.showModal();
+        document.documentElement.style.overflow = "hidden";
+      }
+      if (viewer.complete && viewer.naturalWidth) measure();
+    };
+
+    viewer.addEventListener("load", measure);
+
+    dialog.addEventListener("close", () => {
+      document.documentElement.style.overflow = "";
+      const target = opener;
+      opener = null;
+      // Focus goes back where the reader left it, not to the top of the page.
+      if (target && target.isConnected) target.focus();
+    });
+
+    btnClose.addEventListener("click", () => dialog.close());
+    btnIn.addEventListener("click", () => zoomTo(stepScale(transform.scale, 1), { x: 0, y: 0 }));
+    btnOut.addEventListener("click", () => zoomTo(stepScale(transform.scale, -1), { x: 0, y: 0 }));
+    btnReset.addEventListener("click", reset);
+
+    stage.addEventListener(
+      "wheel",
+      (event: WheelEvent) => {
+        event.preventDefault();
+        const factor = Math.exp(-event.deltaY * 0.0015);
+        zoomTo(clampScale(transform.scale * factor), anchorFor(event.clientX, event.clientY), false);
+      },
+      { passive: false },
+    );
+
+    viewer.addEventListener("dblclick", (event: MouseEvent) => {
+      event.preventDefault();
+      zoomTo(toggleScale(transform.scale), anchorFor(event.clientX, event.clientY));
+    });
+
+    // ── Drag to pan, two fingers to pinch ─────────────────────────────────
+    const pointers = new Map<number, Point>();
+    let dragFrom: Point | null = null;
+    let dragOrigin: Point = { x: 0, y: 0 };
+    let moved = false;
+    let pinch: { distance: number; scale: number } | null = null;
+
+    stage.addEventListener("pointerdown", (event: PointerEvent) => {
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      moved = false;
+      if (pointers.size === 2) {
+        const [a, b] = Array.from(pointers.values());
+        pinch = { distance: distanceBetween(a, b), scale: transform.scale };
+        dragFrom = null;
+        return;
+      }
+      if (pointers.size !== 1) return;
+      // Capture is a nicety (it keeps a fast drag from escaping the stage), so
+      // a browser that refuses it must not cost us the drag itself.
+      try {
+        stage.setPointerCapture(event.pointerId);
+      } catch {
+        /* no capture; the pointermove listener still tracks the drag */
+      }
+      dragFrom = { x: event.clientX, y: event.clientY };
+      dragOrigin = { x: transform.x, y: transform.y };
+      stage.dataset.dragging = "true";
+    });
+
+    stage.addEventListener("pointermove", (event: PointerEvent) => {
+      if (!pointers.has(event.pointerId)) return;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+      if (pinch && pointers.size >= 2) {
+        const [a, b] = Array.from(pointers.values());
+        const centre = midpoint(a, b);
+        moved = true;
+        zoomTo(
+          pinchScale(pinch.scale, pinch.distance, distanceBetween(a, b)),
+          anchorFor(centre.x, centre.y),
+          false,
+        );
+        return;
+      }
+
+      if (!dragFrom) return;
+      const dx = event.clientX - dragFrom.x;
+      const dy = event.clientY - dragFrom.y;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+      if (stage.dataset.pannable !== "true") return;
+      transform.x = dragOrigin.x + dx;
+      transform.y = dragOrigin.y + dy;
+      apply(false);
+    });
+
+    const endPointer = (event: PointerEvent) => {
+      pointers.delete(event.pointerId);
+      if (pointers.size < 2) pinch = null;
+      if (pointers.size === 0) {
+        dragFrom = null;
+        delete stage.dataset.dragging;
+        // A click that landed on the stage rather than the image, and that did
+        // not turn into a drag, is a backdrop click.
+        if (!moved && event.target !== viewer) dialog.close();
+      }
+    };
+
+    stage.addEventListener("pointerup", endPointer);
+    stage.addEventListener("pointercancel", endPointer);
+
+    // A click straight on the dialog box (outside the stage) is a backdrop
+    // click too; the stage fills the dialog, so this is belt and braces.
+    dialog.addEventListener("click", (event: MouseEvent) => {
+      if (event.target === dialog) dialog.close();
+    });
+
+    window.addEventListener("resize", () => {
+      if (dialog.open && naturalWidth) apply(false);
+    });
+
+    // ── Arming ────────────────────────────────────────────────────────────
+    const hint = () => {
+      const span = document.createElement("span");
+      span.className = "izoom-hint";
+      span.setAttribute("aria-hidden", "true");
+      span.innerHTML =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"></path><path d="M9 21H3v-6"></path><path d="M21 3l-7 7"></path><path d="M3 21l7-7"></path></svg><span>full size</span>';
+      return span;
+    };
+
+    const arm = (img: HTMLImageElement) => {
+      const box: HTMLElement = img.closest("picture") ?? img;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "izoom-trigger";
+      for (const cls of ALIGN_CLASSES) {
+        if (img.classList.contains(cls)) button.classList.add(cls);
+      }
+      const alt = img.alt.trim();
+      button.setAttribute(
+        "aria-label",
+        alt ? `View at full size: ${alt}` : "View the image at full size",
+      );
+      box.replaceWith(button);
+      button.appendChild(box);
+      button.appendChild(hint());
+      button.addEventListener("click", () => open(img, button));
+    };
+
+    const disarm = (button: HTMLElement) => {
+      const box = button.querySelector("picture, img");
+      if (!box) return;
+      button.replaceWith(box);
+    };
+
+    const evaluate = () => {
+      const images = document.querySelectorAll<HTMLImageElement>(".prose-docs img");
+      for (const img of images) {
+        if (img === viewer) continue;
+        const trigger = img.closest<HTMLElement>(".izoom-trigger");
+        if (!img.complete || !img.naturalWidth) continue;
+        const armed = shouldArm(img.naturalWidth, img.getBoundingClientRect().width);
+        if (armed && !trigger) arm(img);
+        else if (!armed && trigger) disarm(trigger);
+      }
+    };
+
+    let pending = 0;
+    const scheduleEvaluate = () => {
+      window.clearTimeout(pending);
+      pending = window.setTimeout(evaluate, 120);
+    };
+
+    for (const img of document.querySelectorAll<HTMLImageElement>(".prose-docs img")) {
+      if (img === viewer) continue;
+      // A still-loading image has no natural width to compare against yet.
+      if (!img.complete) img.addEventListener("load", scheduleEvaluate, { once: true });
+    }
+
+    evaluate();
+    window.addEventListener("load", evaluate);
+    window.addEventListener("resize", scheduleEvaluate);
+  }
+</script>

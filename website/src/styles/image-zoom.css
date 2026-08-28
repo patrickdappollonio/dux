@@ -1,0 +1,279 @@
+/* Docs screenshot lightbox. Imported once, by src/components/ImageZoom.astro,
+   which is the only thing that renders this markup; every color comes from the
+   site tokens declared in global.css, so the file adds no palette of its own.
+
+   Two surfaces live here: the trigger a shrunken screenshot is wrapped in
+   (.izoom-trigger) and the native <dialog> viewer (.izoom). */
+
+/* ── Trigger ──────────────────────────────────────────────────────────────
+   The script wraps a shrunken <picture> in a real <button>, and copies the
+   image's alignment class onto that button so the wrapper takes over the box
+   the image used to occupy. That means the float/width rules from the prose
+   image styles are restated here for the button; the inner <img> is then
+   neutralised to simply fill it. Keeping the pair in sync is the cost of
+   wrapping, and the alternative (an absolutely positioned overlay) needs a
+   positioned wrapper with the same duplication plus a focus target that is not
+   the thing you click. */
+.prose-docs .izoom-trigger {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  position: relative;
+  cursor: zoom-in;
+  width: max-content;
+  max-width: 100%;
+  margin: 1.25rem auto;
+  border-radius: 0.5rem;
+  line-height: 0;
+}
+
+.prose-docs .izoom-trigger > picture > img,
+.prose-docs .izoom-trigger > img {
+  display: block;
+  width: 100%;
+  margin: 0;
+}
+
+.prose-docs .izoom-trigger.full-width {
+  width: 100%;
+}
+
+.prose-docs .izoom-trigger.align-center {
+  margin-inline: auto;
+}
+
+.prose-docs .izoom-trigger.align-left {
+  float: left;
+  width: min(45%, 14rem);
+  margin: 0.35rem 1.5rem 1rem 0;
+}
+
+.prose-docs .izoom-trigger.align-right {
+  float: right;
+  width: min(45%, 14rem);
+  margin: 0.35rem 0 1rem 1.5rem;
+}
+
+@media (max-width: 640px) {
+  .prose-docs .izoom-trigger.align-left,
+  .prose-docs .izoom-trigger.align-right {
+    float: none;
+    width: 100%;
+    margin: 1.25rem 0;
+  }
+}
+
+.prose-docs .izoom-trigger:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+}
+
+/* The corner affordance. Hidden until the pointer or the keyboard arrives, so
+   a screenshot that is only being read carries no chrome. On a coarse pointer
+   there is no hover, so it is simply always visible. */
+.izoom-hint {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.45rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-panel) 88%, transparent);
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  pointer-events: none;
+}
+
+.izoom-hint svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.prose-docs .izoom-trigger:hover .izoom-hint,
+.prose-docs .izoom-trigger:focus-visible .izoom-hint {
+  opacity: 1;
+  color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+
+@media (hover: none) {
+  .izoom-hint {
+    opacity: 1;
+  }
+}
+
+/* ── Viewer ───────────────────────────────────────────────────────────────
+   One <dialog> for the whole page, opened with showModal() so the browser
+   supplies the backdrop, the focus trap, and Esc. */
+.izoom {
+  width: 100vw;
+  max-width: 100vw;
+  height: 100dvh;
+  max-height: 100dvh;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  overflow: hidden;
+}
+
+.izoom::backdrop {
+  background: color-mix(in srgb, var(--color-ink) 97%, transparent);
+}
+
+.izoom[open] {
+  display: flex;
+}
+
+/* The pan surface. It fills the dialog, so a click on it that missed the image
+   is a backdrop click and closes the viewer. */
+.izoom-stage {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  touch-action: none;
+  cursor: default;
+}
+
+.izoom-stage[data-pannable="true"] {
+  cursor: grab;
+}
+
+.izoom-stage[data-dragging="true"] {
+  cursor: grabbing;
+}
+
+.izoom-image {
+  max-width: none;
+  max-height: none;
+  transform-origin: center center;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-drag: none;
+  image-rendering: auto;
+  border-radius: 0.25rem;
+  box-shadow: 0 24px 60px color-mix(in srgb, var(--color-ink) 70%, transparent);
+  transition: transform 0.16s ease-out;
+}
+
+/* While a gesture is running the transform must track the pointer exactly. */
+.izoom-image[data-animated="false"] {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .izoom-image {
+    transition: none;
+  }
+}
+
+/* ── Toolbar ─────────────────────────────────────────────────────────────── */
+.izoom-bar {
+  position: absolute;
+  top: max(0.75rem, env(safe-area-inset-top));
+  right: max(0.75rem, env(safe-area-inset-right));
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-panel) 92%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.izoom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.izoom-btn svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.izoom-btn:hover:not(:disabled) {
+  background: var(--color-highlight);
+  color: var(--color-text);
+}
+
+.izoom-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+  color: var(--color-accent);
+}
+
+.izoom-btn:disabled {
+  color: var(--color-dim);
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The toolbar buttons sit right next to each other, so on a finger they get a
+   40px target rather than the tighter pointer size. */
+@media (pointer: coarse) {
+  .izoom-btn {
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+}
+
+.izoom-level {
+  min-width: 3.25rem;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--color-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.izoom-sep {
+  width: 1px;
+  height: 1.25rem;
+  background: var(--color-border-soft);
+}
+
+/* The caption sits under the toolbar rather than over the image, so it never
+   covers the pixels the reader opened the viewer to see. */
+.izoom-caption {
+  position: absolute;
+  left: 50%;
+  bottom: max(0.75rem, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  max-width: min(60rem, 90vw);
+  padding: 0.4rem 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--color-border-soft);
+  background: color-mix(in srgb, var(--color-panel) 88%, transparent);
+  color: var(--color-dim);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  text-align: center;
+  pointer-events: none;
+}
+
+.izoom-caption:empty {
+  display: none;
+}

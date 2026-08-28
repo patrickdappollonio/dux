@@ -3,6 +3,7 @@ import Layout from "./Layout.astro";
 import Header from "../components/Header.astro";
 import Footer from "../components/Footer.astro";
 import DocsSidebar from "../components/DocsSidebar.astro";
+import ImageZoom from "../components/ImageZoom.astro";
 
 interface Heading {
   depth: number;
@@ -187,5 +188,7 @@ const gridClass =
     </div>
   </main>
   <Footer />
+  {/* Click-to-maximize for any screenshot the prose column had to shrink. */}
+  <ImageZoom />
   <script type="application/ld+json" set:html={JSON.stringify(breadcrumb)} />
 </Layout>
