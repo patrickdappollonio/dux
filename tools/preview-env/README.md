@@ -86,18 +86,35 @@ app over REST (`/api/v1/...`) is often faster than clicking; see the routes in
 
 `tui-shot.sh` runs the real terminal UI in a disposable Docker container at a
 fixed terminal grid. It drives a small journey script, captures the styled terminal
-cells, and renders them with the bundled Dux terminal font stack in headless Chromium. The
-capture has its own `DUX_HOME`, repositories, and process lock, so it can run
-while the web preview is up.
+cells, and renders them in headless Chromium. The capture has its own `DUX_HOME`,
+repositories, and process lock, so it can run while the web preview is up.
 
-The default 160×45 grid renders 2760 pixels wide at 2× scale and is the desktop
+The default 160×45 grid renders 2632 pixels wide at 2× scale and is the desktop
 baseline. Use `--cols` and `--rows` only for a different terminal class.
 
 ```bash
 ./tui-shot.sh tui-journey.example.js shots/tui-workspace.png
 ./tui-shot.sh palette.tmp.js shots/tui-palette.png --cols 160 --rows 45
 ./tui-shot.sh narrow.tmp.js shots/tui-narrow.png --cols 100 --rows 30
+./tui-shot.sh sidebar.tmp.js shots/tui-sidebar.png --crop sidebar
 ```
+
+The face is **MonoLisa Nerd Font Mono** when the host has it installed, and the
+bundled Dux Mono stack otherwise. MonoLisa is commercial, so it is referenced by
+family name and never vendored here; a host without it still captures correctly
+and says so on stderr, at a slightly different cell size than the committed
+screenshots. The font size is 12.5 for a measured reason spelled out in
+`tui-shot.js`: xterm's DOM renderer places cells at the font's unrounded
+advance, and any size whose advance misses a whole device pixel turns every
+`▄`/`▀`/`█` row into a comb of antialiased seams. 12.5 is the only readable size
+that lands exactly for both faces.
+
+`--crop sidebar` frames the left pane instead of the whole screen. The rect is
+read out of the capture's own text grid (the pane's border columns, its top
+border row, and every row down to the last one with content in it plus a row of
+air) and multiplied by the cell metrics measured off the live terminal, so a
+crop edge always lands on a cell boundary rather than slicing a border column
+down the middle. Crops are flush to their cells and never exceed 1.5:1.
 
 Each run writes four artifacts beside the requested PNG: the image, styled ANSI
 cells, a plain-text grid, and JSON capture details. The example journey does not use
@@ -151,6 +168,6 @@ host (`BASE_IMAGE=<image> ./up.sh`) or use the in-container build.
 | `compose.yml` | Defines the isolated web preview and opt-in TUI capture service. |
 | `up.sh` | Host: build binary + start/restart the container. |
 | `shot.sh` / `shot.js` | Host: screenshot one page of the running preview; also the boilerplate reference for throwaway interaction scripts. |
-| `tui-shot.sh` / `tui-shot.js` | Host: run a deterministic TUI scene and render its captured cells as a PNG. |
+| `tui-shot.sh` / `tui-shot.js` | Host: run a deterministic TUI scene and render its captured cells as a PNG (`--crop sidebar` frames the left pane). |
 | `tui-driver.js` | Container: seed disposable state, run one journey, and export capture artifacts. |
 | `tui-journey.example.js` | Minimal example that agents copy into ignored, task-specific journeys. |

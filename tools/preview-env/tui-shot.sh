@@ -5,7 +5,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${DUX_SRC:-$(cd "$HERE/../.." && pwd)}"
 
 usage() {
-  echo "usage: ./tui-shot.sh [journey.js] [output.png] [--cols N] [--rows N] [--theme NAME]"
+  echo "usage: ./tui-shot.sh [journey.js] [output.png] [--cols N] [--rows N] [--theme NAME] [--crop sidebar]"
 }
 
 fail() {
@@ -45,11 +45,13 @@ if [ "$#" -ge 2 ]; then shift 2; else shift "$#"; fi
 COLS=160
 ROWS=45
 THEME=catppuccin-mocha
+CROP=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --cols) COLS=${2:?missing value for --cols}; shift 2 ;;
     --rows) ROWS=${2:?missing value for --rows}; shift 2 ;;
     --theme) THEME=${2:?missing value for --theme}; shift 2 ;;
+    --crop) CROP=${2:?missing value for --crop}; shift 2 ;;
     -h|--help)
       usage
       exit 0
@@ -106,7 +108,7 @@ fi
 
 CHROME="$CHROME_BIN" node "$HERE/tui-shot.js" \
   "$OUTPUT_DIR/$OUTPUT_STEM.ansi" "$OUT" "$COLS" "$ROWS" \
-  "$SRC/crates/dux-web/web/src/assets/fonts/dux-mono-regular.woff2"
+  "$SRC/crates/dux-web/web/src/assets/fonts/dux-mono-regular.woff2" $CROP
 
 echo ">> PNG:      $OUT"
 echo ">> text:     $OUTPUT_DIR/$OUTPUT_STEM.txt"
