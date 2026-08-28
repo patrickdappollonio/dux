@@ -498,7 +498,7 @@ describe("self-succession after a blipped socket", () => {
   // AND IT KEEPS THE NAME THE NEWER EVENT WROTE. The seed runs from the PTY
   // socket, whose handlers were wired on the mount render, so the prior name has
   // to be read through a ref: passing the render closure's value pinned it to
-  // null forever and quietly downgraded "Open on Chrome on macOS" to the generic
+  // null forever and quietly downgraded "Active on Chrome on macOS" to the generic
   // title on every superseded handshake.
   it("keeps the device name a superseding handover wrote", () => {
     const { view } = setup()
@@ -543,7 +543,7 @@ describe("the LOST state", () => {
 describe("the other device's NAME across an events-socket outage", () => {
   // FLIPPED. Losing the events socket used to WIPE the name while
   // `ownerPresent` stayed true, so a flapping spine downgraded a perfectly good
-  // "Open on Chrome on macOS" to the generic "Active on another device" and back
+  // "Active on Chrome on macOS" to the generic "Active on another device" and back
   // again. The wipe was defending against a name going stale with no correction
   // coming; the correction now exists (the spine's own `input_owner`), so the
   // name is kept and only ever replaced by a newer fact.

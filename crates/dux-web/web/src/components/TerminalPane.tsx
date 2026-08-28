@@ -1219,7 +1219,7 @@ function TakeoverCard({
   takeOver: () => void
 }) {
   const title = takeoverLabel
-    ? "Open on " + takeoverLabel
+    ? "Active on " + takeoverLabel
     : ownerPresent
       ? "Active on another device"
       : "Running in the background"

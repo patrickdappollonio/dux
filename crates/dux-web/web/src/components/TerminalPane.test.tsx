@@ -941,7 +941,7 @@ describe("TerminalPane take-over card", () => {
 })
 
 // The take-over placeholder's device naming: a `pty.owner` handover carrying the
-// other device's raw User-Agent must render "Open on {parsed label}", our own claim
+// other device's raw User-Agent must render "Active on {parsed label}", our own claim
 // echo must restore the owner view, and a non-open events socket must drop the
 // specific name back to the generic copy (the stale-name-on-reconnect fix).
 describe("TerminalPane take-over device naming", () => {
@@ -955,7 +955,7 @@ describe("TerminalPane take-over device naming", () => {
   it("names the owning device from the connected handshake alone, no pty.owner event", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     act(() => last().onConnected("conn-self", "conn-other", 3, chromeMac))
-    expect(screen.getByText("Open on Chrome on macOS")).toBeTruthy()
+    expect(screen.getByText("Active on Chrome on macOS")).toBeTruthy()
     expect(screen.queryByText("Active on another device")).toBeNull()
   })
 
@@ -963,7 +963,7 @@ describe("TerminalPane take-over device naming", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     // A foreign device claims the PTY (owner id is not ours) with its UA attached.
     act(() => notifyPtyOwner("s1", "conn-other", undefined, chromeMac))
-    expect(screen.getByText("Open on Chrome on macOS")).toBeTruthy()
+    expect(screen.getByText("Active on Chrome on macOS")).toBeTruthy()
   })
 
   it("clears the label and restores the owner view on our own claim echo", () => {
@@ -971,17 +971,18 @@ describe("TerminalPane take-over device naming", () => {
     // Learn our own connection id so an echo with that id reads as ours.
     act(() => last().onConnected("conn-self"))
     act(() => notifyPtyOwner("s1", "conn-other", undefined, chromeMac))
-    expect(screen.getByText("Open on Chrome on macOS")).toBeTruthy()
+    expect(screen.getByText("Active on Chrome on macOS")).toBeTruthy()
     // Our own claim echoes back -> we are the owner again; the placeholder (and its
     // device name) disappears entirely.
     act(() => notifyPtyOwner("s1", "conn-self", undefined, chromeMac))
-    expect(screen.queryByText(/Open on/)).toBeNull()
-    expect(screen.queryByText("Active on another device")).toBeNull()
+    // Both titles start "Active on", so one regex retires the named and the
+    // unnamed card together.
+    expect(screen.queryByText(/Active on/)).toBeNull()
   })
 
   // FLIPPED. Losing the events socket used to WIPE the name while
   // `ownerPresent` stayed true, so a flapping spine downgraded a perfectly good
-  // "Open on Chrome on macOS" to the generic copy and back again. The wipe was
+  // "Active on Chrome on macOS" to the generic copy and back again. The wipe was
   // defending against a name going stale with no correction coming; the
   // correction now exists (the spine's own `input_owner`, checked on the next
   // open), so the name is kept and only ever replaced by a newer fact.
@@ -990,10 +991,10 @@ describe("TerminalPane take-over device naming", () => {
       <TerminalPane kind="agent" id="s1" sessionId="s1" />,
     )
     act(() => notifyPtyOwner("s1", "conn-other", undefined, chromeMac))
-    expect(screen.getByText("Open on Chrome on macOS")).toBeTruthy()
+    expect(screen.getByText("Active on Chrome on macOS")).toBeTruthy()
     mockState = makeState(false, "closed")
     act(() => rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />))
-    expect(screen.getByText("Open on Chrome on macOS")).toBeTruthy()
+    expect(screen.getByText("Active on Chrome on macOS")).toBeTruthy()
     expect(screen.queryByText("Active on another device")).toBeNull()
   })
 })

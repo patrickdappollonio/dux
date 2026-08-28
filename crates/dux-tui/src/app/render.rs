@@ -3179,10 +3179,10 @@ impl App {
         const PREFERRED_INNER: u16 = 46;
         let inner_w = PREFERRED_INNER.min(area.width.saturating_sub(2)).max(1);
 
-        // `Open on {device}` is nine characters of chrome plus the padding
+        // `Active on {device}` is ten characters of chrome plus the two padding
         // spaces, so a pane with no room for a name falls back to the title that
         // needs none rather than printing an ellipsis where the device goes.
-        const NAMED_TITLE_CHROME: u16 = 10;
+        const NAMED_TITLE_CHROME: u16 = 12;
         // The kind sits inside a different sentence in each arm, so each arm
         // carries its whole prose rather than an opening a shared tail is glued
         // to: the free card's sentence names what happened to the pty, and the
@@ -3191,7 +3191,7 @@ impl App {
             crate::app::pty_ownership::PtyTakeoverCard::Elsewhere { device } => {
                 let title = match device.as_deref() {
                     Some(device) if inner_w > NAMED_TITLE_CHROME + 3 => format!(
-                        " Open on {} ",
+                        " Active on {} ",
                         dux_core::device_label::truncate_chars(
                             device,
                             (inner_w - NAMED_TITLE_CHROME) as usize

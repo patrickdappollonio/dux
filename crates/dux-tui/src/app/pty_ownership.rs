@@ -18,7 +18,7 @@
 //! whenever the terminal in the center pane is NOT this surface's, the pane is
 //! covered by the take-over card, the same card and the same words a browser
 //! puts over its own terminal. All three of the web's states, word for word:
-//! `Open on {device}` and `Active on another device` for a pty somebody else
+//! `Active on {device}` and `Active on another device` for a pty somebody else
 //! drives, and `Running in the background` for one nobody drives. One deviation
 //! from the
 //! web's, deliberate: the web suppresses its card while its socket is lost,
@@ -1103,7 +1103,7 @@ mod tests {
         let flat = flowed(&rows);
 
         assert!(
-            flat.contains("Open on Chrome on macOS"),
+            flat.contains("Active on Chrome on macOS"),
             "the card's title must name the device that holds the pty, shortened: {flat}"
         );
         assert!(
@@ -1149,8 +1149,11 @@ mod tests {
             flat.contains("Active on another device"),
             "a driver with no name still gets an honest title: {flat}"
         );
+        // The named title is `Active on {device}`, so it shares a prefix with
+        // this one: what must never appear is that prefix with a blank where the
+        // device goes.
         assert!(
-            !flat.contains("Open on"),
+            !flat.contains("Active on  "),
             "and never the named title with a blank in it: {flat}"
         );
         assert!(flat.contains("Take over"));
@@ -1163,7 +1166,7 @@ mod tests {
     fn the_card_names_a_short_device_verbatim() {
         let (_app, rows) = render_with_a_browser_driving(Some(TUI_DEVICE_LABEL));
         assert!(
-            flowed(&rows).contains(&format!("Open on {TUI_DEVICE_LABEL}")),
+            flowed(&rows).contains(&format!("Active on {TUI_DEVICE_LABEL}")),
             "a label that already fits is copy, not something to parse"
         );
     }
@@ -2824,7 +2827,7 @@ mod tests {
         // the button that cannot be confused with anything else on screen.
         let title_row = u16::try_from(
             rows.iter()
-                .position(|row| row.contains("Open on Chrome on macOS"))
+                .position(|row| row.contains("Active on Chrome on macOS"))
                 .expect("the card's titled top border is on screen"),
         )
         .expect("a screen row index fits");

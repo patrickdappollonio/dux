@@ -169,7 +169,7 @@ as `the dux TUI`. It shows the same card, with the same words, when your browser
 one driving.
 
 **A watcher sees the take-over card**, a full-pane card naming who has the keyboard
-("Open on Chrome on macOS") with a **Take over** button. Hit it and dux resizes the PTY
+("Active on Chrome on macOS") with a **Take over** button. Hit it and dux resizes the PTY
 to your screen, repaints it fresh, and hands you the keyboard. Nothing is lost; the other
 device becomes the watcher.
 
@@ -194,7 +194,7 @@ frame.
 If the driving device disconnects, every card switches to **Running in the background**
 rather than naming a browser that has gone: the session kept running without its driver. The card also keeps naming the device that had the
 keyboard even while your own connection is wobbling, so a flaky signal no longer turns
-"Open on Chrome on Linux" into a vague "Active on another device".
+"Active on Chrome on Linux" into a vague "Active on another device".
 
 **Reconnecting never takes the terminal from anybody.** Every automatic reconnect joins as
 a watcher unless nobody is driving; taking a terminal away from a device that holds it is
