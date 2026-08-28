@@ -76,6 +76,20 @@ describe("ConfirmCloseTabDialog", () => {
     expect(screen.getByText(/ends the claude session/)).toBeTruthy()
   })
 
+  // The way back from a closed tab is a NEW tab, and a new tab always starts
+  // fresh, so the copy must point at the provider's own history command rather
+  // than at a resume dux will not perform.
+  it("says a new tab starts fresh and names the history command", () => {
+    seed("b2", [
+      tab({ id: "s1", provider: "claude", has_live_process: true }),
+      tab({ id: "b2", provider: "codex", has_live_process: true }),
+    ])
+    render(<ConfirmCloseTabDialog />)
+    expect(screen.getByText(/deletes this tab for good/)).toBeTruthy()
+    expect(screen.getByText(/A new tab always starts fresh/)).toBeTruthy()
+    expect(screen.getByText(/history command/)).toBeTruthy()
+  })
+
   it("shows no detach warning when a live sibling keeps the agent running", () => {
     seed("s1", [
       tab({ id: "s1", provider: "claude", has_live_process: true }),

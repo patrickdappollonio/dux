@@ -57,7 +57,8 @@ function ChangeProviderForm({
           Pick the CLI this agent uses. The change takes effect the next time
           this agent launches; the running session keeps its current provider
           until you reconnect it. dux resumes the chosen provider&rsquo;s prior
-          session on this worktree when one is available.
+          session on this worktree when one is available and no other tab of that
+          provider is already running.
         </DialogDescription>
       </DialogHeader>
 

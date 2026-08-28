@@ -156,9 +156,10 @@ saying it is not running, with a **Start session** button, and nothing launches 
 Opening the agent's own tab is different: that view is the terminal, so opening it starts or
 resumes the agent's provider.
 
-dux does not restore a tab's conversation across a restart, but your provider CLI likely still
-has it in its own history, so a started tab often picks up where it left off, and every
-provider offers its own command to browse past conversations.
+Starting a dormant tab picks up that provider's most recent conversation in the worktree,
+unless another tab of the same provider is already running or the provider cannot resume, in
+which case it starts fresh. See [how resume works](/docs/agent-tabs#how-resume-works). To
+reach an older conversation, use the provider's own history command.
 
 ## Attention and notifications
 

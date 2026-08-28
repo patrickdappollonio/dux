@@ -2408,9 +2408,11 @@ impl App {
     /// Render the ASCII "dux" logo centered in the given area, with an
     /// optional feature tip displayed below.
     /// Centered, provider-agnostic message shown when a focused tab has no live
-    /// process (dormant, e.g. after a restart). dux does not restore a tab's
-    /// conversation across a restart; the message points the user at their CLI's
-    /// own history.
+    /// process (dormant, e.g. after a restart). Launching it picks up that
+    /// provider's most recent conversation in the worktree when this is the sole
+    /// live-or-launching tab of that provider (`Engine::tab_resume_decision`),
+    /// and starts fresh otherwise; the copy states that rule rather than
+    /// promising either outcome.
     fn render_dormant_support_tab(&mut self, frame: &mut Frame, area: Rect) {
         self.welcome_logo_visible = false;
         if area.height < 5 || area.width < 20 {
@@ -2426,22 +2428,22 @@ impl App {
             Line::from(Span::styled("Tab not running", title_style)),
             Line::from(""),
             Line::from(Span::styled(
-                "dux doesn't restore a tab's conversation across a restart.",
+                "Launching picks up this provider's most recent",
                 body_style,
             )),
             Line::from(Span::styled(
-                "To pick up its previous conversation, start a fresh",
+                "conversation, unless another tab of the same provider",
                 dim_style,
             )),
             Line::from(Span::styled(
-                "session and use your CLI's own history command.",
+                "is already running or the provider can't resume.",
                 dim_style,
             )),
             Line::from(""),
             Line::from(vec![
                 Span::styled("Press ", body_style),
                 Span::styled("Enter", key_style),
-                Span::styled(" to start a fresh session.", body_style),
+                Span::styled(" to launch this tab.", body_style),
             ]),
         ];
         let h = lines.len() as u16;
@@ -5472,10 +5474,11 @@ impl App {
             .iter()
             .map(|option| {
                 // In NewTab mode a tab always launches fresh (create_tab
-                // never resumes), so the retarget-only resume/current
-                // language would be misleading here.
+                // never requests resume), whatever else is running, so the
+                // retarget-only resume/current language would be misleading
+                // here. Resume is for a tab coming back up.
                 let status = if prompt.mode == ChangeAgentProviderMode::NewTab {
-                    "will start a fresh tab"
+                    "a new tab always starts fresh"
                 } else if option.is_current {
                     "current"
                 } else if option.resume_available {
@@ -11808,9 +11811,9 @@ fn confirm_close_tab_tail(only_tab: bool, is_main: bool) -> &'static str {
     if only_tab {
         " It's this agent's only tab, so the agent detaches and stays in Projects, reopenable."
     } else if is_main {
-        " Other tabs on this agent keep running; this tab stops and can be reopened fresh from the agent."
+        " Other tabs on this agent keep running; this tab stops and can be reopened from the agent."
     } else {
-        " dux can't reopen this exact conversation — a recent one can be recovered from a fresh tab via your provider's own history command."
+        " dux deletes this tab for good. A new tab always starts fresh, so use your provider's own history command to get back to this conversation."
     }
 }
 
@@ -13297,15 +13300,19 @@ mod tests {
             tail.contains("keep running"),
             "expected non-destructive copy for is_main with siblings, got: {tail}"
         );
-        assert!(!tail.contains("can't reopen"));
+        assert!(!tail.contains("deletes this tab"));
     }
 
     /// Closing an extra (non-main) tab while siblings are live is destructive
     /// (the row is permanently deleted) and must keep the original warning.
+    /// The way back is a NEW tab, which always starts fresh, so the copy points
+    /// at the provider's own history command rather than promising a resume.
     #[test]
     fn confirm_close_tab_tail_is_destructive_for_extra_tab_with_siblings() {
         let tail = confirm_close_tab_tail(false, false);
-        assert!(tail.contains("can't reopen"));
+        assert!(tail.contains("deletes this tab for good"), "tail: {tail}");
+        assert!(tail.contains("always starts fresh"), "tail: {tail}");
+        assert!(tail.contains("history command"), "tail: {tail}");
     }
 
     /// Closing the agent's only tab (main or extra) detaches the whole agent,
@@ -13359,6 +13366,47 @@ mod tests {
             rendered.contains("orig:"),
             "header should show the drift crumb even when the agent sits on the project branch; \
              rendered header did not contain 'orig:'"
+        );
+    }
+
+    /// The dormant-tab card must state the actual resume rule: launching picks
+    /// up that provider's most recent conversation unless another tab of the
+    /// same provider is already running. The old copy claimed a tab's
+    /// conversation is never restored, which is the opposite of what a lone
+    /// tab's launch does.
+    #[test]
+    fn dormant_tab_card_states_the_per_provider_resume_rule() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                app.render_dormant_support_tab(frame, area);
+            })
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("most recent"),
+            "card should say launching picks up the most recent conversation; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("already running"),
+            "card should name the same-provider exception; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("doesn't restore"),
+            "card must not claim a conversation is never restored; got:\n{rendered}"
         );
     }
 
@@ -15025,7 +15073,7 @@ mod tests {
             "dormant card: {rendered}"
         );
         assert!(
-            rendered.contains("Press Enter to start a fresh session."),
+            rendered.contains("Press Enter to launch this tab."),
             "dormant action: {rendered}"
         );
     }

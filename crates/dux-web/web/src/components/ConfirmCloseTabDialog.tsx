@@ -59,7 +59,7 @@ export function ConfirmCloseTabDialog() {
         <DialogHeader>
           <DialogTitle>Close tab?</DialogTitle>
           <DialogDescription>
-            {`This ends ${sessionLabel} in this tab. dux can't reopen this exact conversation — a recent one can be recovered from a fresh tab via your provider's own history command.`}
+            {`This ends ${sessionLabel} in this tab. dux deletes this tab for good. A new tab always starts fresh, so use your provider's own history command to get back to this conversation.`}
             {willDetach
               ? " It's this agent's last live tab, so the agent detaches and stays in Projects, reopenable."
               : ""}{" "}

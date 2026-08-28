@@ -7,11 +7,11 @@ import { startDormantTab } from "@/lib/store"
 // gates this) because subscribing would force-launch the provider; only the "Start
 // session" button launches it, via `startDormantTab`.
 //
-// The message is deliberately PROVIDER-AGNOSTIC: dux doesn't itself restore a tab's
-// conversation after a restart. Launching may resume the provider's most-recent
-// conversation in this worktree (when it's the sole live tab of that provider) or
-// start fresh; either way the provider's own history command can browse prior ones,
-// and different CLIs name that command differently, so we don't name one.
+// The message is deliberately PROVIDER-AGNOSTIC and states the actual rule:
+// launching resumes the provider's most-recent conversation in this worktree when
+// this is the sole live-or-launching tab of that provider, and starts fresh
+// otherwise. Older conversations are reachable through the provider's own history
+// command, and different CLIs name that command differently, so we don't name one.
 export function DormantTabCard({
   sessionId,
   tabId,
@@ -34,10 +34,10 @@ export function DormantTabCard({
           This <span className="font-mono">{provider}</span> tab isn&rsquo;t running.
         </p>
         <p className="text-sm text-muted-foreground">
-          dux doesn&rsquo;t restore a tab&rsquo;s conversation after a restart, but
-          your CLI likely still has it: start it here (it may pick up where it left
-          off), or use the provider&rsquo;s own command to browse and choose a
-          previous conversation.{" "}
+          Starting it picks up this provider&rsquo;s most recent conversation in
+          this worktree, unless another tab of the same provider is already running
+          or the provider can&rsquo;t resume, in which case it starts fresh. To reach
+          an older conversation, use the provider&rsquo;s own history command.{" "}
           <a
             href={DOCS_AGENT_TABS_RESUME}
             target="_blank"

@@ -41,9 +41,14 @@ reopen the identical conversation.
 
 So dux hands the resume slot to a tab **only when it is the sole tab of its provider
 coming up**, meaning no other tab running that provider is already live or launching. A
-different-provider sibling never blocks it. In practice: reopen an agent that was fully
-stopped and each provider picks up where it left off, but add a *second* Claude tab on
-top of a running one and it starts clean.
+different-provider sibling never blocks it, and tab position has nothing to do with it.
+In practice: reopen an agent that was fully stopped and each provider picks up where it
+left off, but launch a *second* Claude tab on top of a running one and it starts clean.
+
+> [!NOTE]
+> A tab you **create** always starts fresh, whatever else is running. The resume slot is
+> for tabs coming back up: an agent you reopen, or a dormant tab you launch. Making a new
+> tab never reaches for a previous conversation.
 
 > [!IMPORTANT]
 > Copilot never resumes. Its `--continue` is not directory-scoped the way the others
@@ -56,10 +61,11 @@ dux does not track which conversation belonged to which tab. When it hands a tab
 resume slot, it passes the provider's own continue flag, and that flag grabs the
 **most-recent** conversation in the worktree.
 
-Walk it through. You have a Claude tab mid-conversation. You close it, then open a new
-Claude tab. The new tab comes up alone for Claude, so dux passes `--continue`, and
-Claude reopens the latest conversation in that folder, which is the one you were just
-in. It *looks* like dux resumed your closed tab. It did not.
+Walk it through. You have a Claude tab mid-conversation, and you quit dux. Every tab
+comes back dormant, and you launch that Claude tab. It comes up alone for Claude, so dux
+passes `--continue`, and Claude reopens the latest conversation in that folder, which is
+the one you were just in. It *looks* like dux resumed that exact tab. It did not: a
+different Claude tab, launched first, would have taken the very same conversation.
 
 > [!TIP]
 > dux cannot target an **older** conversation for you. Start a fresh tab and use the
@@ -126,7 +132,7 @@ it in Projects. Deleting the agent takes every tab with it.
 ## What happens on restart
 
 Tabs come back **dormant**: the pills are there, no processes are running, and each tab
-shows a "start fresh" prompt instead of an old session. Press it, or click *Start
-session* on the web, and a new session spins up. A tab that comes up alone for its
-provider may resume automatically, per the rule above, which again means the newest
+says it isn't running instead of showing an old session. Press the key it names, or click
+*Start session* on the web, and the tab launches. A tab that comes up alone for its
+provider resumes automatically, per the rule above, which again means the newest
 conversation in the worktree rather than a specific tab's.
