@@ -11463,8 +11463,9 @@ fn active_provider_marker_span(is_active: bool, theme: &Theme) -> Span<'static> 
 ///
 /// There is no Apply button to grey out (a picker confirms by picking, see the
 /// `Picker` family in `super::modal`), so the cue lives on the row that owns the
-/// information. It is a marker IN THE TEXT rather than a dimmed style on purpose: the moment the cue matters most
-/// is when that row is HIGHLIGHTED, and `Theme::selection_style` sets fg, bg
+/// information. It is a marker IN THE TEXT rather than a dimmed style on
+/// purpose: the moment the cue matters most is when that row is HIGHLIGHTED,
+/// and `Theme::selection_style` sets fg, bg
 /// and BOLD, so any style the row set for itself is patched away underneath the
 /// selection. A glyph in the string survives.
 pub(crate) const ACTIVE_PROVIDER_MARKER: &str = "\u{2713}";
