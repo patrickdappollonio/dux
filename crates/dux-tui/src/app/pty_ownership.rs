@@ -2037,12 +2037,6 @@ mod tests {
         assert_eq!(app.takeover_press, None);
     }
 
-    /// There is nothing readable under the card, so a press inside the pane
-    /// starts no selection: a highlight the user cannot see, over text they
-    /// cannot see, that copies the child's cells on release.
-    ///
-    /// Driven through the interactive raw path, because that is the one path
-    /// that starts a terminal selection at all.
     /// The take-over card swallows a release that lands on the covered pane, so a
     /// sidebar drag released there never reaches the gesture. The next press must
     /// retire it, or an unrelated click somewhere else finishes a drag the user
@@ -2100,6 +2094,12 @@ mod tests {
         );
     }
 
+    /// There is nothing readable under the card, so a press inside the pane
+    /// starts no selection: a highlight the user cannot see, over text they
+    /// cannot see, that copies the child's cells on release.
+    ///
+    /// Driven through the interactive raw path, because that is the one path
+    /// that starts a terminal selection at all.
     #[test]
     fn a_press_under_the_card_starts_no_selection() {
         use ratatui::layout::Rect;
