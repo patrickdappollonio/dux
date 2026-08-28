@@ -20824,6 +20824,50 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn apply_agent_order_reorders_flips_to_manual_and_follows_the_agent() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        app.engine.sessions.clear();
+        for id in ["s1", "s2", "s3"] {
+            app.engine
+                .sessions
+                .push(filter_test_session(id, id, "p1", now));
+        }
+        app.engine.config.ui.agent_sort = "active".to_string();
+        app.rebuild_left_items();
+        let baseline: Vec<String> = vec!["s1".into(), "s2".into(), "s3".into()];
+
+        app.apply_agent_order(&baseline, vec!["s3".into(), "s1".into(), "s2".into()], "s3");
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(order, vec!["s3", "s1", "s2"]);
+        assert_eq!(app.engine.config.ui.agent_sort, "manual");
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s3"));
+    }
+
+    #[test]
+    fn apply_agent_order_is_a_no_op_when_the_order_matches_its_baseline() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        app.engine.sessions.clear();
+        for id in ["s1", "s2"] {
+            app.engine
+                .sessions
+                .push(filter_test_session(id, id, "p1", now));
+        }
+        app.engine.config.ui.agent_sort = "active".to_string();
+        app.rebuild_left_items();
+        let baseline: Vec<String> = vec!["s1".into(), "s2".into()];
+
+        app.apply_agent_order(&baseline, baseline.clone(), "s1");
+
+        assert_eq!(
+            app.engine.config.ui.agent_sort, "active",
+            "an unchanged order must not take the list off its computed sort",
+        );
+    }
+
+    #[test]
     fn execute_command_routes_move_agent_top_to_the_handler() {
         let mut app = test_app(default_bindings());
         let now = Utc::now();

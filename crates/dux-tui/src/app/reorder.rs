@@ -67,8 +67,32 @@ impl App {
             return;
         };
         let new_order = move_in_order(&order, idx, dir);
-        if new_order == order {
-            return; // already at the relevant edge; leave the sort mode as it was
+        self.apply_agent_order(&order, new_order, &session_id);
+    }
+
+    /// Apply a new GLOBAL agent order: flip the sort to manual, persist the
+    /// order, rebuild the sidebar, and leave the selection on `follow` (the id of
+    /// the agent that moved).
+    ///
+    /// `baseline` is the order the caller computed `new_order` FROM, and an order
+    /// that comes back equal to it is a no-op: nothing is persisted and the sort
+    /// mode is left alone, so an already-at-the-edge move or a drop back where it
+    /// started does not silently take the list off its computed sort. The
+    /// baseline is a parameter rather than the current `engine.sessions` order
+    /// because a drop's baseline is what the SCREEN shows, which in a computed
+    /// sort mode is not the Vec order (the web's `handleDragEnd` compares against
+    /// the same displayed baseline, for the same reason).
+    ///
+    /// Every caller that reorders agents goes through here, so the manual flip,
+    /// the persisted write and the status the user reads cannot drift apart.
+    pub(crate) fn apply_agent_order(
+        &mut self,
+        baseline: &[String],
+        new_order: Vec<String>,
+        follow: &str,
+    ) {
+        if new_order == baseline {
+            return;
         }
         // Switch to manual so the display honors the new order.
         self.engine.set_agent_sort("manual");
@@ -89,8 +113,7 @@ impl App {
             .enumerate()
             .find_map(|(pos, item)| match item {
                 LeftItem::Session(i)
-                    if self.engine.sessions.get(*i).map(|s| s.id.as_str())
-                        == Some(session_id.as_str()) =>
+                    if self.engine.sessions.get(*i).map(|s| s.id.as_str()) == Some(follow) =>
                 {
                     Some(pos)
                 }
