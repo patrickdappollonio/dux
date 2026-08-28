@@ -3199,12 +3199,13 @@ impl LeftItem {
 }
 
 /// The agent-list display sort mode, driven by the shared `config.ui.agent_sort`
-/// preference. This is a pure DISPLAY ordering computed at render time: the TUI
-/// never rewrites `engine.sessions` and never persists a sort order (that stored
-/// order IS the `Manual` display order, set only by the web's drag-reorder).
+/// preference. This is a pure DISPLAY ordering computed at render time: the sort
+/// mode never rewrites `engine.sessions`. The stored order IS the `Manual`
+/// display order, and every hand-placement writes it: the TUI's move commands,
+/// a mouse drag on either surface.
 ///
-/// The TUI's own picker OFFERS the five non-manual modes (see `TUI_CYCLE`) but
-/// DISPLAYS `Manual` when the web set it. The web mirror OFFERS
+/// The TUI's own picker OFFERS the five non-manual modes (see `TUI_CYCLE`) and
+/// DISPLAYS `Manual` whenever a hand-placement selected it. The web mirror OFFERS
 /// active/updated/created/name/manual and DISPLAYS a TUI-set `NameDesc`. The
 /// shared value set therefore has six modes; both surfaces render all six.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3220,14 +3221,15 @@ pub(crate) enum AgentSortMode {
     NameAsc,
     /// By name (title-or-branch, case-insensitive), Z to A.
     NameDesc,
-    /// The stored global order verbatim (the web's drag-reorder order). Display
-    /// only in the TUI, which never offers it.
+    /// The stored global order verbatim: the hand-placed order. The TUI's picker
+    /// does not offer it, but the TUI reaches it by hand-placing a row.
     Manual,
 }
 
 impl AgentSortMode {
     /// The five modes the TUI's `sort-agents` picker cycles through. `Manual` is
-    /// deliberately excluded (it is display-only, set only by the web's drag).
+    /// deliberately excluded: it is not a sort to pick but the result of placing
+    /// a row by hand, which selects it on its own.
     pub(crate) const TUI_CYCLE: [AgentSortMode; 5] = [
         AgentSortMode::Active,
         AgentSortMode::Updated,

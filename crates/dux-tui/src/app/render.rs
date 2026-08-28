@@ -4414,6 +4414,24 @@ impl App {
     }
 
     pub(crate) fn footer_hints_for(&self, ctx: HintContext) -> Vec<(String, &'static str)> {
+        // A live drag takes the sidebar's hint line over: while a row is being
+        // carried, every other hint is about something the drag has suspended.
+        // Only a promoted gesture does this, so a plain press never flickers the
+        // bar. The way out is resolved through the bindings like every other
+        // label, never spelled out as a key.
+        if self.row_drag.is_some_and(|drag| drag.moved)
+            && matches!(
+                ctx,
+                HintContext::LeftProject | HintContext::LeftSession | HintContext::LeftTerminal
+            )
+        {
+            let mut hints = vec![("Release".to_string(), "Drop here")];
+            let cancel = self.bindings.label_for(Action::CloseOverlay);
+            if !cancel.is_empty() {
+                hints.push((cancel, "Cancel"));
+            }
+            return hints;
+        }
         let mut hints = self.bindings.hints_for(ctx);
         if matches!(ctx, HintContext::Center) && self.current_pr_info().is_some() {
             let key = self.bindings.label_for(Action::OpenCurrentPullRequest);
@@ -13273,6 +13291,43 @@ mod tests {
             .map(|x| buf[(x, y)].symbol())
             .collect();
         text.trim_end().to_string()
+    }
+
+    #[test]
+    fn a_live_drag_takes_over_the_sidebar_hint_line() {
+        let mut app = test_app(default_bindings());
+        let ordinary = app.footer_hints_for(HintContext::LeftSession);
+        assert!(
+            !ordinary.iter().any(|(_, desc)| *desc == "Drop here"),
+            "no drag, no drag hints",
+        );
+
+        app.row_drag = Some(crate::app::RowDragState {
+            list: crate::app::RowDragList::Agents,
+            source: 0,
+            hover: Some(1),
+            moved: true,
+        });
+        let dragging = app.footer_hints_for(HintContext::LeftSession);
+        assert_eq!(
+            dragging.iter().map(|(_, desc)| *desc).collect::<Vec<_>>(),
+            vec!["Drop here", "Cancel"],
+            "the drag owns the line while it is live",
+        );
+        assert_eq!(
+            dragging[1].0,
+            app.bindings.label_for(Action::CloseOverlay),
+            "the way out is the bound label, never a hardcoded key",
+        );
+
+        // A press that has not become a drag leaves the ordinary hints alone.
+        app.row_drag = Some(crate::app::RowDragState {
+            list: crate::app::RowDragList::Agents,
+            source: 0,
+            hover: None,
+            moved: false,
+        });
+        assert_eq!(app.footer_hints_for(HintContext::LeftSession), ordinary);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 title: Ordering the sidebar
-description: Sort agents and terminals by activity, name, or recency, or hand-place them by dragging in the browser or with the move commands in the terminal UI.
+description: Sort agents and terminals by activity, name, or recency, or hand-place them by dragging with the mouse on either surface.
 group: Guides
 order: 12
 ---
@@ -83,18 +83,27 @@ too; pick manual and each holds the spot you put it in.
 
 ## Hand-ordering
 
-**In the browser, drag it.** Grab a row and drop it where you want. Agents reorder
-among agents and terminals among terminals; a terminal never jumps into the agent
-list, and vice versa.
+**Drag it, on either surface.** Grab a row with the mouse and drop it where you want,
+in the browser or in the terminal UI. Agents reorder among agents and terminals among
+terminals; a terminal never jumps into the agent list, and vice versa. Agents move
+freely across projects, because the order is one list rather than one list per project.
 
-**In the terminal UI, use the move commands.** The command palette carries
-`move-agent-up`, `move-agent-down`, `move-agent-top`, and `move-agent-bottom`, plus the
-matching `move-terminal-*` set. Each moves the selected row. The terminal commands
-appear only when you have a terminal to move; the agent ones are always there.
+In the terminal UI the drag starts once you leave the row you pressed on, so an
+ordinary click still just selects, and a line marks the gap the row will drop into
+while you carry it. Release to drop it there; drop it back where it started and
+nothing happens. Dormant agents in the Inactive tail are not places to drop something,
+and neither is anything a search filter is currently hiding: the rows you can see are
+the rows you can drop onto, and the list does not scroll while you drag. Rows the
+filter hides keep their places in the order underneath.
+
+**In the terminal UI you can also move a row without a mouse.** The command palette
+carries `move-agent-up`, `move-agent-down`, `move-agent-top`, and `move-agent-bottom`,
+plus the matching `move-terminal-*` set. Each moves the selected row. The terminal
+commands appear only when you have a terminal to move; the agent ones are always there.
 
 > [!IMPORTANT]
 > Dragging or moving a row switches the sort to **manual**, for the whole list, agents
-> and terminals together. Otherwise a computed sort would snap your row straight back.
+> and terminals together, whichever surface you did it on. Otherwise a computed sort would snap your row straight back.
 > Cycle the sort to "active first" to hand the arranging back to dux.
 
 ## What sticks around
