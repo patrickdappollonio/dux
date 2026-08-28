@@ -180,10 +180,9 @@ move between panes whichever way it is set.
 Rather than memorizing hotkeys, reach most actions through the terminal UI's command
 palette. It is the fastest way to discover what dux can do.
 
-The palette matches on names and descriptions. Anything that matched only loosely is kept,
-under an "Other matches" rule, so a half-remembered phrase still finds the command:
-
-![The terminal UI command palette with the words new tab typed, showing the Other matches rule and the new-agent-tab command below it.](/screens/tui-palette-other-matches.png)
+The palette matches on names and descriptions. Exact phrase matches lead the list, and
+anything that matched only loosely follows them, so a half-remembered phrase still finds
+the command.
 
 ## Per-project startup commands
 
