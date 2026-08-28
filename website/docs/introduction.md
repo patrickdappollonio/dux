@@ -15,7 +15,17 @@ JSON-RPC. Just the tools you already use, side by side, each in its own branch.
 
 dux has a terminal UI and a web UI. Both are first class, and both share the same
 projects, agents, worktrees and config file, so an agent you start in one is the same
-agent in the other. They differ on purpose:
+agent in the other.
+
+The terminal UI:
+
+![The dux terminal UI: six agents listed on the left with three of them working, the selected agent's live terminal in the middle, and its changed files on the right.](/screens/tui-two-front-ends.png#full)
+
+The same workspace in the browser:
+
+![The same six agents in the dux web UI, the same three working, the same agent selected, with its terminal in the middle and its changed files on the right.](/screens/web-two-front-ends.png#full)
+
+They differ on purpose:
 
 - The **terminal** gives you full keyboard control, rebindable keys, a command palette
   and themes.
