@@ -149,12 +149,13 @@ away, and nothing passive ever gives one back.
 Whenever the terminal you are looking at is not yours to type into, a card covers it, in
 the terminal UI and in the browser alike, and it says which of the two things is true.
 When another device is driving, the card names it. When nobody is driving, the card says
-**Take control**; press it once and the terminal is yours. Either way the card carries
+**Running in the background**, because the terminal kept going when its driver left;
+press **Take over** once and it is yours. Either way the card carries
 one button, **Take over**, and two ways to press it: click it, or, with the pane focused,
 use the key that focuses an agent (Enter unless you have rebound it). Typing does not
 claim a terminal, so keys pressed under the card go nowhere. An agent you start yourself
 is yours straight away, with no card over it; agents dux reopens for you at startup wear
-the **Take control** card until you press it. The card calls the terminal UI `the dux
+the **Running in the background** card until you press it. The card calls the terminal UI `the dux
 TUI` when that is what has the keyboard. Taking a terminal over also retargets its size
 to the device that took it, and everyone watching adopts that geometry. Take-over works
 in both directions and is sticky either way: losing a terminal does not silently give it

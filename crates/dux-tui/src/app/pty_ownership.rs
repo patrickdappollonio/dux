@@ -19,7 +19,8 @@
 //! covered by the take-over card, the same card and the same words a browser
 //! puts over its own terminal. All three of the web's states, word for word:
 //! `Open on {device}` and `Active on another device` for a pty somebody else
-//! drives, and `Take control` for one nobody drives. One deviation from the
+//! drives, and `Running in the background` for one nobody drives. One deviation
+//! from the
 //! web's, deliberate: the web suppresses its card while its socket is lost,
 //! which has no counterpart here, because there is no socket between this
 //! surface and its own engine to lose.
@@ -58,7 +59,8 @@
 //! is dropped, whoever holds it and even when nobody does, because the card is
 //! already covering that pane and asking for the press. The cost is stated
 //! rather than hidden: the startup auto-reopen sweep claims nothing, so every
-//! agent reopened at startup shows `Take control` until somebody presses it,
+//! agent reopened at startup shows `Running in the background` until somebody
+//! presses it,
 //! which is exactly what a browser shows for a terminal it did not start. An
 //! agent launched from this keyboard is this surface's immediately, with no card
 //! over it at all.
@@ -85,7 +87,8 @@ use super::*;
 pub(crate) enum PtyDriver {
     /// Nobody has claimed it, or nothing is serving so the question does not
     /// arise. While something IS serving this is a card state like any other
-    /// (`Take control`), and the two acts that claim it are the card's button
+    /// (`Running in the background`), and the two acts that claim it are the
+    /// card's button
     /// and a launch started from here. Typing does not, merely looking does
     /// not, and neither does the resize that drawing its pane would send.
     Free,
@@ -138,7 +141,8 @@ pub(crate) fn launch_claims_its_pty(kind: &dux_core::worker::AgentLaunchKind) ->
         // pass claims nothing either. Claiming here would hand this terminal
         // every auto-reopened agent in the workspace the moment it starts, and
         // ownership is sticky, so a browser would have to take each one back by
-        // hand. Each of them wears the `Take control` card instead, and the
+        // hand. Each of them wears the `Running in the background` card instead,
+        // and the
         // press on it is what claims, exactly as it is for any other free pty.
         AgentLaunchKind::StartupAutoReopen => false,
         // A person asked for each of these: a create (including a fork, a pull
@@ -1326,26 +1330,31 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::layout::Rect;
 
-        for (w, h) in [(12u16, 10u16), (12, 3), (20, 4), (8, 2), (2, 1), (60, 12)] {
-            let (mut app, _recorded, _seat) = serving_app();
-            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
-            terminal
-                .draw(|frame| {
-                    app.render_takeover_card(
-                        frame,
-                        Rect::new(0, 0, w, h),
-                        &PtyTakeoverCard::Elsewhere {
-                            device: Some("Chrome".to_string()),
-                        },
+        // Both cards, because their titles are different lengths and the free
+        // one's is the longer: a title too wide for the frame is clipped by the
+        // block, and the button below it is what has to survive either way.
+        let cards = [
+            PtyTakeoverCard::Elsewhere {
+                device: Some("Chrome".to_string()),
+            },
+            PtyTakeoverCard::Free,
+        ];
+        for card in &cards {
+            for (w, h) in [(12u16, 10u16), (12, 3), (20, 4), (8, 2), (2, 1), (60, 12)] {
+                let (mut app, _recorded, _seat) = serving_app();
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        app.render_takeover_card(frame, Rect::new(0, 0, w, h), card);
+                    })
+                    .expect("render succeeds");
+                let flat = flowed(&rows_of(&terminal));
+                if w >= 12 && h >= 3 {
+                    assert!(
+                        flat.contains("Take over"),
+                        "a {w}x{h} pane must still carry the button: {flat:?}"
                     );
-                })
-                .expect("render succeeds");
-            let flat = flowed(&rows_of(&terminal));
-            if w >= 12 && h >= 3 {
-                assert!(
-                    flat.contains("Take over"),
-                    "a {w}x{h} pane must still carry the button: {flat:?}"
-                );
+                }
             }
         }
     }
@@ -1434,7 +1443,8 @@ mod tests {
 
         // And the pane really is live again once this surface drives it. The
         // browser letting go is not enough on its own: nothing passive claims,
-        // so the card stays up saying "Take control" until it is pressed.
+        // so the card stays up saying "Running in the background" until it is
+        // pressed.
         assert!(seat.owners.release("session-1", browser).is_some());
         assert!(
             app.focused_pty_is_covered_by_card(),
@@ -2518,7 +2528,8 @@ mod tests {
 
     /// A launch this surface started IS a claim, and the frame after it sizes the
     /// child. Without this half an agent started here would come up under the
-    /// `Take control` card, and no window resize would reach its child until
+    /// `Running in the background` card, and no window resize would reach its
+    /// child until
     /// somebody had pressed the button.
     #[test]
     fn a_launch_started_here_claims_its_pty_and_the_next_frame_sizes_the_child() {
@@ -2578,8 +2589,9 @@ mod tests {
     // ── The third card: a pty nobody is driving ─────────────────────────────
 
     /// While a background server is serving, a pty NOBODY drives is covered by
-    /// the web's third card, word for word: the title that names the act, the
-    /// description that names the absence, and the same one button.
+    /// the web's third card, word for word: the title that names the state the
+    /// pty is in, the description that says how it got there, and the same one
+    /// button.
     ///
     /// A real render rather than a call to the card builder, for the same reason
     /// the other card tests use one: the bug this guards against is a pane that
@@ -2593,12 +2605,13 @@ mod tests {
         let flat = flowed(&render_rows(&mut app, 160, 40));
 
         assert!(
-            flat.contains("Take control"),
-            "a pty nobody drives gets the title that names the act: {flat}"
+            flat.contains("Running in the background"),
+            "a pty nobody drives gets the title that names its state: {flat}"
         );
         assert!(
             flat.contains(
-                "No device is driving right now. Take over to drive this agent from here."
+                "The device driving this agent disconnected, so it kept running in the \
+                 background. Take over to drive it from here."
             ),
             "the description is the web's, word for word: {flat}"
         );
@@ -2645,7 +2658,8 @@ mod tests {
         let flat = flowed(&render_rows(&mut app, 160, 40));
         assert!(
             flat.contains(
-                "No device is driving right now. Take over to drive this terminal from here."
+                "The device driving this terminal disconnected, so it kept running in \
+                 the background. Take over to drive it from here."
             ),
             "a terminal's card names a terminal: {flat}"
         );
@@ -2690,7 +2704,7 @@ mod tests {
 
         let flat = flowed(&render_rows(&mut app, 160, 40));
         assert!(
-            !flat.contains("Take control"),
+            !flat.contains("Running in the background"),
             "the card is gone once the pane is this surface's: {flat}"
         );
     }
@@ -2731,7 +2745,10 @@ mod tests {
         app.focus = FocusPane::Center;
 
         let flat = flowed(&render_rows(&mut app, 160, 40));
-        assert!(!flat.contains("Take control"), "no seat, no card: {flat}");
+        assert!(
+            !flat.contains("Running in the background"),
+            "no seat, no card: {flat}"
+        );
         assert!(app.may_type_into_pty("session-1"));
     }
 
@@ -2984,7 +3001,8 @@ mod tests {
 
     /// The outcome half of the same rule, and the cost of it stated as a test:
     /// an agent reopened by the startup sweep is claimed by nobody, so this
-    /// surface shows it the `Take control` card until somebody presses the
+    /// surface shows it the `Running in the background` card until somebody
+    /// presses the
     /// button. That is exactly what a browser shows for a terminal it did not
     /// start, and pressing is what makes it this window's.
     #[test]
@@ -3001,7 +3019,7 @@ mod tests {
             "nobody acted, so nobody drives it yet"
         );
         assert!(
-            flat.contains("Take control"),
+            flat.contains("Running in the background"),
             "and the pane says so rather than inviting keys it would drop: {flat}"
         );
 
@@ -3011,6 +3029,9 @@ mod tests {
             seat.owners.is_owner("session-1", seat.conn_id),
             "the press is what claims it"
         );
-        assert!(!flat.contains("Take control"), "and the card goes: {flat}");
+        assert!(
+            !flat.contains("Running in the background"),
+            "and the card goes: {flat}"
+        );
     }
 }

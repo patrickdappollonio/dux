@@ -659,7 +659,7 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
     })
     try {
       act(() => notifyPtyOwner("s1", undefined, 7))
-      expect(screen.getByText("Take control")).toBeTruthy()
+      expect(screen.getByText("Running in the background")).toBeTruthy()
       expect(screen.queryByText("Active on another device")).toBeNull()
     } finally {
       Object.defineProperty(document, "visibilityState", {
@@ -681,7 +681,18 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
     pty.sendResize.mockClear()
     act(() => notifyPtyOwner("s1", undefined, 7))
     expect(screen.queryByText("Active on another device")).toBeNull()
-    expect(screen.getByText("Take control")).toBeTruthy()
+    expect(screen.getByText("Running in the background")).toBeTruthy()
+    // The sentence frames the state as continuity: the pty kept running when
+    // its driver left. Read off the description slot, because the kind is its
+    // own text node.
+    expect(
+      document
+        .querySelector('[data-slot="card-description"]')
+        ?.textContent?.replace(/\s+/g, " ")
+        .trim(),
+    ).toBe(
+      "The device driving this agent disconnected, so it kept running in the background. Take over to drive it from here.",
+    )
     expect(pty.sendResize).not.toHaveBeenCalled()
   })
 

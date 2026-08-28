@@ -191,8 +191,8 @@ frame.
 > over**, reload, or navigate away and back, and it is yours. One tap is the whole cost of
 > switching devices.
 
-If the driving device disconnects, every card switches to **Take control** rather
-than naming a browser that has gone. The card also keeps naming the device that had the
+If the driving device disconnects, every card switches to **Running in the background**
+rather than naming a browser that has gone: the session kept running without its driver. The card also keeps naming the device that had the
 keyboard even while your own connection is wobbling, so a flaky signal no longer turns
 "Open on Chrome on Linux" into a vague "Active on another device".
 

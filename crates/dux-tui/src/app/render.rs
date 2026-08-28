@@ -3140,7 +3140,11 @@ impl App {
         // spaces, so a pane with no room for a name falls back to the title that
         // needs none rather than printing an ellipsis where the device goes.
         const NAMED_TITLE_CHROME: u16 = 10;
-        let (title, opening) = match card {
+        // The kind sits inside a different sentence in each arm, so each arm
+        // carries its whole prose rather than an opening a shared tail is glued
+        // to: the free card's sentence names what happened to the pty, and the
+        // word `agent` or `terminal` belongs inside that first clause.
+        let (title, prose) = match card {
             crate::app::pty_ownership::PtyTakeoverCard::Elsewhere { device } => {
                 let title = match device.as_deref() {
                     Some(device) if inner_w > NAMED_TITLE_CHROME + 3 => format!(
@@ -3152,15 +3156,23 @@ impl App {
                     ),
                     _ => " Active on another device ".to_string(),
                 };
-                (title, "Only one device can type at a time.")
+                (
+                    title,
+                    format!(
+                        "Only one device can type at a time. Take over to drive this \
+                         {target} from here."
+                    ),
+                )
             }
             crate::app::pty_ownership::PtyTakeoverCard::Free => (
-                " Take control ".to_string(),
-                "No device is driving right now.",
+                " Running in the background ".to_string(),
+                format!(
+                    "The device driving this {target} disconnected, so it kept running in \
+                     the background. Take over to drive it from here."
+                ),
             ),
         };
 
-        let prose = format!("{opening} Take over to drive this {target} from here.");
         // One column of padding on each side, the way the web's card pads its
         // body: prose that touches the border ring reads as clipped.
         const SIDE_PADDING: u16 = 1;

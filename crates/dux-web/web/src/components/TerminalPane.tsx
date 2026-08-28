@@ -1256,26 +1256,38 @@ export function TerminalPane(props: TerminalPaneProps) {
           <Card className="w-full max-w-sm text-center">
             <CardHeader className="items-center gap-3">
               <MonitorSmartphone className="size-8 text-muted-foreground" />
-              {/* THREE TITLES for three truths. "Take control" is the one the
-                  owner-cleared broadcast makes reachable: the device that was
-                  driving has disconnected, and nobody claims passively, so
-                  every viewer, foregrounded or not, keeps the card until a
-                  deliberate act. It names the act rather than the absence:
+              {/* THREE TITLES for three truths. "Running in the background" is
+                  the one the owner-cleared broadcast makes reachable: the
+                  device that was driving has disconnected, and nobody claims
+                  passively, so every viewer, foregrounded or not, keeps the
+                  card until a deliberate act. It frames the state as
+                  continuity rather than as an unclaimed thing going spare:
+                  the session did not stop when its driver left, and
                   "Active on another device" would name a browser tab that has
-                  closed, and a card about who left is not the point. */}
+                  closed. */}
               <CardTitle>
                 {takeoverLabel
                   ? `Open on ${takeoverLabel}`
                   : ownerPresent
                     ? "Active on another device"
-                    : "Take control"}
+                    : "Running in the background"}
               </CardTitle>
+              {/* The kind sits in a different clause in each sentence, so the
+                  two are written whole rather than sharing a tail. */}
               <CardDescription>
-                {ownerPresent
-                  ? "Only one device can type at a time. "
-                  : "No device is driving right now. "}
-                Take over to drive this{" "}
-                {kind === "agent" ? "agent" : "terminal"} from here.
+                {ownerPresent ? (
+                  <>
+                    Only one device can type at a time. Take over to drive this{" "}
+                    {kind === "agent" ? "agent" : "terminal"} from here.
+                  </>
+                ) : (
+                  <>
+                    The device driving this{" "}
+                    {kind === "agent" ? "agent" : "terminal"} disconnected, so
+                    it kept running in the background. Take over to drive it
+                    from here.
+                  </>
+                )}
               </CardDescription>
             </CardHeader>
             <CardContent>
