@@ -1122,10 +1122,12 @@ impl App {
         // A keystroke retires a live row drag: the pointer and the keyboard must
         // not both be moving the sidebar, and a gesture that outlived the press
         // would drop a row somewhere the user stopped looking at. The
-        // close-overlay key is the advertised way out, so it is CONSUMED here
-        // (cancelling the drag and nothing else); every other key retires the
-        // drag and then does its own job as usual.
-        if self.row_drag.take().is_some()
+        // close-overlay key is the advertised way out of a DRAG, so it is consumed
+        // only when the gesture actually became one; a press that has not left its
+        // row is a click in progress, and swallowing the cancel key there would
+        // steal it from whatever it normally closes. Every other key retires the
+        // gesture and then does its own job as usual.
+        if self.row_drag.take().is_some_and(|drag| drag.moved)
             && self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
         {
             return Ok(false);
@@ -10111,7 +10113,10 @@ impl App {
         let Some(drag) = self.row_drag.take() else {
             return;
         };
-        let Some(hover) = drag.hover.filter(|_| drag.moved) else {
+        if !drag.moved {
+            return;
+        }
+        let Some(hover) = drag.hover else {
             return;
         };
         match drag.list {
@@ -10142,6 +10147,12 @@ impl App {
     }
 
     fn handle_primary_mouse_down(&mut self, mouse: &MouseEvent, windowed: bool) {
+        // A new press retires any previous row drag, wherever it lands. A release
+        // does not always come back: the take-over card swallows one that lands on
+        // the covered pane, and a gesture left armed would be finished later by an
+        // unrelated click somewhere else entirely. Arming happens further down, so
+        // a press on a row still starts its own gesture.
+        self.row_drag = None;
         if windowed && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
             self.mouse_drag = Some(drag);
             self.update_dragged_panes(mouse.column, mouse.row);
@@ -11556,6 +11567,108 @@ mod tests {
             order,
             vec!["t3", "t1", "t2"],
             "the hidden terminal keeps its place in the total order",
+        );
+    }
+
+    #[test]
+    fn a_press_anywhere_retires_a_gesture_whose_release_never_arrived() {
+        let mut app = drag_test_app();
+        app.engine.config.ui.agent_sort = "active".to_string();
+        let x = app.mouse_layout.left_list.x;
+
+        // A real drag, and then no release: the release landed somewhere that
+        // swallowed it (the take-over card covering the center pane is the case
+        // this really happens in; see the pty ownership test of the same name).
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 2),
+        ));
+        assert!(app.row_drag.is_some(), "the gesture is live");
+
+        // An unrelated click in another pane. Its press must retire the stale
+        // gesture, so its release reorders nothing.
+        let files = app.mouse_layout.unstaged_list.expect("files pane rect");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            files.x,
+            files.y,
+        ));
+        assert!(
+            app.row_drag.is_none(),
+            "a new press retires the old gesture"
+        );
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            files.x,
+            files.y,
+        ));
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["s1", "s2", "s3", "s4"],
+            "a click in another pane must never finish an abandoned drag",
+        );
+        assert_eq!(app.engine.config.ui.agent_sort, "active");
+    }
+
+    #[test]
+    fn an_armed_but_unmoved_press_does_not_swallow_the_cancel_key() {
+        let mut app = drag_test_app();
+        app.agent_filter = Some(TextInput::with_text("s".to_string()));
+        app.rebuild_left_items();
+        let x = app.mouse_layout.left_list.x;
+
+        // Pressed, never moved: this is a click in progress, not a drag, so the
+        // cancel key belongs to whatever it normally closes.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        assert!(app.row_drag.is_some(), "the press armed a gesture");
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("key handled");
+
+        assert!(app.row_drag.is_none(), "the keystroke still retires it");
+        assert!(
+            app.agent_filter.is_none(),
+            "the cancel key reached its normal target",
+        );
+    }
+
+    #[test]
+    fn a_moved_gesture_swallows_the_cancel_key() {
+        let mut app = drag_test_app();
+        app.agent_filter = Some(TextInput::with_text("s".to_string()));
+        app.rebuild_left_items();
+        let x = app.mouse_layout.left_list.x;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(&app, 0),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(&app, 1),
+        ));
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("key handled");
+
+        assert!(app.row_drag.is_none(), "the drag is cancelled");
+        assert!(
+            app.agent_filter.is_some(),
+            "cancelling a live drag does nothing else",
         );
     }
 

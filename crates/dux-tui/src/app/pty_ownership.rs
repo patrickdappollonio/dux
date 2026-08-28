@@ -2043,6 +2043,63 @@ mod tests {
     ///
     /// Driven through the interactive raw path, because that is the one path
     /// that starts a terminal selection at all.
+    /// The take-over card swallows a release that lands on the covered pane, so a
+    /// sidebar drag released there never reaches the gesture. The next press must
+    /// retire it, or an unrelated click somewhere else finishes a drag the user
+    /// abandoned minutes ago.
+    #[test]
+    fn a_release_swallowed_by_the_card_cannot_reorder_later() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let (mut app, _recorded, seat) = app_with_a_live_pty_running("sleep 5");
+        // Two ordinary agent rows, the first of them the one with the live pty.
+        let base = app.engine.sessions[0].clone();
+        app.engine.sessions.clear();
+        for id in ["session-1", "session-2"] {
+            let mut session = base.clone();
+            session.id = id.to_string();
+            session.status = crate::model::SessionStatus::Active;
+            app.engine.sessions.push(session);
+        }
+        app.rebuild_left_items();
+        // The pty with the card on it belongs to the first row, which is also the
+        // row the drag starts from.
+        app.selected_left = 0;
+        app.mouse_layout.left_list = Rect::new(0, 0, 20, 10);
+        app.mouse_layout.left_row_to_item = (0..10usize).collect();
+        app.mouse_layout.agent_term = Some(Rect::new(21, 1, 40, 10));
+        app.mouse_layout.unstaged_list = Some(Rect::new(70, 1, 20, 5));
+
+        // Another device drives the pty, so the card covers the center pane.
+        let browser = seat.owners.next_conn_id();
+        seat.owners.claim("session-1", browser).expect("claimed");
+        assert!(app.focused_pty_is_covered_by_card(), "the card is up");
+
+        let press = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Drag the first agent onto the second, then release over the covered
+        // center, where the card eats the event.
+        app.handle_mouse(press(MouseEventKind::Down(MouseButton::Left), 1, 0));
+        app.handle_mouse(press(MouseEventKind::Drag(MouseButton::Left), 1, 1));
+        app.handle_mouse(press(MouseEventKind::Up(MouseButton::Left), 25, 5));
+
+        // Later, an unrelated click in the changed-files pane.
+        app.handle_mouse(press(MouseEventKind::Down(MouseButton::Left), 71, 2));
+        app.handle_mouse(press(MouseEventKind::Up(MouseButton::Left), 71, 2));
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["session-1", "session-2"],
+            "the abandoned drag must not fire on a later click",
+        );
+    }
+
     #[test]
     fn a_press_under_the_card_starts_no_selection() {
         use ratatui::layout::Rect;
