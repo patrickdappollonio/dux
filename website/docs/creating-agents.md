@@ -43,13 +43,13 @@ Every creation path that makes a branch ends at a naming prompt, and there the n
 the branch name. It becomes a git ref, so only ASCII letters, digits, `-`, `_`, and `/`
 are accepted, and spaces become dashes.
 
-Leave the field empty with `enable_randomized_pet_name_by_default` on and dux generates a
-two-word pet name such as `brave-morse`, for both the agent and the branch. Toggle it
-with the checkbox in the naming prompt, or permanently:
+Tick the pet-name checkbox in the naming prompt and dux generates a two-word pet name
+such as `brave-morse`, for both the agent and the branch. The checkbox starts unticked;
+to make pet names the default for every new agent, turn it on permanently:
 
 ```toml
 [defaults]
-enable_randomized_pet_name_by_default = false
+enable_randomized_pet_name_by_default = true
 ```
 
 A standalone agent has no branch, so its name is a plain label taken exactly as you type
