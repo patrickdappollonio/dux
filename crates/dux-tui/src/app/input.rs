@@ -1127,7 +1127,7 @@ impl App {
         // row is a click in progress, and swallowing the cancel key there would
         // steal it from whatever it normally closes. Every other key retires the
         // gesture and then does its own job as usual.
-        if self.row_drag.take().is_some_and(|drag| drag.moved)
+        if self.row_drag.take().is_some_and(|drag| drag.promoted)
             && self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
         {
             return Ok(false);
@@ -10017,7 +10017,7 @@ impl App {
             source_id,
             hover: None,
             hover_id: None,
-            moved: false,
+            promoted: false,
         });
     }
 
@@ -10066,12 +10066,12 @@ impl App {
             return;
         };
         let over_row = self.row_drag_target_row(drag.list, mouse);
-        if !drag.moved {
+        if !drag.promoted {
             let still_home = over_row == Some(drag.source);
             if still_home {
                 return;
             }
-            drag.moved = true;
+            drag.promoted = true;
             // The press is a drag now, so it can no longer be the first half of a
             // double click: a release that reorders must not also count as a click
             // the next press can pair with.
@@ -10098,7 +10098,7 @@ impl App {
         let Some(drag) = self.row_drag.take() else {
             return;
         };
-        if !drag.moved {
+        if !drag.promoted {
             return;
         }
         let (Some(hover), Some(target_id)) = (drag.hover, drag.hover_id.clone()) else {
@@ -11026,7 +11026,7 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), x + 4, y));
 
         let drag = app.row_drag.as_ref().expect("gesture still armed");
-        assert!(!drag.moved, "a move within the row is not a drag");
+        assert!(!drag.promoted, "a move within the row is not a drag");
         assert_eq!(drag.hover, None, "an unpromoted gesture has no drop target");
     }
 
@@ -11047,7 +11047,7 @@ mod tests {
         ));
 
         let drag = app.row_drag.as_ref().expect("gesture still live");
-        assert!(drag.moved, "reaching another row promotes the gesture");
+        assert!(drag.promoted, "reaching another row promotes the gesture");
         assert_eq!(drag.source, 0);
         assert_eq!(drag.hover, Some(2));
         assert!(
@@ -11097,7 +11097,7 @@ mod tests {
             source_id: "s1".to_string(),
             hover: Some(1),
             hover_id: Some("s2".to_string()),
-            moved: true,
+            promoted: true,
         });
 
         app.handle_terminal_event(crossterm::event::Event::Resize(80, 24));
@@ -11114,7 +11114,7 @@ mod tests {
             source_id: "s1".to_string(),
             hover: Some(1),
             hover_id: Some("s2".to_string()),
-            moved: true,
+            promoted: true,
         });
 
         app.handle_terminal_event(crossterm::event::Event::FocusLost);
@@ -11131,7 +11131,7 @@ mod tests {
             source_id: "s1".to_string(),
             hover: Some(1),
             hover_id: Some("s2".to_string()),
-            moved: true,
+            promoted: true,
         });
 
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
@@ -11150,7 +11150,7 @@ mod tests {
             source_id: "s2".to_string(),
             hover: Some(2),
             hover_id: Some("s3".to_string()),
-            moved: true,
+            promoted: true,
         });
 
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
@@ -11175,7 +11175,7 @@ mod tests {
             source_id: "s1".to_string(),
             hover: Some(2),
             hover_id: Some("s3".to_string()),
-            moved: true,
+            promoted: true,
         });
 
         app.handle_mouse(mouse(
@@ -11189,7 +11189,7 @@ mod tests {
             .as_ref()
             .expect("the new press arms its own gesture");
         assert_eq!(drag.source, 2);
-        assert!(!drag.moved);
+        assert!(!drag.promoted);
         assert_eq!(drag.hover, None);
     }
 
@@ -11788,7 +11788,7 @@ mod tests {
         ));
 
         let drag = app.row_drag.as_ref().expect("gesture still live");
-        assert!(drag.moved, "the pointer left the row it pressed on");
+        assert!(drag.promoted, "the pointer left the row it pressed on");
         assert_eq!(drag.hover, None, "there is nothing there to drop onto");
         assert!(
             app.last_mouse_click.is_none(),
@@ -11826,7 +11826,7 @@ mod tests {
 
         let drag = app.row_drag.as_ref().expect("gesture still live");
         assert!(
-            drag.moved,
+            drag.promoted,
             "the pointer left the row in a direction with no rows"
         );
         assert_eq!(drag.hover, None);

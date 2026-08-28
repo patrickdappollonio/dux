@@ -1724,7 +1724,7 @@ impl App {
         let Some(drag) = self.row_drag.as_ref().filter(|drag| drag.list == list) else {
             return;
         };
-        if !drag.moved {
+        if !drag.promoted {
             return;
         }
         let x0 = list_content.x;
@@ -4424,7 +4424,7 @@ impl App {
         // Only a promoted gesture does this, so a plain press never flickers the
         // bar. The way out is resolved through the bindings like every other
         // label, never spelled out as a key.
-        if self.row_drag.as_ref().is_some_and(|drag| drag.moved)
+        if self.row_drag.as_ref().is_some_and(|drag| drag.promoted)
             && matches!(
                 ctx,
                 HintContext::LeftProject | HintContext::LeftSession | HintContext::LeftTerminal
@@ -13229,7 +13229,7 @@ mod tests {
     fn render_with_row_drag(
         source: usize,
         hover: Option<usize>,
-        moved: bool,
+        promoted: bool,
     ) -> (ratatui::buffer::Buffer, Rect, Vec<usize>) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -13254,7 +13254,7 @@ mod tests {
             source_id: format!("s{source}"),
             hover,
             hover_id: hover.map(|index| format!("s{index}")),
-            moved,
+            promoted,
         });
 
         let backend = TestBackend::new(120, 40);
@@ -13293,7 +13293,7 @@ mod tests {
             source_id: "s0".to_string(),
             hover: Some(1),
             hover_id: Some("s1".to_string()),
-            moved: true,
+            promoted: true,
         });
         let dragging = app.footer_hints_for(HintContext::LeftSession);
         assert_eq!(
@@ -13314,7 +13314,7 @@ mod tests {
             source_id: "s0".to_string(),
             hover: None,
             hover_id: None,
-            moved: false,
+            promoted: false,
         });
         assert_eq!(app.footer_hints_for(HintContext::LeftSession), ordinary);
     }
@@ -13423,7 +13423,7 @@ mod tests {
             source_id: "t1".to_string(),
             hover: Some(2),
             hover_id: Some("t3".to_string()),
-            moved: true,
+            promoted: true,
         });
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");

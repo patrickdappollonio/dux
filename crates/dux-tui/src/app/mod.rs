@@ -3119,7 +3119,7 @@ pub(crate) enum RowDragList {
 /// CLICK until the pointer reaches a DIFFERENT reorderable row: an agent row is
 /// three screen rows tall, so a one-to-three-cell wobble inside the pressed row
 /// stays a click, and a double click there still pairs. The first move onto
-/// another row promotes the gesture (`moved`), and from then on the pointer's
+/// another row promotes the gesture (`promoted`), and from then on the pointer's
 /// row is tracked in `hover`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RowDragState {
@@ -3144,7 +3144,7 @@ pub(crate) struct RowDragState {
     /// Whether the pointer has left the source row, promoting the press from a
     /// click into a drag. An unpromoted gesture paints no marker and reorders
     /// nothing.
-    pub(crate) moved: bool,
+    pub(crate) promoted: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
