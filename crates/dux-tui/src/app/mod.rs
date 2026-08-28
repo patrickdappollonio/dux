@@ -463,9 +463,9 @@ pub struct App {
     pub(crate) mouse_drag: Option<ResizeDragState>,
     /// The live drag-to-reorder gesture over a sidebar row (an agent's or a
     /// terminal's), or `None` when no row is being dragged. Armed by a left press
-    /// on a reorderable row
-    /// and retired on release, on a host resize, on focus loss, on any keystroke,
-    /// and by the next press. See [`RowDragState`] for the click/drag threshold.
+    /// on a reorderable row and retired on release, on a host resize, on focus
+    /// loss, on any keystroke, and by the next press. See [`RowDragState`] for
+    /// the click/drag threshold.
     pub(crate) row_drag: Option<RowDragState>,
     /// A mouse button pressed inside the WINDOWED center pane that is being
     /// forwarded to a mouse-aware child: holds the SGR button
@@ -3102,15 +3102,6 @@ pub(crate) enum MouseClickTarget {
     MacroTextInput,
 }
 
-/// A drag-to-reorder gesture over a sidebar row, the TUI's twin of the web
-/// sidebar's drag ordering.
-///
-/// The gesture is armed by a left press on a reorderable row and stays a plain
-/// CLICK until the pointer reaches a DIFFERENT reorderable row: an agent row is
-/// three screen rows tall, so a one-to-three-cell wobble inside the row the press
-/// landed on leaves a click (and a double click) behaving exactly as it did
-/// before drag reordering existed. The first move onto another row promotes the
-/// gesture (`moved`), and from then on the pointer's row is tracked in `hover`.
 /// Which sidebar list a row drag belongs to. The two lists are separate orders
 /// with separate reorder commands, so a gesture that started in one never finds
 /// a drop target in the other: the same rule the web enforces by giving the
@@ -3121,6 +3112,15 @@ pub(crate) enum RowDragList {
     Terminals,
 }
 
+/// A drag-to-reorder gesture over a sidebar row, the TUI's twin of the web
+/// sidebar's drag ordering.
+///
+/// The gesture is armed by a left press on a reorderable row and stays a plain
+/// CLICK until the pointer reaches a DIFFERENT reorderable row: an agent row is
+/// three screen rows tall, so a one-to-three-cell wobble inside the pressed row
+/// stays a click, and a double click there still pairs. The first move onto
+/// another row promotes the gesture (`moved`), and from then on the pointer's
+/// row is tracked in `hover`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RowDragState {
     /// The list the press landed in. A drop is only ever computed within it.
