@@ -1261,7 +1261,12 @@ impl App {
                 project.default_provider.as_str().to_string(),
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
-            if has_project_override {
+            // A project override that restates the global default is one fact,
+            // so the global crumb only appears when the two providers differ.
+            if has_project_override
+                && project.default_provider.as_str()
+                    != self.engine.config.default_provider().as_str()
+            {
                 spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
                 spans.push(Span::styled(
                     "global default: ",
@@ -13424,6 +13429,38 @@ mod tests {
         (0..buf.area.width)
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect()
+    }
+
+    /// A project override that merely restates the global default is one fact,
+    /// not two: the header names the project provider and drops the global crumb.
+    /// An override that differs keeps both, because then the reader needs both.
+    #[test]
+    fn header_drops_the_global_default_crumb_when_the_project_override_matches_it() {
+        let mut app = test_app(default_bindings());
+        let global = app.engine.config.default_provider().as_str().to_string();
+        let project = &mut app.engine.projects[0];
+        let same = dux_core::model::ProviderKind::new(global.clone());
+        project.explicit_default_provider = Some(same.clone());
+        project.default_provider = same;
+        let row = header_row(&mut app, 200);
+        assert!(row.contains("project provider: "), "{row}");
+        assert!(!row.contains("global default: "), "{row}");
+
+        let other = app
+            .engine
+            .config
+            .providers
+            .commands
+            .keys()
+            .find(|name| name.as_str() != global)
+            .map(|name| dux_core::model::ProviderKind::new(name.clone()))
+            .expect("a second provider exists in the test config");
+        let project = &mut app.engine.projects[0];
+        project.explicit_default_provider = Some(other.clone());
+        project.default_provider = other;
+        let row = header_row(&mut app, 200);
+        assert!(row.contains("project provider: "), "{row}");
+        assert!(row.contains("global default: "), "{row}");
     }
 
     /// The header carries the serving chip while a background server is up, in the
