@@ -228,6 +228,20 @@ export interface PendingSessionOrder {
   ids: string[]
 }
 
+// Where the agent this client is creating will land, which is what makes a new
+// session in the next spine recognizable as ours (see `armCreateFocus`).
+//
+// A tagged pair rather than a nullable project id, because the two answers are
+// genuinely different questions and one of them used to be unaskable: an agent
+// created in a project is matched by that project, while a standalone agent
+// belongs to no project at all and is matched by having none. A nullable field
+// would spell "standalone" and "the project could not be resolved" the same
+// way, and the callers that cannot resolve a project must skip arming rather
+// than arm a token that grabs the next standalone agent to appear.
+export type CreateFocusScope =
+  | { kind: "project"; projectId: string }
+  | { kind: "standalone" }
+
 // The changed-files request state machine for the SELECTED session. This is the
 // single source of truth for changed-files data across the app (the changes
 // pane, commit dialog, discard dialog, mobile badge, and editor markers all read
@@ -565,11 +579,11 @@ export interface DuxState {
   // spine confirms it. Mirrors `pendingAgentOrder` exactly (see `reorderTerminals`).
   pendingTerminalOrder: string[] | null
   // While an agent-create THIS client initiated is in flight, holds the session
-  // ids that already existed when we submitted, plus the project the new agent
-  // will land in. Agent creation is an async server job whose only completion
+  // ids that already existed when we submitted, plus where the new agent will
+  // land. Agent creation is an async server job whose only completion
   // signal is a `sessions.changed` event + spine refetch (no per-client reply, no request/echo
-  // correlation), so we recognize "our" new agent as the session id that appears
-  // in `projectId` and wasn't in `knownIds`, then focus it — mirroring the TUI,
+  // correlation), so we recognize "our" new agent as the session id that matches
+  // `scope` and wasn't in `knownIds`, then focus it, mirroring the TUI,
   // which jumps selection to a freshly created agent when its launch completes.
   // Only the client that armed this reacts, so other connected clients aren't
   // yanked off whatever they're viewing. Null when no create is awaiting focus.
@@ -577,11 +591,11 @@ export interface DuxState {
   // `armedAt` (epoch ms) bounds the token's lifetime: a create that never lands
   // (the dispatch failed silently server-side, or the agent took absurdly long)
   // would otherwise leave the token armed forever, ready to mis-focus the next
-  // unrelated session that happens to appear in `projectId`. See
+  // unrelated session that happens to match `scope`. See
   // `CREATE_FOCUS_TTL_MS` and `focusNewlyCreatedSession`.
   pendingCreateFocus: {
     knownIds: string[]
-    projectId: string
+    scope: CreateFocusScope
     armedAt: number
   } | null
   // Explicit project expand/collapse choices, keyed by project id. A project not
@@ -1875,14 +1889,14 @@ function navigateAfterVanish(
 }
 
 // Snapshot the session ids that exist right now and arm auto-focus for an agent
-// THIS client is creating, so the next spine carrying a new id in `projectId`
+// THIS client is creating, so the next spine carrying a new id matching `scope`
 // is recognized as our new agent and focused (see `focusNewlyCreatedSession`).
 // Call this immediately before dispatching an agent-create command; it is wired
-// into `submitNameDialog` (new/fork/from-PR) and `attachWorktree`. Re-arming
-// overwrites any prior pending focus, so a fresh create supersedes an earlier
-// one whose agent never arrived. Always pass the project the new agent will land
-// in — the match is project-scoped, so a caller that cannot resolve the project
-// must skip arming rather than pass a placeholder.
+// into `submitNameDialog` (new/fork/from-PR), `attachWorktree` and
+// `createStandaloneAgent`. Re-arming overwrites any prior pending focus, so a
+// fresh create supersedes an earlier one whose agent never arrived. Always pass
+// the scope the new agent will land in: a caller creating in a project it
+// cannot resolve must skip arming rather than pass a placeholder.
 // How long an armed create-focus token stays live before it self-expires. Set
 // comfortably above the longest server-side create window (the from-PR create
 // awaits up to 60s — see `FROM_PR_CREATE_AWAIT_TIMEOUT`) so a legitimate slow
@@ -1890,16 +1904,37 @@ function navigateAfterVanish(
 // a stale token armed to grab a later, unrelated session.
 const CREATE_FOCUS_TTL_MS = 90_000
 
-function armCreateFocus(projectId: string): void {
+function armCreateFocus(scope: CreateFocusScope): void {
   const knownIds = (state.spine?.sessions ?? []).map((s) => s.id)
   setState({
-    pendingCreateFocus: { knownIds, projectId, armedAt: Date.now() },
+    pendingCreateFocus: { knownIds, scope, armedAt: Date.now() },
   })
+}
+
+// Whether a session is the one an armed token is waiting for, by where it
+// lives. Exhaustive on the scope so a third way to create an agent has to say
+// how it is recognized rather than falling into someone else's arm.
+function sessionInCreateScope(
+  session: SessionView,
+  scope: CreateFocusScope,
+): boolean {
+  const projectId = workspaceProjectId(session.workspace)
+  switch (scope.kind) {
+    case "project":
+      return projectId === scope.projectId
+    // A standalone agent belongs to no project, and that is the whole test: the
+    // folder cannot be compared, because the server canonicalizes the path it
+    // was handed and may answer with a different string than the one typed.
+    case "standalone":
+      return projectId === null
+    default:
+      return assertNever(scope)
+  }
 }
 
 // Focus the agent THIS client just created, the instant it shows up. With a
 // pending-focus token armed (`armCreateFocus`), scan the incoming spine for a
-// session that wasn't known at submit time and lives in the expected project,
+// session that wasn't known at submit time and matches the armed scope,
 // select it (which points the changed-files watch at it; the focused TerminalPane
 // subscribes its PTY on mount), and disarm. No-op — and cheap — when nothing is
 // pending, the overwhelmingly common case. Other clients never armed a token, so
@@ -1916,8 +1951,7 @@ function focusNewlyCreatedSession(spine: Spine): void {
   }
   const known = new Set(pending.knownIds)
   const created = spine.sessions.find(
-    (s) =>
-      !known.has(s.id) && workspaceProjectId(s.workspace) === pending.projectId,
+    (s) => !known.has(s.id) && sessionInCreateScope(s, pending.scope),
   )
   if (!created) return
   // Consume the token before selecting so a later spine can't re-fire.
@@ -4440,6 +4474,11 @@ export function closeStandaloneAgentPicker(): void {
  * server's, shared with the terminal UI, so the two surfaces cannot answer
  * differently. */
 export function createStandaloneAgent(folder: string, name: string): void {
+  // The same auto-focus token every other creation path arms, scoped to "an
+  // agent with no project" because that is what a standalone agent is. Without
+  // it the agent lands in the sidebar and the URL stays where it was, which is
+  // the one creation gesture that did not take the user to what it made.
+  armCreateFocus({ kind: "standalone" })
   void sessionsApi
     .create({ kind: "standalone", folder, name })
     .catch((e) =>
@@ -4821,7 +4860,7 @@ export function attachWorktree(
   worktreePath: string,
   name: string,
 ): void {
-  armCreateFocus(projectId)
+  armCreateFocus({ kind: "project", projectId })
   sessionsApi
     .create({ kind: "from_worktree", project_id: projectId, worktree_path: worktreePath, name })
     .catch((e) => toastCreateError(e, "Could not attach the worktree."))
@@ -5206,7 +5245,7 @@ function submitPrReferenceFirst(reference: string, name: string): void {
       const repository = resolved.repository ?? reference
       if (resolved.projects.length === 1) {
         const projectId = resolved.projects[0].id
-        armCreateFocus(projectId)
+        armCreateFocus({ kind: "project", projectId })
         createAgentFromPr(projectId, reference, name)
         closeCreateAgent()
         return
@@ -5259,7 +5298,7 @@ export function submitNameDialog(name: string): void {
   const target = state.createAgentTarget
   if (!target) return
   if (target.kind === "new") {
-    armCreateFocus(target.projectId)
+    armCreateFocus({ kind: "project", projectId: target.projectId })
     createAgent(target.projectId, name, state.createAgentCopyChanges)
   } else if (target.kind === "fork") {
     // A fork lands in the same project as its source session; resolve it so the
@@ -5272,7 +5311,7 @@ export function submitNameDialog(name: string): void {
     const projectId = forkSource
       ? workspaceProjectId(forkSource.workspace)
       : null
-    if (projectId) armCreateFocus(projectId)
+    if (projectId) armCreateFocus({ kind: "project", projectId })
     forkAgent(target.sessionId, name)
   } else if (target.projectId === null) {
     // Reference-first: dux has to work out the project before anything is
@@ -5280,7 +5319,7 @@ export function submitNameDialog(name: string): void {
     submitPrReferenceFirst(state.createAgentPrInput.trim(), name)
     return
   } else {
-    armCreateFocus(target.projectId)
+    armCreateFocus({ kind: "project", projectId: target.projectId })
     createAgentFromPr(target.projectId, state.createAgentPrInput.trim(), name)
   }
   closeCreateAgent()

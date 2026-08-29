@@ -11,15 +11,41 @@ import type { Spine } from "./workspaceApi"
 // So these tests drive it by mutating `spineBody` and dispatching a
 // `sessions.changed` event, then awaiting the refetch landing in state.
 
-function makeSpine(sessions: { id: string; project_id: string }[]): Spine {
+// A session as these tests describe it: a managed agent names its project, a
+// standalone agent names the folder it lives in. The two spellings mirror the
+// wire, where the workspace is tagged rather than flat.
+type TestSession =
+  | { id: string; project_id: string }
+  | { id: string; folder: string }
+
+function makeSpine(sessions: TestSession[]): Spine {
   return {
     projects: [],
-    sessions: sessions.map((s) => ({ ...s, terminals: [] })) as Spine["sessions"],
+    sessions: sessions.map((s) =>
+      "folder" in s
+        ? {
+            id: s.id,
+            terminals: [],
+            workspace: {
+              kind: "folder",
+              folder_path: s.folder,
+              folder_label: s.folder,
+              repo_status: "working_repo",
+              quiet_reason: "",
+            },
+          }
+        : { ...s, terminals: [] },
+    ) as Spine["sessions"],
     sidebar: { groups: [], agentless_start: null },
   }
 }
 
 let spineBody: Spine = makeSpine([])
+
+// The address bar these tests read back. `syncUrl` writes through `history`, so
+// the stubs below mirror the write into `hash`: the URL is the source of truth
+// for position, and that is what a creation is supposed to move.
+let fakeLocation = { host: "localhost:0", pathname: "/", search: "", hash: "" }
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
@@ -55,14 +81,24 @@ class FakeWebSocket {
 
 beforeEach(() => {
   spineBody = makeSpine([])
-  vi.stubGlobal("location", { host: "localhost:0" })
+  fakeLocation = { host: "localhost:0", pathname: "/", search: "", hash: "" }
+  vi.stubGlobal("location", fakeLocation)
   vi.stubGlobal("localStorage", {
     getItem: () => null,
     setItem: () => {},
     removeItem: () => {},
   })
   vi.stubGlobal("window", { addEventListener: () => {} })
-  vi.stubGlobal("history", { go: () => {} })
+  vi.stubGlobal("history", {
+    go: () => {},
+    state: null,
+    pushState: (_state: unknown, _title: string, url: string) => {
+      fakeLocation.hash = url.startsWith("#") ? url : ""
+    },
+    replaceState: (_state: unknown, _title: string, url: string) => {
+      fakeLocation.hash = url.startsWith("#") ? url : ""
+    },
+  })
   vi.stubGlobal("WebSocket", FakeWebSocket)
   vi.stubGlobal("fetch", fetchMock)
   vi.resetModules()
@@ -86,7 +122,7 @@ async function loadStore() {
 // content). Returns once `applyWorkspace` (and its focus/prune reconciliation) ran.
 async function pushSpine(
   mod: Awaited<ReturnType<typeof loadStore>>,
-  sessions: { id: string; project_id: string }[],
+  sessions: TestSession[],
 ): Promise<void> {
   const prev = mod.getSnapshot().spine
   spineBody = makeSpine(sessions)
@@ -108,6 +144,8 @@ describe("auto-focus the agent this client created", () => {
       { id: "s2", project_id: "p1" },
     ])
     expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    // The URL is the source of truth for position, so the address moved with it.
+    expect(fakeLocation.hash).toBe("#/agent/s2")
     // Selecting also subscribes the new session's changed-files topic.
     expect(subSpy).toHaveBeenCalledWith(["session:s2:changes"])
     // The coarse app-wide topics are NOT clobbered by the focus change — the
@@ -210,7 +248,10 @@ describe("auto-focus the agent this client created", () => {
     // overwritten so the latest create wins focus.
     mod.openCreateAgent("p2")
     mod.submitNameDialog("second")
-    expect(mod.getSnapshot().pendingCreateFocus?.projectId).toBe("p2")
+    expect(mod.getSnapshot().pendingCreateFocus?.scope).toEqual({
+      kind: "project",
+      projectId: "p2",
+    })
     // A session arriving in the superseded project (p1) must NOT be focused.
     await pushSpine(mod, [
       { id: "s1", project_id: "p1" },
@@ -317,4 +358,54 @@ describe("auto-focus the agent this client created", () => {
     ])
     expect(mod.getSnapshot().selectedSessionId).toBeNull()
   })
+
+  it("focuses a standalone agent this client created", async () => {
+    const mod = await loadStore()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    mod.createStandaloneAgent("/home/dev/scratch", "scratch")
+    await pushSpine(mod, [
+      { id: "s1", project_id: "p1" },
+      { id: "sa1", folder: "/home/dev/scratch" },
+    ])
+    expect(mod.getSnapshot().selectedSessionId).toBe("sa1")
+    expect(fakeLocation.hash).toBe("#/agent/sa1")
+    // The token is consumed so a later spine can't re-fire focus.
+    expect(mod.getSnapshot().pendingCreateFocus).toBeNull()
+  })
+
+  it("does not let a standalone create grab a new agent in a project", async () => {
+    const mod = await loadStore()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    mod.createStandaloneAgent("/home/dev/scratch", "scratch")
+    // Another client's project agent lands first: it is not the one we created.
+    await pushSpine(mod, [
+      { id: "s1", project_id: "p1" },
+      { id: "theirs", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+    expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
+    // Ours arrives with a folder of its own and wins the focus.
+    await pushSpine(mod, [
+      { id: "s1", project_id: "p1" },
+      { id: "theirs", project_id: "p1" },
+      { id: "mine", folder: "/home/dev/scratch" },
+    ])
+    expect(mod.getSnapshot().selectedSessionId).toBe("mine")
+  })
+
+  it("does not let a project create grab a new standalone agent", async () => {
+    const mod = await loadStore()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    mod.openCreateAgent("p1")
+    mod.submitNameDialog("my-agent")
+    // A standalone agent belongs to no project, so it cannot satisfy a
+    // project-scoped token however new it is.
+    await pushSpine(mod, [
+      { id: "s1", project_id: "p1" },
+      { id: "loose", folder: "/home/dev/scratch" },
+    ])
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+    expect(mod.getSnapshot().pendingCreateFocus).not.toBeNull()
+  })
+
 })
