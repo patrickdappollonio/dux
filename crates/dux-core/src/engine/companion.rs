@@ -338,15 +338,13 @@ impl Engine {
         Some((session.id.clone(), PathBuf::from(session.directory())))
     }
 
-    /// The agent session a pane's pty id belongs to: the session itself, or the
-    /// session owning that extra tab.
+    /// The agent session a pane's pty id belongs to: the agent whose
+    /// session-slot tab it is, or the session owning that extra tab. Routed
+    /// through `owning_session_for_tab` so this pane-side lookup and the rest of
+    /// the engine resolve a bare tab id the same single way.
     fn session_behind_pty(&self, pty_id: &str) -> Option<&crate::model::AgentSession> {
-        let session_id = if self.sessions.iter().any(|s| s.id == pty_id) {
-            pty_id
-        } else {
-            self.agent_tabs.get(pty_id)?.session_id.as_str()
-        };
-        self.sessions.iter().find(|s| s.id == session_id)
+        let session_id = self.owning_session_for_tab(pty_id)?;
+        self.session_by_id(&session_id)
     }
 }
 
@@ -358,9 +356,10 @@ mod tests {
     #[test]
     fn a_drop_on_any_tab_of_an_agent_lands_in_that_agent_s_upload_directory() {
         // Every tab of one agent shares one worktree, so which tab is on screen
-        // must not change where the file lands. The session-slot tab's id equals
-        // the session id; an extra tab's does not, and resolving that is the
-        // half a route would otherwise have to know about.
+        // must not change where the file lands. Both a slot tab id and an extra
+        // tab id resolve back to the owning agent through
+        // `owning_session_for_tab`, which is the half a route would otherwise
+        // have to know about.
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
         engine.projects.push(sample_project(

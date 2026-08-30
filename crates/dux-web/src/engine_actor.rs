@@ -137,6 +137,11 @@ pub enum EngineRequest {
     /// and is served by `/ws/sessions/:id/pty`). Lets the tab PTY socket and tab
     /// REST routes enforce that a `:tab` belongs to its path `:id`.
     TabSession(String, oneshot::Sender<Option<String>>),
+    /// Resolve an agent's session-slot tab id (the id its first tab's PTY is
+    /// keyed by), or `None` when the session id names no agent. The HTTP and
+    /// socket layers are handed bare path segments, so this is how they ask the
+    /// one resolver instead of assuming the slot tab id is the session id.
+    SlotTabId(String, oneshot::Sender<Option<String>>),
     /// Run the create-agent branch preflight for `(project_id, name)`: does a new
     /// agent of that name start fresh or attach to an existing branch? Runs a git
     /// subprocess on the engine thread. `None` means the project is unknown.
@@ -1042,6 +1047,28 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// The id of `session_id`'s session-slot tab (its first tab), or `None` when
+    /// the session is unknown. The routing key for that tab's PTY, and the one
+    /// way the HTTP and socket layers learn it.
+    pub async fn slot_tab_id(&self, session_id: String) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::SlotTabId(session_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    /// Whether `tab_id` names `session_id`'s session-slot tab. An unknown session
+    /// answers `false`: it has no slot tab to name.
+    pub async fn is_slot_tab(&self, session_id: String, tab_id: &str) -> bool {
+        self.slot_tab_id(session_id).await.as_deref() == Some(tab_id)
+    }
+
     /// The create-agent branch preflight for `(project_id, name)`: whether a new
     /// agent of that name would start fresh or attach to an existing branch.
     /// `None` when the project is unknown or the engine thread is gone. The create
@@ -1748,6 +1775,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         EngineRequest::TerminalOwnerOf(..)
         | EngineRequest::TerminalRoot(..)
         | EngineRequest::TabSession(..)
+        | EngineRequest::SlotTabId(..)
         | EngineRequest::SessionWorktree(..)
         | EngineRequest::SessionGitAccess(..)
         | EngineRequest::FileDropDestination(..)
@@ -3372,10 +3400,27 @@ fn handle_request(
             let res = create_agent_tab_inner(engine, &session_id, provider);
             let _ = reply.send(res);
         }
+        EngineRequest::SlotTabId(session_id, reply) => {
+            let slot = engine
+                .session_by_id(&session_id)
+                .map(|s| s.slot_tab_id().to_string());
+            let _ = reply.send(slot);
+        }
         EngineRequest::TabSession(tab_id, reply) => {
-            // Support-only ownership: a session-slot tab has no `agent_tabs` row (`None`),
-            // so the tabs route 404s it — Main is served by `/ws/sessions/:id/pty`.
-            let owner = engine.agent_tabs.get(&tab_id).map(|t| t.session_id.clone());
+            // Support-only ownership: the session-slot tab is excluded here (it is
+            // served by `/ws/sessions/:id/pty`), so the tabs route 404s it. Asked
+            // through the resolver rather than relying on "the slot tab has no
+            // `agent_tabs` row", which is a fact about today's storage shape.
+            //
+            // `ws_tab_pty_upgrade` refuses the slot tab before it ever gets here,
+            // and both refusals stay. This one is not merely that check repeated:
+            // every tab REST route resolves ownership through here too, so the
+            // exclusion has to live with the ownership answer, not only at the one
+            // socket edge that reads best with an explicit refusal of its own.
+            let owner = match engine.session_for_slot_tab(&tab_id) {
+                Some(_) => None,
+                None => engine.agent_tabs.get(&tab_id).map(|t| t.session_id.clone()),
+            };
             let _ = reply.send(owner);
         }
         EngineRequest::CreateAgentBranchPlan(project_id, name, reply) => {
@@ -3685,19 +3730,16 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
     if engine.is_in_flight(&InFlightKey::AgentLaunch(subscribed_id.to_string())) {
         return Ok(());
     }
-    // session-slot tab: the subscribed id is a session id -> resume-eligible reconnect.
-    if let Some(session) = engine
-        .sessions
-        .iter()
-        .find(|s| s.id == subscribed_id)
-        .cloned()
-    {
+    // session-slot tab: the subscribed id names some agent's first tab ->
+    // resume-eligible reconnect.
+    if let Some(session) = engine.session_for_slot_tab(subscribed_id).cloned() {
         // Derive the message from the ACTUAL resume decision, not just
         // `should_resume_session`: a live same-provider extra tab downgrades the
         // session-slot launch to fresh (per-provider collision), and the toast
         // must not claim "Resumed" when the dispatch actually starts fresh. The
-        // session-slot tab id equals the session id.
-        let resume = engine.tab_resume_decision(&session, &session.id, &session.provider, true);
+        // The launch is for the agent's session-slot tab.
+        let resume =
+            engine.tab_resume_decision(&session, session.slot_tab_id(), &session.provider, true);
         // Use the SAME completion message the TUI shows on reconnect-ready rather
         // than a static "attaching…" placeholder (which left the status line stuck).
         let status_message = engine.agent_reconnect_status_message(&session, resume);

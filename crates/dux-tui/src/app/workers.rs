@@ -142,7 +142,7 @@ impl App {
         };
         let was_focused_tab = context.selected_session.as_deref() == Some(session_id)
             && context.focused_tab.as_deref() == Some(pty.id.as_str());
-        let support_provider = (pty.id != session_id).then(|| {
+        let support_provider = (!self.engine.is_slot_tab_of(session_id, &pty.id)).then(|| {
             context
                 .tab_providers
                 .get(&pty.id)
@@ -203,12 +203,14 @@ impl App {
         };
         let Some(pty) = pruned
             .iter()
-            .find(|pty| is_session_slot_prune(pty, &current_id))
+            .find(|pty| is_session_slot_prune(&self.engine, pty, &current_id))
         else {
             return;
         };
         let focused = self.focused_tab_id(&current_id);
-        if focused != current_id && self.engine.providers.contains_key(&focused) {
+        if !self.engine.is_slot_tab_of(&current_id, &focused)
+            && self.engine.providers.contains_key(&focused)
+        {
             return;
         }
         self.apply_selected_agent_exit_status(pty);
@@ -1584,9 +1586,9 @@ fn session_owner_id(pty: &PrunedPty) -> Option<&str> {
     }
 }
 
-fn is_session_slot_prune(pty: &PrunedPty, session_id: &str) -> bool {
+fn is_session_slot_prune(engine: &Engine, pty: &PrunedPty, session_id: &str) -> bool {
     pty.kind == PrunedPtyKind::Agent
-        && pty.id == session_id
+        && engine.is_slot_tab_of(session_id, &pty.id)
         && session_owner_id(pty) == Some(session_id)
 }
 

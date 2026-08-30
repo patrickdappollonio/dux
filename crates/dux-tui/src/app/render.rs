@@ -3698,10 +3698,10 @@ impl App {
         term_area: Rect,
         context: &AgentTerminalContext,
     ) {
-        let dormant_support = matches!(
-            (&context.session_id, &context.focused_tab),
-            (Some(session_id), Some(tab_id)) if tab_id != session_id
-        );
+        let dormant_support = match (&context.session_id, &context.focused_tab) {
+            (Some(session_id), Some(tab_id)) => !self.engine.is_slot_tab_of(session_id, tab_id),
+            _ => false,
+        };
         match context.active_surface {
             SessionSurface::Agent if dormant_support => {
                 self.welcome_logo_visible = false;

@@ -479,7 +479,7 @@ pub enum WireCommand {
     },
     /// Retarget one tab's provider (effective on its next launch), mirroring
     /// `ChangeAgentProvider` but scoped to a single tab. For the session-slot tab
-    /// (`tab_id == session_id`) this delegates to the session-level change; for a
+    /// this delegates to the session-level change; for a
     /// extra tab it updates only that tab. `provider` is validated server-side.
     ChangeAgentTabProvider {
         session_id: String,
@@ -2062,7 +2062,7 @@ impl Engine {
         // `desired_running` on detach so startup auto-reopen does not relaunch a
         // deliberately-killed agent) is the single-source `kill_tab_runtime`,
         // shared with the TUI kill overlay so both surfaces agree.
-        let outcome = self.kill_tab_runtime(&session.id);
+        let outcome = self.kill_tab_runtime(session.slot_tab_id());
         if !outcome.killed {
             // No live PTY -> nothing to kill. Idempotent success so a
             // double-click or a kill racing a natural exit is not an error. The
@@ -2330,7 +2330,7 @@ impl Engine {
         tab_id: &str,
         provider: &str,
     ) -> anyhow::Result<WireStatus> {
-        if tab_id == session_id {
+        if self.is_slot_tab_of(session_id, tab_id) {
             return self.change_agent_provider_wire(session_id, provider);
         }
         if !self.config.providers.commands.contains_key(provider) {
@@ -3571,7 +3571,7 @@ impl Engine {
             EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
                 AgentLaunchReadyView::Reconnect { status_message }
                 | AgentLaunchReadyView::ResumeFallback { status_message, .. } => {
-                    if outcome.tab_id != outcome.session.id {
+                    if !self.is_slot_tab(&outcome.session, &outcome.tab_id) {
                         // Support-tab launch success: no op is stashed under a tab
                         // id, so emit a status KEYED `tab-launch-<tab_id>` (matching
                         // the failure path) rather than an unkeyed one — otherwise an
@@ -3584,7 +3584,7 @@ impl Engine {
                             clear_keys: Vec::new(),
                         }
                     } else {
-                        // session-slot tab (tab_id == session_id): resolve its pending
+                        // session-slot tab: resolve its pending
                         // reconnect op keyed by the session id, as before.
                         self.resolve_web_launch_op_or(
                             &outcome.tab_id,

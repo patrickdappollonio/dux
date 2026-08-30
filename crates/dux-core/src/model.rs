@@ -529,9 +529,9 @@ pub struct AgentSession {
     pub updated_at: DateTime<Utc>,
     /// The tab id the user last focused on this agent, remembered so switching
     /// away and back (either surface, and across restarts) restores it. `None`
-    /// means "no memory recorded" and resolves to the session-slot tab (id ==
-    /// `self.id`). A remembered value equal to `self.id`, or one that no longer
-    /// names a live extra tab, also resolves to the session-slot tab — see
+    /// means "no memory recorded" and resolves to the session-slot tab (see
+    /// [`AgentSession::slot_tab_id`]). A remembered value naming the slot tab, or
+    /// one that no longer names a live extra tab, also resolves to it — see
     /// [`AgentSession::resolved_focused_tab`]. Derived runtime/UI state: kept in
     /// SQLite via a dedicated setter, never in portable config, and deliberately
     /// excluded from `upsert_session`'s hot-path SET/INSERT lists so status
@@ -624,17 +624,40 @@ impl AgentSession {
         true
     }
 
+    /// The id of this agent's **session-slot tab**: its first tab, the one that
+    /// has no `agent_tabs` row of its own and that the user cannot close.
+    ///
+    /// Today that id IS the session id, because the slot tab is synthesized from
+    /// this record rather than stored. It becomes a stored pointer when tab
+    /// promotion lands, so this method is the one place that has to change: every
+    /// slot-ness decision in both crates routes through it (or through
+    /// [`AgentSession::is_slot_tab`] and the `Engine` wrappers) rather than
+    /// comparing a tab id against `self.id` inline.
+    pub fn slot_tab_id(&self) -> &str {
+        &self.id
+    }
+
+    /// Whether `tab_id` names this agent's session-slot tab. See
+    /// [`AgentSession::slot_tab_id`].
+    pub fn is_slot_tab(&self, tab_id: &str) -> bool {
+        self.slot_tab_id() == tab_id
+    }
+
     /// Resolve the tab to focus: the remembered tab when it is a real, still-open
-    /// extra tab of this session; the session-slot tab (== session id) otherwise.
-    /// `None`, the session id itself, and a closed/foreign tab id all resolve to
-    /// the session-slot tab.
+    /// extra tab of this session; the session-slot tab otherwise. `None`, the
+    /// slot tab's own id, and a closed/foreign tab id all resolve to the
+    /// session-slot tab.
     pub fn resolved_focused_tab<'a>(
         &'a self,
         live_extra_tab_ids: impl IntoIterator<Item = &'a str>,
     ) -> &'a str {
         match self.last_focused_tab.as_deref() {
-            Some(id) if id != self.id && live_extra_tab_ids.into_iter().any(|t| t == id) => id,
-            _ => &self.id,
+            Some(id)
+                if !self.is_slot_tab(id) && live_extra_tab_ids.into_iter().any(|t| t == id) =>
+            {
+                id
+            }
+            _ => self.slot_tab_id(),
         }
     }
 }
@@ -996,6 +1019,25 @@ mod tests {
                 "for {path:?}"
             );
         }
+    }
+
+    #[test]
+    fn slot_tab_id_names_the_agents_first_tab() {
+        // The one resolver every slot-ness decision routes through. Today the
+        // answer is the session id, because the slot tab is synthesized from the
+        // session record rather than stored; this test pins the contract, not the
+        // storage shape, so the day it becomes a stored pointer only the value
+        // below moves.
+        let session = session_with_focus(None);
+        assert_eq!(session.slot_tab_id(), "s1");
+    }
+
+    #[test]
+    fn is_slot_tab_accepts_only_the_slot_tab_id() {
+        let session = session_with_focus(None);
+        assert!(session.is_slot_tab(session.slot_tab_id().to_string().as_str()));
+        assert!(!session.is_slot_tab("t1"));
+        assert!(!session.is_slot_tab(""));
     }
 
     #[test]

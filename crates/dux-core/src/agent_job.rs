@@ -966,7 +966,8 @@ fn run_create_standalone_agent_job(
     // crossterm::terminal::size() returns (cols, rows).
     let (cols, rows) = term_size;
     let request = AgentLaunchRequest {
-        tab_id: session.id.clone(),
+        // Create is always the session-slot tab. (Evaluated before `session` is moved.)
+        tab_id: session.slot_tab_id().to_string(),
         provider: session.provider.clone(),
         // A brand-new standalone agent starts a fresh conversation; the dynamic
         // per-provider resume rule applies to later launches like any agent's.
@@ -1170,9 +1171,9 @@ fn launch_managed_create(
     // crossterm::terminal::size() returns (cols, rows).
     let (cols, rows) = term_size;
     let request = AgentLaunchRequest {
-        // Create is always the session-slot tab: tab_id == session.id, effective
-        // provider == session.provider. (Evaluated before `session` is moved.)
-        tab_id: session.id.clone(),
+        // Create is always the session-slot tab, effective provider ==
+        // session.provider. (Evaluated before `session` is moved.)
+        tab_id: session.slot_tab_id().to_string(),
         provider: session.provider.clone(),
         session,
         provider_config: provider_cfg,

@@ -1282,7 +1282,7 @@ impl App {
                     if self.selected_session().is_some()
                         && self
                             .selected_session()
-                            .map(|s| self.engine.providers.contains_key(&s.id))
+                            .map(|s| self.engine.providers.contains_key(s.slot_tab_id()))
                             .unwrap_or(false)
                     {
                         self.focus = FocusPane::Center;
@@ -8992,7 +8992,7 @@ impl App {
                 self.reload_changed_files();
                 if self
                     .selected_session()
-                    .map(|s| self.engine.providers.contains_key(&s.id))
+                    .map(|s| self.engine.providers.contains_key(s.slot_tab_id()))
                     .unwrap_or(false)
                 {
                     if allow_launch {
@@ -9070,7 +9070,7 @@ impl App {
             self.set_info(format!(
                 "Fullscreen. Keys go to the agent verbatim. Press {exit_key} to minimize."
             ));
-        } else if tab_id != session_id {
+        } else if !self.engine.is_slot_tab_of(&session_id, &tab_id) {
             // Dormant extra tab: launch it (only when the caller allows it).
             // Resume eligibility is decided dynamically by
             // `tab_resume_decision` inside the launch — this tab may resume

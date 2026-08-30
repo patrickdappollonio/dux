@@ -1431,7 +1431,7 @@ impl App {
         };
         let session_id = session.id.clone();
         let tab_id = self.focused_tab_id(&session_id);
-        if tab_id == session_id {
+        if self.engine.is_slot_tab_of(&session_id, &tab_id) {
             self.prompt = PromptState::FirstTabCannotClose { session_id };
             return;
         }
@@ -3868,12 +3868,14 @@ impl App {
         let mut runtimes = Vec::new();
 
         for session in &self.engine.sessions {
-            let main_running = self.engine.providers.contains_key(&session.id);
+            let main_running = self.engine.providers.contains_key(session.slot_tab_id());
             let has_live_support = self
                 .engine
                 .tab_ids_for_session(&session.id)
                 .into_iter()
-                .any(|tab_id| tab_id != session.id && self.engine.providers.contains_key(&tab_id));
+                .any(|tab_id| {
+                    !session.is_slot_tab(&tab_id) && self.engine.providers.contains_key(&tab_id)
+                });
             // Skip only when NEITHER the session-slot tab nor any extra tab is live.
             if !main_running && !has_live_support {
                 continue;
@@ -3905,7 +3907,7 @@ impl App {
             // id. List each running one so a runaway extra tab can be killed;
             // killing it stops the process but keeps the (now dormant) tab.
             for tab_id in self.engine.tab_ids_for_session(&session.id) {
-                if tab_id == session.id || !self.engine.providers.contains_key(&tab_id) {
+                if session.is_slot_tab(&tab_id) || !self.engine.providers.contains_key(&tab_id) {
                     continue;
                 }
                 let Some(tab) = self.engine.agent_tabs.get(&tab_id) else {
@@ -4107,7 +4109,10 @@ impl App {
                 // an extra tab KEEPS its `agent_tabs` row (the tab goes dormant;
                 // row deletion is `close_tab`'s job).
                 RuntimeTargetId::Agent(session_id) => {
-                    if self.engine.kill_tab_runtime(session_id).killed {
+                    // An `Agent` target is the agent's session-slot tab; its
+                    // extra tabs are listed as `Tab` targets of their own.
+                    let slot_tab_id = self.engine.slot_tab_id_of(session_id).to_string();
+                    if self.engine.kill_tab_runtime(&slot_tab_id).killed {
                         killed_agents += 1;
                         if selected_session_id.as_deref() == Some(session_id.as_str()) {
                             selected_agent_killed = true;

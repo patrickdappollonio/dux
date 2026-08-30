@@ -1610,7 +1610,8 @@ mod tests {
         engine.projects.push(sample_project("p1", "/tmp/p1"));
         let session = sample_session("s1", "p1", "feat/x");
         engine.sessions.push(session);
-        // The session-slot tab id equals the session id; mark its launch in flight.
+        // Mark the session-slot tab's launch in flight, under the id
+        // `AgentSession::slot_tab_id` resolves to for this fixture.
         engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
 
         let reaction = engine

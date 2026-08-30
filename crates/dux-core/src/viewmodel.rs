@@ -742,13 +742,13 @@ pub struct TerminalView {
 }
 
 /// One provider tab of an agent, projected for the tab strip. `order == 0` is
-/// the **session-slot tab**, the one whose id equals the session id and which
+/// the **session-slot tab**, the one named by `SessionView::slot_tab_id`, which
 /// has no row of its own; it is also the one tab a user cannot close. No tab is
 /// privileged for RESUME: that is decided per provider by liveness at launch
 /// (see `Engine::tab_resume_decision`), not by position.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentTabView {
-    /// Tab id. Equals the session id for the session-slot tab.
+    /// Tab id. Matches `SessionView::slot_tab_id` for the session-slot tab.
     pub id: String,
     /// Effective provider name (the running pin if a swap happened while live,
     /// otherwise the tab's configured provider).
@@ -1212,10 +1212,10 @@ impl Engine {
         // was precomputed to avoid (`spine`'s single O(total tabs) grouping pass),
         // and calling it here per-session silently re-introduced the O(S * T) cost
         // `spine` was factored to eliminate.
-        let has_output = std::iter::once(s.id.as_str())
+        let has_output = std::iter::once(s.slot_tab_id())
             .chain(support_tabs.iter().map(|t| t.id.as_str()))
             .any(|id| self.providers.get(id).is_some_and(|p| p.has_output()));
-        let working = std::iter::once(s.id.as_str())
+        let working = std::iter::once(s.slot_tab_id())
             .chain(support_tabs.iter().map(|t| t.id.as_str()))
             .any(|id| self.is_agent_streaming(id));
         // Typing rolls up any-tab too, and is disjoint from `working` (which
@@ -1224,11 +1224,11 @@ impl Engine {
         let typing = self.session_is_typing(&s.id);
         // Attention rolls up any-tab, exactly like `working`: the sidebar row
         // marks the agent if any of its tabs (session-slot or extra) is flagged.
-        let needs_attention = std::iter::once(s.id.as_str())
+        let needs_attention = std::iter::once(s.slot_tab_id())
             .chain(support_tabs.iter().map(|t| t.id.as_str()))
             .any(|id| self.tab_needs_attention(id));
         // Tabs, session-slot first, then extras in creation order.
-        let mut tabs = vec![self.tab_view(&s.id, self.running_provider_for(s), 0)];
+        let mut tabs = vec![self.tab_view(s.slot_tab_id(), self.running_provider_for(s), 0)];
         let mut support: Vec<_> = support_tabs.to_vec();
         support.sort_by(|a, b| {
             a.sort_order

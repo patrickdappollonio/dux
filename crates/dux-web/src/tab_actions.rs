@@ -118,8 +118,8 @@ async fn create_tab(
 }
 
 /// `DELETE /api/v1/sessions/:id/tabs/:tab` - close one tab. The session-slot tab
-/// (`tab == id`) is refused: it lives as long as the agent does. Any other tab
-/// is closed. A `:tab` not owned by `:id` is a 404.
+/// is refused: it lives as long as the agent does. Any other tab is closed. A
+/// `:tab` not owned by `:id` is a 404.
 async fn delete_tab(
     State(state): State<AppState>,
     Path((id, tab)): Path<(String, String)>,
@@ -145,7 +145,7 @@ async fn delete_tab(
     // provider via `KillSessionPty`, which is not what "close the tab" means and
     // left the user with a tab they could not get rid of and a session they had
     // not meant to stop.
-    if tab == id {
+    if state.engine.is_slot_tab(id.clone(), &tab).await {
         return (
             StatusCode::BAD_REQUEST,
             "This agent's first tab can't be closed: it lives as long as the agent does. \
@@ -187,7 +187,7 @@ async fn delete_tab(
 }
 
 /// `PATCH /api/v1/sessions/:id/tabs/:tab` - retarget the tab's provider (effective
-/// on its next launch). `tab == id` retargets the session-slot tab (delegates to
+/// on its next launch). Naming the session-slot tab retargets it (delegates to
 /// the session-level change); an extra `:tab` must belong to `:id`.
 async fn retarget_tab(
     State(state): State<AppState>,
@@ -206,9 +206,9 @@ async fn retarget_tab(
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp.into_response();
     }
-    // Extra tabs must belong to the path session; the session-slot tab (tab ==
-    // id) is always valid and delegates to the session-level provider change.
-    if tab != id {
+    // Extra tabs must belong to the path session; the session-slot tab is always
+    // valid and delegates to the session-level provider change.
+    if !state.engine.is_slot_tab(id.clone(), &tab).await {
         match state.engine.tab_session(tab.clone()).await {
             Some(owner) if owner == id => {}
             _ => return unknown_tab(),

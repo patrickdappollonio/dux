@@ -119,8 +119,9 @@ pub enum GridApplyOutcome<T> {
 }
 
 /// Tracks which connection currently owns sizing+input for each PTY, keyed by
-/// pty id (the tab id for an agent PTY, which is the session id for the
-/// session-slot tab, and the terminal id for a companion). Shared between every
+/// pty id: the tab id for an agent PTY, which for an agent's first tab is
+/// whatever `AgentSession::slot_tab_id` points at, and the terminal id for a
+/// companion. Shared between every
 /// per-PTY socket, the engine actor loop and, while a background server runs
 /// behind the terminal UI, that terminal UI. The web layer's
 /// `build_actor_channels` is what constructs one, once per serve.

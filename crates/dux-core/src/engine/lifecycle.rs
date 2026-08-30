@@ -155,7 +155,7 @@ pub struct KillTabRuntimeOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrunedPty {
     pub kind: PrunedPtyKind,
-    /// The tab id (for an agent — `== session_id` for the session-slot tab) or terminal
+    /// The tab id (for an agent — the slot tab id for the session-slot tab) or terminal
     /// id (for a companion terminal).
     pub id: String,
     /// Who owned the pruned PTY: `Session(sid)` for an agent tab or a
@@ -392,7 +392,9 @@ impl Engine {
             // the label falls back to a raw UUID and the session-state marks
             // silently no-op on the wrong key.
             let owning = self.owning_session_for_tab(&tab_id);
-            let is_session_slot = owning.as_deref() == Some(tab_id.as_str());
+            let is_session_slot = owning
+                .as_deref()
+                .is_some_and(|sid| self.is_slot_tab_of(sid, &tab_id));
             // When the AGENT itself exits (its session-slot tab), re-check its PR
             // now: an exit commonly follows a merge, so the badge would otherwise
             // stay stale until the next background sync. This is the shared-exit

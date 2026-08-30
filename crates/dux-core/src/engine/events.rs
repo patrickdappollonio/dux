@@ -371,7 +371,7 @@ pub struct DetachedSession {
 /// `detached_session_id`, runs view rebuilds, sets surfaces/overlays/status.
 pub struct AgentLaunchReadyOutcome {
     pub session: AgentSession,
-    /// The tab whose launch completed (== `session.id` for the session-slot tab). Lets a
+    /// The tab whose launch completed (the slot tab id for the session-slot tab). Lets a
     /// surface route an extra-tab ready to the correct pane without re-deriving.
     pub tab_id: String,
     pub pty_size: (u16, u16),
@@ -729,7 +729,7 @@ pub struct BeginDeleteSessionView {
 /// with its session without re-deriving it from the request.
 pub struct DispatchAgentLaunchView {
     pub session_id: String,
-    /// The tab whose launch was dispatched (== `session_id` for the session-slot tab).
+    /// The tab whose launch was dispatched (the slot tab id for the session-slot tab).
     pub tab_id: String,
     pub launched: bool,
     pub status: Option<StatusUpdate>,
@@ -843,7 +843,7 @@ impl Engine {
         let AgentLaunchReadyData { request, client } = data;
         let session = request.session.clone();
         let pty_size = request.pty_size;
-        // Runtime PTY/provider state is keyed by tab id (== session.id for the
+        // Runtime PTY/provider state is keyed by tab id (the slot tab id for the
         // session-slot tab). Use it for the in-flight clear, the providers insert, and
         // the resume-fallback candidate so an extra tab tracks under its own key.
         let tab_id = request.tab_id.clone();
@@ -961,9 +961,9 @@ impl Engine {
         // Ghost-launch guard: an extra tab whose row was deleted while its
         // launch was in flight must not resurrect a live PTY under a dead tab
         // id. Dropping `client` here (PtyClient::Drop) terminates the freshly
-        // spawned process. The session-slot tab (`tab_id == session.id`, which never has
-        // an `agent_tabs` row) is exempt — "no row" is normal for Main.
-        let is_main = tab_id == session.id;
+        // spawned process. The session-slot tab (which never has an `agent_tabs`
+        // row) is exempt — "no row" is normal for it.
+        let is_main = self.is_slot_tab(&session, &tab_id);
         if !is_main && !self.agent_tabs.contains_key(&tab_id) {
             logger::info(&format!(
                 "dropping launched PTY for closed extra tab {tab_id} of session {}",
@@ -1171,7 +1171,7 @@ impl Engine {
     /// Clear every runtime map entry (`providers`, `running_provider_pins`,
     /// `resume_fallback_candidates`, `pty_activity`, `pty_input`, and the
     /// in-flight `AgentLaunch` key) for ALL of a session's tabs — the
-    /// session-slot tab (`tab_id == session_id`) and every extra tab. Does NOT
+    /// session-slot tab and every extra tab. Does NOT
     /// remove the persisted `agent_tabs` records: a detach keeps them (the
     /// session lives on, just disconnected); a delete removes them separately
     /// via `agent_tabs.retain`.
@@ -1820,7 +1820,7 @@ impl Engine {
         data: AgentLaunchFailedData,
     ) -> (AgentLaunchFailedOutcome, Option<ResolvedFinal>) {
         let AgentLaunchFailedData { request, message } = data;
-        // Clear the tab-keyed in-flight lock (== session.id for the session-slot tab),
+        // Clear the tab-keyed in-flight lock (the slot tab id for the session-slot tab),
         // mirroring the success path in `process_agent_launch_ready`.
         let tab_id = request.tab_id.clone();
         let session = request.session;
@@ -1893,9 +1893,9 @@ impl Engine {
                 // have diverged" WARN in storage.rs for a row that is already
                 // gone), and surface a user-facing "Tab launch failed"
                 // warning for a tab the user already closed. The session-slot tab
-                // (`tab_id == session.id`, which never has an `agent_tabs`
-                // row) is exempt, same as the ready-path guard.
-                let is_main = tab_id == session.id;
+                // (which never has an `agent_tabs` row) is exempt, same as the
+                // ready-path guard.
+                let is_main = self.is_slot_tab(&session, &tab_id);
                 if !is_main && !self.agent_tabs.contains_key(&tab_id) {
                     logger::info(&format!(
                         "dropping launch-failed event for closed extra tab {tab_id} of session {}",
@@ -6137,7 +6137,8 @@ mod tests {
         let session = sample_session("s1", "p1", "feat/x");
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
-        // The session-slot tab's id equals the session id; mark its launch in flight.
+        // Mark the session-slot tab's launch in flight, under the id
+        // `AgentSession::slot_tab_id` resolves to for this fixture.
         engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
 
         let outcome = engine

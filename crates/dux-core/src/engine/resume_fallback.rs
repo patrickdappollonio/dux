@@ -109,13 +109,13 @@ impl Engine {
         pty_size: (u16, u16),
         kind: AgentLaunchKind,
     ) -> AgentLaunchRequest {
-        // Session-slot launch: tab_id == session.id, provider == session.provider.
-        let tab_id = session.id.clone();
+        // Session-slot launch: the slot tab id, provider == session.provider.
+        let tab_id = session.slot_tab_id().to_string();
         self.build_tab_launch_request(tab_id, None, session, resume, pty_size, kind)
     }
 
     /// Tab-aware launch-request builder. `tab_provider = None` uses the session's
-    /// own provider (the session-slot tab, `tab_id == session.id`); `Some(provider)`
+    /// own provider (the session-slot tab); `Some(provider)`
     /// launches that provider for an extra tab.
     ///
     /// Resume eligibility is dynamic, not positional: a tab launches with the
@@ -239,7 +239,7 @@ impl Engine {
         };
         // Capture the provider that was resuming (the exited tab's own provider)
         // BEFORE tearing down the pin, so the fresh relaunch reuses it.
-        let is_session_slot = tab_id == session.id;
+        let is_session_slot = self.is_slot_tab(&session, tab_id);
         let provider = self.tab_running_provider(&session, tab_id);
         // 4. Tear down the stale resume attempt, through the ONE function that
         //    knows every map keyed by a tab id. This used to remove the three

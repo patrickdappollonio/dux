@@ -6353,7 +6353,7 @@ impl App {
     /// resolver so the remembered tab survives a restart too.
     pub(crate) fn focused_tab_id(&self, session_id: &str) -> String {
         match self.focused_tabs.get(session_id) {
-            Some(id) if id == session_id => id.clone(),
+            Some(id) if self.engine.is_slot_tab_of(session_id, id) => id.clone(),
             Some(id)
                 if self
                     .engine
@@ -6363,8 +6363,8 @@ impl App {
             {
                 id.clone()
             }
-            Some(_) => session_id.to_string(),
-            None => match self.engine.sessions.iter().find(|s| s.id == session_id) {
+            Some(_) => self.engine.slot_tab_id_of(session_id).to_string(),
+            None => match self.engine.session_by_id(session_id) {
                 Some(session) => {
                     let live_extra_ids = self
                         .engine
@@ -6407,7 +6407,7 @@ impl App {
                 .then_with(|| a.created_at.cmp(&b.created_at))
         });
         let mut ids = Vec::with_capacity(support.len() + 1);
-        ids.push(session_id.to_string());
+        ids.push(self.engine.slot_tab_id_of(session_id).to_string());
         ids.extend(support.into_iter().map(|t| t.id.clone()));
         ids
     }
@@ -6424,20 +6424,18 @@ impl App {
     /// authoritative) in-process focus switch, so any error is intentionally
     /// discarded, matching the wire command's "no status" contract (J3).
     pub(crate) fn set_focused_tab(&mut self, session_id: &str, tab_id: &str) {
-        if tab_id == session_id {
+        // The slot tab is the default focus, so focusing it is recorded as "no
+        // memory" on both the in-process map and the persisted column.
+        let is_slot = self.engine.is_slot_tab_of(session_id, tab_id);
+        if is_slot {
             self.focused_tabs.remove(session_id);
         } else {
             self.focused_tabs
                 .insert(session_id.to_string(), tab_id.to_string());
         }
-        let _ = self.engine.set_last_focused_tab(
-            session_id,
-            if tab_id == session_id {
-                None
-            } else {
-                Some(tab_id)
-            },
-        );
+        let _ = self
+            .engine
+            .set_last_focused_tab(session_id, (!is_slot).then_some(tab_id));
         self.last_snapshot_id = None;
         self.last_pty_size = (0, 0);
         self.terminal_selection = None;

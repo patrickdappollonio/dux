@@ -1103,18 +1103,20 @@ fn acquire_ws_permit(
 /// loop treats them identically once subscribed; they differ only in how the
 /// upgrade handler validates the path and how the initial subscription is taken.
 enum PtyTarget {
+    /// An agent's session-slot tab PTY, keyed by that tab's id (resolved through
+    /// `EngineHandle::slot_tab_id`, never assumed to be the session id).
     Agent(String),
     Terminal(String),
     /// An extra tab's provider PTY, keyed by tab id. Resolves through the same
-    /// tab-keyed `providers` map as `Agent` (Main's tab id == session id), so the
-    /// socket loop treats it identically once subscribed.
+    /// tab-keyed `providers` map as `Agent` (which carries the session-slot tab's
+    /// id), so the socket loop treats it identically once subscribed.
     Tab(String),
 }
 
 impl PtyTarget {
-    /// The id used to route stdin writes and resizes (the session id for an agent,
-    /// the terminal id for a companion terminal, the tab id for an extra tab). The
-    /// engine's `pty_for` accepts any of these keyspaces.
+    /// The id used to route stdin writes and resizes (the session-slot tab id for
+    /// an agent, the terminal id for a companion terminal, the tab id for an extra
+    /// tab). The engine's `pty_for` accepts any of these keyspaces.
     fn pty_id(&self) -> &str {
         match self {
             PtyTarget::Agent(id) | PtyTarget::Terminal(id) | PtyTarget::Tab(id) => id,
@@ -1289,6 +1291,11 @@ async fn ws_session_pty_upgrade(
     {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     }
+    // The PTY this route streams is the agent's SESSION-SLOT tab, whose id comes
+    // from the resolver rather than being assumed equal to the path's session id.
+    let Some(slot_tab_id) = state.engine.slot_tab_id(id.clone()).await else {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    };
     let permit = match acquire_ws_permit(
         &state.ws_agent_semaphore,
         peer.ip(),
@@ -1307,7 +1314,7 @@ async fn ws_session_pty_upgrade(
     upgrade_pty_socket(
         ws,
         &state,
-        PtyTarget::Agent(id),
+        PtyTarget::Agent(slot_tab_id),
         peer.ip(),
         permit,
         &headers,
@@ -1528,7 +1535,7 @@ impl Drop for TabWsGuard {
 
 /// Upgrade handler for `GET /ws/sessions/:id/tabs/:tab/pty` — stream a Support
 /// tab's provider PTY. Support-only (the session-slot tab uses `/ws/sessions/:id/pty`).
-/// Validates origin, id bounds, session existence, and extra-tab ownership
+/// Validates origin, id bounds, session existence, slot-ness, and extra-tab ownership
 /// (`:tab` belongs to `:id`), then takes a permit from the DEDICATED tab-socket
 /// pool (`ws_tab_semaphore`, sized by `max_websocket_tab_connections`) — separate
 /// from the agent-PTY pool, so tab sockets can never 503 the session-slot tab streams.
@@ -1553,8 +1560,16 @@ async fn ws_tab_pty_upgrade(
     if state.engine.session_worktree(id.clone()).await.is_none() {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     }
-    // Support-only ownership: a session-slot tab has no `agent_tabs` row, so `tab_session`
-    // returns `None` and this 404s (Main streams over `/ws/sessions/:id/pty`).
+    // Support-only: the session-slot tab streams over `/ws/sessions/:id/pty`, so
+    // naming it here is a 404. Asked of the resolver rather than inferred from
+    // "the slot tab has no `agent_tabs` row". `EngineHandle::tab_session` below
+    // excludes the slot tab as well, for every caller rather than just this one;
+    // the two agree by construction, and this one states the refusal where the
+    // route's other 404s are.
+    if state.engine.is_slot_tab(id.clone(), &tab).await {
+        return (StatusCode::NOT_FOUND, "unknown tab").into_response();
+    }
+    // Extra-tab ownership: `:tab` must belong to `:id`.
     match state.engine.tab_session(tab.clone()).await {
         Some(owner) if owner == id => {}
         _ => return (StatusCode::NOT_FOUND, "unknown tab").into_response(),
