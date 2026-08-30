@@ -742,8 +742,10 @@ pub struct TerminalView {
 }
 
 /// One provider tab of an agent, projected for the tab strip. `order == 0` is
-/// the **session-slot tab** (the only resumable one). extra tabs (`order >= 1`) are
-/// ephemeral and always launch fresh.
+/// the **session-slot tab**, the one whose id equals the session id and which
+/// has no row of its own; it is also the one tab a user cannot close. No tab is
+/// privileged for RESUME: that is decided per provider by liveness at launch
+/// (see `Engine::tab_resume_decision`), not by position.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentTabView {
     /// Tab id. Equals the session id for the session-slot tab.

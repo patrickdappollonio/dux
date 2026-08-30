@@ -111,14 +111,25 @@ file carries as a commented-out row ready to fill in.
 
 ## Closing tabs
 
-Closing a tab ends that session, so dux asks you to confirm. Closing the agent's
-**last** tab detaches the whole agent: it leaves the sidebar's active list but stays in
-Projects, ready to reopen.
+An agent's **first** tab cannot be closed: it lives as long as the agent does. Every tab
+you add after it closes freely, and closing one ends that session, so dux asks you to
+confirm. Closing the agent's **last running** tab detaches the whole agent: it leaves the
+sidebar's active list but stays in Projects, ready to reopen.
 
 ![A tab's menu open over the tab strip, offering Change provider and Close tab.](/screens/agent-tab-actions-menu.png)
 
 A separate **Detach agent** action stops every one of the agent's tabs at once and parks
 it in Projects. Deleting the agent takes every tab with it.
+
+### The first tab stays
+
+> [!IMPORTANT]
+> The close gesture on an agent's first tab does not close it, and it no longer stops
+> the agent behind it either, which is what it used to do. On the web its *Close tab*
+> entry is greyed out and says why; in the terminal UI the close key answers with a note
+> instead of a confirmation. Add as many more tabs as you like and close those freely.
+> To stop what the agent is running, detach it, or use the Task Manager's **Stop** on
+> the agent's row, which still works exactly as before.
 
 ### Closing a tab is one-way
 
