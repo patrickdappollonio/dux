@@ -334,6 +334,11 @@ names the keys, and you can rebind them under `[keys]` in `config.toml`. Every w
 opens the same folder browser. Any folder is accepted: it does not have to be a git
 repository, and dux initializes nothing in it.
 
+Both surfaces then ask what to call the agent. The name is optional: leave it empty and
+the agent is named after the folder, or type one and it is used exactly as you typed it,
+spaces and punctuation included. Backing out of that question creates nothing and leaves
+the folder untouched.
+
 > [!NOTE]
 > Once you start filtering inside the chooser, the key that still works is a modifier
 > chord, because plain letters go into the search box. GNU Screen's flow control can
