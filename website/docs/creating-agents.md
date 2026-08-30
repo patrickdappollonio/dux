@@ -335,9 +335,10 @@ opens the same folder browser. Any folder is accepted: it does not have to be a 
 repository, and dux initializes nothing in it.
 
 Both surfaces then ask what to call the agent. The name is optional: leave it empty and
-the agent is named after the folder, or type one and it is used exactly as you typed it,
-spaces and punctuation included. Backing out of that question creates nothing and leaves
-the folder untouched.
+the agent is named after the folder, or type one and it is used as you typed it, interior
+spaces and punctuation included; surrounding whitespace is trimmed, and a blank name means
+the folder's name. Backing out of that question creates nothing and leaves the folder
+untouched.
 
 > [!NOTE]
 > Once you start filtering inside the chooser, the key that still works is a modifier

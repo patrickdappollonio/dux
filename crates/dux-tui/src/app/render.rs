@@ -20742,8 +20742,11 @@ mod tests {
     #[test]
     fn the_standalone_name_modal_promises_the_folders_own_name() {
         let mut app = test_app(default_bindings());
+        // A path the tester's home directory cannot be a prefix of: the modal
+        // renders the folder home-collapsed, so a fixture under $HOME would
+        // come back as "~/..." and the assertion below would be a coin flip.
         app.prompt = PromptState::NameStandaloneAgent {
-            folder: "/home/ada/notes".to_string(),
+            folder: "/dux-tests/ada/notes".to_string(),
             input: TextInput::new(),
         };
 
@@ -20759,7 +20762,7 @@ mod tests {
             "an empty field must promise the folder's own name:\n{screen}"
         );
         assert!(
-            screen.contains("/home/ada/notes"),
+            screen.contains("/dux-tests/ada/notes"),
             "the modal must say which folder was picked:\n{screen}"
         );
         assert!(

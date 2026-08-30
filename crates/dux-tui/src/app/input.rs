@@ -24899,8 +24899,10 @@ cyan = "#00ffff"
         );
     }
 
-    /// A typed name is used exactly as typed, spaces and all: no branch is
+    /// A typed name keeps its interior spaces and punctuation: no branch is
     /// created here, so the ref-name rules deliberately do not apply.
+    /// Surrounding whitespace is trimmed, and a blank name means the folder's
+    /// own name, which is what the web posts to the same helper.
     #[test]
     fn a_typed_standalone_agent_name_is_used_verbatim() {
         let mut app = test_app(default_bindings());
@@ -24917,6 +24919,45 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .expect("the confirm key must be handled");
         assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    /// The one-agent-per-folder refusal still runs on submit, and it is the
+    /// engine's, shared with the web. The prompt closes on it the way the web
+    /// dialog does, reporting the refusal rather than holding the folder
+    /// behind an open form.
+    #[test]
+    fn confirming_a_folder_that_already_hosts_an_agent_is_refused() {
+        let mut app = test_app(default_bindings());
+        let folder = tempfile::tempdir().expect("folder");
+        let occupied = folder.path().to_string_lossy().to_string();
+        app.engine.sessions[0].workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: occupied.clone(),
+            });
+
+        pick_standalone_folder(&mut app, folder.path());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the confirm key must be handled");
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "the refusal must close the prompt, as the web dialog does"
+        );
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Error,
+            "the refusal must be reported: {}",
+            app.status.text()
+        );
+        assert!(
+            app.status.text().contains("already working in"),
+            "the refusal must be the shared occupied-folder one, got: {}",
+            app.status.text()
+        );
+        assert!(
+            !app.engine.is_in_flight(&InFlightKey::CreateAgent),
+            "a refused create must not have dispatched anything"
+        );
     }
 
     /// Escape abandons the creation the way the web dialog's Cancel does: no
@@ -24949,9 +24990,9 @@ cyan = "#00ffff"
         assert_eq!(before, after, "escape must not touch the folder");
     }
 
-    /// Every entry point ends in the same prompt: the palette command and both
-    /// agents-pane keys reach the folder browser, and picking there asks for a
-    /// name.
+    /// Every entry point ends in the same prompt: the palette command, both
+    /// agents-pane keys and the project chooser's chord reach the folder
+    /// browser, and picking there asks for a name.
     #[test]
     fn every_standalone_entry_point_ends_in_the_name_prompt() {
         let folder = tempfile::tempdir().expect("folder");
@@ -24978,6 +25019,22 @@ cyan = "#00ffff"
                 "{key:?} must reach the name prompt"
             );
         }
+
+        // And the way out of the "New agent in project" chooser, for someone
+        // who is already there and finds that no project fits. The chord is
+        // the key that works there whether or not the search is engaged.
+        let mut chooser = test_app(default_bindings());
+        chooser
+            .execute_command("new-agent".to_string())
+            .expect("the chooser must open");
+        chooser
+            .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .expect("the chord must be handled");
+        aim_and_pick(&mut chooser, folder.path());
+        assert!(
+            matches!(chooser.prompt, PromptState::NameStandaloneAgent { .. }),
+            "the project chooser must reach the name prompt too"
+        );
     }
 
     /// The journey: the user runs `new-standalone-terminal` from the palette with
