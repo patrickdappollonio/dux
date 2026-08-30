@@ -149,15 +149,6 @@
     @apply rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/80 backdrop-blur;
   }
 
-  /* The tile a feature or a benefit is written on. One definition, so the
-     homepage's five benefits and the features page's full catalogue are
-     literally the same object rather than two that drifted apart. */
-  /* The utilities are spelled out rather than `@apply card`: Tailwind 4 will
-     not apply one custom component class inside another. */
-  .tile-card {
-    @apply rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/80 p-5 backdrop-blur transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)];
-  }
-
   .heading {
     font-family: var(--font-display);
     letter-spacing: -0.025em;
@@ -221,107 +212,6 @@
      3.5rem, plus its 1px bottom border) and leave a little air. */
   .anchor-offset {
     scroll-margin-top: 4.5rem;
-  }
-
-  /* The headline's left-to-right fade, and the page's only gradient. Clipped to
-     the text, so the letters carry it and nothing behind them does. The plain
-     `color` is the fallback: a browser without background-clip paints the
-     headline solid white rather than transparent. */
-  .heading-gradient {
-    color: #ffffff;
-    background-image: linear-gradient(90deg, #ffffff 0%, #9b9b9b 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-  }
-
-  @supports (background-clip: text) or (-webkit-background-clip: text) {
-    .heading-gradient {
-      color: transparent;
-    }
-  }
-
-  /* Reveal on scroll. See src/lib/reveal.ts for why the hidden state hangs off
-     `is-armed`: the markup ships visible, and only a script that ran can hide
-     it, so a reader with no JavaScript gets the finished page.
-
-     cubic-bezier(0.32, 0.72, 0, 1) is the site's reveal curve, and the tagline's
-     per-word colour below uses the same one. It leaves fast and settles slowly,
-     which is what makes an arrival read as arriving rather than sliding. */
-  .reveal.is-armed {
-    opacity: 0;
-    transform: translateY(4rem);
-  }
-
-  .reveal.is-armed.is-visible {
-    opacity: 1;
-    transform: translateY(0);
-    transition:
-      opacity 800ms cubic-bezier(0.32, 0.72, 0, 1),
-      transform 800ms cubic-bezier(0.32, 0.72, 0, 1);
-  }
-
-  /* Anyone who asked for less motion gets the finished state immediately. The
-     section is content, not decoration, so it appears rather than not. */
-  @media (prefers-reduced-motion: reduce) {
-    .reveal.is-armed,
-    .reveal.is-armed.is-visible {
-      opacity: 1;
-      transform: none;
-      transition: none;
-    }
-  }
-
-  /* The tagline's per-word reveal, same arming rule as the section reveal. */
-  .is-armed .tagline-word {
-    color: color-mix(in oklab, var(--color-text) 30%, transparent);
-    transition: color 700ms cubic-bezier(0.32, 0.72, 0, 1);
-  }
-
-  .is-armed .tagline-word.is-lit {
-    color: var(--color-text);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .is-armed .tagline-word {
-      color: var(--color-text);
-      transition: none;
-    }
-  }
-
-  /* The FAQ's disclosure rows. A `<details>` is the whole mechanism: it opens
-     with no script, it is keyboard operable by the browser, and it is what a
-     find-in-page can reach. Everything here is appearance. */
-  .faq-item summary {
-    cursor: pointer;
-    list-style: none;
-    display: flex;
-    align-items: flex-start;
-    gap: 0.75rem;
-  }
-
-  .faq-item summary::-webkit-details-marker {
-    display: none;
-  }
-
-
-  .faq-item summary:focus-visible {
-    outline: 2px solid var(--color-accent);
-    outline-offset: 4px;
-    border-radius: 0.5rem;
-  }
-
-  .faq-item .faq-marker {
-    transition: transform 200ms ease;
-  }
-
-  .faq-item[open] .faq-marker {
-    transform: rotate(90deg);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .faq-item .faq-marker {
-      transition: none;
-    }
   }
 
   /* Recommendation blocks (Recommended tools page). */

@@ -115,36 +115,7 @@ const tab =
       </p>
     </div>
 
-    {/* The three steps, before the panes they happen in. A reader who has not
-        used dux wants to know what they would DO with it before being shown
-        where each thing is drawn, so the journey comes first and the layout
-        tour follows it. Deliberately not cards: these are a sequence, and a row
-        of three more cards directly above three cards reads as six of a kind. */}
-    <ol class="mt-10 grid gap-6 sm:grid-cols-3">
-      <li>
-        <div class="flex items-center gap-2">
-          <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[color:var(--color-pink)]/15 text-[color:var(--color-pink)] mono text-[11px]">1</span>
-          <strong class="text-sm text-[color:var(--color-text)]">Add a project</strong>
-        </div>
-        <p class="mt-2 text-sm text-[color:var(--color-muted)]">Point dux at a repository you already have.</p>
-      </li>
-      <li>
-        <div class="flex items-center gap-2">
-          <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[color:var(--color-pink)]/15 text-[color:var(--color-pink)] mono text-[11px]">2</span>
-          <strong class="text-sm text-[color:var(--color-text)]">Spawn an agent</strong>
-        </div>
-        <p class="mt-2 text-sm text-[color:var(--color-muted)]">It gets its own branch and worktree, or runs in a folder you already have.</p>
-      </li>
-      <li>
-        <div class="flex items-center gap-2">
-          <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[color:var(--color-pink)]/15 text-[color:var(--color-pink)] mono text-[11px]">3</span>
-          <strong class="text-sm text-[color:var(--color-text)]">Review and ship</strong>
-        </div>
-        <p class="mt-2 text-sm text-[color:var(--color-muted)]">Staged files, diffs, commit and push, from the right pane.</p>
-      </li>
-    </ol>
-
-    <div class="mt-10 grid gap-4 sm:grid-cols-3">
+    <div class="mt-8 grid gap-4 sm:grid-cols-3">
       <div class="card p-4">
         <div class="flex items-center gap-2">
           <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-[color:var(--color-accent)]/15 text-[color:var(--color-accent)] mono text-[11px]">1</span>
@@ -372,11 +343,11 @@ const tab =
      default, so the WEB panel survives anything: no `:has()` support, no
      stylesheet at all, no JavaScript (there is none to miss).
 
-     The web surface is the default deliberately. The hero already shows the
-     terminal UI, as a recorded cast, so opening on the terminal again would
-     spend this figure repeating it. Defaulting to the web panel also means its
-     iframe is not `display: none` at load, so it starts fetching immediately
-     instead of on the first click.
+     The web surface is the default deliberately. The section directly above
+     already shows the terminal UI, as a recorded cast, so opening on the
+     terminal again would spend this figure repeating it. Defaulting to the web
+     panel also means its iframe is not `display: none` at load, so it starts
+     fetching immediately instead of on the first click.
 
      Anchored on the class, not on the attribute alone: Astro scopes a selector
      by hanging its component id off a class or an element, and a lone

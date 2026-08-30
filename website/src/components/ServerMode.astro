@@ -1,18 +1,13 @@
 ---
 // "Server mode. Host it anywhere." The remote-dux pitch.
 //
-// PLACEMENT: after the office tour, before the FAQ and the install section that
-// closes the page. The tour is where the reader meets the web UI; this is the
-// immediate "so put that binary on a box that is not your laptop"
-// follow-through, and it is the only section that asks the reader to think
-// about deployment.
-//
-// LENGTH: this is a landing page, so the section states the offer, boxes the
-// missing login, draws the topology and then hands off. The three detail cards
-// it used to carry (the guards are not a login, one shared workspace, and the
-// two things a proxy must get right) are not lost: every one of them is written
-// out at length in /docs/server-mode and /docs/public-hosting, which is where a
-// reader who is actually deploying needs them.
+// PLACEMENT: directly after InstallSection, before the blog/contributors tail.
+// The install section is where the reader learns that ONE binary carries both
+// front ends and that `dux server` comes out of that same executable. This
+// section is the immediate "so put that binary on a box that is not your
+// laptop" follow-through, and it is the only section that asks the reader to
+// think about deployment, so it belongs after the thing it deploys rather than
+// interrupting the feature narrative above.
 //
 // THE SPINE IS THE MISSING LOGIN, NOT A FOOTNOTE.
 //
@@ -88,34 +83,24 @@ const topology = `digraph server_mode {
       </h2>
       <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
         <span class="mono text-[color:var(--color-text)]">dux server</span>{" "}
-        is the same binary that draws the terminal UI, serving the web UI
-        instead. Which means the box it runs on does not have to be
+        is the same binary you just installed, serving the web UI instead of
+        drawing a terminal. Which means the box it runs on does not have to be
         the box you are sitting at. Put it on a VPS, install your favourite
         agent CLIs and <span class="mono text-[color:var(--color-text)]">git</span>{" "}
         (plus <span class="mono text-[color:var(--color-text)]">gh</span> if you
         want the GitHub bits), and your agents run on a machine with a real
         uplink that does not go to sleep when you close the lid.
       </p>
-    </div>
-
-    {/* The missing login is the spine of this section, not a footnote, so it
-        gets a box of its own. The docs' admonition styling is scoped to
-        `.prose-docs`, so this reuses the warning idiom already on this page
-        rather than minting a third callout look. */}
-    <div class="mt-8 rounded-xl border border-[color:var(--color-warning)]/45 bg-[color:var(--color-warning)]/10 p-5">
-      <div class="flex items-start gap-3">
-        <span aria-hidden="true" class="mt-0.5 shrink-0 text-[color:var(--color-warning)]">▲</span>
-        <p class="text-pretty leading-relaxed text-[color:var(--color-muted)]">
-          Then comes the part everyone skips, so here it is first:{" "}
-          <strong class="text-[color:var(--color-text)]">dux has no login.</strong>{" "}
-          None. Not a weak one, not a default password, not a token you forgot to
-          rotate. There is no authentication layer in dux at all, and none is
-          planned, because the job belongs to the thing in front of it. So
-          "host it anywhere" is really "host it behind something that
-          authenticates you, over HTTPS". Do that and this is a genuinely lovely
-          way to work. Skip it and you have published a shell.
-        </p>
-      </div>
+      <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
+        Then comes the part everyone skips, so here it is first:{" "}
+        <strong class="text-[color:var(--color-text)]">dux has no login.</strong>{" "}
+        None. Not a weak one, not a default password, not a token you forgot to
+        rotate. There is no authentication layer in dux at all, and none is
+        planned, because the job belongs to the thing in front of it. So
+        "host it anywhere" is really "host it behind something that
+        authenticates you, over HTTPS". Do that and this is a genuinely lovely
+        way to work. Skip it and you have published a shell.
+      </p>
     </div>
 
     <div class="mt-10">
@@ -127,12 +112,91 @@ const topology = `digraph server_mode {
       />
     </div>
 
+      <div class="mt-6 grid items-stretch gap-4 md:grid-cols-3">
+        <div class="card p-4">
+          <div class="flex items-center gap-2">
+            <span class="shrink-0 text-[color:var(--color-warning)]">▲</span>
+            <strong class="text-sm text-[color:var(--color-text)]">
+              The two built-in guards are not a login
+            </strong>
+          </div>
+          <p class="mt-2 text-sm text-[color:var(--color-muted)]">
+            dux does run a Host-header allowlist and a same-origin check, and
+            they are worth having: they stop a hostile web page tricking{" "}
+            <em>your</em> browser into driving your server. They do nothing
+            whatsoever about a person who simply opens the URL. Anti-rebinding
+            and anti-CSRF, not access control. Do not confuse the two.
+          </p>
+        </div>
+
+        <div class="card p-4">
+          <div class="flex items-center gap-2">
+            <span class="shrink-0 text-[color:var(--color-accent)]">✦</span>
+            <strong class="text-sm text-[color:var(--color-text)]">
+              One workspace, shared by everyone who reaches it
+            </strong>
+          </div>
+          <p class="mt-2 text-sm text-[color:var(--color-muted)]">
+            There are no user accounts, so there is nothing to scope anything
+            to. Whoever gets in can attach to any agent or terminal, type into a
+            session someone else is using, run git, and browse the server's
+            filesystem through the project picker. That is deliberate for a
+            per-developer tool. It is also exactly why the gate goes in front.
+          </p>
+        </div>
+
+        <div class="card p-4">
+          <div class="flex items-center gap-2">
+            <span class="shrink-0 text-[color:var(--color-pink)]">✦</span>
+            <strong class="text-sm text-[color:var(--color-text)]">
+              Two things any proxy in front must get right
+            </strong>
+          </div>
+          <p class="mt-2 text-sm text-[color:var(--color-muted)]">
+            It has to pass <strong class="text-[color:var(--color-text)]">WebSockets</strong>{" "}
+            through, because every terminal rides one and so does the change
+            feed that tells the page when anything moved, and it has to forward
+            the original{" "}
+            <span class="mono text-[color:var(--color-text)]">Host</span>, or
+            the allowlist answers <span class="mono">403</span>. Rewriting{" "}
+            <span class="mono text-[color:var(--color-text)]">Host</span> to
+            loopback is the sneaky one: it passes the allowlist and then fails
+            every upgrade and every write on the origin check.
+          </p>
+        </div>
+      </div>
+
+    <div class="mt-6 grid items-stretch gap-2.5 md:grid-cols-2">
+      <div class="flex items-start gap-2.5 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel-2)]/50 px-3.5 py-2.5 text-sm text-[color:var(--color-muted)]">
+        <span class="mt-0.5 shrink-0 text-[color:var(--color-success)]">✓</span>
+        <p>
+          <strong class="text-[color:var(--color-text)]">Your phone is a real client, not a consolation prize.</strong>{" "}
+          Below tablet width dux draws a purpose-built shell: a hub of projects
+          and sessions, a full-screen terminal, and above the soft keyboard an
+          accessory bar with the keys a phone does not have. Below that, a
+          compose box, so autocorrect, swipe typing and voice input finally have
+          a buffer to work on instead of firing straight into a PTY.
+        </p>
+      </div>
+      <div class="flex items-start gap-2.5 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel-2)]/50 px-3.5 py-2.5 text-sm text-[color:var(--color-muted)]">
+        <span class="mt-0.5 shrink-0 text-[color:var(--color-success)]">✓</span>
+        <p>
+          <strong class="text-[color:var(--color-text)]">Staying on your own network is easier still.</strong>{" "}
+          If you do not need the open internet, do not take it. dux binds your
+          Tailscale address out of the box, which is a private path to the same
+          workspace with nothing to configure and nothing to publish. Close the
+          lid and reopen it on another network and dux picks that address back up
+          by itself, without a restart.
+        </p>
+      </div>
+    </div>
+
     <div class="mt-6 flex flex-wrap gap-3">
       <a href="/docs/public-hosting" class="btn btn-primary">
         Put it behind oauth2-proxy →
       </a>
       <a href="/docs/server-mode" class="btn btn-ghost">
-        Read the full server mode guide →
+        Server mode overview
       </a>
       <a href="/docs/tailscale" class="btn btn-ghost">
         Reach it over Tailscale

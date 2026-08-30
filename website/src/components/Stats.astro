@@ -1,7 +1,7 @@
 ---
-// A compact, build-time strip of live download counters: the proof strip under
-// the hero's demo cast. Any counter whose lookup fails is dropped; if all fail,
-// nothing renders.
+// A compact, build-time strip of live download counters, sized to sit directly
+// under the install widget in the hero. Any counter whose lookup fails is
+// dropped; if all fail, nothing renders.
 import { getReleaseDownloads, getNpmTotal, formatCount } from "../lib/stats";
 
 const repo = "patrickdappollonio/dux";
