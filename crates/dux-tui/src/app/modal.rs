@@ -292,7 +292,10 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         PromptState::RenameSession { .. }
         | PromptState::NameNewAgent { .. }
         | PromptState::PullRequestInput { .. }
-        | PromptState::AttachPullRequestInput { .. } => ModalSpec::new(Form, false, false),
+        | PromptState::AttachPullRequestInput { .. }
+        // The standalone-agent name field: one single-line control, so Enter
+        // submits and the rule asks no button of it either.
+        | PromptState::NameStandaloneAgent { .. } => ModalSpec::new(Form, false, false),
 
         // The three configure modals: one full-text field plus Cancel/Save.
         // They were the dual-mode rule's only violators and are now compliant,
@@ -368,6 +371,7 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::RenameSession { input, .. }
         | PromptState::PullRequestInput { input, .. }
         | PromptState::AttachPullRequestInput { input, .. }
+        | PromptState::NameStandaloneAgent { input, .. }
         | PromptState::NameNewAgent { input, .. } => vec![input],
 
         PromptState::StartupCommandLogs(prompt) => vec![&prompt.filter],
@@ -430,6 +434,8 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         // One single-line field and nothing else: Enter submits, so the
         // dual-mode rule asks no confirm button of it.
         | OverlayMouseLayout::AttachPullRequestInput { .. }
+        // Likewise one single-line field and nothing else.
+        | OverlayMouseLayout::NameStandaloneAgent { .. }
         | OverlayMouseLayout::NameNewAgent { .. } => false,
 
         // A button that commits.
@@ -1104,6 +1110,13 @@ mod tests {
                 PromptState::AttachPullRequestInput {
                     session_id: "s1".to_string(),
                     current_pr: Some("#42 (open) Fix the frobnicator".to_string()),
+                    input: TextInput::new(),
+                },
+            ),
+            (
+                "NameStandaloneAgent",
+                PromptState::NameStandaloneAgent {
+                    folder: "/home/ada/notes".to_string(),
                     input: TextInput::new(),
                 },
             ),

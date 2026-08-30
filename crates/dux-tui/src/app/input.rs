@@ -276,6 +276,7 @@ enum PromptMouseTarget {
     PullRequestInput,
     PullRequestChooseProject,
     AttachPullRequestInput,
+    NameStandaloneAgentInput,
     MacroNameInput,
     MacroTextInput,
     /// Index into `MacroSurface`'s `Agent, Terminal, Both` order.
@@ -410,6 +411,7 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::NameNewAgentInput
             | PromptMouseTarget::PullRequestInput
             | PromptMouseTarget::AttachPullRequestInput
+            | PromptMouseTarget::NameStandaloneAgentInput
             | PromptMouseTarget::MacroNameInput
             | PromptMouseTarget::MacroTextInput
             | PromptMouseTarget::MacroSurfaceOption(_)
@@ -1841,7 +1843,8 @@ impl App {
                     input.insert_str(text);
                 }
             }
-            PromptState::AttachPullRequestInput { input, .. } => {
+            PromptState::AttachPullRequestInput { input, .. }
+            | PromptState::NameStandaloneAgent { input, .. } => {
                 input.insert_str(text);
             }
             PromptState::NameNewAgent { input, focus, .. } => {
@@ -4153,7 +4156,7 @@ impl App {
         };
         match purpose {
             BrowsePurpose::AddProject => self.add_project_from_browser_path(path),
-            BrowsePurpose::StandaloneAgent => self.create_standalone_agent_in(path),
+            BrowsePurpose::StandaloneAgent => self.open_standalone_agent_name_prompt(path),
         }
     }
 
@@ -5054,6 +5057,31 @@ impl App {
         Ok(Some(false))
     }
 
+    /// The standalone-agent name field. One single-line control, so the shape
+    /// is the attach-PR modal's: the close key abandons, the confirm key
+    /// creates, and everything else is typing.
+    fn handle_name_standalone_agent_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if !matches!(self.prompt, PromptState::NameStandaloneAgent { .. }) {
+            return None;
+        }
+        let action = if binding_lookup_is_suppressed(key, true) {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::Dialog)
+        };
+        match modal_key_step(action, key, true) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::Confirm => self.confirm_standalone_agent_name(),
+            ModalKeyStep::MoveFocus(_) | ModalKeyStep::ActivateFocus => {}
+            ModalKeyStep::FallThroughToField => {
+                if let PromptState::NameStandaloneAgent { input, .. } = &mut self.prompt {
+                    input.handle_key(key);
+                }
+            }
+        }
+        Some(false)
+    }
+
     fn handle_rename_session_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
         let PromptState::RenameSession { focus, .. } = &self.prompt else {
             return None;
@@ -5237,6 +5265,9 @@ impl App {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_name_new_agent_prompt_key(key)? {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_name_standalone_agent_prompt_key(key) {
             return Ok(Some(exit));
         }
         Ok(self.handle_rename_session_prompt_key(key))
@@ -6568,6 +6599,8 @@ impl App {
                 contains_point(input, column, row)
                     .then_some(PromptMouseTarget::AttachPullRequestInput)
             }
+            OverlayMouseLayout::NameStandaloneAgent { input } => contains_point(input, column, row)
+                .then_some(PromptMouseTarget::NameStandaloneAgentInput),
             OverlayMouseLayout::RenameSession { input, checkbox } => {
                 Self::checkbox_before_buttons_target(
                     checkbox,
@@ -7862,6 +7895,18 @@ impl App {
         }
     }
 
+    fn set_standalone_name_cursor_from_mouse(&mut self, column: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::NameStandaloneAgent { input } => input,
+            _ => return,
+        };
+        if let PromptState::NameStandaloneAgent { input, .. } = &mut self.prompt {
+            // The single-line renderer pads by one leading space. No focus to
+            // move: the field is the modal's only control and always has it.
+            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+        }
+    }
+
     fn set_name_new_agent_cursor_from_mouse(&mut self, column: u16) {
         let input_area = match self.overlay_layout.active {
             OverlayMouseLayout::NameNewAgent { input, .. } => input,
@@ -8647,6 +8692,9 @@ impl App {
             }
             PromptMouseTarget::AttachPullRequestInput => {
                 self.set_attach_pull_request_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::NameStandaloneAgentInput => {
+                self.set_standalone_name_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::PullRequestChooseProject => {}
             PromptMouseTarget::StartupCommandInput => {
@@ -24732,9 +24780,10 @@ cyan = "#00ffff"
         );
     }
 
-    /// Picking a plain folder that is not a repository creates the agent: the
+    /// Picking a plain folder that is not a repository is accepted: the
     /// add-project validator would have refused it, and this flow must not
-    /// consult it. Nothing is initialized in the folder either.
+    /// consult it. Nothing is initialized in the folder either, and the pick
+    /// itself creates nothing at all: it asks for a name first.
     #[test]
     fn picking_a_plain_folder_for_a_standalone_agent_is_accepted() {
         let mut app = test_app(default_bindings());
@@ -24744,7 +24793,9 @@ cyan = "#00ffff"
             .filter_map(|e| e.ok().map(|e| e.file_name()))
             .collect();
 
-        app.create_standalone_agent_in(folder.path().to_string_lossy().to_string());
+        pick_standalone_folder(&mut app, folder.path());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the confirm key must be handled");
 
         assert_ne!(
             app.status.tone(),
@@ -24760,6 +24811,173 @@ cyan = "#00ffff"
             before, after,
             "picking a folder must not initialize anything in it"
         );
+    }
+
+    /// Open the standalone folder browser, aim it at `folder`, and pick it.
+    /// That is the gesture the palette command, the agents-pane keys and the
+    /// project chooser all end in.
+    fn pick_standalone_folder(app: &mut App, folder: &std::path::Path) {
+        app.open_standalone_agent_browser()
+            .expect("the folder browser must open");
+        aim_and_pick(app, folder);
+    }
+
+    /// Point an already-open folder browser at `folder` and pick it.
+    fn aim_and_pick(app: &mut App, folder: &std::path::Path) {
+        match &mut app.prompt {
+            PromptState::BrowseProjects { current_dir, .. } => {
+                *current_dir = folder.to_path_buf();
+            }
+            other => panic!("expected the folder browser, got {other:?}"),
+        }
+        app.add_project_browser_current_directory();
+    }
+
+    /// The title the open name prompt would create, or a panic naming what is
+    /// open instead. Asks the same function the confirm key asks, so the two
+    /// cannot answer differently.
+    fn planned_standalone_title(app: &App) -> String {
+        match app
+            .planned_standalone_agent_create()
+            .expect("the name prompt must be open")
+            .expect("the plan must be accepted")
+            .0
+        {
+            dux_core::worker::CreateAgentRequest::Standalone { title, .. } => title,
+            other => panic!("expected a standalone create, got {other:?}"),
+        }
+    }
+
+    /// Picking the folder does not create anything: it asks for a name, the
+    /// same single field the web dialog shows once a folder is chosen.
+    #[test]
+    fn picking_a_folder_for_a_standalone_agent_asks_for_a_name_first() {
+        let mut app = test_app(default_bindings());
+        let folder = tempfile::tempdir().expect("folder");
+
+        pick_standalone_folder(&mut app, folder.path());
+
+        match &app.prompt {
+            PromptState::NameStandaloneAgent { folder: picked, .. } => {
+                assert_eq!(*picked, folder.path().to_string_lossy().to_string());
+            }
+            other => panic!("expected the name prompt, got {other:?}"),
+        }
+        assert!(
+            !app.engine.is_in_flight(&InFlightKey::CreateAgent),
+            "picking the folder must not have created anything yet"
+        );
+    }
+
+    /// An empty field is the ordinary case: the agent is named after the
+    /// folder, exactly as the web dialog's placeholder promises.
+    #[test]
+    fn an_empty_standalone_name_creates_the_agent_named_after_the_folder() {
+        let mut app = test_app(default_bindings());
+        let folder = tempfile::tempdir().expect("folder");
+        let folder_name = folder
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        pick_standalone_folder(&mut app, folder.path());
+        assert_eq!(planned_standalone_title(&app), folder_name);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the confirm key must be handled");
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "confirming must close the prompt"
+        );
+        assert!(
+            app.engine.is_in_flight(&InFlightKey::CreateAgent),
+            "confirming must have dispatched the create: {}",
+            app.status.text()
+        );
+    }
+
+    /// A typed name is used exactly as typed, spaces and all: no branch is
+    /// created here, so the ref-name rules deliberately do not apply.
+    #[test]
+    fn a_typed_standalone_agent_name_is_used_verbatim() {
+        let mut app = test_app(default_bindings());
+        let folder = tempfile::tempdir().expect("folder");
+
+        pick_standalone_folder(&mut app, folder.path());
+        for ch in "notes for q3".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .expect("the letter must type into the field");
+        }
+
+        assert_eq!(planned_standalone_title(&app), "notes for q3");
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the confirm key must be handled");
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    /// Escape abandons the creation the way the web dialog's Cancel does: no
+    /// agent, nothing written into the folder, and the workspace back.
+    #[test]
+    fn escaping_the_standalone_name_prompt_creates_nothing() {
+        let mut app = test_app(default_bindings());
+        let folder = tempfile::tempdir().expect("folder");
+        let before: Vec<_> = std::fs::read_dir(folder.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+
+        pick_standalone_folder(&mut app, folder.path());
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("the close key must be handled");
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "escape must return to the workspace"
+        );
+        assert!(
+            !app.engine.is_in_flight(&InFlightKey::CreateAgent),
+            "escape must not create an agent"
+        );
+        let after: Vec<_> = std::fs::read_dir(folder.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+        assert_eq!(before, after, "escape must not touch the folder");
+    }
+
+    /// Every entry point ends in the same prompt: the palette command and both
+    /// agents-pane keys reach the folder browser, and picking there asks for a
+    /// name.
+    #[test]
+    fn every_standalone_entry_point_ends_in_the_name_prompt() {
+        let folder = tempfile::tempdir().expect("folder");
+        let mut palette = test_app(default_bindings());
+        palette
+            .execute_command("new-standalone-agent".to_string())
+            .expect("the palette command must open the browser");
+        aim_and_pick(&mut palette, folder.path());
+        assert!(
+            matches!(palette.prompt, PromptState::NameStandaloneAgent { .. }),
+            "the palette command must reach the name prompt"
+        );
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        ] {
+            let mut app = test_app(default_bindings());
+            app.focus = FocusPane::Left;
+            app.handle_key(key).expect("the key must be handled");
+            aim_and_pick(&mut app, folder.path());
+            assert!(
+                matches!(app.prompt, PromptState::NameStandaloneAgent { .. }),
+                "{key:?} must reach the name prompt"
+            );
+        }
     }
 
     /// The journey: the user runs `new-standalone-terminal` from the palette with

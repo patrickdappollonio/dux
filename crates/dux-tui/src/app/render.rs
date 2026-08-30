@@ -8319,6 +8319,83 @@ impl App {
             OverlayMouseLayout::AttachPullRequestInput { input: input_inner };
     }
 
+    /// The standalone-agent name field, the terminal-UI twin of the web
+    /// dialog's name input.
+    ///
+    /// The folder's own name is the promise the field makes when it is left
+    /// empty, so it is written into the label rather than left implicit, the
+    /// way the web dialog's placeholder spells it out. The folder itself is on
+    /// its own line underneath, home-collapsed, because the browser is gone by
+    /// the time this modal is up and the path is what says which folder was
+    /// picked.
+    fn render_name_standalone_agent_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::NameStandaloneAgent { folder, input } = &self.prompt else {
+            return;
+        };
+        let folder_path = PathBuf::from(folder);
+        let default_name = dux_core::git::standalone_agent_title("", &folder_path);
+        let folder_label = dux_core::home_path::shorten_home(&folder_path);
+        self.render_dim_overlay(frame);
+        let area = centered_rect_exact(64, 9, frame.area());
+        self.clear_overlay_area(frame, area);
+
+        let outer = self.themed_overlay_block("Name standalone agent");
+        let inner = outer.inner(area);
+        outer.render(area, frame.buffer_mut());
+
+        let [label_area, input_area, hint_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(1),
+            ])
+            .areas(inner);
+
+        let labels = vec![
+            Line::from(Span::styled(
+                format!(" Name this agent (optional, defaults to \"{default_name}\"):"),
+                Style::default().fg(self.theme.input_label_fg),
+            )),
+            Line::from(Span::styled(
+                format!(" It runs in {folder_label}"),
+                Style::default().fg(self.theme.hint_desc_fg),
+            )),
+            Line::from(Span::styled(
+                " dux never creates, moves or removes that folder.",
+                Style::default().fg(self.theme.hint_desc_fg),
+            )),
+        ];
+        Paragraph::new(labels).render(label_area, frame.buffer_mut());
+
+        // The field is the modal's only control, so it is always focused:
+        // focused border, caret drawn.
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(self.theme.overlay_field_border_style(true));
+        let input_inner = input_block.inner(input_area);
+        Paragraph::new(render_single_line_cursor_input(
+            " ",
+            &input.text,
+            input.cursor,
+            self.theme.input_cursor_fg,
+            self.theme.input_cursor_bg,
+            true,
+        ))
+        .block(input_block)
+        .render(input_area, frame.buffer_mut());
+
+        let confirm_key = self.bindings.label_for(Action::Confirm);
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let hints = vec![
+            Hint::key(confirm_key, "create agent"),
+            Hint::key(close_key, "cancel"),
+        ];
+        Paragraph::new(modal_hint_line(&self.theme, &hints)).render(hint_area, frame.buffer_mut());
+        self.overlay_layout.active = OverlayMouseLayout::NameStandaloneAgent { input: input_inner };
+    }
+
     fn render_configure_prompt(&mut self, frame: &mut Frame) {
         let (PromptState::ConfigureStartupCommand {
             project_name,
@@ -9692,6 +9769,9 @@ impl App {
             PromptState::PullRequestInput { .. } => self.render_pull_request_input_prompt(frame),
             PromptState::AttachPullRequestInput { .. } => {
                 self.render_attach_pull_request_input_prompt(frame)
+            }
+            PromptState::NameStandaloneAgent { .. } => {
+                self.render_name_standalone_agent_prompt(frame)
             }
             _ => {}
         }
@@ -20639,6 +20719,94 @@ mod tests {
                 caret_columns(&buf, input, app.theme.input_cursor_bg).len(),
                 1
             );
+        }
+    }
+
+    /// The whole modal as one string, rows joined by newlines, so a test can
+    /// read the copy the user actually sees.
+    fn drawn_screen(buf: &ratatui::buffer::Buffer) -> String {
+        let area = buf.area;
+        (area.y..area.y + area.height)
+            .map(|y| {
+                (area.x..area.x + area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The standalone name modal says, in consumer words, what an empty field
+    /// will name the agent and where the agent will run, and its hints name
+    /// the bound keys rather than literal ones.
+    #[test]
+    fn the_standalone_name_modal_promises_the_folders_own_name() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::NameStandaloneAgent {
+            folder: "/home/ada/notes".to_string(),
+            input: TextInput::new(),
+        };
+
+        let buf = draw(&mut app);
+        let screen = drawn_screen(&buf);
+
+        assert!(
+            screen.contains("Name standalone agent"),
+            "the modal must name what it creates:\n{screen}"
+        );
+        assert!(
+            screen.contains("defaults to \"notes\""),
+            "an empty field must promise the folder's own name:\n{screen}"
+        );
+        assert!(
+            screen.contains("/home/ada/notes"),
+            "the modal must say which folder was picked:\n{screen}"
+        );
+        assert!(
+            screen.contains(&app.bindings.label_for(Action::Confirm)),
+            "the hint must name the bound confirm key:\n{screen}"
+        );
+        assert!(
+            screen.contains(&app.bindings.label_for(Action::CloseOverlay)),
+            "the hint must name the bound cancel key:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_standalone_name_modal_publishes_a_clickable_input_rect() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::NameStandaloneAgent {
+            folder: "/home/ada/notes".to_string(),
+            input: TextInput::new(),
+        };
+
+        let buf = draw(&mut app);
+
+        let OverlayMouseLayout::NameStandaloneAgent { input } = app.overlay_layout.active else {
+            panic!(
+                "the standalone name modal must publish its input rect, got {:?}",
+                app.overlay_layout.active
+            );
+        };
+        assert!(input.width > 0 && input.height > 0);
+        // It is the only control, so it is always focused and draws a caret.
+        assert_eq!(
+            caret_columns(&buf, input, app.theme.input_cursor_bg).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_standalone_name_modal_survives_a_caret_before_every_multibyte_character() {
+        for cursor in caret_positions(MULTIBYTE_NAME) {
+            let mut app = test_app(default_bindings());
+            let mut input = TextInput::with_text(MULTIBYTE_NAME.to_string());
+            input.cursor = cursor;
+            app.prompt = PromptState::NameStandaloneAgent {
+                folder: "/home/ada/notes".to_string(),
+                input,
+            };
+            draw(&mut app);
         }
     }
 

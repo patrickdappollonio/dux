@@ -19,22 +19,55 @@ impl App {
         self.open_folder_browser(BrowsePurpose::StandaloneAgent)
     }
 
-    /// Create a standalone agent in the folder the browser is currently in.
+    /// Ask what to call the standalone agent about to run in the folder the
+    /// browser just committed to.
+    ///
+    /// The web's dialog reveals a name field the moment a folder is picked, so
+    /// the terminal UI asks the same question in the same place rather than
+    /// creating straight from the picker.
     ///
     /// Deliberately does NOT go through `validate_project_add_path`: that
     /// validator rejects a folder which is not a repository root, and a plain
     /// folder is the ordinary case here. Nothing is initialized in the user's
     /// directory either; dux just runs the provider in it.
+    pub(crate) fn open_standalone_agent_name_prompt(&mut self, path: String) {
+        self.prompt = PromptState::NameStandaloneAgent {
+            folder: path,
+            input: TextInput::new(),
+        };
+    }
+
+    /// What the open standalone name prompt would create right now: the folder
+    /// it was opened for, and the name exactly as typed.
     ///
-    /// The refusals (a relative path, a folder that already hosts a standalone
-    /// agent) come back from the shared wire arm, so the TUI and the web say
-    /// the same thing for the same reason.
-    pub(crate) fn create_standalone_agent_in(&mut self, path: String) {
+    /// `None` when that prompt is not open. The `Err` is the engine's own
+    /// refusal (a relative path, a folder that already hosts an agent), which
+    /// is shared with the web so the two surfaces cannot answer the same
+    /// question differently.
+    pub(crate) fn planned_standalone_agent_create(
+        &self,
+    ) -> Option<Result<(CreateAgentRequest, String)>> {
+        let PromptState::NameStandaloneAgent { folder, input } = &self.prompt else {
+            return None;
+        };
+        // The typed name travels verbatim: no branch is created here, so the
+        // ref-name rules deliberately do not apply, and an empty field means
+        // the folder's own name. The provider is the global default,
+        // retargetable afterwards.
+        Some(self.engine.plan_standalone_agent(folder, &input.text, None))
+    }
+
+    /// Confirm on the standalone name field: create the agent and close.
+    ///
+    /// The prompt closes either way, refusal included, mirroring the web
+    /// dialog, which closes on Create and reports the server's refusal as a
+    /// toast rather than holding the folder hostage behind an open form.
+    pub(crate) fn confirm_standalone_agent_name(&mut self) {
+        let Some(planned) = self.planned_standalone_agent_create() else {
+            return;
+        };
         self.prompt = PromptState::None;
-        // No name typed: the title comes from the folder's own name, and
-        // renaming afterwards is an ordinary rename like any agent's. The
-        // provider is the global default, retargetable afterwards.
-        match self.engine.plan_standalone_agent(&path, "", None) {
+        match planned {
             Ok((request, busy_message)) => {
                 if let Err(err) = self.dispatch_create_agent_request(request, busy_message) {
                     self.set_error(format!("Could not create the standalone agent: {err:#}"));

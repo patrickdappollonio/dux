@@ -159,6 +159,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::RenameSession { .. }
         | PromptState::PullRequestInput { .. }
         | PromptState::AttachPullRequestInput { .. }
+        | PromptState::NameStandaloneAgent { .. }
         | PromptState::NameNewAgent { .. }
         | PromptState::KillRunning(_) => Blink,
     }
@@ -353,6 +354,7 @@ impl App {
             | PromptState::RenameSession { .. }
             | PromptState::PullRequestInput { .. }
             | PromptState::AttachPullRequestInput { .. }
+            | PromptState::NameStandaloneAgent { .. }
             | PromptState::NameNewAgent { .. }
             | PromptState::KillRunning(_) => return false,
         }
@@ -573,6 +575,13 @@ mod tests {
                     input: TextInput::with_text("half-typed-name".to_string()),
                 },
             ),
+            (
+                "NameStandaloneAgent",
+                PromptState::NameStandaloneAgent {
+                    folder: "/home/ada/notes".to_string(),
+                    input: TextInput::with_text("half-typed-name".to_string()),
+                },
+            ),
             ("NameNewAgent", name_new_agent_prompt(app)),
             (
                 "KillRunning",
@@ -615,6 +624,7 @@ mod tests {
             | PromptState::RenameSession { input, .. }
             | PromptState::PullRequestInput { input, .. }
             | PromptState::AttachPullRequestInput { input, .. }
+            | PromptState::NameStandaloneAgent { input, .. }
             | PromptState::NameNewAgent { input, .. } => input.text.clone(),
             PromptState::KillRunning(prompt) => format!("{:?}", prompt.selected_ids),
             other => panic!("not a refusing modal: {other:?}"),

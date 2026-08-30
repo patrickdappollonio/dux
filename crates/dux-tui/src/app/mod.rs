@@ -2183,6 +2183,25 @@ pub(crate) enum PromptState {
         current_pr: Option<String>,
         input: TextInput,
     },
+    /// Name the standalone agent about to run in the folder the user just
+    /// picked in the browser.
+    ///
+    /// The terminal-UI twin of the web's standalone-agent dialog, which shows
+    /// a name field the moment a folder is committed. ONE single-line control
+    /// and therefore no focus enum, exactly like
+    /// [`PromptState::AttachPullRequestInput`]: there is nowhere for focus to
+    /// move, so Enter submits and the modal needs no confirm button.
+    ///
+    /// An empty field is the ordinary case (the agent takes the folder's own
+    /// name); a typed one is used VERBATIM, since no branch is created here
+    /// and the ref-name rules deliberately do not apply. Closing the prompt
+    /// abandons the creation, the way the web dialog's Cancel does: no agent,
+    /// and nothing written into the user's folder.
+    NameStandaloneAgent {
+        /// Absolute path of the folder the browser committed to.
+        folder: String,
+        input: TextInput,
+    },
     NameNewAgent {
         request: CreateAgentRequest,
         input: TextInput,
@@ -3047,6 +3066,10 @@ pub(crate) enum OverlayMouseLayout {
     },
     /// The attach-pull-request modal's single text field (its only control).
     AttachPullRequestInput {
+        input: Rect,
+    },
+    /// The standalone-agent name modal's single text field (its only control).
+    NameStandaloneAgent {
         input: Rect,
     },
     NameNewAgent {
