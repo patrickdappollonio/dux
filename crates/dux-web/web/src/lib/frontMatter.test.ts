@@ -185,3 +185,81 @@ describe("front matter fallbacks", () => {
     expect(() => splitFrontMatter(junk)).not.toThrow()
   })
 })
+
+describe("front matter never loses the author's text", () => {
+  it("reports a block with content but no rows as unreadable raw text", () => {
+    const split = splitFrontMatter("---\n- a\n- b\n---\nbody\n")
+    expect(split?.rows).toEqual([])
+    expect(split?.unreadable).toBe("- a\n- b")
+  })
+
+  it("reports a colon without a following space as unreadable", () => {
+    const split = splitFrontMatter("---\nkey:value\n---\nbody\n")
+    expect(split?.rows).toEqual([])
+    expect(split?.unreadable).toBe("key:value")
+  })
+
+  it("leaves an empty block with nothing unreadable", () => {
+    const split = splitFrontMatter("---\n\n# just a comment\n---\nbody\n")
+    expect(split?.rows).toEqual([])
+    expect(split?.unreadable).toBeNull()
+  })
+
+  it("keeps a list of maps whole instead of dropping its continuations", () => {
+    const doc = "---\nitems:\n  - name: x\n    v: 1\n---\n"
+    expect(displayOf(doc)).toEqual([["items", "- name: x v: 1"]])
+  })
+
+  it("keeps a block whose item has no space after the dash", () => {
+    expect(displayOf("---\ntags:\n  - a\n  -b\n---\n")).toEqual([["tags", "- a -b"]])
+  })
+
+  it("keeps a nested map with a mis-indented sibling whole", () => {
+    const doc = "---\nauthor:\n    name: Ada\n  age: 3\n---\n"
+    expect(displayOf(doc)).toEqual([["author", "name: Ada age: 3"]])
+  })
+
+  it("strips a leading byte order mark before looking for the fence", () => {
+    expect(displayOf("﻿---\ntitle: x\n---\nbody\n")).toEqual([["title", "x"]])
+  })
+})
+
+describe("front matter display fidelity", () => {
+  it("shows a number as the author wrote it", () => {
+    const doc = [
+      "---",
+      "big: 12345678901234567890",
+      "padded: 007",
+      "trailing: 1.10",
+      "negzero: -0",
+      "bare: 1.",
+      "plain: 42",
+      "---",
+      "",
+    ].join("\n")
+    expect(displayOf(doc)).toEqual([
+      ["big", "12345678901234567890"],
+      ["padded", "007"],
+      ["trailing", "1.10"],
+      ["negzero", "-0"],
+      ["bare", "1."],
+      ["plain", "42"],
+    ])
+  })
+
+  it("unquotes a scalar that carries a trailing comment", () => {
+    expect(displayOf("---\ne: 'a' # c\nf: \"b: c\" # d\n---\n")).toEqual([
+      ["e", "a"],
+      ["f", "b: c"],
+    ])
+  })
+
+  it("displays an absent value as an empty cell rather than the word null", () => {
+    expect(formatFrontMatterValue(null)).toBe("")
+    expect(displayOf("---\nreviewer:\neditor: ~\nauthor: null\n---\n")).toEqual([
+      ["reviewer", ""],
+      ["editor", ""],
+      ["author", ""],
+    ])
+  })
+})

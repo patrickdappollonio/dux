@@ -70,6 +70,28 @@ describe("MarkdownPreview front matter", () => {
     expect(screen.getByRole("heading", { name: "Body" })).toBeTruthy()
   })
 
+  it("shows an unreadable block as its own raw text rather than dropping it", () => {
+    const { container } = preview("---\n- a\n- b\n---\n\n# Body\n")
+    expect(container.querySelector("table")).toBeNull()
+    const pre = container.querySelector("pre")
+    expect(pre?.textContent).toBe("- a\n- b")
+    expect(screen.getByRole("heading", { name: "Body" })).toBeTruthy()
+  })
+
+  it("strips only the first block, leaving a second one to render as markdown", () => {
+    const { container } = preview("---\nk: v\n---\n---\nx: y\n---\nbody\n")
+    expect(tableRows()).toEqual([["k", "v"]])
+    expect(container.querySelector("hr")).toBeTruthy()
+    expect(screen.getByRole("heading", { name: "x: y" })).toBeTruthy()
+    expect(container.textContent).toContain("body")
+  })
+
+  it("lets a long unbroken value wrap instead of widening the table", () => {
+    preview(`---\nurl: ${"a".repeat(200)}\n---\n\nbody\n`)
+    const cell = document.querySelector("tbody td")
+    expect(cell?.className).toContain("break-words")
+  })
+
   it("escapes markup in a front-matter value instead of rendering it", () => {
     const { container } = preview(
       '---\ntitle: "<img src=x onerror=alert(1)> **bold**"\n---\n\nbody\n',

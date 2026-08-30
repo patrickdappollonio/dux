@@ -7,8 +7,10 @@
 // dependency for a decorative feature. It reads the subset front matter is
 // actually written in (scalars, quoted strings, flow and block lists, one level
 // of nested map) and falls back to showing the raw text for anything else. It
-// never throws: an unreadable value is displayed verbatim, because a preview
-// that renders nothing is worse than one that renders the author's own text.
+// never throws and never drops text: a value it cannot read is displayed
+// verbatim, and a block it produces no rows at all for is reported through
+// `unreadable` so the caller can show the block itself. The block is stripped
+// from the body either way, so silence there would lose what the author wrote.
 //
 // Known limits, stated rather than hidden: anchors, aliases, tags, multi-document
 // streams and maps nested more than one level deep are shown as raw text; flow
@@ -26,6 +28,10 @@ export interface FrontMatterRow {
 
 export interface FrontMatterSplit {
   rows: FrontMatterRow[]
+  // The block's own text, when it holds content this reader produced no rows
+  // for. The caller shows it verbatim: the block is stripped from the body, so
+  // dropping it silently would lose text the author wrote.
+  unreadable: string | null
   // The document with the front-matter block removed, ready for the markdown
   // renderer.
   body: string
@@ -35,7 +41,7 @@ export interface FrontMatterSplit {
 // when there is no front matter. Front matter exists only when the document's
 // FIRST line is exactly `---` and a later line is exactly `---` or `...`.
 export function splitFrontMatter(content: string): FrontMatterSplit | null {
-  const lines = content.split("\n").map(stripCarriageReturn)
+  const lines = stripByteOrderMark(content).split("\n").map(stripCarriageReturn)
   if (lines.length === 0) return null
   if (lines[0].trimEnd() !== "---") return null
   let end = -1
@@ -47,8 +53,13 @@ export function splitFrontMatter(content: string): FrontMatterSplit | null {
     }
   }
   if (end === -1) return null
+  const block = lines.slice(1, end)
+  const rows = parseFrontMatterBlock(block)
+  const kept = trimBlankEdges(block)
+  const hasContent = kept.some((line) => !isIgnorable(line))
   return {
-    rows: parseFrontMatterBlock(lines.slice(1, end)),
+    rows,
+    unreadable: rows.length === 0 && hasContent ? kept.join("\n") : null,
     body: lines.slice(end + 1).join("\n"),
   }
 }
@@ -89,7 +100,9 @@ export function formatFrontMatterValue(value: FrontMatterValue): string {
 }
 
 function formatScalar(value: FrontMatterScalar): string {
-  if (value === null) return "null"
+  // An absent value is an empty cell. The word "null" in a table reads as a
+  // value the author wrote, and usually they wrote nothing at all.
+  if (value === null) return ""
   if (typeof value === "boolean") return value ? "true" : "false"
   if (typeof value === "number") return String(value)
   return value
@@ -119,7 +132,8 @@ function pushEntry(
     return
   }
   if (isListItem(first)) {
-    rows.push({ key, value: readBlockList(block) })
+    const items = readBlockList(block)
+    rows.push({ key, value: items ?? rawText(block) })
     return
   }
   const nested = readNestedMap(key, block)
@@ -138,11 +152,17 @@ function readNestedMap(parent: string, block: string[]): FrontMatterRow[] {
   let i = 0
   while (i < block.length) {
     const line = block[i]
-    if (isIgnorable(line) || indentOf(line) !== base) {
+    if (isIgnorable(line)) {
       i += 1
       continue
     }
+    // Deeper lines are consumed as a child's own block below, so anything left
+    // at a different indent is a mis-indented sibling: bail rather than drop it.
+    if (indentOf(line) !== base) return []
     const entry = splitKey(line)
+    // A line that is neither an entry at this level nor a continuation of one
+    // means this block is not the shape we read. Give up on the whole block so
+    // the caller shows its text rather than a table missing rows.
     if (entry === null) return []
     const inner: string[] = []
     let j = i + 1
@@ -157,7 +177,9 @@ function readNestedMap(parent: string, block: string[]): FrontMatterRow[] {
     } else if (trimmed.length === 0) {
       rows.push({ key, value: null })
     } else if (isListItem(trimmed.find((l) => !isIgnorable(l)) ?? "")) {
-      rows.push({ key, value: readBlockList(trimmed) })
+      const items = readBlockList(trimmed)
+      if (items === null) return []
+      rows.push({ key, value: items })
     } else {
       rows.push({ key, value: rawText(trimmed) })
     }
@@ -166,13 +188,15 @@ function readNestedMap(parent: string, block: string[]): FrontMatterRow[] {
   return rows
 }
 
-function readBlockList(block: string[]): FrontMatterScalar[] {
+// A block list of plain scalars, or null when it is something else: a list of
+// maps whose continuation lines this would drop, or a `-b` that is not an item
+// at all. Null means the caller shows the block's raw text.
+function readBlockList(block: string[]): FrontMatterScalar[] | null {
   const items: FrontMatterScalar[] = []
   for (const line of block) {
     if (isIgnorable(line)) continue
-    const text = line.trimStart()
-    if (!isListItem(line)) continue
-    items.push(parseScalar(text.replace(/^-\s*/, "")))
+    if (!isListItem(line)) return null
+    items.push(parseScalar(line.trimStart().replace(/^-\s*/, "")))
   }
   return items
 }
@@ -236,13 +260,20 @@ export function parseScalar(text: string): FrontMatterScalar {
   const quoted = unquote(trimmed)
   if (quoted !== null) return quoted
   const bare = stripTrailingComment(trimmed)
+  // A quoted scalar may carry a trailing comment, which leaves the quotes on the
+  // end of `trimmed`: retry the unquote once the comment is off.
+  const quotedBeforeComment = bare === trimmed ? null : unquote(bare)
+  if (quotedBeforeComment !== null) return quotedBeforeComment
   if (bare === "" || bare === "~") return null
   if (/^null$/i.test(bare)) return null
   if (/^(true|yes|on)$/i.test(bare)) return true
   if (/^(false|no|off)$/i.test(bare)) return false
   if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(bare)) {
     const n = Number(bare)
-    if (Number.isFinite(n)) return n
+    // Only when the number survives the round trip. `007`, `1.10`, `-0` and
+    // integers past the float range all come back different, and a table must
+    // show what the author wrote, not what JavaScript made of it.
+    if (Number.isFinite(n) && String(n) === bare) return n
   }
   return bare
 }
@@ -331,6 +362,12 @@ function trimBlankEdges(lines: string[]): string[] {
   while (start < end && isBlank(lines[start])) start += 1
   while (end > start && isBlank(lines[end - 1])) end -= 1
   return lines.slice(start, end)
+}
+
+// An editor that writes a BOM puts it before the opening fence, where it would
+// otherwise make the first line something other than `---`.
+function stripByteOrderMark(content: string): string {
+  return content.startsWith("﻿") ? content.slice(1) : content
 }
 
 function stripCarriageReturn(line: string): string {

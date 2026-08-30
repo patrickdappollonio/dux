@@ -2,7 +2,6 @@ import type { MouseEvent } from "react"
 import Markdown, { defaultUrlTransform } from "react-markdown"
 import rehypeRaw from "rehype-raw"
 import rehypeSanitize from "rehype-sanitize"
-import remarkFrontmatter from "remark-frontmatter"
 import remarkGfm from "remark-gfm"
 import { markdownAssetUrl } from "@/lib/markdown"
 import { formatFrontMatterValue, splitFrontMatter } from "@/lib/frontMatter"
@@ -23,10 +22,7 @@ interface MarkdownPreviewProps {
 // arbitrary child-element variants so it tracks the app palette without the
 // Tailwind typography plugin.
 //
-// Plugins: remark-gfm (tables, task lists, strikethrough, autolinks);
-// remark-frontmatter (recognizes a leading YAML `--- … ---` block so a block this
-// component chose not to lift out never renders as a stray rule + key:value text);
-// rehype-raw (renders embedded HTML rather than escaping it); then rehype-sanitize
+// Plugins: remark-gfm (tables, task lists, strikethrough, autolinks); rehype-raw (renders embedded HTML rather than escaping it); then rehype-sanitize
 // (its default = GitHub's schema). Embedded HTML therefore renders the way it does
 // on GitHub — common formatting tags (div, details/summary, table, kbd, sub/sup,
 // task-list inputs, …) are kept, while <script>, inline event handlers, and
@@ -70,6 +66,11 @@ export default function MarkdownPreview({
   // rather than dropping it, and front matter is often the only place a title,
   // date or tag list is written. The values are user content and are rendered as
   // React text, so they are escaped rather than parsed as markup.
+  //
+  // splitFrontMatter owns the extraction, so there is deliberately no
+  // remark-frontmatter here: it would strip a SECOND `--- … ---` block sitting
+  // right after the first, which GitHub renders as an ordinary rule and setext
+  // heading. Only the leading block is ours.
   const front = splitFrontMatter(content)
   const body = front === null ? content : front.body
 
@@ -111,7 +112,9 @@ export default function MarkdownPreview({
               {front.rows.map((row, index) => (
                 <tr key={`${row.key}-${index}`}>
                   <th scope="row">{row.key}</th>
-                  <td className="whitespace-pre-wrap">
+                  {/* A long unbroken value (a URL, a hash) must wrap rather
+                      than push the table past its column. */}
+                  <td className="break-words whitespace-pre-wrap">
                     {formatFrontMatterValue(row.value)}
                   </td>
                 </tr>
@@ -119,8 +122,15 @@ export default function MarkdownPreview({
             </tbody>
           </table>
         )}
+        {front !== null && front.unreadable !== null && (
+          // The block was stripped from the body, so text this reader produced
+          // no rows for is shown verbatim instead of disappearing.
+          <pre>
+            <code>{front.unreadable}</code>
+          </pre>
+        )}
         <Markdown
-          remarkPlugins={[remarkFrontmatter, remarkGfm]}
+          remarkPlugins={[remarkGfm]}
           rehypePlugins={[rehypeRaw, rehypeSanitize]}
           urlTransform={transformUrl}
         >

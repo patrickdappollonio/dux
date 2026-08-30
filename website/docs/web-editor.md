@@ -292,8 +292,8 @@ For Markdown files (`.md`, `.markdown`, and friends) a **Preview / Edit** toggle
 current buffer, unsaved edits included. It handles GitHub-flavored Markdown and rewrites
 relative image paths so they load from the worktree. A leading YAML frontmatter block is
 rendered the way GitHub renders it, as a key/value table above the page, with lists joined
-inline and a nested key shown as `parent.child`; a value dux cannot read is shown as the
-raw text you wrote.
+inline and a nested key shown as `parent.child`. Nothing you wrote is dropped: a value dux
+cannot read is shown as your raw text, and so is a whole block it cannot make a table of.
 
 SVG files get the same treatment: they open as text and the toggle renders the drawing from
 whatever is in the buffer right now.
