@@ -2,15 +2,22 @@
 interface Props {
   castId?: string;
   title?: string;
+  /** Section padding. The hero renders this component as its own visual and
+      wants tighter air above it than a standalone section would take. */
+  spacing?: string;
 }
 
-const { castId = "IvqL89rXvwCzvSxQ", title = "dux in action" } = Astro.props;
+const {
+  castId = "IvqL89rXvwCzvSxQ",
+  title = "dux in action",
+  spacing = "py-16 sm:py-24",
+} = Astro.props;
 const link = `https://asciinema.org/a/${castId}`;
 const scriptSrc = `https://asciinema.org/a/${castId}.js`;
 const scriptId = `asciicast-${castId}`;
 ---
 
-<section class="py-16 sm:py-24">
+<section class={spacing}>
   <div id="demo" class="anchor-offset container-app">
     <div class="mb-8 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
       <div>
@@ -40,7 +47,7 @@ const scriptId = `asciicast-${castId}`;
         rather than repeating the pitch: the figure below is one scroll away and
         makes the case better than a sentence can. */}
     <p class="mt-4 text-sm text-[color:var(--color-muted)] leading-relaxed">
-      This is the terminal UI, recorded live. The same workspace runs in a browser too, and you can flip between the two in the section below.
+      This is the terminal UI, recorded live. The same workspace runs in a browser too, and you can flip between the two further down this page.
     </p>
 
     {/* `.term` carries no margin of its own, so without this the caption above

@@ -1,17 +1,28 @@
 ---
+// The landing page. It has one job: get the visitor to install dux.
+//
+// The order below is that job, in order. The hero says what dux is and shows it
+// running; RealCLI says what problem that solves; the tagline states the change
+// in one breath; the benefits are five doors into the catalogue on /features;
+// the tour shows the shape of the thing; server mode is the reach; the FAQ
+// clears the last objections; and install is the ask, with the newsletter and
+// the blog and contributors tail after it.
+//
+// The feature catalogue and the config sample are not gone. They are the whole
+// of /features, which is where a reader who wants to browse is better served.
 import Layout from "../layouts/Layout.astro";
 import Header from "../components/Header.astro";
 import Hero from "../components/Hero.astro";
-import Asciinema from "../components/Asciinema.astro";
-import Manifesto from "../components/Manifesto.astro";
 import RealCLI from "../components/RealCLI.astro";
-import FeatureGrid from "../components/FeatureGrid.astro";
-import ConfigPeek from "../components/ConfigPeek.astro";
-import InstallSection from "../components/InstallSection.astro";
+import TaglineReveal from "../components/TaglineReveal.astro";
+import Benefits from "../components/Benefits.astro";
+import Manifesto from "../components/Manifesto.astro";
 import ServerMode from "../components/ServerMode.astro";
+import Faq from "../components/Faq.astro";
+import InstallSection from "../components/InstallSection.astro";
+import Newsletter from "../components/Newsletter.astro";
 import LatestPosts from "../components/LatestPosts.astro";
 import Contributors from "../components/Contributors.astro";
-import Newsletter from "../components/Newsletter.astro";
 import Footer from "../components/Footer.astro";
 import { SITE_TITLE, SITE_DESCRIPTION } from "../lib/site";
 
@@ -25,14 +36,14 @@ const description = SITE_DESCRIPTION;
   <Header />
   <main>
     <Hero />
-    <Newsletter />
-    <Asciinema />
-    <Manifesto />
     <RealCLI />
-    <FeatureGrid />
-    <ConfigPeek />
+    <TaglineReveal />
+    <Benefits />
+    <Manifesto />
     <ServerMode />
+    <Faq />
     <InstallSection />
+    <Newsletter />
     <LatestPosts />
     <Contributors />
   </main>

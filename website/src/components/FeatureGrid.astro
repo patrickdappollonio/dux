@@ -62,7 +62,7 @@
 
     <div class="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
       <!-- 1. Bring Any CLI -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="bring-any-cli" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="text-[color:var(--color-dim)]">[providers.my-agent]</div>
           <div><span class="text-[color:var(--color-accent)]">command</span> = <span class="text-[color:var(--color-success)]">"my-cool-agent"</span></div>
@@ -79,7 +79,7 @@
       </article>
 
       <!-- 2. Themes -->
-      <article data-surface="terminal" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="themes-that-actually-theme" data-surface="terminal" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 flex gap-1.5">
           <div class="flex-1 rounded-md border border-[color:var(--color-border-soft)] p-2 mono text-[10px]" style="background:#101018;color:#f4f7ff">
             <div style="color:#00d4ff">●</div>
@@ -120,7 +120,7 @@
       </article>
 
       <!-- 3. Macros -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="macros-but-make-them-fun" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="text-[color:var(--color-dim)]">[macros]</div>
           <div><span class="text-[color:var(--color-pink)]">"Review"</span> = "review for bugs"</div>
@@ -137,7 +137,7 @@
       </article>
 
       <!-- 4. Command palette -->
-      <article data-surface="terminal" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="a-palette-that-knows-your-tricks" data-surface="terminal" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="flex items-center gap-2">
             <span class="text-[color:var(--color-accent)]">›</span>
@@ -159,7 +159,7 @@
       </article>
 
       <!-- 5. Companion terminals -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="companion-terminals" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="text-[color:var(--color-dim)]">$ cargo test --lib pty</div>
           <div class="text-[color:var(--color-muted)]">running 4 tests</div>
@@ -177,7 +177,7 @@
       </article>
 
       <!-- 6. Startup commands -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="startup-ceremonies-automated" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="text-[color:var(--color-dim)]">startup_command = """</div>
           <div class="text-[color:var(--color-text)]">npm install</div>
@@ -194,7 +194,7 @@
       </article>
 
       <!-- 7. Agent from a PR -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="spin-up-an-agent-from-a-pr" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="flex items-center gap-2">
             <span class="text-[color:var(--color-accent)]">›</span>
@@ -214,7 +214,7 @@
       </article>
 
       <!-- 8. gh CLI integration -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="befriend-the-gh-cli" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="flex items-center justify-between"><span class="text-[color:var(--color-text)]">refactor-pty</span><span class="rounded-full px-1.5 text-[10px]" style="background:rgba(74,222,128,.15);color:#4ade80">● open #243</span></div>
           <div class="flex items-center justify-between"><span class="text-[color:var(--color-text)]">add-themes</span><span class="rounded-full px-1.5 text-[10px]" style="background:rgba(139,92,246,.18);color:#a78bfa">✦ merged #238</span></div>
@@ -230,7 +230,7 @@
       </article>
 
       <!-- 9. Featherweight footprint -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="featherweight-footprint" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="flex items-center justify-between text-[color:var(--color-dim)]"><span>resource-monitor</span><span>CPU · RSS</span></div>
           <div class="mt-1 flex items-center justify-between"><span class="text-[color:var(--color-accent)]">dux</span><span class="text-[color:var(--color-success)]">0.2% · 41 MB</span></div>
@@ -249,7 +249,7 @@
       </article>
 
       <!-- 10. Mouse support -->
-      <article data-surface="terminal" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="yes-the-mouse-works" data-surface="terminal" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed space-y-0.5">
           <div><span class="text-[color:var(--color-accent)]">⌖</span> <span class="text-[color:var(--color-text)]">click pane</span> <span class="text-[color:var(--color-dim)]">→ focus it</span></div>
           <div><span class="text-[color:var(--color-accent)]">⇿</span> <span class="text-[color:var(--color-text)]">drag border</span> <span class="text-[color:var(--color-dim)]">→ resize panes</span></div>
@@ -266,7 +266,7 @@
       </article>
 
       <!-- 11. Crash recovery / auto-reopen -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="crash-recovery-opt-in" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="text-[color:var(--color-dim)]">$ dux</div>
           <div class="text-[color:var(--color-accent)]">↺ reopening 2 agents…</div>
@@ -283,7 +283,7 @@
       </article>
 
       <!-- 12. Hot-reload config -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="reload-your-config-live" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="flex items-center gap-2">
             <span class="text-[color:var(--color-accent)]">›</span>
@@ -294,7 +294,7 @@
           <div class="text-[color:var(--color-dim)]">invalid? keeps the last good config</div>
         </div>
         <div class="flex items-start justify-between gap-3">
-          <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Hot-reload your config</h3>
+          <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Reload your config live</h3>
           <span class="pill pill-xs mt-0.5 shrink-0"><span class="sr-only">Available in: </span>Both</span>
         </div>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
@@ -303,7 +303,7 @@
       </article>
 
       <!-- 13. Provider per worktree -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="one-worktree-any-provider" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="flex items-center gap-2">
             <span class="text-[color:var(--color-accent)]">›</span>
@@ -322,7 +322,7 @@
       </article>
 
       <!-- 14. Adopt an existing worktree -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="adopt-an-existing-worktree" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="flex items-center gap-2">
             <span class="text-[color:var(--color-accent)]">›</span>
@@ -342,7 +342,7 @@
       </article>
 
       <!-- 15. Jump to your editor -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="jump-straight-to-your-editor" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="flex items-center gap-2">
             <span class="text-[color:var(--color-accent)]">›</span>
@@ -361,7 +361,7 @@
       </article>
 
       <!-- 16. Git staging area -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="a-real-git-staging-area" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="flex items-center justify-between text-[color:var(--color-dim)]"><span>Changes (3)</span><span>2 staged</span></div>
           <div class="flex items-center gap-2 text-[color:var(--color-success)]"><span>M</span><span class="flex-1 truncate text-[color:var(--color-text)]">src/pty.rs</span><span>+18</span></div>
@@ -380,7 +380,7 @@
       </article>
 
       <!-- 17. Conservative git -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="conservative-git-on-purpose" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="text-[color:var(--color-dim)]">$ refresh checkout</div>
           <div class="text-[color:var(--color-text)]">git pull --ff-only</div>
@@ -397,7 +397,7 @@
       </article>
 
       <!-- 18. Per-project env -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="environment-per-project" data-surface="both" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="text-[color:var(--color-dim)]">[env] <span class="text-[color:var(--color-dim)]"># every project</span></div>
           <div><span class="text-[color:var(--color-accent)]">API_KEY</span> = <span class="text-[color:var(--color-success)]">{'"${PROD_KEY}"'}</span></div>
@@ -415,7 +415,7 @@
 
       <!-- 19. In-page code editor (web-native). Mock is font-sans on purpose:
            a monospace box would read as another terminal. -->
-      <article data-surface="web" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="a-real-editor-in-the-page" data-surface="web" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 font-sans text-[11px] leading-relaxed">
           <div class="flex items-center gap-1.5 border-b border-[color:var(--color-border-soft)] pb-2">
             <span class="rounded bg-[color:var(--color-accent)]/15 px-1.5 py-0.5 text-[color:var(--color-accent)]">pty.rs</span>
@@ -439,7 +439,7 @@
       </article>
 
       <!-- 20. One writer, many watchers (web-native). -->
-      <article data-surface="web" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="one-writer-many-watchers" data-surface="web" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 font-sans text-[11px] leading-relaxed">
           <div class="text-[color:var(--color-dim)]">refactor-pty · claude</div>
           <div class="mt-1.5 text-[color:var(--color-text)]">Active on Chrome on macOS</div>
@@ -459,7 +459,7 @@
       </article>
 
       <!-- 21. The phone shell (web-native). -->
-      <article data-surface="web" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="built-for-one-thumb-not-shrunk-to-fit" data-surface="web" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 font-sans text-[11px] leading-relaxed">
           <div class="flex flex-wrap gap-1 text-[color:var(--color-dim)]">
             <span class="rounded border border-[color:var(--color-border-soft)] px-1.5">Esc</span>
@@ -485,7 +485,7 @@
       </article>
 
       <!-- 22. Attention chrome (web-native). -->
-      <article data-surface="web" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="the-tab-tells-you-who-needs-you" data-surface="web" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 font-sans text-[11px] leading-relaxed">
           <div class="flex items-center gap-2 rounded-t-md border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel-2)] px-2 py-1">
             <span class="relative flex h-2.5 w-2.5 shrink-0 items-center justify-center rounded-sm bg-[color:var(--color-accent)]/30">
@@ -506,7 +506,7 @@
       </article>
 
       <!-- 23. Ordering, dragged with the mouse on either surface -->
-      <article data-surface="both" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="put-them-in-your-own-order" data-surface="both" class="feature-tile tile-card anchor-offset">
         {/* Sans, not mono: this tile covers both surfaces, so the mock stands
             for a list of rows rather than for either one's chrome; a monospace
             mock would read as the terminal alone. */}
@@ -532,7 +532,7 @@
       </article>
 
       <!-- 24. The flip, and its one precondition -->
-      <article data-surface="terminal" class="feature-tile card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+      <article id="change-surfaces-without-stopping" data-surface="terminal" class="feature-tile tile-card anchor-offset">
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="flex items-center gap-2">
             <span class="text-[color:var(--color-accent)]">›</span>

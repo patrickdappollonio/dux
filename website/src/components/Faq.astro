@@ -1,0 +1,106 @@
+---
+// The eight questions a reader has before they will run the install command.
+//
+// Every answer is checked against the docs rather than written from memory: the
+// licence, telemetry and Windows answers come from /docs/faq, the requirements
+// from the install section's own copy, the server answers from /docs/server-mode
+// and /docs/public-hosting, and the git answers from how dux actually treats
+// branches. When one of those changes, this changes with it.
+//
+// The answers are plain strings, because they are also the JSON-LD below. A
+// question answered one way for a reader and another way for a search engine is
+// a bug waiting to happen, so there is one copy of each answer and both
+// renderings read it.
+const faqs = [
+  {
+    q: "Is dux free?",
+    a: "Yes. dux is open source under the MIT license, and it sends no telemetry: no analytics, no background uploads. You bring your own agent CLIs and whatever accounts they need.",
+  },
+  {
+    q: "What do I need installed?",
+    a: "git, because dux is built on worktrees. Beyond that the CLI has no dependencies. The gh CLI is optional: install it for pull request tracking and agent-opened PRs, skip it and dux quietly disables anything GitHub. Then install whichever agent CLIs you want to run.",
+  },
+  {
+    q: "Does it work with my agent's skills, MCP servers and hooks?",
+    a: "Yes. dux spawns the real CLI in a real pseudo-terminal, exactly as it would run in your shell, so your skills, MCP servers, hooks, slash commands and permission prompts all work. dux does not touch your setup.",
+  },
+  {
+    q: "Can I use a CLI you have not heard of?",
+    a: "Yes. Any CLI that runs an interactive session in a terminal can be a provider. Add a providers block to your config with the command and its arguments and dux spawns it. That is a config change, not a code change: there are no adapters and no protocol layer.",
+  },
+  {
+    q: "Do I need the web UI?",
+    a: "No. The terminal UI is complete on its own and is staying that way. The web UI is the same binary: run dux server and it serves the browser instead of drawing a terminal, over the same projects, agents and worktrees.",
+  },
+  {
+    q: "Is it safe to expose the server?",
+    a: "Only behind something that authenticates, over HTTPS. dux has no login of any kind, so everyone who reaches the address shares one workspace and can drive any agent and browse the server's filesystem. Out of the box it binds loopback and your Tailscale address, which are the two shapes that need nothing else.",
+  },
+  {
+    q: "Does it run on Windows?",
+    a: "Through WSL2, which is Linux. dux targets macOS and Linux; there is no native Windows build.",
+  },
+  {
+    q: "Will it touch my git branches?",
+    a: "Conservatively, and only where you asked. An agent on a branch gets its own worktree; a standalone agent runs in a folder you point it at, and dux never creates, moves or removes that folder. dux deletes only branches it created itself, and anything destructive asks first.",
+  },
+];
+
+const schema = {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  mainEntity: faqs.map((faq) => ({
+    "@type": "Question",
+    name: faq.q,
+    acceptedAnswer: { "@type": "Answer", text: faq.a },
+  })),
+};
+---
+
+<section class="reveal py-16 sm:py-24" data-reveal>
+  <div id="faq" class="anchor-offset container-app">
+    <div>
+      <span class="pill">▸ questions</span>
+      <h2 class="heading mt-3 text-balance text-3xl font-bold tracking-tight sm:text-4xl">
+        The things you were about to go and look up.
+      </h2>
+      <p class="mt-3 text-pretty text-[color:var(--color-muted)]">
+        Short answers. The <a href="/docs/faq" class="text-[color:var(--color-accent)] hover:underline">docs FAQ</a>{" "}
+        has the rest of them.
+      </p>
+    </div>
+
+    <div class="mt-10 grid items-start gap-3 lg:grid-cols-2">
+      {
+        faqs.map((faq) => (
+          <details class="faq-item card p-5">
+            <summary class="heading text-base font-semibold text-[color:var(--color-text)]">
+              <span aria-hidden="true" class="faq-marker mt-0.5 shrink-0 text-[color:var(--color-accent)]">
+                ▸
+              </span>
+              <span>{faq.q}</span>
+            </summary>
+            <p class="mt-3 pl-6 text-pretty text-sm leading-relaxed text-[color:var(--color-muted)]">
+              {faq.a}
+            </p>
+          </details>
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+{/* The same answers a reader sees, in the shape a search engine reads. Astro
+    allows a JSON-LD block anywhere in the document, and keeping it beside the
+    questions is what stops the two copies drifting. */}
+<script type="application/ld+json" is:inline set:html={JSON.stringify(schema)} />
+
+{/* One module owns both halves of the reveal, arming and revealing, so a
+    section can never be hidden by a script that then fails to show it again.
+    A deep link to #faq settles this section at init rather than arming it, so
+    the browser's scroll target does not move under it. See src/lib/reveal.ts. */}
+<script>
+  import { initReveal } from "../lib/reveal";
+
+  initReveal();
+</script>

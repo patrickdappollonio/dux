@@ -1,0 +1,91 @@
+---
+// The five reasons that fit on a landing page, each one a door into the full
+// catalogue on /features.
+//
+// The copy is lifted from the matching feature tile rather than written again,
+// and every tile here links to the tile it came from, so a reader who wants the
+// long version is one click and no searching away. If a claim changes, it
+// changes in FeatureGrid and gets shortened here, never the other way round.
+//
+// The card is `.tile-card`, the same class the feature tiles use. There is no
+// second card definition on this site.
+const benefits = [
+  {
+    title: "Bring any CLI",
+    anchor: "bring-any-cli",
+    body: "Claude, Codex, Copilot and OpenCode ship as defaults, and anything else is a TOML block away.",
+  },
+  {
+    title: "One worktree, any provider",
+    anchor: "one-worktree-any-provider",
+    body: "Point a worktree at a different CLI, Claude to Codex and back, on the same branch and the same files.",
+  },
+  {
+    title: "A real git staging area",
+    anchor: "a-real-git-staging-area",
+    body: "Stage files, read the diffs, write the commit, push and pull, all without leaving dux.",
+  },
+  {
+    title: "Built for one thumb, not shrunk to fit",
+    anchor: "built-for-one-thumb-not-shrunk-to-fit",
+    body: "Below tablet width the web UI is a different shell, not a squished desktop: a hub of projects and agents, a full-screen terminal, and a changes screen.",
+  },
+  {
+    title: "The tab tells you who needs you",
+    anchor: "the-tab-tells-you-who-needs-you",
+    body: "When agents want an answer and you are looking at something else, the browser tab counts them and the favicon grows a dot.",
+  },
+];
+---
+
+<section class="reveal py-16 sm:py-24" data-reveal>
+  <div class="container-app">
+    <div>
+      <span class="pill">▸ why dux</span>
+      <h2 class="heading mt-3 text-balance text-3xl font-bold tracking-tight sm:text-4xl">
+        Why you would bother running more than one.
+      </h2>
+      <p class="mt-3 text-pretty text-[color:var(--color-muted)]">
+        Each one opens its full version on the features page, where the rest of them live.
+      </p>
+    </div>
+
+    <div class="mt-10 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+      {
+        benefits.map((benefit) => (
+          <a
+            href={`/features#${benefit.anchor}`}
+            class="tile-card group block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--color-ink)]"
+          >
+            <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">
+              {benefit.title}
+            </h3>
+            <p class="mt-2 text-pretty text-sm text-[color:var(--color-muted)]">{benefit.body}</p>
+            <span class="mt-4 inline-flex items-center gap-1.5 text-sm text-[color:var(--color-accent)]">
+              The long version
+              <span aria-hidden="true" class="transition-transform group-hover:translate-x-1">
+                →
+              </span>
+            </span>
+          </a>
+        ))
+      }
+    </div>
+
+    <div class="mt-8">
+      <a href="/features" class="btn-ghost active:scale-[0.98]">
+        See all features
+        <span aria-hidden="true">→</span>
+      </a>
+    </div>
+  </div>
+</section>
+
+{/* One module owns both halves of the reveal, arming and revealing, so a
+    section can never be hidden by a script that then fails to show it again.
+    See src/lib/reveal.ts. */}
+<script>
+  import { initReveal } from "../lib/reveal";
+
+  initReveal();
+</script>
