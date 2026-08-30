@@ -1420,31 +1420,32 @@ impl App {
         seek_fullscreen || !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
     }
 
-    /// Close-tab entry point. Opens the confirmation dialog for the focused
-    /// tab: closing the session-slot tab detaches the agent (non-destructive); closing a
-    /// extra tab ends that session for good (destructive).
+    /// Close-tab entry point. The agent's FIRST tab (the session-slot tab,
+    /// whose id equals the session id) cannot be closed at all: it lives as
+    /// long as the agent does, so the gesture raises a warning that says so
+    /// instead of a confirmation that would have stopped its provider. Any
+    /// other tab opens the confirmation dialog, which ends that tab for good.
     pub(crate) fn close_focused_tab_prompt(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
         };
         let session_id = session.id.clone();
         let tab_id = self.focused_tab_id(&session_id);
-        let is_main = tab_id == session_id;
-        let provider = if is_main {
-            session.provider.as_str().to_string()
-        } else {
-            self.engine
-                .agent_tabs
-                .get(&tab_id)
-                .map(|t| t.provider.as_str().to_string())
-                .unwrap_or_else(|| session.provider.as_str().to_string())
-        };
+        if tab_id == session_id {
+            self.prompt = PromptState::FirstTabCannotClose { session_id };
+            return;
+        }
+        let provider = self
+            .engine
+            .agent_tabs
+            .get(&tab_id)
+            .map(|t| t.provider.as_str().to_string())
+            .unwrap_or_else(|| session.provider.as_str().to_string());
         let provider_label = Self::title_case_word(&provider);
         self.prompt = PromptState::ConfirmCloseTab {
             session_id,
             tab_id,
             provider_label,
-            is_main,
             focus: ConfirmFocus::Cancel,
         };
     }

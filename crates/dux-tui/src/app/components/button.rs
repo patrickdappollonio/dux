@@ -86,6 +86,9 @@ pub(crate) enum ButtonPressedTarget {
     ConfirmDeleteTerminalConfirm,
     ConfirmCloseTabCancel,
     ConfirmCloseTabConfirm,
+    /// The first-tab warning's single dismiss button. It commits nothing: the
+    /// modal exists to say the gesture has no effect here.
+    FirstTabCannotCloseOk,
     ConfirmDeleteMacroCancel,
     ConfirmDeleteMacroConfirm,
     /// The macro EDITOR's own buttons (distinct from the nested delete-confirm

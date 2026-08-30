@@ -2109,15 +2109,26 @@ pub(crate) enum PromptState {
         foreground_cmd: Option<String>,
         focus: ConfirmFocus, // Cancel (default) or Delete
     },
-    /// Close/detach an agent tab. Closing the session-slot tab (`is_main`) detaches the
-    /// agent (non-destructive, stays in Projects); closing an extra tab ends
-    /// that session for good (destructive), so it defaults to Cancel.
+    /// Close an EXTRA agent tab. Closing it ends that tab's session for good
+    /// (destructive), so it defaults to Cancel. The session-slot tab never
+    /// reaches this prompt: it cannot be closed at all, and the close gesture
+    /// raises [`PromptState::FirstTabCannotClose`] instead.
     ConfirmCloseTab {
         session_id: String,
         tab_id: String,
         provider_label: String,
-        is_main: bool,
-        focus: ConfirmFocus, // Cancel (default) or Close/Detach
+        focus: ConfirmFocus, // Cancel (default) or Close
+    },
+    /// Raised when the close-tab gesture lands on the agent's FIRST tab (the
+    /// session-slot tab, whose id equals the session id). That tab lives as
+    /// long as the agent does, so there is nothing to confirm: the modal is a
+    /// warning with a single dismiss button that says why and points at the
+    /// two things the user can actually do instead (add more tabs, or detach
+    /// the whole agent).
+    FirstTabCannotClose {
+        /// The agent whose first tab the gesture landed on, so the prose can
+        /// name it.
+        session_id: String,
     },
     ConfirmQuit {
         agent_count: usize,
@@ -3017,6 +3028,9 @@ pub(crate) enum OverlayMouseLayout {
     ConfirmCloseTab {
         cancel_button: Rect,
         confirm_button: Rect,
+    },
+    FirstTabCannotClose {
+        ok_button: Rect,
     },
     ConfirmDeleteMacro {
         cancel_button: Rect,

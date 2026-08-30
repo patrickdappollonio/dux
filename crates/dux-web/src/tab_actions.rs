@@ -13,19 +13,18 @@
 //! it by design.
 //!
 //! Routes:
-//! - `POST   /api/v1/sessions/:id/tabs`            — create a tab running
+//! - `POST   /api/v1/sessions/:id/tabs`            - create a tab running
 //!   `{ "provider"? }` (the session's project default when omitted). 201 +
 //!   `{ "tab_id", "provider" }`. 404 when `:id` is unknown; 400 when the provider
 //!   is not configured.
-//! - `DELETE /api/v1/sessions/:id/tabs/:tab`       — close one tab. For the
-//!   session-slot tab (`:tab == :id`, which has no row) this stops that tab via
-//!   `KillSessionPty`; any other tab is closed and its row removed. Either way,
-//!   closing an agent's LAST live tab detaches it, so both branches return
-//!   200 + `{ "detached": <bool> }` computed after the close. A `:tab` not
-//!   owned by `:id` is a 404.
-//! - `PATCH  /api/v1/sessions/:id/tabs/:tab`       — retarget the tab's provider
+//! - `DELETE /api/v1/sessions/:id/tabs/:tab`       - close one tab. The agent's
+//!   FIRST tab (`:tab == :id`, the session-slot tab, which has no row) cannot be
+//!   closed and is refused with a 400 saying why; any other tab is closed and
+//!   its row removed, returning 200 + `{ "detached": <bool> }` (closing an
+//!   agent's LAST live tab detaches it). A `:tab` not owned by `:id` is a 404.
+//! - `PATCH  /api/v1/sessions/:id/tabs/:tab`       - retarget the tab's provider
 //!   `{ "provider" }`. 200 on success; 400 when the provider is not configured.
-//! - `PUT    /api/v1/sessions/:id/focused-tab`     — remember the tab the user
+//! - `PUT    /api/v1/sessions/:id/focused-tab`     - remember the tab the user
 //!   last focused on this agent, so a later sidebar/bare-route navigation to
 //!   this agent restores it. `{ "tab_id": string | null }`. A `tab_id` equal to
 //!   `:id`, or naming a tab that isn't a live extra tab of `:id`, is normalized
@@ -89,7 +88,7 @@ struct SetFocusedTabBody {
     tab_id: Option<String>,
 }
 
-/// `POST /api/v1/sessions/:id/tabs` — create an extra tab. Direct-return through
+/// `POST /api/v1/sessions/:id/tabs` - create an extra tab. Direct-return through
 /// the dedicated engine request (mints the id synchronously; the launch is async),
 /// mirroring `create_terminal`.
 async fn create_tab(
@@ -118,9 +117,9 @@ async fn create_tab(
     }
 }
 
-/// `DELETE /api/v1/sessions/:id/tabs/:tab` — close one tab. The session-slot tab
-/// (`tab == id`) stops via `KillSessionPty` (detaches the agent only if it was the
-/// last live tab); any other tab is closed. A `:tab` not owned by `:id` is a 404.
+/// `DELETE /api/v1/sessions/:id/tabs/:tab` - close one tab. The session-slot tab
+/// (`tab == id`) is refused: it lives as long as the agent does. Any other tab
+/// is closed. A `:tab` not owned by `:id` is a 404.
 async fn delete_tab(
     State(state): State<AppState>,
     Path((id, tab)): Path<(String, String)>,
@@ -139,32 +138,21 @@ async fn delete_tab(
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp.into_response();
     }
-    // The session-slot tab has no row, so its "close" goes through the single-tab
-    // KillSessionPty path: it stops that tab and detaches the agent only if it was
-    // the last live one (any other tabs keep running).
+    // The agent's first tab cannot be closed: it has no row of its own and it
+    // lives as long as the agent does. This route is reachable by hand as well
+    // as from the browser (whose menu item is disabled), so it refuses out loud
+    // rather than quietly doing something else. It used to stop that tab's
+    // provider via `KillSessionPty`, which is not what "close the tab" means and
+    // left the user with a tab they could not get rid of and a session they had
+    // not meant to stop.
     if tab == id {
-        return match state
-            .engine
-            .apply_wire_scoped(
-                WireCommand::KillSessionPty {
-                    session_id: id.clone(),
-                },
-                scope_from_headers(&headers, &state.connections),
-            )
-            .await
-        {
-            // `KillSessionPty` only detaches the agent when it was the LAST live
-            // tab. The engine computes that with the IN-FLIGHT-AWARE
-            // `any_tab_active` and returns it on the wire outcome; consume it
-            // directly rather than re-deriving from `has_live_process` (a
-            // `providers`-only check that misses a sibling's in-flight launch,
-            // so a close racing a launch reported `detached: true` wrongly).
-            Ok(outcome) => {
-                let detached = outcome.detached.unwrap_or(true);
-                (StatusCode::OK, Json(DetachedTab { detached })).into_response()
-            }
-            Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-        };
+        return (
+            StatusCode::BAD_REQUEST,
+            "This agent's first tab can't be closed: it lives as long as the agent does. \
+             Add more tabs and close those instead, or detach the agent to stop everything \
+             it is running.",
+        )
+            .into_response();
     }
     // extra tab: enforce ownership (never a cross-session close), then close it.
     match state.engine.tab_session(tab.clone()).await {
@@ -198,7 +186,7 @@ async fn delete_tab(
     }
 }
 
-/// `PATCH /api/v1/sessions/:id/tabs/:tab` — retarget the tab's provider (effective
+/// `PATCH /api/v1/sessions/:id/tabs/:tab` - retarget the tab's provider (effective
 /// on its next launch). `tab == id` retargets the session-slot tab (delegates to
 /// the session-level change); an extra `:tab` must belong to `:id`.
 async fn retarget_tab(
@@ -246,7 +234,7 @@ async fn retarget_tab(
     }
 }
 
-/// `PUT /api/v1/sessions/:id/focused-tab` — remember the tab the user last
+/// `PUT /api/v1/sessions/:id/focused-tab` - remember the tab the user last
 /// focused on this agent (J4: a dedicated route rather than piggybacking on an
 /// existing verb, matching the one-verb-per-action style above). Silent
 /// (`SetLastFocusedTab` carries no status/toast, J3): the engine itself

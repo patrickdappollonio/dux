@@ -317,42 +317,6 @@ describe("store agent-tab lifecycle", () => {
     })
   })
 
-  it("closeTab on the focused session-slot tab moves focus to a live sibling", async () => {
-    // Closing the focused session-slot tab while a sibling is live must move
-    // focus off it, so the pane doesn't re-subscribe the just-closed tab (which
-    // would force-relaunch the provider).
-    spineBody = spineWithExtraTab(true) // b2 is live
-    const mod = await loadStore()
-    mod.selectTab("s1", "s1") // focus the session-slot tab
-    mod.closeTab("s1", "s1")
-    await tick()
-    expect(mod.getSnapshot().selectedTarget).toEqual({
-      kind: "agent",
-      sessionId: "s1",
-      tabId: "b2",
-    })
-    const del = find(
-      (u, init) =>
-        u === "/api/v1/sessions/s1/tabs/s1" && init?.method === "DELETE",
-    )
-    expect(del).toBeDefined()
-  })
-
-  it("closeTab on the focused session-slot tab with no live sibling leaves focus put", async () => {
-    // No live sibling → the agent is detaching → selection stays on the
-    // session-slot tab (there is nothing live to move to).
-    spineBody = spineWithExtraTab(false) // b2 is dormant
-    const mod = await loadStore()
-    mod.selectTab("s1", "s1")
-    mod.closeTab("s1", "s1")
-    await tick()
-    expect(mod.getSnapshot().selectedTarget).toEqual({
-      kind: "agent",
-      sessionId: "s1",
-      tabId: "s1",
-    })
-  })
-
   it("retargetTab PATCHes the tab with a configured provider", async () => {
     const mod = await loadStore()
     const ok = await mod.retargetTab("s1", "b2", "opencode")

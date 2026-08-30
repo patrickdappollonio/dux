@@ -348,8 +348,11 @@ async fn a_launched_tab_publishes_its_drop_paste_profile_on_the_spine() {
     );
 }
 
+/// The agent's first tab cannot be closed. The route is reachable by hand, so
+/// it refuses with a purposeful sentence instead of stopping the tab's provider
+/// the way it used to.
 #[tokio::test]
-async fn delete_main_tab_detaches_when_no_other_tab_is_live() {
+async fn delete_first_tab_is_refused_with_a_reason() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
 
@@ -358,44 +361,14 @@ async fn delete_main_tab_detaches_when_no_other_tab_is_live() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["detached"], true);
-}
-
-/// F9 regression: `KillSessionPty` on the session-slot tab detaches the agent
-/// only when it was the LAST live tab. With a live Support-tab sibling, the
-/// agent stays Active and `detached` must be false, not the old hardcoded
-/// `true`.
-#[tokio::test]
-async fn delete_main_tab_with_live_sibling_does_not_detach() {
-    let (addr, _tmp) = boot().await;
-    let client = reqwest::Client::new();
-    // A Support tab exists alongside Main; the Main detach must not close it.
-    let support = create_support_tab(&client, addr, "s1").await;
-    // Wait for the async tab-launch job to actually spawn the sibling's PTY,
-    // so the assertion below reflects a truly live sibling, not a race.
-    let session =
-        wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &support)).await;
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap();
     assert!(
-        tab_has_live_process(&session, &support),
-        "support tab never came up live; got {session}"
+        body.contains("first tab can't be closed"),
+        "the refusal must say why: {body}"
     );
 
-    let resp = client
-        .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/s1"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(
-        body["detached"], false,
-        "closing Main while a sibling tab is live must not report detached"
-    );
-
-    // The session still exists and its Support tab survived the Main close,
-    // still with a live process.
+    // The agent is untouched: the refusal stopped nothing.
     let session: serde_json::Value = client
         .get(format!("http://{addr}/api/v1/sessions/s1"))
         .send()
@@ -405,8 +378,12 @@ async fn delete_main_tab_with_live_sibling_does_not_detach() {
         .await
         .unwrap();
     assert!(
-        tab_has_live_process(&session, &support),
-        "the live sibling tab must survive the Main close: {session}"
+        session["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"].as_str() == Some("s1")),
+        "the first tab is still there: {session}"
     );
 }
 

@@ -249,6 +249,13 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::ConfirmDeleteWorktree(_)
         | PromptState::ConfigReloadFailed { .. } => ModalSpec::new(Confirm, false, true),
 
+        // Prose plus ONE button, and that button DISMISSES rather than commits,
+        // so `confirm_button` is false. Confirm rather than Report because its
+        // body does not scroll and its button is a real focused control:
+        // movement keys move focus (trivially, there being one control), Space
+        // and Enter press it, Escape abandons.
+        PromptState::FirstTabCannotClose { .. } => ModalSpec::new(Confirm, false, false),
+
         // ── Picker ──────────────────────────────────────────────────────
         // A selection cursor over rows; Enter picks. The filter rows these
         // carry are deliberately type-immediately and are single-line, so no
@@ -348,6 +355,7 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::ConfirmDeleteAgent { .. }
         | PromptState::ConfirmDeleteTerminal { .. }
         | PromptState::ConfirmCloseTab { .. }
+        | PromptState::FirstTabCannotClose { .. }
         | PromptState::ConfirmQuit { .. }
         | PromptState::ConfirmDiscardFile { .. }
         | PromptState::ConfirmInitRepo { .. }
@@ -436,7 +444,9 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::AttachPullRequestInput { .. }
         // Likewise one single-line field and nothing else.
         | OverlayMouseLayout::NameStandaloneAgent { .. }
-        | OverlayMouseLayout::NameNewAgent { .. } => false,
+        | OverlayMouseLayout::NameNewAgent { .. }
+        // One button, and it is a way out: the modal commits nothing.
+        | OverlayMouseLayout::FirstTabCannotClose { .. } => false,
 
         // A button that commits.
         OverlayMouseLayout::KillRunning { .. }
@@ -1060,8 +1070,13 @@ mod tests {
                     session_id: "s1".to_string(),
                     tab_id: "t1".to_string(),
                     provider_label: "Claude".to_string(),
-                    is_main: false,
                     focus: ConfirmFocus::Cancel,
+                },
+            ),
+            (
+                "FirstTabCannotClose",
+                PromptState::FirstTabCannotClose {
+                    session_id: "s1".to_string(),
                 },
             ),
             (

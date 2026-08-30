@@ -24,10 +24,10 @@ export interface CreatedTab {
 }
 
 // The 200 body for a tab close: whether that close detached the agent (it was
-// the LAST live tab). Both the session-slot branch and the extra-tab branch of
-// `DELETE .../tabs/:tab` return this shape, so the caller never has to guess the
-// outcome from a stale local snapshot. `undefined` only for an older server that
-// still replies with a bodiless 204.
+// the LAST live tab). Only an extra tab can be closed, and its close returns this
+// shape, so the caller never has to guess the outcome from a stale local
+// snapshot. `undefined` only for an older server that still replies with a
+// bodiless 204.
 export interface ClosedTab {
   detached: boolean
 }
@@ -46,11 +46,11 @@ export const tabsApi = {
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs`,
       provider === undefined ? {} : { provider },
     ),
-  // Close a tab. For the session-slot tab (`tabId === sessionId`) this stops that
-  // tab (detaching the agent only if it was the last live tab); for an extra tab
-  // it destroys the tab (same detach-if-last-live rule). Either way the 200 body
-  // carries the authoritative `{ detached }` outcome — the caller should use it
-  // rather than guessing from a pre-close snapshot.
+  // Close an EXTRA tab: the tab is destroyed, and the agent detaches when it was
+  // the last live one. The 200 body carries that authoritative `{ detached }`
+  // outcome rather than leaving the caller to guess from a pre-close snapshot.
+  // The agent's FIRST tab (`tabId === sessionId`) cannot be closed and the route
+  // refuses it with a 400, so nothing should send one here.
   remove: (sessionId: string, tabId: string) =>
     request<ClosedTab | undefined>(
       "DELETE",

@@ -108,6 +108,9 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::ChangeTheme(_)
         | PromptState::AddProjectFailed { .. }
         | PromptState::ConfigReloadFailed { .. }
+        // A warning with one dismiss button: an outside click means the same
+        // thing the button does, since nothing is pending behind it.
+        | PromptState::FirstTabCannotClose { .. }
         | PromptState::Command { .. } => Cancel,
 
         // Confirmations. Dismissal IS cancel here, and every one of these
@@ -303,6 +306,11 @@ impl App {
             }
             PromptState::ConfirmCloseTab { .. } => {
                 self.resolve_confirm_close_tab(false);
+            }
+            // Nothing to resolve: the modal only ever said why the gesture had
+            // no effect.
+            PromptState::FirstTabCannotClose { .. } => {
+                self.prompt = PromptState::None;
             }
             PromptState::ConfirmDiscardFile { .. } => {
                 self.resolve_confirm_discard_file(false);

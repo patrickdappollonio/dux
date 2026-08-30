@@ -3620,8 +3620,9 @@ export function addTab(sessionId: string, provider?: string): void {
     })
 }
 
-// Open the close-tab confirmation. Closing ALWAYS confirms; all tabs are generic.
-// Closing a tab ends it, and closing the agent's last tab detaches the agent.
+// Open the close-tab confirmation for an EXTRA tab. Closing ALWAYS confirms.
+// Closing a tab ends it, and closing the agent's last live tab detaches the
+// agent. The agent's first tab cannot be closed, so it never reaches this.
 export function openCloseTab(sessionId: string, tabId: string): void {
   setState({ closeTabTarget: { sessionId, tabId } })
 }
@@ -3630,24 +3631,23 @@ export function closeCloseTab(): void {
   setState({ closeTabTarget: null })
 }
 
-// Close a tab via REST. Closing the session-slot tab (`tabId === sessionId`) stops
-// that tab and detaches the agent only if it was the last live tab (server 200,
-// session survives); an extra tab is destroyed (also 200, same `{ detached }`
-// shape). All focus/latch mutations wait for the DELETE to actually resolve —
-// closing is NOT optimistic: mutating them beforehand would leave the UI
-// navigated away from a tab that is still alive server-side whenever the
-// request fails, with only a toast and no rollback. On success, if the closed
-// tab was the focused target, move focus off it so the pane never sits on the
-// just-closed tab and re-subscribes it (subscribing force-relaunches the
-// provider): an extra tab falls back to the session-slot tab; the session-slot
-// tab falls back to a live sibling using the server's authoritative `detached`
-// flag (never a pre-close snapshot, which can go stale in a race with another
-// client closing tabs concurrently) with none when the agent fully detached. A
-// failure toasts and leaves all state untouched.
+// Close an EXTRA tab via REST. Only extra tabs can be closed: the agent's first
+// tab (`tabId === sessionId`) has no row of its own, lives as long as the agent
+// does, and the route refuses it with a 400, so no caller may send one here.
+// Closing an extra tab destroys it and detaches the agent when it was the last
+// live one, which the 200 body reports as `{ detached }`.
+//
+// All focus/latch mutations wait for the DELETE to actually resolve: closing is
+// NOT optimistic, because mutating them beforehand would leave the UI navigated
+// away from a tab that is still alive server-side whenever the request fails,
+// with only a toast and no rollback. On success, if the closed tab was the
+// focused target, focus falls back to the session-slot tab so the pane never
+// sits on the just-closed tab and re-subscribes it (subscribing force-relaunches
+// the provider). A failure toasts and leaves all state untouched.
 export function closeTab(sessionId: string, tabId: string): void {
   tabsApi
     .remove(sessionId, tabId)
-    .then((result) => {
+    .then(() => {
       setState({
         startedDormantTabs: state.startedDormantTabs.filter((t) => t !== tabId),
       })
@@ -3657,25 +3657,13 @@ export function closeTab(sessionId: string, tabId: string): void {
         target.sessionId === sessionId &&
         target.tabId === tabId
       if (!focused) return
-      if (tabId !== sessionId) {
-        // Focus the session-slot tab DIRECTLY via `selectTab`, not
-        // `selectSession`: the spine may still be stale at this point (no
-        // `sessions.changed` refetch has pruned it yet), and `selectSession`
-        // would resolve the remembered tab against that stale spine, which
-        // can still name the tab we just deleted, so use `selectTab` to
-        // pick the session-slot tab without consulting that memory.
-        selectTab(sessionId, sessionId)
-        return
-      }
-      // Closing the focused session-slot tab: an older server that still replies
-      // with a bodiless 204 gives no `detached` signal, so treat that as detached
-      // (the safer default: leave selection put rather than guessing a sibling).
-      const detached = result?.detached ?? true
-      if (detached) return
-      const liveSibling = state.spine?.sessions
-        .find((s) => s.id === sessionId)
-        ?.tabs.find((t) => t.id !== tabId && t.has_live_process)
-      if (liveSibling) selectTab(sessionId, liveSibling.id)
+      // Focus the session-slot tab DIRECTLY via `selectTab`, not
+      // `selectSession`: the spine may still be stale at this point (no
+      // `sessions.changed` refetch has pruned it yet), and `selectSession`
+      // would resolve the remembered tab against that stale spine, which
+      // can still name the tab we just deleted, so use `selectTab` to
+      // pick the session-slot tab without consulting that memory.
+      selectTab(sessionId, sessionId)
     })
     .catch((e) =>
       notifyError(e instanceof Error ? e.message : "Could not close the tab."),

@@ -247,6 +247,7 @@ enum PromptMouseTarget {
     ConfirmDeleteTerminalConfirm,
     ConfirmCloseTabCancel,
     ConfirmCloseTabConfirm,
+    FirstTabCannotCloseOk,
     ConfirmDeleteMacroCancel,
     ConfirmDeleteMacroConfirm,
     ConfirmQuitCancel,
@@ -329,6 +330,9 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::ConfirmCloseTabConfirm => {
                 Some(ButtonPressedTarget::ConfirmCloseTabConfirm)
+            }
+            PromptMouseTarget::FirstTabCannotCloseOk => {
+                Some(ButtonPressedTarget::FirstTabCannotCloseOk)
             }
             PromptMouseTarget::ConfirmDeleteMacroCancel => {
                 Some(ButtonPressedTarget::ConfirmDeleteMacroCancel)
@@ -1887,6 +1891,7 @@ impl App {
             | PromptState::ConfirmDeleteAgent { .. }
             | PromptState::ConfirmDeleteTerminal { .. }
             | PromptState::ConfirmCloseTab { .. }
+            | PromptState::FirstTabCannotClose { .. }
             | PromptState::ConfirmQuit { .. }
             | PromptState::ConfirmDiscardFile { .. }
             | PromptState::ConfirmInitRepo { .. }
@@ -4781,6 +4786,24 @@ impl App {
         Some(false)
     }
 
+    /// The first-tab warning's keys. One control, so focus never moves and
+    /// every ladder step that means "act" or "leave" does the same thing:
+    /// close the modal. Movement keys are accepted and change nothing, which is
+    /// what moving focus among one control means.
+    fn handle_first_tab_cannot_close_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if !matches!(self.prompt, PromptState::FirstTabCannotClose { .. }) {
+            return None;
+        }
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close | ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
+                self.prompt = PromptState::None;
+            }
+            ModalKeyStep::MoveFocus(_) | ModalKeyStep::FallThroughToField => {}
+        }
+        Some(false)
+    }
+
     fn handle_confirm_quit_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
         let PromptState::ConfirmQuit { focus, .. } = &mut self.prompt else {
             return None;
@@ -4976,6 +4999,9 @@ impl App {
             return Some(exit);
         }
         if let Some(exit) = self.handle_confirm_close_tab_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_first_tab_cannot_close_prompt_key(key) {
             return Some(exit);
         }
         if let Some(exit) = self.handle_confirm_quit_prompt_key(key) {
@@ -6462,6 +6488,11 @@ impl App {
                 column,
                 row,
             ),
+            OverlayMouseLayout::FirstTabCannotClose { ok_button } => click_target(
+                &[(ok_button, PromptMouseTarget::FirstTabCannotCloseOk)],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmDeleteMacro {
                 cancel_button,
                 delete_button,
@@ -7542,63 +7573,45 @@ impl App {
     }
 
     pub(super) fn resolve_confirm_close_tab(&mut self, confirm: bool) -> bool {
-        let (session_id, tab_id, is_main) = match &self.prompt {
+        let (session_id, tab_id) = match &self.prompt {
             PromptState::ConfirmCloseTab {
-                session_id,
-                tab_id,
-                is_main,
-                ..
-            } => (session_id.clone(), tab_id.clone(), *is_main),
+                session_id, tab_id, ..
+            } => (session_id.clone(), tab_id.clone()),
             _ => return false,
         };
         self.prompt = PromptState::None;
         if !confirm {
             return false;
         }
-        if is_main {
-            // Closing the session-slot tab (which has no row) stops just that
-            // tab's provider; the agent detaches only when it was the last live
-            // tab (kill_runtime_targets handles the detach-if-last). Other tabs
-            // keep running and the agent stays Active.
-            self.kill_runtime_targets(&[RuntimeTargetId::Agent(session_id.clone())]);
-            // Prefer a live sibling tab so the user lands on something
-            // running; fall back to the now-dormant session-slot tab only
-            // when nothing else is live.
-            let target = self
-                .engine
-                .first_live_tab(&session_id)
-                .unwrap_or_else(|| session_id.clone());
-            self.set_focused_tab(&session_id, &target);
-            if self.engine.any_tab_active(&session_id) {
-                self.set_info("Tab closed. The agent's other tabs are still running.".to_string());
-            } else {
-                self.set_info(
-                    "Closed the last tab, so the agent detached. It stays in Projects and can be reopened at any time.".to_string(),
-                );
+        match self.engine.close_tab(&session_id, &tab_id) {
+            Ok(outcome) => {
+                // Prefer a live sibling tab so the user lands on something
+                // running; fall back to the session-slot tab only when nothing
+                // else is live. This also resets the snapshot so the target
+                // tab's PTY renders immediately, and keeps the next fullscreen
+                // toggle (activate) from relaunching a dormant tab.
+                let target = self
+                    .engine
+                    .first_live_tab(&session_id)
+                    .unwrap_or_else(|| session_id.clone());
+                self.set_focused_tab(&session_id, &target);
+                self.rebuild_left_items();
+                // `CloseTabOutcome.detached` is authoritative about whether that
+                // close took the agent's last live tab with it. When it did, the
+                // close changed more than the tab the user acted on, so the line
+                // has to say what happened to the agent and how to get it back.
+                if outcome.detached {
+                    self.set_info(
+                        "Tab closed. That was the agent's last live tab, so the agent detached. It stays in Projects and can be reopened at any time.".to_string(),
+                    );
+                } else {
+                    self.set_info(
+                        "Tab closed. The agent's other tabs are still running.".to_string(),
+                    );
+                }
             }
-        } else {
-            match self.engine.close_tab(&session_id, &tab_id) {
-                // The core `CloseTabOutcome.detached` is authoritative; this
-                // branch's messaging does not distinguish detach, so it is
-                // ignored here (the session-slot close path above reports it).
-                Ok(_) => {
-                    // Prefer a live sibling tab so the user lands on something
-                    // running; fall back to the session-slot tab only when
-                    // nothing else is live. This also resets the snapshot so
-                    // the target tab's PTY renders immediately, and keeps the
-                    // next fullscreen toggle (activate) from relaunching a
-                    // dormant tab.
-                    let target = self
-                        .engine
-                        .first_live_tab(&session_id)
-                        .unwrap_or_else(|| session_id.clone());
-                    self.set_focused_tab(&session_id, &target);
-                    self.rebuild_left_items();
-                    self.set_info("Tab closed.".to_string());
-                }
-                Err(e) => {
-                    self.set_error(format!("Could not close the tab: {e}"));
-                }
+            Err(e) => {
+                self.set_error(format!("Could not close the tab: {e}"));
             }
         }
         false
@@ -8727,6 +8740,7 @@ impl App {
             | PromptMouseTarget::ConfirmDeleteTerminalConfirm
             | PromptMouseTarget::ConfirmCloseTabCancel
             | PromptMouseTarget::ConfirmCloseTabConfirm
+            | PromptMouseTarget::FirstTabCannotCloseOk
             | PromptMouseTarget::ConfirmDeleteMacroCancel
             | PromptMouseTarget::ConfirmDeleteMacroConfirm
             | PromptMouseTarget::MacroCancel
@@ -8829,6 +8843,10 @@ impl App {
             }
             ButtonPressedTarget::ConfirmCloseTabCancel => self.resolve_confirm_close_tab(false),
             ButtonPressedTarget::ConfirmCloseTabConfirm => self.resolve_confirm_close_tab(true),
+            ButtonPressedTarget::FirstTabCannotCloseOk => {
+                self.prompt = PromptState::None;
+                false
+            }
             ButtonPressedTarget::ConfirmDeleteMacroCancel => {
                 self.resolve_confirm_delete_macro(false)
             }
@@ -32354,7 +32372,6 @@ cyan = "#00ffff"
             session_id: session_id.clone(),
             tab_id: tab_id.clone(),
             provider_label: "Codex".to_string(),
-            is_main: false,
             focus: ConfirmFocus::Confirm,
         };
         // Space activates the focused (Close) button.
@@ -32397,7 +32414,6 @@ cyan = "#00ffff"
             session_id: session_id.clone(),
             tab_id: "tab-1".to_string(),
             provider_label: "Codex".to_string(),
-            is_main: false,
             focus: ConfirmFocus::Confirm,
         };
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
@@ -32411,8 +32427,11 @@ cyan = "#00ffff"
         );
     }
 
+    /// The close gesture on the agent's FIRST tab must explain itself rather
+    /// than stopping the provider behind it. The old behaviour killed the
+    /// session-slot PTY, which is what this asserts is gone.
     #[test]
-    fn closing_main_tab_refocuses_live_sibling_not_dormant_main() {
+    fn close_gesture_on_the_first_tab_warns_instead_of_killing_its_pty() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         let worktree = std::path::PathBuf::from(
@@ -32420,35 +32439,60 @@ cyan = "#00ffff"
                 .managed_worktree()
                 .expect("managed test session"),
         );
-        // The session-slot tab is live; one extra tab is also live. Closing
-        // the session-slot (main) tab should refocus the live extra tab, not
-        // leave focus stuck on the now-dormant session-slot id.
-        let tab_id = "tab-1".to_string();
-        insert_support_tab(&mut app, &session_id, &tab_id);
         app.engine
             .providers
             .insert(session_id.clone(), spawn_test_provider(&worktree));
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("a session row");
+        app.set_focused_tab(&session_id, &session_id);
+        let status_before = app.status.most_recent_tui().map(|(_, text)| text);
+
+        app.close_focused_tab_prompt();
+
+        assert!(
+            matches!(
+                &app.prompt,
+                PromptState::FirstTabCannotClose { session_id: s } if s == &session_id
+            ),
+            "the first tab must raise the warning"
+        );
+        assert!(
+            app.engine.providers.contains_key(&session_id),
+            "the first tab's PTY must survive the close gesture"
+        );
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            status_before,
+            "the warning says everything; no status line is emitted"
+        );
+    }
+
+    /// One control, so every "act" or "leave" key dismisses it and nothing
+    /// else happens.
+    #[test]
+    fn the_first_tab_warning_dismisses_and_leaves_the_agent_alone() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::PathBuf::from(
+            &app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         app.engine
             .providers
-            .insert(tab_id.clone(), spawn_test_provider(&worktree));
-        app.set_focused_tab(&session_id, &session_id);
-        app.focus = FocusPane::Center;
-
-        app.prompt = PromptState::ConfirmCloseTab {
+            .insert(session_id.clone(), spawn_test_provider(&worktree));
+        app.prompt = PromptState::FirstTabCannotClose {
             session_id: session_id.clone(),
-            tab_id: session_id.clone(),
-            provider_label: "Codex".to_string(),
-            is_main: true,
-            focus: ConfirmFocus::Confirm,
         };
-        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
-            .expect("handle close");
 
-        assert_eq!(
-            app.focused_tab_id(&session_id),
-            tab_id,
-            "focus should land on the live sibling, not the dormant session-slot tab"
-        );
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("dismiss the warning");
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(app.engine.providers.contains_key(&session_id));
     }
 
     #[test]
@@ -32476,7 +32520,6 @@ cyan = "#00ffff"
             session_id: session_id.clone(),
             tab_id: "tab-1".to_string(),
             provider_label: "Codex".to_string(),
-            is_main: false,
             focus: ConfirmFocus::Confirm,
         };
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
@@ -32501,40 +32544,28 @@ cyan = "#00ffff"
         );
     }
 
+    /// The close gesture on an EXTRA tab is unchanged: it still opens the
+    /// destructive confirmation, focused on Cancel.
     #[test]
-    fn confirm_close_main_tab_detaches_without_deleting() {
+    fn close_gesture_on_an_extra_tab_still_confirms() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::PathBuf::from(
-            &app.engine.sessions[0]
-                .managed_worktree()
-                .expect("managed test session"),
-        );
-        // An extra tab exists; detaching the session-slot tab must NOT touch it.
         let tab_id = "tab-1".to_string();
         insert_support_tab(&mut app, &session_id, &tab_id);
-        app.engine
-            .providers
-            .insert(session_id.clone(), spawn_test_provider(&worktree));
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("a session row");
+        app.set_focused_tab(&session_id, &tab_id);
 
-        app.prompt = PromptState::ConfirmCloseTab {
-            session_id: session_id.clone(),
-            tab_id: session_id.clone(),
-            provider_label: "Codex".to_string(),
-            is_main: true,
-            focus: ConfirmFocus::Confirm,
-        };
-        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
-            .expect("handle detach");
+        app.close_focused_tab_prompt();
 
-        assert!(
-            !app.engine.providers.contains_key(&session_id),
-            "detaching the session-slot tab stops its provider"
-        );
-        assert!(
-            app.engine.agent_tabs.contains_key(&tab_id),
-            "detaching the session-slot tab must not delete extra tab rows"
-        );
+        assert!(matches!(
+            &app.prompt,
+            PromptState::ConfirmCloseTab { tab_id: t, focus, .. }
+                if t == "tab-1" && matches!(focus, ConfirmFocus::Cancel)
+        ));
     }
 
     #[test]
@@ -34549,11 +34580,16 @@ cyan = "#00ffff"
                     .expect("open the delete-terminal confirmation");
             }
             "ConfirmCloseTab" => {
+                // Only an EXTRA tab reaches this confirmation; the first tab
+                // raises the un-closable warning instead.
+                let session_id = app.engine.sessions[0].id.clone();
+                insert_support_tab(&mut app, &session_id, "tab-1");
                 app.selected_left = app
                     .left_items()
                     .iter()
                     .position(|item| matches!(item, LeftItem::Session(_)))
                     .expect("a session row");
+                app.set_focused_tab(&session_id, "tab-1");
                 app.close_focused_tab_prompt();
             }
             "ConfirmQuit" => {
