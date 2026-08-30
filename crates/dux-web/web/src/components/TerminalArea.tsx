@@ -7,7 +7,7 @@ import { DormantTabCard } from "@/components/DormantTabCard"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { PrBanner } from "@/components/PrBanner"
 import { Welcome } from "@/components/Welcome"
-import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
+import { isFocusedTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { useDux } from "@/lib/store"
 import type { DuxState } from "@/lib/store"
 import { ownerSessionId as terminalOwnerSessionId } from "@/lib/terminalOwner"
@@ -187,11 +187,12 @@ export function TerminalArea() {
     selectedTarget.kind === "agent"
       ? tabs.find((t) => t.id === selectedTarget.tabId)
       : undefined
-  // A focused extra tab with no live process is DORMANT (reopened after a
-  // restart): render its card WITHOUT mounting the pane, because mounting opens
-  // the PTY socket, which force-launches the provider. Only the card's "Start
-  // session" button (via `startedDormantTabs`) launches it.
-  const isExtraDormant = isExtraTabDormant(
+  // A focused tab with no live process is DORMANT (reopened after a restart):
+  // render its card WITHOUT mounting the pane, because mounting opens the PTY
+  // socket, which force-launches the provider. Only a deliberate launch (the
+  // card's "Start session" button, a create, a reconnect, all of them via
+  // `startedDormantTabs`) starts it. This includes the agent's first tab.
+  const dormant = isFocusedTabDormant(
     selectedTarget,
     focusedTab,
     startedDormantTabs,
@@ -227,7 +228,7 @@ export function TerminalArea() {
           target={selectedTarget}
           paneKey={paneKey}
           targetId={targetId}
-          dormant={isExtraDormant}
+          dormant={dormant}
           focusedTab={focusedTab}
         />
       </div>

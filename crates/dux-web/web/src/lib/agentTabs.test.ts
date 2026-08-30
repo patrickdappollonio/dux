@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   defaultProviderForSession,
-  isExtraTabDormant,
+  isFocusedTabDormant,
   isFirstTab,
   isTabGone,
   resolveFocusedTab,
@@ -105,24 +105,37 @@ describe("isFirstTab", () => {
   })
 })
 
-describe("isExtraTabDormant", () => {
-  it("is false for the session-slot tab even with no live process", () => {
+describe("isFocusedTabDormant", () => {
+  // The agent's FIRST tab is dormant like any other. It used to be excluded,
+  // which made focusing a first tab left dormant by a restart launch it
+  // silently.
+  it("is true for a dormant first tab until it has been started", () => {
     const sessionSlot = { ...extraTab("s1", false), id: "s1" }
-    expect(isExtraTabDormant(agentTarget("s1", "s1"), sessionSlot, [])).toBe(false)
+    expect(isFocusedTabDormant(agentTarget("s1", "s1"), sessionSlot, [])).toBe(
+      true,
+    )
+    expect(
+      isFocusedTabDormant(agentTarget("s1", "s1"), sessionSlot, ["s1"]),
+    ).toBe(false)
+  })
+
+  it("is false for a live first tab", () => {
+    const live = { ...extraTab("s1", true), id: "s1" }
+    expect(isFocusedTabDormant(agentTarget("s1", "s1"), live, [])).toBe(false)
   })
 
   it("is true for an extra tab with no live process until it has been started", () => {
     const dormant = extraTab("tab-1", false)
-    expect(isExtraTabDormant(agentTarget("s1", "tab-1"), dormant, [])).toBe(true)
+    expect(isFocusedTabDormant(agentTarget("s1", "tab-1"), dormant, [])).toBe(true)
     // Once explicitly started, the card is suppressed for that tab id.
     expect(
-      isExtraTabDormant(agentTarget("s1", "tab-1"), dormant, ["tab-1"]),
+      isFocusedTabDormant(agentTarget("s1", "tab-1"), dormant, ["tab-1"]),
     ).toBe(false)
   })
 
   it("is false for an extra tab that has a live process", () => {
     expect(
-      isExtraTabDormant(agentTarget("s1", "tab-1"), extraTab("tab-1", true), []),
+      isFocusedTabDormant(agentTarget("s1", "tab-1"), extraTab("tab-1", true), []),
     ).toBe(false)
   })
 
@@ -132,9 +145,9 @@ describe("isExtraTabDormant", () => {
       terminalId: "t1",
       sessionId: "s1",
     }
-    expect(isExtraTabDormant(terminal, extraTab("tab-1", false), [])).toBe(false)
-    expect(isExtraTabDormant(agentTarget("s1", "tab-1"), undefined, [])).toBe(false)
-    expect(isExtraTabDormant(null, extraTab("tab-1", false), [])).toBe(false)
+    expect(isFocusedTabDormant(terminal, extraTab("tab-1", false), [])).toBe(false)
+    expect(isFocusedTabDormant(agentTarget("s1", "tab-1"), undefined, [])).toBe(false)
+    expect(isFocusedTabDormant(null, extraTab("tab-1", false), [])).toBe(false)
   })
 })
 

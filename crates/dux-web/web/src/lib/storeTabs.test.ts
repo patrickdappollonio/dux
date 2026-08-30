@@ -111,6 +111,14 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       headers: { get: () => null },
     } as unknown as Response
   }
+  if (u.endsWith("/reconnect") && init?.method === "POST") {
+    return {
+      ok: true,
+      status: 200,
+      text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response
+  }
   if (u.includes("/changes")) {
     return {
       ok: true,
@@ -168,6 +176,32 @@ function spineWithExtraTab(b2Live: boolean) {
           { id: "s1", has_live_process: true },
           { id: "b2", has_live_process: b2Live },
         ],
+      },
+    ],
+    sidebar: { groups: [] },
+  }
+}
+
+// A spine whose SESSION-SLOT tab (s1) has no live process: the shape a create or
+// a reconnect leaves behind while its launch is still in flight, and the shape a
+// launch that FAILED leaves behind forever.
+function spineWithDormantSlot() {
+  return {
+    projects: [{ id: "p1", name: "Repo" }],
+    sessions: [
+      {
+        id: "s1",
+        workspace: {
+          kind: "managed",
+          project_id: "p1",
+          branch_name: "",
+          initial_branch: "",
+          branch_provenance: "created",
+          source_branch: "",
+          worktree_path: "",
+        },
+        terminals: [],
+        tabs: [{ id: "s1", has_live_process: false }],
       },
     ],
     sidebar: { groups: [] },
@@ -415,6 +449,69 @@ describe("store agent-tab lifecycle", () => {
     expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
     mod.handleTabGone("b2")
     expect(mod.getSnapshot().startedDormantTabs).not.toContain("b2")
+  })
+
+  // A SESSION-SLOT launch failure emits no `tab-launch-<id>` key (that key exists
+  // only for extra tabs), so nothing on the wire tells this client the reconnect
+  // it asked for never came up. The latch therefore expires on its own; without
+  // that, the dormant card would stay suppressed forever and every attach would
+  // force-launch the agent again.
+  it("expires the reconnect latch when the relaunched first tab never comes up", async () => {
+    spineBody = spineWithDormantSlot()
+    const mod = await loadStore()
+    vi.useFakeTimers()
+    try {
+      mod.reconnectSession("s1", true)
+      expect(mod.getSnapshot().startedDormantTabs).toContain("s1")
+
+      // Still in flight: the latch holds, so the card does not flash over a
+      // launch the user asked for.
+      vi.advanceTimersByTime(mod.TAB_LAUNCH_LATCH_TTL_MS - 1)
+      expect(mod.getSnapshot().startedDormantTabs).toContain("s1")
+
+      // The launch failed and nothing ever reported live: the latch goes, and
+      // the dormant card is back.
+      vi.advanceTimersByTime(2)
+      expect(mod.getSnapshot().startedDormantTabs).not.toContain("s1")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("keeps the reconnect latch once the relaunched first tab reports live", async () => {
+    spineBody = spineWithDormantSlot()
+    const mod = await loadStore()
+    mod.reconnectSession("s1", true)
+    expect(mod.getSnapshot().startedDormantTabs).toContain("s1")
+
+    // The provider comes up; the spine clears the latch because it is no longer
+    // needed, NOT because the launch failed.
+    spineBody = spineWithExtraTab(true)
+    fireSessionsChanged()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().startedDormantTabs).not.toContain("s1")
+    })
+    const slot = mod
+      .getSnapshot()
+      .spine?.sessions[0].tabs?.find((t) => t.id === "s1")
+    expect(slot?.has_live_process).toBe(true)
+  })
+
+  it("reconnectSession latches the session-slot tab it focuses", async () => {
+    spineBody = spineWithDormantSlot()
+    const mod = await loadStore()
+    mod.reconnectSession("s1", true)
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1",
+    })
+    expect(mod.getSnapshot().startedDormantTabs).toContain("s1")
+    await vi.waitFor(() => {
+      expect(
+        find((u, init) => u.endsWith("/reconnect") && init?.method === "POST"),
+      ).toBeDefined()
+    })
   })
 
   it("normalizes a spine session that omits tabs to an empty array without throwing", async () => {

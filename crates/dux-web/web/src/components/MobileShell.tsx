@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
+import { isFocusedTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
@@ -563,7 +563,7 @@ function TerminalScreen() {
         <TerminalViewport
           target={selectedTarget}
           focusedTab={focusedTab}
-          dormant={isExtraTabDormant(
+          dormant={isFocusedTabDormant(
             selectedTarget,
             focusedTab,
             startedDormantTabs,

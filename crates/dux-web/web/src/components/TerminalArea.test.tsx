@@ -198,18 +198,52 @@ describe("TerminalArea dormant-tab gating (G-T4)", () => {
     expect(startDormantTabMock).toHaveBeenCalledWith("s1", "b2")
   })
 
-  // Control case: the LIVE session-slot tab does NOT get the dormant treatment
-  // (mirrors `isExtraTabDormant`'s own "never for the session-slot tab" case,
-  // exercised here through the actual component gate rather than only the pure
-  // helper). This does not assert a PTY socket opens — mounting a real
-  // `TerminalPane` pulls in xterm's canvas rendering, which jsdom cannot back
-  // without the (unlisted) `canvas` npm package — only that the gate takes the
+  // Control case: the LIVE session-slot tab does NOT get the dormant treatment.
+  // This does not assert a PTY socket opens: mounting a real `TerminalPane`
+  // pulls in xterm's canvas rendering, which jsdom cannot back without the
+  // (unlisted) `canvas` npm package. It only checks that the gate takes the
   // "not dormant" branch.
   it("does not render the DormantTabCard for the live session-slot tab", () => {
     mockState = makeState({
       spine: dormantSpine(),
       selectedSessionId: "s1",
       selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+    })
+    render(<TerminalArea />)
+    expect(screen.queryByText("Start session")).toBeNull()
+  })
+
+  // The agent's FIRST tab, dormant after a restart, gets the same card and the
+  // same "no socket until pressed" contract an extra tab gets. Subscribing is
+  // what force-launches the provider server-side, so focus alone must not do it
+  // here either.
+  it("renders the DormantTabCard and opens NO PTY socket for a dormant first tab", async () => {
+    const spine = dormantSpine()
+    spine!.sessions[0].tabs[0].has_live_process = false
+    mockState = makeState({
+      spine,
+      selectedSessionId: "s1",
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+    })
+    render(<TerminalArea />)
+
+    expect(await screen.findByText("Start session")).toBeTruthy()
+    expect(TrackingWebSocket.instances).toHaveLength(0)
+
+    fireEvent.click(screen.getByText("Start session"))
+    expect(startDormantTabMock).toHaveBeenCalledWith("s1", "s1")
+  })
+
+  // The latch is what keeps the card off a launch the user asked for (a create
+  // or a reconnect marks the tab started before its PTY reports live).
+  it("suppresses the card for a not-yet-live first tab this client started", () => {
+    const spine = dormantSpine()
+    spine!.sessions[0].tabs[0].has_live_process = false
+    mockState = makeState({
+      spine,
+      selectedSessionId: "s1",
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      startedDormantTabs: ["s1"],
     })
     render(<TerminalArea />)
     expect(screen.queryByText("Start session")).toBeNull()

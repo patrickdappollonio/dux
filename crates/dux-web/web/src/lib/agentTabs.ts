@@ -15,13 +15,20 @@ export function isFirstTab(sessionId: string, tabId: string): boolean {
   return tabId === sessionId
 }
 
-// Whether the focused target is an extra tab that is currently DORMANT (reopened
-// after a restart with no live process, and not yet explicitly started this
-// session). A dormant tab must render its "Start session" card WITHOUT mounting
-// the terminal pane, because mounting subscribes to the PTY socket which
-// force-launches the provider — so focus alone must never launch it. The
-// session-slot tab (`focusedTab.id === target.sessionId`) is never dormant.
-export function isExtraTabDormant(
+// Whether the focused tab is currently DORMANT (no live process, and not
+// explicitly started by this client). A dormant tab must render its "Start
+// session" card WITHOUT mounting the terminal pane, because mounting subscribes
+// to the PTY socket which force-launches the provider, so focus alone must
+// never launch it.
+//
+// This covers the agent's FIRST tab too. It used to be excluded, which meant
+// selecting a first tab left over dormant from a restart silently launched it
+// (possibly with resume arguments that fail), the one place on the web where
+// focus alone still launched something. Every deliberate launch this client
+// starts (a create, a reconnect, the card's own button) latches its tab id into
+// `startedDormantTabs`, so the card never flashes in front of a launch the user
+// actually asked for.
+export function isFocusedTabDormant(
   target: SelectedTarget | null,
   focusedTab: AgentTabView | undefined,
   startedDormantTabs: string[],
@@ -30,7 +37,6 @@ export function isExtraTabDormant(
     !!target &&
     target.kind === "agent" &&
     !!focusedTab &&
-    focusedTab.id !== target.sessionId &&
     !focusedTab.has_live_process &&
     !startedDormantTabs.includes(focusedTab.id)
   )
