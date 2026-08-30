@@ -289,8 +289,11 @@ IntelliSense and no cross-file diagnostics.
 ## Markdown and SVG preview
 
 For Markdown files (`.md`, `.markdown`, and friends) a **Preview / Edit** toggle renders the
-current buffer, unsaved edits included. It handles GitHub-flavored Markdown, hides a YAML
-frontmatter block, and rewrites relative image paths so they load from the worktree.
+current buffer, unsaved edits included. It handles GitHub-flavored Markdown and rewrites
+relative image paths so they load from the worktree. A leading YAML frontmatter block is
+rendered the way GitHub renders it, as a key/value table above the page, with lists joined
+inline and a nested key shown as `parent.child`; a value dux cannot read is shown as the
+raw text you wrote.
 
 SVG files get the same treatment: they open as text and the toggle renders the drawing from
 whatever is in the buffer right now.

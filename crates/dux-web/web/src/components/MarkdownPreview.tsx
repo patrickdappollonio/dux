@@ -5,6 +5,7 @@ import rehypeSanitize from "rehype-sanitize"
 import remarkFrontmatter from "remark-frontmatter"
 import remarkGfm from "remark-gfm"
 import { markdownAssetUrl } from "@/lib/markdown"
+import { formatFrontMatterValue, splitFrontMatter } from "@/lib/frontMatter"
 import type { EditorRoot } from "@/lib/editorRoot"
 
 interface MarkdownPreviewProps {
@@ -23,8 +24,8 @@ interface MarkdownPreviewProps {
 // Tailwind typography plugin.
 //
 // Plugins: remark-gfm (tables, task lists, strikethrough, autolinks);
-// remark-frontmatter (recognizes a leading YAML `--- … ---` block so it's omitted
-// from the preview instead of rendering as a stray rule + key:value text);
+// remark-frontmatter (recognizes a leading YAML `--- … ---` block so a block this
+// component chose not to lift out never renders as a stray rule + key:value text);
 // rehype-raw (renders embedded HTML rather than escaping it); then rehype-sanitize
 // (its default = GitHub's schema). Embedded HTML therefore renders the way it does
 // on GitHub — common formatting tags (div, details/summary, table, kbd, sub/sup,
@@ -65,6 +66,13 @@ export default function MarkdownPreview({
     window.open(anchor.href, "_blank", "noopener,noreferrer")
   }
 
+  // GitHub renders a document's leading YAML block as a table above the prose
+  // rather than dropping it, and front matter is often the only place a title,
+  // date or tag list is written. The values are user content and are rendered as
+  // React text, so they are escaped rather than parsed as markup.
+  const front = splitFrontMatter(content)
+  const body = front === null ? content : front.body
+
   return (
     <div className="h-full overflow-auto" onClick={onLinkClick}>
       <div
@@ -91,12 +99,32 @@ export default function MarkdownPreview({
           "[&_img]:max-w-full [&_img]:rounded",
         ].join(" ")}
       >
+        {front !== null && front.rows.length > 0 && (
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Key</th>
+                <th scope="col">Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {front.rows.map((row, index) => (
+                <tr key={`${row.key}-${index}`}>
+                  <th scope="row">{row.key}</th>
+                  <td className="whitespace-pre-wrap">
+                    {formatFrontMatterValue(row.value)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
         <Markdown
           remarkPlugins={[remarkFrontmatter, remarkGfm]}
           rehypePlugins={[rehypeRaw, rehypeSanitize]}
           urlTransform={transformUrl}
         >
-          {content}
+          {body}
         </Markdown>
       </div>
     </div>
