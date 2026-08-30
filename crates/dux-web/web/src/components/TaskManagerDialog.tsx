@@ -22,6 +22,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import { sessionLabel } from "@/lib/agentWorkspace"
+import { isFirstTab } from "@/lib/agentTabs"
 import { formatBytes, formatCpu } from "@/lib/formatStats"
 import {
   RESOURCE_POLL_INTERVAL_MS,
@@ -39,10 +42,13 @@ import {
 } from "@/lib/resourceRows"
 import { resourcesApi, type ResourceStatsView } from "@/lib/resourcesApi"
 import {
+  closeStopAgent,
   closeStopAll,
   closeTaskManager,
+  killSessionPty,
   openCloseTab,
   openDeleteTerminal,
+  openStopAgent,
   openStopAll,
   stopAllRunning,
   useDux,
@@ -93,6 +99,7 @@ export function TaskManagerDialog() {
       </Dialog>
 
       <ConfirmStopAllDialog open={stopAllOpen} />
+      <ConfirmStopAgentDialog />
     </>
   )
 }
@@ -209,15 +216,24 @@ function TaskManagerBody() {
 
   function handleStop(row: TaskRow) {
     if (row.targetId === null) return
-    // Both paths open an EXISTING confirmation dialog rather than acting now.
-    // Guard per KIND: a terminal (of either owner) needs only its target id.
-    // A project terminal's `sessionId` is null, and a session-null early
-    // return here would leave its Stop button dead.
+    // Every path opens a confirmation dialog rather than acting now. Guard per
+    // KIND: a terminal (of either owner) needs only its target id. A project
+    // terminal's `sessionId` is null, and a session-null early return here would
+    // leave its Stop button dead.
     if (row.kind === "terminal") {
       openDeleteTerminal(row.targetId)
       return
     }
     if (row.sessionId === null) return
+    // Two different acts wear the same Stop control. An agent's FIRST tab cannot
+    // be closed, so its row STOPS the agent (its provider ends, the agent stays
+    // in the list, relaunchable); an extra tab's row CLOSES that tab for good.
+    // Routing the first tab through the close dialog would confirm and then be
+    // refused by the server, leaving no way to stop an agent from here at all.
+    if (isFirstTab(row.sessionId, row.targetId)) {
+      openStopAgent(row.sessionId)
+      return
+    }
     openCloseTab(row.sessionId, row.targetId)
   }
 
@@ -696,6 +712,75 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
           </Button>
           <Button variant="destructive" onClick={handleConfirm}>
             Stop all
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// The confirmation behind an agent row's Stop. An agent's FIRST tab cannot be
+// closed, so this row's verb is genuinely "stop", not "close", and it needs its
+// own dialog rather than borrowing ConfirmCloseTabDialog, whose copy promises to
+// delete a tab for good and whose confirm the server would refuse. Follows the
+// established per-action pattern: Cancel `autoFocus`, the confirm
+// `variant="destructive"`, misclick-safe spacing.
+//
+// The copy states what `KillSessionPty` actually does: it stops the provider
+// running in this agent's first tab and nothing else. Sibling tabs keep running,
+// and the agent detaches only when this was its last live tab.
+function ConfirmStopAgentDialog() {
+  const { stopAgentTarget, spine } = useDux()
+
+  const session = stopAgentTarget
+    ? spine?.sessions.find((s) => s.id === stopAgentTarget)
+    : undefined
+  const label = session ? sessionLabel(session) : ""
+  // Sibling tabs that would keep running. Counted by liveness, because a dormant
+  // tab left over from a restart keeps nothing alive.
+  const liveSiblings =
+    session?.tabs.filter((t) => t.id !== session.id && t.has_live_process)
+      .length ?? 0
+
+  // Closes itself when the agent leaves the live view model, like every other
+  // target-keyed dialog.
+  const isOpen = useVanishedTargetGuard(
+    stopAgentTarget !== null,
+    session !== undefined,
+    closeStopAgent,
+  )
+
+  function handleConfirm() {
+    if (!stopAgentTarget) return
+    killSessionPty(stopAgentTarget)
+    closeStopAgent()
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (!next) closeStopAgent()
+  }
+
+  return (
+    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
+      <DialogContent showCloseButton={false} destructive>
+        <DialogHeader>
+          <DialogTitle>Stop {label}?</DialogTitle>
+          <DialogDescription>
+            This ends the process running in this agent&apos;s first tab. The
+            agent stays in your list and can be started again at any time.{" "}
+            {liveSiblings > 0
+              ? `Its other ${countLabel(liveSiblings, "tab")} keep running, so the agent stays active.`
+              : "It has no other running tab, so the agent detaches and stays in Projects, reopenable."}
+          </DialogDescription>
+        </DialogHeader>
+        {/* Misclick-safe spacing between the body and the buttons. */}
+        <div className="h-2" />
+        <DialogFooter>
+          <Button variant="outline" autoFocus onClick={closeStopAgent}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={handleConfirm}>
+            Stop agent
           </Button>
         </DialogFooter>
       </DialogContent>

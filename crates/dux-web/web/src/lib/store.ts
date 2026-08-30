@@ -335,10 +335,16 @@ export interface DuxState {
   // The companion terminal id pending close confirmation, or null. Mirrors the
   // TUI, which ALWAYS confirms terminal deletion (the running process is killed).
   deleteTerminalTarget: string | null
-  // The tab pending close confirmation, or null. Closing always confirms; all
-  // tabs are generic. Closing a tab ends it, and closing the agent's last tab
-  // detaches the agent (which stays in Projects, reopenable).
+  // The EXTRA tab pending close confirmation, or null. Closing always confirms.
+  // Closing a tab ends it, and closing the agent's last live tab detaches the
+  // agent (which stays in Projects, reopenable). The agent's first tab can never
+  // be a target here: it cannot be closed at all.
   closeTabTarget: { sessionId: string; tabId: string } | null
+  // The agent pending stop confirmation, or null. Distinct from
+  // `closeTabTarget`: stopping ends the agent's first tab's process and leaves
+  // the agent in the list, where closing destroys an extra tab for good. Raised
+  // by the Task Manager's row for an agent's first tab.
+  stopAgentTarget: string | null
   // Session ids with a tab-create request in flight, so the strip's "+" disables
   // until it resolves (a double-click can't spawn two tabs). The per-agent tab
   // cap still guards the server; this is the common-case UX guard.
@@ -888,6 +894,7 @@ let state: DuxState = {
   deleteTarget: null,
   deleteTerminalTarget: null,
   closeTabTarget: null,
+  stopAgentTarget: null,
   createTabInFlight: [],
   startedDormantTabs: [],
   discardTarget: null,
@@ -3622,13 +3629,28 @@ export function addTab(sessionId: string, provider?: string): void {
 
 // Open the close-tab confirmation for an EXTRA tab. Closing ALWAYS confirms.
 // Closing a tab ends it, and closing the agent's last live tab detaches the
-// agent. The agent's first tab cannot be closed, so it never reaches this.
+// agent. The agent's first tab cannot be closed, so it never reaches this: the
+// surfaces that offer a first-tab gesture either disable it (the tab strip) or
+// route it to `openStopAgent` (the Task Manager).
 export function openCloseTab(sessionId: string, tabId: string): void {
   setState({ closeTabTarget: { sessionId, tabId } })
 }
 
 export function closeCloseTab(): void {
   setState({ closeTabTarget: null })
+}
+
+// Open the stop-agent confirmation. The Task Manager's row for an agent's first
+// tab is a Stop control, not a close: the first tab cannot be closed, and what
+// the user is asking for there is to end the process the row is showing numbers
+// for. `killSessionPty` behind it stops that tab's provider and leaves the agent
+// in the list.
+export function openStopAgent(sessionId: string): void {
+  setState({ stopAgentTarget: sessionId })
+}
+
+export function closeStopAgent(): void {
+  setState({ stopAgentTarget: null })
 }
 
 // Close an EXTRA tab via REST. Only extra tabs can be closed: the agent's first

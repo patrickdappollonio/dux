@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   defaultProviderForSession,
   isExtraTabDormant,
+  isFirstTab,
   isTabGone,
   resolveFocusedTab,
   shouldRefireFocusPut,
@@ -94,6 +95,13 @@ describe("shouldShowTabStrip", () => {
     expect(shouldShowTabStrip([tab("claude")], true)).toBe(true)
     expect(shouldShowTabStrip([tab("claude")], false)).toBe(false)
     expect(shouldShowTabStrip([tab("claude"), tab("codex")], false)).toBe(true)
+  })
+})
+
+describe("isFirstTab", () => {
+  it("is true only for the tab whose id equals the session id", () => {
+    expect(isFirstTab("s1", "s1")).toBe(true)
+    expect(isFirstTab("s1", "tab-1")).toBe(false)
   })
 })
 

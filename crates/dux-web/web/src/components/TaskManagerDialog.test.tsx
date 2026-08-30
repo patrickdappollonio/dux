@@ -11,6 +11,9 @@ import type { AgentTabView, SessionView, TerminalView } from "@/lib/types"
 // our seeded state. The stops MUST open existing confirmations rather than act,
 // so these are the assertions that prove "every stop confirms".
 const openCloseTab = vi.fn()
+const openStopAgent = vi.fn()
+const closeStopAgent = vi.fn()
+const killSessionPty = vi.fn()
 const openDeleteTerminal = vi.fn()
 const openStopAll = vi.fn()
 const closeStopAll = vi.fn()
@@ -24,6 +27,9 @@ vi.mock("@/lib/store", async (importOriginal) => {
     ...actual,
     useDux: () => mockState,
     openCloseTab: (s: string, t: string) => openCloseTab(s, t),
+    openStopAgent: (s: string) => openStopAgent(s),
+    closeStopAgent: () => closeStopAgent(),
+    killSessionPty: (s: string) => killSessionPty(s),
     openDeleteTerminal: (t: string) => openDeleteTerminal(t),
     openStopAll: () => openStopAll(),
     closeStopAll: () => closeStopAll(),
@@ -237,14 +243,53 @@ describe("TaskManagerDialog", () => {
     expect(screen.queryByLabelText("Stop TOTAL")).toBeNull()
   })
 
-  it("stop_agent_confirms_then_kills", async () => {
-    // The stop must OPEN the close-tab confirmation, never kill on the click.
+  // The row for an agent's FIRST tab stops the agent. It must never route
+  // through the close-tab confirmation: that tab cannot be closed, so the DELETE
+  // behind that dialog is refused with a 400 and the user is left with no way to
+  // stop an agent from the Task Manager at all.
+  it("stop_agent_opens_the_stop_confirmation_not_the_close_tab_one", async () => {
     seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
     render(<TaskManagerDialog />)
 
     const stop = await screen.findByLabelText("Stop fix-auth")
     fireEvent.click(stop)
-    expect(openCloseTab).toHaveBeenCalledWith("s1", "s1")
+    expect(openStopAgent).toHaveBeenCalledWith("s1")
+    expect(openCloseTab).not.toHaveBeenCalled()
+    // Still a confirmation, never an act on the click itself.
+    expect(killSessionPty).not.toHaveBeenCalled()
+  })
+
+  it("stop_agent_confirmation_stops_the_agent_and_never_deletes_a_tab", async () => {
+    seed({
+      spine: { sessions: [session({ id: "s1", title: "fix-auth" })] },
+      stopAgentTarget: "s1",
+    } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    fireEvent.click(await screen.findByText("Stop agent"))
+    expect(killSessionPty).toHaveBeenCalledWith("s1")
+    expect(closeStopAgent).toHaveBeenCalled()
+  })
+
+  // An EXTRA tab's row keeps the close routing: that tab really is deleted.
+  it("stop_on_an_extra_tab_row_still_opens_the_close_tab_confirmation", async () => {
+    seed({
+      spine: {
+        sessions: [
+          session({
+            id: "s1",
+            title: "fix-auth",
+            tabs: [tab({ id: "s1" }), tab({ id: "b2", provider: "codex", order: 1 })],
+          }),
+        ],
+      },
+    } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    const stop = await screen.findByLabelText("Stop codex tab 1 in fix-auth")
+    fireEvent.click(stop)
+    expect(openCloseTab).toHaveBeenCalledWith("s1", "b2")
+    expect(openStopAgent).not.toHaveBeenCalled()
   })
 
   it("stop_terminal_confirms_then_deletes", async () => {

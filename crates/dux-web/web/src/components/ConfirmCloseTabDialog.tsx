@@ -11,11 +11,14 @@ import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { DOCS_AGENT_TABS_CLOSING } from "@/lib/docs"
 import { closeCloseTab, closeTab, useDux } from "@/lib/store"
 
-// Confirmation before closing a tab. Closing ALWAYS confirms (matching the TUI):
-// all tabs are generic, so the copy is uniform. dux can't reopen a tab's exact
-// conversation; if it's the agent's only remaining tab, closing it detaches the
-// agent (which stays in Projects, reopenable). The ✕ on a tab pill opens this
-// instead of closing on a single click. Cancel is the default focus.
+// Confirmation before closing a tab. Only an EXTRA tab can reach this dialog:
+// the agent's first tab cannot be closed at all, its tab-strip menu item is
+// disabled, and the Task Manager's row for it stops the agent through
+// ConfirmStopAgentDialog instead. So the copy here is unconditionally the
+// destructive one. Closing always confirms (matching the TUI). dux can't reopen
+// a tab's exact conversation; if this was the agent's last live tab, closing it
+// detaches the agent (which stays in Projects, reopenable). Cancel is the
+// default focus.
 export function ConfirmCloseTabDialog() {
   const { closeTabTarget, spine } = useDux()
 
@@ -59,7 +62,7 @@ export function ConfirmCloseTabDialog() {
         <DialogHeader>
           <DialogTitle>Close tab?</DialogTitle>
           <DialogDescription>
-            {`This ends ${sessionLabel} in this tab. dux deletes this tab for good. A new tab always starts fresh, so use your provider's own history command to get back to this conversation.`}
+            {`This ends ${sessionLabel} in this tab and deletes the tab for good. A new tab always starts fresh, so use your provider's own history command to get back to this conversation.`}
             {willDetach
               ? " It's this agent's last live tab, so the agent detaches and stays in Projects, reopenable."
               : ""}{" "}

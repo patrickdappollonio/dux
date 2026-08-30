@@ -7,12 +7,14 @@ import type { SessionView } from "@/lib/types"
 
 let mockState: DuxState
 const addTabMock = vi.fn()
+const openCloseTabMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
     ...actual,
     useDux: () => mockState,
     addTab: (...args: unknown[]) => addTabMock(...args),
+    openCloseTab: (...args: unknown[]) => openCloseTabMock(...args),
   }
 })
 
@@ -55,6 +57,7 @@ function session(): SessionView {
 beforeEach(() => {
   installBootStubs()
   addTabMock.mockClear()
+  openCloseTabMock.mockClear()
   mockState = {
     bootstrap: { available_providers: ["claude", "codex", "opencode"] },
     spine: {
@@ -114,6 +117,36 @@ describe("AgentTabsStrip", () => {
     const menu = within(await screen.findByRole("menu"))
     fireEvent.click(menu.getByText("opencode"))
     expect(addTabMock).toHaveBeenCalledWith("s1", "opencode")
+  })
+
+  // The first tab cannot be closed, and the menu says so by keeping the item
+  // and deactivating it: a missing item reads as a bug, a greyed one reads as a
+  // rule.
+  it("renders the first tab's Close item disabled", async () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    fireEvent.click(screen.getAllByLabelText("Tab actions")[0])
+    const menu = within(await screen.findByRole("menu"))
+    const item = menu.getByText("Close tab…").closest("[role='menuitem']")
+    expect(item).toBeTruthy()
+    expect(item?.getAttribute("aria-disabled")).toBe("true")
+  })
+
+  it("does not open the close dialog when the first tab's Close item is clicked", async () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    fireEvent.click(screen.getAllByLabelText("Tab actions")[0])
+    const menu = within(await screen.findByRole("menu"))
+    fireEvent.click(menu.getByText("Close tab…"))
+    expect(openCloseTabMock).not.toHaveBeenCalled()
+  })
+
+  it("keeps an extra tab's Close item enabled and acting", async () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    fireEvent.click(screen.getAllByLabelText("Tab actions")[1])
+    const menu = within(await screen.findByRole("menu"))
+    const item = menu.getByText("Close tab…").closest("[role='menuitem']")
+    expect(item?.getAttribute("aria-disabled")).not.toBe("true")
+    fireEvent.click(menu.getByText("Close tab…"))
+    expect(openCloseTabMock).toHaveBeenCalledWith("s1", "b2")
   })
 
   it("marks the flagged tab's pill with an attention dot", () => {

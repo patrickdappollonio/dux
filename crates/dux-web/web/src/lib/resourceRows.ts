@@ -195,8 +195,12 @@ export function taskManagerRows(
           name: isSlot ? label : tab.provider,
           detail: isSlot ? tab.provider : null,
           nested: !isSlot,
-          // A dormant tab has no process but is still closeable, so it keeps
-          // its Stop control.
+          // A dormant tab has no process but is still actionable, so it keeps
+          // its Stop control. No discriminator field is needed for WHICH act
+          // that is: the session-slot tab is the one whose id equals the
+          // session id, so the dialog `handleStop` opens is decided from
+          // `sessionId`/`targetId` through the shared `isFirstTab`. A first tab
+          // STOPS the agent (it cannot be closed); an extra tab is closed.
           stoppable: true,
           stopLabel: isSlot
             ? `Stop ${label}`

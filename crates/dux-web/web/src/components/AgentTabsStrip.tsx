@@ -12,7 +12,11 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { defaultProviderForSession, tabLabels } from "@/lib/agentTabs"
+import {
+  defaultProviderForSession,
+  isFirstTab as tabIsFirst,
+  tabLabels,
+} from "@/lib/agentTabs"
 import {
   addTab,
   openCloseTab,
@@ -141,6 +145,8 @@ function TabPill({
   active: boolean
   providers: string[]
 }) {
+  const isFirstTab = tabIsFirst(session.id, tab.id)
+
   function select() {
     selectTab(session.id, tab.id)
   }
@@ -236,10 +242,38 @@ function TabPill({
               </DropdownMenuSubContent>
             </DropdownMenuSub>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => openCloseTab(session.id, tab.id)}>
-              <X />
-              Close tab…
-            </DropdownMenuItem>
+            {/* The agent's FIRST tab (its id equals the session id) cannot be
+                closed: it has no row of its own and lives as long as the agent
+                does. The item stays in the menu and renders DISABLED rather
+                than disappearing, so the gesture reads as deactivated instead
+                of missing, and the tooltip says why. The span is load-bearing:
+                a disabled item is `pointer-events-none`, so the tooltip needs a
+                live element around it to hover.
+
+                Accepted limitation: the REASON is hover-only. base-ui keeps a
+                disabled item focusable (`focusableWhenDisabled`), so a keyboard
+                still reaches the item and hears it is dimmed, but the tooltip
+                hangs off the wrapper span rather than the item, so neither a
+                keyboard nor a finger opens it; the docs page carries the rule,
+                and the disabled state itself is visible on every pointer. */}
+            {isFirstTab ? (
+              <SimpleTooltip
+                content="The first tab can't be closed: it lives as long as the agent does. Add more tabs and close those, or detach the agent to stop everything."
+                side="bottom"
+              >
+                <span className="block">
+                  <DropdownMenuItem disabled>
+                    <X />
+                    Close tab…
+                  </DropdownMenuItem>
+                </span>
+              </SimpleTooltip>
+            ) : (
+              <DropdownMenuItem onClick={() => openCloseTab(session.id, tab.id)}>
+                <X />
+                Close tab…
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

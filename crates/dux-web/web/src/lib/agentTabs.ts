@@ -7,6 +7,14 @@ import type { AgentTabView, SessionView } from "./types"
 import type { SelectedTarget } from "./store"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
 
+// The agent's FIRST tab: the session-slot tab, whose id equals the session id.
+// It has no row of its own and lives as long as the agent does, so it can never
+// be closed. Named rather than open-coded, because the comparison reads like an
+// accident wherever it appears.
+export function isFirstTab(sessionId: string, tabId: string): boolean {
+  return tabId === sessionId
+}
+
 // Whether the focused target is an extra tab that is currently DORMANT (reopened
 // after a restart with no live process, and not yet explicitly started this
 // session). A dormant tab must render its "Start session" card WITHOUT mounting

@@ -85,7 +85,7 @@ describe("ConfirmCloseTabDialog", () => {
       tab({ id: "b2", provider: "codex", has_live_process: true }),
     ])
     render(<ConfirmCloseTabDialog />)
-    expect(screen.getByText(/deletes this tab for good/)).toBeTruthy()
+    expect(screen.getByText(/deletes the tab for good/)).toBeTruthy()
     expect(screen.getByText(/A new tab always starts fresh/)).toBeTruthy()
     expect(screen.getByText(/history command/)).toBeTruthy()
   })
