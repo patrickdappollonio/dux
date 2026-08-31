@@ -4955,7 +4955,9 @@ mod tests {
     /// slot-tab resolvers.
     fn engine_with_an_extra_tab() -> (Engine, tempfile::TempDir) {
         let (mut engine, tmp) = test_engine();
-        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        engine
+            .projects
+            .push(crate::engine::test_support::sample_project("p1", "/tmp/p1"));
         engine.sessions.push(sample_session("s1", "p1", "b1"));
         engine.agent_tabs.insert(
             TabId::new("tab-b"),
@@ -5045,7 +5047,9 @@ mod tests {
     fn engine_with_a_standalone_agent() -> (Engine, tempfile::TempDir, tempfile::TempDir) {
         let (mut engine, tmp) = test_engine();
         let folder = tempfile::tempdir().expect("folder");
-        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        engine
+            .projects
+            .push(crate::engine::test_support::sample_project("p1", "/tmp/p1"));
         engine.sessions.push(sample_session("s1", "p1", "b1"));
         engine.sessions.push(sample_standalone_session(
             "sa1",
@@ -5324,7 +5328,9 @@ mod tests {
     #[test]
     fn renaming_a_managed_agent_still_enforces_the_refname_rules() {
         let (mut engine, _tmp) = test_engine();
-        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        engine
+            .projects
+            .push(crate::engine::test_support::sample_project("p1", "/tmp/p1"));
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         assert!(matches!(
             engine.prepare_branch_rename("s1", "My Notes", true),
@@ -6604,7 +6610,9 @@ mod tests {
     #[test]
     fn agent_reconnect_status_message_reads_as_completed() {
         let (mut engine, _tmp) = test_engine();
-        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        engine
+            .projects
+            .push(crate::engine::test_support::sample_project("p1", "/tmp/p1"));
         let session = sample_session("s1", "p1", "feature");
 
         // Resume → a completed-action message naming provider, agent, project.
@@ -9474,6 +9482,299 @@ mod tab_ops_tests {
         assert!(
             engine.session_needs_attention("s1"),
             "and so does the promoted tab's"
+        );
+    }
+
+    /// An agent whose slot has ALREADY been promoted: a claude tab held the slot
+    /// over a codex extra and a claude extra, and closing it moved the slot onto
+    /// the codex tab. That leaves the shape every launch path has to get right:
+    /// the slot is a ROW-BACKED tab whose id is not the session id, and the
+    /// session's provider mirror says codex.
+    ///
+    /// `worktree` is a directory that exists, because the reconnect and
+    /// auto-reopen paths both refuse a vanished one. Both providers have run
+    /// here, so a resume decision turns on liveness rather than history.
+    fn agent_with_a_promoted_codex_slot(engine: &mut Engine, worktree: &std::path::Path) {
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.to_string_lossy().to_string();
+        session.provider = ProviderKind::new("claude");
+        session.started_providers = vec!["claude".into(), "codex".into()];
+        engine.session_store.create_session(&session).unwrap();
+        engine.sessions.push(session);
+        for (i, (id, provider)) in [("t2", "codex"), ("t3", "claude")].iter().enumerate() {
+            let mut tab = support_tab(id, "s1", provider);
+            tab.sort_order = i as i64 + 1;
+            engine.session_store.insert_agent_tab(&tab).unwrap();
+            engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
+        }
+        let outcome = engine.close_tab("s1", "s1-slot").expect("promotion");
+        assert_eq!(
+            outcome.promoted.as_deref(),
+            Some(TabIdRef::new("t2")),
+            "fixture precondition: the codex tab is in the slot now"
+        );
+    }
+
+    #[test]
+    fn reconnect_after_a_promotion_launches_the_promoted_slot_tab() {
+        // The reconnect path builds its request from the session's POINTER, not
+        // from the session id and not from whichever provider used to be in the
+        // slot: after a promotion it must launch the promoted tab, running the
+        // provider that tab was already configured for.
+        let (mut engine, tmp) = test_engine();
+        agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
+
+        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+            ReconnectPlan::Launch {
+                request, resume, ..
+            } => {
+                assert_eq!(request.tab_id, TabId::new("t2"));
+                assert_eq!(request.provider.as_str(), "codex");
+                assert!(
+                    request.resume,
+                    "codex has run in this worktree and no live sibling owns that conversation"
+                );
+                assert_eq!(resume, request.resume);
+            }
+            other => panic!("expected a Launch plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconnect_after_a_promotion_starts_fresh_when_a_sibling_owns_codex() {
+        // The other half of the resume rule, asked of the PROMOTED tab: a live
+        // sibling already owns the codex conversation in this worktree, so the
+        // slot's relaunch must start fresh rather than fight it for `--continue`.
+        let (mut engine, tmp) = test_engine();
+        agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
+        let rival = support_tab("t4", "s1", "codex");
+        engine.session_store.insert_agent_tab(&rival).unwrap();
+        engine.agent_tabs.insert(TabId::new("t4"), rival);
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("t4")));
+
+        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+            ReconnectPlan::Launch {
+                request, resume, ..
+            } => {
+                assert_eq!(request.tab_id, TabId::new("t2"));
+                assert_eq!(request.provider.as_str(), "codex");
+                assert!(!request.resume, "a live codex sibling downgrades to fresh");
+                assert_eq!(resume, request.resume);
+            }
+            other => panic!("expected a Launch plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_forced_reconnect_after_a_promotion_targets_the_promoted_slot_tab() {
+        // Force is the same path with resume off; it must still tear down and
+        // relaunch the tab the pointer names.
+        let (mut engine, tmp) = test_engine();
+        agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
+        engine
+            .providers
+            .insert(TabId::new("t2"), spawn_cat(tmp.path()));
+
+        match engine.reconnect_plan("s1", true, (24, 80)).expect("plan") {
+            ReconnectPlan::Launch { request, .. } => {
+                assert_eq!(request.tab_id, TabId::new("t2"));
+                assert_eq!(request.provider.as_str(), "codex");
+                assert!(!request.resume, "a forced reconnect never resumes");
+                assert!(
+                    !engine.providers.contains_key(TabIdRef::new("t2")),
+                    "the force teardown cleared the PROMOTED tab's runtime"
+                );
+            }
+            other => panic!("expected a Launch plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_reopen_after_a_promotion_launches_the_promoted_slot_tab() {
+        // The startup sweep hands each candidate session to the same builder
+        // both surfaces call, so the eligibility question and the request must
+        // both read the pointer: the provider consulted is the slot's.
+        let (mut engine, tmp) = test_engine();
+        engine.config.ui.auto_reopen_agents = true;
+        engine
+            .projects
+            .push(crate::engine::test_support::sample_project("p1", "/tmp/p1"));
+        agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
+        // Closing the slot took the agent's last live process, so the promotion
+        // detached it and dropped the reopen intent. This models the next
+        // startup, with the agent left running and its intent set again.
+        engine.sessions[0].desired_running = true;
+        engine.sessions[0].auto_reopen_enabled = true;
+
+        let candidates = engine.auto_reopen_candidates();
+
+        assert_eq!(
+            candidates.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["s1"]
+        );
+        let request = engine.build_agent_launch_request(
+            candidates[0].clone(),
+            true,
+            (24, 80),
+            AgentLaunchKind::StartupAutoReopen,
+        );
+        assert_eq!(request.tab_id, TabId::new("t2"));
+        assert_eq!(request.provider.as_str(), "codex");
+        assert!(
+            request.resume,
+            "the reopen resumes the promoted tab's own conversation"
+        );
+    }
+
+    #[test]
+    fn dormant_tab_launch_request_refuses_a_row_backed_slot_tab() {
+        // The dormant-tab builder is the EXTRA-tab path: it launches a tab as a
+        // `Tab` kind, which never flips the agent's own state. A promoted slot
+        // must not come through it, and it cannot: the slot's row is not in the
+        // extras map. Both surfaces gate on the slot resolver before calling
+        // this (the TUI's activate branch, the web's `launch_agent`), and this is
+        // the backstop that makes a missed gate a visible no-op rather than a
+        // tab-scoped launch of the agent's own tab.
+        let (mut engine, tmp) = test_engine();
+        agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
+
+        assert!(
+            engine.dormant_tab_launch_request("t2", (24, 80)).is_none(),
+            "the promoted slot is not an extra tab"
+        );
+        let extra = engine
+            .dormant_tab_launch_request("t3", (24, 80))
+            .expect("the surviving extra still launches through this path");
+        assert_eq!(extra.tab_id, TabId::new("t3"));
+        assert_eq!(extra.provider.as_str(), "claude");
+    }
+
+    #[test]
+    fn resume_fallback_retry_after_a_promotion_relaunches_the_slot_as_the_agents_own() {
+        // The retry decides slot-ness AT FIRING TIME. The candidate was seeded
+        // while t2 was an extra tab; by the time it fires t2 is the slot, so the
+        // relaunch must be the agent's own (a session-slot launch, whose failure
+        // detaches the agent) rather than a tab-scoped one.
+        //
+        // The dispatch is refused on purpose (the agent is mid-deletion), because
+        // the refusal is what makes the arm observable: only the session-slot arm
+        // marks the agent Detached when its relaunch does not get off the ground.
+        let (mut engine, tmp) = test_engine();
+        agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
+        engine.sessions[0].status = SessionStatus::Active;
+        engine
+            .resume_fallback_candidates
+            .insert(TabId::new("t2"), std::time::Instant::now());
+        engine.closing_sessions.insert("s1".to_string());
+
+        let outcome = engine.retry_resume_fallback("t2", (24, 80), "retrying".to_string());
+
+        let ResumeFallbackOutcome::Retried { reaction } = outcome else {
+            panic!("expected a Retried outcome");
+        };
+        match *reaction {
+            EventReaction::DispatchAgentLaunchView(view) => {
+                assert_eq!(view.tab_id, "t2", "the relaunch targets the promoted tab");
+                assert!(!view.launched, "refused: the agent is being deleted");
+            }
+            _ => panic!("expected a dispatch view"),
+        }
+        assert_eq!(
+            engine.sessions[0].status,
+            SessionStatus::Detached,
+            "a session-slot relaunch that never started detaches the agent"
+        );
+        assert!(
+            !engine
+                .resume_fallback_candidates
+                .contains_key(TabIdRef::new("t2")),
+            "the stale resume attempt was torn down"
+        );
+    }
+
+    #[test]
+    fn resume_fallback_retry_for_a_surviving_extra_stays_tab_scoped_after_a_promotion() {
+        // The mirror of the test above, and the reason the arm has to be
+        // re-decided rather than remembered: the surviving extra is still an
+        // extra, so its refused relaunch must say nothing about the agent.
+        let (mut engine, tmp) = test_engine();
+        agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
+        engine.sessions[0].status = SessionStatus::Active;
+        engine
+            .resume_fallback_candidates
+            .insert(TabId::new("t3"), std::time::Instant::now());
+        engine.closing_sessions.insert("s1".to_string());
+
+        let outcome = engine.retry_resume_fallback("t3", (24, 80), "retrying".to_string());
+
+        assert!(matches!(outcome, ResumeFallbackOutcome::Retried { .. }));
+        assert_eq!(
+            engine.sessions[0].status,
+            SessionStatus::Active,
+            "an extra tab's failed relaunch must not detach the agent"
+        );
+    }
+
+    #[test]
+    fn retargeting_a_row_backed_slot_moves_the_promoted_tabs_row_and_the_next_launch() {
+        // Provider retarget on a promoted slot: the one write site moves the
+        // PROMOTED tab's row and the session mirror together, so the next launch
+        // of that tab runs the new provider.
+        let (mut engine, tmp) = test_engine();
+        agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
+
+        let outcome = engine
+            .change_agent_provider("s1", ProviderKind::new("opencode"))
+            .expect("retarget");
+
+        assert_eq!(outcome.previous.as_str(), "codex");
+        assert_eq!(engine.sessions[0].provider.as_str(), "opencode");
+        let stored_tab_provider = engine
+            .session_store
+            .load_agent_tabs()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t2")
+            .expect("the promoted tab's row")
+            .provider;
+        assert_eq!(
+            stored_tab_provider.as_str(),
+            "opencode",
+            "the retarget wrote the row the pointer names, not a row named after the session"
+        );
+        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+            ReconnectPlan::Launch { request, .. } => {
+                assert_eq!(request.tab_id, TabId::new("t2"));
+                assert_eq!(request.provider.as_str(), "opencode");
+            }
+            other => panic!("expected a Launch plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retargeting_a_live_row_backed_slot_pins_what_is_actually_running() {
+        // The pin rule is unchanged by promotion: while the promoted tab's codex
+        // process is alive, every label still says codex, and only the next
+        // launch takes the new provider.
+        let (mut engine, tmp) = test_engine();
+        agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
+        engine
+            .providers
+            .insert(TabId::new("t2"), spawn_cat(tmp.path()));
+
+        let outcome = engine
+            .change_agent_provider("s1", ProviderKind::new("opencode"))
+            .expect("retarget");
+
+        assert!(outcome.running, "the promoted tab's PTY is the agent's PTY");
+        assert_eq!(
+            engine.running_provider_for(&engine.sessions[0]).as_str(),
+            "codex",
+            "the pin is keyed by the promoted tab id, so the label stays truthful"
         );
     }
 

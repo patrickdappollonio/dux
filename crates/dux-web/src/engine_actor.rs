@@ -4356,6 +4356,129 @@ mod tests {
         }
     }
 
+    /// An engine whose agent has ALREADY had its slot promoted: the claude tab
+    /// that held the slot is closed over a codex extra, so the slot is a
+    /// row-backed tab called `t2` whose id is not the session id. This is the
+    /// shape the web's launch and subscribe paths have to route correctly.
+    fn engine_with_a_promoted_codex_slot(paths: &DuxPaths) -> Engine {
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            let mut session =
+                sample_session("s1", "p1", "feat", paths.root.to_string_lossy().as_ref());
+            session.started_providers = vec!["claude".into(), "codex".into()];
+            store.create_session(&session).unwrap();
+            store
+                .insert_agent_tab(&dux_core::model::AgentTab {
+                    id: "t2".to_string(),
+                    session_id: "s1".to_string(),
+                    provider: dux_core::model::ProviderKind::new("codex"),
+                    sort_order: 1,
+                    created_at: chrono::Utc::now(),
+                })
+                .unwrap();
+        }
+        let mut engine = bootstrap_engine(paths).expect("bootstrap");
+        let outcome = engine.close_tab("s1", "s1-slot").expect("promotion");
+        assert_eq!(
+            outcome.promoted.as_deref(),
+            Some(dux_core::ids::TabIdRef::new("t2")),
+            "fixture precondition: the codex tab is in the slot now"
+        );
+        engine
+    }
+
+    /// The web launches a subscribed id through one of two arms, and the arm is
+    /// chosen by the slot resolver rather than by the id's shape. A promoted
+    /// slot must take the SESSION-SLOT arm: it is the agent's own tab now, so its
+    /// launch is the agent's reconnect, not a tab-scoped relaunch.
+    ///
+    /// The agent is mid-deletion on purpose. Both arms refuse that, in different
+    /// words, and the wording is what makes the arm observable without spawning
+    /// a provider.
+    #[test]
+    fn launch_agent_after_a_promotion_takes_the_session_slot_arm() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = engine_with_a_promoted_codex_slot(&paths);
+        engine.closing_sessions.insert("s1".to_string());
+
+        let err = launch_agent(&mut engine, "t2").expect_err("closing session must refuse");
+
+        assert!(
+            err.contains("cannot be launched"),
+            "the session-slot arm's refusal (the dispatch chokepoint's) is expected: {err}"
+        );
+        assert!(
+            !err.contains("not launching its tab"),
+            "that is the EXTRA-tab arm's refusal, so the promoted slot took the wrong arm: {err}"
+        );
+    }
+
+    /// The passive-attach refusal is keyed by tab, and a promoted slot is just
+    /// another tab id there: subscribing to one whose last run failed must
+    /// refuse rather than relaunch it on every retry.
+    #[test]
+    fn subscribing_a_promoted_slot_whose_last_run_failed_is_refused() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = engine_with_a_promoted_codex_slot(&paths);
+        engine.mark_tab_run_failed(dux_core::ids::TabIdRef::new("t2"));
+
+        let mut pending = Vec::new();
+        let mut last_pr = None;
+        let (status_tx, mut status_rx) = broadcast::channel(8);
+        let (clear_tx, _clear_rx) = broadcast::channel(8);
+        let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx);
+        let (tx, rx) = oneshot::channel();
+        handle_subscribe(
+            &mut engine,
+            &mut pending,
+            &mut last_pr,
+            &mut status,
+            "t2".to_string(),
+            tx,
+        );
+
+        let emitted = status_rx.try_recv().expect("the refusal is said out loud");
+        assert_eq!(
+            emitted.key.as_deref(),
+            Some("tab-launch-t2"),
+            "keyed on the promoted tab's own id"
+        );
+        assert!(pending.is_empty(), "no launch may be waited on");
+        assert!(
+            !engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                "t2"
+            ))),
+            "a passive attach onto a failed promoted slot must not relaunch it"
+        );
+        assert!(rx.blocking_recv().expect("a reply").is_err());
+    }
+
+    /// The per-tab REST verbs (`DELETE`, `PATCH`, `POST .../start`) accept a tab
+    /// either because it IS the session's slot or because its stored row belongs
+    /// to that session. A promoted slot passes on the first test and, by design,
+    /// fails the second: its row is the slot row, so it is no longer an extra.
+    /// Both halves are asserted, because a route that only asked the second
+    /// question would 404 the agent's own tab.
+    #[tokio::test]
+    async fn the_per_tab_routes_still_recognise_a_promoted_slot() {
+        let (_tmp, paths) = temp_paths();
+        let engine = engine_with_a_promoted_codex_slot(&paths);
+        let (handle, _join) = spawn_engine_thread(engine);
+
+        assert_eq!(
+            handle.slot_tab_id("s1".to_string()).await.as_deref(),
+            Some("t2")
+        );
+        assert!(handle.is_slot_tab("s1".to_string(), "t2").await);
+        assert!(!handle.is_slot_tab("s1".to_string(), "s1").await);
+        assert_eq!(
+            handle.tab_session("t2".to_string()).await,
+            None,
+            "the promoted slot is not an extra tab any more"
+        );
+    }
+
     #[tokio::test]
     async fn apply_wire_toggle_reflects_in_spine_and_emits_sessions_change() {
         let (_tmp, paths) = temp_paths();

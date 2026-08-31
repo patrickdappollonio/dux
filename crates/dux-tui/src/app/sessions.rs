@@ -7373,4 +7373,87 @@ mod tests {
             vec!["term-b", "term-c", "term-a", "term-d"]
         );
     }
+
+    /// The TUI's ownership claim is armed on the request's OWN tab id, which is
+    /// what makes a promoted slot claim the right PTY: after a promotion the
+    /// agent's tab is `t2`, so reconnecting it must claim `t2` and nothing else.
+    /// Claiming the session id (or the tab that just left the slot) would leave
+    /// the terminal typing into a pty it does not hold.
+    #[test]
+    fn reconnecting_a_promoted_slot_claims_the_promoted_tabs_pty() {
+        let worktree = tempdir().expect("worktree");
+        let mut session = make_session("s1", "claude", worktree.path().to_str().unwrap());
+        session.started_providers = vec!["claude".to_string(), "codex".to_string()];
+        let mut app = test_app_with_sessions(vec![session.clone()], Vec::new());
+        app.engine.session_store.create_session(&session).unwrap();
+        let tab = dux_core::model::AgentTab {
+            id: "t2".to_string(),
+            session_id: "s1".to_string(),
+            provider: ProviderKind::from_str("codex"),
+            sort_order: 1,
+            created_at: Utc::now(),
+        };
+        app.engine.session_store.insert_agent_tab(&tab).unwrap();
+        app.engine
+            .agent_tabs
+            .insert(dux_core::ids::TabId::new("t2"), tab);
+        app.engine.close_tab("s1", "s1-slot").expect("promotion");
+        // The launch really is dispatched, so point the promoted tab's provider
+        // at a command that exists and exits immediately rather than at whatever
+        // codex CLI the developer's machine happens to have installed.
+        if let Some(cmd) = app.engine.config.providers.commands.get_mut("codex") {
+            cmd.command = "/bin/true".to_string();
+            cmd.args = Vec::new();
+        }
+
+        app.dispatch_reconnect_plan("s1", false, false)
+            .expect("reconnect");
+
+        assert!(
+            app.tui_launched_ptys.contains("t2"),
+            "the claim is armed on the promoted tab"
+        );
+        assert!(!app.tui_launched_ptys.contains("s1"));
+        assert!(!app.tui_launched_ptys.contains("s1-slot"));
+    }
+
+    /// Activation routes a dormant tab by the slot resolver, not by whether the
+    /// id has an extras row: a promoted slot is the agent's own tab, so it takes
+    /// the reconnect path, and the extra-tab launch path refuses it outright.
+    #[test]
+    fn a_promoted_slot_is_not_activated_through_the_extra_tab_launch_path() {
+        let worktree = tempdir().expect("worktree");
+        let mut session = make_session("s1", "claude", worktree.path().to_str().unwrap());
+        session.started_providers = vec!["codex".to_string()];
+        let mut app = test_app_with_sessions(vec![session.clone()], Vec::new());
+        app.engine.session_store.create_session(&session).unwrap();
+        for (id, provider) in [("t2", "codex"), ("t3", "claude")] {
+            let tab = dux_core::model::AgentTab {
+                id: id.to_string(),
+                session_id: "s1".to_string(),
+                provider: ProviderKind::from_str(provider),
+                sort_order: if id == "t2" { 1 } else { 2 },
+                created_at: Utc::now(),
+            };
+            app.engine.session_store.insert_agent_tab(&tab).unwrap();
+            app.engine
+                .agent_tabs
+                .insert(dux_core::ids::TabId::new(id), tab);
+        }
+        app.engine.close_tab("s1", "s1-slot").expect("promotion");
+
+        assert!(
+            app.engine.is_slot_tab_of(
+                dux_core::ids::SessionIdRef::new("s1"),
+                dux_core::ids::TabIdRef::new("t2")
+            ),
+            "the activate branch reads this, and it must say the promoted tab is the slot"
+        );
+        app.launch_focused_support_tab("s1", "t2", false)
+            .expect("no-op");
+        assert!(
+            app.tui_launched_ptys.is_empty(),
+            "the extra-tab launch path must not start the agent's own tab"
+        );
+    }
 }
