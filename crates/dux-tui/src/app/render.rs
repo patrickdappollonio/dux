@@ -4065,19 +4065,48 @@ impl App {
         ))
     }
 
-    /// The quiet changes region: the pane's own frame, and the reason inside it.
+    /// The quiet changes region: the pane's own frame, and the reason centered
+    /// inside it.
     ///
     /// Wrapped rather than truncated, because the reason is a sentence that
     /// tells the user what to do next and a clipped one tells them nothing.
+    /// Centered on both axes with a blank column against each border, matching
+    /// the browser's padded empty state and the terminal placeholder's own
+    /// idiom: an empty state is a card in the middle of its pane, not prose
+    /// pressed into the corner.
+    ///
+    /// Pre-wrapped through [`wrap_styled_lines`] rather than handed to
+    /// `Wrap { trim: false }`, because the vertical centering needs the row
+    /// count a `Paragraph` will not tell it.
     fn render_quiet_changes(&mut self, frame: &mut Frame, area: Rect, reason: &str) {
+        /// Blank columns kept between the message and each border.
+        const SIDE_PADDING: u16 = 1;
+
         let focused = self.focus == FocusPane::Files;
         let block = self.themed_block("Changes", focused);
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
-        Paragraph::new(reason)
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(self.theme.hint_desc_fg))
-            .render(inner, frame.buffer_mut());
+
+        let text_width = inner.width.saturating_sub(SIDE_PADDING * 2);
+        if text_width > 0 && inner.height > 0 {
+            let lines: Vec<Line> = reason
+                .lines()
+                .map(|line| Line::raw(line.to_owned()))
+                .collect();
+            let wrapped = wrap_styled_lines(&lines, text_width as usize);
+            let text_height = u16::try_from(wrapped.len()).unwrap_or(u16::MAX);
+            let y = inner.y + inner.height.saturating_sub(text_height) / 2;
+            let card = Rect::new(
+                inner.x + SIDE_PADDING,
+                y,
+                text_width,
+                text_height.min(inner.height),
+            );
+            Paragraph::new(wrapped)
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(Style::default().fg(self.theme.hint_desc_fg))
+                .render(card, frame.buffer_mut());
+        }
         // No list and no rows, so nothing here is clickable: clear the click
         // maps rather than leaving the previous agent's rects behind.
         self.mouse_layout.unstaged_list = None;
@@ -12286,6 +12315,182 @@ mod tests {
         assert!(
             !rendered.to_lowercase().contains("busy"),
             "and never that a repository is busy; got:\n{rendered}"
+        );
+    }
+
+    /// The quiet-changes pane, rendered on its own at `width` x `height`, as
+    /// rows of text. Rendered directly rather than through the whole frame so
+    /// the geometry assertions can name the pane's own columns.
+    fn quiet_changes_rows(reason: &str, width: u16, height: u16) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                app.render_quiet_changes(frame, area, reason);
+            })
+            .expect("render frame");
+        buffer_rows(terminal.backend().buffer())
+    }
+
+    /// The rows of `rows` that carry message text: everything inside the block's
+    /// border ring that is not blank.
+    fn quiet_changes_text_rows(rows: &[String]) -> Vec<(usize, String)> {
+        rows.iter()
+            .enumerate()
+            .skip(1)
+            .take(rows.len().saturating_sub(2))
+            .filter_map(|(index, row)| {
+                let chars: Vec<char> = row.chars().collect();
+                let body: String = chars[1..chars.len() - 1].iter().collect();
+                (!body.trim().is_empty()).then_some((index, body))
+            })
+            .collect()
+    }
+
+    /// The quiet changes message keeps a blank column against each border and
+    /// sits centered in the pane, the way the browser's empty state does.
+    ///
+    /// The old renderer handed the message straight to the block's inner rect,
+    /// so the first character of every wrapped row butted against the left
+    /// border with no breathing room at all.
+    #[test]
+    fn the_quiet_changes_message_is_padded_and_centered() {
+        let reason = format!(
+            "{}\n\n/home/someone/notes",
+            dux_core::git::FolderRepoStatus::NoRepo.quiet_reason()
+        );
+        let width = 40u16;
+        let height = 24u16;
+        let rows = quiet_changes_rows(&reason, width, height);
+        let text_rows = quiet_changes_text_rows(&rows);
+        assert!(
+            !text_rows.is_empty(),
+            "the pane must render the message; got:\n{}",
+            rows.join("\n")
+        );
+
+        for (index, body) in &text_rows {
+            let cells: Vec<char> = body.chars().collect();
+            assert_eq!(
+                cells.first().copied(),
+                Some(' '),
+                "row {index} must keep a blank column against the left border; got:\n{}",
+                rows.join("\n")
+            );
+            assert_eq!(
+                cells.last().copied(),
+                Some(' '),
+                "row {index} must keep a blank column against the right border; got:\n{}",
+                rows.join("\n")
+            );
+            let lead = cells.iter().take_while(|c| **c == ' ').count();
+            let trail = cells.iter().rev().take_while(|c| **c == ' ').count();
+            assert!(
+                lead.abs_diff(trail) <= 1,
+                "row {index} must be centered (lead {lead}, trail {trail}); got:\n{}",
+                rows.join("\n")
+            );
+        }
+
+        // Vertically centered too, matching the terminal placeholder's idiom:
+        // there is blank room above the first line of text and below the last.
+        let first = text_rows.first().expect("a first text row").0;
+        let last = text_rows.last().expect("a last text row").0;
+        assert!(
+            first > 1,
+            "the message must sit below the top of the pane; got:\n{}",
+            rows.join("\n")
+        );
+        assert!(
+            last < rows.len() - 2,
+            "and above the bottom of it; got:\n{}",
+            rows.join("\n")
+        );
+        let above = first - 1;
+        let below = rows.len() - 2 - last;
+        assert!(
+            above.abs_diff(below) <= 1,
+            "the message must be vertically centered (above {above}, below {below}); got:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    /// Every word of the sentence survives the wrap at a narrow width: the
+    /// padding must cost the message room, never a clipped character.
+    #[test]
+    fn the_quiet_changes_message_wraps_whole_at_a_narrow_width() {
+        let reason = dux_core::git::FolderRepoStatus::InsideRepoRootedElsewhere.quiet_reason();
+        let rows = quiet_changes_rows(reason, 26, 30);
+        let text_rows = quiet_changes_text_rows(&rows);
+        let joined = text_rows
+            .iter()
+            .map(|(_, body)| body.trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in reason.split_whitespace() {
+            assert!(
+                joined.contains(word),
+                "the wrap must not clip \"{word}\"; got:\n{}",
+                rows.join("\n")
+            );
+        }
+        for (index, body) in &text_rows {
+            let cells: Vec<char> = body.chars().collect();
+            assert_eq!(
+                cells.first().copied(),
+                Some(' '),
+                "row {index} keeps its left padding even when narrow; got:\n{}",
+                rows.join("\n")
+            );
+            assert_eq!(
+                cells.last().copied(),
+                Some(' '),
+                "row {index} keeps its right padding even when narrow; got:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+
+    /// A folder path full of multi-byte characters is wrapped by display column,
+    /// never by byte, so no glyph is cut in half and nothing panics.
+    #[test]
+    fn the_quiet_changes_message_wraps_multibyte_paths_char_safely() {
+        let reason = "This folder has no git repository.\n\n/home/someone/日本語のフォルダ/notas-ñ";
+        let rows = quiet_changes_rows(reason, 24, 20);
+        // A double-width glyph occupies two cells and the second carries no
+        // symbol, so read the buffer with every blank removed: what is left is
+        // the text itself, wrap points included.
+        let joined: String = quiet_changes_text_rows(&rows)
+            .iter()
+            .flat_map(|(_, body)| body.chars())
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            joined.contains("/home/someone/日本語のフォルダ/notas-ñ"),
+            "the multi-byte path must render whole; got:\n{}",
+            rows.join("\n")
+        );
+        assert!(
+            !joined.contains('\u{fffd}'),
+            "and never as a replacement character; got:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    /// The pane refuses to draw rather than overflowing when there is no room
+    /// for padding at all. A one-column inner area cannot hold a padded
+    /// message, and drawing one anyway would put text under the border.
+    #[test]
+    fn the_quiet_changes_message_is_dropped_when_there_is_no_room_to_pad_it() {
+        let rows = quiet_changes_rows("This folder has no git repository.", 4, 6);
+        assert!(
+            quiet_changes_text_rows(&rows).is_empty(),
+            "nothing may be drawn where padding does not fit; got:\n{}",
+            rows.join("\n")
         );
     }
 
