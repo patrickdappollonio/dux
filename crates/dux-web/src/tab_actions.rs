@@ -140,6 +140,36 @@ async fn create_tab(
     }
 }
 
+/// Resolve a `.../tabs/:tab` address: `:id` names a live session and `:tab` is
+/// one of its tabs. Every `:tab`-scoped verb opens with this, so they cannot
+/// drift on what a bad address answers.
+///
+/// The two ids are checked separately because an out-of-bound `:id` is an
+/// unknown SESSION (matching `resolve_worktree`'s 404 below it), and collapsing
+/// both into `unknown_tab()` blames the tab even when the session id is the bad
+/// one. Slot-ness decides only whether the ownership check applies: the slot tab
+/// has no `agent_tabs` row for `tab_session` to resolve, and the session's own
+/// pointer is what names it as this agent's. An extra tab must belong to `:id`,
+/// so no verb here ever reaches across sessions.
+async fn resolve_tab_of_session(state: &AppState, id: &str, tab: &str) -> Result<(), Response> {
+    if !id_within_bound(id) {
+        return Err(unknown_session());
+    }
+    if !id_within_bound(tab) {
+        return Err(unknown_tab());
+    }
+    if let Err(resp) = resolve_worktree(state, id.to_string()).await {
+        return Err(resp.into_response());
+    }
+    if !state.engine.is_slot_tab(id.to_string(), tab).await {
+        match state.engine.tab_session(tab.to_string()).await {
+            Some(owner) if owner == id => {}
+            _ => return Err(unknown_tab()),
+        }
+    }
+    Ok(())
+}
+
 /// `DELETE /api/v1/sessions/:id/tabs/:tab` - close one tab. Naming the
 /// session-slot tab promotes the next tab in strip order into it; the agent's
 /// only tab is refused by the engine, because an agent always has a slot. A
@@ -149,30 +179,8 @@ async fn delete_tab(
     Path((id, tab)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    // Check the session id and the tab id separately: an out-of-bound `:id` is an
-    // unknown SESSION (matches `resolve_worktree`'s 404 below), not a tab-worded
-    // error: collapsing both into `unknown_tab()` blames the tab even when the
-    // session id itself is the bad one.
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    if !id_within_bound(&tab) {
-        return unknown_tab();
-    }
-    if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp.into_response();
-    }
-    // The slot tab is closable like any other: the engine hands the slot to the
-    // next tab in strip order and then tears this one down. Slot-ness is asked
-    // only to decide whether the ownership check applies, because the slot tab
-    // has no `agent_tabs` row for `tab_session` to resolve; the session's own
-    // pointer is what names it as this agent's.
-    if !state.engine.is_slot_tab(id.clone(), &tab).await {
-        // An extra tab: enforce ownership, so this is never a cross-session close.
-        match state.engine.tab_session(tab.clone()).await {
-            Some(owner) if owner == id => {}
-            _ => return unknown_tab(),
-        }
+    if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
+        return resp;
     }
     match state
         .engine
@@ -215,22 +223,8 @@ async fn start_tab(
     State(state): State<AppState>,
     Path((id, tab)): Path<(String, String)>,
 ) -> Response {
-    // See `delete_tab`: the two ids are checked separately so a bad `:id` reads
-    // as an unknown session rather than a tab-worded error.
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    if !id_within_bound(&tab) {
-        return unknown_tab();
-    }
-    if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp.into_response();
-    }
-    if !state.engine.is_slot_tab(id.clone(), &tab).await {
-        match state.engine.tab_session(tab.clone()).await {
-            Some(owner) if owner == id => {}
-            _ => return unknown_tab(),
-        }
+    if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
+        return resp;
     }
     match state.engine.start_agent_tab(tab).await {
         Ok(()) => StatusCode::OK.into_response(),
@@ -247,24 +241,8 @@ async fn retarget_tab(
     headers: HeaderMap,
     Json(body): Json<RetargetBody>,
 ) -> Response {
-    // See `delete_tab` above: check the session id and tab id separately so a
-    // bad `:id` is reported as an unknown session, not a tab-worded error.
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    if !id_within_bound(&tab) {
-        return unknown_tab();
-    }
-    if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp.into_response();
-    }
-    // Extra tabs must belong to the path session; the session-slot tab is always
-    // valid and delegates to the session-level provider change.
-    if !state.engine.is_slot_tab(id.clone(), &tab).await {
-        match state.engine.tab_session(tab.clone()).await {
-            Some(owner) if owner == id => {}
-            _ => return unknown_tab(),
-        }
+    if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
+        return resp;
     }
     match state
         .engine
