@@ -67,13 +67,15 @@ pub struct AppState {
     /// scratch-terminal stream. Sized and exhausted INDEPENDENTLY of the events and
     /// agent classes.
     pub ws_terminal_semaphore: Arc<tokio::sync::Semaphore>,
-    /// Caps concurrent EXTRA-TAB PTY WebSocket connections across all agents
-    /// (`[server] max_websocket_tab_connections`). Tab sockets draw from THIS pool,
-    /// not `ws_agent_semaphore`, so tabs can never starve the session-slot tab (agent) pool.
+    /// Caps concurrent PER-TAB-ADDRESSED PTY WebSocket connections across all
+    /// agents (`[server] max_websocket_tab_connections`). Every socket dialled at
+    /// `/ws/sessions/:id/tabs/:tab/pty` draws from THIS pool, the session-slot tab
+    /// included, and not from `ws_agent_semaphore`, so the per-tab address can
+    /// never starve the bare per-agent one.
     pub ws_tab_semaphore: Arc<tokio::sync::Semaphore>,
     /// Per-agent fairness sub-quota (`[server] max_websocket_tabs_per_agent`) on
-    /// top of `ws_tab_semaphore`: the count of live extra-tab sockets keyed by
-    /// owning session id. `ws_tab_pty_upgrade` refuses a new tab socket for a
+    /// top of `ws_tab_semaphore`: the count of live per-tab-addressed sockets
+    /// keyed by owning session id. `ws_tab_pty_upgrade` refuses a new tab socket for a
     /// session already at `max_ws_tabs_per_agent` BEFORE taking a tab-pool permit,
     /// so one agent's tabs cannot monopolize the shared tab pool. A [`TabWsGuard`]
     /// increments on connect and decrements on drop (every early return included).
@@ -284,7 +286,8 @@ pub struct RouterParams {
     /// (`[server] max_websocket_terminal_connections`). Defaults to
     /// [`dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS`].
     pub max_websocket_terminal_connections: u32,
-    /// Cap on concurrent extra-tab PTY WebSocket connections across all agents
+    /// Cap on concurrent per-tab-addressed PTY WebSocket connections across all
+    /// agents, the session-slot tab included when it is dialled at that address
     /// (`[server] max_websocket_tab_connections`). Defaults to
     /// [`dux_core::config::DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS`].
     pub max_websocket_tab_connections: u32,
@@ -1533,13 +1536,23 @@ impl Drop for TabWsGuard {
     }
 }
 
-/// Upgrade handler for `GET /ws/sessions/:id/tabs/:tab/pty` — stream a Support
-/// tab's provider PTY. Support-only (the session-slot tab uses `/ws/sessions/:id/pty`).
-/// Validates origin, id bounds, session existence, slot-ness, and extra-tab ownership
-/// (`:tab` belongs to `:id`), then takes a permit from the DEDICATED tab-socket
-/// pool (`ws_tab_semaphore`, sized by `max_websocket_tab_connections`) — separate
-/// from the agent-PTY pool, so tab sockets can never 503 the session-slot tab streams.
+/// Upgrade handler for `GET /ws/sessions/:id/tabs/:tab/pty` — stream one tab's
+/// provider PTY. This is the stable address of EVERY tab of `:id`, the
+/// session-slot tab included; `/ws/sessions/:id/pty` is a convenience alias that
+/// resolves the slot tab id and reaches the identical PTY. Validates origin, id
+/// bounds, session existence, and (for an extra tab) ownership that `:tab`
+/// belongs to `:id`, then takes a permit from the DEDICATED tab-socket pool
+/// (`ws_tab_semaphore`, sized by `max_websocket_tab_connections`) — separate
+/// from the agent-PTY pool, so tab sockets can never 503 the bare agent streams.
 /// Each failing branch is a 404/503 BEFORE the upgrade.
+///
+/// A slot tab arriving HERE therefore consumes the extra-tab permit pool and the
+/// per-agent tab sub-quota, while the same PTY reached through the bare alias
+/// consumes the agent pool. That is deliberate: admission class is a property of
+/// the address a client dialled, not of the PTY behind it, and it keeps this
+/// route's caps meaning "sockets opened at the per-tab address". An established
+/// connection keeps the class it was admitted under until it reconnects, so a
+/// client moving between the two forms changes pool only on its next dial.
 async fn ws_tab_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -1560,19 +1573,19 @@ async fn ws_tab_pty_upgrade(
     if state.engine.session_worktree(id.clone()).await.is_none() {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     }
-    // Support-only: the session-slot tab streams over `/ws/sessions/:id/pty`, so
-    // naming it here is a 404. Asked of the resolver rather than inferred from
-    // "the slot tab has no `agent_tabs` row". `EngineHandle::tab_session` below
-    // excludes the slot tab as well, for every caller rather than just this one;
-    // the two agree by construction, and this one states the refusal where the
-    // route's other 404s are.
-    if state.engine.is_slot_tab(id.clone(), &tab).await {
-        return (StatusCode::NOT_FOUND, "unknown tab").into_response();
-    }
-    // Extra-tab ownership: `:tab` must belong to `:id`.
-    match state.engine.tab_session(tab.clone()).await {
-        Some(owner) if owner == id => {}
-        _ => return (StatusCode::NOT_FOUND, "unknown tab").into_response(),
+    // Every owned tab of `:id` is addressable here, the session-slot tab
+    // included: it is a real tab and this is its stable address, reaching the
+    // same PTY the bare `/ws/sessions/:id/pty` alias does. Slot-ness is asked of
+    // the resolver rather than inferred from "the slot tab has no `agent_tabs`
+    // row", and a slot tab needs no ownership lookup because the resolver has
+    // already answered whose slot tab it is. `EngineHandle::tab_session` knows
+    // only the stored extra tabs, so the two questions are asked in this order.
+    if !state.engine.is_slot_tab(id.clone(), &tab).await {
+        // Extra-tab ownership: `:tab` must belong to `:id`.
+        match state.engine.tab_session(tab.clone()).await {
+            Some(owner) if owner == id => {}
+            _ => return (StatusCode::NOT_FOUND, "unknown tab").into_response(),
+        }
     }
     // Per-agent fairness sub-quota: refuse a new tab socket for a session already
     // at `max_ws_tabs_per_agent` BEFORE taking a shared tab-pool permit, so one

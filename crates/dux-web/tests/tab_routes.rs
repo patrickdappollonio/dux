@@ -711,6 +711,27 @@ async fn nested_tab_pty_socket_enforces_session_ownership() {
     );
 }
 
+/// One session's SLOT tab is refused at ANOTHER session's per-tab address.
+///
+/// This refusal only became reachable when the slot tab gained a per-tab address:
+/// before, `s2` in the `:tab` slot was rejected for being a slot tab at all, so
+/// the ownership check never got a say. `both_address_forms_of_the_slot_tab_reach_the_same_pty`
+/// covers the same id dialled under its OWN session, which is what makes this a
+/// test about ownership rather than about the address being unknown.
+#[tokio::test]
+async fn nested_tab_pty_socket_refuses_another_sessions_slot_tab() {
+    let (addr, _tmp) = boot().await;
+
+    // A session's slot tab id is its session id today, so `s2` here is a real,
+    // resolvable tab id that simply does not belong to `s1`.
+    let foreign =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/tabs/s2/pty")).await;
+    assert!(
+        foreign.is_err(),
+        "another session's slot tab must be rejected before upgrade"
+    );
+}
+
 #[tokio::test]
 async fn tab_pty_socket_cap_refuses_beyond_the_per_agent_limit() {
     // Per-agent cap of one live tab socket.
@@ -890,5 +911,76 @@ async fn tab_with_a_failing_async_launch_never_looks_live_and_is_cleaned_up() {
         saw_row_removed,
         "a fresh tab whose first launch failed must be cleaned up, not left as a \
          permanently dead-looking row"
+    );
+}
+
+/// Both address forms of the session-slot tab reach the SAME pty.
+///
+/// The bare per-agent form (`/ws/sessions/:id/pty`) is a convenience alias; the
+/// per-tab form (`/ws/sessions/:id/tabs/:tab/pty`) is the stable address every
+/// owned tab now answers at, the slot tab included. Nothing weaker than a real
+/// round trip proves it: this writes through one form and reads the echo on the
+/// other, in both directions. The harness's `claude` provider is `cat`, so bytes
+/// written to the child come back out of it and reach every attached subscriber.
+#[tokio::test]
+async fn both_address_forms_of_the_slot_tab_reach_the_same_pty() {
+    use futures_util::{SinkExt, StreamExt};
+
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    // Launch the session-slot tab so both forms have a live child to talk to.
+    let launch = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/reconnect"))
+        .json(&serde_json::json!({ "force": false }))
+        .send()
+        .await
+        .unwrap();
+    assert!(launch.status().is_success(), "reconnect should launch s1");
+    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, "s1")).await;
+
+    let bare = format!("ws://{addr}/ws/sessions/s1/pty");
+    // The slot tab's own stable address: `:tab` equals the slot tab id, which is
+    // the session id today.
+    let per_tab = format!("ws://{addr}/ws/sessions/s1/tabs/s1/pty");
+
+    /// Write `line` on `writer` and wait for it to come back on `reader`,
+    /// retrying the write: input is gated on pty ownership, and a previous
+    /// socket's ownership is released asynchronously when it drops.
+    async fn write_here_read_there(writer_url: &str, reader_url: &str, line: &str) -> bool {
+        let (mut writer, _) = tokio_tungstenite::connect_async(writer_url)
+            .await
+            .unwrap_or_else(|e| panic!("connect {writer_url}: {e}"));
+        let (mut reader, _) = tokio_tungstenite::connect_async(reader_url)
+            .await
+            .unwrap_or_else(|e| panic!("connect {reader_url}: {e}"));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut seen = String::new();
+        while tokio::time::Instant::now() < deadline {
+            writer
+                .send(tokio_tungstenite::tungstenite::Message::Binary(
+                    format!("{line}\n").into_bytes().into(),
+                ))
+                .await
+                .unwrap();
+            let until = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+            while let Ok(Some(Ok(msg))) = tokio::time::timeout_at(until, reader.next()).await {
+                if let tokio_tungstenite::tungstenite::Message::Binary(b) = msg {
+                    seen.push_str(&String::from_utf8_lossy(&b));
+                }
+                if seen.contains(line) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    assert!(
+        write_here_read_there(&per_tab, &bare, "alphaslot").await,
+        "a write through the per-tab form must reach the pty the bare form streams"
+    );
+    assert!(
+        write_here_read_there(&bare, &per_tab, "betaslot").await,
+        "a write through the bare form must reach the pty the per-tab form streams"
     );
 }

@@ -73,8 +73,10 @@ function wsScheme(): string {
   return location.protocol === "https:" ? "wss:" : "ws:"
 }
 
-// The agent session's main PTY socket URL. Connecting launches/resumes the
-// provider, exactly as the legacy `Subscribe` did.
+// The agent session's slot-tab PTY socket URL: a convenience alias for
+// `tabPtyUrl(sessionId, <that agent's slot tab>)`, which the server resolves.
+// Connecting launches/resumes the provider, exactly as the legacy `Subscribe`
+// did.
 export function agentPtyUrl(sessionId: string): string {
   return `${wsScheme()}//${location.host}/ws/sessions/${encodeURIComponent(
     sessionId,
@@ -130,11 +132,12 @@ export function terminalSocketUrl(
   }
 }
 
-// An extra tab's PTY socket URL, nested under its owning session so the server
-// can enforce that the tab belongs to that session. Used ONLY for extra tabs;
-// the session-slot tab keeps `agentPtyUrl` (served by the existing
-// `/ws/sessions/:id/pty` route). Connecting launches the extra
-// tab's provider fresh (there is no resume for extra tabs).
+// A tab's own PTY socket URL, nested under its owning session so the server can
+// enforce that the tab belongs to that session. This is the stable address of
+// EVERY tab, the session-slot tab included; the bare `agentPtyUrl` is a
+// convenience alias that reaches the slot tab's identical PTY, and is still what
+// the client dials for it. Connecting launches a dormant tab's provider,
+// resuming or not per the server's dynamic decision.
 export function tabPtyUrl(sessionId: string, tabId: string): string {
   return `${wsScheme()}//${location.host}/ws/sessions/${encodeURIComponent(
     sessionId,

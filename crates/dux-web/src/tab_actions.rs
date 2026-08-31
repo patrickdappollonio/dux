@@ -12,6 +12,14 @@
 //! visitor's browser, but a client sending no `Origin` (curl, a script) bypasses
 //! it by design.
 //!
+//! Every tab of `:id` is addressable at `.../tabs/:tab`, the session-slot tab
+//! included, and so is its PTY socket. What each verb DOES with the slot tab is
+//! therefore a stated decision per route rather than a consequence of the slot
+//! tab having no `agent_tabs` row: `DELETE` refuses it (it lives as long as the
+//! agent does), `PATCH` accepts it and delegates to the session-level provider
+//! change, and neither infers slot-ness from a missing row. Both ask
+//! `EngineHandle::is_slot_tab`.
+//!
 //! Routes:
 //! - `POST   /api/v1/sessions/:id/tabs`            - create a tab running
 //!   `{ "provider"? }` (the session's project default when omitted). 201 +

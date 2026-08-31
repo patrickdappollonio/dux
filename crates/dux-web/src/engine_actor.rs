@@ -3407,16 +3407,15 @@ fn handle_request(
             let _ = reply.send(slot);
         }
         EngineRequest::TabSession(tab_id, reply) => {
-            // Support-only ownership: the session-slot tab is excluded here (it is
-            // served by `/ws/sessions/:id/pty`), so the tabs route 404s it. Asked
-            // through the resolver rather than relying on "the slot tab has no
-            // `agent_tabs` row", which is a fact about today's storage shape.
+            // This answers "which session owns this EXTRA tab". Slot-ness is
+            // asked of the resolver rather than inferred from "the slot tab has
+            // no `agent_tabs` row", which is a fact about today's storage shape.
             //
-            // `ws_tab_pty_upgrade` refuses the slot tab before it ever gets here,
-            // and both refusals stay. This one is not merely that check repeated:
-            // every tab REST route resolves ownership through here too, so the
-            // exclusion has to live with the ownership answer, not only at the one
-            // socket edge that reads best with an explicit refusal of its own.
+            // The per-tab route accepts the slot tab and reaches its PTY; the
+            // exclusion here is only about the stored-owner lookup, since the
+            // slot tab's owner is not stored, it is resolved. Callers that must
+            // accept the slot tab ask `is_slot_tab` first (the tab PTY socket
+            // and the REST tab verbs all do).
             let owner = match engine.session_for_slot_tab(&tab_id) {
                 Some(_) => None,
                 None => engine.agent_tabs.get(&tab_id).map(|t| t.session_id.clone()),

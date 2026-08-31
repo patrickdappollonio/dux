@@ -166,7 +166,12 @@ export function useTerminalLifecycle(
   // else. For an agent, the session-slot tab uses the session PTY route and an
   // extra tab its own nested route; a terminal uses its owner's nested route.
   // The target carries ids and no session record, so slot-ness is asked of the
-  // id-only helper the URL grammar shares.
+  // id-only helper the URL grammar shares. Both forms are valid for the slot tab
+  // now: the server serves it at its own `/tabs/:tab/pty` address too, and the
+  // bare per-agent route is a convenience alias onto the identical PTY. The
+  // choice below stays with the alias (no behavior change, and it keeps the slot
+  // tab out of the per-tab socket quota); the stable per-tab form is what tab
+  // promotion will move it to.
   const ptyUrl =
     target.kind === "agent"
       ? isSlotTabTarget(target.sessionId, target.id)
