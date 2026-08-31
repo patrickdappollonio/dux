@@ -536,6 +536,17 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // engine's PR-sync side effects.
     },
     PaletteCommand {
+        action: Action::RecheckGithub,
+        name: "recheck-github",
+        description: "Re-check whether the gh CLI can be used, without restarting dux",
+        // GLOBAL and parameter-free, so the web gets a counterpart: the app
+        // menu's "Re-check GitHub" under Configuration (`appMenu.ts`), which
+        // reaches the same engine entry point. Restarting dux to clear a
+        // momentary `gh` failure would take every running agent with it, which is
+        // exactly why this exists on both surfaces rather than only where the
+        // person happens to be sitting.
+    },
+    PaletteCommand {
         action: Action::ToggleAlwaysShowTabs,
         name: "toggle-always-show-tabs",
         description: "Toggle always showing the agent tab strip, even with a single tab",

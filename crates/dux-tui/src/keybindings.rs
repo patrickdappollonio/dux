@@ -1379,6 +1379,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        action: Action::RecheckGithub,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::ToggleAlwaysShowTabs,
         default_keys: &[],
         scopes: &[],
@@ -3228,6 +3235,7 @@ mod tests {
             "open-worktree-with",
             "pull-project",
             "read-startup-command-logs",
+            "recheck-github",
             "reconnect-agent",
             "refresh-changes",
             "reload-config",

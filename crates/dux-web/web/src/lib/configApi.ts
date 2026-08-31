@@ -62,6 +62,13 @@ export const configApi = {
   // `writeTarget` doc in settingsDescriptors.ts.
   toggleGithubIntegration: () =>
     send("POST", "/api/v1/ui/toggle-github-integration", {}),
+  // Ask `gh` again right now (the app menu's "Re-check GitHub"). NOT a
+  // preference and NOT a config write: it is the way back from a `gh` that
+  // failed for a reason that has since passed, for someone who cannot restart
+  // dux without taking every running agent with it. The engine answers with a
+  // routed status, and if availability actually changed every client is told to
+  // refetch its bootstrap document, so the pull-request entries appear.
+  recheckGithub: () => send("POST", "/api/v1/github/recheck", {}),
   // Save `[server] tailscale` and, when a listener is up, move the Tailscale
   // listener to match. Bespoke rather than part of the generic settings PATCH
   // because the second half is a live act only the serve loop can perform.

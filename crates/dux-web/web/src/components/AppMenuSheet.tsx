@@ -97,8 +97,9 @@ export function AppMenuSheet({
   // variant, exactly as the launcher corner's ⋯ menu gates its copy.
   const { bootstrap } = useDux()
   const ghAvailable = bootstrap?.gh_available ?? false
+  const githubIntegrationEnabled = bootstrap?.github_integration ?? false
 
-  const model = appMenuModel({ ghAvailable })
+  const model = appMenuModel({ ghAvailable, githubIntegrationEnabled })
   const submenu = drilled ? findSubmenu(model, drilled) : null
   // Fall back to the root if a drilled id ever goes missing, so the sheet can
   // never strand the user on an empty list with no way back.

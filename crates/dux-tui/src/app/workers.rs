@@ -427,6 +427,11 @@ impl App {
         }
         match reaction {
             EventReaction::Nothing => {}
+            // The terminal UI reads `Engine::gh_status` live every time it gates
+            // a pull-request command, so the flip is already visible here and
+            // the accompanying keyed status carries the explanation. The arm
+            // exists so a surface that DOES need to react cannot forget to.
+            EventReaction::GhAvailabilityChanged { .. } => {}
             EventReaction::Status(StatusUpdate {
                 tone, message, key, ..
             }) => {

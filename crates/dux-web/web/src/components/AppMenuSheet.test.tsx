@@ -23,7 +23,9 @@ vi.mock("@/lib/store", () => ({
   openCreateAgentFromPr: vi.fn(),
   openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
   createStandaloneTerminal: () => createStandaloneTerminal(),
-  useDux: () => ({ bootstrap: { gh_available: ghAvailable } }),
+  useDux: () => ({
+    bootstrap: { gh_available: ghAvailable, github_integration: true },
+  }),
 }))
 vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => Promise.resolve() },
@@ -50,7 +52,7 @@ describe("AppMenuSheet", () => {
   // sheet's root list must match the desktop menu's top level exactly.
   it("renders the same top-level titles as the desktop menu", () => {
     render(<Harness />)
-    const expected = appMenuModel({ ghAvailable: true })
+    const expected = appMenuModel({ ghAvailable: true, githubIntegrationEnabled: true })
       .filter((e) => e.kind !== "separator")
       .map((e) => (e.kind === "separator" ? "" : e.title))
     const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
@@ -99,7 +101,7 @@ describe("AppMenuSheet", () => {
     render(<Harness />)
     fireEvent.click(screen.getByText("Sort agents by"))
     await settle()
-    const sub = findSubmenu(appMenuModel({ ghAvailable: true }), "sort-agents")!
+    const sub = findSubmenu(appMenuModel({ ghAvailable: true, githubIntegrationEnabled: true }), "sort-agents")!
     expect(screen.getAllByText(sub.title).length).toBeGreaterThan(0)
     expect(screen.getByText("Recently updated")).toBeTruthy()
   })

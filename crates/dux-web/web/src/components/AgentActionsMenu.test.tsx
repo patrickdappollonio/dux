@@ -388,6 +388,22 @@ describe("AgentActionsMenu pull-request entries", () => {
     expect(screen.queryByText("Detach pull request")).toBeNull()
   })
 
+  // The recovery the whole re-check exists for: dux booted while GitHub was
+  // rate-limiting, so the menu had no pull-request entries; a later probe found
+  // gh working, the bootstrap document was refetched, and the entry has to be
+  // there without reloading the page.
+  it("gains the attach entry once gh becomes available, with no reload", async () => {
+    seed(makeSession({ id: "s1" }), false)
+    const first = await openMenu(makeSession({ id: "s1" }))
+    expect(first).toBeTruthy()
+    expect(screen.queryByText("Attach pull request…")).toBeNull()
+    cleanup()
+
+    seed(makeSession({ id: "s1" }), true)
+    await openMenu(makeSession({ id: "s1" }))
+    expect(screen.getByText("Attach pull request…")).toBeTruthy()
+  })
+
   it("offers the attach entry with gh, with icon and trailing ellipsis, routed to the store", async () => {
     const session = makeSession({ id: "s1" })
     seed(session, true)

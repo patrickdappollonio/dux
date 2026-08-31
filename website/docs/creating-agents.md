@@ -128,10 +128,29 @@ github_integration = true
 ```
 
 dux checks `gh` at startup and again whenever you switch the integration on, so running
-`gh auth login` while dux is up is enough: toggle the setting off and on. If `gh` is
-missing or none of its logins work, the path is hidden outright on both front ends. One
-expired login does not take the others down: if you are signed in to two hosts and one
-token is stale, the working host keeps the GitHub features on.
+`gh auth login` while dux is up is enough. If `gh` is missing or none of its logins work,
+the path is hidden outright on both front ends. One expired login does not take the
+others down: if you are signed in to two hosts and one token is stale, the working host
+keeps the GitHub features on.
+
+**A failed check is never final.** While GitHub features are unavailable, dux quietly
+asks `gh` again every few minutes and turns them back on the moment it works, so a
+GitHub rate limit or a short outage while dux was starting no longer means restarting it.
+The interval is yours:
+
+```toml
+[ui]
+github_probe_interval_secs = 300  # 0 turns the periodic re-check off
+```
+
+`0` disables the periodic re-check entirely; asking on demand still works. Any other
+value is clamped to between 30 seconds and 21600 seconds (6 hours), and dux logs a
+warning once when it clamps one, so a mistyped `1` cannot have it launching `gh` every
+second.
+
+You can also ask right away: **Re-check GitHub** in the browser's settings menu under
+**Configuration**, or the `recheck-github` palette command in the terminal UI. Either
+way dux tells you what it found, including why it still cannot use `gh`.
 
 **GitHub Enterprise works, on any hostname `gh` is logged in to.** A company server at
 `git.company.example` is treated exactly like `github.com` once

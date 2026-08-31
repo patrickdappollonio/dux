@@ -24,7 +24,9 @@ vi.mock("@/lib/store", () => ({
     openCreateAgentFromPr(projectId),
   openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
   createStandaloneTerminal: () => createStandaloneTerminal(),
-  useDux: () => ({ bootstrap: { gh_available: ghAvailable } }),
+  useDux: () => ({
+    bootstrap: { gh_available: ghAvailable, github_integration: true },
+  }),
 }))
 vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => Promise.resolve() },
@@ -101,7 +103,10 @@ describe("AppMenu", () => {
     await screen.findByRole("menu")
 
     // Drive the expectation from the model, never a hand-written list.
-    const topLevel = appMenuModel({ ghAvailable: true }).filter((e) => e.kind !== "separator")
+    const topLevel = appMenuModel({
+      ghAvailable: true,
+      githubIntegrationEnabled: true,
+    }).filter((e) => e.kind !== "separator")
     const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
     expect(rendered).toHaveLength(topLevel.length)
     for (const entry of topLevel) {
@@ -129,7 +134,10 @@ describe("AppMenu", () => {
     const subTriggers = document.querySelectorAll(
       '[data-slot="dropdown-menu-sub-trigger"]',
     )
-    const submenus = appMenuModel({ ghAvailable: true }).filter((e) => e.kind === "submenu")
+    const submenus = appMenuModel({
+      ghAvailable: true,
+      githubIntegrationEnabled: true,
+    }).filter((e) => e.kind === "submenu")
     expect(subTriggers).toHaveLength(submenus.length)
     for (const t of subTriggers) {
       expect(t.getAttribute("aria-haspopup")).toBe("menu")
@@ -262,6 +270,10 @@ describe("AppMenu", () => {
 
   it("walks the whole model without a submenu losing entries", () => {
     // Guards the recursion contract the renderer depends on.
-    expect(walk(appMenuModel({ ghAvailable: true })).length).toBeGreaterThan(appMenuModel({ ghAvailable: true }).length)
+    const model = appMenuModel({
+      ghAvailable: true,
+      githubIntegrationEnabled: true,
+    })
+    expect(walk(model).length).toBeGreaterThan(model.length)
   })
 })

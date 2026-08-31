@@ -231,7 +231,14 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // the terminal UI asked for it and only the terminal UI has a status
             // op waiting on it; the browsers on that serve learn about the mode
             // from the `config.changed` refetch the write already fired.
-            | EventReaction::TailscaleModeApplied { .. } => FollowupOwner::Drainer,
+            | EventReaction::TailscaleModeApplied { .. }
+            // GitHub availability flipping. The web half is not a follow-up at
+            // all: it is a peek in `fanout_reaction`, which runs on both serving
+            // modes and only nudges browsers to refetch the bootstrap document
+            // that carries `gh_available`. The terminal UI reads the engine's
+            // status live, so its arm has nothing to do and cannot double
+            // anything.
+            | EventReaction::GhAvailabilityChanged { .. } => FollowupOwner::Drainer,
     }
 }
 

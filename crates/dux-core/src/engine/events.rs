@@ -173,6 +173,10 @@ impl StatusUpdate {
 /// session_store, sync entries, in-flight maps, env, etc.); anything that
 /// touches view state (status line, prompt, focus, input_target, derived caches
 /// like `left_items_cache` and `files_index`) is described here.
+/// The one status key every "GitHub features came back / went away" message
+/// carries, so the surfaces replace the standing one instead of stacking.
+pub const GH_AVAILABILITY_STATUS_KEY: &str = "gh-availability";
+
 pub enum EventReaction {
     /// Engine fully handled the event; no view follow-up needed.
     Nothing,
@@ -351,6 +355,18 @@ pub enum EventReaction {
     TailscaleModeApplied {
         mode: crate::config::TailscaleMode,
         outcome: crate::config::TailscaleModeOutcome,
+    },
+    /// Whether GitHub features work has CHANGED (a probe answered differently
+    /// from the state dux held). Emitted only on the transition, never once per
+    /// re-check, so the surfaces can act on it without de-duplicating.
+    ///
+    /// The terminal UI needs nothing from it: it reads `Engine::gh_status` live
+    /// when it gates a palette command. The web does, because `gh_available`
+    /// rides the bootstrap document a browser fetches once at connect, so
+    /// without a nudge a browser keeps hiding the pull-request entries until it
+    /// is reloaded.
+    GhAvailabilityChanged {
+        available: bool,
     },
 }
 
@@ -2355,6 +2371,12 @@ impl Engine {
             return EventReaction::Nothing;
         }
         let decisive = !matches!(outcome, crate::gh::GhProbe::Transient(_));
+        // What the surfaces publish is the COMPOSITE (integration on and `gh`
+        // usable), so the transition is measured on that and not on the raw
+        // status: a probe that moves NotInstalled to Unreachable changes
+        // nothing anybody can see.
+        let was_available = self.pr_agent_command_available();
+        let mut unreachable_reason: Option<String> = None;
         let status = match outcome {
             crate::gh::GhProbe::NotInstalled => {
                 self.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
@@ -2369,6 +2391,7 @@ impl Engine {
                 // holds. It only names the state dux is genuinely in when it
                 // has never had one: unreachable, not logged out. Recording it
                 // as NotAuthenticated is the bug this variant exists for.
+                unreachable_reason = Some(reason);
                 if matches!(self.gh_status, GhStatus::Unknown) {
                     GhStatus::Unreachable
                 } else {
@@ -2422,7 +2445,108 @@ impl Engine {
                 self.disarm_pr_sync();
             }
         }
-        EventReaction::Nothing
+        let now_available = self.pr_agent_command_available();
+        // An on-demand re-check reports its outcome whatever it is: the user
+        // asked a question and is owed the answer, including "still not".
+        let asked_for = std::mem::take(&mut self.gh_probe.announce_outcome);
+        let changed = was_available != now_available;
+        let mut reactions = Vec::new();
+        if changed {
+            reactions.push(EventReaction::GhAvailabilityChanged {
+                available: now_available,
+            });
+        }
+        if changed || asked_for {
+            reactions.push(EventReaction::Status(
+                self.gh_availability_status(unreachable_reason.as_deref()),
+            ));
+        }
+        match reactions.len() {
+            0 => EventReaction::Nothing,
+            1 => reactions.pop().expect("one reaction"),
+            _ => EventReaction::Multi(reactions),
+        }
+    }
+
+    /// The user-facing sentence for the state GitHub integration is in now,
+    /// carried on the one shared key so a later transition replaces it rather
+    /// than stacking a second toast.
+    ///
+    /// Verbose on purpose: the pull-request entries appearing or disappearing is
+    /// otherwise a silent change to what the interface offers, and the reason
+    /// (a rate limit, no login, no `gh` at all) is the whole point of saying
+    /// anything.
+    fn gh_availability_status(&self, unreachable_reason: Option<&str>) -> StatusUpdate {
+        if self.pr_agent_command_available() {
+            return StatusUpdate::info(
+                "GitHub integration is available: gh is installed and logged in, so \
+                 pull requests can be attached, opened and used to create agents again.",
+            )
+            .with_key(GH_AVAILABILITY_STATUS_KEY);
+        }
+        // A probe that failed transiently reports THAT, whatever last-known-good
+        // status is still standing: the reason this attempt failed is the fact
+        // the user is owed, and "nobody is logged in" would be an accusation
+        // about a login gh never got far enough to look at.
+        if let Some(reason) = unreachable_reason
+            && self.github_integration_enabled
+        {
+            return StatusUpdate::warning(format!(
+                "GitHub features are paused: gh could not be reached ({reason}). {}",
+                self.gh_retry_sentence(),
+            ))
+            .with_key(GH_AVAILABILITY_STATUS_KEY);
+        }
+        // The setting wins over anything gh said. It can be switched off while a
+        // re-check the user asked for is still in flight, and the answer that
+        // lands then must name what they just changed rather than accuse them of
+        // being logged out: the integration is off, so gh's verdict on the login
+        // is not why the features are gone.
+        let cause = if !self.github_integration_enabled {
+            "the GitHub integration is turned off in your config".to_string()
+        } else {
+            match self.gh_status {
+                GhStatus::NotInstalled => {
+                    "the gh CLI is not on PATH (install it from https://cli.github.com)".to_string()
+                }
+                GhStatus::NotAuthenticated => {
+                    "gh reports that nobody is logged in (run: gh auth login)".to_string()
+                }
+                // Available cannot actually arrive here: with the integration on
+                // it returned at the top, and with it off the branch above
+                // answered. It shares the arm rather than claiming something
+                // specific about a state this sentence is not describing.
+                GhStatus::Available | GhStatus::Unreachable | GhStatus::Unknown => {
+                    match unreachable_reason {
+                        Some(reason) => format!("gh could not be reached ({reason})"),
+                        None => "gh could not be reached".to_string(),
+                    }
+                }
+            }
+        };
+        StatusUpdate::warning(format!(
+            "GitHub features are paused: {cause}. {}",
+            self.gh_retry_sentence(),
+        ))
+        .with_key(GH_AVAILABILITY_STATUS_KEY)
+    }
+
+    /// What happens next, which is the half of the message the user can act on.
+    fn gh_retry_sentence(&self) -> String {
+        let interval = self.github_probe_interval();
+        if !self.github_integration_enabled {
+            "Turn the integration back on to use them.".to_string()
+        } else if interval.is_zero() {
+            "The periodic re-check is disabled (ui.github_probe_interval_secs = 0), so \
+             re-check on demand from the TUI command palette or the web app menu."
+                .to_string()
+        } else {
+            format!(
+                "dux re-checks every {}s, and you can re-check now from the TUI command \
+                 palette or the web app menu.",
+                interval.as_secs(),
+            )
+        }
     }
 
     fn pr_status_result_is_current(
@@ -3873,6 +3997,7 @@ mod tests {
             EventReaction::Status(_) => "Status",
             EventReaction::ClearStatus(_) => "ClearStatus",
             EventReaction::TailscaleModeApplied { .. } => "TailscaleModeApplied",
+            EventReaction::GhAvailabilityChanged { .. } => "GhAvailabilityChanged",
             EventReaction::Multi(_) => "Multi",
             EventReaction::RebuildLeftItems => "RebuildLeftItems",
             EventReaction::ReloadChangedFiles => "ReloadChangedFiles",
@@ -4611,7 +4736,16 @@ mod tests {
             outcome: crate::gh::GhProbe::NotInstalled,
         });
 
-        assert!(matches!(reaction, EventReaction::Nothing));
+        // Losing `gh` is a transition, so it is published and explained rather
+        // than swallowed.
+        let EventReaction::Multi(reactions) = reaction else {
+            panic!("expected the availability transition to be reported");
+        };
+        assert!(
+            reactions
+                .iter()
+                .any(|r| matches!(r, EventReaction::GhAvailabilityChanged { available: false }))
+        );
         assert_eq!(engine.gh_status, GhStatus::NotInstalled);
         assert_eq!(
             engine.github_host_policy(),

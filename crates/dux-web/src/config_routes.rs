@@ -24,6 +24,7 @@
 //! - `POST /api/v1/ui/toggle-pr-banner-position` — swap the PR banner top/bottom.
 //! - `POST /api/v1/ui/agent-sort` — set the web agent-list sort mode (validated).
 //! - `POST /api/v1/ui/toggle-github-integration` — flip GitHub PR integration.
+//! - `POST /api/v1/github/recheck` — ask `gh` again right now (no config write).
 //! - `POST /api/v1/ui/toggle-copy-on-select` — flip web-terminal copy-on-select.
 //! - `POST /api/v1/ui/toggle-always-show-tab-strip` — flip whether the agent tab
 //!   strip always renders, even with a single tab.
@@ -77,6 +78,7 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/ui/toggle-github-integration",
             post(toggle_github_integration),
         )
+        .route("/api/v1/github/recheck", post(recheck_github))
         .route(
             "/api/v1/ui/toggle-copy-on-select",
             post(toggle_copy_on_select),
@@ -230,6 +232,13 @@ async fn set_agent_sort(
 /// (`ui.github_integration`) and its engine-side PR-sync side effects.
 async fn toggle_github_integration(State(state): State<AppState>, headers: HeaderMap) -> Response {
     dispatch(&state, &headers, WireCommand::ToggleGithubIntegration {}).await
+}
+
+/// `POST /api/v1/github/recheck`. Ask `gh` again right now. Writes no config;
+/// the reply is the routed status, and a change in availability separately
+/// nudges every client to refetch its bootstrap document.
+async fn recheck_github(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    dispatch(&state, &headers, WireCommand::RecheckGithub {}).await
 }
 
 /// `POST /api/v1/ui/toggle-copy-on-select`. Flip whether selecting text in the

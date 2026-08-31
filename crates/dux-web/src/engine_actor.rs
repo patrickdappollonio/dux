@@ -2082,6 +2082,15 @@ impl EngineService {
         for status in dux_core::wire::wire_statuses_from_reaction(reaction) {
             let _ = self.status.send(status);
         }
+        // `gh_available` rides the bootstrap document, which a browser fetches
+        // at connect and then only on `config.changed`. So a flip in whether
+        // GitHub features work rides the same signal: without it a browser goes
+        // on hiding (or offering) the pull-request entries until it is reloaded,
+        // which is the whole reason a momentary rate limit used to need a
+        // restart to clear.
+        if peek_gh_availability_changed(reaction).is_some() {
+            let _ = self.config_reload_tx.send(());
+        }
         // NOT origin-routed, deliberately, and for the same reason as the launch
         // follow-up further down: it looks its own session up in a web pending map
         // first and does nothing when the delete was not web-started. It starts no
@@ -2683,6 +2692,16 @@ pub(crate) fn run_engine_loop(
         thread::sleep(TICK);
     }
     engine
+}
+
+/// Whether this reaction (or one nested inside a `Multi`) says GitHub
+/// availability flipped, and which way.
+fn peek_gh_availability_changed(reaction: &EventReaction) -> Option<bool> {
+    match reaction {
+        EventReaction::GhAvailabilityChanged { available } => Some(*available),
+        EventReaction::Multi(reactions) => reactions.iter().find_map(peek_gh_availability_changed),
+        _ => None,
+    }
 }
 
 /// Borrow the reloaded `Config` out of a reload follow-up reaction WITHOUT

@@ -32,6 +32,7 @@ import {
   Clock,
   FileCode,
   FolderGit2,
+  GitPullRequestArrow,
   Globe,
   Plus,
   RefreshCw,
@@ -88,6 +89,11 @@ export interface AppMenuContext {
    *  Gates the from-PR agent variant, exactly as the launcher corner's `⋯`
    *  menu and the per-project `⋯` menu gate theirs. */
   ghAvailable: boolean
+  /** Whether the integration is switched ON (`bootstrap.github_integration`),
+   *  which is a different question from whether `gh` currently works. Gates
+   *  "Re-check GitHub", which exists precisely for when `gh` does NOT work and
+   *  so must never be gated on `ghAvailable`. */
+  githubIntegrationEnabled: boolean
 }
 
 /**
@@ -230,6 +236,32 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
               )
           },
         },
+        // No ellipsis: it runs immediately. Present whenever the integration is
+        // ON, and deliberately NOT gated on gh currently working, because the
+        // state it exists to escape is exactly the one where gh is not working.
+        // Restarting dux would clear a stale gh answer too, and would take every
+        // running agent with it.
+        ...(ctx.githubIntegrationEnabled
+          ? ([
+              {
+                kind: "item",
+                id: "recheck-github",
+                title: "Re-check GitHub",
+                icon: GitPullRequestArrow,
+                run: () => {
+                  configApi
+                    .recheckGithub()
+                    .catch((e) =>
+                      notifyError(
+                        e instanceof Error
+                          ? e.message
+                          : "Could not ask the server to re-check the GitHub CLI.",
+                      ),
+                    )
+                },
+              },
+            ] as AppMenuEntry[])
+          : []),
       ],
     },
     // Still here now that the standalone terminal has moved into the "New"

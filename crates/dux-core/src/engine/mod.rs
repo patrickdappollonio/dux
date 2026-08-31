@@ -99,6 +99,11 @@ pub struct GhProbeState {
     /// and it is wall-clock elapsed time per the animation/refresh tenet.
     /// `None` until the first probe, which the surfaces spawn at startup.
     pub last_probe_at: Option<Instant>,
+    /// Set when the probe now in flight was asked for BY THE USER, so its
+    /// outcome is reported even when nothing changed. A scheduled re-check that
+    /// answers the same as last time says nothing; a re-check somebody pressed
+    /// a button for has to answer.
+    pub announce_outcome: bool,
 }
 
 impl Default for GhProbeState {
@@ -108,6 +113,7 @@ impl Default for GhProbeState {
             generation: 0,
             program: std::ffi::OsString::from("gh"),
             last_probe_at: None,
+            announce_outcome: false,
         }
     }
 }
@@ -2192,6 +2198,31 @@ impl Engine {
             self.github_probe_interval().as_secs(),
         ));
         self.spawn_gh_status_check();
+    }
+
+    /// Re-ask `gh` right now because the user said so, from the TUI palette or
+    /// the web app menu.
+    ///
+    /// Returns the sentence to show. Restarting dux is often not an option (it
+    /// would take every running agent with it), so this is the way out of a
+    /// paused integration that does not involve waiting for the timer. It is
+    /// gated on the integration being enabled and NOT on the current status: a
+    /// gesture that vanishes exactly when it would help is not a way back.
+    pub fn request_gh_recheck(&mut self) -> StatusUpdate {
+        if !self.github_integration_enabled {
+            return StatusUpdate::warning(
+                "The GitHub integration is turned off, so there is nothing to re-check. \
+                 Turn it on first (ui.github_integration), and dux asks gh straight away.",
+            )
+            .with_key(crate::engine::events::GH_AVAILABILITY_STATUS_KEY);
+        }
+        self.gh_probe.announce_outcome = true;
+        self.spawn_gh_status_check();
+        StatusUpdate::info(
+            "Re-checking the GitHub CLI: running gh auth status now, and the result \
+             replaces this message when it lands.",
+        )
+        .with_key(crate::engine::events::GH_AVAILABILITY_STATUS_KEY)
     }
 
     /// Ask `gh` which hosts it can serve, on a worker.
@@ -7090,6 +7121,193 @@ mod tests {
         engine.gh_probe.last_probe_at = Some(Instant::now() - Duration::from_secs(31));
         engine.poll_gh_probe_schedule();
         assert_eq!(engine.gh_probe.generation, 1, "no further probes");
+    }
+
+    /// Collect the reactions of one settled probe, flattened out of `Multi`.
+    fn probe_reactions(engine: &mut Engine, outcome: GhProbe) -> Vec<EventReaction> {
+        let reaction = engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome,
+        });
+        match reaction {
+            EventReaction::Multi(reactions) => reactions,
+            EventReaction::Nothing => Vec::new(),
+            other => vec![other],
+        }
+    }
+
+    #[test]
+    fn only_a_transition_publishes_and_says_so() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Unreachable;
+
+        let reactions = probe_reactions(
+            &mut engine,
+            GhProbe::Decided {
+                available: true,
+                policy: GithubHostPolicy::LegacyNameRule,
+            },
+        );
+        assert!(
+            reactions
+                .iter()
+                .any(|r| matches!(r, EventReaction::GhAvailabilityChanged { available: true })),
+            "the browser is told to refetch the document carrying gh_available",
+        );
+        let status = reactions
+            .iter()
+            .find_map(|r| match r {
+                EventReaction::Status(status) => Some(status),
+                _ => None,
+            })
+            .expect("the user is told GitHub features came back");
+        assert_eq!(
+            status.key.as_deref(),
+            Some(crate::engine::events::GH_AVAILABILITY_STATUS_KEY),
+        );
+        assert!(
+            status.message.contains("available"),
+            "got {}",
+            status.message,
+        );
+
+        // A second probe that answers the same way is not a transition, so it
+        // says nothing: a re-check every few minutes must not be a toast every
+        // few minutes.
+        let repeat = probe_reactions(
+            &mut engine,
+            GhProbe::Decided {
+                available: true,
+                policy: GithubHostPolicy::LegacyNameRule,
+            },
+        );
+        assert!(repeat.is_empty(), "a repeat answer says nothing");
+    }
+
+    #[test]
+    fn losing_gh_says_why_and_names_the_retry() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Available;
+        engine.config.ui.github_probe_interval_secs = 300;
+
+        let reactions = probe_reactions(&mut engine, GhProbe::NotInstalled);
+        assert!(
+            reactions
+                .iter()
+                .any(|r| matches!(r, EventReaction::GhAvailabilityChanged { available: false }))
+        );
+        let status = reactions
+            .iter()
+            .find_map(|r| match r {
+                EventReaction::Status(status) => Some(status),
+                _ => None,
+            })
+            .expect("a status");
+        assert!(
+            status.message.contains("cli.github.com"),
+            "the sentence must say what to do: {}",
+            status.message,
+        );
+        assert!(
+            status.message.contains("300s"),
+            "and that dux keeps trying: {}",
+            status.message,
+        );
+    }
+
+    #[test]
+    fn an_on_demand_re_check_answers_even_when_nothing_changed() {
+        // Somebody pressed a button. "Still not working, here is why" is an
+        // answer; silence is not.
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.github_integration_enabled = true;
+        engine.gh_probe.program = stand_in_gh(dir.path(), "exit 1").into();
+        engine.gh_status = GhStatus::NotAuthenticated;
+
+        let asked = engine.request_gh_recheck();
+        assert_eq!(
+            asked.key.as_deref(),
+            Some(crate::engine::events::GH_AVAILABILITY_STATUS_KEY),
+            "the request and its outcome share one key, so one replaces the other",
+        );
+        assert_eq!(engine.gh_probe.generation, 1, "the probe was spawned");
+
+        let reactions = probe_reactions(&mut engine, GhProbe::Transient("HTTP 403".to_string()));
+        let status = reactions
+            .iter()
+            .find_map(|r| match r {
+                EventReaction::Status(status) => Some(status),
+                _ => None,
+            })
+            .expect("an on-demand re-check reports its outcome");
+        assert!(
+            status.message.contains("403"),
+            "and names the real reason: {}",
+            status.message,
+        );
+        assert!(
+            !reactions
+                .iter()
+                .any(|r| matches!(r, EventReaction::GhAvailabilityChanged { .. })),
+            "nothing changed, so nothing is republished",
+        );
+    }
+
+    #[test]
+    fn an_on_demand_re_check_with_the_integration_off_asks_nothing() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = false;
+
+        let status = engine.request_gh_recheck();
+        assert_eq!(engine.gh_probe.generation, 0, "no probe was spawned");
+        assert!(
+            status.message.contains("turned off"),
+            "and it says why: {}",
+            status.message,
+        );
+    }
+
+    /// The integration can be switched off while the re-check it asked for is
+    /// still running. The answer that lands then has to name the setting the
+    /// user just changed, not accuse them of being logged out.
+    #[test]
+    fn an_outcome_landing_after_the_integration_was_turned_off_says_so() {
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.github_integration_enabled = true;
+        engine.gh_probe.program = stand_in_gh(dir.path(), "exit 1").into();
+        engine.gh_status = GhStatus::NotAuthenticated;
+
+        engine.request_gh_recheck();
+        engine.github_integration_enabled = false;
+
+        let reactions = probe_reactions(
+            &mut engine,
+            GhProbe::Decided {
+                available: false,
+                policy: GithubHostPolicy::DenyAll,
+            },
+        );
+        let status = reactions
+            .iter()
+            .find_map(|r| match r {
+                EventReaction::Status(status) => Some(status),
+                _ => None,
+            })
+            .expect("an on-demand re-check reports its outcome");
+        assert!(
+            status.message.contains("turned off"),
+            "the setting the user just changed is the reason: {}",
+            status.message,
+        );
+        assert!(
+            !status.message.contains("nobody is logged in"),
+            "and gh's opinion of the login is beside the point: {}",
+            status.message,
+        );
     }
 
     #[test]

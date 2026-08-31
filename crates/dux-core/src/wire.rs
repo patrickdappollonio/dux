@@ -196,6 +196,11 @@ pub enum WireCommand {
     /// talking to `gh`. The write is eager because the user wants to know if
     /// persisting the toggle failed.
     ToggleGithubIntegration {},
+    /// Ask `gh` again right now, mirroring the TUI's `recheck-github` palette
+    /// command. Writes no config: it is the way out of a `gh` that failed for a
+    /// reason that has since passed, for a user who cannot restart dux without
+    /// taking every running agent down with it.
+    RecheckGithub {},
     /// Manually attach (pin) an already-RESOLVED pull request to a session. The
     /// fields carry what `gh pr view` answered; parsing/resolution of the raw
     /// reference happens earlier (the attach lookup worker), so applying this is
@@ -1557,6 +1562,12 @@ impl Engine {
             WireCommand::ToggleGithubIntegration {} => {
                 let status = self.toggle_github_integration();
                 return Ok(WireCommandOutcome::with_status(status));
+            }
+            WireCommand::RecheckGithub {} => {
+                let update = self.request_gh_recheck();
+                return Ok(WireCommandOutcome::with_status(WireStatus::from_update(
+                    &update,
+                )));
             }
             WireCommand::AttachPullRequest {
                 session_id,
@@ -4307,6 +4318,7 @@ impl Engine {
             | WireCommand::SetAgentSort { .. }
             | WireCommand::ToggleCopyOnSelect {}
             | WireCommand::ToggleGithubIntegration {}
+            | WireCommand::RecheckGithub {}
             | WireCommand::ToggleAlwaysShowTabStrip {}
             | WireCommand::ToggleTabReachesAgent {}
             | WireCommand::SetTailscaleMode { .. }
@@ -5937,6 +5949,35 @@ mod tests {
         assert_eq!(
             engine.gh_probe.generation, 2,
             "off and on again re-runs the probe a second time",
+        );
+    }
+
+    /// The web app menu's "Re-check GitHub". It writes no config and it works
+    /// while `gh` is broken, which is the only state it is for.
+    #[test]
+    fn apply_wire_recheck_github_asks_gh_again_and_recovers() {
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.gh_probe.program =
+            crate::gh::probe_test_support::stand_in_gh_serving(dir.path(), &["github.com"]).into();
+        engine.github_integration_enabled = true;
+        engine.config.ui.github_integration = true;
+        engine.gh_status = crate::model::GhStatus::Unreachable;
+
+        let outcome = engine
+            .apply_wire(WireCommand::RecheckGithub {})
+            .expect("apply re-check");
+        assert!(
+            outcome.status.is_some(),
+            "the press is answered immediately, not silently",
+        );
+        assert_eq!(engine.gh_probe.generation, 1, "the probe was spawned");
+
+        settle_gh_probe(&mut engine);
+        assert_eq!(engine.gh_status, crate::model::GhStatus::Available);
+        assert!(
+            engine.config.ui.github_integration,
+            "and nothing about the config was touched",
         );
     }
 

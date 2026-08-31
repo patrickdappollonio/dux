@@ -4536,6 +4536,10 @@ impl App {
     fn is_palette_action_available(&self, action: Action) -> bool {
         match action {
             Action::OpenCurrentPullRequest => self.current_pr_info().is_some(),
+            // Gated on the integration being on and NOT on the current status:
+            // this is the way back from an unusable `gh`, so it has to be there
+            // precisely when `gh` is unusable.
+            Action::RecheckGithub => self.engine.github_integration_enabled,
             // The PR flows require GitHub integration plus an authenticated gh.
             Action::NewAgentFromPr => self.github_pr_agent_command_available(),
             // Attach is additionally hidden while one is already resolving for
@@ -4841,6 +4845,12 @@ impl App {
                 self.set_info(format!(
                     "Diff line numbers {state}. Press {palette_key} to open the palette and toggle back."
                 ));
+                Ok(())
+            }
+            "recheck-github" => {
+                let status = self.engine.request_gh_recheck();
+                self.status
+                    .set(Instant::now(), status.key, status.tone, status.message);
                 Ok(())
             }
             "toggle-github-integration" => {
@@ -8276,6 +8286,61 @@ leading_branch = "main"
         assert_eq!(
             app.engine.gh_probe.generation, 2,
             "off and on again re-runs the probe a second time",
+        );
+    }
+
+    /// The palette gates the pull-request commands on the LIVE status, so a
+    /// re-check that finds `gh` working brings them back without a restart.
+    /// This is the terminal UI's half of the latched-probe bug: the same engine
+    /// value the web publishes is read here on every keystroke.
+    #[test]
+    fn palette_gating_follows_the_live_gh_status() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        app.engine.github_integration_enabled = true;
+        app.engine.gh_status = crate::model::GhStatus::Unreachable;
+        let names = |app: &App| -> Vec<String> {
+            app.filtered_palette_commands("")
+                .into_iter()
+                .filter_map(|binding| binding.palette_name.map(str::to_string))
+                .collect()
+        };
+
+        assert!(!names(&app).contains(&"new-agent-from-pr".to_string()));
+        // The way back is offered precisely while gh does not work.
+        assert!(names(&app).contains(&"recheck-github".to_string()));
+
+        app.engine.gh_status = crate::model::GhStatus::Available;
+        assert!(
+            names(&app).contains(&"new-agent-from-pr".to_string()),
+            "the PR command returns with no restart",
+        );
+        assert!(
+            names(&app).contains(&"recheck-github".to_string()),
+            "and the re-check does not vanish once it has worked",
+        );
+
+        app.engine.github_integration_enabled = false;
+        assert!(
+            !names(&app).contains(&"recheck-github".to_string()),
+            "with the integration off there is nothing to re-check",
+        );
+    }
+
+    #[test]
+    fn the_palette_re_check_asks_gh_again() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let dir = tempfile::tempdir().expect("tempdir");
+        app.engine.gh_probe.program = stand_in_gh(dir.path());
+        app.engine.github_integration_enabled = true;
+        app.engine.gh_status = crate::model::GhStatus::Unreachable;
+
+        app.execute_command("recheck-github".to_string())
+            .expect("palette re-check");
+
+        assert_eq!(app.engine.gh_probe.generation, 1, "it launched the probe");
+        assert!(
+            app.engine.gh_probe.announce_outcome,
+            "and the outcome is reported even if it does not change",
         );
     }
 

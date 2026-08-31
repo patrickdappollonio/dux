@@ -14,6 +14,7 @@ const openCreateAgentFromPr = vi.fn()
 const openNewAgentPicker = vi.fn()
 const createStandaloneTerminal = vi.fn()
 const reload = vi.fn(() => Promise.resolve())
+const recheckGithub = vi.fn(() => Promise.resolve())
 
 vi.mock("@/lib/store", () => ({
   openCustomizeWebapp: () => openCustomizeWebapp(),
@@ -31,7 +32,9 @@ vi.mock("@/lib/store", () => ({
   openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
   createStandaloneTerminal: () => createStandaloneTerminal(),
 }))
-vi.mock("@/lib/configApi", () => ({ configApi: { reload: () => reload() } }))
+vi.mock("@/lib/configApi", () => ({
+  configApi: { reload: () => reload(), recheckGithub: () => recheckGithub() },
+}))
 
 import { SquarePen } from "lucide-react"
 
@@ -50,7 +53,7 @@ function walk(entries: AppMenuEntry[]): AppMenuEntry[] {
 }
 
 // Most tests build the fullest menu: gh available, so the from-PR entry exists.
-const ctx = { ghAvailable: true }
+const ctx = { ghAvailable: true, githubIntegrationEnabled: true }
 
 describe("appMenuModel", () => {
   beforeEach(() => vi.clearAllMocks())
@@ -100,7 +103,7 @@ describe("appMenuModel", () => {
           : { kind: e.kind, id: e.id },
       )
     for (const ghAvailable of [true, false]) {
-      const model = appMenuModel({ ghAvailable })
+      const model = appMenuModel({ ghAvailable, githubIntegrationEnabled: true })
       const agentSub = findSubmenu(model, "new-agent")
       expect(agentSub?.title).toBe("New")
       expect(shape(agentSub?.entries)).toEqual(
@@ -138,9 +141,30 @@ describe("appMenuModel", () => {
     expect(createStandaloneTerminal).toHaveBeenCalledOnce()
   })
 
+  // The way back from a gh that stopped working. Restarting dux would clear a
+  // stale answer too, and would take every running agent with it.
+  it("offers the GitHub re-check while the integration is on, whatever gh says", () => {
+    const ids = (githubIntegrationEnabled: boolean, ghAvailable: boolean) =>
+      walk(appMenuModel({ ghAvailable, githubIntegrationEnabled })).map(
+        (e) => e.id,
+      )
+    expect(ids(true, false)).toContain("recheck-github")
+    expect(ids(true, true)).toContain("recheck-github")
+    expect(ids(false, false)).not.toContain("recheck-github")
+  })
+
+  it("routes the GitHub re-check to its endpoint", () => {
+    const entry = walk(appMenuModel(ctx)).find((e) => e.id === "recheck-github")
+    if (entry?.kind !== "item") throw new Error("not an item")
+    // No trailing ellipsis: it runs immediately, with no dialog to open.
+    expect(entry.title).toBe("Re-check GitHub")
+    entry.run()
+    expect(recheckGithub).toHaveBeenCalledOnce()
+  })
+
   it("hides the from-PR agent variant when gh is unavailable", () => {
     const ids = (ghAvailable: boolean) =>
-      walk(appMenuModel({ ghAvailable })).map((e) => e.id)
+      walk(appMenuModel({ ghAvailable, githubIntegrationEnabled: true })).map((e) => e.id)
     expect(ids(true)).toContain("new-agent-from-pr")
     expect(ids(false)).not.toContain("new-agent-from-pr")
   })
@@ -221,6 +245,7 @@ describe("appMenuModel", () => {
       "global-env",
       "sep-config",
       "reload-config",
+      "recheck-github",
     ])
   })
 
@@ -287,8 +312,12 @@ describe("appMenuModel", () => {
   it("does not reference the removed palette toggles", () => {
     for (const entry of walk(appMenuModel(ctx))) {
       const text = `${entry.id} ${entry.kind === "separator" ? "" : entry.title}`
+      // The GitHub clause names the TOGGLE, not the word: flipping
+      // `ui.github_integration` is a preference and stays in the Preferences
+      // dialog, while "Re-check GitHub" is an action that happens once and
+      // writes nothing, so it belongs here.
       expect(text).not.toMatch(
-        /copy on select|copy-on-select|pr banner|pr-banner|tab strip|tab-strip|changes pane|changes-pane|github|pet name|pet-name/i,
+        /copy on select|copy-on-select|pr banner|pr-banner|tab strip|tab-strip|changes pane|changes-pane|toggle[ -]github|github integration|github-integration|pet name|pet-name/i,
       )
     }
   })

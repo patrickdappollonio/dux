@@ -66,6 +66,7 @@ export function AppMenu() {
   // variant, exactly as the launcher corner's ⋯ menu gates its copy.
   const { bootstrap } = useDux()
   const ghAvailable = bootstrap?.gh_available ?? false
+  const githubIntegrationEnabled = bootstrap?.github_integration ?? false
   return (
     <DropdownMenu>
       {/* LABELLED on desktop, where there is room: "Settings" says what the cog
@@ -84,7 +85,7 @@ export function AppMenu() {
         }
       />
       <DropdownMenuContent align="end" side="bottom">
-        <AppMenuEntries entries={appMenuModel({ ghAvailable })} />
+        <AppMenuEntries entries={appMenuModel({ ghAvailable, githubIntegrationEnabled })} />
       </DropdownMenuContent>
     </DropdownMenu>
   )
