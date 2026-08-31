@@ -236,7 +236,7 @@ pub struct Engine {
     /// the owning `session_id` carried in the value (mirrors `companion_terminals`
     /// so ownership resolves O(1) with no side index). The session-slot tab has no entry —
     /// it is reached through the session's stored pointer (see `AgentSession::slot_tab_id`). Seeded
-    /// from `session_store.load_agent_tabs()` at construction.
+    /// from `session_store.load_extra_agent_tabs()` at construction.
     pub agent_tabs: HashMap<TabId, AgentTab>,
     /// Agent/terminal PTYs that have been SIGTERMed on an individual delete or
     /// close and are being given a grace period to exit before they are

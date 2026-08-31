@@ -2441,12 +2441,12 @@ impl EngineService {
             // over-broad `true` only costs a serialize.
             let mutates = request_mutates_spine(&req);
             match req {
-                EngineRequest::SubscribePty(session_id, reply) => {
+                EngineRequest::SubscribePty(tab_id, reply) => {
                     handle_subscribe(
                         engine,
                         &mut self.pending,
                         &mut self.last_pr_foregrounded,
-                        session_id,
+                        tab_id,
                         reply,
                     );
                 }
@@ -3652,16 +3652,17 @@ fn handle_subscribe(
     engine: &mut Engine,
     pending: &mut Vec<PendingSubscribe>,
     last_pr_foregrounded: &mut Option<String>,
-    session_id: String,
+    tab_id: String,
     reply: oneshot::Sender<Result<PtySubscription, String>>,
 ) {
-    // Opening an agent's PTY foregrounds it — refresh its PR status. The
-    // subscribed id may be an extra-tab id, so resolve the owning session first
-    // (a session-slot id resolves to itself). Only a GENUINE focus change gets
-    // the tight foreground refresh; a reconnect/remount of the already-focused
-    // agent falls back to the normal background cadence, so socket blips don't
-    // re-poll `gh` (mirrors the TUI's `previously_watched` gate).
-    if let Some(owner) = engine.owning_session_for_tab(&session_id) {
+    // Opening an agent's PTY foregrounds it — refresh its PR status. What is
+    // subscribed is always a TAB id (a slot tab's or an extra tab's), never a
+    // session id, so resolve the owning session first. Only a GENUINE focus
+    // change gets the tight foreground refresh; a reconnect/remount of the
+    // already-focused agent falls back to the normal background cadence, so
+    // socket blips don't re-poll `gh` (mirrors the TUI's `previously_watched`
+    // gate).
+    if let Some(owner) = engine.owning_session_for_tab(&tab_id) {
         if last_pr_foregrounded.as_deref() != Some(owner.as_str()) {
             engine.spawn_foreground_pr_check(&owner);
         } else {
@@ -3670,20 +3671,20 @@ fn handle_subscribe(
         *last_pr_foregrounded = Some(owner);
     }
     // Opening a tab's live view is the web's "looking at it" signal: clear and
-    // briefly suppress its attention flag. Stamp the subscribed TAB id (which may
-    // be an extra tab), not the owning session. Gated on the id resolving to a
-    // real tab so a stale deep link, a race, or a retry can never leak an
-    // `agent_viewed` entry that is never cleaned up. Typing then keeps it cleared
-    // via `note_pty_input` on `WritePty`, and the client's periodic viewed ping
-    // keeps it down while foregrounded.
-    engine.note_agent_viewed_if_known(&session_id);
-    if let Some(client) = engine.providers.get(TabIdRef::new(&session_id)) {
+    // briefly suppress its attention flag. Stamp the subscribed TAB id, not the
+    // owning session. Gated on the id resolving to a real tab so a stale deep
+    // link, a race, or a retry can never leak an `agent_viewed` entry that is
+    // never cleaned up. Typing then keeps it cleared via `note_pty_input` on
+    // `WritePty`, and the client's periodic viewed ping keeps it down while
+    // foregrounded.
+    engine.note_agent_viewed_if_known(&tab_id);
+    if let Some(client) = engine.providers.get(TabIdRef::new(&tab_id)) {
         let _ = reply.send(Ok(client.subscribe_with_repaint()));
         return;
     }
-    match launch_agent(engine, &session_id) {
+    match launch_agent(engine, &tab_id) {
         Ok(()) => pending.push(PendingSubscribe {
-            tab_id: TabId::new(session_id),
+            tab_id: TabId::new(tab_id),
             reply: Some(reply),
             deadline: Instant::now() + LAUNCH_TIMEOUT,
         }),
@@ -3728,8 +3729,8 @@ fn create_agent_tab_inner(
     Ok((tab_id, provider_str))
 }
 
-/// Launch (or resume) the real provider for a subscribed id. The id is either a
-/// session id (the session-slot tab) or an extra tab id; either is resume-eligible
+/// Launch (or resume) the real provider for a subscribed id. The id names either
+/// a session's slot tab or one of its extra tabs; either is resume-eligible
 /// per-provider (see `tab_resume_decision`).
 /// The provider is NOT inserted here: the dispatched launch runs in a background
 /// worker and the provider appears later via the worker-event drain

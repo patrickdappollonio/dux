@@ -473,9 +473,15 @@ impl SessionStore {
     /// A pre-pointer session's first tab was synthesized from the session record
     /// and had no row, so the row is MINTED here rather than adopted from the
     /// session's existing tabs: adopting one would silently turn tab 2 into tab 1
-    /// and lose a tab. The minted row sorts strictly before every tab the session
-    /// already has, so the strip's `(sort_order, created_at)` order is exactly
-    /// what the user last saw with the first tab back at the front.
+    /// and lose a tab.
+    ///
+    /// The minted row is placed one below the session's current minimum
+    /// `sort_order`. That arithmetic is not what puts the first tab at the front
+    /// of the strip today, because both surfaces render the slot tab first by
+    /// following the pointer and then the extras by `(sort_order, created_at)`.
+    /// It is there so the stamp keeps telling the truth if the slot is ever
+    /// PROMOTED to another tab: at that point the row's own position is what
+    /// orders it, and a first tab stamped above its successors would jump.
     ///
     /// Idempotent: a session with a pointer is not touched, so a second run
     /// changes nothing.
@@ -734,7 +740,10 @@ impl SessionStore {
     ///
     /// `agent_sessions.provider` is a MIRROR of the slot tab's provider, kept
     /// because every read path in both surfaces asks the session for it. This is
-    /// the one place either value is written, so the two cannot drift.
+    /// the one place a RETARGET writes either value, so a retarget cannot leave
+    /// them disagreeing. It is not the only writer of the mirror: `upsert_session`
+    /// stores whatever the in-memory session carries, and the migration's adopt
+    /// repair moves the mirror when the slot moves.
     pub fn set_slot_provider(
         &self,
         session_id: &str,

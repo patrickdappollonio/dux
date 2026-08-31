@@ -679,9 +679,12 @@ impl AgentSession {
 /// A persisted provider tab belonging to an agent session. EVERY tab is one of
 /// these, the agent's first included; which of them occupies the session slot is
 /// the session record's `slot_tab_id` pointer. Kept in SQLite (derived runtime
-/// state), never in portable config. `sort_order` is an append-only stamp that
-/// fixes strip order: the slot tab is written at 0 and extras are appended above
-/// it, so the strip renders slot-first.
+/// state), never in portable config. `sort_order` is an append-only stamp: the
+/// slot tab is written at 0 and extras are appended above it. It orders the
+/// EXTRAS today, because both surfaces put the slot tab first by following the
+/// session's pointer rather than by comparing stamps; keeping the slot at the
+/// bottom of the range is what would keep the strip stable if the slot were ever
+/// promoted to another tab.
 #[derive(Clone, Debug)]
 pub struct AgentTab {
     pub id: String,

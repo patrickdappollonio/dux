@@ -965,8 +965,9 @@ impl Engine {
         // Ghost-launch guard: an extra tab whose row was deleted while its
         // launch was in flight must not resurrect a live PTY under a dead tab
         // id. Dropping `client` here (PtyClient::Drop) terminates the freshly
-        // spawned process. The session-slot tab (which never has an `agent_tabs`
-        // row) is exempt — "no row" is normal for it.
+        // spawned process. The session-slot tab is exempt: its row is real, but
+        // the engine's in-memory `agent_tabs` map holds only the extras, so
+        // "not in the map" is normal for it.
         let is_main = self.is_slot_tab(&session, &tab_id);
         if !is_main && !self.agent_tabs.contains_key(&tab_id) {
             logger::info(&format!(
@@ -1906,8 +1907,8 @@ impl Engine {
                 // have diverged" WARN in storage.rs for a row that is already
                 // gone), and surface a user-facing "Tab launch failed"
                 // warning for a tab the user already closed. The session-slot tab
-                // (which never has an `agent_tabs` row) is exempt, same as the
-                // ready-path guard.
+                // is exempt for the same reason as in the ready-path guard: the
+                // in-memory map holds only the extras.
                 let is_main = self.is_slot_tab(&session, &tab_id);
                 if !is_main && !self.agent_tabs.contains_key(&tab_id) {
                     logger::info(&format!(

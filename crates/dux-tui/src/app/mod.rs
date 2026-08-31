@@ -6348,9 +6348,10 @@ impl App {
 
     // ---- Agent tabs: per-session focused tab, switching, labels ----
 
-    /// The focused tab id for a session, defaulting to the session-slot tab (the
-    /// session id). Clamps to Main when the stored tab no longer exists, so
-    /// every seam that resolves the focused tab is safe after a tab close.
+    /// The focused tab id for a session, defaulting to the tab the session's
+    /// `slot_tab_id` pointer names. Clamps back to that tab when the stored one
+    /// no longer exists, so every seam that resolves the focused tab is safe
+    /// after a tab close.
     ///
     /// The in-process `focused_tabs` HashMap is the live value and wins when it
     /// has an entry for this session. When it has none (e.g. right after a
@@ -6400,8 +6401,8 @@ impl App {
             .tab_running_provider(session, TabIdRef::new(&tab))
     }
 
-    /// Ordered tab ids for a session: Main (session id) first, then Support
-    /// tabs by (sort_order, created_at).
+    /// Ordered tab ids for a session: the slot tab first, then the extra tabs
+    /// by (sort_order, created_at).
     pub(crate) fn session_tab_ids(&self, session_id: &str) -> Vec<String> {
         let mut support: Vec<&AgentTab> = self
             .engine
