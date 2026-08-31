@@ -843,18 +843,10 @@ fn diagnostic_says_gh_cannot_do_this(output: &std::process::Output) -> bool {
 
 /// Text in an account's `error` that means GitHub REJECTED the credential.
 ///
-/// Measured on gh 2.95.0 against a live api.github.com with a token GitHub does
-/// not know, in both the shapes `gh` produces:
-///
-/// ```text
-/// GH_TOKEN:   non-200 OK status code: 401 Unauthorized body: "{ … "message": "Bad credentials" … }"
-/// hosts.yml:  HTTP 401: Bad credentials (https://api.github.com/)
-/// ```
-///
-/// This is the one account failure that is genuinely decisive: the token is
-/// bad, and asking again in five minutes cannot make it good. Checked BEFORE
-/// [`AUTH_STATUS_TRANSIENT_ERROR_MARKERS`] so a body that happens to quote a
-/// retryable-looking word cannot rescue a rejected credential.
+/// The one decisive account failure: a bad token cannot become good on a retry.
+/// Checked BEFORE [`AUTH_STATUS_TRANSIENT_ERROR_MARKERS`] so a body quoting a
+/// retryable-looking word cannot rescue a rejected credential. Both shapes `gh`
+/// produces are measured, as the `MEASURED_JSON_BAD_*_TOKEN` test fixtures.
 const AUTH_STATUS_CREDENTIAL_ERROR_MARKERS: &[&str] =
     &["bad credentials", "401 unauthorized", "http 401"];
 
@@ -862,20 +854,14 @@ const AUTH_STATUS_CREDENTIAL_ERROR_MARKERS: &[&str] =
 /// login: GitHub rate-limited it, answered a server error, or the request did
 /// not arrive at all.
 ///
-/// The connection group is measured on gh 2.95.0 with every outbound connection
-/// refused; `gh` surfaces Go's transport error verbatim, which is why the entries
-/// read like Go's net stack rather than like `gh`:
-///
-/// ```text
-/// Post "https://api.github.com/graphql": proxyconnect tcp: dial tcp 127.0.0.1:1: connect: connection refused
-/// ```
-///
-/// The status-code group is NOT measured (a rate limit cannot be provoked on
-/// demand): it is the measured `HTTP <code>: <message>` shape above carrying the
-/// statuses GitHub documents for an exhausted quota (403 and 429) and the ones a
-/// proxy or an outage produces (5xx). A record that matches neither table keeps
-/// the decisive reading, so this list can only ever RESCUE an answer from being
-/// latched, never invent a failure.
+/// The connection entries read like Go's net stack rather than like `gh` because
+/// `gh` surfaces Go's transport error verbatim (measured on gh 2.95.0 with every
+/// outbound connection refused). The status codes are NOT measured, since a rate
+/// limit cannot be provoked on demand: they are the `HTTP <code>: <message>`
+/// shape carrying what GitHub documents for an exhausted quota (403, 429) and
+/// what a proxy or an outage produces (5xx). A record matching neither table
+/// keeps the decisive reading, so this list can only ever RESCUE an answer from
+/// being latched, never invent a failure.
 const AUTH_STATUS_TRANSIENT_ERROR_MARKERS: &[&str] = &[
     "rate limit",
     "http 403",
@@ -940,34 +926,17 @@ fn plain_status_says_logged_out(output: &std::process::Output) -> bool {
 /// Text in a plain `gh auth status` that does not decide whether the user is
 /// logged in.
 ///
-/// There is exactly one entry, and that is a measurement rather than a
-/// shortcut. On gh 2.95.0 a refused token and a dead network produce BYTE FOR
-/// BYTE the same diagnostic:
+/// The single entry is ambiguous by measurement: on gh 2.95.0 a refused token
+/// and a dead network print it BYTE FOR BYTE alike, naming neither the network,
+/// a status code, nor a rate limit (the `MEASURED_PLAIN_*` test fixtures carry
+/// the four runs). dux therefore reads it as transient and retries, and the
+/// sentence the user sees carries `gh`'s own line, so nothing is hidden by the
+/// choice; deciding the other way strands a working login behind a momentary
+/// outage for the rest of the run.
 ///
-/// ```text
-/// github.com
-///   X Failed to log in to github.com using token (GH_TOKEN)
-///   - Active account: true
-///   - The token in GH_TOKEN is invalid.
-/// ```
-///
-/// That was measured twice for each of the two credential sources (an env token
-/// and a `hosts.yml` login), once against a live api.github.com with a token
-/// GitHub rejects and once with every outbound connection refused, and the four
-/// runs differed only in naming the source. `gh` never mentions the network, a
-/// status code, or a rate limit here, which is why the previous table of
-/// HTTP-and-Go phrases matched none of the output this path actually sees.
-///
-/// Faced with a shape that cannot distinguish them, dux retries: a genuinely bad
-/// token keeps producing this same answer, and the sentence the user is shown
-/// carries `gh`'s own line, so nothing is hidden by the choice. Deciding the
-/// other way is what stranded a working login behind a momentary outage for the
-/// rest of the run.
-///
-/// Everything here is measured on gh 2.95.0. This path only ever RUNS on a `gh`
-/// too old to understand `--json`, whose wording could not be measured; an
-/// answer this table does not recognise keeps the old decisive reading, so an
-/// older `gh` is no worse off than before.
+/// This path RUNS only on a `gh` too old to understand `--json`, whose wording
+/// could not be measured, so an answer this table does not recognise keeps the
+/// decisive reading.
 const PLAIN_STATUS_TRANSIENT_MARKERS: &[&str] = &["failed to log in to"];
 
 /// The transient phrase this output carries, if any, as the diagnostic line it

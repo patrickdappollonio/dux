@@ -3749,20 +3749,18 @@ fn handle_subscribe(
         let _ = reply.send(Ok(client.subscribe_with_repaint()));
         return;
     }
-    // Subscribing is what force-launches a dormant tab, and that is deliberate:
-    // it is how selecting an agent starts it in one click. It must not be how a
-    // tab whose last run FAILED gets started, though, or a tab that cannot come
-    // up relaunches on every passive attach (a retrying socket, a second browser
-    // that still had the pane open) with nothing the user can do about it. The
-    // explicit start route clears the verdict first and then launches, so a press
-    // still works; only the passive path is refused, and it says why.
+    // Subscribing force-launches a dormant tab deliberately: it is how selecting
+    // an agent starts it in one click. It must not start a tab whose last run
+    // FAILED, though, or one that cannot come up relaunches on every passive
+    // attach (a retrying socket, a second browser with the pane open) with
+    // nothing the user can do. Only the passive path is refused: the explicit
+    // start route clears the verdict first, so a press still works.
     //
-    // The socket close cannot carry the why: its code is the client's
-    // do-not-retry rule and its reason is fixed. So the sentence rides the keyed
-    // status controller, the one status surface both surfaces already read, and
-    // reaches the browser as a toast. Keyed on the tab (the same
-    // `tab-launch-<id>` family a launch failure uses), so a second refused attach
-    // replaces the toast rather than stacking another one.
+    // The socket close cannot carry the why (its code is the client's
+    // do-not-retry rule and its reason is fixed), so the sentence rides the keyed
+    // status controller instead, keyed on the tab in the same `tab-launch-<id>`
+    // family a launch failure uses, so a second refused attach replaces the toast
+    // rather than stacking another one.
     if engine.tab_last_run_failed(&tab_id) {
         let _ = status_tx.send(
             WireStatus::new("warning", last_run_failed_refusal())

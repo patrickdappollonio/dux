@@ -84,31 +84,26 @@ export function slotTabIdOf(
 // starts a dormant tab, so this one answer decides both what is on screen and
 // whether the tab launches.
 //
-// A live tab never needs the card. A dormant EXTRA tab always does: the user
-// added it deliberately and closing it is how it goes away, so it stays put
-// until asked. The agent's FIRST tab is the one that differs, and deliberately:
-// selecting an agent is asking for the agent, and the agent's own tab starting
-// in one click is the whole gesture. The exception is a first tab whose last run
-// ENDED BADLY (`last_run_failed`), which is what a resume against a conversation
-// that is not there, or a provider that has left the PATH, looks like: starting
-// that on selection means it relaunches every time the user looks at it with no
-// way out, so the card becomes the diagnosis surface and only a press starts it.
+//   live tab                    no card
+//   dormant extra tab           card: the user added it deliberately, so it
+//                               stays put until a press asks for it
+//   dormant slot tab            no card: selecting an agent is asking for it,
+//                               and starting in one click is the whole gesture
+//   dormant slot tab whose      card, as the diagnosis surface: a resume against
+//     last run ENDED BADLY      a conversation that is not there, or a provider
+//     (`last_run_failed`)       gone from the PATH, otherwise relaunches every
+//                               time the user looks at it with no way out
+//   started by this client      no card: the press is sent and the spine has not
+//     (`startedDormantTabs`)    caught up (see `startDormantTab`)
 //
-// A tab this client has explicitly started is not shown the card either, because
-// the press has already been sent and the spine has not caught up yet
-// (`startedDormantTabs`); see `startDormantTab`.
+// A missing `session` is DEFENSIVE, not a case the rule turns on: both callers
+// derive `focusedTab` from that same session's tab list, so a tab with no session
+// cannot reach here. The branch falls to the cautious side rather than guessing.
 //
-// The session is what answers slot-ness. A missing one is DEFENSIVE, not a case
-// the rule turns on: both callers derive `focusedTab` from that same session's
-// tab list, so a tab with no session behind it cannot reach here. The branch
-// exists so that if one ever could, it falls to the cautious side (card, no
-// launch) instead of guessing.
-//
-// `slotTabId` is the client's live answer to "which tab holds the slot"
-// (`slotTabIdOf`), which the promotion overlay can know before the spine does.
-// Without it, the tab a close just promoted would be judged an extra tab for as
-// long as the spine is stale and flash the Start-session card at a user who
-// asked for nothing of the kind.
+// `slotTabId` is the client's live answer to which tab holds the slot
+// (`slotTabIdOf`), which the promotion overlay knows before the spine does:
+// without it a just-promoted tab is judged an extra for as long as the spine is
+// stale and flashes the card at a user who asked for nothing of the kind.
 export function dormantTabNeedsCard(
   target: SelectedTarget | null,
   session: SessionView | undefined,

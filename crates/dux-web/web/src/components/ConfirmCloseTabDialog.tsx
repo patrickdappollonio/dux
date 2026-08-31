@@ -14,18 +14,18 @@ import { closeCloseTab, closeTab, useDux } from "@/lib/store"
 
 // Confirmation before closing a tab. The agent's first tab reaches this dialog
 // like any other: the session slot is a pointer, so closing the tab holding it
-// hands the slot to the next tab in strip order rather than being refused. Two
-// gestures deliberately do not come here. An agent's ONLY tab has no successor,
-// so the server refuses that close and the tab strip's menu item is disabled
-// with the reason rather than opening a dialog that would promise a detach and
-// then 400. And the Task Manager's row for the first tab is a Stop, because a
-// process monitor ends a process rather than deleting the tab it is showing
-// numbers for (ConfirmStopAgentDialog). Closing always confirms (matching the
-// TUI), and
-// the copy states each consequence that actually applies: dux can't reopen a
-// tab's exact conversation; a close that takes the agent's last live tab
-// detaches the agent (which stays in Projects, reopenable); a close of the
-// first tab names the tab that takes its place. Cancel is the default focus.
+// hands the slot to the next tab in strip order rather than being refused.
+//
+// Two gestures deliberately do not come here. An agent's ONLY tab has no
+// successor, so the server refuses that close and the tab strip's menu item is
+// disabled with the reason rather than opening a dialog that would promise a
+// detach and then 400. And the Task Manager's row for the first tab is a Stop,
+// because a process monitor ends a process rather than deleting the row it is
+// showing numbers for (ConfirmStopAgentDialog).
+//
+// Closing always confirms (matching the TUI), the copy states only the
+// consequences that apply (`closeTabConsequences`), and Cancel is the default
+// focus.
 export function ConfirmCloseTabDialog() {
   const { closeTabTarget, spine } = useDux()
 

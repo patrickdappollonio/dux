@@ -310,21 +310,18 @@ impl SessionStore {
         // Deliberately OMITTED from `upsert_session`'s SET/INSERT lists (same rationale
         // as `sort_order`): a dedicated setter owns it so status/config churn can't reset it.
         ensure_column(&self.conn, "agent_sessions", "last_focused_tab", "text")?;
-        // Which `agent_tabs` row currently occupies this agent's session slot:
-        // its first tab. Every tab is a row, so this is a pointer rather than a
-        // synthesized identity, and moving it is what promoting a sibling tab
-        // into the slot means when the tab holding it is closed.
+        // Which `agent_tabs` row currently occupies this agent's session slot.
+        // Every tab is a row, so this is a pointer rather than a synthesized
+        // identity, and moving it is what promotes a sibling into the slot.
         //
-        // NULL means one thing only, and only for as long as `migrate()` is
-        // running: "this session predates the pointer and has not been migrated
-        // yet". `backfill_slot_tabs` below closes that window on every open, and
-        // `heal_slot_tab_pointers` closes the other one (a pointer naming a row
-        // that is gone). After `migrate()` returns, a session with no usable
-        // pointer is a bug, not a state the read path tolerates.
+        // NULL means "predates the pointer, not migrated yet", and only while
+        // `migrate()` runs: `backfill_slot_tabs` closes that window on every
+        // open and `heal_slot_tab_pointers` closes the other one (a pointer
+        // naming a row that is gone). After `migrate()` returns, a session with
+        // no usable pointer is a bug, not a state the read path tolerates.
         //
-        // The table is created further down (`create table if not exists
-        // agent_tabs`), and both passes below run after it, because they write
-        // rows into it.
+        // Both passes run after `create table if not exists agent_tabs` further
+        // down, because they write rows into it.
         ensure_column(&self.conn, "agent_sessions", "slot_tab_id", "text")?;
         self.conn.execute_batch(
             r#"
@@ -470,21 +467,17 @@ impl SessionStore {
     /// Give every session that predates the slot pointer a real first-tab row,
     /// in one transaction.
     ///
-    /// A pre-pointer session's first tab was synthesized from the session record
-    /// and had no row, so the row is MINTED here rather than adopted from the
-    /// session's existing tabs: adopting one would silently turn tab 2 into tab 1
-    /// and lose a tab.
+    /// A pre-pointer session's first tab has no row of its own, so one is MINTED
+    /// rather than adopted from the session's existing tabs: adopting one would
+    /// silently turn tab 2 into tab 1 and lose a tab.
     ///
-    /// The minted row is placed one below the session's current minimum
-    /// `sort_order`. That arithmetic is not what puts the first tab at the front
-    /// of the strip today, because both surfaces render the slot tab first by
-    /// following the pointer and then the extras by `(sort_order, created_at)`.
-    /// It is there so the stamp keeps telling the truth if the slot is ever
-    /// PROMOTED to another tab: at that point the row's own position is what
-    /// orders it, and a first tab stamped above its successors would jump.
+    /// The minted row sits one below the session's current minimum `sort_order`.
+    /// Nothing reads that today (both surfaces render the slot tab from the
+    /// pointer, then the extras by `(sort_order, created_at)`), but once the slot
+    /// is PROMOTED elsewhere the row's own position orders it, and a first tab
+    /// stamped above its successors would jump.
     ///
-    /// Idempotent: a session with a pointer is not touched, so a second run
-    /// changes nothing.
+    /// Idempotent: a session with a pointer is not touched.
     fn backfill_slot_tabs(&self) -> Result<()> {
         let pending: Vec<(String, String, String)> = {
             let mut stmt = self.conn.prepare(
@@ -540,18 +533,15 @@ impl SessionStore {
 
     /// Repair a slot pointer that names no tab of its own session, out loud.
     ///
-    /// "No tab of its own session" covers both a row that is gone and a row that
-    /// belongs to some other agent: a pointer across sessions would otherwise
-    /// resolve, and the slot of one agent would be a tab living in another's
-    /// strip.
+    /// "No tab of its own session" covers a row that is gone AND a row belonging
+    /// to another agent: a cross-session pointer would otherwise resolve, and one
+    /// agent's slot would be a tab living in another's strip.
     ///
     /// Distinct from [`Self::backfill_slot_tabs`] on purpose. An EMPTY pointer
     /// (NULL or blank, spelled the same way in both passes) means "not migrated
-    /// yet" and its first tab has to be minted; a DANGLING pointer
-    /// means the row it named is gone, and the honest repair is to hand the slot
-    /// to the session's oldest surviving tab (which the user is already looking
-    /// at) rather than mint a tab nothing has ever run in. Only a session with no
-    /// tabs left at all falls back to minting one.
+    /// yet" and mints a first tab; a DANGLING one means the row it named is gone,
+    /// and the honest repair is the session's oldest surviving tab, which the
+    /// user is already looking at. Only a session with no tabs left mints.
     fn heal_slot_tab_pointers(&self) -> Result<()> {
         let dangling: Vec<(String, String, String, String)> = {
             let mut stmt = self.conn.prepare(
@@ -771,29 +761,23 @@ impl SessionStore {
     /// Move a session's slot to one of its other tabs and delete the tab that
     /// was in the slot, in ONE transaction.
     ///
-    /// This is what closing an agent's first tab does when it has siblings: the
-    /// pointer names the successor, the session's `provider` mirror follows the
-    /// promoted tab's provider (the mirror's rule is "whatever the slot tab
-    /// runs"), and the departing tab's row goes away. All three or none: a
-    /// pointer that moved without the old row being deleted leaves a tab in the
-    /// strip whose PTY is being torn down, and a deletion without the pointer
-    /// move leaves the agent naming a row that no longer exists.
+    /// The pointer names the successor, the session's `provider` mirror follows
+    /// the promoted tab (the mirror's rule is "whatever the slot tab runs"), and
+    /// the departing row goes away. All three or none: a pointer that moves
+    /// alone leaves a tab in the strip whose PTY is being torn down, and a
+    /// deletion alone leaves the agent naming a row that no longer exists.
     ///
-    /// The promoted row keeps its `sort_order`. Renumbering it to 0 would buy
-    /// nothing (both surfaces render the slot tab first from the pointer, not
-    /// from the ordering) and would cost the identity this whole design is
-    /// built on: the promoted tab changes role, not shape.
+    /// The promoted row keeps its `sort_order`: it changes role, not shape, and
+    /// both surfaces render the slot tab from the pointer rather than the order.
     ///
-    /// Refuses when `new_slot_tab_id` is not a tab of `session_id` (including
-    /// when it does not exist at all), because a pointer at a foreign or absent
-    /// row is the one state no later read can recover from.
+    /// Refuses when `new_slot_tab_id` is not a tab of `session_id` (absent rows
+    /// included), because a pointer at a foreign or absent row is the one state
+    /// no later read can recover from.
     ///
-    /// The focus memory is normalized in the same statement: the slot tab is
-    /// represented there as ABSENCE (see
-    /// [`crate::model::AgentSession::last_focused_tab`]), so a memory naming
-    /// either the promoted tab or the departing one becomes NULL. Doing it here
-    /// rather than in a follow-up write is what keeps a restart from reading
-    /// back a memory this promotion invalidated.
+    /// The focus memory is normalized in the same statement, because the slot
+    /// tab is represented there as ABSENCE (see
+    /// [`crate::model::AgentSession::last_focused_tab`]): a memory naming either
+    /// tab becomes NULL, so a restart cannot read one this promotion invalidated.
     pub fn promote_tab_to_slot(
         &self,
         session_id: &str,
