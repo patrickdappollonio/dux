@@ -206,6 +206,43 @@ describe("dormantTabNeedsCard", () => {
     ).toBe(true)
   })
 
+  // After a promotion the slot is a tab whose id is nothing like the session's,
+  // so the one-click rule has to travel with the POINTER. The promoted tab gets
+  // the first-tab treatment (start on selection, card only after a failed run)
+  // and every sibling, the tab that used to be addressed by the session id
+  // included, gets the extra-tab treatment.
+  it("applies the first-tab rule to a promoted slot and the extra-tab rule to its siblings", () => {
+    const promoted = withSlot("t2")
+    const healthy = extraTab("t2", false)
+    expect(
+      dormantTabNeedsCard(agentTarget("s1", "t2"), promoted, healthy, []),
+    ).toBe(false)
+    const failed = { ...healthy, last_run_failed: true }
+    expect(
+      dormantTabNeedsCard(agentTarget("s1", "t2"), promoted, failed, []),
+    ).toBe(true)
+    expect(
+      dormantTabNeedsCard(agentTarget("s1", "t2"), promoted, failed, ["t2"]),
+    ).toBe(false)
+    // A sibling waits for a press, whatever its id looks like.
+    expect(
+      dormantTabNeedsCard(
+        agentTarget("s1", "t3"),
+        promoted,
+        extraTab("t3", false),
+        [],
+      ),
+    ).toBe(true)
+    expect(
+      dormantTabNeedsCard(
+        agentTarget("s1", "s1"),
+        promoted,
+        { ...extraTab("s1", false), id: "s1" },
+        [],
+      ),
+    ).toBe(true)
+  })
+
   it("is false for a terminal target or a missing focused tab", () => {
     const terminal: SelectedTarget = {
       kind: "terminal",
