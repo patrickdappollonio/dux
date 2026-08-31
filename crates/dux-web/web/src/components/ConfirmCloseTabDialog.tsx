@@ -8,7 +8,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
-import { isFirstTab, tabProseLabel } from "@/lib/agentTabs"
+import { closeTabConsequences } from "@/lib/agentTabs"
 import { DOCS_AGENT_TABS_CLOSING } from "@/lib/docs"
 import { closeCloseTab, closeTab, useDux } from "@/lib/store"
 
@@ -35,32 +35,15 @@ export function ConfirmCloseTabDialog() {
   const tab = closeTabTarget
     ? session?.tabs.find((t) => t.id === closeTabTarget.tabId)
     : undefined
-  const provider = tab?.provider
-  const sessionLabel = provider ? `the ${provider} session` : "the session"
-  // Closing detaches the agent when it removes the agent's LAST live tab. Count
-  // by liveness (dormant siblings from a restart don't keep the agent running),
-  // not by total tab count.
-  const liveTabs = session?.tabs.filter((t) => t.has_live_process).length ?? 0
-  const willDetach = (tab?.has_live_process ?? false)
-    ? liveTabs <= 1
-    : liveTabs === 0
-  // Closing the tab in the session slot promotes the next tab in strip order,
-  // so the successor is the first tab that is not this one. That reading is
-  // sound because `SessionView.tabs` is published slot-tab-first then extras in
-  // strip order (see the field's contract on `AgentTabView`/`SessionView` in
-  // `lib/types.ts`, which the ViewModel guarantees), which is the same ordering
-  // the engine promotes by.
-  const successor =
-    session && tab && isFirstTab(session, tab.id)
-      ? session.tabs.find((t) => t.id !== tab.id)
-      : undefined
-  // Named the way the strip labels it, upper-cased for prose: the disambiguating
-  // suffix matters when two tabs share a provider ("Codex 2" is a pill the user
-  // can point at, "codex" is two of them). The status message the server sends
-  // back after the close is built from the same rule in Rust, so the
-  // confirmation and the toast that follows it cannot name different tabs.
-  const successorLabel =
-    successor && session ? tabProseLabel(session.tabs, successor.id) : undefined
+  // The successor is named the way the strip labels it, upper-cased for prose:
+  // the disambiguating suffix matters when two tabs share a provider ("Codex 2"
+  // is a pill the user can point at, "codex" is two of them). The status message
+  // the server sends back after the close is built from the same rule in Rust,
+  // so the confirmation and the toast that follows it cannot name different tabs.
+  const { sessionLabel, willDetach, successorLabel } = closeTabConsequences(
+    session,
+    tab,
+  )
 
   // Closes the dialog when the tab (or its whole session) vanishes from the
   // ViewModel; see the hook.

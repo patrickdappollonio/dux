@@ -184,6 +184,49 @@ export function tabProseLabel(
   return label.charAt(0).toUpperCase() + label.slice(1)
 }
 
+// What closing one tab actually costs, as the close confirmation states it. The
+// three answers are derived together because they are one reading of the same
+// session, and kept pure so each branch is testable without mounting a dialog.
+export interface CloseTabConsequences {
+  /// Names the conversation the close ends, falling back when no provider is known.
+  sessionLabel: string
+  /// The close removes the agent's LAST live tab, so the agent detaches.
+  willDetach: boolean
+  /// The tab that takes the session slot, absent unless the slot tab is closing.
+  successorLabel: string | undefined
+}
+
+export function closeTabConsequences(
+  session: SessionView | undefined,
+  tab: AgentTabView | undefined,
+): CloseTabConsequences {
+  const provider = tab?.provider
+  // Detaching is counted by LIVENESS: dormant siblings left by a restart do not
+  // keep the agent running, so they cannot save it from detaching.
+  const liveTabs = session?.tabs.filter((t) => t.has_live_process).length ?? 0
+  const willDetach = (tab?.has_live_process ?? false)
+    ? liveTabs <= 1
+    : liveTabs === 0
+  // Closing the tab in the session slot promotes the next tab in strip order, so
+  // the successor is the first tab that is not this one. That reading is sound
+  // because `SessionView.tabs` is published slot-tab-first then extras in strip
+  // order (see the field's contract on `AgentTabView`/`SessionView` in
+  // `lib/types.ts`, which the ViewModel guarantees), which is the same ordering
+  // the engine promotes by.
+  const successor =
+    session && tab && isFirstTab(session, tab.id)
+      ? session.tabs.find((t) => t.id !== tab.id)
+      : undefined
+  return {
+    sessionLabel: provider ? `the ${provider} session` : "the session",
+    willDetach,
+    successorLabel:
+      successor && session
+        ? tabProseLabel(session.tabs, successor.id)
+        : undefined,
+  }
+}
+
 // Branch drift moved to `branchDriftOf` in `lib/agentWorkspace.ts`, beside the
 // rest of the workspace questions: the two branches it compares now live inside
 // the managed shape, and a standalone agent has neither, so the answer belongs

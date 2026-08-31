@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   ONLY_TAB_CLOSE_REFUSAL,
+  closeTabConsequences,
   defaultProviderForSession,
   dormantTabNeedsCard,
   isFirstTab,
@@ -478,5 +479,49 @@ describe("shouldRefireFocusPut", () => {
     const latest = { generation: 2, tabId: "t2" }
     const settled = { generation: 1, tabId: "t1" }
     expect(shouldRefireFocusPut(latest, settled)).toBe(true)
+  })
+})
+
+// A session whose slot tab is named explicitly, so a close of the slot tab and a
+// close of an extra tab can both be posed to `closeTabConsequences`.
+function sessionWithSlot(slotTabId: string, tabs: AgentTabView[]): SessionView {
+  return { id: "s1", slot_tab_id: slotTabId, tabs } as unknown as SessionView
+}
+
+describe("closeTabConsequences", () => {
+  it("names the provider's session and detaches when the closing tab is the last live one", () => {
+    const only = extraTab("t1", true)
+    const result = closeTabConsequences(sessionWithSlot("t1", [only]), only)
+    expect(result.sessionLabel).toBe("the codex session")
+    expect(result.willDetach).toBe(true)
+  })
+
+  it("does not detach while a live sibling keeps the agent running", () => {
+    const closing = extraTab("t2", true)
+    const session = sessionWithSlot("t1", [extraTab("t1", true), closing])
+    expect(closeTabConsequences(session, closing).willDetach).toBe(false)
+  })
+
+  it("detaches on a dormant tab's close only when no sibling is live", () => {
+    const dormant = extraTab("t2", false)
+    const withLive = sessionWithSlot("t1", [extraTab("t1", true), dormant])
+    const allDormant = sessionWithSlot("t1", [extraTab("t1", false), dormant])
+    expect(closeTabConsequences(withLive, dormant).willDetach).toBe(false)
+    expect(closeTabConsequences(allDormant, dormant).willDetach).toBe(true)
+  })
+
+  it("names the successor when the slot tab closes, and none when an extra tab does", () => {
+    const slot = extraTab("t1", true)
+    const extra = extraTab("t2", true)
+    const session = sessionWithSlot("t1", [slot, extra])
+    expect(closeTabConsequences(session, slot).successorLabel).toBe("Codex 2")
+    expect(closeTabConsequences(session, extra).successorLabel).toBeUndefined()
+  })
+
+  it("falls back to the bare session wording when no tab is in hand", () => {
+    const result = closeTabConsequences(undefined, undefined)
+    expect(result.sessionLabel).toBe("the session")
+    expect(result.willDetach).toBe(true)
+    expect(result.successorLabel).toBeUndefined()
   })
 })
