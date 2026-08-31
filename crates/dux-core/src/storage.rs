@@ -768,6 +768,101 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Move a session's slot to one of its other tabs and delete the tab that
+    /// was in the slot, in ONE transaction.
+    ///
+    /// This is what closing an agent's first tab does when it has siblings: the
+    /// pointer names the successor, the session's `provider` mirror follows the
+    /// promoted tab's provider (the mirror's rule is "whatever the slot tab
+    /// runs"), and the departing tab's row goes away. All three or none: a
+    /// pointer that moved without the old row being deleted leaves a tab in the
+    /// strip whose PTY is being torn down, and a deletion without the pointer
+    /// move leaves the agent naming a row that no longer exists.
+    ///
+    /// The promoted row keeps its `sort_order`. Renumbering it to 0 would buy
+    /// nothing (both surfaces render the slot tab first from the pointer, not
+    /// from the ordering) and would cost the identity this whole design is
+    /// built on: the promoted tab changes role, not shape.
+    ///
+    /// Refuses when `new_slot_tab_id` is not a tab of `session_id` (including
+    /// when it does not exist at all), because a pointer at a foreign or absent
+    /// row is the one state no later read can recover from.
+    ///
+    /// The focus memory is normalized in the same statement: the slot tab is
+    /// represented there as ABSENCE (see
+    /// [`crate::model::AgentSession::last_focused_tab`]), so a memory naming
+    /// either the promoted tab or the departing one becomes NULL. Doing it here
+    /// rather than in a follow-up write is what keeps a restart from reading
+    /// back a memory this promotion invalidated.
+    pub fn promote_tab_to_slot(
+        &self,
+        session_id: &str,
+        new_slot_tab_id: &str,
+        old_slot_tab_id: &str,
+        provider: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<()> {
+        if new_slot_tab_id == old_slot_tab_id {
+            anyhow::bail!(
+                "tab {new_slot_tab_id} cannot be promoted over itself: it is already the slot tab \
+                 of agent {session_id}"
+            );
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("failed to start promoting a tab into the agent's slot")?;
+        let owner: Option<String> = tx
+            .query_row(
+                "select session_id from agent_tabs where id = ?1",
+                params![new_slot_tab_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to read the promoted tab's owning agent")?;
+        match owner.as_deref() {
+            Some(owner) if owner == session_id => {}
+            Some(other) => anyhow::bail!(
+                "tab {new_slot_tab_id} belongs to agent {other}, not {session_id}, so it cannot \
+                 take its slot"
+            ),
+            None => anyhow::bail!("unknown tab {new_slot_tab_id}: it cannot take a slot"),
+        }
+        let sessions_updated = tx
+            .execute(
+                "update agent_sessions set slot_tab_id = ?2, provider = ?3, updated_at = ?4, \
+                 last_focused_tab = case when last_focused_tab in (?2, ?5) then null \
+                 else last_focused_tab end \
+                 where id = ?1",
+                params![
+                    session_id,
+                    new_slot_tab_id,
+                    provider,
+                    updated_at.to_rfc3339(),
+                    old_slot_tab_id,
+                ],
+            )
+            .context("failed to point the agent at its new slot tab")?;
+        if sessions_updated == 0 {
+            anyhow::bail!("unknown agent {session_id}: its slot cannot be moved");
+        }
+        let removed = tx
+            .execute(
+                "delete from agent_tabs where id = ?1 and session_id = ?2",
+                params![old_slot_tab_id, session_id],
+            )
+            .context("failed to delete the tab that was in the agent's slot")?;
+        if removed == 0 {
+            crate::logger::warn(&format!(
+                "promote_tab_to_slot found no row for the outgoing slot tab {old_slot_tab_id} of \
+                 agent {session_id} — the in-memory tab map and SQLite may have diverged",
+            ));
+        }
+        tx.commit()
+            .context("failed to commit the agent's new slot tab")?;
+        Ok(())
+    }
+
     /// Retarget an extra tab's provider (effective on its next launch).
     pub fn update_agent_tab_provider(&self, tab_id: &str, provider: &str) -> Result<()> {
         let affected = self.conn.execute(
@@ -2823,6 +2918,179 @@ mod tests {
             store.load_agent_tabs().unwrap()[0].provider.as_str(),
             "codex"
         );
+    }
+
+    /// The shape every promotion test starts from: an agent whose slot tab is
+    /// `slot-1` and which has one extra tab, `t2`.
+    fn session_with_one_extra_tab(store: &SessionStore) {
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        session.provider = crate::model::ProviderKind::new("claude");
+        store.create_session(&session).unwrap();
+        let mut extra = test_tab("t2", "s1", 1);
+        extra.provider = crate::model::ProviderKind::new("codex");
+        store.insert_agent_tab(&extra).unwrap();
+    }
+
+    #[test]
+    fn promote_tab_to_slot_moves_the_pointer_the_mirror_and_the_old_row_at_once() {
+        let store = test_store();
+        session_with_one_extra_tab(&store);
+
+        store
+            .promote_tab_to_slot("s1", "t2", "slot-1", "codex", Utc::now())
+            .unwrap();
+
+        let session = store.load_sessions().unwrap().remove(0);
+        assert_eq!(session.slot_tab_id, "t2", "the pointer names the successor");
+        assert_eq!(
+            session.provider.as_str(),
+            "codex",
+            "the session's provider mirrors the promoted tab's"
+        );
+        let tabs = store.load_agent_tabs().unwrap();
+        assert_eq!(
+            tabs.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["t2"],
+            "the closed slot tab's row is gone and the promoted row survives"
+        );
+    }
+
+    #[test]
+    fn promote_tab_to_slot_restores_the_same_shape_on_reload() {
+        // The invariant a restart depends on: after a promotion the store reads
+        // back with the promoted tab in the slot and NOT among the extras, and
+        // the cap counts each surviving tab exactly once.
+        let store = test_store();
+        session_with_one_extra_tab(&store);
+        store.insert_agent_tab(&test_tab("t3", "s1", 2)).unwrap();
+
+        store
+            .promote_tab_to_slot("s1", "t2", "slot-1", "codex", Utc::now())
+            .unwrap();
+
+        assert_eq!(store.load_sessions().unwrap()[0].slot_tab_id, "t2");
+        let extras: Vec<String> = store
+            .load_extra_agent_tabs()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(
+            extras,
+            vec!["t3".to_string()],
+            "the promoted tab is the slot, so it is not an extra as well"
+        );
+        assert_eq!(store.count_agent_tabs("s1").unwrap(), 2);
+    }
+
+    #[test]
+    fn promote_tab_to_slot_forgets_a_focus_memory_the_promotion_invalidated() {
+        // The slot tab is represented in the focus memory as absence, so a
+        // memory naming the promoted tab must not survive the promotion; one
+        // naming the departing tab must not survive its deletion either.
+        for remembered in ["t2", "slot-1"] {
+            let store = test_store();
+            session_with_one_extra_tab(&store);
+            store.insert_agent_tab(&test_tab("t3", "s1", 2)).unwrap();
+            store.set_last_focused_tab("s1", Some(remembered)).unwrap();
+
+            store
+                .promote_tab_to_slot("s1", "t2", "slot-1", "codex", Utc::now())
+                .unwrap();
+
+            assert_eq!(
+                store.load_sessions().unwrap()[0].last_focused_tab,
+                None,
+                "a memory of {remembered} cannot outlive this promotion"
+            );
+        }
+
+        // A memory of an untouched sibling is left exactly as it was.
+        let store = test_store();
+        session_with_one_extra_tab(&store);
+        store.insert_agent_tab(&test_tab("t3", "s1", 2)).unwrap();
+        store.set_last_focused_tab("s1", Some("t3")).unwrap();
+        store
+            .promote_tab_to_slot("s1", "t2", "slot-1", "codex", Utc::now())
+            .unwrap();
+        assert_eq!(
+            store.load_sessions().unwrap()[0].last_focused_tab,
+            Some("t3".to_string())
+        );
+    }
+
+    #[test]
+    fn promote_tab_to_slot_refuses_a_tab_belonging_to_another_agent() {
+        let store = test_store();
+        session_with_one_extra_tab(&store);
+        let now = Utc::now();
+        let mut other = test_session("s2", now, now);
+        other.slot_tab_id = "s2-slot".to_string();
+        store.create_session(&other).unwrap();
+        store
+            .insert_agent_tab(&test_tab("foreign", "s2", 1))
+            .unwrap();
+
+        assert!(
+            store
+                .promote_tab_to_slot("s1", "foreign", "slot-1", "codex", Utc::now())
+                .is_err()
+        );
+
+        let session = store.load_sessions().unwrap();
+        let s1 = session.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s1.slot_tab_id, "slot-1", "the pointer must not have moved");
+        assert_eq!(s1.provider.as_str(), "claude", "nor the mirror");
+        assert_eq!(
+            store.count_agent_tabs("s1").unwrap(),
+            2,
+            "nor may the old slot row have been deleted"
+        );
+    }
+
+    #[test]
+    fn promote_tab_to_slot_refuses_a_tab_that_does_not_exist() {
+        let store = test_store();
+        session_with_one_extra_tab(&store);
+
+        assert!(
+            store
+                .promote_tab_to_slot("s1", "ghost", "slot-1", "codex", Utc::now())
+                .is_err()
+        );
+        assert_eq!(store.load_sessions().unwrap()[0].slot_tab_id, "slot-1");
+        assert_eq!(store.count_agent_tabs("s1").unwrap(), 2);
+    }
+
+    #[test]
+    fn promote_tab_to_slot_rolls_the_pointer_back_when_the_old_row_cannot_be_deleted() {
+        // Atomicity under storage failure: the pointer move and the old row's
+        // deletion are one transaction, so a failure on the second half must not
+        // leave the agent pointing at a tab whose predecessor is still a row.
+        // A trigger injects the failure deterministically, which is the only way
+        // to fail a DELETE that would otherwise always succeed.
+        let store = test_store();
+        session_with_one_extra_tab(&store);
+        store
+            .conn
+            .execute_batch(
+                "create trigger refuse_tab_delete before delete on agent_tabs \
+                 begin select raise(abort, 'no deletes today'); end",
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .promote_tab_to_slot("s1", "t2", "slot-1", "codex", Utc::now())
+                .is_err()
+        );
+
+        let session = store.load_sessions().unwrap().remove(0);
+        assert_eq!(session.slot_tab_id, "slot-1");
+        assert_eq!(session.provider.as_str(), "claude");
+        assert_eq!(store.count_agent_tabs("s1").unwrap(), 2);
     }
 
     #[test]
