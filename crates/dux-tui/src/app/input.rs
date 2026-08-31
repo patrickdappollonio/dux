@@ -3206,6 +3206,13 @@ impl App {
             self.observe_raw_terminal_focus(gained);
             return None;
         }
+        // The rest of the host's report family, dropped for the same reason the
+        // focus report above is: the child's queries are answered by dux's own
+        // emulator and never reach the host, so an answer on dux's stdin belongs
+        // to nobody here. Forwarded, it is typed at the child's prompt.
+        if crate::raw_input::is_device_report(seq) {
+            return None;
+        }
         if let Some(mouse_event) = crate::raw_input::parse_sgr_mouse(seq) {
             return Some(RawSeqAction::Mouse(mouse_event, seq.to_vec()));
         }
@@ -30572,6 +30579,57 @@ cyan = "#00ffff"
         assert!(
             !app.engine.pty_input.is_empty(),
             "bracketed-paste content, including literal ESC[I, must forward to the PTY"
+        );
+    }
+
+    /// A host terminal's answer to a device query, arriving on dux's stdin while
+    /// a pane is taking input, must be dropped rather than forwarded: the child
+    /// never asked the host anything (dux's own emulator answers it), so the
+    /// answer would land at the child's prompt as literal garbage. A pasted copy
+    /// of the same bytes is user data and must still forward.
+    #[test]
+    fn host_device_reports_are_dropped_instead_of_typed_at_the_child() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.engine.providers.insert(
+            TabId::new("session-1-slot"),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "cat; sleep 0.5".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        for report in [
+            &b"\x1b]11;rgb:0000/0000/0000\x07"[..],
+            b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\",
+            b"\x1b[?1;2c",
+            b"\x1b[0n",
+            b"\x1b[?2004;2$y",
+            b"\x1b[8;24;80t",
+        ] {
+            app.process_raw_input_bytes(report).unwrap();
+            assert!(
+                app.engine.pty_input.is_empty(),
+                "the host's answer {:?} must not reach the child",
+                String::from_utf8_lossy(report),
+            );
+        }
+
+        // The same bytes inside a bracketed paste are user data and forward.
+        let mut pasted = Vec::new();
+        pasted.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
+        pasted.extend_from_slice(b"\x1b]11;rgb:0000/0000/0000\x07");
+        pasted.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
+        app.process_raw_input_bytes(&pasted).unwrap();
+        assert!(
+            !app.engine.pty_input.is_empty(),
+            "a report-shaped bracketed paste is user data and must still forward"
         );
     }
 

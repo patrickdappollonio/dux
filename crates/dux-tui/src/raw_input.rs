@@ -28,6 +28,55 @@ pub fn parse_focus_event(seq: &[u8]) -> Option<bool> {
     }
 }
 
+/// Recognize a HOST terminal's answer to a device query, arriving on dux's own
+/// stdin.
+///
+/// The same rule the focus report above exists for, applied to the rest of the
+/// report family: dux's embedded emulator is the authoritative answerer for the
+/// child, so the child's queries never reach the host at all. Anything of this
+/// shape on dux's stdin is therefore an answer to a question dux, its host
+/// chain, or a program that ran in this terminal before dux resumed asked, and
+/// it is never the child's business. Forwarding it types the answer at the
+/// child's prompt as literal garbage (`11;rgb:0000/0000/0000`, `1;2c`), which is
+/// exactly the class of leak the OSC splitter was taught to keep whole rather
+/// than shred; keeping it whole is what finally makes it recognizable enough to
+/// drop.
+///
+/// What is matched, and only this:
+///
+/// * A complete OSC (`ESC ] … BEL` or `ESC ] … ST`) — the color and clipboard
+///   answers. A bare `ESC ]` (the Alt-`]` keystroke) has no terminator and is
+///   deliberately not matched.
+/// * A CSI whose final byte is `c` (device attributes), `n` (device status),
+///   `t` (window/geometry report) or `y` (the DECRQM `$y` mode report), and a
+///   CSI beginning `?` and ending `u` (the kitty keyboard-flags report, whose
+///   unprefixed form is a KEY under that protocol).
+///
+/// Deliberately NOT matched: the cursor-position report `CSI row ; col R`. Its
+/// shape is indistinguishable from a modified F3 (`CSI 1 ; 5 R`) on xterm and
+/// its imitators, and eating a keystroke is worse than passing a stray report
+/// through. Also not matched: a DCS answer (`ESC P … ST`), because the sequence
+/// splitter cuts `ESC P` off after two bytes and never delivers one whole.
+///
+/// Bracketed-paste content is exempt at the CALL SITE, not here: pasted text
+/// really can contain these bytes, and a paste is user data.
+pub fn is_device_report(seq: &[u8]) -> bool {
+    if let Some(body) = seq.strip_prefix(b"\x1b]") {
+        return body.ends_with(b"\x07") || body.ends_with(b"\x1b\\");
+    }
+    let Some(body) = seq.strip_prefix(b"\x1b[") else {
+        return false;
+    };
+    let Some((&final_byte, params)) = body.split_last() else {
+        return false;
+    };
+    match final_byte {
+        b'c' | b'n' | b't' | b'y' => true,
+        b'u' => params.first() == Some(&b'?'),
+        _ => false,
+    }
+}
+
 /// Normalize the newlines of a bracketed-paste BODY chunk for a child that
 /// never enabled DECSET 2004: every LF becomes CR (a classic terminal paste
 /// sends CR per line break), and a CR-LF pair collapses to one CR rather
@@ -401,6 +450,48 @@ mod tests {
         assert_eq!(parse_focus_event(b"I"), None); // bare letter
         assert_eq!(parse_focus_event(b"\x1b[1I"), None); // parameterized, not focus
         assert_eq!(parse_focus_event(b""), None);
+    }
+
+    #[test]
+    fn is_device_report_matches_the_host_answers() {
+        // The color answers, the pair users actually see typed at their prompt.
+        assert!(is_device_report(b"\x1b]11;rgb:0000/0000/0000\x07"));
+        assert!(is_device_report(b"\x1b]11;rgb:0000/0000/0000\x1b\\"));
+        assert!(is_device_report(b"\x1b]10;rgb:ffff/ffff/ffff\x07"));
+        assert!(is_device_report(b"\x1b]4;1;rgb:cdcd/0000/0000\x07"));
+        // Device attributes, primary and secondary.
+        assert!(is_device_report(b"\x1b[?1;2c"));
+        assert!(is_device_report(b"\x1b[?6c"));
+        assert!(is_device_report(b"\x1b[>0;276;0c"));
+        // Device status and the DECRQM mode report.
+        assert!(is_device_report(b"\x1b[0n"));
+        assert!(is_device_report(b"\x1b[?2004;2$y"));
+        // Geometry reports.
+        assert!(is_device_report(b"\x1b[8;24;80t"));
+        assert!(is_device_report(b"\x1b[4;600;800t"));
+        // The kitty keyboard-flags report, which carries the `?` prefix.
+        assert!(is_device_report(b"\x1b[?0u"));
+    }
+
+    #[test]
+    fn is_device_report_leaves_every_keystroke_alone() {
+        // Ordinary keys and text.
+        assert!(!is_device_report(b"a"));
+        assert!(!is_device_report(b""));
+        assert!(!is_device_report(b"\x1b"));
+        assert!(!is_device_report(b"\x1b[A")); // cursor up
+        assert!(!is_device_report(b"\x1b[5~")); // page up
+        assert!(!is_device_report(b"\x1bOR")); // F3, SS3 form
+        assert!(!is_device_report(b"\x1b[<0;1;1M")); // SGR mouse
+        assert!(!is_device_report(b"\x1b[I")); // focus, handled separately
+        // Alt-] is a bare ESC ] with no OSC terminator behind it.
+        assert!(!is_device_report(b"\x1b]"));
+        // A modified F3 is `CSI 1 ; 5 R`, the same shape as a cursor-position
+        // report. The report loses; a swallowed keystroke is the worse bug.
+        assert!(!is_device_report(b"\x1b[1;5R"));
+        assert!(!is_device_report(b"\x1b[24;1R"));
+        // Under the kitty keyboard protocol an unprefixed `CSI … u` is a KEY.
+        assert!(!is_device_report(b"\x1b[97;5u"));
     }
 
     #[test]
