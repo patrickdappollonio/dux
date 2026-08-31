@@ -3402,7 +3402,6 @@ function selectSessionRoute(
   }
   const slotTab = session ? session.slot_tab_id : slotTabTargetId(id)
   setState({
-    // Selecting a session focuses its session-slot tab.
     selectedTarget: { kind: "agent", sessionId: id, tabId: slotTab },
     selectedSessionId: id,
     // Re-selecting the same session keeps its loaded data; a real switch enters
@@ -3849,7 +3848,6 @@ function markTabStarted(tabId: string): void {
   setState({ startedDormantTabs: [...state.startedDormantTabs, tabId] })
 }
 
-// Drop one tab's latch.
 function dropTabStarted(tabId: string): void {
   if (!state.startedDormantTabs.includes(tabId)) return
   setState({
