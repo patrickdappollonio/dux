@@ -70,18 +70,18 @@ const fallback = [
       </div>
 
       <h1 class="hero-headline">
-        {/* The full stop used to sit outside the accent span, which is an
-            inline-block and therefore an atomic inline: at narrow widths the
-            browser stranded the dot on a line of its own. A word joiner does
-            not fix that, measured rather than assumed, because at those widths
-            no other break opportunity fits and the browser breaks anyway.
-            Binding the whole phrase into one nowrap unit does not fix it
-            either: "proper office." is wider than a 320px column, so it
-            overflowed the viewport instead.
+        {/* Each word is its own accent unit, which keeps a break available
+            between them, and the full stop lives inside the second unit's
+            nowrap box where nothing can strand it. Three simpler shapes are
+            measured and do not work: a stop outside the accent span is stranded
+            on a line of its own at narrow widths, because that span is an
+            inline-block and therefore an atomic inline; a word joiner does not
+            help, because at those widths no other break opportunity fits and
+            the browser breaks anyway; and binding the whole phrase into one
+            nowrap unit overflows the viewport, because "proper office." is
+            wider than a 320px column.
 
-            So each word is its own accent unit, which restores the break
-            between them, and the dot lives inside the second unit's nowrap box
-            where nothing can strand it. Each unit's underline is anchored to a
+            Each unit's underline is anchored to a
             wrapper holding only its word, so the rule never reaches under the
             dot; the leading unit's rule is extended by one character cell (the
             headline is monospaced, so 1ch is exactly the space's advance) and
