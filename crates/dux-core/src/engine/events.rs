@@ -1246,6 +1246,13 @@ impl Engine {
         self.needs_attention.remove(tab_id);
         self.pty_progress.remove(tab_id);
         self.agent_viewed.remove(tab_id);
+        // Every OTHER caller of this is a deliberate end (a stop, a force
+        // reconnect, a close, a delete, a resume-fallback retry), and after a
+        // deliberate end the tab deserves a clean slate: selecting it should
+        // start it again rather than show the diagnosis card for a run the user
+        // already dealt with. The one caller that must NOT lose the verdict is
+        // the non-zero-exit prune, which records it AFTER calling this.
+        self.failed_tab_runs.remove(tab_id);
         self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.to_owned()));
     }
 
@@ -1840,7 +1847,7 @@ impl Engine {
         let session = request.session;
         self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.clone()));
 
-        match request.kind {
+        let outcome = match request.kind {
             AgentLaunchKind::Create { status_op_id, .. } => {
                 self.clear_in_flight(&InFlightKey::CreateAgent);
                 // Resolve the shared create op to its keyed error final so both
@@ -1951,7 +1958,18 @@ impl Engine {
                     None,
                 )
             }
+        };
+        // A launch that never came up is the tab's last run ending badly, and it
+        // is recorded for every kind of launch alike: the surfaces decide what to
+        // do about it, and a rule that held for some launches and not others
+        // would be a rule nobody could predict. The guard is existence, not kind:
+        // a create that failed has no session behind it and the ghost-tab paths
+        // above have just deleted the row, and an entry for a tab nothing can
+        // ever ask about again is a leak.
+        if self.owning_session_for_tab(tab_id.as_str()).is_some() {
+            self.mark_tab_run_failed(&tab_id);
         }
+        outcome
     }
 
     /// Close the reload barrier opened by `Command::ReloadConfig` and drive the
@@ -5428,6 +5446,52 @@ mod tests {
         assert!(matches!(outcome, AgentLaunchFailedOutcome::ResumeFallback));
         assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1-slot"))));
         assert_eq!(engine.sessions[0].status, SessionStatus::Detached);
+    }
+
+    /// A launch that never came up records the tab's last run as failed, which
+    /// is what stops the web from starting that tab again on the next selection.
+    #[test]
+    fn process_agent_launch_failed_records_the_tabs_run_as_failed() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "project-1", "feat/x");
+        let _ = engine.session_store.upsert_session(&session);
+        engine.sessions.push(session);
+
+        let data = make_failed_data(
+            "s1",
+            "feat/x",
+            AgentLaunchKind::Reconnect {
+                status_message: String::new(),
+            },
+            "boom",
+        );
+        let _ = engine.process_agent_launch_failed(data);
+        assert!(
+            engine.tab_last_run_failed("s1-slot"),
+            "a failed launch is the tab's last run ending badly"
+        );
+    }
+
+    /// A create that failed has no agent behind it: recording a verdict for a tab
+    /// nothing can ever ask about again would be a leak, one entry per failed
+    /// create on a long-running server.
+    #[test]
+    fn process_agent_launch_failed_records_nothing_for_a_tab_that_no_longer_exists() {
+        let (mut engine, _tmp) = test_engine();
+        let data = make_failed_data(
+            "s1",
+            "feat/x",
+            AgentLaunchKind::Create {
+                status_message: String::new(),
+                repo_path: String::from("/tmp/wt"),
+                owns_worktree: true,
+                startup_result: None,
+                status_op_id: String::new(),
+            },
+            "boom",
+        );
+        let _ = engine.process_agent_launch_failed(data);
+        assert!(engine.failed_tab_runs.is_empty());
     }
 
     #[test]

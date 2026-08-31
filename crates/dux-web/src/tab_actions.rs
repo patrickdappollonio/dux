@@ -30,6 +30,12 @@
 //!   closed and is refused with a 400 saying why; any other tab is closed and
 //!   its row removed, returning 200 + `{ "detached": <bool> }` (closing an
 //!   agent's LAST live tab detaches it). A `:tab` not owned by `:id` is a 404.
+//! - `POST   /api/v1/sessions/:id/tabs/:tab/start` - start a DORMANT tab (the
+//!   "Start session" press). 200 once the launch is dispatched, or when the tab
+//!   was already running. This is the only start that gets past a recorded
+//!   launch failure: opening a failed tab's PTY socket deliberately refuses to
+//!   launch it, so a tab that cannot come up never relaunches itself. 404 when
+//!   `:tab` is not a tab of `:id`.
 //! - `PATCH  /api/v1/sessions/:id/tabs/:tab`       - retarget the tab's provider
 //!   `{ "provider" }`. 200 on success; 400 when the provider is not configured.
 //! - `PUT    /api/v1/sessions/:id/focused-tab`     - remember the tab the user
@@ -59,6 +65,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/sessions/{id}/tabs", post(create_tab))
         .route("/api/v1/sessions/{id}/tabs/{tab}", delete(delete_tab))
         .route("/api/v1/sessions/{id}/tabs/{tab}", patch(retarget_tab))
+        .route("/api/v1/sessions/{id}/tabs/{tab}/start", post(start_tab))
         .route(
             "/api/v1/sessions/{id}/focused-tab",
             put(set_focused_tab_route),
@@ -190,6 +197,36 @@ async fn delete_tab(
         // A concurrent close removed the row between the ownership check and the
         // command: "gone" is 404, not a validation error (mirrors kill_session).
         Err(e) if e.contains("unknown tab") => (StatusCode::NOT_FOUND, e).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// `POST /api/v1/sessions/:id/tabs/:tab/start` - start a dormant tab. The
+/// session-slot tab is as valid a target as any extra tab; slot-ness is asked of
+/// the resolver, never inferred from a missing row.
+async fn start_tab(
+    State(state): State<AppState>,
+    Path((id, tab)): Path<(String, String)>,
+) -> Response {
+    // See `delete_tab`: the two ids are checked separately so a bad `:id` reads
+    // as an unknown session rather than a tab-worded error.
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    if !id_within_bound(&tab) {
+        return unknown_tab();
+    }
+    if let Err(resp) = resolve_worktree(&state, id.clone()).await {
+        return resp.into_response();
+    }
+    if !state.engine.is_slot_tab(id.clone(), &tab).await {
+        match state.engine.tab_session(tab.clone()).await {
+            Some(owner) if owner == id => {}
+            _ => return unknown_tab(),
+        }
+    }
+    match state.engine.start_agent_tab(tab).await {
+        Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }

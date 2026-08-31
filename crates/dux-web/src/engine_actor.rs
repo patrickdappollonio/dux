@@ -133,6 +133,13 @@ pub enum EngineRequest {
         Option<String>,
         oneshot::Sender<Result<(String, String), String>>,
     ),
+    /// Start a DORMANT tab explicitly: the press on its "Start session" card.
+    /// It is the one launch path that gets past a recorded failure, because a
+    /// press is the user saying "try it again anyway"; dispatching the launch is
+    /// itself what clears the verdict, so the pane that mounts behind the card
+    /// then attaches to a launch already in flight rather than starting a second
+    /// one. A tab that is already running is an idempotent `Ok`.
+    StartAgentTab(String, oneshot::Sender<Result<(), String>>),
     /// Resolve the owning session id of a EXTRA tab (instant lookup), or `None`
     /// when the tab id is unknown or is a session-slot tab (which has no `agent_tabs` row
     /// and is served by `/ws/sessions/:id/pty`). Lets the tab PTY socket and tab
@@ -1038,6 +1045,18 @@ impl EngineHandle {
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
 
+    /// Start dormant tab `tab_id` explicitly (the "Start session" press). See
+    /// [`EngineRequest::StartAgentTab`] for why this exists alongside the
+    /// subscribe-launch path.
+    pub async fn start_agent_tab(&self, tab_id: String) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::StartAgentTab(tab_id, tx))
+            .await
+            .map_err(|_| "engine thread gone".to_string())?;
+        rx.await.map_err(|_| "engine reply dropped".to_string())?
+    }
+
     /// The session id that owns EXTRA tab `tab_id`, or `None` when the tab is
     /// unknown or is a session-slot tab. Used by the tab PTY socket and the tab REST routes
     /// to enforce that the tab belongs to the path's session before acting.
@@ -1741,7 +1760,10 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::CreateTerminal(..)
         | EngineRequest::CreateProjectTerminal(..)
         | EngineRequest::CreateStandaloneTerminal(..)
-        | EngineRequest::CreateAgentTab(..) => true,
+        | EngineRequest::CreateAgentTab(..)
+        // Starting a dormant tab dispatches a launch and clears its recorded
+        // failure, both of which the spine publishes.
+        | EngineRequest::StartAgentTab(..) => true,
 
         // The attach dispatch itself only mints a pending status op and spawns
         // the lookup worker, but the worker's result lands as an engine event
@@ -2446,6 +2468,7 @@ impl EngineService {
                         engine,
                         &mut self.pending,
                         &mut self.last_pr_foregrounded,
+                        &mut self.status,
                         tab_id,
                         reply,
                     );
@@ -3409,6 +3432,16 @@ fn handle_request(
             let res = create_agent_tab_inner(engine, &session_id, provider);
             let _ = reply.send(res);
         }
+        EngineRequest::StartAgentTab(tab_id, reply) => {
+            // Already running is success, not a second launch: the card can be
+            // pressed from a page whose spine has not caught up yet.
+            let res = if engine.providers.contains_key(TabIdRef::new(&tab_id)) {
+                Ok(())
+            } else {
+                launch_agent(engine, &tab_id)
+            };
+            let _ = reply.send(res);
+        }
         EngineRequest::SlotTabId(session_id, reply) => {
             let slot = engine
                 .session_by_id(&session_id)
@@ -3645,6 +3678,16 @@ fn write_raw_config_on_engine(
     Ok(())
 }
 
+/// Why a PTY subscribe onto a tab whose last run failed is refused, in the words
+/// the user gets. The socket's own close carries a fixed code and a fixed reason
+/// (the client keys its do-not-retry rule off the code), so this sentence reaches
+/// the user as a keyed status instead, which the web renders as a toast.
+fn last_run_failed_refusal() -> String {
+    "This tab's last run failed, so it will not be started by opening it. \
+     Start it explicitly to try again."
+        .to_string()
+}
+
 /// Handle a `SubscribePty` request. If the provider already exists, reply
 /// immediately. Otherwise launch/resume the real agent provider and defer the
 /// reply via a `PendingSubscribe` until the provider comes up (or times out).
@@ -3652,6 +3695,7 @@ fn handle_subscribe(
     engine: &mut Engine,
     pending: &mut Vec<PendingSubscribe>,
     last_pr_foregrounded: &mut Option<String>,
+    status_tx: &mut StatusEmitter,
     tab_id: String,
     reply: oneshot::Sender<Result<PtySubscription, String>>,
 ) {
@@ -3680,6 +3724,28 @@ fn handle_subscribe(
     engine.note_agent_viewed_if_known(&tab_id);
     if let Some(client) = engine.providers.get(TabIdRef::new(&tab_id)) {
         let _ = reply.send(Ok(client.subscribe_with_repaint()));
+        return;
+    }
+    // Subscribing is what force-launches a dormant tab, and that is deliberate:
+    // it is how selecting an agent starts it in one click. It must not be how a
+    // tab whose last run FAILED gets started, though, or a tab that cannot come
+    // up relaunches on every passive attach (a retrying socket, a second browser
+    // that still had the pane open) with nothing the user can do about it. The
+    // explicit start route clears the verdict first and then launches, so a press
+    // still works; only the passive path is refused, and it says why.
+    //
+    // The socket close cannot carry the why: its code is the client's
+    // do-not-retry rule and its reason is fixed. So the sentence rides the keyed
+    // status controller, the one status surface both surfaces already read, and
+    // reaches the browser as a toast. Keyed on the tab (the same
+    // `tab-launch-<id>` family a launch failure uses), so a second refused attach
+    // replaces the toast rather than stacking another one.
+    if engine.tab_last_run_failed(&tab_id) {
+        let _ = status_tx.send(
+            WireStatus::new("warning", last_run_failed_refusal())
+                .with_key(format!("tab-launch-{tab_id}")),
+        );
+        let _ = reply.send(Err(last_run_failed_refusal()));
         return;
     }
     match launch_agent(engine, &tab_id) {
@@ -4218,6 +4284,76 @@ mod tests {
             err.contains("being deleted"),
             "refusal message should be surfaced verbatim: {err}"
         );
+    }
+
+    /// Opening a tab's PTY socket is what starts a dormant tab in one click, and
+    /// that is exactly why it must refuse a tab whose last run FAILED: otherwise
+    /// a tab that cannot come up relaunches on every passive attach (a retrying
+    /// socket, a second browser that still had the pane open) forever. The
+    /// explicit start route is the way past it, and it clears the verdict first.
+    /// The refusal is also SAID: the socket's close code is the client's
+    /// do-not-retry rule and carries no room for a reason, so the sentence rides
+    /// the keyed status controller and reaches the browser as a toast.
+    #[test]
+    fn subscribing_does_not_relaunch_a_tab_whose_last_run_failed() {
+        let (_tmp, paths) = temp_paths();
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .create_session(&sample_session(
+                    "s1",
+                    "p1",
+                    "feat",
+                    paths.root.to_string_lossy().as_ref(),
+                ))
+                .unwrap();
+        }
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        let slot = engine
+            .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+            .to_owned();
+        engine.mark_tab_run_failed(&slot);
+
+        let mut pending = Vec::new();
+        let mut last_pr = None;
+        let (status_tx, mut status_rx) = broadcast::channel(8);
+        let (clear_tx, _clear_rx) = broadcast::channel(8);
+        let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx);
+        let (tx, rx) = oneshot::channel();
+        handle_subscribe(
+            &mut engine,
+            &mut pending,
+            &mut last_pr,
+            &mut status,
+            slot.as_str().to_string(),
+            tx,
+        );
+
+        let emitted = status_rx.try_recv().expect("the refusal is said out loud");
+        assert_eq!(emitted.tone, "warning");
+        assert!(
+            emitted.message.contains("Start it explicitly"),
+            "the toast must name the way forward: {}",
+            emitted.message
+        );
+        assert_eq!(
+            emitted.key.as_deref(),
+            Some(format!("tab-launch-{}", slot.as_str()).as_str()),
+            "keyed on the tab, so a second refused attach replaces the toast"
+        );
+        assert!(pending.is_empty(), "no launch may be waited on");
+        assert!(
+            !engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(slot.clone())),
+            "no launch may be dispatched by a passive attach onto a failed tab"
+        );
+        match rx.blocking_recv().expect("a reply") {
+            Ok(_) => panic!("subscribing a failed tab must be refused"),
+            Err(err) => assert!(
+                err.contains("Start it explicitly"),
+                "the refusal must name the way forward: {err}"
+            ),
+        }
     }
 
     #[tokio::test]

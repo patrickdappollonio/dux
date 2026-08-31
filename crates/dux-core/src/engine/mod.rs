@@ -458,6 +458,25 @@ pub struct Engine {
     /// a tab the user is engaged with) and cleared when the user looks at or
     /// tears down the tab. The sidebar rolls this up across an agent's tabs.
     pub needs_attention: HashSet<TabId>,
+    /// Tabs (keyed by tab id) whose LAST run ended badly: a launch that failed
+    /// outright, or a process that exited non-zero. Published per tab as
+    /// [`crate::viewmodel::AgentTabView::last_run_failed`], where it is what
+    /// stops a surface from launching a dormant tab on selection alone: a tab
+    /// that keeps failing (a resume against a conversation that isn't there, a
+    /// provider that is no longer on PATH) would otherwise relaunch every time
+    /// the user looks at it, with no way out but to look somewhere else.
+    ///
+    /// Deliberately NOT part of [`Engine::clear_tab_runtime`]: every other
+    /// tab-keyed map describes a LIVE process and dies with it, while this one
+    /// exists precisely to outlive the process it describes. It is cleared when
+    /// a launch is actually dispatched for the tab (any launch is somebody
+    /// asking for one, so the next failure is a fresh verdict) and forgotten
+    /// when the tab's row goes away.
+    ///
+    /// Memory-only, like `needs_attention`: after a restart every tab comes back
+    /// dormant with a clean slate, which is what makes a restart a way out of a
+    /// tab that was failing before it.
+    pub failed_tab_runs: HashSet<TabId>,
     /// The most recent `OSC 9;4` progress report per tab (keyed by tab id), with
     /// the moment the engine observed it. [`Engine::is_agent_streaming`] treats a
     /// fresh report as authoritative for the "working" indicator, overriding the
@@ -1575,6 +1594,25 @@ impl Engine {
     /// Keyed by TAB id; the sidebar rolls this up across an agent's tabs.
     pub fn tab_needs_attention(&self, tab_id: &str) -> bool {
         self.needs_attention.contains(TabIdRef::new(tab_id))
+    }
+
+    /// Whether this tab's LAST run ended badly (a failed launch, or a non-zero
+    /// exit). See [`Engine::failed_tab_runs`] for what the answer is for.
+    pub fn tab_last_run_failed(&self, tab_id: &str) -> bool {
+        self.failed_tab_runs.contains(TabIdRef::new(tab_id))
+    }
+
+    /// Record that this tab's last run ended badly. Called from the two places
+    /// that observe a bad ending: the launch-failed event and the non-zero-exit
+    /// prune.
+    pub fn mark_tab_run_failed(&mut self, tab_id: &TabIdRef) {
+        self.failed_tab_runs.insert(tab_id.to_owned());
+    }
+
+    /// Forget a tab's recorded failure: a launch has been dispatched for it, so
+    /// whatever happens next is the verdict that counts.
+    pub fn clear_tab_run_failure(&mut self, tab_id: &TabIdRef) {
+        self.failed_tab_runs.remove(tab_id);
     }
 
     /// Whether ANY tab of the session (session-slot or extra) currently needs
@@ -4533,6 +4571,10 @@ impl Engine {
         if self.agent_tabs.remove(TabIdRef::new(tab_id)).is_none() {
             return false;
         }
+        // The row is gone, so nothing will ever read this tab's recorded verdict
+        // again; keeping it would be one leaked entry per closed tab on a
+        // long-running server.
+        self.clear_tab_run_failure(TabIdRef::new(tab_id));
         if let Err(err) = self.session_store.delete_agent_tab(tab_id) {
             crate::logger::warn(&format!(
                 "failed to delete cleanly-exited tab {tab_id} from the session store: {err}"

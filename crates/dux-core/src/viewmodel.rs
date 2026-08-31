@@ -779,6 +779,17 @@ pub struct AgentTabView {
     /// dormant card from this flag *without* subscribing, because subscribing
     /// would force-launch the provider.
     pub has_live_process: bool,
+    /// Whether this tab's LAST run ended badly: a launch that failed, or a
+    /// process that exited non-zero. Only meaningful while `has_live_process` is
+    /// `false`, and it is what tells a surface apart the two kinds of dormant
+    /// tab: one that is simply not running yet (a restart, a stop) and one that
+    /// tried and failed. The web starts the first on selection and shows the
+    /// second its diagnosis card instead, so a tab that keeps failing cannot
+    /// relaunch itself every time the user looks at it.
+    ///
+    /// Uniform across every tab; no slot special-casing lives in the data.
+    /// Memory-only, so a restart clears it (see [`crate::engine::Engine::failed_tab_runs`]).
+    pub last_run_failed: bool,
     /// What this tab's LIVE process launched with, for a file dropped onto its
     /// pane; `None` when no process is live.
     ///
@@ -1282,6 +1293,7 @@ impl Engine {
                 .map(|p| p.has_output())
                 .unwrap_or(false),
             has_live_process: self.providers.contains_key(id),
+            last_run_failed: self.tab_last_run_failed(id.as_str()),
             // Read off the LIVE process's launch, so it appears when the tab
             // launches and disappears when it is torn down. Both halves come out
             // of the one recorded entry; neither is topped up from current
@@ -2794,6 +2806,36 @@ mod tests {
             Some("backslash_escaped".to_string()),
             "...including a sibling tab of the same provider that launched later"
         );
+    }
+
+    /// The failure verdict reaches the browser per tab, uniformly: the data
+    /// carries no notion of which tab is in the session slot, because the rule
+    /// that reads it is the surface's, not the engine's.
+    #[test]
+    fn a_tabs_failed_run_is_published_per_tab() {
+        let (mut engine, _tmp) = engine_with_two_tabs();
+        let failed = |engine: &Engine, tab_id: &str| {
+            engine
+                .session_view("s1")
+                .expect("session projects")
+                .tabs
+                .into_iter()
+                .find(|t| t.id == tab_id)
+                .expect("tab projects")
+                .last_run_failed
+        };
+        assert!(!failed(&engine, "s1-slot"));
+        assert!(!failed(&engine, "tab-b"));
+
+        engine.mark_tab_run_failed(TabIdRef::new("s1-slot"));
+        assert!(failed(&engine, "s1-slot"));
+        assert!(
+            !failed(&engine, "tab-b"),
+            "one tab's bad run says nothing about its siblings"
+        );
+
+        engine.clear_tab_run_failure(TabIdRef::new("s1-slot"));
+        assert!(!failed(&engine, "s1-slot"));
     }
 
     #[test]

@@ -189,6 +189,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pty_input: std::collections::HashMap::new(),
         pty_pointer: std::collections::HashMap::new(),
         needs_attention: std::collections::HashSet::new(),
+        failed_tab_runs: std::collections::HashSet::new(),
         pty_progress: std::collections::HashMap::new(),
         agent_viewed: std::collections::HashMap::new(),
         last_foreground_refresh: None,

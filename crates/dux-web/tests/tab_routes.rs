@@ -118,6 +118,15 @@ async fn boot_with_tab_per_agent(tab_per_agent: u32) -> (SocketAddr, tempfile::T
 /// nonexistent binary, so a tab created against it fails its async launch
 /// instead of coming up live. Used by the G-T2 async-launch-failure test.
 async fn boot_with_broken_provider() -> (SocketAddr, tempfile::TempDir) {
+    boot_with_broken_provider_and_claude("cat").await
+}
+
+/// `boot_with_broken_provider`, with the command `claude` (the sessions' own
+/// provider, so the SLOT tab's) chosen by the caller: pass a nonexistent binary
+/// to make the slot tab's launch fail the way a broken resume does.
+async fn boot_with_broken_provider_and_claude(
+    claude_command: &str,
+) -> (SocketAddr, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
     let wt1 = root.join("wt1");
@@ -153,7 +162,7 @@ async fn boot_with_broken_provider() -> (SocketAddr, tempfile::TempDir) {
     engine.config.providers.commands.insert(
         "claude".to_string(),
         ProviderCommandConfig {
-            command: "cat".to_string(),
+            command: claude_command.to_string(),
             args: vec![],
             resume_args: None,
             ..Default::default()
@@ -932,6 +941,67 @@ async fn tab_with_a_failing_async_launch_never_looks_live_and_is_cleaned_up() {
         "a fresh tab whose first launch failed must be cleaned up, not left as a \
          permanently dead-looking row"
     );
+}
+
+/// A failed launch is published per tab as `last_run_failed`, and the explicit
+/// start route is what gets past it. That pair is the whole loop-breaker:
+/// selecting a healthy dormant tab starts it in one click, while a tab that
+/// keeps failing waits for a press instead of relaunching itself forever.
+#[tokio::test]
+async fn a_failed_launch_is_published_and_an_explicit_start_tries_again() {
+    let (addr, _tmp) =
+        boot_with_broken_provider_and_claude("/nonexistent/dux-test-broken-provider-binary").await;
+    let client = reqwest::Client::new();
+
+    let start = || {
+        client
+            .post(format!(
+                "http://{addr}/api/v1/sessions/s1/tabs/s1-slot/start"
+            ))
+            .send()
+    };
+
+    assert_eq!(
+        start().await.unwrap().status(),
+        200,
+        "the press is accepted"
+    );
+    let session = wait_for_session(&client, addr, "s1", |s| {
+        s["tabs"][0]["last_run_failed"] == true
+    })
+    .await;
+    assert_eq!(
+        session["tabs"][0]["last_run_failed"], true,
+        "a launch that never came up must be published as the tab's last run failing"
+    );
+    assert_ne!(session["tabs"][0]["has_live_process"], true);
+
+    // The press is the way past the verdict: it is accepted again (the passive
+    // socket path is what refuses), and the launch it dispatches fails again,
+    // so the verdict comes back rather than being lost.
+    assert_eq!(start().await.unwrap().status(), 200);
+    let session = wait_for_session(&client, addr, "s1", |s| {
+        s["tabs"][0]["last_run_failed"] == true
+    })
+    .await;
+    assert_eq!(session["tabs"][0]["last_run_failed"], true);
+}
+
+/// The start route answers about the tab, not about a guess: an id that is not a
+/// tab of the path session is a 404, the same as every other tab verb.
+#[tokio::test]
+async fn start_refuses_a_tab_that_is_not_the_sessions() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let other = create_support_tab(&client, addr, "s2").await;
+    let resp = client
+        .post(format!(
+            "http://{addr}/api/v1/sessions/s1/tabs/{other}/start"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
 }
 
 /// Both address forms of the session-slot tab reach the SAME pty.

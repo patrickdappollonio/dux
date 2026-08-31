@@ -546,14 +546,25 @@ impl Engine {
                 // Wrap the primitive's return into the View variant so App
                 // callers keep a single pattern-match shape.
                 match reaction {
-                    EventReaction::Nothing => Ok(EventReaction::DispatchAgentLaunchView(Box::new(
-                        DispatchAgentLaunchView {
-                            session_id,
-                            tab_id: tab_id_view.clone(),
-                            launched: true,
-                            status: None,
-                        },
-                    ))),
+                    EventReaction::Nothing => {
+                        // A launch is on its way, so the previous run's verdict
+                        // stops counting: whatever this launch does is the fresh
+                        // one. Clearing it HERE, at the one chokepoint every
+                        // launch funnels through, is what lets an explicit start
+                        // (and a reconnect, and a create) get past the diagnosis
+                        // card without any surface having to ask for it. Only a
+                        // dispatch that actually launched clears; a refusal
+                        // leaves the verdict standing, because nothing ran.
+                        self.clear_tab_run_failure(&tab_id);
+                        Ok(EventReaction::DispatchAgentLaunchView(Box::new(
+                            DispatchAgentLaunchView {
+                                session_id,
+                                tab_id: tab_id_view.clone(),
+                                launched: true,
+                                status: None,
+                            },
+                        )))
+                    }
                     EventReaction::Status(status) => Ok(EventReaction::DispatchAgentLaunchView(
                         Box::new(DispatchAgentLaunchView {
                             session_id,
@@ -1680,6 +1691,62 @@ mod tests {
         }
         // No in-flight launch key was set (the guard returned before dispatch).
         assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
+    }
+
+    /// A dispatched launch clears the tab's recorded failure, and a REFUSED one
+    /// leaves it standing. This one chokepoint is why an explicit start, a
+    /// reconnect and a create all get past the diagnosis card without any of
+    /// them asking for it, and why a refusal (which ran nothing) does not.
+    #[test]
+    fn dispatch_agent_launch_clears_a_recorded_failure_only_when_it_launches() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.sessions.push(session.clone());
+        engine.mark_tab_run_failed(session.slot_tab_id());
+
+        let request = engine.build_agent_launch_request(
+            session.clone(),
+            false,
+            (24, 80),
+            crate::worker::AgentLaunchKind::Reconnect {
+                status_message: String::new(),
+            },
+        );
+        let reaction = engine
+            .apply(Command::DispatchAgentLaunch {
+                request: Box::new(request),
+            })
+            .expect("apply");
+        assert!(
+            matches!(reaction, EventReaction::DispatchAgentLaunchView(ref v) if v.launched),
+            "the launch must actually dispatch for this test to say anything"
+        );
+        assert!(!engine.tab_last_run_failed(session.slot_tab_id().as_str()));
+
+        // Now the refusal side: a closing session runs nothing, so the verdict
+        // it would have replaced must survive.
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s2", "p1", "feat/y");
+        engine.sessions.push(session.clone());
+        engine.closing_sessions.insert("s2".to_string());
+        engine.mark_tab_run_failed(session.slot_tab_id());
+        let request = engine.build_agent_launch_request(
+            session.clone(),
+            false,
+            (24, 80),
+            crate::worker::AgentLaunchKind::Reconnect {
+                status_message: String::new(),
+            },
+        );
+        let _ = engine
+            .apply(Command::DispatchAgentLaunch {
+                request: Box::new(request),
+            })
+            .expect("apply");
+        assert!(
+            engine.tab_last_run_failed(session.slot_tab_id().as_str()),
+            "a refused dispatch launched nothing, so it clears nothing"
+        );
     }
 
     #[test]

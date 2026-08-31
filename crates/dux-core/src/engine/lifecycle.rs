@@ -466,6 +466,18 @@ impl Engine {
                 }
                 self.mark_session_status(sid, SessionStatus::Detached);
             }
+            // A non-zero exit is the tab's last run ending badly, and it is
+            // recorded AFTER `clear_tab_runtime` above (which wipes the flag for
+            // every deliberate end) so the verdict survives its own teardown. A
+            // clean exit and a bare EOF with no status both leave the slate
+            // clean: only a status that actually says "this failed" may stop the
+            // next selection from starting the tab. The guard is existence, the
+            // same one the launch-failed path uses: an orphan PTY has no tab
+            // anything can ever ask about again, so a verdict for it would be one
+            // leaked entry per orphan on a long-running server.
+            if exit_success == Some(false) && owning.is_some() {
+                self.mark_tab_run_failed(&tab_id);
+            }
             let tab_closed = clean_exit_closes_tab_row(is_session_slot, exit_success)
                 && self.remove_agent_tab_row(tab_id.as_str());
             pruned.push(PrunedPty {
@@ -1090,6 +1102,80 @@ mod tests {
         assert!(
             engine.agent_tabs.contains_key(TabIdRef::new("tab-crash")),
             "the crashed tab's dormant row must survive"
+        );
+        assert!(
+            engine.tab_last_run_failed("tab-crash"),
+            "a non-zero exit must record the tab's last run as failed, so selecting \
+             it shows the diagnosis surface instead of starting it again"
+        );
+        assert!(
+            !engine.tab_last_run_failed("tab-clean"),
+            "a clean exit leaves a clean slate"
+        );
+    }
+
+    /// An explicit stop clears the recorded failure, so the next selection starts
+    /// the tab again rather than meeting the diagnosis surface for a run the user
+    /// has already dealt with. `clear_tab_runtime` is where every deliberate end
+    /// funnels, which is why the clear lives there.
+    #[test]
+    fn a_deliberate_teardown_clears_a_recorded_failure() {
+        let (mut engine, _tmp) = test_engine();
+        engine.mark_tab_run_failed(TabIdRef::new("s1-slot"));
+        assert!(engine.tab_last_run_failed("s1-slot"));
+        engine.clear_tab_runtime(TabIdRef::new("s1-slot"));
+        assert!(
+            !engine.tab_last_run_failed("s1-slot"),
+            "a stop, a force reconnect, a close or a delete all give the tab a clean slate"
+        );
+    }
+
+    /// An ORPHAN PTY (one whose tab belongs to no session any more) exiting
+    /// non-zero records nothing. Nothing can ever ask about that tab again, so
+    /// the entry would sit in the map for the life of the process, one per
+    /// orphan. Same existence guard the launch-failed path applies.
+    #[test]
+    fn prune_records_no_failure_for_an_orphan_ptys_non_zero_exit() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        // No session, no `agent_tabs` row: just a live PTY under a tab id.
+        engine.providers.insert(
+            TabId::new("tab-orphan"),
+            PtyClient::spawn_with_env(
+                "sh",
+                &["-c".to_string(), "exit 3".to_string()],
+                worktree.path(),
+                24,
+                80,
+                100,
+                &[],
+            )
+            .expect("spawn sh"),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let done = engine
+                .providers
+                .get_mut(TabIdRef::new("tab-orphan"))
+                .is_some_and(|c| c.is_exited() && c.try_wait().is_some());
+            if done {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the orphan PTY never reached end of input"
+            );
+            sleep(Duration::from_millis(20));
+        }
+        let pruned = engine.prune_exited_ptys();
+        assert!(
+            pruned.iter().any(|p| p.id == "tab-orphan"),
+            "the orphan must actually be pruned for this test to say anything"
+        );
+        assert!(
+            engine.failed_tab_runs.is_empty(),
+            "an orphan PTY's bad exit leaves no entry behind"
         );
     }
 

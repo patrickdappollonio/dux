@@ -98,6 +98,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         pty_input: HashMap::new(),
         pty_pointer: HashMap::new(),
         needs_attention: HashSet::new(),
+        failed_tab_runs: HashSet::new(),
         pty_progress: HashMap::new(),
         agent_viewed: HashMap::new(),
         last_foreground_refresh: None,
