@@ -803,11 +803,15 @@ async fn nested_tab_pty_socket_enforces_session_ownership() {
 #[tokio::test]
 async fn nested_tab_pty_socket_refuses_another_sessions_slot_tab() {
     let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
 
-    // A session's slot tab id is its session id today, so `s2` here is a real,
-    // resolvable tab id that simply does not belong to `s1`.
-    let foreign =
-        tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/tabs/s2/pty")).await;
+    // A real, resolvable tab id that simply does not belong to `s1`, so the
+    // refusal can only come from the ownership check.
+    let foreign = tokio_tungstenite::connect_async(format!(
+        "ws://{addr}/ws/sessions/s1/tabs/{}/pty",
+        slot_tab_id(&client, addr, "s2").await
+    ))
+    .await;
     assert!(
         foreign.is_err(),
         "another session's slot tab must be rejected before upgrade"
