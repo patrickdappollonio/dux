@@ -991,8 +991,8 @@ impl Engine {
         // and judged by the snapshot the freshly promoted tab looks like an extra
         // whose row has gone, so this guard would kill the process it just
         // started.
-        let is_main = self.is_slot_tab_of(SessionIdRef::new(&session.id), &tab_id);
-        if !is_main && !self.agent_tabs.contains_key(&tab_id) {
+        let is_slot_tab = self.is_slot_tab_of(SessionIdRef::new(&session.id), &tab_id);
+        if !is_slot_tab && !self.agent_tabs.contains_key(&tab_id) {
             logger::info(&format!(
                 "dropping launched PTY for closed extra tab {tab_id} of session {}",
                 session.id,
@@ -1017,10 +1017,11 @@ impl Engine {
             self.resume_fallback_candidates
                 .insert(tab_id.clone(), Instant::now());
         }
-        // Session-level running state stays Main-scoped: an extra-tab launch
-        // must not flip the whole agent to Active or persist desired_running
-        // (that would light the sidebar and auto-reopen the Main provider).
-        if is_main {
+        // Session-level running state follows the SLOT tab only: an extra-tab
+        // launch must not flip the whole agent to Active or persist
+        // desired_running (that would light the sidebar and auto-reopen the
+        // provider the agent comes back as).
+        if is_slot_tab {
             self.mark_session_desired_running(&session.id, true);
             self.mark_session_status(&session.id, SessionStatus::Active);
         }
@@ -1042,7 +1043,8 @@ impl Engine {
             }
             AgentLaunchKind::StartupAutoReopen => AgentLaunchReadyView::StartupAutoReopen,
             // An extra-tab ready behaves like a reconnect for the view (show the
-            // surface + info); it is never resumed and never Main-scoped.
+            // surface + info); it is never resumed and never moves the
+            // session-level running state.
             AgentLaunchKind::Tab { status_message, .. } => {
                 AgentLaunchReadyView::Reconnect { status_message }
             }
@@ -1942,8 +1944,8 @@ impl Engine {
                 //
                 // Asked of the LIVE session for the same reason as there: the
                 // request's snapshot predates any promotion this launch raced.
-                let is_main = self.is_slot_tab_of(SessionIdRef::new(&session.id), &tab_id);
-                if !is_main && !self.agent_tabs.contains_key(&tab_id) {
+                let is_slot_tab = self.is_slot_tab_of(SessionIdRef::new(&session.id), &tab_id);
+                if !is_slot_tab && !self.agent_tabs.contains_key(&tab_id) {
                     logger::info(&format!(
                         "dropping launch-failed event for closed extra tab {tab_id} of session {}",
                         session.id,
@@ -1967,7 +1969,7 @@ impl Engine {
                 // failing, and deleting that row would leave the agent's pointer
                 // naming a row that no longer exists. A slot tab keeps its row and
                 // becomes the dormant crash-diagnosis surface instead.
-                if is_fresh && !is_main {
+                if is_fresh && !is_slot_tab {
                     // Persist-first (mirrors close_tab): only drop the in-memory
                     // entry once the row is actually gone, so a failed DB delete
                     // leaves a visible/closeable tab rather than an invisible
@@ -3824,7 +3826,7 @@ mod tests {
     }
 
     #[test]
-    fn detach_conflicting_detects_a_conflict_when_only_a_support_tab_is_live() {
+    fn detach_conflicting_detects_a_conflict_when_only_an_extra_tab_is_live() {
         use crate::pty::PtyClient;
         let (mut engine, _tmp) = test_engine();
         let tmp = tempfile::tempdir().expect("worktree dir");

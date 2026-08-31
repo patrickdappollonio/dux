@@ -312,9 +312,10 @@ pub struct App {
     pub(crate) clipboard: Clipboard,
     pub(crate) active_terminal_id: Option<String>,
     /// Which tab is focused in the center pane, per session (session_id →
-    /// tab_id). Missing or equal-to-session-id means the session-slot tab. Only the
-    /// center pane resolves the focused tab; sidebar/session labels stay
-    /// Main-scoped. Pruned when a session is torn down.
+    /// tab_id). A missing or unusable entry resolves to the session's slot tab
+    /// (`AgentSession::resolved_focused_tab`). Only the center pane resolves the
+    /// focused tab; sidebar and session labels stay agent-scoped. Pruned when a
+    /// session is torn down.
     pub(crate) focused_tabs: HashMap<String, String>,
     /// Passthrough bytes captured but not yet written to the host terminal because
     /// a single tick's forward exceeded [`HOST_FORWARD_MAX_PER_TICK`]. Carried to

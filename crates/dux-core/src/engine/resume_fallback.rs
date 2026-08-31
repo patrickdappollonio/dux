@@ -763,9 +763,9 @@ mod tests {
 
     #[test]
     fn retry_rebuilds_an_extra_tab_launch_keyed_by_tab_id() {
-        // A resumed EXTRA tab (candidate keyed by tab id, not session id) that
-        // exits with no output must retry fresh under its own tab id — not be
-        // silently dropped because the key isn't a session id.
+        // A resumed EXTRA tab must retry fresh under its own tab id, not be
+        // silently dropped because its key is not the one in the session's
+        // slot.
         let (mut engine, _tmp) = test_engine();
         let session = sample_session("s1", "p1", "feat/x");
         engine.sessions.push(session);

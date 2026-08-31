@@ -8839,7 +8839,7 @@ mod tab_ops_tests {
         PtyClient::spawn_with_env("cat", &[], cwd, 24, 80, 1000, &[]).expect("spawn cat")
     }
 
-    fn support_tab(id: &str, session_id: &str, provider: &str) -> AgentTab {
+    fn extra_tab(id: &str, session_id: &str, provider: &str) -> AgentTab {
         AgentTab {
             id: id.to_string(),
             session_id: session_id.to_string(),
@@ -8894,7 +8894,7 @@ mod tab_ops_tests {
         );
 
         // A SECOND codex tab already launching makes this one start fresh.
-        let other = support_tab("tab-2", "s1", "codex");
+        let other = extra_tab("tab-2", "s1", "codex");
         engine
             .agent_tabs
             .insert(TabId::new(other.id.clone()), other);
@@ -8910,7 +8910,7 @@ mod tab_ops_tests {
         // have history in the shared worktree.
         session.started_providers = vec!["claude".into(), "opencode".into()];
         engine.sessions.push(session.clone());
-        let oc = support_tab("tab-oc", "s1", "opencode");
+        let oc = extra_tab("tab-oc", "s1", "opencode");
         engine.session_store.insert_agent_tab(&oc).unwrap();
         engine.agent_tabs.insert(TabId::new(oc.id.clone()), oc);
 
@@ -8966,7 +8966,7 @@ mod tab_ops_tests {
         assert!(main.resume);
         // A live SAME-provider (claude) tab makes the session-slot tab start fresh.
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-x")));
-        let tab = support_tab("tab-x", "s1", "claude");
+        let tab = extra_tab("tab-x", "s1", "claude");
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         let main2 = engine.build_agent_launch_request(
             session,
@@ -8993,7 +8993,7 @@ mod tab_ops_tests {
         let mut session = sample_session("s1", "p1", "feat");
         session.started_providers = vec!["claude".into()];
         engine.sessions.push(session.clone());
-        let tab = support_tab("tab-x", "s1", "claude");
+        let tab = extra_tab("tab-x", "s1", "claude");
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-x")));
 
@@ -9028,7 +9028,7 @@ mod tab_ops_tests {
         engine.sessions.push(session.clone());
         // A live same-provider extra tab: `should_resume_session` still reports
         // eligible, but `tab_resume_decision` downgrades to fresh.
-        let tab = support_tab("tab-x", "s1", "claude");
+        let tab = extra_tab("tab-x", "s1", "claude");
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-x")));
         assert!(
@@ -9108,7 +9108,7 @@ mod tab_ops_tests {
         session.started_providers = vec!["claude".into()];
         session.provider = ProviderKind::new("claude");
         engine.sessions.push(session.clone());
-        let tab = support_tab("tab-x", "s1", "claude");
+        let tab = extra_tab("tab-x", "s1", "claude");
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-x")));
 
@@ -9203,7 +9203,7 @@ mod tab_ops_tests {
         engine.sessions.push(session);
         // Default cap is 20 tabs → the slot row plus 19 extras fills it.
         for i in 0..19 {
-            let tab = support_tab(&format!("t{i}"), "s1", "codex");
+            let tab = extra_tab(&format!("t{i}"), "s1", "codex");
             engine.session_store.insert_agent_tab(&tab).unwrap();
             engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         }
@@ -9243,7 +9243,7 @@ mod tab_ops_tests {
     fn change_tab_provider_support_updates_only_the_tab() {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let tab = support_tab("tab-1", "s1", "claude");
+        let tab = extra_tab("tab-1", "s1", "claude");
         engine.session_store.insert_agent_tab(&tab).unwrap();
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
@@ -9266,7 +9266,7 @@ mod tab_ops_tests {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "claude"));
         engine.mark_session_provider_started("s1", &ProviderKind::new("codex"));
-        let tab = support_tab("tab-1", "s1", "claude");
+        let tab = extra_tab("tab-1", "s1", "claude");
         engine.session_store.insert_agent_tab(&tab).unwrap();
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
@@ -9283,7 +9283,7 @@ mod tab_ops_tests {
         // even if it otherwise supports the --continue-style flag.
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "claude"));
-        let tab = support_tab("tab-1", "s1", "claude");
+        let tab = extra_tab("tab-1", "s1", "claude");
         engine.session_store.insert_agent_tab(&tab).unwrap();
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
@@ -9405,7 +9405,7 @@ mod tab_ops_tests {
         engine.session_store.create_session(&session).unwrap();
         engine.sessions.push(session);
         for (i, (id, provider)) in extras.iter().enumerate() {
-            let mut tab = support_tab(id, "s1", provider);
+            let mut tab = extra_tab(id, "s1", provider);
             tab.sort_order = i as i64 + 1;
             engine.session_store.insert_agent_tab(&tab).unwrap();
             engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
@@ -9463,7 +9463,7 @@ mod tab_ops_tests {
         engine.session_store.create_session(&session).unwrap();
         engine.sessions.push(session);
         for (id, order) in [("late", 9), ("early", 2), ("middle", 5)] {
-            let mut tab = support_tab(id, "s1", "codex");
+            let mut tab = extra_tab(id, "s1", "codex");
             tab.sort_order = order;
             engine.session_store.insert_agent_tab(&tab).unwrap();
             engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
@@ -9623,7 +9623,7 @@ mod tab_ops_tests {
         let session = sample_session("s1", "p1", "feat");
         engine.session_store.create_session(&session).unwrap();
         engine.sessions.push(session);
-        let tab = support_tab("t2", "s1", "codex");
+        let tab = extra_tab("t2", "s1", "codex");
         engine.agent_tabs.insert(TabId::new("t2"), tab);
         engine
             .providers
@@ -9936,7 +9936,7 @@ mod tab_ops_tests {
         engine.session_store.create_session(&session).unwrap();
         engine.sessions.push(session);
         for (i, (id, provider)) in [("t2", "codex"), ("t3", "claude")].iter().enumerate() {
-            let mut tab = support_tab(id, "s1", provider);
+            let mut tab = extra_tab(id, "s1", provider);
             tab.sort_order = i as i64 + 1;
             engine.session_store.insert_agent_tab(&tab).unwrap();
             engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
@@ -9981,7 +9981,7 @@ mod tab_ops_tests {
         // slot's relaunch must start fresh rather than fight it for `--continue`.
         let (mut engine, tmp) = test_engine();
         agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
-        let rival = support_tab("t4", "s1", "codex");
+        let rival = extra_tab("t4", "s1", "codex");
         engine.session_store.insert_agent_tab(&rival).unwrap();
         engine.agent_tabs.insert(TabId::new("t4"), rival);
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("t4")));
@@ -10209,7 +10209,7 @@ mod tab_ops_tests {
     }
 
     #[test]
-    fn support_tab_launch_ready_does_not_flip_session_state() {
+    fn extra_tab_launch_ready_does_not_flip_session_state() {
         let (mut engine, tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         let tab = AgentTab {
@@ -10241,12 +10241,13 @@ mod tab_ops_tests {
 
         // The extra tab's PTY is tracked under its own key...
         assert!(engine.providers.contains_key(TabIdRef::new("tab-1")));
-        // ...but the session stays Main-scoped: not flipped to Active.
+        // ...but the session's own running state is untouched: not flipped to
+        // Active, because only the slot tab moves it.
         assert_eq!(engine.sessions[0].status, SessionStatus::Detached);
     }
 
     #[test]
-    fn ghost_support_tab_launch_is_dropped_when_the_row_is_gone() {
+    fn ghost_extra_tab_launch_is_dropped_when_the_row_is_gone() {
         let (mut engine, tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         let session = engine.sessions[0].clone();
@@ -10275,7 +10276,7 @@ mod tab_ops_tests {
     fn first_live_tab_returns_none_when_every_tab_is_dormant() {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let tab = support_tab("tab-1", "s1", "codex");
+        let tab = extra_tab("tab-1", "s1", "codex");
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         assert_eq!(engine.first_live_tab("s1"), None);
@@ -10285,7 +10286,7 @@ mod tab_ops_tests {
     fn first_live_tab_skips_a_dormant_session_slot_for_a_live_extra_tab() {
         let (mut engine, tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let tab = support_tab("tab-1", "s1", "codex");
+        let tab = extra_tab("tab-1", "s1", "codex");
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         // Session-slot "s1" has no provider; the extra tab does.
         engine
@@ -10299,7 +10300,7 @@ mod tab_ops_tests {
     fn first_live_tab_prefers_session_slot_when_it_is_live() {
         let (mut engine, tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let tab = support_tab("tab-1", "s1", "codex");
+        let tab = extra_tab("tab-1", "s1", "codex");
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         engine
             .providers
@@ -10315,9 +10316,9 @@ mod tab_ops_tests {
     fn first_live_tab_honors_sort_order_among_live_extras() {
         let (mut engine, tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let mut earlier = support_tab("tab-2", "s1", "codex");
+        let mut earlier = extra_tab("tab-2", "s1", "codex");
         earlier.sort_order = 2;
-        let mut later = support_tab("tab-1", "s1", "codex");
+        let mut later = extra_tab("tab-1", "s1", "codex");
         later.sort_order = 1;
         engine
             .agent_tabs
@@ -10341,7 +10342,7 @@ mod tab_ops_tests {
     fn first_live_tab_counts_an_in_flight_launch_as_live() {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let tab = support_tab("tab-1", "s1", "codex");
+        let tab = extra_tab("tab-1", "s1", "codex");
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-1")));
 

@@ -2502,7 +2502,7 @@ impl App {
     /// live-or-launching tab of that provider (`Engine::tab_resume_decision`),
     /// and starts fresh otherwise; the copy states that rule rather than
     /// promising either outcome.
-    fn render_dormant_support_tab(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_dormant_extra_tab(&mut self, frame: &mut Frame, area: Rect) {
         self.welcome_logo_visible = false;
         if area.height < 5 || area.width < 20 {
             return;
@@ -3698,16 +3698,16 @@ impl App {
         term_area: Rect,
         context: &AgentTerminalContext,
     ) {
-        let dormant_support = match (&context.session_id, &context.focused_tab) {
+        let dormant_extra = match (&context.session_id, &context.focused_tab) {
             (Some(session_id), Some(tab_id)) => !self
                 .engine
                 .is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id)),
             _ => false,
         };
         match context.active_surface {
-            SessionSurface::Agent if dormant_support => {
+            SessionSurface::Agent if dormant_extra => {
                 self.welcome_logo_visible = false;
-                self.render_dormant_support_tab(frame, term_area);
+                self.render_dormant_extra_tab(frame, term_area);
             }
             SessionSurface::Agent => self.render_ascii_logo(frame, term_area),
             SessionSurface::Terminal => {
@@ -13897,7 +13897,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                app.render_dormant_support_tab(frame, area);
+                app.render_dormant_extra_tab(frame, area);
             })
             .expect("render frame");
         let buf = terminal.backend().buffer();
@@ -15630,7 +15630,7 @@ mod tests {
     }
 
     #[test]
-    fn dormant_support_tab_uses_the_terminal_grid_without_restoring_the_logo() {
+    fn dormant_extra_tab_uses_the_terminal_grid_without_restoring_the_logo() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 

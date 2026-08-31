@@ -328,8 +328,8 @@ impl Engine {
     pub fn file_drop_refresh_target(&self, pty_id: &str) -> Option<(String, PathBuf)> {
         // The two branches resolve DIFFERENT keyspaces and must not share a
         // lookup: a companion terminal names its owner by SESSION id, while a
-        // bare pane id is a TAB id. They were the same string only while the
-        // slot tab's id was the same string as the session id.
+        // bare pane id is a TAB id. No tab id is ever a session id, so a shared
+        // lookup would silently answer for the wrong entity.
         let session = match self.companion_terminals.get(pty_id) {
             Some(terminal) => match terminal.owner.as_ref() {
                 crate::model::TerminalOwnerRef::Session(id) => self.session_by_id(id)?,

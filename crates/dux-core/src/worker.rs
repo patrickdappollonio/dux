@@ -166,8 +166,8 @@ pub struct ProcessInfo {
 pub enum ResourceKind {
     /// dux itself.
     Dux,
-    /// One agent tab's provider process (the session-slot tab is keyed by the
-    /// session id, extra tabs by their tab id).
+    /// One agent tab's provider process, keyed by that tab's own id (the first
+    /// tab included).
     Agent,
     /// One companion terminal.
     Terminal,

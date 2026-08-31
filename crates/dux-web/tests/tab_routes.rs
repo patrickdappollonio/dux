@@ -199,7 +199,7 @@ async fn boot_with_broken_provider_and_claude(
     (addr, tmp)
 }
 
-async fn create_support_tab(client: &reqwest::Client, addr: SocketAddr, session: &str) -> String {
+async fn create_extra_tab(client: &reqwest::Client, addr: SocketAddr, session: &str) -> String {
     let resp = client
         .post(format!("http://{addr}/api/v1/sessions/{session}/tabs"))
         .send()
@@ -311,7 +311,7 @@ fn tab_has_live_process(session: &serde_json::Value, tab_id: &str) -> bool {
 async fn a_launched_tab_publishes_its_drop_paste_profile_on_the_spine() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let support = create_support_tab(&client, addr, "s1").await;
+    let support = create_extra_tab(&client, addr, "s1").await;
     let session =
         wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &support)).await;
 
@@ -386,7 +386,7 @@ async fn delete_slot_tab_promotes_the_next_tab() {
     let client = reqwest::Client::new();
 
     let slot = slot_tab_id(&client, addr, "s1").await;
-    let sibling = create_support_tab(&client, addr, "s1").await;
+    let sibling = create_extra_tab(&client, addr, "s1").await;
     // Wait out the sibling's async launch so the assertion below is about a
     // process the promotion left alone, not one that never started.
     wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &sibling)).await;
@@ -468,10 +468,10 @@ async fn delete_the_only_tab_is_refused_with_the_engine_sentence() {
 }
 
 #[tokio::test]
-async fn delete_support_tab_removes_its_row() {
+async fn delete_extra_tab_removes_its_row() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let tab = create_support_tab(&client, addr, "s1").await;
+    let tab = create_extra_tab(&client, addr, "s1").await;
 
     let resp = client
         .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/{tab}"))
@@ -508,13 +508,13 @@ async fn delete_support_tab_removes_its_row() {
 }
 
 #[tokio::test]
-async fn delete_support_tab_with_live_sibling_does_not_detach() {
+async fn delete_extra_tab_with_live_sibling_does_not_detach() {
     // G15 companion case: closing an extra tab while a sibling (here, the
     // session-slot tab) is still live must report `detached: false`, not just
     // default to `true` because the closed tab itself is gone.
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let tab = create_support_tab(&client, addr, "s1").await;
+    let tab = create_extra_tab(&client, addr, "s1").await;
     // Launch the session-slot tab too, so a live sibling remains after the
     // extra tab closes.
     let launch_resp = client
@@ -547,7 +547,7 @@ async fn delete_support_tab_with_live_sibling_does_not_detach() {
 async fn cross_session_tab_delete_is_404() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let tab = create_support_tab(&client, addr, "s1").await;
+    let tab = create_extra_tab(&client, addr, "s1").await;
     // The tab belongs to s1; deleting it under s2 must 404 (never cross-session).
     let resp = client
         .delete(format!("http://{addr}/api/v1/sessions/s2/tabs/{tab}"))
@@ -561,7 +561,7 @@ async fn cross_session_tab_delete_is_404() {
 async fn patch_tab_rejects_an_unconfigured_provider() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let tab = create_support_tab(&client, addr, "s1").await;
+    let tab = create_extra_tab(&client, addr, "s1").await;
     let resp = client
         .patch(format!("http://{addr}/api/v1/sessions/s1/tabs/{tab}"))
         .json(&serde_json::json!({ "provider": "bogus-provider" }))
@@ -581,7 +581,7 @@ async fn patch_tab_rejects_an_unconfigured_provider() {
 async fn patch_tab_retargets_to_a_valid_provider() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let tab = create_support_tab(&client, addr, "s1").await;
+    let tab = create_extra_tab(&client, addr, "s1").await;
 
     // Wait for the tab's async launch to come up, then detach the whole agent
     // (kills every tab's process but keeps the `agent_tabs` rows) so the tab is
@@ -669,7 +669,7 @@ async fn patch_tab_with_bad_session_id_is_unknown_session_not_unknown_tab() {
 async fn put_focused_tab_persists_and_is_readable_from_the_session() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let tab = create_support_tab(&client, addr, "s1").await;
+    let tab = create_extra_tab(&client, addr, "s1").await;
 
     let resp = client
         .put(format!("http://{addr}/api/v1/sessions/s1/focused-tab"))
@@ -694,7 +694,7 @@ async fn put_focused_tab_persists_and_is_readable_from_the_session() {
 async fn put_focused_tab_null_clears_the_memory() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let tab = create_support_tab(&client, addr, "s1").await;
+    let tab = create_extra_tab(&client, addr, "s1").await;
     client
         .put(format!("http://{addr}/api/v1/sessions/s1/focused-tab"))
         .json(&serde_json::json!({ "tab_id": tab }))
@@ -725,7 +725,7 @@ async fn put_focused_tab_null_clears_the_memory() {
 async fn put_focused_tab_rejects_a_tab_owned_by_another_session() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let foreign_tab = create_support_tab(&client, addr, "s2").await;
+    let foreign_tab = create_extra_tab(&client, addr, "s2").await;
 
     let resp = client
         .put(format!("http://{addr}/api/v1/sessions/s1/focused-tab"))
@@ -775,7 +775,7 @@ async fn put_focused_tab_with_bad_session_id_is_unknown_session() {
 async fn nested_tab_pty_socket_enforces_session_ownership() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let tab = create_support_tab(&client, addr, "s1").await;
+    let tab = create_extra_tab(&client, addr, "s1").await;
 
     let owning =
         tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/tabs/{tab}/pty"))
@@ -821,8 +821,8 @@ async fn tab_pty_socket_cap_refuses_beyond_the_per_agent_limit() {
     // Per-agent cap of one live tab socket.
     let (addr, _tmp) = boot_with_tab_per_agent(1).await;
     let client = reqwest::Client::new();
-    let tab1 = create_support_tab(&client, addr, "s1").await;
-    let tab2 = create_support_tab(&client, addr, "s1").await;
+    let tab1 = create_extra_tab(&client, addr, "s1").await;
+    let tab2 = create_extra_tab(&client, addr, "s1").await;
 
     // The first tab socket for agent s1 connects and is held open.
     let sock1 =
@@ -880,7 +880,7 @@ async fn deleting_a_tab_closes_its_attached_socket_and_frees_the_sub_quota() {
     // never be able to connect.
     let (addr, _tmp) = boot_with_tab_per_agent(1).await;
     let client = reqwest::Client::new();
-    let tab = create_support_tab(&client, addr, "s1").await;
+    let tab = create_extra_tab(&client, addr, "s1").await;
 
     let (mut ws, _) =
         tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/tabs/{tab}/pty"))
@@ -916,7 +916,7 @@ async fn deleting_a_tab_closes_its_attached_socket_and_frees_the_sub_quota() {
     // The per-agent sub-quota slot the deleted tab's socket held must be
     // released: a brand-new tab's socket must be able to connect under the
     // same cap of 1, proving nothing was leaked.
-    let tab2 = create_support_tab(&client, addr, "s1").await;
+    let tab2 = create_extra_tab(&client, addr, "s1").await;
     let mut reconnected = false;
     for _ in 0..40 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1048,7 +1048,7 @@ async fn a_failed_launch_is_published_and_an_explicit_start_tries_again() {
 async fn start_refuses_a_tab_that_is_not_the_sessions() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let other = create_support_tab(&client, addr, "s2").await;
+    let other = create_extra_tab(&client, addr, "s2").await;
     let resp = client
         .post(format!(
             "http://{addr}/api/v1/sessions/s1/tabs/{other}/start"

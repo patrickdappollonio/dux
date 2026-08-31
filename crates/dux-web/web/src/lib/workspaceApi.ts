@@ -234,9 +234,10 @@ export function normalizeWorkspace(raw: RawWorkspace): Spine {
         // missing the same as an explicit null ("no memory recorded").
         last_focused_tab: s.last_focused_tab ?? null,
         // An older server that predates the published slot pointer omits the
-        // field. Such a server keeps the first tab's id equal to the session id,
-        // so that is exactly what it meant; filling it here means every consumer
-        // reads one required field instead of re-deriving the rule.
+        // field. The session id is the PLACEHOLDER for "this agent's first tab,
+        // whichever it is" (see `slotTabTargetId`), so filling it here means
+        // every consumer reads one required field instead of re-deriving the
+        // rule; a server that publishes the pointer always wins.
         slot_tab_id: s.slot_tab_id ?? s.id,
       }
     }),

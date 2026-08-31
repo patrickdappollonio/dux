@@ -1393,7 +1393,7 @@ impl App {
     /// focused tab has no live process (e.g. after a restart). Resume is decided
     /// per-provider: reopening resumes that provider's conversation when it is the
     /// sole live tab of that provider (see `tab_resume_decision`); otherwise fresh.
-    pub(crate) fn launch_focused_support_tab(
+    pub(crate) fn launch_focused_extra_tab(
         &mut self,
         _session_id: &str,
         tab_id: &str,
@@ -7467,7 +7467,7 @@ mod tests {
             ),
             "the activate branch reads this, and it must say the promoted tab is the slot"
         );
-        app.launch_focused_support_tab("s1", "t2", false)
+        app.launch_focused_extra_tab("s1", "t2", false)
             .expect("no-op");
         assert!(
             app.tui_launched_ptys.is_empty(),

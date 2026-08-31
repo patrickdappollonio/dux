@@ -6399,7 +6399,7 @@ mod tests {
         engine.sessions.push(session);
 
         // An extra tab with its own row, plus a live provider for BOTH the
-        // session-slot tab (keyed by session id) and the extra tab.
+        // session-slot tab (keyed by its own tab id) and the extra tab.
         let tab = crate::model::AgentTab {
             id: "tab-2".to_string(),
             session_id: "s1".to_string(),

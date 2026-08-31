@@ -9079,7 +9079,7 @@ impl App {
             // its provider's prior conversation if it is the sole
             // live/launching tab of that provider, not "never resume".
             if allow_launch {
-                self.launch_focused_support_tab(&session_id, &tab_id, seek_fullscreen)?;
+                self.launch_focused_extra_tab(&session_id, &tab_id, seek_fullscreen)?;
             } else {
                 self.exit_interactive_without_launch();
             }
@@ -32697,7 +32697,7 @@ cyan = "#00ffff"
         .expect("spawn test provider")
     }
 
-    fn insert_support_tab(app: &mut App, session_id: &str, tab_id: &str) {
+    fn insert_extra_tab(app: &mut App, session_id: &str, tab_id: &str) {
         app.engine.agent_tabs.insert(
             TabId::new(tab_id),
             dux_core::model::AgentTab {
@@ -32711,7 +32711,7 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn confirm_close_support_tab_closes_and_refocuses_main() {
+    fn confirm_close_extra_tab_closes_and_refocuses_the_slot_tab() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         let worktree = std::path::PathBuf::from(
@@ -32720,7 +32720,7 @@ cyan = "#00ffff"
                 .expect("managed test session"),
         );
         let tab_id = "tab-1".to_string();
-        insert_support_tab(&mut app, &session_id, &tab_id);
+        insert_extra_tab(&mut app, &session_id, &tab_id);
         app.engine
             .providers
             .insert(TabId::new(tab_id.clone()), spawn_test_provider(&worktree));
@@ -32758,11 +32758,11 @@ cyan = "#00ffff"
                 .expect("managed test session"),
         );
         // The session-slot tab is dormant (no provider). Two extra tabs, both live.
-        insert_support_tab(&mut app, &session_id, "tab-1");
+        insert_extra_tab(&mut app, &session_id, "tab-1");
         app.engine
             .providers
             .insert(TabId::new("tab-1"), spawn_test_provider(&worktree));
-        insert_support_tab(&mut app, &session_id, "tab-2");
+        insert_extra_tab(&mut app, &session_id, "tab-2");
         app.engine
             .providers
             .insert(TabId::new("tab-2"), spawn_test_provider(&worktree));
@@ -32805,7 +32805,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
-        insert_support_tab(&mut app, &session_id, "tab-1");
+        insert_extra_tab(&mut app, &session_id, "tab-1");
         app.selected_left = app
             .left_items()
             .iter()
@@ -32892,7 +32892,7 @@ cyan = "#00ffff"
             .session_store
             .upsert_session(&app.engine.sessions[0].clone())
             .expect("seed the session row");
-        insert_support_tab(&mut app, &session_id, "tab-1");
+        insert_extra_tab(&mut app, &session_id, "tab-1");
         app.engine
             .session_store
             .insert_agent_tab(
@@ -32960,11 +32960,11 @@ cyan = "#00ffff"
                 .managed_worktree()
                 .expect("managed test session"),
         );
-        insert_support_tab(&mut app, &session_id, "tab-1");
+        insert_extra_tab(&mut app, &session_id, "tab-1");
         app.engine
             .providers
             .insert(TabId::new("tab-1"), spawn_test_provider(&worktree));
-        insert_support_tab(&mut app, &session_id, "tab-2");
+        insert_extra_tab(&mut app, &session_id, "tab-2");
         app.engine
             .providers
             .insert(TabId::new("tab-2"), spawn_test_provider(&worktree));
@@ -33012,7 +33012,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         let tab_id = "tab-1".to_string();
-        insert_support_tab(&mut app, &session_id, &tab_id);
+        insert_extra_tab(&mut app, &session_id, &tab_id);
         app.selected_left = app
             .left_items()
             .iter()
@@ -33030,7 +33030,7 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn kill_running_lists_live_support_tab_and_keeps_its_row() {
+    fn kill_running_lists_live_extra_tab_and_keeps_its_row() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         let worktree = std::path::PathBuf::from(
@@ -33039,7 +33039,7 @@ cyan = "#00ffff"
                 .expect("managed test session"),
         );
         let tab_id = "tab-1".to_string();
-        insert_support_tab(&mut app, &session_id, &tab_id);
+        insert_extra_tab(&mut app, &session_id, &tab_id);
         app.engine
             .providers
             .insert(TabId::new(tab_id.clone()), spawn_test_provider(&worktree));
@@ -35044,7 +35044,7 @@ cyan = "#00ffff"
                 // Only an EXTRA tab reaches this confirmation; the first tab
                 // raises the un-closable warning instead.
                 let session_id = app.engine.sessions[0].id.clone();
-                insert_support_tab(&mut app, &session_id, "tab-1");
+                insert_extra_tab(&mut app, &session_id, "tab-1");
                 app.selected_left = app
                     .left_items()
                     .iter()

@@ -706,7 +706,7 @@ export interface DuxState {
   mobileTopBarOverride: boolean | null
   mobileAccessoryBarOverride: boolean | null
   // Per-PTY input-ownership verdicts from MOUNTED TerminalPanes, keyed by pty
-  // id (a tab id, with the session-slot tab id equal to the session id). The
+  // id (a tab id, the agent's first tab included). The
   // pane is the freshest source: it learns handovers from the `pty.owner`
   // events on its own socket the moment they happen, ahead of the next spine
   // refetch. "elsewhere" gates the agent ⋯ menu's mutating actions at once;

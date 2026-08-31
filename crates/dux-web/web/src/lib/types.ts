@@ -62,9 +62,10 @@ export interface PrView {
 }
 
 // One provider tab of an agent, mirroring the Rust `AgentTabView`. Tabs are
-// generic provider sessions in the agent's shared worktree, in creation order
-// (`tabs[0]` is the session-slot tab, the one named by `SessionView.slot_tab_id`
-// — no tab is privileged). Resume is decided dynamically at launch: a tab
+// generic provider sessions in the agent's shared worktree, in creation order.
+// Which one holds the session slot is named by `SessionView.slot_tab_id`; ask
+// that pointer (through `isFirstTab`), never a position or a session id. Resume
+// is decided dynamically at launch: a tab
 // resumes the worktree's prior conversation only when it is the sole tab coming up
 // (no other tab live/launching); concurrent tabs start fresh. `has_live_process`
 // is false for a tab with no running PTY (a tab reopened dormant after a restart)
@@ -191,11 +192,11 @@ export interface SessionView {
   /** The id of this agent's session-slot tab: its first tab. Closing it hands
    * the slot to the next tab in strip order, so this pointer moves; what cannot
    * be closed is an agent's only tab. Read it through `isFirstTab` in
-   * `lib/agentTabs.ts` rather than comparing a tab id against the session id. An older server omits it;
-   * `normalizeWorkspace` fills it with the session id, which is what such a
-   * server meant by it. */
+   * `lib/agentTabs.ts` rather than comparing a tab id against the session id.
+   * An older server omits it; `normalizeWorkspace` fills it with the session id,
+   * which is the placeholder for "the first tab, whichever it is". */
   slot_tab_id: string
-  /** The agent's provider tabs in creation order (`tabs[0].id === slot_tab_id`). A session
+  /** The agent's provider tabs in creation order. A session
    * always has at least one tab; the tab strip renders only when there are two or
    * more. See `AgentTabView`. An older server that predates tabs (e.g. after a
    * binary downgrade, seen by an already-open client) omits the field;

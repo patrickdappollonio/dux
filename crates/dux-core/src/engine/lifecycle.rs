@@ -144,8 +144,9 @@ pub struct KillTabRuntimeOutcome {
     /// True when there was a live provider to kill; `false` is an idempotent
     /// no-op (already gone).
     pub killed: bool,
-    /// The session that owns the killed tab (the session-slot tab resolves to
-    /// its own session id), or `None` for an unknown tab.
+    /// The session that owns the killed tab, resolved through the session's
+    /// slot pointer for a first tab and through the tab's own row for an extra
+    /// one, or `None` for an unknown tab.
     pub session_id: Option<String>,
     /// True when the kill detached the agent (its last live tab is gone, so the
     /// session is now `Detached` and its auto-reopen intent cleared).
@@ -156,7 +157,7 @@ pub struct KillTabRuntimeOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrunedPty {
     pub kind: PrunedPtyKind,
-    /// The tab id (for an agent — the slot tab id for the session-slot tab) or terminal
+    /// The tab id (for an agent, the id of whichever tab exited) or terminal
     /// id (for a companion terminal).
     pub id: String,
     /// Who owned the pruned PTY: `Session(sid)` for an agent tab or a
@@ -344,7 +345,7 @@ impl Engine {
     pub fn prune_exited_ptys(&mut self) -> Vec<PrunedPty> {
         let mut pruned = Vec::new();
 
-        // Agent providers (keyed by session id). Capture each exited client's
+        // Agent providers (keyed by TAB id). Capture each exited client's
         // exit-success so a clean exit can clear `desired_running` (matching the
         // TUI), which keeps a deliberately-exited agent from auto-reopening.
         // Capture the minimal-output excerpt in the SAME pass, before
@@ -387,11 +388,11 @@ impl Engine {
             })
             .collect();
         for (tab_id, exit_success, is_minimal, output_excerpt) in exited_agents {
-            // Resolve the exited PTY's owning session and whether it was the Main
-            // tab. `providers` is keyed by tab id, so an extra-tab id never
-            // matches a session id directly — resolve via the tab index first, or
-            // the label falls back to a raw UUID and the session-state marks
-            // silently no-op on the wrong key.
+            // Resolve the exited PTY's owning session and whether it held the
+            // slot. `providers` is keyed by tab id and a tab id names no session,
+            // so resolve via the tab index first, or the label falls back to a
+            // raw id and the session-state marks silently no-op on the wrong
+            // key.
             let owning = self.owning_session_for_tab(tab_id.as_str());
             let is_session_slot = owning
                 .as_deref()
@@ -3435,7 +3436,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_support_tab_exit_is_quiet_and_keeps_session_active() {
+    fn prune_extra_tab_exit_is_quiet_and_keeps_session_active() {
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
         engine.projects.push(sample_project(
@@ -3450,7 +3451,7 @@ mod tests {
             .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.mark_session_status("s1", crate::model::SessionStatus::Active);
-        // The session-slot tab is live (keyed by the session id) AND an extra tab
+        // The session-slot tab is live (keyed by its own tab id) AND an extra tab
         // of s1 (agent_tabs row + a tab-keyed provider). Only the extra tab exits,
         // so the agent must stay Active — no tab is privileged, but a live sibling
         // keeps the session up.
@@ -3567,7 +3568,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_exited_support_tab_clears_the_running_provider_pin() {
+    fn prune_exited_extra_tab_clears_the_running_provider_pin() {
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
         engine.projects.push(sample_project(

@@ -1081,10 +1081,10 @@ impl Engine {
         // Group extra tabs by session id in ONE pass (O(total tabs)) so each
         // per-session projection costs only its own tab count, instead of every
         // `project_session` re-scanning the whole `agent_tabs` map (O(S * T)).
-        let mut support_by_session: std::collections::HashMap<&str, Vec<&crate::model::AgentTab>> =
+        let mut extras_by_session: std::collections::HashMap<&str, Vec<&crate::model::AgentTab>> =
             std::collections::HashMap::new();
         for t in self.agent_tabs.values() {
-            support_by_session
+            extras_by_session
                 .entry(t.session_id.as_str())
                 .or_default()
                 .push(t);
@@ -1099,11 +1099,11 @@ impl Engine {
                 .sessions
                 .iter()
                 .map(|s| {
-                    let support = support_by_session
+                    let extras = extras_by_session
                         .get(s.id.as_str())
                         .map(|v| v.as_slice())
                         .unwrap_or(&[]);
-                    self.project_session(s, support)
+                    self.project_session(s, extras)
                 })
                 .collect(),
             terminals: self.terminal_views(),
@@ -1219,24 +1219,24 @@ impl Engine {
     fn project_session(
         &self,
         s: &AgentSession,
-        support_tabs: &[&crate::model::AgentTab],
+        extra_tabs: &[&crate::model::AgentTab],
     ) -> SessionView {
         // The sidebar-facing status reflects ANY live tab: the agent is "active"
         // when any of its tabs (session-slot or extra) has a live PTY. (The
         // persisted `desired_running` auto-reopen intent stays agent-level and is
         // NOT churned by transient per-tab activity — that's set/cleared on the
         // delete/detach paths, not here.)
-        // Derive tab ids from the already-computed `support_tabs` slice (plus the
+        // Derive tab ids from the already-computed `extra_tabs` slice (plus the
         // session-slot id) instead of re-scanning the whole `agent_tabs` map via
-        // `tab_ids_for_session` — that full scan is exactly what `support_tabs`
+        // `tab_ids_for_session` — that full scan is exactly what `extra_tabs`
         // was precomputed to avoid (`spine`'s single O(total tabs) grouping pass),
         // and calling it here per-session silently re-introduced the O(S * T) cost
         // `spine` was factored to eliminate.
         let has_output = std::iter::once(s.slot_tab_id())
-            .chain(support_tabs.iter().map(|t| TabIdRef::new(&t.id)))
+            .chain(extra_tabs.iter().map(|t| TabIdRef::new(&t.id)))
             .any(|id| self.providers.get(id).is_some_and(|p| p.has_output()));
         let working = std::iter::once(s.slot_tab_id())
-            .chain(support_tabs.iter().map(|t| TabIdRef::new(&t.id)))
+            .chain(extra_tabs.iter().map(|t| TabIdRef::new(&t.id)))
             .any(|id| self.is_agent_streaming(id.as_str()));
         // Typing rolls up any-tab too, and is disjoint from `working` (which
         // excludes typing). Uses the shared any-tab rollup so the sidebar row and
@@ -1245,18 +1245,18 @@ impl Engine {
         // Attention rolls up any-tab, exactly like `working`: the sidebar row
         // marks the agent if any of its tabs (session-slot or extra) is flagged.
         let needs_attention = std::iter::once(s.slot_tab_id())
-            .chain(support_tabs.iter().map(|t| TabIdRef::new(&t.id)))
+            .chain(extra_tabs.iter().map(|t| TabIdRef::new(&t.id)))
             .any(|id| self.tab_needs_attention(id.as_str()));
         // Tabs, session-slot first, then extras in creation order.
         let mut tabs = vec![self.tab_view(s.slot_tab_id(), self.running_provider_for(s), 0)];
-        let mut support: Vec<_> = support_tabs.to_vec();
-        support.sort_by(|a, b| {
+        let mut extras: Vec<_> = extra_tabs.to_vec();
+        extras.sort_by(|a, b| {
             a.sort_order
                 .cmp(&b.sort_order)
                 .then_with(|| a.created_at.cmp(&b.created_at))
                 .then_with(|| a.id.cmp(&b.id))
         });
-        for (i, t) in support.into_iter().enumerate() {
+        for (i, t) in extras.into_iter().enumerate() {
             let effective = self
                 .running_provider_pins
                 .get(TabIdRef::new(&t.id))
@@ -1318,12 +1318,12 @@ impl Engine {
     /// whole projects/sessions/sidebar spine just to find one session.
     pub fn session_view(&self, id: &str) -> Option<SessionView> {
         self.sessions.iter().find(|s| s.id == id).map(|s| {
-            let support: Vec<&crate::model::AgentTab> = self
+            let extras: Vec<&crate::model::AgentTab> = self
                 .agent_tabs
                 .values()
                 .filter(|t| t.session_id == s.id)
                 .collect();
-            self.project_session(s, &support)
+            self.project_session(s, &extras)
         })
     }
 

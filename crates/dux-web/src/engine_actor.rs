@@ -140,10 +140,11 @@ pub enum EngineRequest {
     /// then attaches to a launch already in flight rather than starting a second
     /// one. A tab that is already running is an idempotent `Ok`.
     StartAgentTab(String, oneshot::Sender<Result<(), String>>),
-    /// Resolve the owning session id of a EXTRA tab (instant lookup), or `None`
-    /// when the tab id is unknown or is a session-slot tab (which has no `agent_tabs` row
-    /// and is served by `/ws/sessions/:id/pty`). Lets the tab PTY socket and tab
-    /// REST routes enforce that a `:tab` belongs to its path `:id`.
+    /// Resolve the owning session id of an EXTRA tab (instant lookup), or
+    /// `None` when the tab id is unknown or names a session's first tab, whose
+    /// owner is resolved from that session's slot pointer rather than looked up.
+    /// Lets the tab PTY socket and tab REST routes enforce that a `:tab` belongs
+    /// to its path `:id`.
     TabSession(String, oneshot::Sender<Option<String>>),
     /// Resolve an agent's session-slot tab id (the id its first tab's PTY is
     /// keyed by), or `None` when the session id names no agent. The HTTP and
@@ -173,8 +174,8 @@ pub enum EngineRequest {
         oneshot::Sender<Option<dux_core::engine::SessionGitAccess>>,
     ),
     /// Where a file dropped onto the pane showing this pty id should be saved.
-    /// The pty id may be a terminal, an agent's session id, or an extra tab's
-    /// id; the engine resolves all three. A terminal answers with a PLAN rather
+    /// The pty id may be a terminal, an agent's first tab, or an extra tab; the
+    /// engine resolves all three. A terminal answers with a PLAN rather
     /// than a path, so the live-directory probe (a `/proc` read, or `lsof` on
     /// macOS) happens on a blocking pool and never on this thread.
     FileDropDestination(
@@ -2906,8 +2907,8 @@ fn owned_spine(engine: &Engine, owners: &PtySizeOwners) -> dux_core::viewmodel::
 }
 
 /// The pure half of the overlay: stamp `input_owner` onto every tab of ONE
-/// session whose PTY id appears in the owner map. Tab ids are the PTY ids (the
-/// session id for the session-slot tab), so this is a direct per-tab lookup.
+/// session whose PTY id appears in the owner map. A tab's own id is its PTY id,
+/// the first tab included, so this is a direct per-tab lookup.
 /// Companion terminal ownership IS published now, by
 /// [`overlay_terminal_input_owners`]: a terminal pane's take-over card consumes
 /// it to tell a stale driver name from a fresh one. Shared by [`owned_spine`] and the `Spine`/`Session` request arms in
@@ -3901,7 +3902,7 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
     }
     // Resolution, the per-provider resume decision, the fresh/resumed wording,
     // and the request build are the single-source `dormant_tab_launch_request`
-    // (shared with the TUI's `launch_focused_support_tab`). The tab was just
+    // (shared with the TUI's `launch_focused_extra_tab`). The tab was just
     // resolved above, so `None` is unreachable, but map it to the same
     // unknown-tab error for safety.
     let request = engine

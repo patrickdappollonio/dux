@@ -35,8 +35,9 @@ function makeSpine(
         source_branch: "",
         worktree_path: "",
       },
-      // The session-slot tab's id always equals the session id; any extra ids are
-      // extra tabs.
+      // These fixtures spell the slot tab with the placeholder id (the session
+      // id), which is what the URL grammar produces; any extra ids are extra
+      // tabs.
       tabs: [{ id: s.id }, ...(s.tabs ?? []).map((id) => ({ id }))],
     })) as unknown as Spine["sessions"],
     // Every terminal, of every owner, in one flat owner-tagged collection: the
@@ -375,8 +376,8 @@ describe("selection writes the hash", () => {
       "#/agent/s1/tab/t2",
     )
     replaceStateMock.mockClear()
-    // Focusing the session-slot tab (tabId === sessionId) collapses back to the
-    // bare form, and stays on the same screen, so it replaces.
+    // Focusing the first tab collapses back to the bare form (here spelled with
+    // the placeholder id), and stays on the same screen, so it replaces.
     mod.selectTab("s1", "s1")
     expect(replaceStateMock).toHaveBeenCalledWith(null, "", "#/agent/s1")
   })

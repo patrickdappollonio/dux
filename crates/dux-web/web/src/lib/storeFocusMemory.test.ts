@@ -31,8 +31,9 @@ function makeSpine(
         worktree_path: "",
       },
       terminals: [],
-      // The session-slot tab's id always equals the session id; any extra ids
-      // are extra tabs.
+      // These fixtures spell the slot tab with the placeholder id (the session
+      // id), which is what the URL grammar produces; any extra ids are extra
+      // tabs.
       tabs: [{ id: s.id }, ...(s.tabs ?? []).map((id) => ({ id }))],
       last_focused_tab: s.last_focused_tab ?? null,
     })) as unknown as Spine["sessions"],
