@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { brotliDecompressSync } from "node:zlib"
 import { describe, expect, it } from "vitest"
 
+import { SPINNER_FRAMES } from "./spinnerFrames"
 import {
   DUX_MONO_FAMILY,
   DUX_MONO_FILL_FAMILY,
@@ -315,6 +316,16 @@ describe("Dux Mono Fill subset contents", () => {
     // manual/plan, and the check marker. These rendering as tofu on Android
     // is why this face exists.
     for (const cp of [0x23f5, 0x23f8, 0x2714]) {
+      expect(coverage.has(cp), `U+${cp.toString(16).toUpperCase()}`).toBe(true)
+    }
+  })
+
+  it("carries every frame of the UI's glyph spinner", () => {
+    // `.glyph-spinner` (index.css) names this face first precisely because no
+    // other bundled face and no UI font has these six arcs; a recut that drops
+    // one puts the spinner back on a substituted glyph from an unknown face.
+    for (const frame of SPINNER_FRAMES) {
+      const cp = frame.codePointAt(0) as number
       expect(coverage.has(cp), `U+${cp.toString(16).toUpperCase()}`).toBe(true)
     }
   })

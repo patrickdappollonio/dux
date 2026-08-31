@@ -15,6 +15,7 @@ import { VIEWER_MIN_FONT_SIZE } from "@/lib/viewerFit"
 import { replayWaitMs } from "@/lib/connectionTiming"
 import { REPLAY_WAIT_POLL_MS } from "@/components/terminal/constants"
 import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
+import { GLYPH_SPINNER_CLASS, SPINNER_FRAMES } from "@/lib/spinnerFrames"
 
 // TerminalPane embeds xterm.js, whose canvas rendering jsdom cannot back (see the
 // note in TerminalArea.test.tsx). So we mount the REAL TerminalPane — exercising
@@ -1264,6 +1265,23 @@ describe("TerminalPane take-over is a fresh attach", () => {
     completeBounce(pty, "conn-3", null)
     expect(pty.sendResize.mock.calls.filter((call) => call[2] === true)).toEqual([])
     expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+  })
+
+  it("covers a reconnecting pane with the shared glyph spinner in its fixed slot", () => {
+    // The reconnect cover pairs a spinner with a label. The spinner's six arc
+    // frames have no common advance in a substituted font, so without the
+    // shared fixed-width slot the label shifts sideways every 100ms.
+    const pty = mountSettled()
+    // A screen has landed once, so the pane is past its first attach and the
+    // cover's word for a dropped socket is "Reconnecting", not "Starting".
+    act(() => pty.bytesCb?.(new Uint8Array([0x61])))
+    act(() => pty.onReconnecting())
+    const label = screen.getByText("Reconnecting\u2026")
+    const spinner = label.parentElement?.querySelector(
+      `.${GLYPH_SPINNER_CLASS}`,
+    ) as HTMLElement
+    expect(spinner, "the cover renders the shared GlyphSpinner").toBeTruthy()
+    expect(SPINNER_FRAMES).toContain(spinner.textContent)
   })
 
   it("shows the Reconnect affordance, not the take-over card, on a dead socket", () => {

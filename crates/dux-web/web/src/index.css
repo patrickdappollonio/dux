@@ -266,6 +266,32 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     }
 }
 
+/* The text spinner's slot (components/GlyphSpinner.tsx), which cycles six arc
+   frames, U+25DC-U+25E1.
+
+   MEASURED: none of the UI font (Geist), "Dux Mono" (Roboto Mono) or "Dux
+   Blocks" carries a single one of those six code points, so the browser drew
+   every frame from whatever fallback it picked. Those substituted glyphs have
+   no common advance width, so the label beside the spinner shifted sideways
+   each time the frame changed. "Dux Mono Fill" is the one bundled face whose
+   subset covers all six, at a single 600/1000em advance (pinned by
+   lib/terminalFonts.test.ts), so naming it first ends the substitution.
+
+   The 1em slot with centered text makes the width independent of the glyph
+   anyway, which is what keeps the label still during the face's own load (the
+   face is `font-display: swap`, so a fallback really does draw first) and on
+   any device where even the bundled face somehow does not arrive. `flex: none`
+   because every caller drops this into a flex row, where a shrinkable item is
+   not a fixed slot. */
+.glyph-spinner {
+    display: inline-block;
+    flex: none;
+    width: 1em;
+    line-height: 1;
+    text-align: center;
+    font-family: "Dux Mono Fill", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 /* Status indicator icons (StatusBadge dots) rest slightly transparent so they
    read as quiet metadata. `--on` (the active dot while the agent works) PULSES,
    breathing its opacity between faint and fully opaque so it reads as a live
