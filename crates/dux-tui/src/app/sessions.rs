@@ -2078,10 +2078,14 @@ impl App {
             project_still_has_sessions: _,
         } = outcome;
 
-        // View-side cleanup the engine couldn't do.
-        self.engine.pty_activity.remove(session_id);
-        self.engine.pty_input.remove(session_id);
-        self.engine.pty_pointer.remove(session_id);
+        // View-side cleanup the engine couldn't do. The activity, input and
+        // pointer maps are NOT part of it: they are tab-keyed engine state that
+        // `finish_delete_session_memory` already cleared for every tab of this
+        // agent through `clear_session_tab_runtime`, before any of these
+        // outcomes reached a surface. Removing them again here by SESSION id
+        // read like the cleanup for those maps while in fact covering only one
+        // of the agent's tabs, so the honest version is to leave the engine's
+        // documented half to the engine.
         self.clear_companion_terminals_for_session(session_id);
         self.clear_focused_tab_for_session(session_id);
 
@@ -6868,6 +6872,50 @@ mod tests {
                 app.pending_delete_ops.is_empty(),
                 "the op must be consumed on resolution",
             );
+        }
+    }
+
+    /// Deleting an agent must leave no activity, input or pointer entry behind
+    /// for ANY of its tabs, not just its first one. Those maps are keyed by tab
+    /// id, so an extra tab's entries live under an id the session id never
+    /// names; a surviving entry would let a later tab reusing the id read as
+    /// working or typing before it had emitted a byte. This pins the whole
+    /// delete path rather than one clearing site, so it stays true wherever the
+    /// clearing lives.
+    #[test]
+    fn deleting_an_agent_clears_the_activity_maps_for_every_tab() {
+        use dux_core::engine::WorktreeRemoval;
+        let session = make_session("s1", "claude", "/tmp/wt");
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![session], vec![project]);
+        app.engine.agent_tabs.insert(
+            "tab-9".to_string(),
+            dux_core::model::AgentTab {
+                id: "tab-9".to_string(),
+                session_id: "s1".to_string(),
+                provider: dux_core::model::ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: Utc::now(),
+            },
+        );
+        let now = std::time::Instant::now();
+        for id in ["s1", "tab-9"] {
+            app.engine.pty_activity.insert(id.to_string(), now);
+            app.engine.pty_input.insert(id.to_string(), now);
+            app.engine.pty_pointer.insert(
+                id.to_string(),
+                dux_core::engine::PointerStamp {
+                    at: now,
+                    window: std::time::Duration::from_secs(1),
+                },
+            );
+        }
+        app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
+            .expect("delete");
+        for id in ["s1", "tab-9"] {
+            assert!(!app.engine.pty_activity.contains_key(id), "activity {id}");
+            assert!(!app.engine.pty_input.contains_key(id), "input {id}");
+            assert!(!app.engine.pty_pointer.contains_key(id), "pointer {id}");
         }
     }
 
