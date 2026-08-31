@@ -157,31 +157,22 @@ describe("auto-focus the agent this client created", () => {
     expect(mod.getSnapshot().pendingCreateFocus).toBeNull()
   })
 
-  // The create latches the new agent's first tab so its creator is not greeted by
-  // the dormant "Start session" card while the provider is still coming up. That
-  // latch must not outlive a create whose launch FAILED: a session-slot launch
-  // emits no `tab-launch-<id>` key for the client to clear it by, so it expires.
-  it("latches the created agent's first tab, and the latch expires if it never comes up", async () => {
+  // A brand-new agent's first tab needs no latch to keep the "Start session"
+  // card away while its provider comes up: nothing has failed for it, and a
+  // healthy dormant first tab shows the pane, not the card. The latch this used
+  // to arm needed a timer behind it, because a create whose launch failed had no
+  // other way to retire it.
+  it("focuses the created agent without latching its first tab", async () => {
     const mod = await loadStore()
     await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
     mod.openCreateAgent("p1")
     mod.submitNameDialog("my-agent")
-    // Take the timers over BEFORE the spine that latches, so the expiry clock the
-    // latch arms is a fake one this test can run out.
-    vi.useFakeTimers()
-    try {
-      await pushSpine(mod, [
-        { id: "s1", project_id: "p1" },
-        { id: "s2", project_id: "p1" },
-      ])
-      expect(mod.getSnapshot().selectedSessionId).toBe("s2")
-      expect(mod.getSnapshot().startedDormantTabs).toContain("s2")
-
-      await vi.advanceTimersByTimeAsync(mod.TAB_LAUNCH_LATCH_TTL_MS + 1)
-      expect(mod.getSnapshot().startedDormantTabs).not.toContain("s2")
-    } finally {
-      vi.useRealTimers()
-    }
+    await pushSpine(mod, [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    expect(mod.getSnapshot().startedDormantTabs).toEqual([])
   })
 
   it("stays armed until the agent actually appears", async () => {

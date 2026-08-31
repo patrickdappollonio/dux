@@ -86,6 +86,15 @@ export interface AgentTabView {
   needs_attention: boolean
   has_output: boolean
   has_live_process: boolean
+  /** This tab's LAST run ended badly: a launch that failed, or a process that
+   * exited non-zero. Only meaningful while `has_live_process` is false, and it
+   * is what tells apart the two kinds of dormant tab: one that is simply not
+   * running yet (a restart, a stop), which selecting starts, and one that tried
+   * and failed, which waits for an explicit press instead of relaunching itself
+   * every time the user looks at it. Memory-only server-side, so a restart
+   * clears it. An older server omits it, which reads as "no failure recorded"
+   * and therefore as the pre-existing start-on-selection behavior. */
+  last_run_failed?: boolean
   /** What this tab's LIVE process launched with, for a file dropped onto its
    * pane: the paste form and the command that identifies the receiving CLI.
    * Absent when no process is live (a dormant tab), and absent on an older

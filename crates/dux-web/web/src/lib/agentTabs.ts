@@ -42,31 +42,41 @@ export function slotTabTargetId(sessionId: string): string {
   return sessionId
 }
 
-// Whether the focused tab is currently DORMANT (no live process, and not
-// explicitly started by this client). A dormant tab must render its "Start
-// session" card WITHOUT mounting the terminal pane, because mounting subscribes
-// to the PTY socket which force-launches the provider, so focus alone must
-// never launch it.
+// Whether the focused tab must render the "Start session" card INSTEAD of the
+// terminal pane. Mounting the pane subscribes to the PTY socket, and subscribing
+// starts a dormant tab, so this one answer decides both what is on screen and
+// whether the tab launches.
 //
-// This covers the agent's FIRST tab too. It used to be excluded, which meant
-// selecting a first tab left over dormant from a restart silently launched it
-// (possibly with resume arguments that fail), the one place on the web where
-// focus alone still launched something. Every deliberate launch this client
-// starts (a create, a reconnect, the card's own button) latches its tab id into
-// `startedDormantTabs`, so the card never flashes in front of a launch the user
-// actually asked for.
-export function isFocusedTabDormant(
+// A live tab never needs the card. A dormant EXTRA tab always does: the user
+// added it deliberately and closing it is how it goes away, so it stays put
+// until asked. The agent's FIRST tab is the one that differs, and deliberately:
+// selecting an agent is asking for the agent, and the agent's own tab starting
+// in one click is the whole gesture. The exception is a first tab whose last run
+// ENDED BADLY (`last_run_failed`), which is what a resume against a conversation
+// that is not there, or a provider that has left the PATH, looks like: starting
+// that on selection means it relaunches every time the user looks at it with no
+// way out, so the card becomes the diagnosis surface and only a press starts it.
+//
+// A tab this client has explicitly started is not shown the card either, because
+// the press has already been sent and the spine has not caught up yet
+// (`startedDormantTabs`); see `startDormantTab`.
+//
+// The session is what answers slot-ness. A missing one is DEFENSIVE, not a case
+// the rule turns on: both callers derive `focusedTab` from that same session's
+// tab list, so a tab with no session behind it cannot reach here. The branch
+// exists so that if one ever could, it falls to the cautious side (card, no
+// launch) instead of guessing.
+export function dormantTabNeedsCard(
   target: SelectedTarget | null,
+  session: SessionView | undefined,
   focusedTab: AgentTabView | undefined,
   startedDormantTabs: string[],
 ): boolean {
-  return (
-    !!target &&
-    target.kind === "agent" &&
-    !!focusedTab &&
-    !focusedTab.has_live_process &&
-    !startedDormantTabs.includes(focusedTab.id)
-  )
+  if (!target || target.kind !== "agent") return false
+  if (!focusedTab || focusedTab.has_live_process) return false
+  if (startedDormantTabs.includes(focusedTab.id)) return false
+  if (!session || !isFirstTab(session, focusedTab.id)) return true
+  return focusedTab.last_run_failed === true
 }
 
 // Whether an extra tab has vanished from the spine's tab list (e.g. another

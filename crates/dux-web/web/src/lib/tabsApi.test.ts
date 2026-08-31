@@ -75,6 +75,14 @@ describe("tabsApi", () => {
     expect(result).toBeUndefined()
   })
 
+  it("start POSTs the nested start endpoint, encoding both ids", async () => {
+    const fetchMock = stubOkFetch(200, {})
+    await tabsApi.start("s 1", "b/2")
+    const c = lastCall(fetchMock)
+    expect(c.url).toBe("/api/v1/sessions/s%201/tabs/b%2F2/start")
+    expect(c.method).toBe("POST")
+  })
+
   it("patch PATCHes the tab endpoint with the new provider", async () => {
     const fetchMock = stubOkFetch(200, {})
     await tabsApi.patch("s1", "b1", "opencode")

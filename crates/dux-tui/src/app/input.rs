@@ -8973,8 +8973,8 @@ impl App {
     /// Activate the selected Projects-pane item. `allow_launch` distinguishes
     /// the explicit activate action (`FocusAgent`/Enter, always launches a
     /// dormant agent) from `ToggleFullscreen` (Ctrl-g by default), which must
-    /// never launch a dormant agent per the Agent Tabs tenet ("focus alone
-    /// never launches — only an explicit action launches"). When
+    /// never launch a dormant agent per the Agent Tabs tenet ("in the TUI ...
+    /// focus alone never launches, only an explicit action launches"). When
     /// `allow_launch` is false and the target agent is dormant, this either
     /// minimizes a (defensively possible) fullscreen overlay or is a no-op.
     ///

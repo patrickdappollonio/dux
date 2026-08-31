@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   defaultProviderForSession,
-  isFocusedTabDormant,
+  dormantTabNeedsCard,
   isFirstTab,
   isSlotTabTarget,
   isTabGone,
@@ -137,38 +137,73 @@ describe("isSlotTabTarget", () => {
   })
 })
 
-describe("isFocusedTabDormant", () => {
-  // The agent's FIRST tab is dormant like any other. It used to be excluded,
-  // which made focusing a first tab left dormant by a restart launch it
-  // silently.
-  it("is true for a dormant first tab until it has been started", () => {
+describe("dormantTabNeedsCard", () => {
+  // A session whose slot tab is `slot`, which is all this helper asks of it.
+  const withSlot = (slot: string) =>
+    ({ id: "s1", slot_tab_id: slot }) as unknown as SessionView
+  const slotSession = withSlot("s1")
+
+  // The one-click rule. Selecting an agent is asking for the agent, so its own
+  // first tab starts rather than showing a card and asking a second time.
+  it("is false for a healthy dormant first tab, which selecting starts", () => {
     const sessionSlot = { ...extraTab("s1", false), id: "s1" }
-    expect(isFocusedTabDormant(agentTarget("s1", "s1"), sessionSlot, [])).toBe(
-      true,
-    )
     expect(
-      isFocusedTabDormant(agentTarget("s1", "s1"), sessionSlot, ["s1"]),
+      dormantTabNeedsCard(agentTarget("s1", "s1"), slotSession, sessionSlot, []),
     ).toBe(false)
   })
 
-  it("is false for a live first tab", () => {
-    const live = { ...extraTab("s1", true), id: "s1" }
-    expect(isFocusedTabDormant(agentTarget("s1", "s1"), live, [])).toBe(false)
+  // The loop-breaker: a first tab that tried and failed waits for a press,
+  // instead of relaunching every time the user looks at it.
+  it("is true for a first tab whose last run failed", () => {
+    const failed = { ...extraTab("s1", false), id: "s1", last_run_failed: true }
+    expect(
+      dormantTabNeedsCard(agentTarget("s1", "s1"), slotSession, failed, []),
+    ).toBe(true)
+    // ...and a press retires it while the launch it asked for is in flight.
+    expect(
+      dormantTabNeedsCard(agentTarget("s1", "s1"), slotSession, failed, ["s1"]),
+    ).toBe(false)
   })
 
-  it("is true for an extra tab with no live process until it has been started", () => {
-    const dormant = extraTab("tab-1", false)
-    expect(isFocusedTabDormant(agentTarget("s1", "tab-1"), dormant, [])).toBe(true)
-    // Once explicitly started, the card is suppressed for that tab id.
+  it("is false for a live first tab, failed last run or not", () => {
+    const live = { ...extraTab("s1", true), id: "s1", last_run_failed: true }
     expect(
-      isFocusedTabDormant(agentTarget("s1", "tab-1"), dormant, ["tab-1"]),
+      dormantTabNeedsCard(agentTarget("s1", "s1"), slotSession, live, []),
+    ).toBe(false)
+  })
+
+  // Extra tabs are unchanged: the user added them deliberately, so they wait.
+  it("is true for any dormant extra tab until it has been started", () => {
+    const dormant = extraTab("tab-1", false)
+    expect(
+      dormantTabNeedsCard(agentTarget("s1", "tab-1"), slotSession, dormant, []),
+    ).toBe(true)
+    expect(
+      dormantTabNeedsCard(agentTarget("s1", "tab-1"), slotSession, dormant, [
+        "tab-1",
+      ]),
     ).toBe(false)
   })
 
   it("is false for an extra tab that has a live process", () => {
     expect(
-      isFocusedTabDormant(agentTarget("s1", "tab-1"), extraTab("tab-1", true), []),
+      dormantTabNeedsCard(
+        agentTarget("s1", "tab-1"),
+        slotSession,
+        extraTab("tab-1", true),
+        [],
+      ),
     ).toBe(false)
+  })
+
+  // Pins the DEFENSIVE branch. No caller can reach it (both derive the focused
+  // tab from the session's own tab list); the test says which way it falls if
+  // one ever does: show the card, launch nothing.
+  it("is true for a dormant tab with no session to ask about slot-ness", () => {
+    const sessionSlot = { ...extraTab("s1", false), id: "s1" }
+    expect(
+      dormantTabNeedsCard(agentTarget("s1", "s1"), undefined, sessionSlot, []),
+    ).toBe(true)
   })
 
   it("is false for a terminal target or a missing focused tab", () => {
@@ -177,9 +212,15 @@ describe("isFocusedTabDormant", () => {
       terminalId: "t1",
       sessionId: "s1",
     }
-    expect(isFocusedTabDormant(terminal, extraTab("tab-1", false), [])).toBe(false)
-    expect(isFocusedTabDormant(agentTarget("s1", "tab-1"), undefined, [])).toBe(false)
-    expect(isFocusedTabDormant(null, extraTab("tab-1", false), [])).toBe(false)
+    expect(
+      dormantTabNeedsCard(terminal, slotSession, extraTab("tab-1", false), []),
+    ).toBe(false)
+    expect(
+      dormantTabNeedsCard(agentTarget("s1", "tab-1"), slotSession, undefined, []),
+    ).toBe(false)
+    expect(
+      dormantTabNeedsCard(null, slotSession, extraTab("tab-1", false), []),
+    ).toBe(false)
   })
 })
 

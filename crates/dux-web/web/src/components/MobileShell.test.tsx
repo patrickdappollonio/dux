@@ -435,6 +435,45 @@ describe("MobileShell phone header for a standalone agent", () => {
   })
 })
 
+// The phone reads the same rule as the desktop, through the same helper: a
+// healthy dormant first tab starts on selection, and one whose last run failed
+// gets the diagnosis card instead. Two surfaces, one answer.
+describe("MobileShell dormant first tab", () => {
+  function dormantState(lastRunFailed: boolean): DuxState {
+    const spine = makeSessionSpine(1) as unknown as {
+      sessions: { tabs: Record<string, unknown>[] }[]
+    }
+    spine.sessions[0].tabs[0].has_live_process = false
+    spine.sessions[0].tabs[0].last_run_failed = lastRunFailed
+    return makeState({
+      spine: spine as unknown as DuxState["spine"],
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      selectedSessionId: "s1",
+      mobileScreen: "terminal",
+      changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      terminalEpoch: 0,
+    } as unknown as Partial<DuxState>)
+  }
+
+  it("shows no card for a healthy dormant first tab", () => {
+    mockState = dormantState(false)
+    render(<MobileShell />)
+    expect(screen.queryByText("Start session")).toBeNull()
+  })
+
+  it("shows the card for a first tab whose last run failed", () => {
+    mockState = dormantState(true)
+    render(<MobileShell />)
+    expect(screen.getByText("Start session")).toBeTruthy()
+  })
+})
+
 // The in-app Back chevrons and the not-found screen's way out are UP controls,
 // not history steps. A deep-link boot pushes nothing, so on those screens dux's
 // own first entry IS the screen being shown, and a relative step from there

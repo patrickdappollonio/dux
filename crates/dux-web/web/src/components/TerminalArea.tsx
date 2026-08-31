@@ -7,7 +7,7 @@ import { DormantTabCard } from "@/components/DormantTabCard"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { PrBanner } from "@/components/PrBanner"
 import { Welcome } from "@/components/Welcome"
-import { isFocusedTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
+import { dormantTabNeedsCard, shouldShowTabStrip } from "@/lib/agentTabs"
 import { useDux } from "@/lib/store"
 import type { DuxState } from "@/lib/store"
 import { ownerSessionId as terminalOwnerSessionId } from "@/lib/terminalOwner"
@@ -101,6 +101,7 @@ function TerminalSurface({
         sessionId={target.sessionId}
         tabId={focusedTab.id}
         provider={focusedTab.provider}
+        lastRunFailed={focusedTab.last_run_failed === true}
       />
     )
   }
@@ -187,13 +188,12 @@ export function TerminalArea() {
     selectedTarget.kind === "agent"
       ? tabs.find((t) => t.id === selectedTarget.tabId)
       : undefined
-  // A focused tab with no live process is DORMANT (reopened after a restart):
-  // render its card WITHOUT mounting the pane, because mounting opens the PTY
-  // socket, which force-launches the provider. Only a deliberate launch (the
-  // card's "Start session" button, a create, a reconnect, all of them via
-  // `startedDormantTabs`) starts it. This includes the agent's first tab.
-  const dormant = isFocusedTabDormant(
+  // Whether this tab gets the "Start session" card instead of the pane. The
+  // helper owns the whole rule (a dormant extra tab waits; the agent's first tab
+  // starts on selection unless its last run failed); see `dormantTabNeedsCard`.
+  const dormant = dormantTabNeedsCard(
     selectedTarget,
+    session,
     focusedTab,
     startedDormantTabs,
   )

@@ -56,6 +56,16 @@ export const tabsApi = {
       "DELETE",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}`,
     ),
+  // Start a DORMANT tab: the "Start session" press. It is the only start that
+  // gets past a recorded launch failure, because opening the tab's PTY socket
+  // deliberately refuses to launch a tab whose last run failed. Dispatching the
+  // launch is itself what clears that verdict, so the pane that mounts behind
+  // the retiring card attaches to a launch already in flight.
+  start: (sessionId: string, tabId: string) =>
+    request<void>(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}/start`,
+    ),
   // Retarget a tab's provider (effective on its next launch).
   patch: (sessionId: string, tabId: string, provider: string) =>
     request<void>(

@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { isFocusedTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
+import { dormantTabNeedsCard, shouldShowTabStrip } from "@/lib/agentTabs"
 import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
@@ -475,6 +475,7 @@ function TerminalViewport({
         sessionId={target.sessionId}
         tabId={focusedTab.id}
         provider={focusedTab.provider}
+        lastRunFailed={focusedTab.last_run_failed === true}
       />
     )
   }
@@ -563,8 +564,9 @@ function TerminalScreen() {
         <TerminalViewport
           target={selectedTarget}
           focusedTab={focusedTab}
-          dormant={isFocusedTabDormant(
+          dormant={dormantTabNeedsCard(
             selectedTarget,
+            session,
             focusedTab,
             startedDormantTabs,
           )}

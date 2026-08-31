@@ -356,10 +356,11 @@ export interface DuxState {
   // until it resolves (a double-click can't spawn two tabs). The per-agent tab
   // cap still guards the server; this is the common-case UX guard.
   createTabInFlight: string[]
-  // extra tab ids the user explicitly started from their dormant card. Lets the
-  // pane mount (subscribe = launch fresh) for a tab whose server-reported
-  // `has_live_process` is still false — so FOCUS alone never launches a dormant
-  // tab, only the "Start session" button does.
+  // Tab ids the user explicitly started from their dormant card, kept only for
+  // the gap between the server accepting that start and the spine reporting
+  // what came of it. It lets the pane mount over a tab still reporting no live
+  // process, so the card does not sit in front of a launch already on its way.
+  // See `markTabStarted`; every other launch needs no entry here.
   startedDormantTabs: string[]
   // The unstaged file pending discard confirmation, or null. The TUI confirms
   // every discard (it's destructive); the web mirrors that.
@@ -1072,14 +1073,8 @@ eventsSocket.subscribe(["sessions", "projects", "config"])
 // does, so the registration is never retired.
 registerPageLifecycle(eventsSocket)
 
-function clearFailedTabLaunch(event: EventsServerMessage): void {
-  if (event.tone !== "warning" || !event.key?.startsWith("tab-launch-")) return
-  dropTabStarted(event.key.slice("tab-launch-".length))
-}
-
 function handleStatusEvent(event: EventsServerMessage): void {
   if (event.tone === "error") setState({ ...clearPendingClientIntent() })
-  clearFailedTabLaunch(event)
   if (!statusToastAllowed(event.scope, state.standaloneEditor)) return
   showStatusToast(
     event.key,
@@ -1641,20 +1636,20 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
   // vanished agent picks its replacement from this ordering (see
   // `navigateAfterVanish`), since the new list no longer holds its position.
   const previousSessions = state.spine?.sessions ?? []
-  // Clear the "explicitly started" latch for any tab whose process is now live.
-  // The latch only bridges the click->process-up gap; once the process is up it
-  // is no longer needed, and dropping it means a *later* exit (has_live_process
-  // back to false) correctly re-shows the dormant card so a plain refocus can't
-  // force-launch. Tabs that are started-but-not-yet-live keep their latch.
-  const liveTabIds = new Set(
-    spine.sessions.flatMap((s) => s.tabs.filter((t) => t.has_live_process).map((t) => t.id)),
+  // Retire the "explicitly started" latch for any tab the launch it was bridging
+  // has now answered about, either way: the process is up, or the server has
+  // recorded that the run failed. The latch only covers the press->answer gap.
+  // Dropping it on liveness means a *later* exit (has_live_process back to
+  // false) correctly re-shows the card for a tab whose last run failed; dropping
+  // it on a recorded failure is what stops a press from hiding the diagnosis
+  // surface forever when the retry fails too. Tabs still waiting on an answer
+  // keep their latch.
+  const answeredTabIds = new Set(
+    spine.sessions.flatMap((s) =>
+      s.tabs.filter((t) => t.has_live_process || t.last_run_failed).map((t) => t.id),
+    ),
   )
-  const prunedDormant = state.startedDormantTabs.filter((id) => !liveTabIds.has(id))
-  // A latch retired here no longer needs its expiry clock; leaving one armed
-  // would let it fire against a latch a later gesture re-armed.
-  for (const id of state.startedDormantTabs) {
-    if (liveTabIds.has(id)) cancelTabLatchExpiry(id)
-  }
+  const prunedDormant = state.startedDormantTabs.filter((id) => !answeredTabIds.has(id))
   setState({
     spine,
     startedDormantTabs:
@@ -2000,10 +1995,9 @@ function focusNewlyCreatedSession(spine: Spine): void {
   // A standalone agent has no project group to open; it is a top-level row.
   const createdProjectId = workspaceProjectId(created.workspace)
   if (createdProjectId) setProjectOpen(createdProjectId, true)
-  // The create started this agent's first tab, so latch it: the spine can
-  // reach us before the PTY is up, and without this the brand-new agent would
-  // greet its creator with the dormant "Start session" card.
-  markTabStarted(created.slot_tab_id)
+  // No latch is needed for the tab the create just started: a brand-new agent's
+  // first tab has no recorded failure behind it, so selecting it shows the pane
+  // and not the card, whether or not the PTY is up yet.
   selectSession(created.id)
 }
 
@@ -3758,75 +3752,43 @@ export async function retargetTab(
   }
 }
 
-// Explicitly start a dormant extra tab from its dormant card: mark it started
-// (so the pane mounts and subscribes = launches fresh) and focus it. This is the
-// ONLY path that launches a dormant tab — focusing one never does.
+// Explicitly start a dormant tab from its dormant card. Selection is immediate,
+// because it is what the press MEANT and a request must never be able to yank it
+// back: navigating away while the start is in flight has to stick. The launch
+// itself is the server's, and the LATCH waits for its answer, which is what keeps
+// the pane from mounting early: the card stays up (so no PTY socket opens) until
+// the start route has actually dispatched the launch, because the socket path
+// refuses a tab whose last run failed and the start route is the only way past
+// that. A refusal leaves the card where it is and says why.
 export function startDormantTab(sessionId: string, tabId: string): void {
-  markTabStarted(tabId)
   selectTab(sessionId, tabId)
+  tabsApi
+    .start(sessionId, tabId)
+    .then(() => markTabStarted(tabId))
+    .catch((e) =>
+      notifyError(e instanceof Error ? e.message : "Could not start the tab."),
+    )
 }
 
-// How long a started-tab latch survives while its tab still reports no live
-// process. The latch is normally retired the moment the process comes up (by
-// `applyWorkspace`), or by the `tab-launch-<id>` keyed warning an EXTRA tab's
-// failed launch emits. A SESSION-SLOT launch emits no such key: its failure
-// resolves an opaque keyed status op instead, and nothing on the wire ties that
-// key back to the tab. So an unbounded latch would outlive a failed create or
-// reconnect indefinitely, and every attach onto that tab would force-launch the
-// provider again, which is the loop the dormant card exists to prevent. The
-// window is deliberately generous: if it elapses while a launch is genuinely
-// still in flight, the only cost is that the card shows again until the process
-// reports live.
-export const TAB_LAUNCH_LATCH_TTL_MS = 30_000
-
-// The pending expiry per latched tab. Module-scoped rather than store state:
-// nothing renders from it, and a timer handle is not a value a view can use.
-const tabLatchExpiries = new Map<string, ReturnType<typeof setTimeout>>()
-
 // Latch a tab as deliberately STARTED by this client, so the dormant card does
-// not appear in front of a launch the user actually asked for. Every launch
-// gesture goes through here: the dormant card's own button, an agent create, and
-// a reconnect. The latch is dropped again by `applyWorkspace` the moment the tab
-// reports a live process, and it expires on its own after
-// `TAB_LAUNCH_LATCH_TTL_MS` when the process never arrives, so it can never mask
-// a launch that failed.
+// not sit in front of a launch that is already on its way. The ONLY gesture that
+// needs this is the card's own button, and only for the gap between the server
+// accepting the start and the spine reporting the tab live; a create, a
+// reconnect and a plain selection of a healthy dormant first tab need no latch,
+// because none of them shows the card in the first place.
+//
+// It is dropped by `applyWorkspace` when the tab goes live, and equally when the
+// spine says the tab's last run FAILED, which is the launch this latch was
+// bridging for having come back with a verdict. There is no timer behind it:
+// a latch that neither outcome ever retires would mean the server never answered
+// about a launch it accepted, which is not a state a clock can improve.
 function markTabStarted(tabId: string): void {
-  armTabLatchExpiry(tabId)
   if (state.startedDormantTabs.includes(tabId)) return
   setState({ startedDormantTabs: [...state.startedDormantTabs, tabId] })
 }
 
-// (Re)start the expiry clock for one latch. A second launch gesture on the same
-// tab replaces the pending timer rather than racing it, so an earlier gesture's
-// clock can never retire a later gesture's latch.
-function armTabLatchExpiry(tabId: string): void {
-  cancelTabLatchExpiry(tabId)
-  tabLatchExpiries.set(
-    tabId,
-    setTimeout(() => {
-      tabLatchExpiries.delete(tabId)
-      // Re-read liveness when the clock fires: a spine that arrived meanwhile
-      // would already have dropped the latch, and a tab that is live now keeps it.
-      const live = (state.spine?.sessions ?? []).some((s) =>
-        s.tabs.some((t) => t.id === tabId && t.has_live_process),
-      )
-      if (live) return
-      dropTabStarted(tabId)
-    }, TAB_LAUNCH_LATCH_TTL_MS),
-  )
-}
-
-function cancelTabLatchExpiry(tabId: string): void {
-  const pending = tabLatchExpiries.get(tabId)
-  if (pending === undefined) return
-  clearTimeout(pending)
-  tabLatchExpiries.delete(tabId)
-}
-
-// Drop one tab's latch and its pending expiry together, so no path can leave a
-// timer armed for a latch that is already gone.
+// Drop one tab's latch.
 function dropTabStarted(tabId: string): void {
-  cancelTabLatchExpiry(tabId)
   if (!state.startedDormantTabs.includes(tabId)) return
   setState({
     startedDormantTabs: state.startedDormantTabs.filter((t) => t !== tabId),
@@ -4330,10 +4292,9 @@ export function reconnectSession(sessionId: string, force: boolean): void {
         e instanceof Error ? e.message : "Could not reconnect the session.",
       ),
     )
-  // A reconnect IS a launch the user asked for, so latch its tab before
-  // focusing: until the relaunched provider reports live, the tab still looks
-  // dormant and would otherwise be covered by the "Start session" card.
-  markTabStarted(slotTabIdFor(sessionId))
+  // No latch: the reconnect dispatches a launch server-side, and dispatching is
+  // what clears any recorded failure for the tab, so the card this used to hide
+  // behind a latch no longer shows for the reconnect's own tab.
   setState({
     // Reconnect is a session-slot-tab operation, so focus the session-slot tab.
     selectedTarget: {

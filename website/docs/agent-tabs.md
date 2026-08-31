@@ -142,8 +142,20 @@ it in Projects. Deleting the agent takes every tab with it.
 
 ## What happens on restart
 
-Tabs come back **dormant**: the pills are there, no processes are running, and each tab
-says it isn't running instead of showing an old session. Press the key it names, or click
-*Start session* on the web, and the tab launches. A tab that comes up alone for its
-provider resumes automatically, per the rule above, which again means the newest
-conversation in the worktree rather than a specific tab's.
+Tabs come back **dormant**: the pills are there and no processes are running. A tab that
+comes up alone for its provider resumes automatically, per the rule above, which again
+means the newest conversation in the worktree rather than a specific tab's.
+
+On the web, selecting the agent starts its **first tab** right there: that is the tab the
+agent is, and asking for the agent is asking for it. Extra tabs wait: each says it isn't
+running until you click *Start session*, so a tab you added deliberately does not spring
+back to life just because you looked at it. In the terminal UI, press the key the tab
+names.
+
+There is one exception, and it is the useful one. If a tab's **last run ended badly** (it
+failed to launch, or the provider exited with an error), that tab waits for you too, first
+tab included. It says it isn't running and only *Start session* launches it. Without that,
+a tab that cannot come up would try again every single time you selected the agent, and
+there would be no way to look at the agent without restarting the thing that keeps
+failing. Once a run succeeds, or you stop the tab yourself, or you restart dux, the tab is
+back to starting on selection.

@@ -372,12 +372,58 @@ describe("store agent-tab lifecycle", () => {
     expect(find((u) => u.includes("/tabs/"))).toBeUndefined()
   })
 
+  it("focuses a started tab immediately and latches it only once the server accepts", async () => {
+    spineBody = spineWithExtraTab(false)
+    const mod = await loadStore()
+    mod.startDormantTab("s1", "b2")
+    // Selection is what the press MEANT, so it lands on the press itself.
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "b2",
+    })
+    // The LAUNCH is the server's, and the latch waits for it: until then the
+    // card stays up, which is what keeps the pane from opening the socket path,
+    // which refuses a tab whose last run failed.
+    expect(mod.getSnapshot().startedDormantTabs).not.toContain("b2")
+    await vi.waitFor(() => {
+      expect(
+        find(
+          (u, init) =>
+            u === "/api/v1/sessions/s1/tabs/b2/start" && init?.method === "POST",
+        ),
+      ).toBeDefined()
+    })
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
+    })
+  })
+
+  // The start request must never move the user: navigating away while it is in
+  // flight has to stick, which it cannot if the answer re-selects the tab.
+  it("does not yank the selection back when the start answers after a move away", async () => {
+    spineBody = spineWithExtraTab(false)
+    const mod = await loadStore()
+    mod.startDormantTab("s1", "b2")
+    mod.selectTab("s1", "s1")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
+    })
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1",
+    })
+  })
+
   it("clears the started-dormant latch once a tab is live, so a later exit re-shows the card", async () => {
     spineBody = spineWithExtraTab(false)
     const mod = await loadStore()
     // User clicks "Start session" on the dormant extra tab.
     mod.startDormantTab("s1", "b2")
-    expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
+    })
 
     // The provider comes up: the latch is no longer needed and gets cleared.
     spineBody = spineWithExtraTab(true)
@@ -399,105 +445,42 @@ describe("store agent-tab lifecycle", () => {
     expect(mod.getSnapshot().startedDormantTabs).not.toContain("b2")
   })
 
-  it("clears the started-dormant latch on a tab-launch-failure status, so the retry card returns", async () => {
+  // The latch bridges the press until the launch answers, EITHER WAY. A retry
+  // that fails again must put the diagnosis card back rather than leave the
+  // latch pinning it out of sight forever, which is what a timer used to have to
+  // clean up.
+  it("drops the started-dormant latch when the spine reports the run failed", async () => {
     spineBody = spineWithExtraTab(false)
     const mod = await loadStore()
-    // User clicks "Start session"; the latch is set.
     mod.startDormantTab("s1", "b2")
-    expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
-
-    // The fresh launch fails: the server sends a `tab-launch-<id>` keyed warning.
-    // The latch clears so the dormant retry card reappears (no reconnect loop).
-    sockets.at(-1)?.onmessage?.({
-      data: JSON.stringify({
-        event: "status",
-        key: "tab-launch-b2",
-        tone: "warning",
-        message: 'extra tab launch failed for "s1": boom',
-      }),
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
     })
-    expect(mod.getSnapshot().startedDormantTabs).not.toContain("b2")
-  })
 
-  it("keeps the started-dormant latch on a tab-launch-SUCCESS status, so the pane does not flash back to the card", async () => {
-    spineBody = spineWithExtraTab(false)
-    const mod = await loadStore()
-    // User clicks "Start session"; the latch is set and the pane mounts.
-    mod.startDormantTab("s1", "b2")
-    expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
-
-    // The fresh launch SUCCEEDS: the server sends a `tab-launch-<id>` keyed `info`
-    // status (same key prefix as the failure, so it isn't clobbered). This must NOT
-    // strip the latch — otherwise the tab would re-mark dormant before the spine's
-    // `has_live_process` catches up, unmounting the just-launched pane. The latch is
-    // instead cleared by `applyWorkspace` once the spine reports the live process.
-    sockets.at(-1)?.onmessage?.({
-      data: JSON.stringify({
-        event: "status",
-        key: "tab-launch-b2",
-        tone: "info",
-        message: "Started a fresh codex tab.",
-      }),
+    const failed = spineWithExtraTab(false)
+    failed.sessions[0].tabs[1].last_run_failed = true
+    spineBody = failed
+    fireSessionsChanged()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().startedDormantTabs).not.toContain("b2")
     })
-    expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
   })
 
   it("handleTabGone clears the started-dormant latch for the gone tab id", async () => {
     spineBody = spineWithExtraTab(false)
     const mod = await loadStore()
     mod.startDormantTab("s1", "b2")
-    expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
+    })
     mod.handleTabGone("b2")
     expect(mod.getSnapshot().startedDormantTabs).not.toContain("b2")
   })
 
-  // A SESSION-SLOT launch failure emits no `tab-launch-<id>` key (that key exists
-  // only for extra tabs), so nothing on the wire tells this client the reconnect
-  // it asked for never came up. The latch therefore expires on its own; without
-  // that, the dormant card would stay suppressed forever and every attach would
-  // force-launch the agent again.
-  it("expires the reconnect latch when the relaunched first tab never comes up", async () => {
-    spineBody = spineWithDormantSlot()
-    const mod = await loadStore()
-    vi.useFakeTimers()
-    try {
-      mod.reconnectSession("s1", true)
-      expect(mod.getSnapshot().startedDormantTabs).toContain("s1")
-
-      // Still in flight: the latch holds, so the card does not flash over a
-      // launch the user asked for.
-      vi.advanceTimersByTime(mod.TAB_LAUNCH_LATCH_TTL_MS - 1)
-      expect(mod.getSnapshot().startedDormantTabs).toContain("s1")
-
-      // The launch failed and nothing ever reported live: the latch goes, and
-      // the dormant card is back.
-      vi.advanceTimersByTime(2)
-      expect(mod.getSnapshot().startedDormantTabs).not.toContain("s1")
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it("keeps the reconnect latch once the relaunched first tab reports live", async () => {
-    spineBody = spineWithDormantSlot()
-    const mod = await loadStore()
-    mod.reconnectSession("s1", true)
-    expect(mod.getSnapshot().startedDormantTabs).toContain("s1")
-
-    // The provider comes up; the spine clears the latch because it is no longer
-    // needed, NOT because the launch failed.
-    spineBody = spineWithExtraTab(true)
-    fireSessionsChanged()
-    await vi.waitFor(() => {
-      expect(mod.getSnapshot().startedDormantTabs).not.toContain("s1")
-    })
-    const slot = mod
-      .getSnapshot()
-      .spine?.sessions[0].tabs?.find((t) => t.id === "s1")
-    expect(slot?.has_live_process).toBe(true)
-  })
-
-  it("reconnectSession latches the session-slot tab it focuses", async () => {
+  // A reconnect needs no latch of its own: dispatching a launch is what clears
+  // the tab's recorded failure server-side, so the card the latch used to hide
+  // does not show over a reconnect in the first place.
+  it("reconnectSession focuses the session-slot tab without latching it", async () => {
     spineBody = spineWithDormantSlot()
     const mod = await loadStore()
     mod.reconnectSession("s1", true)
@@ -506,7 +489,7 @@ describe("store agent-tab lifecycle", () => {
       sessionId: "s1",
       tabId: "s1",
     })
-    expect(mod.getSnapshot().startedDormantTabs).toContain("s1")
+    expect(mod.getSnapshot().startedDormantTabs).not.toContain("s1")
     await vi.waitFor(() => {
       expect(
         find((u, init) => u.endsWith("/reconnect") && init?.method === "POST"),

@@ -124,6 +124,9 @@ function dormantSpine(): DuxState["spine"] {
         provider: "claude",
         status: "active",
         auto_reopen_enabled: false,
+        // Slot-ness is the session's answer, and the card rule reads it: without
+        // this the helper cannot tell the agent's first tab from an extra one.
+        slot_tab_id: "s1",
         terminals: [],
         tabs: [
           {
@@ -213,11 +216,10 @@ describe("TerminalArea dormant-tab gating (G-T4)", () => {
     expect(screen.queryByText("Start session")).toBeNull()
   })
 
-  // The agent's FIRST tab, dormant after a restart, gets the same card and the
-  // same "no socket until pressed" contract an extra tab gets. Subscribing is
-  // what force-launches the provider server-side, so focus alone must not do it
-  // here either.
-  it("renders the DormantTabCard and opens NO PTY socket for a dormant first tab", async () => {
+  // ONE CLICK. Selecting an agent whose first tab came back dormant (a restart,
+  // a stop) mounts the pane, and the pane's PTY subscription is what starts it.
+  // The card here would make starting an agent a two-click job.
+  it("mounts the pane for a healthy dormant first tab instead of the card", async () => {
     const spine = dormantSpine()
     spine!.sessions[0].tabs[0].has_live_process = false
     mockState = makeState({
@@ -227,18 +229,39 @@ describe("TerminalArea dormant-tab gating (G-T4)", () => {
     })
     render(<TerminalArea />)
 
+    await vi.waitFor(() => expect(paneProps.length).toBeGreaterThan(0))
+    expect(screen.queryByText("Start session")).toBeNull()
+    expect(paneProps.at(-1)).toMatchObject({ kind: "agent", id: "s1" })
+  })
+
+  // ...unless that tab's last run ENDED BADLY. Then the card is the diagnosis
+  // surface and nothing opens a socket, because subscribing is what would
+  // relaunch it, every single time the user looked at the agent.
+  it("renders the DormantTabCard and opens NO PTY socket for a first tab whose last run failed", async () => {
+    const spine = dormantSpine()
+    spine!.sessions[0].tabs[0].has_live_process = false
+    spine!.sessions[0].tabs[0].last_run_failed = true
+    mockState = makeState({
+      spine,
+      selectedSessionId: "s1",
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+    })
+    render(<TerminalArea />)
+
     expect(await screen.findByText("Start session")).toBeTruthy()
     expect(TrackingWebSocket.instances).toHaveLength(0)
+    expect(paneProps).toHaveLength(0)
 
     fireEvent.click(screen.getByText("Start session"))
     expect(startDormantTabMock).toHaveBeenCalledWith("s1", "s1")
   })
 
-  // The latch is what keeps the card off a launch the user asked for (a create
-  // or a reconnect marks the tab started before its PTY reports live).
+  // The latch keeps the card off a start the user already pressed, for the gap
+  // between the server accepting it and the spine reporting the process live.
   it("suppresses the card for a not-yet-live first tab this client started", () => {
     const spine = dormantSpine()
     spine!.sessions[0].tabs[0].has_live_process = false
+    spine!.sessions[0].tabs[0].last_run_failed = true
     mockState = makeState({
       spine,
       selectedSessionId: "s1",
