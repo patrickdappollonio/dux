@@ -1897,12 +1897,18 @@ mod tests {
     fn exit_prune_clears_the_attention_progress_and_viewed_maps() {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
-        let session_id = app
+        let session = app
             .selected_session()
             .expect("test_app selects a session")
-            .id
             .clone();
-        // A clean-exiting session-slot provider (keyed by the session id).
+        let session_id = session.id.clone();
+        // A clean-exiting session-slot provider, keyed by the tab id the
+        // session's pointer names. That id is NOT the session id: keying these
+        // maps on the session id would exercise the extra-tab branch and prove
+        // nothing about the slot.
+        let slot_tab_id = session.slot_tab_id().as_str().to_string();
+        assert_ne!(slot_tab_id, session_id);
+        assert!(app.engine.is_slot_tab(&session, session.slot_tab_id()));
         let client = crate::pty::PtyClient::spawn(
             "sh",
             &["-c".to_string(), "exit 0".to_string()],
@@ -1914,13 +1920,13 @@ mod tests {
         .expect("spawn pty");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab_id.clone()), client);
         // Seed the three runtime maps the teardown must clear.
         app.engine
             .needs_attention
-            .insert(TabId::new(session_id.clone()));
+            .insert(TabId::new(slot_tab_id.clone()));
         app.engine.pty_progress.insert(
-            TabId::new(session_id.clone()),
+            TabId::new(slot_tab_id.clone()),
             dux_core::pty::ProgressReport {
                 working: true,
                 at: std::time::Instant::now(),
@@ -1928,37 +1934,44 @@ mod tests {
         );
         app.engine
             .agent_viewed
-            .insert(TabId::new(session_id.clone()), std::time::Instant::now());
+            .insert(TabId::new(slot_tab_id.clone()), std::time::Instant::now());
 
         // END OF INPUT *and* a reaped status: with either one missing the prune
         // is deliberately deferred inside REAPED_DRAIN_GRACE and one drain would
         // see nothing. See `wait_for_pty_eof`.
-        crate::app::test_support::wait_for_pty_eof(&mut app, &session_id);
+        crate::app::test_support::wait_for_pty_eof(&mut app, &slot_tab_id);
         app.drain_events();
 
         assert!(
             !app.engine
                 .providers
-                .contains_key(TabIdRef::new(&session_id)),
+                .contains_key(TabIdRef::new(&slot_tab_id)),
             "pruned"
         );
         assert!(
             !app.engine
                 .needs_attention
-                .contains(TabIdRef::new(&session_id)),
+                .contains(TabIdRef::new(&slot_tab_id)),
             "needs_attention must be cleared on exit prune"
         );
         assert!(
             !app.engine
                 .pty_progress
-                .contains_key(TabIdRef::new(&session_id)),
+                .contains_key(TabIdRef::new(&slot_tab_id)),
             "pty_progress must be cleared on exit prune"
         );
         assert!(
             !app.engine
                 .agent_viewed
-                .contains_key(TabIdRef::new(&session_id)),
+                .contains_key(TabIdRef::new(&slot_tab_id)),
             "agent_viewed must be cleared on exit prune"
+        );
+        // The SLOT branch of the teardown is the one that ran: an agent whose
+        // slot provider exited is detached, which an extra tab's exit never does.
+        assert_eq!(
+            app.engine.sessions[0].status,
+            dux_core::model::SessionStatus::Detached,
+            "the exit must have been handled as the agent's slot tab exiting"
         );
     }
 

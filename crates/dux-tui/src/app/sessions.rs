@@ -1341,8 +1341,10 @@ impl App {
         }
 
         let max_per_agent = i64::from(self.engine.agent_tabs_max());
+        // Every tab is a row, the slot tab included, so the stored count is the
+        // whole count and the comparison is the engine's own (`create_tab`).
         let current_tabs = self.engine.session_store.count_agent_tabs(&session.id)?;
-        if current_tabs + 1 >= max_per_agent {
+        if current_tabs >= max_per_agent {
             self.set_error(format!(
                 "This agent already has the maximum of {max_per_agent} tabs. Close a tab before adding another."
             ));

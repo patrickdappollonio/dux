@@ -23541,16 +23541,49 @@ cyan = "#00ffff"
     #[test]
     fn new_tab_picker_at_cap_reports_and_does_not_open() {
         let mut app = test_app(default_bindings());
-        // The session-slot tab already counts as one of the cap; a cap of 1
-        // means no extra tab may be added.
-        app.engine.config.ui.agent_tabs_max = 1;
+        // The slot tab is a row like any other, so the agent starts at one tab
+        // of the cap. Persist it the way a real creation does, or the count the
+        // picker reads is a zero no agent ever has.
+        let session = app.engine.sessions[0].clone();
+        app.engine.session_store.create_session(&session).unwrap();
+
+        // Under the cap: one stored tab against a cap of two leaves room, so the
+        // picker opens.
+        app.engine.config.ui.agent_tabs_max = 2;
+        app.open_new_tab_provider_prompt()
+            .expect("open handler below the cap");
+        assert!(
+            matches!(app.prompt, PromptState::ChangeAgentProvider(_)),
+            "one tab against a cap of two leaves room for another"
+        );
+        app.prompt = PromptState::None;
+
+        // At the cap: a second stored tab against the same cap of two refuses,
+        // and says the true count.
+        app.engine
+            .session_store
+            .insert_agent_tab(&dux_core::model::AgentTab {
+                id: "tab-2".to_string(),
+                session_id: session.id.clone(),
+                provider: dux_core::model::ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("store the second tab");
+        assert_eq!(
+            app.engine
+                .session_store
+                .count_agent_tabs(&session.id)
+                .unwrap(),
+            2
+        );
 
         app.open_new_tab_provider_prompt()
             .expect("open handler returns Ok even when it refuses");
 
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
-            app.status.text().contains("maximum") && app.status.text().contains('1'),
+            app.status.text().contains("maximum") && app.status.text().contains('2'),
             "expected a keyed cap-reached error, got: {}",
             app.status.text()
         );
