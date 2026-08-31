@@ -1023,7 +1023,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         uploadDroppedFile(file, { pty: rootPtyId(root), conn: null, dir: into }),
       revalidateDirs,
       refreshSearchIndex,
-      reportBusy: (message) => notifyBusy(message, { id: toastId }),
+      // Local, not wire: the upload is a fetch this tab awaits, so a
+      // stranded spinner means a slow request rather than a quiet server.
+      reportBusy: (message) => notifyBusy(message, { id: toastId, origin: "local" }),
       // `sticky` is forwarded rather than dropped, so the decision stays in the
       // one place that makes it (`editorDropToast`, where every rung says
       // false, and says why). Hardcoding it here would put a second opinion

@@ -2466,7 +2466,7 @@ impl Engine {
                             crate::engine::launch_outcome_final(o)
                         })
                         .with_scope(self.current_origin.clone());
-                    let pending = WireStatus::from_update(&op.pending_status());
+                    let pending = WireStatus::from_update(&self.begin_status_op(&op));
                     self.pending_web_launch_ops
                         .insert(session_id.to_string(), op);
                     Ok(Some(pending))
@@ -2654,15 +2654,34 @@ impl Engine {
         );
         let op = op.with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
-        let pending = WireStatus::from_update(&op.pending_status());
+        let pending = WireStatus::from_update(&self.begin_status_op(&op));
         self.pending_web_checkout_ops.insert(op_id.clone(), op);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
-            crate::project_browser::run_checkout_project_default_branch_inspection_job(
-                project,
-                worker_tx,
-                Some(op_id),
-            );
+            use std::panic::AssertUnwindSafe;
+            // Guarantee the op resolves even if the job panics: the busy is
+            // already on screen, and a panic here would otherwise leave a
+            // spinner nothing will ever answer.
+            let tx_panic = worker_tx.clone();
+            let project_panic = project.clone();
+            let op_id_panic = op_id.clone();
+            if std::panic::catch_unwind(AssertUnwindSafe(|| {
+                crate::project_browser::run_checkout_project_default_branch_inspection_job(
+                    project,
+                    worker_tx,
+                    Some(op_id),
+                );
+            }))
+            .is_err()
+            {
+                let _ = tx_panic.send(
+                    crate::worker::WorkerEvent::CheckoutProjectDefaultBranchInspected {
+                        project: project_panic,
+                        result: Err("the default-branch inspection worker panicked".to_string()),
+                        status_op_id: Some(op_id_panic),
+                    },
+                );
+            }
         });
         Ok(pending)
     }
@@ -2756,16 +2775,36 @@ impl Engine {
         );
         let op = op.with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
-        let pending = WireStatus::from_update(&op.pending_status());
+        let pending = WireStatus::from_update(&self.begin_status_op(&op));
         self.pending_web_add_project_ops.insert(op_id.clone(), op);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
-            crate::project_browser::run_add_project_checkout_job(
-                action,
-                default_branch,
-                worker_tx,
-                Some(op_id),
-            );
+            use std::panic::AssertUnwindSafe;
+            // Guarantee the op resolves even if the job panics; see the sibling
+            // initial-commit spawn for the same reasoning.
+            let tx_panic = worker_tx.clone();
+            let action_panic = action.clone();
+            let branch_panic = default_branch.clone();
+            let op_id_panic = op_id.clone();
+            if std::panic::catch_unwind(AssertUnwindSafe(|| {
+                crate::project_browser::run_add_project_checkout_job(
+                    action,
+                    default_branch,
+                    worker_tx,
+                    Some(op_id),
+                );
+            }))
+            .is_err()
+            {
+                let _ = tx_panic.send(
+                    crate::worker::WorkerEvent::NonDefaultBranchCheckoutCompleted {
+                        action: action_panic,
+                        target_branch: branch_panic,
+                        result: Err("the branch-checkout worker panicked".to_string()),
+                        status_op_id: Some(op_id_panic),
+                    },
+                );
+            }
         });
         Ok(pending)
     }
@@ -2866,7 +2905,7 @@ impl Engine {
         );
         let op = op.with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
-        let pending = WireStatus::from_update(&op.pending_status());
+        let pending = WireStatus::from_update(&self.begin_status_op(&op));
         self.pending_web_add_project_ops.insert(op_id.clone(), op);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
@@ -2943,7 +2982,7 @@ impl Engine {
         );
         let op = op.with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
-        let pending = WireStatus::from_update(&op.pending_status());
+        let pending = WireStatus::from_update(&self.begin_status_op(&op));
         self.pending_web_add_project_ops.insert(op_id.clone(), op);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
@@ -3060,20 +3099,35 @@ impl Engine {
         );
         let op = op.with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
-        let pending = WireStatus::from_update(&op.pending_status());
+        let pending = WireStatus::from_update(&self.begin_status_op(&op));
         self.pending_web_pr_lookup_ops.insert(op_id.clone(), op);
         let raw_input = pr.to_string();
         let worker_tx = self.worker_tx.clone();
         let policy = self.github_host_policy();
         std::thread::spawn(move || {
-            crate::gh::run_pull_request_lookup_job(
-                project,
-                raw_input,
-                custom_name,
-                worker_tx,
-                Some(op_id),
-                policy,
-            );
+            use std::panic::AssertUnwindSafe;
+            // Guarantee the op resolves even if the job panics; see the sibling
+            // initial-commit spawn for the same reasoning.
+            let tx_panic = worker_tx.clone();
+            let op_id_panic = op_id.clone();
+            if std::panic::catch_unwind(AssertUnwindSafe(|| {
+                crate::gh::run_pull_request_lookup_job(
+                    project,
+                    raw_input,
+                    custom_name,
+                    worker_tx,
+                    Some(op_id),
+                    policy,
+                );
+            }))
+            .is_err()
+            {
+                let _ = tx_panic.send(crate::worker::WorkerEvent::PullRequestResolved {
+                    result: Err("the pull-request lookup worker panicked".to_string()),
+                    purpose: crate::worker::PrLookupPurpose::CreateAgent,
+                    status_op_id: Some(op_id_panic),
+                });
+            }
         });
         Ok(pending)
     }
@@ -3510,7 +3564,7 @@ impl Engine {
                             },
                         );
                         let op = op.with_scope(self.current_origin.clone());
-                        let pending = WireStatus::from_update(&op.pending_status());
+                        let pending = WireStatus::from_update(&self.begin_status_op(&op));
                         self.pending_delete_ops_web
                             .insert(view.session_id.clone(), op);
                         // Vanish the session now: its PTY and terminals are

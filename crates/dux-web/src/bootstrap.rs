@@ -146,6 +146,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         pending_delete_ops_web: HashMap::new(),
         pending_create_ops: HashMap::new(),
         pending_web_launch_ops: HashMap::new(),
+        live_status_keys: Default::default(),
         last_created_op_id: None,
         created_session_by_op: HashMap::new(),
         providers: HashMap::new(),

@@ -1,5 +1,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Audience for a status update. `All` (the default) broadcasts to every
@@ -29,6 +31,98 @@ pub enum StatusScope {
 /// both the TUI tick and the web engine actor so the behaviour is identical on
 /// both surfaces and the value only lives in one place.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Absolute ceiling on how long liveness may keep a `Busy` on screen.
+///
+/// [`LiveStatusKeys`] turns the busy timeout from a guess into an answer, but it
+/// is a registry, and a registry can leak: an operation whose final never gets
+/// produced (a worker path that returns without resolving, a future spawn site
+/// that registers and forgets to retire) would otherwise hold a spinner on
+/// screen for the life of the process. A spinner must never be literally
+/// immortal, so past this age a `Busy` is upgraded whatever liveness says.
+///
+/// Generous on purpose. It is a backstop for a bug, not a timeout: any real
+/// operation dux runs finishes far inside it, and picking a value a slow clone
+/// or a long `git fetch` could plausibly cross would reintroduce the false
+/// "timed out" this whole mechanism exists to remove.
+pub const BUSY_LIVE_CEILING: Duration = Duration::from_secs(30 * 60);
+
+/// The keys of status operations the engine is still running.
+///
+/// The busy timeout exists to stop a LEAKED spinner claiming forever that work
+/// is happening, and from inside [`KeyedStatusController`] it can only ever be a
+/// guess about silence: nothing there knows whether a clone on a slow network is
+/// thirty seconds into its work or was abandoned. Guessing wrong is not
+/// harmless; it replaced a truthful spinner with "timed out" while the clone was
+/// still running, and the user watched their agent creation apparently vanish
+/// and then succeed minutes later.
+///
+/// So the answer is recorded instead of inferred, in ONE set rather than per
+/// registry. A handle is shared (cheaply cloned) between the engine, which
+/// registers a key at the moment it starts the operation behind it, and the
+/// surface's controller, which retires the key at the one moment a final lands
+/// on it. That pairing is what makes it general: a final of ANY origin, from any
+/// of the engine's op registries or from a bare keyed `set`, retires liveness
+/// through the same door, and no registry has to be enumerated anywhere.
+///
+/// Both halves fail safely if a future path forgets one:
+/// - forgetting to register gets the old behavior back for that operation (a
+///   false "timed out" after [`BUSY_TIMEOUT`]), and
+/// - forgetting to retire is bounded by [`BUSY_LIVE_CEILING`].
+#[derive(Clone, Default)]
+pub struct LiveStatusKeys(Arc<Mutex<HashSet<String>>>);
+
+impl LiveStatusKeys {
+    /// Record that an operation is running behind `key`. Idempotent.
+    pub fn register(&self, key: &str) {
+        self.with(|set| {
+            set.insert(key.to_string());
+        });
+    }
+
+    /// Record that nothing is running behind `key` any more. Idempotent, and
+    /// deliberately tolerant of a key that was never registered: the controller
+    /// calls it on every keyed final, most of which never had an op.
+    pub fn retire(&self, key: &str) {
+        self.with(|set| {
+            set.remove(key);
+        });
+    }
+
+    pub fn is_live(&self, key: &str) -> bool {
+        self.with(|set| set.contains(key))
+    }
+
+    /// How many operations are registered. For tests and diagnostics; a leak
+    /// shows up here as a number that only grows.
+    pub fn len(&self) -> usize {
+        self.with(|set| set.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// A poisoned lock is recovered rather than propagated: this set is an
+    /// optimisation over guessing, and a panic in an unrelated thread must not
+    /// take the status line down with it.
+    fn with<T>(&self, f: impl FnOnce(&mut HashSet<String>) -> T) -> T {
+        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    }
+}
+
+impl std::fmt::Debug for LiveStatusKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LiveStatusKeys")
+            .field(&self.with(|set| {
+                let mut keys: Vec<&str> = set.iter().map(String::as_str).collect();
+                keys.sort_unstable();
+                keys.join(", ")
+            }))
+            .finish()
+    }
+}
 
 /// How long a FINAL stays replayable under [`StatusRetention::Emit`].
 ///
@@ -150,6 +244,15 @@ pub struct KeyedStatus {
     /// Wall-clock time when this status was last set. Used for auto-clear and
     /// busy-timeout decisions in `tick`.
     since: Instant,
+    /// When this entry was last heard from: either its `set`, or the most recent
+    /// liveness heartbeat from [`tick`](KeyedStatusController::tick).
+    ///
+    /// Deliberately SEPARATE from `since`, which orders the entries for
+    /// `most_recent()` and drives the spinner animation. The busy timeout asks
+    /// "how long has this operation been silent", not "how old is this message",
+    /// and folding the two would let a heartbeat on a background operation steal
+    /// the TUI's single status line from a status the user just triggered.
+    heartbeat: Instant,
     /// Monotonic insertion counter for `most_recent()` disambiguation when two
     /// entries share the same `since` timestamp.
     seq: u64,
@@ -186,6 +289,17 @@ pub struct KeyedWireStatus {
 pub struct StatusTickChanges {
     pub cleared_keys: Vec<Option<String>>, // None = the anonymous slot cleared
     pub upgraded: Vec<KeyedWireStatus>,    // busy→warning replacements
+    /// Busy entries whose operation is still registered as running, re-stamped
+    /// instead of upgraded. The caller must re-broadcast each one as a live
+    /// `busy` status.
+    ///
+    /// The re-broadcast is not decoration. A browser holds its own leak guard on
+    /// every spinner (`BUSY_TOAST_MAX_MS` in
+    /// `crates/dux-web/web/src/lib/notify.ts`), and the only thing that re-arms
+    /// it is another frame on the same key. Keeping the entry alive server-side
+    /// while saying nothing on the wire would move the silent disappearance from
+    /// the engine to the browser rather than fix it.
+    pub refreshed: Vec<KeyedWireStatus>,
     /// How many finals aged out of the replay window under
     /// [`StatusRetention::Emit`]. These are deliberately NOT reported as keys:
     /// the caller must refresh its published snapshot but must send NO frame for
@@ -254,6 +368,15 @@ pub struct KeyedStatusController {
     anon_pinned: bool,
     /// What happens to a final (non-`Busy`) status. See [`StatusRetention`].
     retention: StatusRetention,
+    /// Which keys still have an operation running behind them. The controller
+    /// READS it to decide whether a timed-out busy is stranded or merely slow,
+    /// and RETIRES a key whenever a final lands on it, which is the one place
+    /// every final of every origin passes through.
+    ///
+    /// Default-empty, so a controller nobody handed a shared set to (every test
+    /// that does not care, and any future surface before it is wired) behaves
+    /// exactly as it did before liveness existed.
+    live: LiveStatusKeys,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,6 +385,41 @@ enum StatusTickAction {
     Clear,
     Purge,
     Upgrade,
+    /// The entry has been busy past [`BUSY_LIVE_CEILING`], so it is upgraded
+    /// whatever liveness claims.
+    Stalled,
+    /// The busy timeout came due but the operation behind the key is still
+    /// registered as running, so the entry is re-stamped and re-broadcast.
+    Heartbeat,
+}
+
+/// Why a `Busy` is being replaced by a warning, which decides what the warning
+/// says. The two cases are genuinely different facts and must not share wording:
+/// one is silence from an operation nobody is waiting on, the other is an
+/// operation dux IS still waiting on that has said nothing for half an hour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BusyUpgrade {
+    TimedOut,
+    Stalled,
+}
+
+impl BusyUpgrade {
+    fn message(self) -> String {
+        match self {
+            BusyUpgrade::TimedOut => "timed out — check dux.log".to_string(),
+            BusyUpgrade::Stalled => format!(
+                "This operation has reported nothing for {} minutes, so dux has stopped showing it as running. It may still be going; check dux.log.",
+                BUSY_LIVE_CEILING.as_secs() / 60
+            ),
+        }
+    }
+
+    fn log_word(self) -> &'static str {
+        match self {
+            BusyUpgrade::TimedOut => "timed-out",
+            BusyUpgrade::Stalled => "stalled",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -269,6 +427,8 @@ struct KeyedTickActions {
     clear: Vec<String>,
     purge: Vec<String>,
     upgrade: Vec<String>,
+    stalled: Vec<String>,
+    heartbeat: Vec<String>,
 }
 
 impl KeyedStatusController {
@@ -304,7 +464,17 @@ impl KeyedStatusController {
             next_gen: 0,
             anon_pinned: false,
             retention,
+            live: LiveStatusKeys::default(),
         }
+    }
+
+    /// Share the engine's [`LiveStatusKeys`] with this controller (builder
+    /// form). Every surface that renders engine statuses must call it: without
+    /// it the controller is back to guessing that a silent operation is a
+    /// stranded one.
+    pub fn with_live_keys(mut self, live: LiveStatusKeys) -> Self {
+        self.live = live;
+        self
     }
 
     /// Exempt the CURRENT anonymous-slot message from auto-clear. Used for the
@@ -376,6 +546,7 @@ impl KeyedStatusController {
             sticky,
             generation,
             since: now,
+            heartbeat: now,
             seq,
         };
 
@@ -391,6 +562,14 @@ impl KeyedStatusController {
                 self.anon_pinned = false;
             }
             Some(k) => {
+                // A final on a key is the one moment every finished operation
+                // passes through, whichever registry (or none) it came from, so
+                // this is where liveness is retired. A `Busy` is the opposite
+                // signal and leaves the registration alone: `progress` re-emits
+                // one on the same key mid-operation.
+                if tone != StatusTone::Busy {
+                    self.live.retire(&k);
+                }
                 self.entries.insert(k, entry);
             }
         }
@@ -425,6 +604,11 @@ impl KeyedStatusController {
     ///
     /// [`sticky`]: KeyedWireStatus::sticky
     pub fn clear(&mut self, key: &str, generation: Option<Generation>) -> bool {
+        // A clear is a final that had nothing to say, so it retires liveness the
+        // same way a message does. Unconditionally, and before the sticky and
+        // generation guards: those decide what stays ON SCREEN, while this
+        // records that the operation is over.
+        self.live.retire(key);
         if let Some(entry) = self.entries.get(key) {
             if entry.sticky {
                 return false;
@@ -457,10 +641,16 @@ impl KeyedStatusController {
     ///   `clear_after` plays no part.
     ///
     /// Under both:
-    /// - `Busy` entries older than `busy_timeout` are upgraded in-place to a
-    ///   `Warning` with a "timed out" message, so a leaked busy is never
-    ///   immortal. The upgrade restamps `since`, so under `Emit` the resulting
-    ///   warning gets its own full replay window before it ages out.
+    /// - `Busy` entries silent for longer than `busy_timeout` are upgraded
+    ///   in-place to a `Warning`, so a leaked busy is never immortal. The
+    ///   upgrade restamps `since`, so under `Emit` the resulting warning gets
+    ///   its own full replay window before it ages out. It is upgraded to a
+    ///   `Warning` with a "timed out" message, UNLESS [`LiveStatusKeys`] says an
+    ///   operation is still registered behind the key, in which case the entry
+    ///   is re-stamped and handed back in `refreshed` for re-broadcast. A slow
+    ///   clone therefore keeps its spinner for as long as it takes, and the
+    ///   timeout still fires for a spinner nothing is behind. Past
+    ///   [`BUSY_LIVE_CEILING`] the upgrade happens whatever liveness says.
     ///
     /// Returns the set of changes the caller must broadcast.
     pub fn tick(&mut self, now: Instant, busy_timeout: Duration) -> StatusTickChanges {
@@ -470,6 +660,8 @@ impl KeyedStatusController {
         self.clear_keyed_finals(actions.clear, &mut changes);
         self.purge_keyed_finals(actions.purge, &mut changes);
         self.upgrade_keyed_busys(actions.upgrade, now, &mut changes);
+        self.stall_keyed_busys(actions.stalled, now, &mut changes);
+        self.heartbeat_keyed_busys(actions.heartbeat, now, &mut changes);
 
         changes
     }
@@ -532,6 +724,7 @@ impl KeyedStatusController {
         anon.tone = StatusTone::Warning;
         anon.message = "timed out — check dux.log".to_string();
         anon.since = now;
+        anon.heartbeat = now;
         anon.generation = Generation(self.next_gen);
         anon.seq = self.next_seq;
         self.next_gen += 1;
@@ -548,11 +741,13 @@ impl KeyedStatusController {
     fn keyed_tick_actions(&self, now: Instant, busy_timeout: Duration) -> KeyedTickActions {
         let mut actions = KeyedTickActions::default();
         for (key, entry) in &self.entries {
-            match self.keyed_tick_action(entry, now, busy_timeout) {
+            match self.keyed_tick_action(key, entry, now, busy_timeout) {
                 StatusTickAction::Keep => {}
                 StatusTickAction::Clear => actions.clear.push(key.clone()),
                 StatusTickAction::Purge => actions.purge.push(key.clone()),
                 StatusTickAction::Upgrade => actions.upgrade.push(key.clone()),
+                StatusTickAction::Stalled => actions.stalled.push(key.clone()),
+                StatusTickAction::Heartbeat => actions.heartbeat.push(key.clone()),
             }
         }
         actions
@@ -560,16 +755,25 @@ impl KeyedStatusController {
 
     fn keyed_tick_action(
         &self,
+        key: &str,
         entry: &KeyedStatus,
         now: Instant,
         busy_timeout: Duration,
     ) -> StatusTickAction {
         let age = now.duration_since(entry.since);
         if entry.tone == StatusTone::Busy {
-            return if age >= busy_timeout {
-                StatusTickAction::Upgrade
+            // The ceiling is measured from `since` (when the operation started),
+            // never from `heartbeat`, which liveness keeps moving forever.
+            if age >= BUSY_LIVE_CEILING {
+                return StatusTickAction::Stalled;
+            }
+            if now.duration_since(entry.heartbeat) < busy_timeout {
+                return StatusTickAction::Keep;
+            }
+            return if self.live.is_live(key) {
+                StatusTickAction::Heartbeat
             } else {
-                StatusTickAction::Keep
+                StatusTickAction::Upgrade
             };
         }
         if self.retention == StatusRetention::Emit {
@@ -611,27 +815,84 @@ impl KeyedStatusController {
         changes: &mut StatusTickChanges,
     ) {
         for key in keys {
-            if let Some(upgraded) = self.upgrade_keyed_busy(&key, now) {
+            if let Some(upgraded) = self.upgrade_keyed_busy(&key, now, BusyUpgrade::TimedOut) {
                 changes.upgraded.push(upgraded);
             }
         }
     }
 
-    fn upgrade_keyed_busy(&mut self, key: &str, now: Instant) -> Option<KeyedWireStatus> {
+    /// Upgrade the busy entries that crossed [`BUSY_LIVE_CEILING`].
+    ///
+    /// Reaching here means liveness leaked: something registered a key and no
+    /// final ever retired it. The message says what is actually known (nothing
+    /// has been heard for that long) rather than claiming a timeout, and points
+    /// at the log, because the leak itself is the thing worth reporting.
+    fn stall_keyed_busys(
+        &mut self,
+        keys: Vec<String>,
+        now: Instant,
+        changes: &mut StatusTickChanges,
+    ) {
+        for key in keys {
+            if let Some(upgraded) = self.upgrade_keyed_busy(&key, now, BusyUpgrade::Stalled) {
+                changes.upgraded.push(upgraded);
+            }
+        }
+    }
+
+    /// Re-stamp the busy entries whose operation is still running and hand each
+    /// one back for re-broadcast.
+    ///
+    /// `since` is deliberately left alone: the operation started when it started,
+    /// and the spinner animation and the TUI's most-recent-wins ordering both
+    /// read it. Only `heartbeat` moves, which is the field the timeout measures.
+    fn heartbeat_keyed_busys(
+        &mut self,
+        keys: Vec<String>,
+        now: Instant,
+        changes: &mut StatusTickChanges,
+    ) {
+        for key in keys {
+            let Some(entry) = self.entries.get_mut(&key) else {
+                continue;
+            };
+            entry.heartbeat = now;
+            changes.refreshed.push(KeyedWireStatus {
+                key: Some(key),
+                tone: entry.tone.as_wire().to_string(),
+                message: entry.message.clone(),
+                scope: entry.scope.clone(),
+                sticky: entry.sticky,
+            });
+        }
+    }
+
+    fn upgrade_keyed_busy(
+        &mut self,
+        key: &str,
+        now: Instant,
+        reason: BusyUpgrade,
+    ) -> Option<KeyedWireStatus> {
+        // Whichever way a busy is upgraded, the operation behind it is no longer
+        // being waited on, so its registration goes with it. Without this the
+        // ceiling would fire again on every tick for the rest of the process.
+        self.live.retire(key);
         let entry = self.entries.get_mut(key)?;
         crate::logger::warn(&format!(
-            "status key \"{key}\" left Busy with no final (\"{}\"); upgrading to a timed-out warning",
-            entry.message
+            "status key \"{key}\" left Busy with no final (\"{}\"); upgrading to a {} warning",
+            entry.message,
+            reason.log_word()
         ));
         let generation = Generation(self.next_gen);
         let seq = self.next_seq;
         self.next_gen += 1;
         self.next_seq += 1;
         entry.tone = StatusTone::Warning;
-        entry.message = "timed out — check dux.log".to_string();
+        entry.message = reason.message();
         entry.sticky = false;
         entry.generation = generation;
         entry.since = now;
+        entry.heartbeat = now;
         entry.seq = seq;
         Some(KeyedWireStatus {
             key: Some(key.to_string()),
@@ -768,7 +1029,10 @@ impl KeyedStatusController {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUSY_TIMEOUT, FINAL_REPLAY_WINDOW, KeyedStatusController, StatusTone};
+    use super::{
+        BUSY_LIVE_CEILING, BUSY_TIMEOUT, FINAL_REPLAY_WINDOW, KeyedStatusController,
+        LiveStatusKeys, StatusTone,
+    };
     use std::time::{Duration, Instant};
 
     #[test]
@@ -1200,6 +1464,217 @@ mod tests {
             snap[0].key.as_deref(),
             Some("del"),
             "and it must have replaced the busy on its own key, not sit beside it"
+        );
+    }
+
+    #[test]
+    fn a_busy_whose_operation_is_still_running_is_never_called_timed_out() {
+        // The bug this pins: creating an agent over a slow network. The clone ran
+        // for minutes, and twenty seconds in the controller replaced the honest
+        // "Pulling latest changes…" spinner with "timed out", which then aged off
+        // the screen on the warning window. The user watched the operation vanish
+        // and then succeed.
+        let t0 = Instant::now();
+        // The clone is still running, so the engine still holds the create op.
+        let live = LiveStatusKeys::default();
+        live.register("create-1");
+        let mut c = KeyedStatusController::emitting_finals().with_live_keys(live.clone());
+        c.set(
+            t0,
+            Some("create-1".into()),
+            StatusTone::Busy,
+            "Pulling latest changes for project \"dux\" before creating the agent...",
+        );
+
+        let changes = c.tick(t0 + BUSY_TIMEOUT + Duration::from_secs(1), BUSY_TIMEOUT);
+        assert!(
+            changes.upgraded.is_empty(),
+            "a running operation must not be reported as timed out, got {:?}",
+            changes.upgraded
+        );
+        assert_eq!(
+            changes.refreshed.len(),
+            1,
+            "and the surfaces must be told it is still going, got {:?}",
+            changes.refreshed
+        );
+        assert_eq!(changes.refreshed[0].tone, "busy");
+        assert_eq!(
+            changes.refreshed[0].message,
+            "Pulling latest changes for project \"dux\" before creating the agent..."
+        );
+        let snap = c.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].tone, "busy", "the spinner stays: {snap:?}");
+
+        // Minutes later it is still going, and still a spinner.
+        let mut now = t0 + BUSY_TIMEOUT + Duration::from_secs(1);
+        for _ in 0..12 {
+            now += BUSY_TIMEOUT;
+            let _ = c.tick(now, BUSY_TIMEOUT);
+        }
+        assert_eq!(
+            c.snapshot()[0].tone,
+            "busy",
+            "a five-minute clone keeps its spinner for the whole five minutes"
+        );
+
+        // The op finishes and its final replaces the spinner, as always.
+        c.set(
+            now,
+            Some("create-1".into()),
+            StatusTone::Info,
+            "Agent created.",
+        );
+        assert_eq!(c.snapshot()[0].tone, "info");
+        assert!(
+            !live.is_live("create-1"),
+            "and the final retired the registration, whatever produced it"
+        );
+    }
+
+    #[test]
+    fn a_final_of_any_origin_retires_liveness_through_the_controller() {
+        // The registration is made by the engine at the spawn site, but it is
+        // retired HERE, at the one door every finished operation passes through.
+        // That is what makes liveness general instead of per registry: a plain
+        // keyed `set`, a resolved op's message, and a bare clear all count.
+        let t0 = Instant::now();
+        for (name, finish) in [
+            (
+                "an info final",
+                Box::new(|c: &mut KeyedStatusController| {
+                    c.set(t0, Some("k".into()), StatusTone::Info, "done");
+                }) as Box<dyn Fn(&mut KeyedStatusController)>,
+            ),
+            (
+                "an error final",
+                Box::new(|c: &mut KeyedStatusController| {
+                    c.set(t0, Some("k".into()), StatusTone::Error, "boom");
+                }),
+            ),
+            (
+                "a clear",
+                Box::new(|c: &mut KeyedStatusController| {
+                    c.clear("k", None);
+                }),
+            ),
+        ] {
+            let live = LiveStatusKeys::default();
+            live.register("k");
+            let mut c = KeyedStatusController::emitting_finals().with_live_keys(live.clone());
+            c.set(t0, Some("k".into()), StatusTone::Busy, "working");
+            assert!(live.is_live("k"), "{name}: a busy leaves it registered");
+            finish(&mut c);
+            assert!(!live.is_live("k"), "{name} must retire the registration");
+        }
+    }
+
+    #[test]
+    fn a_progress_re_emit_leaves_the_operation_registered() {
+        // A `HandlerStatusOp` re-emits a busy on its own key as the work moves
+        // on ("Creating worktree…" then "Launching session…"). That is not a
+        // final and must not retire anything.
+        let t0 = Instant::now();
+        let live = LiveStatusKeys::default();
+        live.register("k");
+        let mut c = KeyedStatusController::emitting_finals().with_live_keys(live.clone());
+        c.set(t0, Some("k".into()), StatusTone::Busy, "Creating worktree…");
+        c.set(t0, Some("k".into()), StatusTone::Busy, "Launching session…");
+        assert!(live.is_live("k"));
+    }
+
+    #[test]
+    fn a_leaked_registration_cannot_hold_a_spinner_forever() {
+        // Belt and braces for the case liveness itself is wrong: something
+        // registered a key and no final ever came. The spinner is not immortal;
+        // past the ceiling it is replaced by a warning that says what is known
+        // (nothing has been heard) rather than claiming a timeout, and names the
+        // log.
+        let t0 = Instant::now();
+        let live = LiveStatusKeys::default();
+        live.register("leaked");
+        let mut c = KeyedStatusController::emitting_finals().with_live_keys(live.clone());
+        c.set(t0, Some("leaked".into()), StatusTone::Busy, "Pulling…");
+
+        // Just under the ceiling it is still a spinner, however many heartbeats
+        // have gone by.
+        let mut now = t0;
+        while now.duration_since(t0) < BUSY_LIVE_CEILING - BUSY_TIMEOUT {
+            now += BUSY_TIMEOUT;
+            let _ = c.tick(now, BUSY_TIMEOUT);
+        }
+        assert_eq!(c.snapshot()[0].tone, "busy", "{:?}", c.snapshot());
+
+        let changes = c.tick(t0 + BUSY_LIVE_CEILING, BUSY_TIMEOUT);
+        assert_eq!(changes.upgraded.len(), 1, "got {:?}", changes.upgraded);
+        assert_eq!(changes.upgraded[0].tone, "warning");
+        assert!(
+            changes.upgraded[0].message.contains("30 minutes"),
+            "the warning must say how long it waited, got {:?}",
+            changes.upgraded[0].message
+        );
+        assert!(
+            changes.upgraded[0].message.contains("dux.log"),
+            "and where to look, got {:?}",
+            changes.upgraded[0].message
+        );
+        assert!(changes.refreshed.is_empty());
+        assert!(
+            !live.is_live("leaked"),
+            "the leaked registration is dropped, or the ceiling fires every tick forever"
+        );
+    }
+
+    #[test]
+    fn a_busy_whose_operation_is_gone_still_times_out() {
+        // The leak guard is why the timeout exists, and it must survive the fix:
+        // an operation that vanished without a final still stops claiming work is
+        // happening.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals();
+        c.set(
+            t0,
+            Some("create-1".into()),
+            StatusTone::Busy,
+            "Creating\u{2026}",
+        );
+        let changes = c.tick(t0 + BUSY_TIMEOUT, BUSY_TIMEOUT);
+        assert_eq!(changes.upgraded.len(), 1, "got {:?}", changes.upgraded);
+        assert_eq!(changes.upgraded[0].tone, "warning");
+        assert_eq!(changes.upgraded[0].message, "timed out — check dux.log");
+        assert!(changes.refreshed.is_empty());
+    }
+
+    #[test]
+    fn a_heartbeat_never_steals_the_status_line_from_a_newer_message() {
+        // `since` orders the TUI's single line. A heartbeat moves only the
+        // timeout clock, so a background operation that has been running for
+        // minutes cannot push aside the status the user just triggered.
+        let t0 = Instant::now();
+        let live = LiveStatusKeys::default();
+        live.register("create-1");
+        let mut c =
+            KeyedStatusController::with_clear_after(Duration::from_secs(600)).with_live_keys(live);
+        c.set(
+            t0,
+            Some("create-1".into()),
+            StatusTone::Busy,
+            "Creating\u{2026}",
+        );
+        c.set(
+            t0 + BUSY_TIMEOUT,
+            Some("push".into()),
+            StatusTone::Busy,
+            "Pushing\u{2026}",
+        );
+
+        let _ = c.tick(t0 + BUSY_TIMEOUT + Duration::from_secs(1), BUSY_TIMEOUT);
+
+        let line = c.most_recent().expect("a status is open");
+        assert_eq!(
+            line.message, "Pushing\u{2026}",
+            "the heartbeat must not reorder the line, got {line:?}"
         );
     }
 

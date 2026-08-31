@@ -906,7 +906,8 @@ impl App {
                     self.set_error(format!("Failed to delete agent: {error:#}"));
                 } else {
                     let op = self.build_delete_status_op(&session_id, busy_message);
-                    self.apply_reaction(EventReaction::Status(op.pending_status()));
+                    let pending = self.engine.begin_status_op(&op);
+                    self.apply_reaction(EventReaction::Status(pending));
                     self.pending_delete_ops.insert(session_id, op);
                 }
             }

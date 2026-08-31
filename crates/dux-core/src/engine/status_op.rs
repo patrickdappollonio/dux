@@ -259,6 +259,86 @@ impl<O> HandlerStatusOp<O> {
     }
 }
 
+impl crate::engine::Engine {
+    /// Whether a keyed status is backed by an operation the engine is still
+    /// waiting on.
+    ///
+    /// This is what stops the status line's busy timeout from calling a slow
+    /// operation stranded, and [`Engine::live_status_keys`] is the one oracle
+    /// for it. The op registries are deliberately NOT consulted: several keyed
+    /// busies have no registry at all (every [`Engine::spawn_status_op`] call,
+    /// and the TUI's own App-level op maps), so an answer assembled from
+    /// registries is an answer that is wrong for whatever it forgot.
+    ///
+    /// [`InFlightKey`](crate::engine::InFlightKey) does not answer it either,
+    /// even where it looks like it could. `InFlightKey::Pull(repo)` really does
+    /// track a pull for its whole run, but its variants exist for mutual
+    /// exclusion between operations of a KIND, so they name no status key:
+    /// `CreateAgent` is a unit variant and could not tell two concurrent
+    /// creates apart, and nothing maps a key back to a variant.
+    pub fn status_op_is_live(&self, key: &str) -> bool {
+        self.live_status_keys.is_live(key)
+    }
+
+    /// Record that an operation is now running behind `key`, so its busy is
+    /// heartbeated rather than called timed out.
+    ///
+    /// Every path that emits a keyed [`StatusTone::Busy`] must call this, or the
+    /// operation gets the old behavior: a false "timed out" warning twenty
+    /// seconds in, however long it is really going to take. Nothing retires it
+    /// here; the surface's controller does that when the final lands.
+    pub fn register_status_key(&self, key: &str) {
+        self.live_status_keys.register(key);
+    }
+
+    /// Drop a registration whose final will never be emitted.
+    ///
+    /// Only for the paths that abandon an operation before it can produce one
+    /// (a worker thread that fails to spawn). An operation that ends normally is
+    /// retired by its final, through the controller.
+    pub fn retire_status_key(&self, key: &str) {
+        self.live_status_keys.retire(key);
+    }
+
+    /// Register an op as running and hand back the pending busy to emit for it.
+    ///
+    /// The pairing is the point: a site goes through here and cannot register
+    /// the operation without also showing it, or show it without registering it.
+    /// Use it wherever a keyed busy is emitted by hand; the two spawn
+    /// primitives already do it for the ops they own.
+    pub fn begin_status_op<O: PendingStatusOp>(&self, op: &O) -> StatusUpdate {
+        self.register_status_key(op.status_key());
+        op.pending_status()
+    }
+}
+
+/// The shared shape of the two op flavours: something with a status key and a
+/// pending busy to show under it. Exists so [`Engine::begin_status_op`] is one
+/// method rather than one per flavour, and so a third flavour has an obvious
+/// place to join.
+pub trait PendingStatusOp {
+    fn status_key(&self) -> &str;
+    fn pending_status(&self) -> StatusUpdate;
+}
+
+impl<O> PendingStatusOp for HandlerStatusOp<O> {
+    fn status_key(&self) -> &str {
+        self.id()
+    }
+    fn pending_status(&self) -> StatusUpdate {
+        HandlerStatusOp::pending_status(self)
+    }
+}
+
+impl<T, E> PendingStatusOp for StatusOp<T, E> {
+    fn status_key(&self) -> &str {
+        self.key()
+    }
+    fn pending_status(&self) -> StatusUpdate {
+        StatusOp::pending_status(self)
+    }
+}
+
 pub struct NeedsFailure<T> {
     key: String,
     pending: String,

@@ -1393,6 +1393,135 @@ mod tests {
     use crate::ids::TabId;
     use crate::statusline::StatusTone;
 
+    /// Feed a status update into a controller the way a surface's reaction
+    /// handler does.
+    fn show(status: &mut crate::statusline::KeyedStatusController, update: &StatusUpdate) {
+        status.set(
+            std::time::Instant::now(),
+            update.key.clone(),
+            update.tone,
+            update.message.clone(),
+        );
+    }
+
+    #[test]
+    fn push_and_pull_keep_their_spinners_while_their_workers_run() {
+        // Neither of these operations has an op registry of its own, so the
+        // first cut of liveness (which enumerated the registries) still called
+        // both of them timed out twenty seconds in, whatever the network was
+        // doing. Registration happens in the two spawn primitives instead, so
+        // both are covered without either dispatch site knowing about it.
+        let (mut engine, tmp) = test_engine();
+        let mut status = crate::statusline::KeyedStatusController::emitting_finals()
+            .with_live_keys(engine.live_status_keys.clone());
+        let t0 = std::time::Instant::now();
+
+        // Push goes through `spawn_status_op`; its busy rides the reaction.
+        let reaction = engine
+            .apply(Command::Push {
+                worktree_path: tmp.path().to_path_buf(),
+            })
+            .expect("apply succeeds");
+        let push_busy = match reaction {
+            EventReaction::Status(s) => s,
+            _ => panic!("expected a pending busy from the push dispatch"),
+        };
+        let push_key = push_busy.key.clone().expect("the push busy is keyed");
+        assert_eq!(push_busy.tone, StatusTone::Busy);
+        show(&mut status, &push_busy);
+
+        // Pull goes through `spawn_command_worker`; its busy rides the worker
+        // channel, posted ahead of anything the worker can send.
+        engine
+            .apply(Command::Pull {
+                repo_path: tmp.path().to_path_buf(),
+                target: PullTarget::Session,
+                busy_message: "Pulling latest changes\u{2026}".to_string(),
+                already_running_message: "A pull is already running.".to_string(),
+            })
+            .expect("apply succeeds");
+        let pull_busy = match engine.worker_rx.try_recv() {
+            Ok(WorkerEvent::CommandWorkerStarted(s)) => s,
+            _ => panic!("expected the pull busy ahead of anything the worker sends"),
+        };
+        let pull_key = pull_busy.key.clone().expect("the pull busy is keyed");
+        show(&mut status, &pull_busy);
+
+        assert!(engine.status_op_is_live(&push_key));
+        assert!(engine.status_op_is_live(&pull_key));
+
+        let changes = c_tick(&mut status, t0);
+        assert!(
+            changes.upgraded.is_empty(),
+            "neither may be called timed out while its worker runs, got {:?}",
+            changes.upgraded
+        );
+        assert_eq!(
+            changes.refreshed.len(),
+            2,
+            "both spinners are re-sent instead, got {:?}",
+            changes.refreshed
+        );
+
+        // Each is retired by its own final, and only its own.
+        show(
+            &mut status,
+            &StatusUpdate::info("Pushed.").with_key(push_key.clone()),
+        );
+        assert!(!engine.status_op_is_live(&push_key));
+        assert!(
+            engine.status_op_is_live(&pull_key),
+            "one final must not retire the other operation"
+        );
+        show(
+            &mut status,
+            &StatusUpdate::error("Pull failed.").with_key(pull_key.clone()),
+        );
+        assert!(!engine.status_op_is_live(&pull_key));
+        assert!(
+            engine.live_status_keys.is_empty(),
+            "and nothing is left registered: {:?}",
+            engine.live_status_keys
+        );
+    }
+
+    fn c_tick(
+        status: &mut crate::statusline::KeyedStatusController,
+        t0: std::time::Instant,
+    ) -> crate::statusline::StatusTickChanges {
+        status.tick(
+            t0 + crate::statusline::BUSY_TIMEOUT + std::time::Duration::from_secs(1),
+            crate::statusline::BUSY_TIMEOUT,
+        )
+    }
+
+    #[test]
+    fn a_worker_that_cannot_be_spawned_takes_its_spinner_and_its_op_with_it() {
+        // The one path that emits a busy and can then never produce a final.
+        // Abandoning the operation is what stops the spinner outliving the
+        // process: the keyed error replaces it on screen, and dropping the
+        // registration stops liveness heartbeating it in the meantime.
+        let (mut engine, _tmp) = test_engine();
+        let op = crate::engine::status_op("Creating a new agent\u{2026}").resolve_in_handler(
+            |_: &crate::engine::CreateLaunchOutcome| crate::engine::Final::clear(),
+        );
+        let op_id = op.id().to_string();
+        let _ = engine.begin_status_op(&op);
+        engine.pending_create_ops.insert(op_id.clone(), op);
+        assert!(engine.status_op_is_live(&op_id));
+
+        engine.abandon_status_op(&op_id);
+
+        assert!(
+            !engine.status_op_is_live(&op_id),
+            "a spinner nothing will ever answer must not be heartbeated"
+        );
+        assert!(
+            engine.pending_create_ops.is_empty(),
+            "and the op it would have resolved is dropped with it"
+        );
+    }
+
     fn session_ids_for(engine: &Engine, project_id: &str) -> Vec<String> {
         engine
             .sessions

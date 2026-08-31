@@ -3413,11 +3413,15 @@ pub(crate) use first_load::{FirstLoadButton, FirstLoadPrompt, NotesFetched};
 /// tomorrow.
 fn boot_status(
     clear_after: Duration,
+    live: dux_core::statusline::LiveStatusKeys,
     orientation: impl Into<String>,
     trap_warning: Option<String>,
     theme_warning: Option<String>,
 ) -> KeyedStatusController {
-    let mut status = KeyedStatusController::with_clear_after(clear_after);
+    // Sharing the engine's live-key set is what lets the status line tell a slow
+    // operation from an abandoned one; without it every busy is timed out on
+    // twenty seconds of silence.
+    let mut status = KeyedStatusController::with_clear_after(clear_after).with_live_keys(live);
     status.set(Instant::now(), None, StatusTone::Info, orientation.into());
     status.pin();
     // The pane-chord trap is a plain warning: it expires like any other, and
@@ -3500,8 +3504,10 @@ impl App {
         // launch in a fresh install's lifetime. On that one launch the welcome
         // modal covers it anyway, and dismissing the modal writes its own
         // status over it.
+        let live_status_keys = dux_core::statusline::LiveStatusKeys::default();
         let status = boot_status(
             Duration::from_secs(config.ui.status_clear_seconds as u64),
+            live_status_keys.clone(),
             initial_status,
             tab_reaches_agent_trap_warning(&bindings, &config),
             theme_warning,
@@ -3584,6 +3590,7 @@ impl App {
             pending_delete_ops_web: HashMap::new(),
             pending_create_ops: HashMap::new(),
             pending_web_launch_ops: HashMap::new(),
+            live_status_keys,
             last_created_op_id: None,
             created_session_by_op: HashMap::new(),
         };
@@ -3793,6 +3800,7 @@ impl App {
             crate::theme::load_or_fallback(&engine.config.ui.theme, &engine.paths);
         let status = boot_status(
             Duration::from_secs(engine.config.ui.status_clear_seconds as u64),
+            engine.live_status_keys.clone(),
             "Web server stopped. Your agents kept running — reconnect to any session to pick up where it left off.",
             tab_reaches_agent_trap_warning(&bindings, &engine.config),
             theme_warning,
@@ -4962,7 +4970,8 @@ impl App {
                     ),
                 },
             );
-            self.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+            let pending = self.engine.begin_status_op(&op);
+            self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
             self.pending_config_reload_op = Some(op);
         }
         Ok(())
@@ -5923,7 +5932,7 @@ impl App {
                     ))
                 });
         let op_key = op.key().to_string();
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
 
         // Clones for the panic path: if the worker thread panics, the
         // synthesised `BranchRenameCompleted` still runs the handler, which
@@ -8818,7 +8827,7 @@ mod pinned_warning_tests {
     #[test]
     fn the_boot_status_holds_the_orientation_hint_past_every_window() {
         let t0 = Instant::now();
-        let mut status = boot_status(WINDOW, "Press ? for help.", None, None);
+        let mut status = boot_status(WINDOW, Default::default(), "Press ? for help.", None, None);
         let _ = status.tick(t0 + WINDOW * 4, dux_core::statusline::BUSY_TIMEOUT);
         assert_eq!(
             status.message(),
@@ -8832,6 +8841,7 @@ mod pinned_warning_tests {
         let t0 = Instant::now();
         let mut status = boot_status(
             WINDOW,
+            Default::default(),
             "Press ? for help.",
             None,
             Some("Theme 'nope' could not be loaded.".to_string()),

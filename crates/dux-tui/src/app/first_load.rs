@@ -834,7 +834,7 @@ impl App {
         self.notes_fetch_explicit_request = Arc::clone(&explicit_waiting);
 
         let op = notes_status_op(purpose, Arc::clone(&explicit_waiting));
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
 
         thread::spawn(move || {
             let result = dux_core::release_notes::load_release_notes(&root, &version);

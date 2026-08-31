@@ -41,7 +41,13 @@
 //      in `components/ui/sonner.test.tsx`, so a sonner upgrade that loosens any
 //      of them fails loudly). A busy toast therefore has no exit of its own, and
 //      if its final never arrives the spinner sits there forever claiming work is
-//      still happening. So the dismissal is scheduled here.
+//      still happening. So the retirement is scheduled here.
+//
+//      It retires the spinner by REPLACING it with a warning, never by taking it
+//      off the screen. A spinner that simply disappears tells the user their
+//      operation is over when nobody knows any such thing, and that is exactly
+//      the report this guard's wording now answers: an agent creation whose
+//      spinner vanished mid-clone and whose agent turned up minutes later.
 
 import { toast } from "sonner"
 
@@ -65,13 +71,16 @@ export const ERROR_DURATION_FACTOR = 4
 /// Hard ceiling for a busy/loading toast.
 ///
 /// A busy toast is normally replaced in place by its keyed final, so this is
-/// not a readability window: it is a leak guard for the case where the final
-/// never arrives (the events socket dropped mid-operation), which is exactly
-/// the stranded spinner the user reported. It must stay comfortably above
-/// `dux_core::statusline::BUSY_TIMEOUT` (20s), after which the engine itself
-/// upgrades a stranded keyed Busy to a Warning and pushes that replacement, so
-/// the guard can never fire while an operation is still live and make the work
-/// look like it stopped.
+/// not a readability window: it is a leak guard for the case where no further
+/// word arrives at all (the events socket dropped mid-operation).
+///
+/// It must stay comfortably above `dux_core::statusline::BUSY_TIMEOUT` (20s),
+/// which is the cadence the engine works to on a key it still holds an
+/// operation for: at the timeout it either upgrades a stranded keyed Busy to a
+/// Warning or, when the operation is genuinely still running, re-sends the busy
+/// on the same key. Either way a live server refreshes this guard long before
+/// it can fire, so the guard firing means the SERVER has gone quiet, never that
+/// the operation finished.
 export const BUSY_TOAST_MAX_MS = 60_000
 
 /// Tones that are a FINAL state. `busy` is excluded on purpose: it is not final,
@@ -202,22 +211,59 @@ export function notifyError(message: string, opts: NotifyOptions = {}): void {
   notify("error", message, opts)
 }
 
+/// Where a spinner's eventual final is expected to come from, which decides
+/// what the leak guard says when it never arrives.
+///
+/// `wire` is an engine status: the outcome rides the events socket, so silence
+/// means dux stopped talking and the log is where the answer is. `local` is a
+/// request this tab made itself: the promise is still pending in this very
+/// browser, so nothing is lost and there is no server-side log entry to send
+/// anyone to. Same guard, two genuinely different facts.
+export type BusyOrigin = "wire" | "local"
+
+/// What a spinner is replaced with when its final never arrives.
+///
+/// Neither wording may claim the operation ended, because nothing here knows
+/// that. Both keep the operation's own words so the user can tell which one
+/// went quiet, and each says what is actually known about its own kind of
+/// silence.
+export function strandedBusyMessage(
+  message: string,
+  origin: BusyOrigin = "wire",
+): string {
+  const seconds = Math.round(BUSY_TOAST_MAX_MS / 1000)
+  if (origin === "local") {
+    return `Still waiting on the server for "${message}" after ${seconds} seconds. The request has not been answered yet; nothing has been lost, and the outcome will replace this as soon as it arrives.`
+  }
+  return `No word from dux about "${message}" for ${seconds} seconds. The operation may still be running, and the connection may simply have dropped. Check dux.log if it never reports back.`
+}
+
 /// Raise (or replace, when `id` repeats) a busy spinner, armed with its leak
 /// guard.
 ///
 /// `id` is required rather than optional: a spinner is a thing that gets
 /// replaced by its final, and both the replacement and the guard need a name to
-/// aim at.
-export function notifyBusy(message: string, opts: { id: string }): void {
+/// aim at. `origin` decides only what the guard SAYS; see [`BusyOrigin`].
+///
+/// NOT sticky, weighed: the guard's warning is a report that a spinner went
+/// quiet, and the operation's real final still replaces it in place whenever it
+/// turns up. Nothing is lost by letting it retire on the warning window, and
+/// pinning one open per stranded spinner is how a flaky connection buries the
+/// screen.
+export function notifyBusy(
+  message: string,
+  opts: { id: string; origin?: BusyOrigin },
+): void {
   if (!message) return
   const duration = statusToastDuration("busy", null)
+  const origin = opts.origin ?? "wire"
   // Whatever was armed for this id is now stale: this call replaces the toast.
   cancelBusyGuard(opts.id)
   busyGuards.set(
     opts.id,
     setTimeout(() => {
       busyGuards.delete(opts.id)
-      toast.dismiss(opts.id)
+      notify("warning", strandedBusyMessage(message, origin), { id: opts.id })
     }, duration),
   )
   toast.loading(message, { id: opts.id, duration })

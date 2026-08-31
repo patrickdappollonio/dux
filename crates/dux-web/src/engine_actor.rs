@@ -2037,7 +2037,12 @@ impl EngineService {
         let spine_check = SpineCheck::new(engine, &pty_input_owners, &workspace_tx);
         Self {
             req_rx,
-            status: StatusEmitter::new(status_tx, status_clear_tx, status_snapshot_tx),
+            status: StatusEmitter::new(
+                status_tx,
+                status_clear_tx,
+                status_snapshot_tx,
+                engine.live_status_keys.clone(),
+            ),
             config_reload_tx,
             spine_change_tx,
             workspace_tx,
@@ -2743,6 +2748,7 @@ impl StatusEmitter {
         tx: broadcast::Sender<WireStatus>,
         clear_tx: broadcast::Sender<Option<String>>,
         snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
+        live: dux_core::statusline::LiveStatusKeys,
     ) -> Self {
         Self {
             tx,
@@ -2754,7 +2760,10 @@ impl StatusEmitter {
             // every reconnect, forever. A `Busy` is live state a late joiner must
             // learn about; a final is an event it legitimately missed. See
             // [`dux_core::statusline::StatusRetention`].
-            controller: KeyedStatusController::emitting_finals(),
+            // Sharing the engine's live-key set is what tells a slow operation
+            // from an abandoned one; without it a spinner is timed out on
+            // twenty seconds of silence however long the work really takes.
+            controller: KeyedStatusController::emitting_finals().with_live_keys(live),
             generations: std::collections::HashMap::new(),
         }
     }
@@ -2806,16 +2815,25 @@ impl StatusEmitter {
     /// snapshot, so skipping on it alone would leave `snapshot_tx` publishing
     /// entries the controller has already dropped, and the stale-replay bug
     /// would survive in the copy the sockets actually read.
+    ///
+    /// A busy whose operation the engine still holds is re-broadcast rather than
+    /// upgraded to a false "timed out" (the controller answers that from the
+    /// live-key set it shares with the engine), and that re-broadcast is also
+    /// what re-arms the browser's own leak guard on the spinner.
     fn tick(&mut self, now: Instant) {
         let changes = self.controller.tick(now, LAUNCH_TIMEOUT);
-        if changes.cleared_keys.is_empty() && changes.upgraded.is_empty() && changes.purged == 0 {
+        if changes.cleared_keys.is_empty()
+            && changes.upgraded.is_empty()
+            && changes.refreshed.is_empty()
+            && changes.purged == 0
+        {
             return;
         }
         let _ = self.snapshot_tx.send(self.controller.snapshot());
         for key in changes.cleared_keys {
             let _ = self.clear_tx.send(key);
         }
-        for up in changes.upgraded {
+        for up in changes.upgraded.into_iter().chain(changes.refreshed) {
             let _ = self.tx.send(WireStatus {
                 key: up.key,
                 tone: up.tone,
@@ -4340,7 +4358,7 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx);
+        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
         let (tx, rx) = oneshot::channel();
         handle_subscribe(
             &mut engine,
@@ -4448,7 +4466,7 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx);
+        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
         let (tx, rx) = oneshot::channel();
         handle_subscribe(
             &mut engine,
@@ -4985,6 +5003,49 @@ mod tests {
         );
         assert_eq!(snap[0].key.as_deref(), Some(key));
         assert_eq!(snap[0].tone, "busy");
+    }
+
+    #[test]
+    fn emitter_tick_rebroadcasts_a_busy_whose_operation_is_still_running() {
+        // The spinner survives past the busy timeout AND is re-sent on the wire.
+        // The re-send is the load-bearing half: the browser holds its own leak
+        // guard on every spinner, and another frame on the key is the only thing
+        // that re-arms it. Keeping the entry alive here while saying nothing
+        // would just move the silent disappearance into the browser.
+        let (tx, mut rx) = broadcast::channel::<WireStatus>(16);
+        let (clear_tx, _crx) = broadcast::channel::<Option<String>>(16);
+        let (snap_tx, snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
+        // The engine registered the create op when it started the clone.
+        let live = dux_core::statusline::LiveStatusKeys::default();
+        live.register("create-1");
+        let mut e = StatusEmitter {
+            tx,
+            clear_tx,
+            snapshot_tx: snap_tx,
+            controller: KeyedStatusController::emitting_finals().with_live_keys(live.clone()),
+            generations: std::collections::HashMap::new(),
+        };
+        let _ = e.send(WireStatus::keyed("create-1", "busy", "Pulling\u{2026}"));
+        let _ = rx.try_recv();
+
+        let past_timeout = Instant::now() + LAUNCH_TIMEOUT + Duration::from_secs(1);
+        e.tick(past_timeout);
+
+        let snap = snap_rx.borrow().clone();
+        assert_eq!(snap.len(), 1, "{snap:?}");
+        assert_eq!(
+            snap[0].tone, "busy",
+            "a running operation keeps its spinner: {snap:?}"
+        );
+        let refreshed = rx.try_recv().expect("the busy must be re-broadcast");
+        assert_eq!(refreshed.tone, "busy");
+        assert_eq!(refreshed.key.as_deref(), Some("create-1"));
+        assert_eq!(refreshed.message, "Pulling\u{2026}");
+
+        // And once the operation is gone, the leak guard still fires.
+        live.retire("create-1");
+        e.tick(past_timeout + LAUNCH_TIMEOUT * 2);
+        assert_eq!(snap_rx.borrow()[0].tone, "warning");
     }
 
     #[test]
@@ -6124,7 +6185,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let mut status = StatusEmitter::new(tx, clear_tx, snapshot_tx);
+        let mut status = StatusEmitter::new(tx, clear_tx, snapshot_tx, Default::default());
         let (config_reload_tx, _config_rx) = broadcast::channel(8);
         let mut disk_ahead = false;
         let owners = crate::pty_owners::PtySizeOwners::default();

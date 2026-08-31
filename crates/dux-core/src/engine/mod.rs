@@ -578,6 +578,21 @@ pub struct Engine {
     /// TUI, which keeps its own op in the App layer.
     pub pending_web_launch_ops: HashMap<String, HandlerStatusOp<LaunchOutcome>>,
 
+    /// The status keys of operations that are still running, shared by handle
+    /// with whichever surface's [`crate::statusline::KeyedStatusController`] is
+    /// rendering them.
+    ///
+    /// This is the whole answer to "has this spinner been abandoned, or is the
+    /// work merely slow": the engine registers a key when it starts the
+    /// operation behind it, and the controller retires the key when a final
+    /// lands on it. It deliberately does NOT enumerate the op registries above.
+    /// They are not the only things that emit a keyed busy (a bare
+    /// `spawn_status_op` and the TUI's own App-level registries do too), and an
+    /// enumeration is a list a future registry gets left off.
+    ///
+    /// See [`crate::statusline::LiveStatusKeys`] for how each half fails safely.
+    pub live_status_keys: crate::statusline::LiveStatusKeys,
+
     /// The opaque create-op id minted by the MOST RECENT synchronous
     /// `DispatchCreateAgentRequest` dispatch within the current `apply_wire`
     /// call, surfaced to the caller as [`crate::wire::WireCommandOutcome::created_op_id`].
@@ -3799,7 +3814,7 @@ impl Engine {
         })
         .with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
-        let pending = op.pending_status();
+        let pending = self.begin_status_op(&op);
         self.pending_pr_attach_ops.insert(op_id.clone(), op);
 
         let worker_tx = self.worker_tx.clone();

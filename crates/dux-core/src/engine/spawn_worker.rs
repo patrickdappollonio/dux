@@ -91,11 +91,21 @@ impl Engine {
         //    `process_worker_event` sees busy → completion regardless of how
         //    fast the worker runs.
         let worker_tx = self.worker_tx.clone();
+        let mut busy_key = None;
         if let Some(mut busy) = spec.busy_status {
             // Stamp the command origin so a web operation's busy reaches only the
             // originating connection. `current_origin` is `All` for the TUI and
             // every test, so behaviour is unchanged there.
             busy.scope = self.current_origin.clone();
+            // A keyed busy from here is an operation this engine is waiting on,
+            // so record it as live: the status controller then heartbeats it
+            // instead of calling it timed out twenty seconds in. This one line
+            // covers push, pull, agent creation and every other keyed caller of
+            // the primitive, none of which has to remember.
+            if let Some(key) = busy.key.clone() {
+                self.register_status_key(&key);
+                busy_key = Some(key);
+            }
             let _ = worker_tx.send(WorkerEvent::CommandWorkerStarted(busy));
         }
 
@@ -144,9 +154,40 @@ impl Engine {
                 }
                 let msg = format!("Could not start background worker '{label}': {err}");
                 crate::logger::error(&msg);
-                EventReaction::Status(StatusUpdate::error(msg))
+                let Some(key) = busy_key else {
+                    return EventReaction::Status(StatusUpdate::error(msg));
+                };
+                // The busy went out on the channel a moment ago and no worker
+                // will ever answer it, so the error has to land ON ITS KEY. An
+                // unkeyed error leaves the spinner spinning next to it for the
+                // life of the process, which is the one thing a busy must never
+                // do. Abandoning the op is what stops liveness heartbeating
+                // that spinner past the timeout as well.
+                self.abandon_status_op(&key);
+                EventReaction::Status(StatusUpdate::error(msg).with_key(key))
             }
         }
+    }
+
+    /// Give up on the operation behind a status key: retire its liveness
+    /// registration and drop any pending op stashed under it.
+    ///
+    /// For the paths that abandon an operation before it can produce a final. An
+    /// operation that ends normally needs none of this: its final retires
+    /// liveness through the status controller and its handler consumes the op.
+    ///
+    /// The registry sweep covers the maps keyed BY the status key. The ones
+    /// keyed by session id are left alone deliberately: a key cannot address
+    /// them, and being incomplete here costs one leaked op struct rather than
+    /// anything the user can see, since the keyed final is what clears the
+    /// screen.
+    pub fn abandon_status_op(&mut self, key: &str) {
+        self.retire_status_key(key);
+        self.pending_create_ops.remove(key);
+        self.pending_web_checkout_ops.remove(key);
+        self.pending_web_add_project_ops.remove(key);
+        self.pending_web_pr_lookup_ops.remove(key);
+        self.pending_pr_attach_ops.remove(key);
     }
 
     /// Dispatch a keyed tri-state operation: emit its pending Busy, run `work`
@@ -176,6 +217,11 @@ impl Engine {
         let key_for_spawn_fail = op.key().to_string();
         let key_for_panic = key_for_spawn_fail.clone();
         let tx = self.worker_tx.clone();
+        // Every `spawn_status_op` is an operation the engine is waiting on, so
+        // its spinner is heartbeated rather than timed out. These ops have no
+        // registry of their own, which is exactly why liveness cannot be
+        // answered by enumerating registries.
+        self.register_status_key(&key_for_spawn_fail);
 
         let spawn_result = thread::Builder::new()
             .name("dux-status-op".into())
@@ -204,9 +250,11 @@ impl Engine {
             Err(err) => {
                 // Spawn itself failed: the Busy was never emitted (it rides the
                 // returned reaction we are now replacing), so surface a keyed
-                // error instead so nothing strands.
+                // error instead so nothing strands, and take the registration
+                // back with it.
                 let msg = format!("Could not start background worker: {err}");
                 crate::logger::error(&msg);
+                self.retire_status_key(&key_for_spawn_fail);
                 EventReaction::Status(StatusUpdate::error(msg).with_key(key_for_spawn_fail))
             }
         }

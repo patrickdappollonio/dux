@@ -5387,6 +5387,65 @@ mod tests {
     // ── CreateAgentFailed ────────────────────────────────────────────────
 
     #[test]
+    fn a_started_operation_is_live_until_its_final_reaches_the_status_controller() {
+        // The two halves of liveness, end to end on one operation: the engine
+        // registers the key where it starts the work, and the SURFACE's
+        // controller retires it when the final lands. Nothing in between reads a
+        // registry, which is what lets an operation with no registry at all use
+        // the same mechanism.
+        let (mut engine, _tmp) = test_engine();
+        let mut status = crate::statusline::KeyedStatusController::emitting_finals()
+            .with_live_keys(engine.live_status_keys.clone());
+        let op = crate::engine::status_op("Creating a new agent\u{2026}").resolve_in_handler(
+            |o: &crate::engine::CreateLaunchOutcome| match o {
+                crate::engine::CreateLaunchOutcome::Failed { message } => {
+                    crate::engine::Final::error(message.clone())
+                }
+                _ => crate::engine::Final::clear(),
+            },
+        );
+        let op_id = op.id().to_string();
+        assert!(
+            !engine.status_op_is_live(&op_id),
+            "nothing is registered yet"
+        );
+
+        let pending = engine.begin_status_op(&op);
+        engine.pending_create_ops.insert(op_id.clone(), op);
+        assert!(engine.status_op_is_live(&op_id));
+        assert!(
+            !engine.status_op_is_live("some-other-op"),
+            "liveness is per key, never a blanket yes"
+        );
+        status.set(
+            std::time::Instant::now(),
+            pending.key.clone(),
+            pending.tone,
+            pending.message.clone(),
+        );
+        assert!(
+            engine.status_op_is_live(&op_id),
+            "showing the busy must not retire it"
+        );
+
+        let reaction = engine.process_worker_event(WorkerEvent::CreateAgentFailed {
+            status_op_id: op_id.clone(),
+            message: "nope".to_string(),
+        });
+        let final_status = unwrap_status(reaction);
+        status.set(
+            std::time::Instant::now(),
+            final_status.key.clone(),
+            final_status.tone,
+            final_status.message.clone(),
+        );
+        assert!(
+            !engine.status_op_is_live(&op_id),
+            "the final retired the key, so nothing keeps the spinner alive"
+        );
+    }
+
+    #[test]
     fn create_agent_failed_flips_inflight_and_resolves_the_op_error() {
         let (mut engine, _tmp) = test_engine();
         engine.mark_in_flight(InFlightKey::CreateAgent);

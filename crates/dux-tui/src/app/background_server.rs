@@ -257,7 +257,8 @@ impl App {
                     .to_string(),
             ),
         });
-        self.apply_reaction(EventReaction::Status(op.pending_status()));
+        let pending = self.engine.begin_status_op(&op);
+        self.apply_reaction(EventReaction::Status(pending));
         self.pending_background_server_op = Some(op);
         self.background_server_preflight_pending = true;
         self.background_server_wanted = true;
@@ -549,7 +550,8 @@ impl App {
                 dux_core::engine::Final::info(report.message)
             }
         });
-        self.apply_reaction(EventReaction::Status(op.pending_status()));
+        let pending = self.engine.begin_status_op(&op);
+        self.apply_reaction(EventReaction::Status(pending));
         self.pending_tailscale_mode_op = Some(op);
         if let Some(companion) = self.companion.as_mut() {
             companion.set_tailscale_mode(&self.engine, mode);

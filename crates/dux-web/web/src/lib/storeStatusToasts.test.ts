@@ -336,9 +336,16 @@ describe("engine status → sonner toast routing", () => {
 
       status(mod, "pull", "busy", "Pulling…")
       vi.advanceTimersByTime(BUSY_TOAST_MAX_MS - 1)
-      expect(toast.dismiss).not.toHaveBeenCalled()
+      expect(toast.warning).not.toHaveBeenCalled()
       vi.advanceTimersByTime(1)
-      expect(toast.dismiss).toHaveBeenCalledWith("pull")
+      // Replaced by a warning on the same key, never dismissed: a spinner that
+      // simply leaves the screen reads as "the operation finished", which is
+      // the one thing the guard does not know.
+      expect(toast.dismiss).not.toHaveBeenCalled()
+      expect(toast.warning).toHaveBeenCalledWith(
+        expect.stringContaining("Pulling…"),
+        expect.objectContaining({ id: "pull" }),
+      )
     })
 
     it("cancels the guard once the keyed final replaces the spinner", async () => {
@@ -378,9 +385,12 @@ describe("engine status → sonner toast routing", () => {
       vi.advanceTimersByTime(BUSY_TOAST_MAX_MS - 1000)
       status(mod, "pull", "busy", "Pulling, still…")
       vi.advanceTimersByTime(1000)
-      expect(toast.dismiss).not.toHaveBeenCalled()
+      expect(toast.warning).not.toHaveBeenCalled()
       vi.advanceTimersByTime(BUSY_TOAST_MAX_MS - 1000)
-      expect(toast.dismiss).toHaveBeenCalledWith("pull")
+      expect(toast.warning).toHaveBeenCalledWith(
+        expect.stringContaining("Pulling, still…"),
+        expect.objectContaining({ id: "pull" }),
+      )
     })
 
     it("guards the anonymous busy slot too", async () => {
@@ -390,7 +400,10 @@ describe("engine status → sonner toast routing", () => {
 
       status(mod, null, "busy", "Uploading…")
       vi.advanceTimersByTime(BUSY_TOAST_MAX_MS)
-      expect(toast.dismiss).toHaveBeenCalledWith("dux-anon-status")
+      expect(toast.warning).toHaveBeenCalledWith(
+        expect.stringContaining("Uploading…"),
+        expect.objectContaining({ id: "dux-anon-status" }),
+      )
     })
 
     it("arms no guard for a final tone, which sonner already retires on its own", async () => {

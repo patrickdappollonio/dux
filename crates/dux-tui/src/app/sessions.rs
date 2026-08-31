@@ -486,7 +486,7 @@ impl App {
                 )),
                 WorktreesFinalOutcome::Dismissed => dux_core::engine::Final::clear(),
             });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let op_id = op.id().to_string();
         self.pending_worktree_ops.insert(op_id.clone(), op);
         self.engine
@@ -663,7 +663,7 @@ impl App {
                         dux_core::engine::Final::clear()
                     }
                 });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let op_id = op.id().to_string();
         self.pending_pr_lookup_ops.insert(op_id.clone(), op);
         // The op id IS the generation stamp. It is already unique per
@@ -813,7 +813,7 @@ impl App {
                 dux_core::engine::Final::clear()
             }
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let op_id = op.id().to_string();
         self.pending_pr_lookup_ops.insert(op_id.clone(), op);
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
@@ -947,7 +947,7 @@ impl App {
                 .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
                     TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
                 });
-                let pending = op.pending_status();
+                let pending = self.engine.begin_status_op(&op);
                 let id = op.id().to_string();
                 self.pending_checkout_inspect_ops.insert(id.clone(), op);
                 self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
@@ -1057,7 +1057,7 @@ impl App {
         .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
             TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let status_op_id = op.id().to_string();
         self.pending_checkout_inspect_ops
             .insert(status_op_id.clone(), op);
@@ -1123,7 +1123,7 @@ impl App {
         .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
             TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let status_op_id = op.id().to_string();
         self.pending_checkout_inspect_ops
             .insert(status_op_id.clone(), op);
@@ -1163,7 +1163,7 @@ impl App {
         .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
             TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let status_op_id = op.id().to_string();
         self.pending_checkout_inspect_ops
             .insert(status_op_id.clone(), op);
@@ -1222,7 +1222,7 @@ impl App {
         .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
             TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let status_op_id = op.id().to_string();
         self.pending_checkout_inspect_ops
             .insert(status_op_id.clone(), op);
@@ -2609,7 +2609,7 @@ impl App {
                 "Provider preference saved to the database for \"{config_fail_name}\", but config.toml could not be updated: {err}"
             )),
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let op_id = op.id().to_string();
         self.pending_persist_ops.insert(op_id.clone(), op);
         let reaction = self.engine.apply(Command::PersistProject {
@@ -2656,7 +2656,7 @@ impl App {
                 "Auto-reopen preference saved to the database for \"{config_fail_name}\", but config.toml could not be updated: {err}"
             )),
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let op_id = op.id().to_string();
         self.pending_persist_ops.insert(op_id.clone(), op);
         let reaction = self.engine.apply(Command::PersistProject {
@@ -2756,7 +2756,7 @@ impl App {
                 "Startup command saved to the database for \"{config_fail_name}\", but config.toml could not be updated: {err}"
             )),
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let op_id = op.id().to_string();
         self.pending_persist_ops.insert(op_id.clone(), op);
         let reaction = self.engine.apply(Command::PersistProject {
@@ -2890,7 +2890,7 @@ impl App {
                 "Environment variables saved to the database for \"{config_fail_name}\", but config.toml could not be updated: {err}"
             )),
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let op_id = op.id().to_string();
         self.pending_persist_ops.insert(op_id.clone(), op);
         let reaction = self.engine.apply(Command::PersistProject {
@@ -2975,7 +2975,7 @@ impl App {
                 "Startup command failed for project \"{failure_name}\": {err}. Run read-startup-command-logs for details.",
             ))
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         std::thread::spawn(move || {
             let result = crate::startup::run_startup_command(
                 &paths,
@@ -3259,7 +3259,7 @@ impl App {
                 "Could not read startup command logs for {failure_label}: {err}"
             ))
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         std::thread::spawn(move || {
             let result = crate::startup::load_logs_for_scope(&paths, scope)
                 .map_err(|err| format!("{err:#}"));
@@ -3297,7 +3297,7 @@ impl App {
                         "Could not read startup command log {failure_name}: {err}"
                     ))
                 });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let read_path = path.clone();
         std::thread::spawn(move || {
             let result = crate::startup::read_log(&read_path).map_err(|err| format!("{err:#}"));
@@ -3450,7 +3450,7 @@ impl App {
                     "Project was removed from the database, but config.toml could not be updated: {err}"
                 )),
             });
-            let pending = op.pending_status();
+            let pending = self.engine.begin_status_op(&op);
             let op_id = op.id().to_string();
             self.pending_persist_ops.insert(op_id.clone(), op);
             let reaction = self.engine.apply(Command::PersistProject {
@@ -3572,9 +3572,8 @@ impl App {
                     // (resolved in the shared launch-ready/failed view handlers)
                     // replaces exactly this spinner instead of most-recent-wins.
                     let op = self.build_reconnect_status_op(busy_message);
-                    self.apply_reaction(dux_core::engine::EventReaction::Status(
-                        op.pending_status(),
-                    ));
+                    let pending = self.engine.begin_status_op(&op);
+                    self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
                     self.pending_reconnect_ops
                         .insert(session_id.to_string(), op);
                 }
@@ -4265,7 +4264,8 @@ impl App {
             TuiServerFlipOutcome::Warned(text) => dux_core::engine::Final::warning(text.clone()),
             TuiServerFlipOutcome::Failed(text) => dux_core::engine::Final::error(text.clone()),
         });
-        self.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+        let pending = self.engine.begin_status_op(&op);
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         self.pending_server_flip_op = Some(op);
         self.server_flip_preflight_pending = true;
         let port = self.engine.config.server.port;
@@ -4451,9 +4451,11 @@ mod tests {
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),
+            live_status_keys: Default::default(),
             last_created_op_id: None,
             created_session_by_op: std::collections::HashMap::new(),
         };
+        let app_live_status_keys = engine.live_status_keys.clone();
         let mut app = App {
             engine,
             bindings,
@@ -4497,7 +4499,8 @@ mod tests {
             startup_log_viewer: None,
             status: crate::statusline::KeyedStatusController::with_clear_after(
                 std::time::Duration::ZERO,
-            ),
+            )
+            .with_live_keys(app_live_status_keys),
             prompt: PromptState::None,
             input_target: InputTarget::None,
             session_surface: crate::model::SessionSurface::Agent,
@@ -4745,6 +4748,7 @@ mod tests {
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),
+            live_status_keys: Default::default(),
             last_created_op_id: None,
             created_session_by_op: std::collections::HashMap::new(),
         }

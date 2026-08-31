@@ -30,6 +30,7 @@ const {
   notifyWarning,
   setStatusClearSeconds,
   statusToastDuration,
+  strandedBusyMessage,
 } = await import("./notify")
 
 beforeEach(() => {
@@ -274,9 +275,78 @@ describe("the busy leak guard", () => {
   it("retires a spinner whose final never arrives", () => {
     notifyBusy("Saving shot.png", { id: "drop-1" })
     vi.advanceTimersByTime(BUSY_TOAST_MAX_MS - 1)
-    expect(toast.dismiss).not.toHaveBeenCalled()
+    expect(toast.warning).not.toHaveBeenCalled()
     vi.advanceTimersByTime(1)
-    expect(toast.dismiss).toHaveBeenCalledWith("drop-1")
+    expect(toast.warning).toHaveBeenCalledWith(
+      strandedBusyMessage("Saving shot.png"),
+      { id: "drop-1", duration: 18000 },
+    )
+  })
+
+  // The bug: an agent created over a slow network showed "Pulling latest
+  // changes..." and then, with the clone still running, the spinner left the
+  // screen on its own. Minutes later the agent appeared. A spinner going away
+  // is the one thing that reads as "this is over", so it may never be the way a
+  // guard fires: the guard knows the SERVER went quiet and nothing more, and it
+  // has to say that instead of implying the work stopped.
+  it("never takes a spinner off the screen silently, because a silent exit reads as done", () => {
+    notifyBusy("Pulling latest changes...", { id: "create-1" })
+    vi.advanceTimersByTime(BUSY_TOAST_MAX_MS * 3)
+
+    expect(toast.dismiss).not.toHaveBeenCalled()
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+    const [text] = vi.mocked(toast.warning).mock.calls[0]
+    expect(text).toContain("Pulling latest changes...")
+    expect(text).toContain("may still be running")
+  })
+
+  // A REGRESSION GUARD on the re-send contract rather than a failing-first
+  // test: re-arming on a replacing spinner already worked. It is pinned because
+  // the other half of the fix depends on it. While the engine still holds the
+  // operation it re-sends the busy on its key every 20s instead of calling it
+  // timed out, and every one of those frames lands here; the moment one stops
+  // re-arming the guard, the server's honesty is undone by this timer.
+  it("stays armed for as long as the server keeps re-sending the busy", () => {
+    notifyBusy("Pulling latest changes...", { id: "create-1" })
+    // Five minutes of clone, with the engine's 20s refresh arriving throughout.
+    for (let elapsed = 0; elapsed < 300_000; elapsed += 20_000) {
+      vi.advanceTimersByTime(20_000)
+      notifyBusy("Pulling latest changes...", { id: "create-1" })
+    }
+    expect(toast.warning).not.toHaveBeenCalled()
+    expect(toast.dismiss).not.toHaveBeenCalled()
+
+    // And the final still replaces the spinner in place.
+    notifySuccess("Agent created.", { id: "create-1" })
+    vi.advanceTimersByTime(BUSY_TOAST_MAX_MS * 2)
+    expect(toast.warning).not.toHaveBeenCalled()
+    expect(toast.dismiss).not.toHaveBeenCalled()
+  })
+
+  // A spinner for a fetch this tab is awaiting itself is a different fact from
+  // a spinner waiting on the events socket, so it may not borrow the wire's
+  // wording: there is no server-side log entry behind it, and nothing has been
+  // lost while the promise is still pending.
+  it("says the request is still in flight for a browser-local spinner", () => {
+    notifyBusy("Uploading shot.png", { id: "drop-1", origin: "local" })
+    vi.advanceTimersByTime(BUSY_TOAST_MAX_MS)
+
+    expect(toast.dismiss).not.toHaveBeenCalled()
+    const [text] = vi.mocked(toast.warning).mock.calls[0]
+    expect(text).toContain("Uploading shot.png")
+    expect(text).toContain("Still waiting on the server")
+    expect(text).not.toContain("dux.log")
+    expect(text).not.toContain("connection may simply have dropped")
+  })
+
+  it("keeps the wire wording for an engine status, which is the default", () => {
+    notifyBusy("Pulling latest changes...", { id: "create-1" })
+    vi.advanceTimersByTime(BUSY_TOAST_MAX_MS)
+
+    const [text] = vi.mocked(toast.warning).mock.calls[0]
+    expect(text).toBe(strandedBusyMessage("Pulling latest changes...", "wire"))
+    expect(text).toContain("dux.log")
+    expect(strandedBusyMessage("x")).toBe(strandedBusyMessage("x", "wire"))
   })
 
   // The consequence is concrete and is the reason the cancellation exists: with
@@ -295,9 +365,10 @@ describe("the busy leak guard", () => {
       duration: Infinity,
     })
 
-    // Well past the guard's window. Nothing may dismiss the final.
+    // Well past the guard's window. Nothing may replace or dismiss the final.
     vi.advanceTimersByTime(BUSY_TOAST_MAX_MS * 2)
     expect(toast.dismiss).not.toHaveBeenCalled()
+    expect(toast.warning).not.toHaveBeenCalled()
   })
 
   it("is disarmed for an ordinary auto-clearing report too", () => {
@@ -307,6 +378,7 @@ describe("the busy leak guard", () => {
 
     vi.advanceTimersByTime(BUSY_TOAST_MAX_MS * 2)
     expect(toast.dismiss).not.toHaveBeenCalled()
+    expect(toast.warning).not.toHaveBeenCalled()
   })
 
   it("leaves a spinner on another id guarded, so the cancellation is never a blanket clear", () => {
@@ -315,19 +387,26 @@ describe("the busy leak guard", () => {
     notifySuccess("Saved a.png.", { id: "drop-a" })
 
     vi.advanceTimersByTime(BUSY_TOAST_MAX_MS * 2)
-    expect(toast.dismiss).toHaveBeenCalledTimes(1)
-    expect(toast.dismiss).toHaveBeenCalledWith("drop-b")
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+    expect(toast.warning).toHaveBeenCalledWith(
+      strandedBusyMessage("Saving b.png"),
+      { id: "drop-b", duration: 18000 },
+    )
   })
 
-  it("re-arms on a replacing spinner, so only the newest one is ever dismissed", () => {
+  it("re-arms on a replacing spinner, so only the newest one is ever reported", () => {
     notifyBusy("step one", { id: "s" })
     vi.advanceTimersByTime(BUSY_TOAST_MAX_MS - 5)
     notifyBusy("step two", { id: "s" })
     vi.advanceTimersByTime(10)
     // The first guard would have fired by now had it not been disarmed.
-    expect(toast.dismiss).not.toHaveBeenCalled()
+    expect(toast.warning).not.toHaveBeenCalled()
     vi.advanceTimersByTime(BUSY_TOAST_MAX_MS)
-    expect(toast.dismiss).toHaveBeenCalledTimes(1)
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+    expect(toast.warning).toHaveBeenCalledWith(
+      strandedBusyMessage("step two"),
+      { id: "s", duration: 18000 },
+    )
   })
 
   it("disarms the guard when the caller dismisses the notification itself", () => {

@@ -59,7 +59,7 @@ impl App {
             )),
             WorktreesFinalOutcome::Dismissed => dux_core::engine::Final::clear(),
         });
-        let pending = op.pending_status();
+        let pending = self.engine.begin_status_op(&op);
         let op_id = op.id().to_string();
         self.pending_worktree_ops.insert(op_id.clone(), op);
         self.engine
@@ -203,6 +203,51 @@ mod tests {
     use dux_core::worktree_manager::ManagedWorktree;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;
+
+    #[test]
+    fn the_listing_spinner_survives_the_busy_timeout_and_is_retired_by_its_final() {
+        // The TUI keeps several op registries of its own, in the App rather than
+        // the engine, and the first cut of liveness could not see any of them:
+        // this spinner was replaced by a false "timed out" twenty seconds in.
+        // The App registers into the ENGINE's live-key set, which is the same set
+        // the App's status controller retires from, so there is one mechanism
+        // rather than one per layer.
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        app.begin_manage_worktrees_for_project(project)
+            .expect("opening the manager succeeds");
+
+        let op_id = app
+            .pending_worktree_ops
+            .keys()
+            .next()
+            .cloned()
+            .expect("the listing op is registered");
+        assert!(app.engine.status_op_is_live(&op_id));
+
+        let t0 = std::time::Instant::now();
+        let changes = app.status.tick(
+            t0 + dux_core::statusline::BUSY_TIMEOUT * 2,
+            dux_core::statusline::BUSY_TIMEOUT,
+        );
+        assert!(
+            changes.upgraded.is_empty(),
+            "a listing that is still running must not be reported as timed out"
+        );
+        assert_eq!(app.status.snapshot()[0].tone, "busy");
+
+        // The op resolves the way the completion handler resolves it.
+        let op = app
+            .pending_worktree_ops
+            .remove(&op_id)
+            .expect("the op is still there");
+        let resolved = op.resolve(&WorktreesFinalOutcome::Loaded);
+        app.apply_reaction(resolved.into_reaction());
+        assert!(
+            !app.engine.status_op_is_live(&op_id),
+            "and its final retires the registration"
+        );
+    }
 
     fn row(name: &str, branch: Option<&str>, agent: Option<&str>, dirty: bool) -> ManagedWorktree {
         ManagedWorktree {

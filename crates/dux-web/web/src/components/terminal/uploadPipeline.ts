@@ -243,7 +243,9 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
         files.length === 1
           ? `Uploading ${file.name}...`
           : `Uploading ${file.name} (${i + 1} of ${files.length})...`,
-        { id: toastId },
+        // A fetch this tab is awaiting itself, not an engine status: if the
+        // guard fires, the request is still in flight in this browser.
+        { id: toastId, origin: "local" },
       )
       let saved
       try {
