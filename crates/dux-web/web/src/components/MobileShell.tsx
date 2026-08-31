@@ -539,11 +539,6 @@ function TerminalScreen() {
     selectedTarget.kind === "agent"
       ? tabs.find((tab) => tab.id === selectedTarget.tabId)
       : undefined
-  // Which tab holds the slot as far as this client knows: a close this client
-  // just performed moved it, and the spine has not caught up. Both the card rule
-  // and the pane's own slot-ness question read the same answer, so a promoted
-  // tab is never briefly treated as an extra one (which would cover it with the
-  // Start-session card nobody asked for).
   const slotTabId = slotTabIdOf(session.id, session, pendingSlotTab)
   const changeCount =
     changes.sessionId === selectedSessionId && changes.phase === "loaded"

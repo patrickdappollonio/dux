@@ -66,7 +66,11 @@ export interface PendingSlotTab {
 // just performed wins over the spine, which has not caught up with the close
 // yet; otherwise the spine answers. `undefined` when neither knows the session.
 // Every reader of the slot goes through here so the overlay cannot apply to
-// some questions and not others.
+// some questions and not others: were the card rule and a pane's own slot-ness
+// question to disagree, a promoted tab would briefly read as an extra one and
+// get covered by the Start-session card nobody asked for. A target with no
+// owning session has no slot to ask about, which is what an empty key resolves
+// to.
 export function slotTabIdOf(
   sessionId: string,
   session: SessionView | undefined,

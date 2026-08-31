@@ -199,12 +199,6 @@ export function TerminalArea() {
     selectedTarget.kind === "agent"
       ? tabs.find((t) => t.id === selectedTarget.tabId)
       : undefined
-  // Which tab holds the slot as far as this client knows: a close this client
-  // just performed moved it, and the spine has not caught up. Both the card rule
-  // and the pane's own slot-ness question read the same answer, so a promoted
-  // tab is never briefly treated as an extra one (which would cover it with the
-  // Start-session card nobody asked for). A terminal with no owning session has
-  // no slot to ask about, which is what the empty key resolves to.
   const slotTabId = slotTabIdOf(ownerSessionId ?? "", session, pendingSlotTab)
   // Whether this tab gets the "Start session" card instead of the pane. The
   // helper owns the whole rule (a dormant extra tab waits; the agent's first tab
