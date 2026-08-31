@@ -188,9 +188,10 @@ export interface SessionView {
    * gates the menu's "Resume PR autodetection" way back. An older server omits
    * it, which reads as false. */
   pr_autodetect_suppressed?: boolean
-  /** The id of this agent's session-slot tab: its first tab, the one the user
-   * cannot close. Read it through `isFirstTab` in `lib/agentTabs.ts` rather than
-   * comparing a tab id against the session id. An older server omits it;
+  /** The id of this agent's session-slot tab: its first tab. Closing it hands
+   * the slot to the next tab in strip order, so this pointer moves; what cannot
+   * be closed is an agent's only tab. Read it through `isFirstTab` in
+   * `lib/agentTabs.ts` rather than comparing a tab id against the session id. An older server omits it;
    * `normalizeWorkspace` fills it with the session id, which is what such a
    * server meant by it. */
   slot_tab_id: string

@@ -583,8 +583,9 @@ pub struct SessionView {
     /// is NO pull request to hang it off: it is what lets a surface offer the
     /// way back.
     pub pr_autodetect_suppressed: bool,
-    /// The id of this agent's **session-slot tab**: its first tab, the one the
-    /// user cannot close. Published so the browser never has to infer slot-ness
+    /// The id of this agent's **session-slot tab**: its first tab. Closing that
+    /// tab hands the slot on, so the pointer moves; what cannot be closed is an
+    /// agent's only tab. Published so the browser never has to infer slot-ness
     /// from the session id (see `AgentSession::slot_tab_id`); every slot-ness
     /// decision in the web client reads this field.
     pub slot_tab_id: String,
@@ -748,9 +749,10 @@ pub struct TerminalView {
 }
 
 /// One provider tab of an agent, projected for the tab strip. `order == 0` is
-/// the **session-slot tab**, the one named by `SessionView::slot_tab_id`, which
-/// is named by the session's stored pointer; it is the one tab a user cannot close. No tab is
-/// privileged for RESUME: that is decided per provider by liveness at launch
+/// the **session-slot tab**, the one named by the session's stored
+/// `SessionView::slot_tab_id` pointer. It is not privileged for CLOSING (closing
+/// it hands the slot to the next tab in strip order) and no tab is privileged
+/// for RESUME: that is decided per provider by liveness at launch
 /// (see `Engine::tab_resume_decision`), not by position.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentTabView {

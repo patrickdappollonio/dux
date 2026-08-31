@@ -203,8 +203,10 @@ export function taskManagerRows(
           // A dormant tab has no process but is still actionable, so it keeps
           // its Stop control. WHICH act that is rides on `nested`, resolved
           // just above through the shared `isFirstTab`: a first tab STOPS the
-          // agent (it cannot be closed); an extra tab is closed. `handleStop`
-          // reads that flag rather than asking the question over again.
+          // agent, an extra tab is closed. A first tab is closable elsewhere,
+          // but a process monitor's Stop ends a process rather than deleting
+          // the row it is showing numbers for. `handleStop` reads that flag
+          // rather than asking the question over again.
           stoppable: true,
           stopLabel: isSlot
             ? `Stop ${label}`

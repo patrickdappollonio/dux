@@ -8,8 +8,9 @@ import type { SelectedTarget } from "./store"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
 
 // The agent's FIRST tab: the session-slot tab, named by the server on
-// `SessionView.slot_tab_id`. It lives as long as the agent does, so it can never
-// be closed. Every slot-ness decision with a session in hand asks this, and
+// `SessionView.slot_tab_id`. Closing it hands the slot to the next tab in strip
+// order, so it is closable like any other; what cannot be closed is an agent's
+// ONLY tab. Every slot-ness decision with a session in hand asks this, and
 // nothing compares a tab id against a session id itself.
 export function isFirstTab(session: SessionView, tabId: string): boolean {
   return tabId === session.slot_tab_id

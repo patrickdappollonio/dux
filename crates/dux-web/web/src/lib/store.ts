@@ -344,15 +344,15 @@ export interface DuxState {
   // The companion terminal id pending close confirmation, or null. Mirrors the
   // TUI, which ALWAYS confirms terminal deletion (the running process is killed).
   deleteTerminalTarget: string | null
-  // The EXTRA tab pending close confirmation, or null. Closing always confirms.
-  // Closing a tab ends it, and closing the agent's last live tab detaches the
-  // agent (which stays in Projects, reopenable). The agent's first tab can never
-  // be a target here: it cannot be closed at all.
+  // The tab pending close confirmation, or null. Closing always confirms.
+  // Closing a tab ends it, closing the tab in the session slot hands the slot
+  // to the next tab in strip order, and closing the agent's last live tab
+  // detaches the agent (which stays in Projects, reopenable).
   closeTabTarget: { sessionId: string; tabId: string } | null
   // The agent pending stop confirmation, or null. Distinct from
   // `closeTabTarget`: stopping ends the agent's first tab's process and leaves
-  // the agent in the list, where closing destroys an extra tab for good. Raised
-  // by the Task Manager's row for an agent's first tab.
+  // the tab and the agent in the list, where closing destroys the tab for good.
+  // Raised by the Task Manager's row for an agent's first tab.
   stopAgentTarget: string | null
   // Session ids with a tab-create request in flight, so the strip's "+" disables
   // until it resolves (a double-click can't spawn two tabs). The per-agent tab

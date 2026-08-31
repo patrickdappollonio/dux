@@ -245,9 +245,10 @@ describe("TaskManagerDialog", () => {
   })
 
   // The row for an agent's FIRST tab stops the agent. It must never route
-  // through the close-tab confirmation: that tab cannot be closed, so the DELETE
-  // behind that dialog is refused with a 400 and the user is left with no way to
-  // stop an agent from the Task Manager at all.
+  // through the close-tab confirmation: that tab is closable (the close promotes
+  // the next tab into the slot), but closing it is not what a process monitor's
+  // Stop means, and routing there would leave no way to stop an agent from the
+  // Task Manager at all.
   it("stop_agent_opens_the_stop_confirmation_not_the_close_tab_one", async () => {
     seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
     render(<TaskManagerDialog />)

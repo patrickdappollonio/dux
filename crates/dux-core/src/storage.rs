@@ -311,9 +311,9 @@ impl SessionStore {
         // as `sort_order`): a dedicated setter owns it so status/config churn can't reset it.
         ensure_column(&self.conn, "agent_sessions", "last_focused_tab", "text")?;
         // Which `agent_tabs` row currently occupies this agent's session slot:
-        // its first tab, the one the user cannot close. Every tab is a row, so
-        // this is a pointer rather than a synthesized identity, and moving it is
-        // what promoting a sibling tab into the slot will mean.
+        // its first tab. Every tab is a row, so this is a pointer rather than a
+        // synthesized identity, and moving it is what promoting a sibling tab
+        // into the slot means when the tab holding it is closed.
         //
         // NULL means one thing only, and only for as long as `migrate()` is
         // running: "this session predates the pointer and has not been migrated

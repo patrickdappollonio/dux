@@ -644,8 +644,9 @@ impl AgentSession {
         true
     }
 
-    /// The id of this agent's **session-slot tab**: its first tab, the one the
-    /// user cannot close.
+    /// The id of this agent's **session-slot tab**: its first tab. Closing that
+    /// tab hands the slot to the next tab in strip order, so this pointer moves;
+    /// what cannot be closed is an agent's only tab.
     ///
     /// A stored pointer into `agent_tabs`, read from the
     /// [`slot_tab_id`](AgentSession::slot_tab_id) column. It is a generated tab
