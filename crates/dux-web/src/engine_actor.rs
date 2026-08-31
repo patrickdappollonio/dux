@@ -3842,7 +3842,7 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
         // Derive the message from the ACTUAL resume decision, not just
         // `should_resume_session`: a live same-provider extra tab downgrades the
         // session-slot launch to fresh (per-provider collision), and the toast
-        // must not claim "Resumed" when the dispatch actually starts fresh. The
+        // must not claim "Resumed" when the dispatch actually starts fresh.
         // The launch is for the agent's session-slot tab.
         let resume =
             engine.tab_resume_decision(&session, session.slot_tab_id(), &session.provider, true);
