@@ -14,7 +14,7 @@ use chrono::Utc;
 
 use crate::config::Config;
 use crate::engine::{CreateLaunchOutcome, Engine, InFlightKey, ResolvedFinal};
-use crate::ids::{TabId, TabIdRef};
+use crate::ids::{SessionIdRef, TabId, TabIdRef};
 use crate::logger;
 use crate::model::{
     AgentSession, GhStatus, PrState, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
@@ -463,10 +463,11 @@ pub enum AgentLaunchFailedOutcome {
         agent_label: String,
         message: String,
     },
-    /// An extra-tab launch failed. `tab_id` keys the failure toast to the
-    /// specific tab. For an `is_fresh` create the Engine has already deleted the
-    /// tab's row (the create never came up); for a dormant relaunch the row is
-    /// kept so the user can retry.
+    /// A tab launch failed. `tab_id` keys the failure toast to the specific tab.
+    /// For an `is_fresh` create of a tab that is not in the session slot the
+    /// Engine has already deleted the tab's row (the create never came up); for
+    /// a dormant relaunch, or for a tab a promotion put in the slot while the
+    /// launch was in flight, the row is kept so the user can retry.
     Tab {
         session_id: String,
         tab_id: String,
@@ -968,7 +969,13 @@ impl Engine {
         // spawned process. The session-slot tab is exempt: its row is real, but
         // the engine's in-memory `agent_tabs` map holds only the extras, so
         // "not in the map" is normal for it.
-        let is_main = self.is_slot_tab(&session, &tab_id);
+        //
+        // Asked of the LIVE session, never of `session` (the snapshot the
+        // request was built from): a promotion during this launch moves the slot,
+        // and judged by the snapshot the freshly promoted tab looks like an extra
+        // whose row has gone, so this guard would kill the process it just
+        // started.
+        let is_main = self.is_slot_tab_of(SessionIdRef::new(&session.id), &tab_id);
         if !is_main && !self.agent_tabs.contains_key(&tab_id) {
             logger::info(&format!(
                 "dropping launched PTY for closed extra tab {tab_id} of session {}",
@@ -1916,7 +1923,10 @@ impl Engine {
                 // warning for a tab the user already closed. The session-slot tab
                 // is exempt for the same reason as in the ready-path guard: the
                 // in-memory map holds only the extras.
-                let is_main = self.is_slot_tab(&session, &tab_id);
+                //
+                // Asked of the LIVE session for the same reason as there: the
+                // request's snapshot predates any promotion this launch raced.
+                let is_main = self.is_slot_tab_of(SessionIdRef::new(&session.id), &tab_id);
                 if !is_main && !self.agent_tabs.contains_key(&tab_id) {
                     logger::info(&format!(
                         "dropping launch-failed event for closed extra tab {tab_id} of session {}",
@@ -1934,7 +1944,14 @@ impl Engine {
                 // permanently-broken dormant tab. An explicit relaunch of an
                 // already-persisted dormant tab keeps its row so the user can
                 // retry; either way the real error is surfaced to the caller.
-                if is_fresh {
+                //
+                // Gated on the tab not being the slot AT ARRIVAL, by the same
+                // live read as the guard above: a promotion while this launch was
+                // in flight can have handed the slot to the very tab that is
+                // failing, and deleting that row would leave the agent's pointer
+                // naming a row that no longer exists. A slot tab keeps its row and
+                // becomes the dormant crash-diagnosis surface instead.
+                if is_fresh && !is_main {
                     // Persist-first (mirrors close_tab): only drop the in-memory
                     // entry once the row is actually gone, so a failed DB delete
                     // leaves a visible/closeable tab rather than an invisible

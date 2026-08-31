@@ -6404,7 +6404,7 @@ impl App {
     }
 
     /// Ordered tab ids for a session: the slot tab first, then the extra tabs
-    /// by (sort_order, created_at).
+    /// by (sort_order, created_at, id).
     pub(crate) fn session_tab_ids(&self, session_id: &str) -> Vec<String> {
         let mut support: Vec<&AgentTab> = self
             .engine
@@ -6416,6 +6416,7 @@ impl App {
             a.sort_order
                 .cmp(&b.sort_order)
                 .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.cmp(&b.id))
         });
         let mut ids = Vec::with_capacity(support.len() + 1);
         ids.push(

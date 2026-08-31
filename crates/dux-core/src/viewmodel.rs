@@ -1252,6 +1252,7 @@ impl Engine {
             a.sort_order
                 .cmp(&b.sort_order)
                 .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.cmp(&b.id))
         });
         for (i, t) in support.into_iter().enumerate() {
             let effective = self
@@ -2100,6 +2101,44 @@ mod tests {
         );
         assert_eq!(session.tabs[0].id, session.slot_tab_id);
         assert_ne!(session.tabs[1].id, session.slot_tab_id);
+    }
+
+    #[test]
+    fn the_published_slot_tab_moves_with_a_promotion() {
+        // What a browser sees after the first tab is closed: the pointer names
+        // the promoted tab, that tab leads the strip, and it appears exactly
+        // once (it is the slot now, so it is no longer an extra as well).
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let session = sample_session("s1", "p1", "feature");
+        engine.session_store.create_session(&session).unwrap();
+        engine.sessions.push(session);
+        for (id, order) in [("tab-b", 1), ("tab-c", 2)] {
+            let tab = crate::model::AgentTab {
+                id: id.to_string(),
+                session_id: "s1".to_string(),
+                provider: ProviderKind::new("codex"),
+                sort_order: order,
+                created_at: chrono::Utc::now(),
+            };
+            engine.session_store.insert_agent_tab(&tab).unwrap();
+            engine.agent_tabs.insert(TabId::new(id), tab);
+        }
+
+        engine.close_tab("s1", "s1-slot").expect("promotion");
+
+        let vm = engine.spine();
+        let session = &vm.sessions[0];
+        assert_eq!(session.slot_tab_id, "tab-b");
+        assert_eq!(
+            session
+                .tabs
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tab-b", "tab-c"]
+        );
+        assert_eq!(session.tabs[0].order, 0);
     }
 
     #[test]

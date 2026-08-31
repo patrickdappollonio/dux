@@ -2296,10 +2296,11 @@ impl Engine {
         }
     }
 
-    /// Close an extra tab and produce a confirming status. Reads the tab's
-    /// provider label before the close (the row is gone afterward). The
-    /// session-slot tab is rejected here (its "close" goes through
-    /// `KillSessionPty`).
+    /// Close a tab and produce a confirming status. Reads the tab's provider
+    /// label before the close (the row is gone afterward). The one route that
+    /// issues this command still refuses the tab in the session slot before it
+    /// gets here, so in practice this only ever closes an extra tab; the engine
+    /// itself would promote the next tab into the slot instead.
     fn close_agent_tab_wire(
         &mut self,
         session_id: &str,
@@ -3569,6 +3570,14 @@ impl Engine {
     /// which goes through `reconnect_session`), the same final is emitted UNKEYED —
     /// byte-identical text, and there is no preceding web busy on those paths to
     /// dismiss. Create-kind launches are resolved engine-side, never here.
+    ///
+    /// Slot-ness is read from the outcome's SESSION SNAPSHOT here, deliberately,
+    /// and this is the one place that must not be swept into asking the live
+    /// session. The question being answered is not "which tab is the slot now"
+    /// but "which arm requested this launch", and a `Kind::Tab` launch collapses
+    /// into the `Reconnect` view, so the snapshot's slot-ness is the only proxy
+    /// left for it. A live read would send a tab promoted mid-launch down the
+    /// session-keyed branch and strand its `tab-launch-<id>` busy toast forever.
     pub fn drive_web_launch_followup(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
         match reaction {
             EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {

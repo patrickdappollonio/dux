@@ -4340,8 +4340,8 @@ impl Engine {
     }
 
     /// The first LIVE tab of a session, in display order: the session-slot tab
-    /// first, then extra tabs ordered by `(sort_order, created_at)` (the same
-    /// order the TUI's tab strip renders). A tab counts as live when it has a
+    /// first, then extra tabs ordered by `(sort_order, created_at, id)` (the
+    /// same order the TUI's tab strip renders). A tab counts as live when it has a
     /// provider PTY or an in-flight `AgentLaunch`. Returns `None` when every
     /// tab is dormant, so callers know to fall back to the session-slot tab
     /// rather than land on a dormant tab that would relaunch on the next
@@ -4353,10 +4353,16 @@ impl Engine {
             .values()
             .filter(|t| t.session_id == session_id)
             .collect();
+        // The id is the final tiebreak, matching `successor_slot_tab` and the two
+        // render orderings. Ties are unreachable today (`sort_order` is a
+        // per-agent append-only stamp), so this is parity across the four
+        // orderings rather than a fix: they must not be able to disagree about
+        // which pill comes first.
         extras.sort_by(|a, b| {
             a.sort_order
                 .cmp(&b.sort_order)
                 .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.cmp(&b.id))
         });
         std::iter::once(
             self.slot_tab_id_of(SessionIdRef::new(session_id))
@@ -4583,24 +4589,133 @@ impl Engine {
         true
     }
 
-    /// Close an extra tab: delete its row first (so a persistence failure leaves
-    /// in-memory state untouched), then gracefully tear down its PTY and clear all
-    /// of its runtime-map entries. The session-slot tab's close is a separate path
-    /// (`KillSessionPty`) — this is only for extra tabs.
+    /// The tab that takes the slot when the tab currently in it is closed: the
+    /// FIRST extra tab in strip order — `sort_order`, then `created_at`, then
+    /// `id`, the same ordering the strip and [`Self::first_live_tab`] render —
+    /// so the successor is the pill next to the one going away. Live or dormant
+    /// makes no difference; a tab is a tab.
+    ///
+    /// `None` when the agent has no other tab, which is the case that stays
+    /// "closing the last tab detaches the agent".
+    ///
+    /// The id is the final tiebreak so the answer is deterministic even for two
+    /// tabs written in the same instant: `agent_tabs` is a `HashMap`, whose
+    /// iteration order is not.
+    pub fn successor_slot_tab(&self, session_id: &SessionIdRef) -> Option<&AgentTab> {
+        self.agent_tabs
+            .values()
+            .filter(|t| t.session_id == session_id.as_str())
+            .min_by(|a, b| {
+                a.sort_order
+                    .cmp(&b.sort_order)
+                    .then_with(|| a.created_at.cmp(&b.created_at))
+                    .then_with(|| a.id.cmp(&b.id))
+            })
+    }
+
+    /// Hand the session slot to `session_id`'s next tab in strip order and
+    /// return which tab took it, so the caller can tear the outgoing one down
+    /// like any other tab.
+    ///
+    /// Nothing is re-keyed: the promoted tab keeps its id, its row, its PTY, its
+    /// sockets, its attention flag and its resume state. Only its ROLE changes,
+    /// which is why a promotion cannot strand a browser connection or a
+    /// runtime-map entry.
+    ///
+    /// Persist-first, like every other tab mutation: the one transaction lands
+    /// before memory moves, so a storage failure leaves the agent exactly as it
+    /// was rather than pointing at a tab SQLite still calls an extra.
+    fn promote_next_tab_into_slot(
+        &mut self,
+        session_id: &SessionIdRef,
+        outgoing_tab_id: &TabIdRef,
+    ) -> anyhow::Result<TabId> {
+        // Mid-deletion the agent's worktree is about to go and every one of its
+        // tabs is already being torn down; moving the slot around inside it
+        // would be re-pointing at a tab that is itself about to vanish.
+        if self.closing_sessions.contains(session_id.as_str()) {
+            anyhow::bail!("this agent is being deleted; its tabs cannot hand the slot around");
+        }
+        let (new_slot, provider) = self
+            .successor_slot_tab(session_id)
+            .map(|t| (TabId::new(t.id.clone()), t.provider.clone()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "this is the agent's only tab, so closing it would leave the agent with no \
+                     tab at all; detach the agent instead"
+                )
+            })?;
+        let updated_at = Utc::now();
+        self.session_store.promote_tab_to_slot(
+            session_id.as_str(),
+            new_slot.as_str(),
+            outgoing_tab_id.as_str(),
+            provider.as_str(),
+            updated_at,
+        )?;
+        // The in-memory `agent_tabs` map holds exactly the tabs that are NOT in
+        // the slot, so the promoted one leaves it: listed in both places it
+        // would be enumerated twice and counted twice.
+        self.agent_tabs.remove(&new_slot);
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == session_id.as_str())
+        {
+            session.slot_tab_id = new_slot.as_str().to_string();
+            // The session's provider is a mirror of whichever tab holds the
+            // slot, so it moves with the pointer (the storage half wrote the
+            // same value in the same transaction).
+            session.provider = provider;
+            session.updated_at = updated_at;
+            // The focus memory represents the slot tab as absence, so a memory
+            // naming either end of this promotion is retired. Persisted in the
+            // transaction above; this is the in-memory half of the same rule.
+            let stale_memory = session
+                .last_focused_tab
+                .as_deref()
+                .is_some_and(|id| id == new_slot.as_str() || id == outgoing_tab_id.as_str());
+            if stale_memory {
+                session.last_focused_tab = None;
+            }
+        }
+        Ok(new_slot)
+    }
+
+    /// Close one of an agent's tabs.
+    ///
+    /// Closing the tab in the session slot PROMOTES the next tab in strip order
+    /// into it and then tears the outgoing tab down exactly like any other: the
+    /// slot is a pointer, not an identity, so there is nothing special left to
+    /// protect. Closing the LAST remaining tab is still refused, because an
+    /// agent always has a slot; that close is the agent's detach, a different
+    /// action.
+    ///
+    /// Either way the row goes first (a persistence failure leaves in-memory
+    /// state untouched), then the PTY is torn down gracefully and every runtime
+    /// map the tab keyed is cleared.
     pub fn close_tab(&mut self, session_id: &str, tab_id: &str) -> anyhow::Result<CloseTabOutcome> {
         // Transport-facing: two path segments arrive as bare strings, which is
         // exactly the pair that used to be swappable. Named here, at the door.
-        if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id)) {
-            anyhow::bail!("the session-slot tab cannot be closed as an extra tab");
-        }
-        match self.agent_tabs.get(TabIdRef::new(tab_id)) {
-            Some(tab) if tab.session_id == session_id => {}
-            Some(_) => anyhow::bail!("tab {tab_id} does not belong to session {session_id}"),
-            None => anyhow::bail!("unknown tab: {tab_id}"),
-        }
+        let promoted = if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id))
+        {
+            Some(
+                self.promote_next_tab_into_slot(
+                    SessionIdRef::new(session_id),
+                    TabIdRef::new(tab_id),
+                )?,
+            )
+        } else {
+            match self.agent_tabs.get(TabIdRef::new(tab_id)) {
+                Some(tab) if tab.session_id == session_id => {}
+                Some(_) => anyhow::bail!("tab {tab_id} does not belong to session {session_id}"),
+                None => anyhow::bail!("unknown tab: {tab_id}"),
+            }
 
-        // Persist first.
-        self.session_store.delete_agent_tab(tab_id)?;
+            // Persist first.
+            self.session_store.delete_agent_tab(tab_id)?;
+            None
+        };
 
         // Graceful PTY teardown (SIGTERM into the terminating set), then clear
         // every runtime map this tab keyed via the shared `clear_tab_runtime`
@@ -4624,9 +4739,21 @@ impl Engine {
         // `has_live_process` (a `providers` lookup that misses in-flight launches).
         let detached = !self.any_tab_active(session_id);
         if detached {
+            // Closing the tab in the SLOT is the deliberate "I am done with this
+            // agent" gesture (the same one a clean exit of the slot tab is, which
+            // clears the intent in `prune_exited_ptys`), so when it takes the
+            // agent's last live process the auto-reopen intent goes with it
+            // rather than resurrecting the agent at the next startup sweep. An
+            // extra tab's close is not that gesture and leaves the intent alone.
+            // This is a deliberate departure from the plan's "the promotion
+            // transfers nothing": the intent belongs to the gesture, not to the
+            // tab, and leaving it set would reopen an agent the user just closed.
+            if promoted.is_some() {
+                self.mark_session_desired_running(session_id, false);
+            }
             self.mark_session_status(session_id, crate::model::SessionStatus::Detached);
         }
-        Ok(CloseTabOutcome { detached })
+        Ok(CloseTabOutcome { detached, promoted })
     }
 
     /// Retarget a tab's provider (effective on its next launch). For the session-slot tab
@@ -4788,14 +4915,19 @@ impl std::fmt::Debug for ReconnectPlan {
     }
 }
 
-/// Result of [`Engine::close_tab`]: whether closing the tab DETACHED the agent
-/// (it was the agent's last live tab). Computed with the in-flight-aware
-/// `any_tab_active`, so both surfaces consume this authoritative value instead
-/// of re-deriving detachment from a `providers`-only liveness check that misses
-/// a sibling's in-flight launch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of [`Engine::close_tab`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloseTabOutcome {
+    /// Whether closing the tab DETACHED the agent (it was the agent's last live
+    /// tab). Computed with the in-flight-aware `any_tab_active`, so both
+    /// surfaces consume this authoritative value instead of re-deriving
+    /// detachment from a `providers`-only liveness check that misses a
+    /// sibling's in-flight launch.
     pub detached: bool,
+    /// The tab that took the session slot, when the closed tab was the one in
+    /// it. `None` for an ordinary extra tab's close. Surfaces use it to say
+    /// which tab is the agent's first pill now, and to land the user on it.
+    pub promoted: Option<TabId>,
 }
 
 /// Result of [`Engine::change_agent_provider`]: the data a surface needs to
@@ -8308,7 +8440,7 @@ mod tab_ops_tests {
     use crate::engine::test_support::{sample_session, test_engine};
     use crate::model::{AgentTab, SessionStatus};
     use crate::pty::PtyClient;
-    use crate::worker::{AgentLaunchKind, AgentLaunchReadyData};
+    use crate::worker::{AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData};
 
     fn spawn_cat(cwd: &std::path::Path) -> PtyClient {
         PtyClient::spawn_with_env("cat", &[], cwd, 24, 80, 1000, &[]).expect("spawn cat")
@@ -8872,11 +9004,477 @@ mod tab_ops_tests {
         );
     }
 
+    /// An agent whose slot tab AND extras are real `agent_tabs` rows, which is
+    /// what promotion needs: it deletes the departing row and re-points the
+    /// session at a surviving one. `extras` is `(id, provider)` in strip order.
+    fn agent_with_tabs(engine: &mut Engine, extras: &[(&str, &str)]) {
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.create_session(&session).unwrap();
+        engine.sessions.push(session);
+        for (i, (id, provider)) in extras.iter().enumerate() {
+            let mut tab = support_tab(id, "s1", provider);
+            tab.sort_order = i as i64 + 1;
+            engine.session_store.insert_agent_tab(&tab).unwrap();
+            engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
+        }
+    }
+
     #[test]
-    fn close_tab_refuses_the_main_tab() {
+    fn close_tab_promotes_the_next_tab_when_the_slot_tab_closes() {
         let (mut engine, _tmp) = test_engine();
-        engine.sessions.push(sample_session("s1", "p1", "feat"));
-        assert!(engine.close_tab("s1", "s1").is_err());
+        agent_with_tabs(&mut engine, &[("t2", "codex"), ("t3", "claude")]);
+
+        let outcome = engine.close_tab("s1", "s1-slot").expect("promotion");
+
+        assert_eq!(outcome.promoted.as_deref(), Some(TabIdRef::new("t2")));
+        let session = &engine.sessions[0];
+        assert_eq!(session.slot_tab_id().as_str(), "t2");
+        assert_eq!(
+            session.provider.as_str(),
+            "codex",
+            "the session's provider mirrors whichever tab holds the slot"
+        );
+        assert!(
+            !engine.agent_tabs.contains_key(TabIdRef::new("t2")),
+            "the promoted tab is the slot now, so it must not ALSO be an extra"
+        );
+        assert!(engine.agent_tabs.contains_key(TabIdRef::new("t3")));
+        assert_eq!(
+            engine.tab_ids_for_session("s1"),
+            vec![TabId::new("t2"), TabId::new("t3")],
+            "enumeration leads with the new slot"
+        );
+        // The cap counts rows, and one row is gone.
+        assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 2);
+        // Persisted, so a restart comes back in exactly this shape.
+        let stored = engine.session_store.load_sessions().unwrap();
+        assert_eq!(stored[0].slot_tab_id, "t2");
+        assert_eq!(stored[0].provider.as_str(), "codex");
+        let extras: Vec<String> = engine
+            .session_store
+            .load_extra_agent_tabs()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(extras, vec!["t3".to_string()]);
+    }
+
+    #[test]
+    fn close_tab_promotes_the_first_tab_in_strip_order_not_the_first_inserted() {
+        // The successor is the NEXT PILL, so the order that decides it is the
+        // strip's (`sort_order`, then `created_at`), never the map's iteration
+        // order or the order the rows happened to be written in.
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.create_session(&session).unwrap();
+        engine.sessions.push(session);
+        for (id, order) in [("late", 9), ("early", 2), ("middle", 5)] {
+            let mut tab = support_tab(id, "s1", "codex");
+            tab.sort_order = order;
+            engine.session_store.insert_agent_tab(&tab).unwrap();
+            engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
+        }
+
+        let outcome = engine.close_tab("s1", "s1-slot").expect("promotion");
+
+        assert_eq!(outcome.promoted.as_deref(), Some(TabIdRef::new("early")));
+    }
+
+    #[test]
+    fn promotion_leaves_the_successors_identity_and_runtime_untouched() {
+        // Nothing is re-keyed: the promoted tab keeps its id, its PTY, its
+        // attention flag and every other runtime entry it had. That is the whole
+        // reason the pointer moves instead of the tab being renamed.
+        let (mut engine, tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex")]);
+        engine
+            .providers
+            .insert(TabId::new("t2"), spawn_cat(tmp.path()));
+        engine.needs_attention.insert(TabId::new("t2"));
+        engine
+            .pty_activity
+            .insert("t2".to_string(), std::time::Instant::now());
+        engine
+            .running_provider_pins
+            .insert(TabId::new("t2"), ProviderKind::new("opencode"));
+
+        engine.close_tab("s1", "s1-slot").expect("promotion");
+
+        assert!(engine.providers.contains_key(TabIdRef::new("t2")));
+        assert!(engine.tab_needs_attention("t2"));
+        assert!(engine.pty_activity.contains_key("t2"));
+        assert_eq!(
+            engine
+                .tab_running_provider(&engine.sessions[0], TabIdRef::new("t2"))
+                .as_str(),
+            "opencode",
+            "a pin on the promoted tab still wins, as it did before the promotion"
+        );
+    }
+
+    #[test]
+    fn promoting_a_dormant_successor_detaches_the_agent_and_drops_the_reopen_intent() {
+        // Every sibling dormant: the close took the agent's last live process, so
+        // it detaches. Closing the SLOT tab is the deliberate "stop this agent"
+        // gesture (the same one a clean exit of the slot tab is), so the
+        // auto-reopen intent goes with it rather than resurrecting the agent at
+        // the next startup sweep.
+        let (mut engine, tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex")]);
+        engine.sessions[0].status = SessionStatus::Active;
+        engine.sessions[0].desired_running = true;
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(tmp.path()));
+
+        let outcome = engine.close_tab("s1", "s1-slot").expect("promotion");
+
+        assert_eq!(outcome.promoted.as_deref(), Some(TabIdRef::new("t2")));
+        assert!(outcome.detached);
+        assert_eq!(engine.sessions[0].status, SessionStatus::Detached);
+        assert!(!engine.sessions[0].desired_running);
+    }
+
+    #[test]
+    fn promoting_a_live_successor_keeps_the_agent_active() {
+        let (mut engine, tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex")]);
+        engine.sessions[0].status = SessionStatus::Active;
+        engine.sessions[0].desired_running = true;
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(tmp.path()));
+        engine
+            .providers
+            .insert(TabId::new("t2"), spawn_cat(tmp.path()));
+
+        let outcome = engine.close_tab("s1", "s1-slot").expect("promotion");
+
+        assert!(!outcome.detached);
+        assert_eq!(engine.sessions[0].status, SessionStatus::Active);
+        assert!(
+            engine.sessions[0].desired_running,
+            "the agent is still running, so its reopen intent stands"
+        );
+    }
+
+    #[test]
+    fn close_tab_refuses_the_last_remaining_tab() {
+        // Unchanged behavior: an agent always has a slot, so the last tab's
+        // close is the agent's detach, which is a different action.
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[]);
+
+        let err = engine.close_tab("s1", "s1-slot").unwrap_err();
+
+        assert!(err.to_string().contains("only tab"), "err: {err}");
+        assert_eq!(engine.sessions[0].slot_tab_id().as_str(), "s1-slot");
+        assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 1);
+    }
+
+    #[test]
+    fn a_refused_promotion_leaves_the_agent_and_the_outgoing_pty_exactly_as_they_were() {
+        // Persist-first, proven from the engine side: when the transaction
+        // refuses, NOTHING moves. The pointer, the provider mirror and the
+        // extras map are untouched, and the outgoing tab's PTY is still running
+        // rather than SIGTERMed, because the close never got past the write.
+        // The successor is inserted into the in-memory map only, so storage
+        // refuses it as a tab it has never heard of.
+        let (mut engine, tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.create_session(&session).unwrap();
+        engine.sessions.push(session);
+        let tab = support_tab("t2", "s1", "codex");
+        engine.agent_tabs.insert(TabId::new("t2"), tab);
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(tmp.path()));
+
+        let err = engine.close_tab("s1", "s1-slot").unwrap_err();
+
+        assert!(err.to_string().contains("unknown tab"), "err: {err}");
+        assert_eq!(engine.sessions[0].slot_tab_id().as_str(), "s1-slot");
+        assert_eq!(
+            engine.sessions[0].provider.as_str(),
+            "claude",
+            "the mirror follows the pointer, and the pointer did not move"
+        );
+        assert!(
+            engine.agent_tabs.contains_key(TabIdRef::new("t2")),
+            "the successor is still an extra"
+        );
+        assert_eq!(
+            engine.session_store.load_sessions().unwrap()[0].slot_tab_id,
+            "s1-slot"
+        );
+        assert!(
+            engine.providers.contains_key(TabIdRef::new("s1-slot")),
+            "the outgoing PTY must not have been torn down by a close that failed"
+        );
+        assert!(
+            engine.terminating_ptys.is_empty(),
+            "nor SIGTERMed into the terminating set"
+        );
+    }
+
+    #[test]
+    fn close_tab_refuses_to_promote_while_the_agent_is_being_deleted() {
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex")]);
+        engine.closing_sessions.insert("s1".to_string());
+
+        let err = engine.close_tab("s1", "s1-slot").unwrap_err();
+
+        assert!(err.to_string().contains("being deleted"), "err: {err}");
+        assert_eq!(engine.sessions[0].slot_tab_id().as_str(), "s1-slot");
+        assert!(engine.agent_tabs.contains_key(TabIdRef::new("t2")));
+        assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 2);
+    }
+
+    #[test]
+    fn a_second_promotion_moves_the_slot_again() {
+        // The first promotion left a row-backed tab in the slot; closing THAT
+        // one must promote again rather than trip over the deleted original.
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex"), ("t3", "opencode")]);
+
+        engine.close_tab("s1", "s1-slot").expect("first promotion");
+        let outcome = engine.close_tab("s1", "t2").expect("second promotion");
+
+        assert_eq!(outcome.promoted.as_deref(), Some(TabIdRef::new("t3")));
+        assert_eq!(engine.sessions[0].slot_tab_id().as_str(), "t3");
+        assert_eq!(engine.sessions[0].provider.as_str(), "opencode");
+        assert!(engine.agent_tabs.is_empty());
+        assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 1);
+        assert_eq!(engine.tab_ids_for_session("s1"), vec![TabId::new("t3")]);
+    }
+
+    #[test]
+    fn promotion_forgets_a_focus_memory_that_named_the_promoted_tab() {
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex"), ("t3", "claude")]);
+        engine.set_last_focused_tab("s1", Some("t2")).unwrap();
+
+        engine.close_tab("s1", "s1-slot").expect("promotion");
+
+        assert_eq!(
+            engine.sessions[0].last_focused_tab, None,
+            "the slot tab is remembered as absence, so the memory is retired"
+        );
+        assert_eq!(
+            engine.session_store.load_sessions().unwrap()[0].last_focused_tab,
+            None
+        );
+    }
+
+    #[test]
+    fn a_launch_in_flight_for_the_successor_lands_under_the_slot_arm_after_promotion() {
+        // The sharpest race: the successor's launch was dispatched while it was
+        // still an extra tab, and the promotion lands before the ready event. The
+        // handler must re-ask which tab is the slot AT ARRIVAL: judged by the
+        // request's stale session snapshot it is an extra tab with no row (its
+        // row is the slot row now), and the ghost-launch guard would kill the
+        // freshly spawned process.
+        let (mut engine, tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex")]);
+        let stale = engine.sessions[0].clone();
+        let request = engine.build_tab_launch_request(
+            TabId::new("t2"),
+            Some(ProviderKind::new("codex")),
+            stale,
+            false,
+            (24, 80),
+            AgentLaunchKind::Tab {
+                is_fresh: false,
+                status_message: "x".into(),
+            },
+        );
+
+        engine.close_tab("s1", "s1-slot").expect("promotion");
+        engine.process_agent_launch_ready(AgentLaunchReadyData {
+            request,
+            client: spawn_cat(tmp.path()),
+        });
+
+        assert!(
+            engine.providers.contains_key(TabIdRef::new("t2")),
+            "the promoted tab's PTY must survive its own launch completing"
+        );
+        assert_eq!(
+            engine.sessions[0].status,
+            SessionStatus::Active,
+            "the arrival takes the slot-scoped arm, which flips the agent Active"
+        );
+        assert!(engine.sessions[0].desired_running);
+    }
+
+    #[test]
+    fn a_launch_failure_for_the_closed_slot_tab_is_dropped_after_promotion() {
+        // The mirror image: the launch that fails belongs to the tab that just
+        // LEFT the slot. Re-asked at arrival it is neither the slot nor a row, so
+        // it is the ghost case and must be silent.
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex")]);
+        let stale = engine.sessions[0].clone();
+        let request = engine.build_tab_launch_request(
+            TabId::new("s1-slot"),
+            Some(ProviderKind::new("claude")),
+            stale,
+            false,
+            (24, 80),
+            AgentLaunchKind::Tab {
+                is_fresh: false,
+                status_message: "x".into(),
+            },
+        );
+
+        engine.close_tab("s1", "s1-slot").expect("promotion");
+        let (outcome, _) = engine.process_agent_launch_failed(AgentLaunchFailedData {
+            request,
+            message: "boom".to_string(),
+        });
+
+        assert!(matches!(outcome, AgentLaunchFailedOutcome::Silent));
+        assert!(
+            !engine.failed_tab_runs.contains(TabIdRef::new("s1-slot")),
+            "a tab nothing can ask about again must not leave a verdict behind"
+        );
+    }
+
+    #[test]
+    fn a_fresh_launch_failing_for_a_promoted_tab_keeps_the_slot_row() {
+        // The third arrival race: `create_tab` dispatched t2's very first launch
+        // while t2 was still an extra, the user closed the slot tab before the
+        // spawn answered, and t2 is the SLOT by the time the failure lands. The
+        // fresh-tab row deletion must not run there: it would delete the row the
+        // session's pointer now names and leave `slot_tab_id` dangling on disk.
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex")]);
+        let stale = engine.sessions[0].clone();
+        let request = engine.build_tab_launch_request(
+            TabId::new("t2"),
+            Some(ProviderKind::new("codex")),
+            stale,
+            false,
+            (24, 80),
+            AgentLaunchKind::Tab {
+                is_fresh: true,
+                status_message: "x".into(),
+            },
+        );
+
+        engine.close_tab("s1", "s1-slot").expect("promotion");
+        let (outcome, _) = engine.process_agent_launch_failed(AgentLaunchFailedData {
+            request,
+            message: "boom".to_string(),
+        });
+
+        assert!(
+            matches!(outcome, AgentLaunchFailedOutcome::Tab { ref tab_id, .. } if tab_id == "t2"),
+            "the failure is real and belongs to the promoted tab"
+        );
+        let rows: Vec<String> = engine
+            .session_store
+            .load_agent_tabs()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["t2".to_string()],
+            "the promoted slot's row must survive its own launch failing"
+        );
+        assert_eq!(
+            engine.session_store.load_sessions().unwrap()[0].slot_tab_id,
+            "t2",
+            "and the pointer must still name a row that exists"
+        );
+        assert_eq!(engine.sessions[0].slot_tab_id().as_str(), "t2");
+    }
+
+    #[test]
+    fn reaping_the_closed_slot_tab_after_a_promotion_leaves_the_session_alone() {
+        // The close SIGTERMs the old slot's PTY into the terminating set; its
+        // reap arrives later, by which time the tab is neither the slot nor a
+        // row. The reap must not mark the agent anything.
+        let (mut engine, tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex")]);
+        engine.sessions[0].status = SessionStatus::Active;
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(tmp.path()));
+        engine
+            .providers
+            .insert(TabId::new("t2"), spawn_cat(tmp.path()));
+
+        engine.close_tab("s1", "s1-slot").expect("promotion");
+        assert_eq!(engine.terminating_ptys.len(), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !engine.terminating_ptys.is_empty() && std::time::Instant::now() < deadline {
+            engine.reap_terminating_ptys();
+        }
+        assert!(engine.terminating_ptys.is_empty(), "the old slot reaped");
+        engine.prune_exited_ptys();
+
+        assert_eq!(
+            engine.sessions[0].status,
+            SessionStatus::Active,
+            "a reap of the departed tab says nothing about the agent"
+        );
+        assert_eq!(engine.sessions[0].slot_tab_id().as_str(), "t2");
+    }
+
+    #[test]
+    fn after_promotion_the_slot_resumes_the_promoted_tabs_provider() {
+        // The resume rule is untouched and asked of the tab: the slot's next
+        // launch resumes codex because codex started in this worktree and no
+        // other live tab owns that conversation.
+        let (mut engine, tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex"), ("t3", "codex")]);
+        engine.mark_session_provider_started("s1", &ProviderKind::new("codex"));
+
+        engine.close_tab("s1", "s1-slot").expect("promotion");
+
+        let session = engine.sessions[0].clone();
+        assert!(engine.tab_resume_decision(
+            &session,
+            session.slot_tab_id(),
+            &ProviderKind::new("codex"),
+            true
+        ));
+        // A live sibling running codex owns that conversation, so the slot's
+        // launch is fresh instead.
+        engine
+            .providers
+            .insert(TabId::new("t3"), spawn_cat(tmp.path()));
+        assert!(!engine.tab_resume_decision(
+            &session,
+            session.slot_tab_id(),
+            &ProviderKind::new("codex"),
+            true
+        ));
+    }
+
+    #[test]
+    fn attention_and_streaming_still_roll_up_over_every_tab_after_a_promotion() {
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex"), ("t3", "claude")]);
+        engine.needs_attention.insert(TabId::new("t3"));
+
+        engine.close_tab("s1", "s1-slot").expect("promotion");
+
+        assert!(
+            engine.session_needs_attention("s1"),
+            "an extra tab's flag still marks the agent"
+        );
+        engine.needs_attention.remove(TabIdRef::new("t3"));
+        engine.needs_attention.insert(TabId::new("t2"));
+        assert!(
+            engine.session_needs_attention("s1"),
+            "and so does the promoted tab's"
+        );
     }
 
     #[test]

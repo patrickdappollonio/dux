@@ -681,10 +681,11 @@ impl AgentSession {
 /// the session record's `slot_tab_id` pointer. Kept in SQLite (derived runtime
 /// state), never in portable config. `sort_order` is an append-only stamp: the
 /// slot tab is written at 0 and extras are appended above it. It orders the
-/// EXTRAS today, because both surfaces put the slot tab first by following the
-/// session's pointer rather than by comparing stamps; keeping the slot at the
-/// bottom of the range is what would keep the strip stable if the slot were ever
-/// promoted to another tab.
+/// EXTRAS in practice, because both surfaces put the slot tab first by following
+/// the session's pointer rather than by comparing stamps. A promotion keeps the
+/// promoted row's stamp exactly as it was, so the remaining extras stay in the
+/// order the user has been looking at; keeping the original slot tab at the
+/// bottom of the range is what makes that true.
 #[derive(Clone, Debug)]
 pub struct AgentTab {
     pub id: String,
