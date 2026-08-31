@@ -7,7 +7,8 @@
 /// two surfaces show the same spinner.
 export const SPINNER_FRAMES = ["◜", "◠", "◝", "◞", "◡", "◟"]
 
-/// The TUI's cadence, so both surfaces spin at the same speed.
+/// The cadence of dux-core's status-line spinner. The TUI's own row spinner
+/// runs faster (`SPINNER_FRAME_MS` in crates/dux-tui/src/theme.rs).
 export const SPINNER_FRAME_MS = 100
 
 /// The class carrying the fixed-width slot and the font stack that actually

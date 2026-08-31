@@ -8,11 +8,12 @@ import {
 } from "@/lib/spinnerFrames"
 import { cn } from "@/lib/utils"
 
-// The one text spinner in the web UI, matching the dux TUI's six-frame, 100ms
-// arc spinner. Every site that wants a glyph spinner renders THIS, so the
-// fixed-width slot (`.glyph-spinner` in index.css) and the reduced-motion
-// behavior below cannot drift between them; a site that wants an icon spinner
-// uses lucide's `Loader2` with `motion-safe:animate-spin` instead.
+// The one text spinner in the web UI, drawing dux's six-frame arc in the
+// glyphs and cadence of `spinnerFrames.ts`. Every site that wants a glyph
+// spinner renders THIS, so the fixed-width slot (`.glyph-spinner` in index.css)
+// and the reduced-motion behavior below cannot drift between them; a site that
+// wants an icon spinner uses lucide's `Loader2` with `motion-safe:animate-spin`
+// instead.
 export function GlyphSpinner({ className }: { className?: string }) {
   const reduceMotion = usePrefersReducedMotion()
   const [i, setI] = useState(0)
