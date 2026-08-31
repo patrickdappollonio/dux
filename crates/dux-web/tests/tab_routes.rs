@@ -376,11 +376,61 @@ async fn a_launched_tab_publishes_its_drop_paste_profile_on_the_spine() {
     );
 }
 
-/// The agent's first tab cannot be closed. The route is reachable by hand, so
-/// it refuses with a purposeful sentence instead of stopping the tab's provider
-/// the way it used to.
+/// Closing the tab in the session slot PROMOTES the next tab in strip order
+/// into it: the slot is a pointer, so the sibling keeps its own id, its row and
+/// its running process, and merely takes over the slot. The 200 body names it,
+/// so the browser can land the user on the tab that is now the agent's first.
 #[tokio::test]
-async fn delete_first_tab_is_refused_with_a_reason() {
+async fn delete_slot_tab_promotes_the_next_tab() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+
+    let slot = slot_tab_id(&client, addr, "s1").await;
+    let sibling = create_support_tab(&client, addr, "s1").await;
+    // Wait out the sibling's async launch so the assertion below is about a
+    // process the promotion left alone, not one that never started.
+    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &sibling)).await;
+
+    let resp = client
+        .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/{slot}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["promoted"], sibling,
+        "the close must name the tab that took the slot: {body}"
+    );
+
+    let session = wait_for_session(&client, addr, "s1", |s| {
+        s["slot_tab_id"].as_str() == Some(sibling.as_str())
+    })
+    .await;
+    assert_eq!(
+        session["slot_tab_id"].as_str(),
+        Some(sibling.as_str()),
+        "the sibling holds the slot now: {session}"
+    );
+    assert!(
+        !session["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"].as_str() == Some(slot.as_str())),
+        "the closed tab is gone: {session}"
+    );
+    assert!(
+        tab_has_live_process(&session, &sibling),
+        "the promoted tab keeps the process it already had: {session}"
+    );
+}
+
+/// The agent's ONLY tab still cannot be closed: an agent always has a slot, and
+/// that gesture is the agent's detach rather than a tab close. The engine's own
+/// sentence reaches the caller through the same 400 shape as before.
+#[tokio::test]
+async fn delete_the_only_tab_is_refused_with_the_engine_sentence() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
 
@@ -392,9 +442,10 @@ async fn delete_first_tab_is_refused_with_a_reason() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.contains("first tab can't be closed"),
-        "the refusal must say why: {body}"
+    assert_eq!(
+        body,
+        dux_core::agent_tabs::ONLY_TAB_CLOSE_REFUSAL,
+        "the refusal is the one core-owned sentence, verbatim"
     );
 
     // The agent is untouched: the refusal stopped nothing.
@@ -412,7 +463,7 @@ async fn delete_first_tab_is_refused_with_a_reason() {
             .unwrap()
             .iter()
             .any(|t| t["id"].as_str() == Some(slot.as_str())),
-        "the first tab is still there: {session}"
+        "the only tab is still there: {session}"
     );
 }
 
@@ -434,6 +485,10 @@ async fn delete_support_tab_removes_its_row() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["detached"], true);
+    assert!(
+        body.get("promoted").is_none(),
+        "an extra tab's close promotes nothing: {body}"
+    );
 
     let session: serde_json::Value = client
         .get(format!("http://{addr}/api/v1/sessions/s1"))

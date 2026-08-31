@@ -24,12 +24,14 @@ export interface CreatedTab {
 }
 
 // The 200 body for a tab close: whether that close detached the agent (it was
-// the LAST live tab). Only an extra tab can be closed, and its close returns this
-// shape, so the caller never has to guess the outcome from a stale local
-// snapshot. `undefined` only for an older server that still replies with a
-// bodiless 204.
+// the LAST live tab), and which tab took the session slot when the closed tab
+// was the one holding it. The caller never has to guess either outcome from a
+// stale local snapshot, which matters most for `promoted`: the spine that would
+// answer it has not caught up when this resolves. `promoted` is absent for an
+// ordinary extra tab's close.
 export interface ClosedTab {
   detached: boolean
+  promoted?: string
 }
 
 const request = createJsonRequest(
@@ -46,11 +48,11 @@ export const tabsApi = {
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs`,
       provider === undefined ? {} : { provider },
     ),
-  // Close an EXTRA tab: the tab is destroyed, and the agent detaches when it was
-  // the last live one. The 200 body carries that authoritative `{ detached }`
-  // outcome rather than leaving the caller to guess from a pre-close snapshot.
-  // The agent's FIRST tab (the session-slot tab) cannot be closed and the route
-  // refuses it with a 400, so nothing should send one here.
+  // Close a tab: the tab is destroyed, and the agent detaches when it was the
+  // last live one. Closing the session-slot tab promotes the next tab in strip
+  // order into the slot. The 200 body carries both authoritative outcomes rather
+  // than leaving the caller to guess from a pre-close snapshot. The agent's ONLY
+  // tab is refused with a 400: an agent always has a slot.
   remove: (sessionId: string, tabId: string) =>
     request<ClosedTab | undefined>(
       "DELETE",

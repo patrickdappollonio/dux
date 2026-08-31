@@ -69,10 +69,12 @@ import {
   normalizeWorkspace,
 } from "./workspaceApi"
 import {
+  type PendingSlotTab,
   isFirstTab,
   isSlotTabTarget,
   resolveFocusedTab,
   shouldRefireFocusPut,
+  slotTabIdOf,
   slotTabTargetId,
 } from "./agentTabs"
 import {
@@ -592,6 +594,17 @@ export interface DuxState {
   // list of terminal ids (any owner) in the just-dragged order, cleared once the
   // spine confirms it. Mirrors `pendingAgentOrder` exactly (see `reorderTerminals`).
   pendingTerminalOrder: string[] | null
+  // Optimistic overlay for a session's slot pointer, keyed by session id: the
+  // tab a close of the SLOT tab just promoted into it, alongside the tab that
+  // close destroyed. The DELETE's answer is the only thing that knows this until
+  // the next spine arrives, and the difference is user-visible (which pill is
+  // the agent's first, whether the address is the bare agent form, whether the
+  // promoted tab is shown the Start-session card), so the answer is held here
+  // rather than waited on.
+  //
+  // Retired by the CLOSED tab, not the promoted one: see
+  // `reconcilePendingSlotTab`.
+  pendingSlotTab: Record<string, PendingSlotTab>
   // While an agent-create THIS client initiated is in flight, holds the session
   // ids that already existed when we submitted, plus where the new agent will
   // land. Agent creation is an async server job whose only completion
@@ -965,6 +978,7 @@ let state: DuxState = {
   pendingProjectOrder: null,
   pendingAgentOrder: null,
   pendingTerminalOrder: null,
+  pendingSlotTab: {},
   pendingCreateFocus: null,
   projectOpen: {},
   agentSort: null,
@@ -1663,6 +1677,7 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
     pendingProjectOrder: reconcilePendingProjectOrder(spine, state.pendingProjectOrder),
     pendingAgentOrder: reconcilePendingAgentOrder(spine, state.pendingAgentOrder),
     pendingTerminalOrder: reconcilePendingTerminalOrder(spine, state.pendingTerminalOrder),
+    pendingSlotTab: reconcilePendingSlotTab(spine, state.pendingSlotTab),
   })
   // Restore a boot-time deep-link before focus/prune: it selects only a session
   // present in this spine (so prune leaves it alone), and it is a one-shot that
@@ -1804,12 +1819,44 @@ function reconcilePendingTerminalOrder(
   return ordersMatch(serverIds, pending) ? null : pending
 }
 
-// The slot tab id for an agent this client is acting on. Resolved from the live
-// spine when the agent is in it, and from the id-only rule when it is not (an
-// action fired against a session the spine has not caught up with yet).
+// Drop a promoted-slot overlay once the spine has caught up with the close it
+// covers, or once the session it was about is gone. Twin of the pending-order
+// reconcilers above: the overlay exists only to cover the window between the
+// close's answer and the spine that confirms it.
+//
+// "Caught up" is the CLOSED tab having left the session's tab list, not the
+// spine naming the promoted tab as the slot. The two differ exactly when
+// somebody else promoted again before this client's spine arrived (we moved the
+// slot A -> B, another surface then moved it B -> C): waiting for a spine to say
+// "the slot is B" would wait forever, and every reader of `slotTabIdFor` would
+// go on answering with a tab that no longer holds the slot, or is gone
+// altogether. The close's own disappearance is a fact any later spine carries.
+function reconcilePendingSlotTab(
+  spine: Spine,
+  pending: Record<string, PendingSlotTab>,
+): Record<string, PendingSlotTab> {
+  const entries = Object.entries(pending).filter(([sessionId, promotion]) => {
+    const session = spine.sessions.find((s) => s.id === sessionId)
+    return (
+      session !== undefined &&
+      session.tabs.some((t) => t.id === promotion.closedTabId)
+    )
+  })
+  if (entries.length === Object.keys(pending).length) return pending
+  return Object.fromEntries(entries)
+}
+
+// The slot tab id for an agent this client is acting on. A promotion this
+// client just performed wins over the spine, which has not caught up with it
+// yet; otherwise resolved from the live spine when the agent is in it, and from
+// the id-only rule when it is not (an action fired against a session the spine
+// has not caught up with yet).
 function slotTabIdFor(sessionId: string): string {
   const session = state.spine?.sessions.find((s) => s.id === sessionId)
-  return session?.slot_tab_id ?? slotTabTargetId(sessionId)
+  return (
+    slotTabIdOf(sessionId, session, state.pendingSlotTab) ??
+    slotTabTargetId(sessionId)
+  )
 }
 
 // Slot-ness for the same imperative actions. Twin of `slotTabIdFor`, and the
@@ -3666,11 +3713,13 @@ export function addTab(sessionId: string, provider?: string): void {
     })
 }
 
-// Open the close-tab confirmation for an EXTRA tab. Closing ALWAYS confirms.
-// Closing a tab ends it, and closing the agent's last live tab detaches the
-// agent. The agent's first tab cannot be closed, so it never reaches this: the
-// surfaces that offer a first-tab gesture either disable it (the tab strip) or
-// route it to `openStopAgent` (the Task Manager).
+// Open the close-tab confirmation for a tab. Closing ALWAYS confirms. Closing a
+// tab ends it; closing the tab in the session slot hands the slot to the next
+// tab in strip order, and closing the agent's last live tab detaches the agent.
+// Two gestures do NOT come here: an agent's ONLY tab, whose close the server
+// refuses and whose menu item is therefore disabled with the reason rather than
+// opening a dialog, and the Task Manager's first-tab row, which is a Stop and
+// routes to `openStopAgent`.
 export function openCloseTab(sessionId: string, tabId: string): void {
   setState({ closeTabTarget: { sessionId, tabId } })
 }
@@ -3680,9 +3729,9 @@ export function closeCloseTab(): void {
 }
 
 // Open the stop-agent confirmation. The Task Manager's row for an agent's first
-// tab is a Stop control, not a close: the first tab cannot be closed, and what
-// the user is asking for there is to end the process the row is showing numbers
-// for. `killSessionPty` behind it stops that tab's provider and leaves the agent
+// tab is a Stop control, not a close: what the user is asking for on a process
+// monitor is to end the process the row is showing numbers for, not to delete
+// the tab it runs in. `killSessionPty` behind it stops that tab's provider and leaves the agent
 // in the list.
 export function openStopAgent(sessionId: string): void {
   setState({ stopAgentTarget: sessionId })
@@ -3692,38 +3741,51 @@ export function closeStopAgent(): void {
   setState({ stopAgentTarget: null })
 }
 
-// Close an EXTRA tab via REST. Only extra tabs can be closed: the agent's first
-// tab holds the session slot and lives as long as the agent
-// does, and the route refuses it with a 400, so no caller may send one here (the
-// tab strip disables the menu item, and the Task Manager's first-tab row stops
-// the agent through `killSessionPty` instead). Closing an extra tab destroys it
-// and detaches the agent when it was the last live one, which the 200 body
-// reports as `{ detached }`.
+// Close a tab via REST. Any tab may be closed, the one in the session slot
+// included: the server hands the slot to the next tab in strip order and names
+// it back as `promoted`. The agent's ONLY tab is the exception, refused by the
+// engine, because an agent always has a slot. The 200 body also reports
+// `{ detached }`, true when the close took the agent's last live tab.
 //
 // All focus/latch mutations wait for the DELETE to actually resolve: closing is
 // NOT optimistic, because mutating them beforehand would leave the UI navigated
 // away from a tab that is still alive server-side whenever the request fails,
 // with only a toast and no rollback. On success, if the closed tab was the
-// focused target, focus falls back to the session-slot tab so the pane never
-// sits on the just-closed tab and re-subscribes it (subscribing force-relaunches
-// the provider). A failure toasts and leaves all state untouched.
+// focused target, focus lands on the tab that took the slot (or, for an extra
+// tab's close, falls back to the slot tab) so the pane never sits on the
+// just-closed tab and re-subscribes it (subscribing force-relaunches the
+// provider). A failure toasts and leaves all state untouched.
 export function closeTab(sessionId: string, tabId: string): void {
   tabsApi
     .remove(sessionId, tabId)
-    .then(() => {
+    .then((closed) => {
       dropTabStarted(tabId)
+      // Record the promotion before anything reads the slot: the spine is still
+      // the pre-close one here, so `slotTabIdFor` would otherwise answer with
+      // the tab that was just deleted.
+      if (closed?.promoted) {
+        setState({
+          pendingSlotTab: {
+            ...state.pendingSlotTab,
+            [sessionId]: {
+              closedTabId: tabId,
+              promotedTabId: closed.promoted,
+            },
+          },
+        })
+      }
       const target = state.selectedTarget
       const focused =
         target?.kind === "agent" &&
         target.sessionId === sessionId &&
         target.tabId === tabId
       if (!focused) return
-      // Focus the session-slot tab DIRECTLY via `selectTab`, not
-      // `selectSession`: the spine may still be stale at this point (no
-      // `sessions.changed` refetch has pruned it yet), and `selectSession`
-      // would resolve the remembered tab against that stale spine, which
-      // can still name the tab we just deleted, so use `selectTab` to
-      // pick the session-slot tab without consulting that memory.
+      // Focus whichever tab holds the slot NOW (the promoted one after a slot
+      // close, the unchanged one after an extra tab's) DIRECTLY via
+      // `selectTab`, not `selectSession`: the spine may still be stale at this
+      // point (no `sessions.changed` refetch has pruned it yet), and
+      // `selectSession` would resolve the remembered tab against that stale
+      // spine, which can still name the tab we just deleted.
       selectTab(sessionId, slotTabIdFor(sessionId))
     })
     .catch((e) =>

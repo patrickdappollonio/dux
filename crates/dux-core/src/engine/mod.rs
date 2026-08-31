@@ -4677,6 +4677,64 @@ impl Engine {
         true
     }
 
+    /// Every tab of a session in strip order, paired with the label the strip
+    /// shows for it: the tab's EFFECTIVE provider (a retarget-while-running pin
+    /// wins over the row, exactly as the pill reads it) run through
+    /// [`crate::agent_tabs::tab_labels`], so a repeated provider carries the
+    /// same disambiguating suffix the pills carry.
+    ///
+    /// Every sentence that names a tab reads it here. A confirmation, a status
+    /// line and a pill that derive the name three different ways can disagree
+    /// about which tab they mean, and the user has only the name to go on.
+    pub fn tab_strip_labels(&self, session_id: &SessionIdRef) -> Vec<(TabId, String)> {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id.as_str()) else {
+            return Vec::new();
+        };
+        let mut extras: Vec<&AgentTab> = self
+            .agent_tabs
+            .values()
+            .filter(|t| t.session_id == session_id.as_str())
+            .collect();
+        // The same `(sort_order, created_at, id)` order `successor_slot_tab`
+        // and `first_live_tab` use: the four orderings must not be able to
+        // disagree about which pill comes first.
+        extras.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let ids: Vec<TabId> = std::iter::once(self.slot_tab_id_of(session_id).to_owned())
+            .chain(extras.into_iter().map(|t| TabId::new(t.id.clone())))
+            .collect();
+        let providers: Vec<String> = ids
+            .iter()
+            .map(|id| {
+                self.tab_running_provider(session, id.as_ref_id())
+                    .as_str()
+                    .to_string()
+            })
+            .collect();
+        let labels = crate::agent_tabs::tab_labels(
+            &providers.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
+        ids.into_iter().zip(labels).collect()
+    }
+
+    /// One tab's name as prose names it: its strip label, upper-cased on the
+    /// first character (see [`crate::agent_tabs::prose_tab_label`]). `None` for
+    /// a tab this session does not have.
+    ///
+    /// Read it BEFORE a close when the sentence is about a close: the strip the
+    /// user is looking at is the pre-close one, and that is the strip the
+    /// confirmation and the status line must both be talking about.
+    pub fn tab_prose_label(&self, session_id: &SessionIdRef, tab_id: &TabIdRef) -> Option<String> {
+        self.tab_strip_labels(session_id)
+            .into_iter()
+            .find(|(id, _)| id.as_str() == tab_id.as_str())
+            .map(|(_, label)| crate::agent_tabs::prose_tab_label(&label))
+    }
+
     /// The tab that takes the slot when the tab currently in it is closed: the
     /// FIRST extra tab in strip order — `sort_order`, then `created_at`, then
     /// `id`, the same ordering the strip and [`Self::first_live_tab`] render —
@@ -4727,12 +4785,7 @@ impl Engine {
         let (new_slot, provider) = self
             .successor_slot_tab(session_id)
             .map(|t| (TabId::new(t.id.clone()), t.provider.clone()))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "this is the agent's only tab, so closing it would leave the agent with no \
-                     tab at all; detach the agent instead"
-                )
-            })?;
+            .ok_or_else(|| anyhow::anyhow!(crate::agent_tabs::ONLY_TAB_CLOSE_REFUSAL))?;
         let updated_at = Utc::now();
         self.session_store.promote_tab_to_slot(
             session_id.as_str(),
@@ -9508,9 +9561,54 @@ mod tab_ops_tests {
 
         let err = engine.close_tab("s1", "s1-slot").unwrap_err();
 
-        assert!(err.to_string().contains("only tab"), "err: {err}");
+        assert_eq!(err.to_string(), crate::agent_tabs::ONLY_TAB_CLOSE_REFUSAL);
         assert_eq!(engine.sessions[0].slot_tab_id().as_str(), "s1-slot");
         assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 1);
+    }
+
+    /// The strip labels a session's tabs in strip order with the disambiguating
+    /// suffix, and prose names one of them with its first character upper-cased.
+    /// Every sentence about a tab reads these, so a confirmation and the pill it
+    /// is about cannot name the tab differently.
+    #[test]
+    fn tab_strip_labels_lead_with_the_slot_tab_and_disambiguate_repeats() {
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "claude"), ("t3", "codex")]);
+
+        let labels = engine.tab_strip_labels(SessionIdRef::new("s1"));
+
+        assert_eq!(
+            labels
+                .iter()
+                .map(|(id, label)| (id.as_str(), label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("s1-slot", "claude"), ("t2", "claude 2"), ("t3", "codex")]
+        );
+        assert_eq!(
+            engine.tab_prose_label(SessionIdRef::new("s1"), TabIdRef::new("t2")),
+            Some("Claude 2".to_string())
+        );
+        assert_eq!(
+            engine.tab_prose_label(SessionIdRef::new("s1"), TabIdRef::new("nope")),
+            None
+        );
+    }
+
+    /// A tab retargeted while running keeps showing the provider it is actually
+    /// running, so the label follows the PIN rather than the row: the sentence
+    /// names the pill the user can see.
+    #[test]
+    fn tab_strip_labels_follow_the_running_pin_not_the_row() {
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "claude")]);
+        engine
+            .running_provider_pins
+            .insert(TabId::new("t2"), ProviderKind::new("codex"));
+
+        assert_eq!(
+            engine.tab_prose_label(SessionIdRef::new("s1"), TabIdRef::new("t2")),
+            Some("Codex".to_string())
+        );
     }
 
     #[test]

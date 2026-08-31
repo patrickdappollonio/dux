@@ -5,7 +5,9 @@ import { AttentionDot } from "@/components/AttentionDot"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
@@ -13,8 +15,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
+  ONLY_TAB_CLOSE_REFUSAL,
   defaultProviderForSession,
-  isFirstTab as tabIsFirst,
   tabLabels,
 } from "@/lib/agentTabs"
 import {
@@ -145,7 +147,11 @@ function TabPill({
   active: boolean
   providers: string[]
 }) {
-  const isFirstTab = tabIsFirst(session, tab.id)
+  // No successor means no slot to hand on, which is the one close the server
+  // refuses. Answered from the tab list rather than from slot-ness, because
+  // "this is the first tab" and "this is the only tab" are different facts and
+  // only the second one refuses.
+  const soleTab = session.tabs.length <= 1
 
   function select() {
     selectTab(session.id, tab.id)
@@ -242,32 +248,38 @@ function TabPill({
               </DropdownMenuSubContent>
             </DropdownMenuSub>
             <DropdownMenuSeparator />
-            {/* The agent's FIRST tab (the one the session's slot pointer
-                names) cannot be closed: it lives as long as the agent
-                does. The item stays in the menu and renders DISABLED rather
-                than disappearing, so the gesture reads as deactivated instead
-                of missing, and the tooltip says why. The span is load-bearing:
-                a disabled item is `pointer-events-none`, so the tooltip needs a
-                live element around it to hover.
+            {/* Every tab closes the same way, the agent's FIRST included: the
+                slot is a pointer, so closing the tab holding it hands the slot
+                to the next tab in strip order rather than being refused. The
+                confirmation dialog is where the difference is spelled out.
 
-                Accepted limitation: the REASON is hover-only. base-ui keeps a
-                disabled item focusable (`focusableWhenDisabled`), so a keyboard
-                still reaches the item and hears it is dimmed, but the tooltip
-                hangs off the wrapper span rather than the item, so neither a
-                keyboard nor a finger opens it; the docs page carries the rule,
-                and the disabled state itself is visible on every pointer. */}
-            {isFirstTab ? (
-              <SimpleTooltip
-                content="The first tab can't be closed: it lives as long as the agent does. Add more tabs and close those, or detach the agent to stop everything."
-                side="bottom"
-              >
-                <span className="block">
-                  <DropdownMenuItem disabled>
-                    <X />
-                    Close tab…
-                  </DropdownMenuItem>
-                </span>
-              </SimpleTooltip>
+                The exception is an agent's ONLY tab, which has no successor to
+                hand the slot to and which the server refuses with the sentence
+                shown here. The browser refuses it in the same place the
+                terminal UI does, BEFORE any dialog: walking a user through a
+                confirmation into a 400 promises a detach that was never going
+                to happen. The item stays and renders disabled (a missing item
+                reads as a bug, a dimmed one reads as a rule), with the reason
+                as a menu label above it: a disabled item is
+                `pointer-events-none`, so a tooltip hung on it could never be
+                opened, by a pointer or by anything else. This is the idiom the
+                agent row's active-elsewhere menu already uses.
+
+                Reachable at all only because `ui.always_show_tab_strip` renders
+                the strip for a single-tab agent; without it there is no pill to
+                open a menu on. */}
+            {soleTab ? (
+              // The group is required, not decorative: a menu label outside one
+              // throws in base-ui.
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="max-w-60 whitespace-normal">
+                  {ONLY_TAB_CLOSE_REFUSAL}
+                </DropdownMenuLabel>
+                <DropdownMenuItem disabled>
+                  <X />
+                  Close tab…
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
             ) : (
               <DropdownMenuItem onClick={() => openCloseTab(session.id, tab.id)}>
                 <X />

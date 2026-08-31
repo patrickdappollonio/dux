@@ -98,6 +98,7 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
     selectedSessionId: null,
     terminalEpoch: 0,
     startedDormantTabs: [],
+    pendingSlotTab: {},
     createTabInFlight: [],
     ...overrides,
   } as unknown as DuxState
@@ -267,6 +268,7 @@ describe("TerminalArea dormant-tab gating (G-T4)", () => {
       selectedSessionId: "s1",
       selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
       startedDormantTabs: ["s1"],
+      pendingSlotTab: {},
     })
     render(<TerminalArea />)
     expect(screen.queryByText("Start session")).toBeNull()

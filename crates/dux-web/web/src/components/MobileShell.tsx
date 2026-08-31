@@ -31,7 +31,11 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { dormantTabNeedsCard, shouldShowTabStrip } from "@/lib/agentTabs"
+import {
+  dormantTabNeedsCard,
+  shouldShowTabStrip,
+  slotTabIdOf,
+} from "@/lib/agentTabs"
 import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
@@ -516,6 +520,7 @@ function TerminalScreen() {
     terminalEpoch,
     changes,
     startedDormantTabs,
+    pendingSlotTab,
   } = duxState
   const ownerScreen = terminalOwnerScreen(selectedTarget)
   if (ownerScreen) return ownerScreen
@@ -534,6 +539,12 @@ function TerminalScreen() {
     selectedTarget.kind === "agent"
       ? tabs.find((tab) => tab.id === selectedTarget.tabId)
       : undefined
+  // Which tab holds the slot as far as this client knows: a close this client
+  // just performed moved it, and the spine has not caught up. Both the card rule
+  // and the pane's own slot-ness question read the same answer, so a promoted
+  // tab is never briefly treated as an extra one (which would cover it with the
+  // Start-session card nobody asked for).
+  const slotTabId = slotTabIdOf(session.id, session, pendingSlotTab)
   const changeCount =
     changes.sessionId === selectedSessionId && changes.phase === "loaded"
       ? changes.staged.length + changes.unstaged.length
@@ -572,10 +583,11 @@ function TerminalScreen() {
             session,
             focusedTab,
             startedDormantTabs,
+            slotTabId,
           )}
           paneKey={paneKey}
           targetId={targetId}
-          slotTabId={session?.slot_tab_id}
+          slotTabId={slotTabId}
         />
       </div>
     </div>

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 
 import type { DuxState } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
+import { ONLY_TAB_CLOSE_REFUSAL } from "@/lib/agentTabs"
 
 let mockState: DuxState
 const addTabMock = vi.fn()
@@ -120,24 +121,34 @@ describe("AgentTabsStrip", () => {
     expect(addTabMock).toHaveBeenCalledWith("s1", "opencode")
   })
 
-  // The first tab cannot be closed, and the menu says so by keeping the item
-  // and deactivating it: a missing item reads as a bug, a greyed one reads as a
-  // rule.
-  it("renders the first tab's Close item disabled", async () => {
+  // The first tab is closable: closing it hands the slot to the next tab, so its
+  // menu item is an ordinary enabled one, exactly like an extra tab's.
+  // An agent's ONLY tab has no successor to hand the slot to, so the server
+  // refuses that close. The menu refuses it too, in the same words and before
+  // any dialog: the alternative is a confirmation promising a detach followed
+  // by a 400.
+  it("disables the Close item on an agent's only tab and says why", async () => {
+    const sole = session()
+    sole.tabs = [sole.tabs[0]]
+    render(<AgentTabsStrip session={sole} activeTabId="s1" maxTabs={20} />)
+    fireEvent.click(screen.getAllByLabelText("Tab actions")[0])
+    const menu = within(await screen.findByRole("menu"))
+    const item = menu.getByText("Close tab…").closest("[role='menuitem']")
+    expect(item?.getAttribute("aria-disabled")).toBe("true")
+    expect(menu.getByText(ONLY_TAB_CLOSE_REFUSAL)).toBeTruthy()
+    fireEvent.click(menu.getByText("Close tab…"))
+    expect(openCloseTabMock).not.toHaveBeenCalled()
+  })
+
+  it("keeps the first tab's Close item enabled and acting", async () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
     fireEvent.click(screen.getAllByLabelText("Tab actions")[0])
     const menu = within(await screen.findByRole("menu"))
     const item = menu.getByText("Close tab…").closest("[role='menuitem']")
     expect(item).toBeTruthy()
-    expect(item?.getAttribute("aria-disabled")).toBe("true")
-  })
-
-  it("does not open the close dialog when the first tab's Close item is clicked", async () => {
-    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    fireEvent.click(screen.getAllByLabelText("Tab actions")[0])
-    const menu = within(await screen.findByRole("menu"))
+    expect(item?.getAttribute("aria-disabled")).not.toBe("true")
     fireEvent.click(menu.getByText("Close tab…"))
-    expect(openCloseTabMock).not.toHaveBeenCalled()
+    expect(openCloseTabMock).toHaveBeenCalledWith("s1", "s1")
   })
 
   it("keeps an extra tab's Close item enabled and acting", async () => {

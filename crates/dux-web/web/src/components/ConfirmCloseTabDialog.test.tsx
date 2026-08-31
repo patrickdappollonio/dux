@@ -45,11 +45,13 @@ function tab(overrides: Partial<AgentTabView>): AgentTabView {
 }
 
 // Seed the dialog to close `tabId` of a session whose tabs are `tabs`.
-function seed(tabId: string, tabs: AgentTabView[]) {
+// `slotTabId` names the tab holding the session slot; left out, no tab does,
+// which is the shape the extra-tab cases care about.
+function seed(tabId: string, tabs: AgentTabView[], slotTabId?: string) {
   mockState = {
     closeTabTarget: { sessionId: "s1", tabId },
     spine: {
-      sessions: [{ id: "s1", tabs }],
+      sessions: [{ id: "s1", slot_tab_id: slotTabId, tabs }],
     },
   } as unknown as DuxState
 }
@@ -121,6 +123,78 @@ describe("ConfirmCloseTabDialog", () => {
     ])
     render(<ConfirmCloseTabDialog />)
     expect(screen.getByText(/last live tab, so the agent detaches/)).toBeTruthy()
+  })
+
+  // Closing the tab in the session slot is not refused any more: the slot moves
+  // to the next tab in strip order, and the copy has to say so and name it, or
+  // the user cannot tell this close apart from an extra tab's.
+  it("says which tab takes the slot when closing the agent's first tab", () => {
+    seed(
+      "t1",
+      [
+        tab({ id: "t1", provider: "claude", has_live_process: true }),
+        tab({ id: "t2", provider: "codex", has_live_process: true }),
+      ],
+      "t1",
+    )
+    render(<ConfirmCloseTabDialog />)
+    expect(
+      screen.getByText(
+        /The next tab, Codex, takes its place as the agent's first tab/,
+      ),
+    ).toBeTruthy()
+  })
+
+  // Two tabs on the same provider are told apart by the strip's own suffix, and
+  // the sentence has to use it: "codex" names two pills, "Codex 2" names one.
+  it("names the successor the way the strip labels it when providers repeat", () => {
+    seed(
+      "t1",
+      [
+        tab({ id: "t1", provider: "codex", has_live_process: true }),
+        tab({ id: "t2", provider: "codex", has_live_process: true }),
+      ],
+      "t1",
+    )
+    render(<ConfirmCloseTabDialog />)
+    expect(
+      screen.getByText(
+        /The next tab, Codex 2, takes its place as the agent's first tab/,
+      ),
+    ).toBeTruthy()
+  })
+
+  it("says nothing about a successor when closing an extra tab", () => {
+    seed(
+      "t2",
+      [
+        tab({ id: "t1", provider: "claude", has_live_process: true }),
+        tab({ id: "t2", provider: "codex", has_live_process: true }),
+      ],
+      "t1",
+    )
+    render(<ConfirmCloseTabDialog />)
+    expect(screen.queryByText(/takes its place/)).toBeNull()
+  })
+
+  // Both facts at once: the successor is dormant, so the close takes the
+  // agent's last live process AND hands the slot on.
+  it("says both when the first tab's close detaches the agent onto a dormant successor", () => {
+    seed(
+      "t1",
+      [
+        tab({ id: "t1", provider: "claude", has_live_process: true }),
+        tab({ id: "t2", provider: "codex", has_live_process: false }),
+      ],
+      "t1",
+    )
+    render(<ConfirmCloseTabDialog />)
+    expect(screen.getByText(/last live tab, so the agent detaches/)).toBeTruthy()
+    expect(
+      screen.getByText(
+        /The next tab, Codex, takes its place as the agent's first tab/,
+      ),
+    ).toBeTruthy()
   })
 
   // The vanished-target guard: the tab (or its session) disappearing from the

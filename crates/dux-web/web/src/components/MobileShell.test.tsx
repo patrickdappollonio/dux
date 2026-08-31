@@ -300,6 +300,7 @@ describe("MobileShell standalone terminals", () => {
       mobileScreen: "terminal",
       changes: { sessionId: null, phase: "empty", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
     } as unknown as Partial<DuxState>)
   }
@@ -428,6 +429,7 @@ describe("MobileShell phone header for a standalone agent", () => {
       mobileScreen: "terminal",
       changes: { sessionId: "sa1", phase: "loaded", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
     } as unknown as Partial<DuxState>)
     render(<MobileShell />)
@@ -457,6 +459,7 @@ describe("MobileShell dormant first tab", () => {
       mobileScreen: "terminal",
       changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
     } as unknown as Partial<DuxState>)
   }
@@ -493,6 +496,7 @@ describe("MobileShell up navigation never steps history", () => {
       mobileScreen: "terminal",
       changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
       ...overrides,
     } as unknown as Partial<DuxState>)
@@ -610,6 +614,7 @@ describe("MobileShell hideable top bar (ui.mobile_top_bar)", () => {
       mobileScreen: "terminal",
       changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
       mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
@@ -726,6 +731,7 @@ describe("MobileShell terminal-screen macro trigger", () => {
       mobileScreen: "terminal",
       changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
       mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
@@ -808,6 +814,7 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
       mobileScreen: "terminal",
       changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
       mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
@@ -981,6 +988,7 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
       mobileScreen: "terminal",
       changes: { sessionId: null, phase: "empty", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
       mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
@@ -1017,6 +1025,7 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
       mobileScreen: "terminal",
       changes: { sessionId: null, phase: "empty", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
       mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
@@ -1108,6 +1117,7 @@ describe("MobileShell agent header identity", () => {
       mobileScreen: "terminal",
       changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
       mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
@@ -1171,6 +1181,7 @@ describe("MobileShell terminal header control family", () => {
       mobileScreen: "terminal",
       changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
       mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
@@ -1270,6 +1281,7 @@ describe("MobileShell agent header lanes", () => {
       mobileScreen: "terminal",
       changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
       startedDormantTabs: [],
+      pendingSlotTab: {},
       terminalEpoch: 0,
       mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,

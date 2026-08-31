@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  ONLY_TAB_CLOSE_REFUSAL,
   defaultProviderForSession,
   dormantTabNeedsCard,
   isFirstTab,
@@ -9,8 +10,10 @@ import {
   resolveFocusedTab,
   shouldRefireFocusPut,
   shouldShowTabStrip,
+  slotTabIdOf,
   slotTabTargetId,
   tabLabels,
+  tabProseLabel,
 } from "./agentTabs"
 import { branchDriftOf } from "@/lib/agentWorkspace"
 import type { Spine } from "./workspaceApi"
@@ -243,6 +246,32 @@ describe("dormantTabNeedsCard", () => {
     ).toBe(true)
   })
 
+  // The promotion overlay knows the slot moved before the spine does. Without
+  // it, the tab a close just promoted is judged an extra tab and covered with
+  // the Start-session card, which the user never asked for and which stays up
+  // until the spine lands.
+  it("gives the first-tab rule to the tab an overlay says was just promoted", () => {
+    const stale = withSlot("t1")
+    const promoted = extraTab("t2", false)
+    expect(
+      dormantTabNeedsCard(agentTarget("s1", "t2"), stale, promoted, []),
+    ).toBe(true)
+    expect(
+      dormantTabNeedsCard(agentTarget("s1", "t2"), stale, promoted, [], "t2"),
+    ).toBe(false)
+    // The tab the close destroyed no longer gets the rule, even while the stale
+    // spine still calls it the slot.
+    expect(
+      dormantTabNeedsCard(
+        agentTarget("s1", "t1"),
+        stale,
+        extraTab("t1", false),
+        [],
+        "t2",
+      ),
+    ).toBe(true)
+  })
+
   it("is false for a terminal target or a missing focused tab", () => {
     const terminal: SelectedTarget = {
       kind: "terminal",
@@ -331,6 +360,53 @@ describe("tabLabels", () => {
         tab("claude"),
       ]),
     ).toEqual(["codex", "claude", "codex 2", "codex 3", "claude 2"])
+  })
+})
+
+// SHARED VECTORS with dux-core `agent_tabs.rs` `prose_tab_label`.
+describe("tabProseLabel", () => {
+  it("upper-cases the first character and keeps the disambiguating suffix", () => {
+    const tabs = [
+      { ...tab("codex"), id: "t1" },
+      { ...tab("codex"), id: "t2" },
+      { ...tab("opencode"), id: "t3" },
+    ]
+    expect(tabProseLabel(tabs, "t1")).toBe("Codex")
+    expect(tabProseLabel(tabs, "t2")).toBe("Codex 2")
+    expect(tabProseLabel(tabs, "t3")).toBe("Opencode")
+  })
+
+  it("is undefined for a tab the session does not have", () => {
+    expect(tabProseLabel([{ ...tab("codex"), id: "t1" }], "nope")).toBeUndefined()
+  })
+})
+
+// MIRROR of dux-core `agent_tabs.rs` `ONLY_TAB_CLOSE_REFUSAL`, pinned as a
+// literal in both languages: the browser refuses this close in the words the
+// server would have refused it in, so a reword on one side that is not mirrored
+// fails here.
+describe("ONLY_TAB_CLOSE_REFUSAL", () => {
+  it("is the one core-owned sentence", () => {
+    expect(ONLY_TAB_CLOSE_REFUSAL).toBe(
+      "This is the agent's only tab, so closing it would leave the agent with no tab at all. Detach the agent instead to stop everything it is running, or add another tab first.",
+    )
+  })
+})
+
+describe("slotTabIdOf", () => {
+  const session = { id: "s1", slot_tab_id: "t1" } as unknown as SessionView
+
+  it("prefers a promotion this client performed over the spine", () => {
+    expect(slotTabIdOf("s1", session, {})).toBe("t1")
+    expect(
+      slotTabIdOf("s1", session, {
+        s1: { closedTabId: "t1", promotedTabId: "t2" },
+      }),
+    ).toBe("t2")
+  })
+
+  it("is undefined when neither the spine nor an overlay knows the session", () => {
+    expect(slotTabIdOf("s9", undefined, {})).toBeUndefined()
   })
 })
 

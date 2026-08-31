@@ -44,11 +44,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{
-    AgentLaunchFailedOutcome, AgentLaunchReadyView, BeginDeleteSessionOutcome, Command, Engine,
-    EventReaction, FinishDeleteSessionOutcome, ProjectPersistenceView, StatusUpdate,
-    WorktreeRemoval,
+    AgentLaunchFailedOutcome, AgentLaunchReadyView, BeginDeleteSessionOutcome, CloseTabOutcome,
+    Command, Engine, EventReaction, FinishDeleteSessionOutcome, ProjectPersistenceView,
+    StatusUpdate, WorktreeRemoval,
 };
-use crate::ids::{SessionIdRef, TabIdRef};
+use crate::ids::{SessionIdRef, TabId, TabIdRef};
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
 use crate::statusline::StatusScope;
 use crate::worker::{
@@ -1054,6 +1054,14 @@ pub struct WireCommandOutcome {
     /// command.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detached: Option<bool>,
+    /// The tab that took the session slot, set only when a `CloseAgentTab`
+    /// closed the tab that HELD it. Nothing about the promoted tab changes but
+    /// its role, so the browser uses this to land the user on it and to say
+    /// which tab is the agent's first now, rather than resolving the slot
+    /// against a spine that has not caught up with the close yet. `None` for an
+    /// ordinary extra tab's close and for every other command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promoted: Option<String>,
     /// The opaque create-op id, set ONLY for a synchronous create dispatch
     /// (`CreateAgent` / `ForkSession` / `CreateAgentFromWorktree`). A REST create
     /// handler resolves its exact new session by polling
@@ -1084,7 +1092,16 @@ impl WireCommandOutcome {
         Self {
             status: Some(status),
             detached: Some(detached),
-            created_op_id: None,
+            ..Self::default()
+        }
+    }
+
+    fn with_close_tab(status: WireStatus, outcome: &CloseTabOutcome) -> Self {
+        Self {
+            status: Some(status),
+            detached: Some(outcome.detached),
+            promoted: outcome.promoted.as_ref().map(|t| t.as_str().to_string()),
+            ..Self::default()
         }
     }
 
@@ -1612,8 +1629,8 @@ impl Engine {
                 return Ok(WireCommandOutcome::with_status(status));
             }
             WireCommand::CloseAgentTab { session_id, tab_id } => {
-                let (status, detached) = self.close_agent_tab_wire(&session_id, &tab_id)?;
-                return Ok(WireCommandOutcome::with_detached(status, detached));
+                let (status, outcome) = self.close_agent_tab_wire(&session_id, &tab_id)?;
+                return Ok(WireCommandOutcome::with_close_tab(status, &outcome));
             }
             WireCommand::ChangeAgentTabProvider {
                 session_id,
@@ -2307,31 +2324,37 @@ impl Engine {
         }
     }
 
-    /// Close a tab and produce a confirming status. Reads the tab's provider
-    /// label before the close (the row is gone afterward). The one route that
-    /// issues this command still refuses the tab in the session slot before it
-    /// gets here, so in practice this only ever closes an extra tab; the engine
-    /// itself would promote the next tab into the slot instead.
+    /// Close a tab and produce a confirming status, handing the caller the whole
+    /// [`CloseTabOutcome`] so the route can report both halves of it.
+    ///
+    /// Both names are read BEFORE the close, from the strip the user was looking
+    /// at when they asked. That is the strip the confirmation named its
+    /// successor from, so a toast built the same way cannot contradict the
+    /// dialog that raised it, and the closed tab's own row is still there to be
+    /// named.
     fn close_agent_tab_wire(
         &mut self,
         session_id: &str,
         tab_id: &str,
-    ) -> anyhow::Result<(WireStatus, bool)> {
-        let provider = self
-            .agent_tabs
-            .get(TabIdRef::new(tab_id))
-            .map(|t| t.provider.as_str().to_string());
+    ) -> anyhow::Result<(WireStatus, CloseTabOutcome)> {
+        let sid = SessionIdRef::new(session_id);
+        let closed = self.tab_prose_label(sid, TabIdRef::new(tab_id));
+        let successor = self
+            .successor_slot_tab(sid)
+            .map(|t| TabId::new(t.id.clone()))
+            .and_then(|id| self.tab_prose_label(sid, id.as_ref_id()));
         let outcome = self.close_tab(session_id, tab_id)?;
-        Ok((
-            WireStatus::new(
-                "info",
-                match provider {
-                    Some(p) => format!("Closed the {p} tab."),
-                    None => "Closed the tab.".to_string(),
-                },
+        let message = match (&outcome.promoted, closed.as_deref(), successor.as_deref()) {
+            (Some(_), Some(closed), Some(next)) => format!(
+                "Closed the first tab, {closed}. {next} took its place as the agent's first tab."
             ),
-            outcome.detached,
-        ))
+            (Some(_), None, Some(next)) => format!(
+                "Closed the agent's first tab. {next} took its place as the agent's first tab."
+            ),
+            (_, Some(closed), _) => format!("Closed the {closed} tab."),
+            (_, None, _) => "Closed the tab.".to_string(),
+        };
+        Ok((WireStatus::new("info", message), outcome))
     }
 
     /// Retarget one tab's provider, validating the choice server-side. The
@@ -6098,6 +6121,75 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert!(err.to_string().contains("unknown session"), "err: {err}");
+    }
+
+    /// The status names BOTH tabs the close moved: the one that went and the one
+    /// that took its place, each the way the strip labelled it before the close.
+    /// A toast that named only the successor left the user guessing which pill
+    /// had just disappeared, and one built from the row provider could
+    /// contradict the confirmation that raised it.
+    #[test]
+    fn apply_wire_close_slot_tab_names_the_closed_tab_and_its_successor() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.create_session(&session).unwrap();
+        engine.sessions.push(session);
+        let tab = crate::model::AgentTab {
+            id: "t2".to_string(),
+            session_id: "s1".to_string(),
+            provider: crate::model::ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(TabId::new("t2"), tab);
+
+        let outcome = engine
+            .apply_wire(WireCommand::CloseAgentTab {
+                session_id: "s1".to_string(),
+                tab_id: "s1-slot".to_string(),
+            })
+            .expect("apply close");
+
+        assert_eq!(outcome.promoted.as_deref(), Some("t2"));
+        assert_eq!(
+            outcome.status.expect("a status").message,
+            "Closed the first tab, Claude. Codex took its place as the agent's first tab."
+        );
+    }
+
+    /// An extra tab's close names the tab that went, and says nothing about a
+    /// successor, because the slot did not move.
+    #[test]
+    fn apply_wire_close_extra_tab_names_only_the_closed_tab() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.create_session(&session).unwrap();
+        engine.sessions.push(session);
+        let tab = crate::model::AgentTab {
+            id: "t2".to_string(),
+            session_id: "s1".to_string(),
+            provider: crate::model::ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(TabId::new("t2"), tab);
+
+        let outcome = engine
+            .apply_wire(WireCommand::CloseAgentTab {
+                session_id: "s1".to_string(),
+                tab_id: "t2".to_string(),
+            })
+            .expect("apply close");
+
+        assert!(outcome.promoted.is_none());
+        assert_eq!(
+            outcome.status.expect("a status").message,
+            "Closed the Codex tab."
+        );
     }
 
     #[test]

@@ -15,6 +15,15 @@ export function isFirstTab(session: SessionView, tabId: string): boolean {
   return tabId === session.slot_tab_id
 }
 
+// The one sentence dux says when closing a tab would leave an agent with no tab
+// at all. MIRROR of dux-core's `agent_tabs::ONLY_TAB_CLOSE_REFUSAL`, which is
+// what the server's own 400 carries: the browser refuses the gesture up front
+// rather than letting the user through a dialog into that refusal, and it must
+// refuse in exactly the same words. Pinned as a literal by the test below, the
+// way the `tabLabels` vectors are.
+export const ONLY_TAB_CLOSE_REFUSAL =
+  "This is the agent's only tab, so closing it would leave the agent with no tab at all. Detach the agent instead to stop everything it is running, or add another tab first."
+
 // Slot-ness for the layers that hold two ids and no session record: the URL
 // grammar (which parses a hash before any spine has arrived), the PTY socket
 // URL choice, and the selection target those two build.
@@ -42,6 +51,29 @@ export function slotTabTargetId(sessionId: string): string {
   return sessionId
 }
 
+// What a close of the SLOT tab leaves behind until a spine catches up: which
+// tab the close destroyed, and which tab took the slot. Keyed on the CLOSED tab
+// because that is the fact a spine can retire (the tab is gone from the
+// session's list); keying it on the promoted id would pin a dead answer forever
+// as soon as somebody else's promotion moved the slot on again.
+export interface PendingSlotTab {
+  closedTabId: string
+  promotedTabId: string
+}
+
+// The tab holding a session's slot as far as THIS client knows. A promotion it
+// just performed wins over the spine, which has not caught up with the close
+// yet; otherwise the spine answers. `undefined` when neither knows the session.
+// Every reader of the slot goes through here so the overlay cannot apply to
+// some questions and not others.
+export function slotTabIdOf(
+  sessionId: string,
+  session: SessionView | undefined,
+  pending: Record<string, PendingSlotTab>,
+): string | undefined {
+  return pending[sessionId]?.promotedTabId ?? session?.slot_tab_id
+}
+
 // Whether the focused tab must render the "Start session" card INSTEAD of the
 // terminal pane. Mounting the pane subscribes to the PTY socket, and subscribing
 // starts a dormant tab, so this one answer decides both what is on screen and
@@ -66,16 +98,24 @@ export function slotTabTargetId(sessionId: string): string {
 // tab list, so a tab with no session behind it cannot reach here. The branch
 // exists so that if one ever could, it falls to the cautious side (card, no
 // launch) instead of guessing.
+//
+// `slotTabId` is the client's live answer to "which tab holds the slot"
+// (`slotTabIdOf`), which the promotion overlay can know before the spine does.
+// Without it, the tab a close just promoted would be judged an extra tab for as
+// long as the spine is stale and flash the Start-session card at a user who
+// asked for nothing of the kind.
 export function dormantTabNeedsCard(
   target: SelectedTarget | null,
   session: SessionView | undefined,
   focusedTab: AgentTabView | undefined,
   startedDormantTabs: string[],
+  slotTabId?: string,
 ): boolean {
   if (!target || target.kind !== "agent") return false
   if (!focusedTab || focusedTab.has_live_process) return false
   if (startedDormantTabs.includes(focusedTab.id)) return false
-  if (!session || !isFirstTab(session, focusedTab.id)) return true
+  const slot = slotTabId ?? session?.slot_tab_id
+  if (!session || focusedTab.id !== slot) return true
   return focusedTab.last_run_failed === true
 }
 
@@ -115,6 +155,28 @@ export function tabLabels(tabs: AgentTabView[]): string[] {
     seen.set(tab.provider, n)
     return n === 1 ? tab.provider : `${tab.provider} ${n}`
   })
+}
+
+// The way PROSE names one of a session's tabs: its strip label with the first
+// character upper-cased. Pills are lower-case because they are chrome; a
+// sentence names a tab the way a sentence names anything, and the
+// disambiguating suffix rides along, so "Codex 2" in a confirmation is the pill
+// the user is looking at. `undefined` for a tab this session does not have.
+//
+// TWIN of dux-core's `Engine::tab_prose_label` / `agent_tabs::prose_tab_label`,
+// which is what the server's own status messages are built from, so a
+// confirmation here and the toast that follows it cannot name the tab
+// differently. `AgentTabView.provider` is already the EFFECTIVE provider (the
+// running pin when a retarget happened mid-run), which is the same input the
+// Rust side uses.
+export function tabProseLabel(
+  tabs: AgentTabView[],
+  tabId: string,
+): string | undefined {
+  const i = tabs.findIndex((t) => t.id === tabId)
+  if (i < 0) return undefined
+  const label = tabLabels(tabs)[i]
+  return label.charAt(0).toUpperCase() + label.slice(1)
 }
 
 // Branch drift moved to `branchDriftOf` in `lib/agentWorkspace.ts`, beside the

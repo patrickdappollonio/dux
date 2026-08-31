@@ -7,7 +7,11 @@ import { DormantTabCard } from "@/components/DormantTabCard"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { PrBanner } from "@/components/PrBanner"
 import { Welcome } from "@/components/Welcome"
-import { dormantTabNeedsCard, shouldShowTabStrip } from "@/lib/agentTabs"
+import {
+  dormantTabNeedsCard,
+  shouldShowTabStrip,
+  slotTabIdOf,
+} from "@/lib/agentTabs"
 import { useDux } from "@/lib/store"
 import type { DuxState } from "@/lib/store"
 import { ownerSessionId as terminalOwnerSessionId } from "@/lib/terminalOwner"
@@ -140,6 +144,7 @@ export function TerminalArea() {
     selectedTarget,
     terminalEpoch,
     startedDormantTabs,
+    pendingSlotTab,
     routeNotFound,
   } = useDux()
 
@@ -194,6 +199,13 @@ export function TerminalArea() {
     selectedTarget.kind === "agent"
       ? tabs.find((t) => t.id === selectedTarget.tabId)
       : undefined
+  // Which tab holds the slot as far as this client knows: a close this client
+  // just performed moved it, and the spine has not caught up. Both the card rule
+  // and the pane's own slot-ness question read the same answer, so a promoted
+  // tab is never briefly treated as an extra one (which would cover it with the
+  // Start-session card nobody asked for). A terminal with no owning session has
+  // no slot to ask about, which is what the empty key resolves to.
+  const slotTabId = slotTabIdOf(ownerSessionId ?? "", session, pendingSlotTab)
   // Whether this tab gets the "Start session" card instead of the pane. The
   // helper owns the whole rule (a dormant extra tab waits; the agent's first tab
   // starts on selection unless its last run failed); see `dormantTabNeedsCard`.
@@ -202,6 +214,7 @@ export function TerminalArea() {
     session,
     focusedTab,
     startedDormantTabs,
+    slotTabId,
   )
 
   // TerminalPane owns its own background and padding (via inline style) so the
@@ -234,7 +247,7 @@ export function TerminalArea() {
           target={selectedTarget}
           paneKey={paneKey}
           targetId={targetId}
-          slotTabId={session?.slot_tab_id}
+          slotTabId={slotTabId}
           dormant={dormant}
           focusedTab={focusedTab}
         />

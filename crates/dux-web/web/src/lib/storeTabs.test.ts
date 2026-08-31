@@ -90,16 +90,30 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     const sid = match?.[1]
     const tid = match?.[2]
     const session = (
-      spineBody as { sessions: { id: string; tabs: { id: string; has_live_process?: boolean }[] }[] }
+      spineBody as {
+        sessions: {
+          id: string
+          slot_tab_id?: string
+          tabs: { id: string; has_live_process?: boolean }[]
+        }[]
+      }
     ).sessions.find((s) => s.id === sid)
     const detached = session
       ? !session.tabs.some((t) => t.id !== tid && t.has_live_process)
       : true
+    // Mirror the real route's promotion: closing the tab the session's pointer
+    // names hands the slot to the next tab in strip order, and the body says
+    // which one took it.
+    const promoted =
+      session && (session.slot_tab_id ?? session.id) === tid
+        ? session.tabs.find((t) => t.id !== tid)?.id
+        : undefined
+    const body = promoted === undefined ? { detached } : { detached, promoted }
     return {
       ok: true,
       status: 200,
-      json: async () => ({ detached }),
-      text: async () => JSON.stringify({ detached }),
+      json: async () => body,
+      text: async () => JSON.stringify(body),
       headers: { get: () => null },
     } as unknown as Response
   }
@@ -208,11 +222,34 @@ function spineWithDormantSlot() {
   }
 }
 
+// The address bar these tests read back. `syncUrl` is the ONE place the store
+// writes history, so mirroring its writes into `hash` is what lets a test assert
+// the URL actually moved rather than that `routeHash` would have computed the
+// right string.
+let fakeLocation = {
+  host: "localhost:0",
+  protocol: "http:",
+  pathname: "/",
+  search: "",
+  hash: "",
+}
+
+function writeUrl(url: string) {
+  fakeLocation.hash = url.startsWith("#") ? url : ""
+}
+
 beforeEach(() => {
   calls = []
   sockets = []
   spineBody = makeSpine()
-  vi.stubGlobal("location", { host: "localhost:0", protocol: "http:" })
+  fakeLocation = {
+    host: "localhost:0",
+    protocol: "http:",
+    pathname: "/",
+    search: "",
+    hash: "",
+  }
+  vi.stubGlobal("location", fakeLocation)
   vi.stubGlobal("localStorage", {
     getItem: () => null,
     setItem: () => {},
@@ -221,8 +258,8 @@ beforeEach(() => {
   vi.stubGlobal("window", { addEventListener: () => {} })
   vi.stubGlobal("history", {
     go: () => {},
-    pushState: () => {},
-    replaceState: () => {},
+    pushState: (_state: unknown, _title: string, url: string) => writeUrl(url),
+    replaceState: (_state: unknown, _title: string, url: string) => writeUrl(url),
   })
   vi.stubGlobal("WebSocket", FakeWebSocket)
   vi.stubGlobal("fetch", fetchMock)
@@ -348,6 +385,170 @@ describe("store agent-tab lifecycle", () => {
       kind: "agent",
       sessionId: "s1",
       tabId: "s1",
+    })
+  })
+
+  it("closeTab on the SLOT tab lands on the promoted tab at the bare agent address", async () => {
+    // The slot tab is closable, and the close promotes its neighbour. The
+    // spine is still stale when the DELETE resolves (no `sessions.changed`
+    // refetch has run), so the answer's `promoted` is the only thing that
+    // knows which tab is the agent's first now: the selection must follow it,
+    // and the address must be the bare agent form, because the promoted tab IS
+    // the slot tab.
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        {
+          id: "s1",
+          slot_tab_id: "t1",
+          workspace: {
+            kind: "managed",
+            project_id: "p1",
+            branch_name: "",
+            initial_branch: "",
+            branch_provenance: "created",
+            source_branch: "",
+            worktree_path: "",
+          },
+          terminals: [],
+          tabs: [
+            { id: "t1", has_live_process: true },
+            { id: "t2", has_live_process: true },
+          ],
+        },
+      ],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    mod.selectTab("s1", "t1")
+    mod.closeTab("s1", "t1")
+    await tick()
+
+    const target = mod.getSnapshot().selectedTarget
+    expect(target).toEqual({ kind: "agent", sessionId: "s1", tabId: "t2" })
+    expect(
+      mod.routeHash({
+        target,
+        changes: false,
+        editor: null,
+        standalone: false,
+      }),
+    ).toBe("#/agent/s1")
+    // And the address bar actually moved there: `routeHash` alone would agree
+    // even if nothing had written the URL.
+    expect(fakeLocation.hash).toBe("#/agent/s1")
+    const del = find(
+      (u, init) =>
+        u === "/api/v1/sessions/s1/tabs/t1" && init?.method === "DELETE",
+    )
+    expect(del).toBeDefined()
+  })
+
+  // ── The promotion overlay's lifecycle ────────────────────────────────────
+  //
+  // A close of the slot tab leaves an overlay behind, because the spine is
+  // still the pre-close one when the DELETE resolves. The overlay is keyed on
+  // the CLOSED tab, so a spine retires it by no longer listing that tab, and a
+  // further promotion somebody else made cannot pin a dead answer here.
+
+  // A three-tab agent whose slot is `slot` and whose tabs are `ids`, in strip
+  // order. Written straight into `spineBody`, which is what the next workspace
+  // fetch answers with.
+  function seedTabs(slot: string, ids: string[]) {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        {
+          id: "s1",
+          slot_tab_id: slot,
+          workspace: {
+            kind: "managed",
+            project_id: "p1",
+            branch_name: "",
+            initial_branch: "",
+            branch_provenance: "created",
+            source_branch: "",
+            worktree_path: "",
+          },
+          terminals: [],
+          tabs: ids.map((id) => ({ id, has_live_process: true })),
+        },
+      ],
+      sidebar: { groups: [] },
+    }
+  }
+
+  it("retires the promotion overlay on the spine that confirms the close", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.closeTab("s1", "t1")
+    await tick()
+    expect(mod.getSnapshot().pendingSlotTab).toEqual({
+      s1: { closedTabId: "t1", promotedTabId: "t2" },
+    })
+
+    seedTabs("t2", ["t2", "t3"])
+    fireSessionsChanged()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingSlotTab).toEqual({})
+    })
+  })
+
+  it("retires it on a spine where somebody else has already promoted again", async () => {
+    // We moved the slot t1 -> t2; another surface then moved it t2 -> t3 before
+    // our spine caught up. Keyed on the promoted id, the overlay would go on
+    // insisting t2 is the slot forever, because no spine will ever say so
+    // again.
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.closeTab("s1", "t1")
+    await tick()
+    expect(mod.getSnapshot().pendingSlotTab.s1?.promotedTabId).toBe("t2")
+
+    seedTabs("t3", ["t3"])
+    fireSessionsChanged()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingSlotTab).toEqual({})
+    })
+    // And the slot the client now reports is the spine's, not the dead t2: a
+    // fresh selection of the agent lands on t3.
+    mod.selectSession("s1")
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t3",
+    })
+  })
+
+  it("keeps the overlay across a spine that predates the close", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.closeTab("s1", "t1")
+    await tick()
+
+    // A spine snapshotted before the DELETE landed: it still lists the closed
+    // tab, so it says nothing about this close and the overlay stands.
+    fireSessionsChanged()
+    await tick()
+    expect(mod.getSnapshot().pendingSlotTab).toEqual({
+      s1: { closedTabId: "t1", promotedTabId: "t2" },
+    })
+  })
+
+  it("re-keys the overlay onto the second close when two land before any spine", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.closeTab("s1", "t1")
+    await tick()
+
+    // Server-side the slot is t2 now; the client has not refetched, so its
+    // spine still says t1. Closing t2 promotes t3, and the overlay must follow
+    // the second close rather than keep answering for the first.
+    seedTabs("t2", ["t2", "t3"])
+    mod.closeTab("s1", "t2")
+    await tick()
+    expect(mod.getSnapshot().pendingSlotTab).toEqual({
+      s1: { closedTabId: "t2", promotedTabId: "t3" },
     })
   })
 

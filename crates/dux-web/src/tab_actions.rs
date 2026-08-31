@@ -15,21 +15,25 @@
 //! Every tab of `:id` is addressable at `.../tabs/:tab`, the session-slot tab
 //! included, and so is its PTY socket. What each verb DOES with the slot tab is
 //! therefore a stated decision per route rather than a consequence of the slot
-//! tab having no `agent_tabs` row: `DELETE` refuses it (it lives as long as the
-//! agent does), `PATCH` accepts it and delegates to the session-level provider
-//! change, and neither infers slot-ness from a missing row. Both ask
-//! `EngineHandle::is_slot_tab`.
+//! tab having no `agent_tabs` row: `DELETE` closes it by PROMOTING the next tab
+//! in strip order into the slot (the slot is a pointer, so the successor keeps
+//! its own id, row, process and sockets and only changes role), and `PATCH`
+//! accepts it and delegates to the session-level provider change. Neither
+//! infers slot-ness from a missing row; both ask `EngineHandle::is_slot_tab`,
+//! `DELETE` only to decide whether the ownership check applies.
 //!
 //! Routes:
 //! - `POST   /api/v1/sessions/:id/tabs`            - create a tab running
 //!   `{ "provider"? }` (the session's project default when omitted). 201 +
 //!   `{ "tab_id", "provider" }`. 404 when `:id` is unknown; 400 when the provider
 //!   is not configured.
-//! - `DELETE /api/v1/sessions/:id/tabs/:tab`       - close one tab. The agent's
-//!   FIRST tab (the session-slot tab, the one the session's pointer names) cannot be
-//!   closed and is refused with a 400 saying why; any other tab is closed and
-//!   its row removed, returning 200 + `{ "detached": <bool> }` (closing an
-//!   agent's LAST live tab detaches it). A `:tab` not owned by `:id` is a 404.
+//! - `DELETE /api/v1/sessions/:id/tabs/:tab`       - close one tab, returning
+//!   200 + `{ "detached": <bool>, "promoted"?: <tab id> }` (closing an agent's
+//!   LAST live tab detaches it; `promoted` names the tab that took the session
+//!   slot, and is absent for an ordinary extra tab's close). Closing the agent's
+//!   ONLY tab is refused with a 400 carrying the engine's sentence: an agent
+//!   always has a slot, and that gesture is the agent's detach. A `:tab` not
+//!   owned by `:id` is a 404.
 //! - `POST   /api/v1/sessions/:id/tabs/:tab/start` - start a DORMANT tab (the
 //!   "Start session" press). 200 once the launch is dispatched, or when the tab
 //!   was already running. This is the only start that gets past a recorded
@@ -86,11 +90,15 @@ struct CreatedTab {
     provider: String,
 }
 
-/// 200 body for a session-slot tab detach, distinguishing it from an extra-tab close
-/// (which is a bodiless 204).
+/// 200 body for a tab close: whether the close detached the agent, plus the tab
+/// that took the session slot when the closed tab was the one holding it.
 #[derive(Serialize)]
-struct DetachedTab {
+struct ClosedTab {
     detached: bool,
+    /// Absent for an ordinary extra tab's close, so the client can tell "nothing
+    /// was promoted" from "some tab was" without a sentinel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    promoted: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -132,8 +140,9 @@ async fn create_tab(
     }
 }
 
-/// `DELETE /api/v1/sessions/:id/tabs/:tab` - close one tab. The session-slot tab
-/// is refused: it lives as long as the agent does. Any other tab is closed. A
+/// `DELETE /api/v1/sessions/:id/tabs/:tab` - close one tab. Naming the
+/// session-slot tab promotes the next tab in strip order into it; the agent's
+/// only tab is refused by the engine, because an agent always has a slot. A
 /// `:tab` not owned by `:id` is a 404.
 async fn delete_tab(
     State(state): State<AppState>,
@@ -153,26 +162,17 @@ async fn delete_tab(
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp.into_response();
     }
-    // The agent's first tab cannot be closed: it holds the session slot and it
-    // lives as long as the agent does. This route is reachable by hand as well
-    // as from the browser (whose menu item is disabled), so it refuses out loud
-    // rather than quietly doing something else. It used to stop that tab's
-    // provider via `KillSessionPty`, which is not what "close the tab" means and
-    // left the user with a tab they could not get rid of and a session they had
-    // not meant to stop.
-    if state.engine.is_slot_tab(id.clone(), &tab).await {
-        return (
-            StatusCode::BAD_REQUEST,
-            "This agent's first tab can't be closed: it lives as long as the agent does. \
-             Add more tabs and close those instead, or detach the agent to stop everything \
-             it is running.",
-        )
-            .into_response();
-    }
-    // extra tab: enforce ownership (never a cross-session close), then close it.
-    match state.engine.tab_session(tab.clone()).await {
-        Some(owner) if owner == id => {}
-        _ => return unknown_tab(),
+    // The slot tab is closable like any other: the engine hands the slot to the
+    // next tab in strip order and then tears this one down. Slot-ness is asked
+    // only to decide whether the ownership check applies, because the slot tab
+    // has no `agent_tabs` row for `tab_session` to resolve; the session's own
+    // pointer is what names it as this agent's.
+    if !state.engine.is_slot_tab(id.clone(), &tab).await {
+        // An extra tab: enforce ownership, so this is never a cross-session close.
+        match state.engine.tab_session(tab.clone()).await {
+            Some(owner) if owner == id => {}
+            _ => return unknown_tab(),
+        }
     }
     match state
         .engine
@@ -192,7 +192,14 @@ async fn delete_tab(
         // `has_live_process`.
         Ok(outcome) => {
             let detached = outcome.detached.unwrap_or(true);
-            (StatusCode::OK, Json(DetachedTab { detached })).into_response()
+            (
+                StatusCode::OK,
+                Json(ClosedTab {
+                    detached,
+                    promoted: outcome.promoted,
+                }),
+            )
+                .into_response()
         }
         // A concurrent close removed the row between the ownership check and the
         // command: "gone" is 404, not a validation error (mirrors kill_session).
