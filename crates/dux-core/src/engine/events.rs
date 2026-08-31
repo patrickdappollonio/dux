@@ -168,15 +168,15 @@ impl StatusUpdate {
     }
 }
 
+/// The one status key every "GitHub features came back / went away" message
+/// carries, so the surfaces replace the standing one instead of stacking.
+pub const GH_AVAILABILITY_STATUS_KEY: &str = "gh-availability";
+
 /// What the App must do after the Engine processed a `WorkerEvent`. The Engine
 /// handles all domain-state mutations (sessions, projects, providers,
 /// session_store, sync entries, in-flight maps, env, etc.); anything that
 /// touches view state (status line, prompt, focus, input_target, derived caches
 /// like `left_items_cache` and `files_index`) is described here.
-/// The one status key every "GitHub features came back / went away" message
-/// carries, so the surfaces replace the standing one instead of stacking.
-pub const GH_AVAILABILITY_STATUS_KEY: &str = "gh-availability";
-
 pub enum EventReaction {
     /// Engine fully handled the event; no view follow-up needed.
     Nothing,

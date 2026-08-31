@@ -4533,9 +4533,6 @@ mod pr_tests {
     }
 }
 
-/// Adds `column` to `table` if it is missing. Returns `true` when the column
-/// was just added by this call, `false` when it already existed. Callers that
-/// need a one-time backfill of a newly-added column branch on the return value.
 /// Read one `agent_tabs` row. Shared by every tab query so the slot tab and an
 /// extra tab can never be decoded differently.
 fn read_agent_tab(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentTab> {
@@ -4569,6 +4566,9 @@ fn min_session_sort_order_in(conn: &Connection, project_id: &str) -> Result<Opti
     .context("failed to compute min session sort order")
 }
 
+/// Adds `column` to `table` if it is missing. Returns `true` when the column
+/// was just added by this call, `false` when it already existed. Callers that
+/// need a one-time backfill of a newly-added column branch on the return value.
 fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("pragma table_info({table})"))?;
     let existing = stmt
