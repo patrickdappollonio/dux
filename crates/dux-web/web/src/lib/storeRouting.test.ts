@@ -1131,7 +1131,34 @@ describe("the editor rides the URL", () => {
         standalone: true,
       },
     ]
-    for (const route of routes) {
+    // The grammar gained a THEATER modifier, which every position shape may
+    // carry and no editor or changes shape may; both halves round-trip here.
+    const withTheater = routes.map((r) => ({ ...r, theater: false }))
+    const theaterRoutes = [
+      { target, changes: false, editor: null, standalone: false, theater: true },
+      {
+        target: { kind: "agent" as const, sessionId: "s1", tabId: "t2" },
+        changes: false,
+        editor: null,
+        standalone: false,
+        theater: true,
+      },
+      {
+        target: standaloneTerminal,
+        changes: false,
+        editor: null,
+        standalone: false,
+        theater: true,
+      },
+      {
+        target: projectTerminal,
+        changes: false,
+        editor: null,
+        standalone: false,
+        theater: true,
+      },
+    ]
+    for (const route of [...withTheater, ...theaterRoutes]) {
       expect(mod.parseRoute(mod.routeHash(route))).toEqual(route)
     }
   })
@@ -1200,6 +1227,7 @@ describe("the editor rides the URL", () => {
       changes: false,
       editor,
       standalone: true,
+      theater: false,
     }
     // An extra-tab target normalizes to the session-slot tab.
     expect(
@@ -1209,6 +1237,7 @@ describe("the editor rides the URL", () => {
           changes: false,
           editor,
           standalone: true,
+          theater: false,
         }),
       ),
     ).toEqual(normalized)
@@ -1220,6 +1249,7 @@ describe("the editor rides the URL", () => {
           changes: true,
           editor,
           standalone: true,
+          theater: false,
         }),
       ),
     ).toEqual(normalized)

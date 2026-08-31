@@ -114,6 +114,16 @@ import {
   type TerminalOwnerRef,
 } from "./terminalOwner"
 import { ownerHasTerminal } from "./terminals"
+import {
+  clearTheaterMemory,
+  readTheaterMemory,
+  splitTheaterHash,
+  theaterMemoryKey,
+  theaterMemoryKeyForPty,
+  theaterSerializable,
+  withTheaterHash,
+  writeTheaterMemory,
+} from "./theater"
 import type {
   BranchWarningView,
   InspectKind,
@@ -316,6 +326,12 @@ export interface DuxState {
   // first boot connect (no prior connection to have lost).
   offline: boolean
   selectedTarget: SelectedTarget | null
+  // THEATER MODE: the focused pane fills the surface and every piece of dux's
+  // own chrome around it leaves. A property of the POSITION, not of the app: it
+  // rides the address as a modifier, it is restored per pane from the browser's
+  // local storage on selection, and losing input ownership of the pane takes it
+  // away (see `noteTheaterOwnershipLost`). Never true with nothing focused.
+  theater: boolean
   // Derived from `selectedTarget`: the owning session id. Session-scoped UI
   // (breadcrumb, changed files, statusbar) reads this so it keeps working
   // whether an agent or one of its terminals is focused. Kept in `state` (not
@@ -907,6 +923,7 @@ let state: DuxState = {
   conn: "connecting",
   offline: false,
   selectedTarget: null,
+  theater: false,
   selectedSessionId: null,
   terminalEpoch: 0,
   composeDrafts: {},
@@ -2343,6 +2360,12 @@ export interface Route {
   // SERIALIZED form: `routeHash` emits at most one suffix (editor wins), and
   // `parseRoute` tries the editor suffix first.
   editor: { mode: EditorViewMode; path: string | null } | null
+  // Theater mode: the focused pane with dux's chrome taken away. A MODIFIER on
+  // the position rather than a shape of its own, so it is spelled as a trailing
+  // `?view=theater` on whatever grammar the position already has (see
+  // `lib/theater.ts`), and it is dropped for every address with no pane to
+  // fill: home, the changes screen, and both editor surfaces.
+  theater: boolean
   // True when the address is the STANDALONE editor's whole-tab form
   // (`#/editor/agent/<sid>[/<mode>/<encoded-path>]`) rather than the in-app
   // suffix. Only meaningful with a non-null `editor`; it decides which shell
@@ -2383,7 +2406,7 @@ function parseEditorRoute(hash: string): Route | null {
     const target = parseSelectionHash(hash.slice(0, at))
     if (!target) continue
     const editor = parseEditorSegment(tm[1], tm[2])
-    return { target, changes: false, editor, standalone: false }
+    return { target, changes: false, editor, standalone: false, theater: false }
   }
   return null
 }
@@ -2418,7 +2441,7 @@ function parseStandaloneEditorRoute(hash: string): Route | null {
     // all — it boots the NORMAL shell and takes the ordinary
     // route-correction path there.
     if (editor === null) return null
-    return { target, changes: false, editor, standalone: true }
+    return { target, changes: false, editor, standalone: true, theater: false }
   } catch {
     return null
   }
@@ -2446,7 +2469,18 @@ function parseEditorSegment(
 // Parse a hash into a route. A hash that names no valid target is home.
 // Exported for the round-trip tests only (`routeHash` likewise): the grammar
 // must stay an exact inverse pair, and that is only checkable from outside.
-export function parseRoute(hash: string): Route {
+export function parseRoute(rawHash: string): Route {
+  // THE MODIFIER COMES OFF FIRST. Every grammar below is end-anchored, so a
+  // trailing `?view=theater` would make each of them fail to match; peeling it
+  // here is what lets one modifier ride every position shape without a second
+  // parser per shape. It goes back on only where a pane exists to fill the
+  // screen, which is the same rule `routeHash` serializes by.
+  const { hash, theater } = splitTheaterHash(rawHash)
+  const route = parsePosition(hash)
+  return theater && theaterSerializable(route) ? { ...route, theater: true } : route
+}
+
+function parsePosition(hash: string): Route {
   // The standalone editor's grammar is prefix-disjoint from everything else
   // (`#/editor/…` vs `#/agent/…`, `#/project/…`, `#/terminal/…`), so its
   // position in this ladder decides nothing; it goes first as the most
@@ -2454,7 +2488,7 @@ export function parseRoute(hash: string): Route {
   const standalone = parseStandaloneEditorRoute(hash)
   if (standalone) return standalone
   const direct = parseSelectionHash(hash)
-  if (direct) return { target: direct, changes: false, editor: null, standalone: false }
+  if (direct) return { target: direct, changes: false, editor: null, standalone: false, theater: false }
   // The editor suffix is tried BEFORE the changes suffix, which is what makes
   // the two mutually exclusive in practice: an editor path is a single
   // encoded segment, so `#/agent/s1/editor/file/changes` (a file literally
@@ -2466,9 +2500,9 @@ export function parseRoute(hash: string): Route {
   if (editor) return editor
   if (hash.endsWith(CHANGES_SUFFIX)) {
     const target = parseSelectionHash(hash.slice(0, -CHANGES_SUFFIX.length))
-    if (target) return { target, changes: true, editor: null, standalone: false }
+    if (target) return { target, changes: true, editor: null, standalone: false, theater: false }
   }
-  return { target: null, changes: false, editor: null, standalone: false }
+  return { target: null, changes: false, editor: null, standalone: false, theater: false }
 }
 
 // The hash for a route. Home is the empty hash; both suffixes only apply on
@@ -2479,6 +2513,13 @@ export function parseRoute(hash: string): Route {
 // pins the cross-product. A pathless editor suffix carries no mode segment,
 // so a pathless route's mode is normalized to "file" on the way back in.
 export function routeHash(route: Route): string {
+  return withTheaterHash(
+    positionHash(route),
+    route.theater && theaterSerializable(route),
+  )
+}
+
+function positionHash(route: Route): string {
   // The standalone form replaces the whole address rather than riding as a
   // suffix, and it is SESSION-SLOT ONLY by definition (the surface is the
   // editor, not a tab strip) with no changes screen: an extra-tab target is
@@ -2554,6 +2595,9 @@ export function standaloneEditorHash(
     changes: false,
     editor: editor ?? { mode: "file", path: null },
     standalone: true,
+    // The editor surface has no PTY to give the height to, so it never carries
+    // the modifier. Stated rather than left to `theaterSerializable` to drop.
+    theater: false,
   })
 }
 
@@ -2586,6 +2630,7 @@ function currentRoute(): Route {
     target,
     changes: state.mobileScreen === "changes",
     editor,
+    theater: state.theater,
     // The surface bit, so a file switch inside the standalone tab writes the
     // standalone grammar back rather than silently converting the address to
     // the in-app form.
@@ -2617,7 +2662,7 @@ function currentRoute(): Route {
 // so a persistently-refusing browser is visible, and let the next successful
 // write bring the address bar back in line. This is the ONE place a history call
 // is made, which is what makes the one guard enough.
-function syncUrl(mode?: "replace"): void {
+function syncUrl(mode?: "replace" | "push"): void {
   if (typeof history === "undefined" || typeof history.replaceState !== "function") {
     return
   }
@@ -2637,7 +2682,13 @@ function syncUrl(mode?: "replace"): void {
   const url = next === "" ? base : next
   // `routePushKey`, not `routeScreen`: the editor-open bit must push/pop like
   // a screen without ever BEING a screen (see routePushKey's comment).
+  // `mode: "push"` is the explicit form, for a move that changes the screen
+  // without changing the SHAPE the push key describes: entering theater is a
+  // real position the user chose, so Back has to come back out of it, but it
+  // is still the terminal screen and the key cannot say so. Leaving is an
+  // ordinary replace, so Back never re-enters a mode just dismissed.
   const movedScreen =
+    mode === "push" ||
     routePushKey(parseRoute(next)) !== routePushKey(parseRoute(current))
   try {
     if (mode !== "replace" && movedScreen && typeof history.pushState === "function") {
@@ -2684,6 +2735,7 @@ function applyUrlRoute(): void {
     pendingDeepLink = route.target
     pendingDeepLinkChanges = route.changes
     pendingDeepLinkEditor = route.editor
+    pendingDeepLinkTheater = route.theater
     return
   }
   if (!route.target) {
@@ -2846,7 +2898,44 @@ function rootIsLive(spine: Spine, root: EditorRoot): boolean {
 function resolveRoute(spine: Spine, route: Route): void {
   if (route.target === null) return
   syncEditorStateFromRoute(spine, route)
-  resolveRouteTarget(spine, route.target, route.changes)
+  // THE ADDRESS WINS over the pane's remembered mode while a route is being
+  // resolved, because the route IS the user's position: a shared theater link,
+  // and a Back out of theater onto the same pane, both have to override what
+  // that pane's memory says. Armed around the commit and dropped in a
+  // `finally` so a route that resolves to not-found cannot leave the override
+  // armed for whatever selection happens next.
+  pendingTheater = route.theater
+  try {
+    resolveRouteTarget(spine, route.target, route.changes)
+  } finally {
+    pendingTheater = undefined
+  }
+}
+
+// The theater flag a route being resolved carries, consumed by the very next
+// selection commit (see `theaterPatch`). Module state rather than a parameter
+// threaded through five restore paths: every one of them ends in one of the
+// three selection actions, and this is the one place that has to know.
+let pendingTheater: boolean | undefined
+
+// The theater half of a selection commit, landing in the SAME state patch as
+// the target so `syncUrl` never writes an address from a half-applied
+// position. With no route override in flight it is the pane's own remembered
+// mode; with one, the address wins and is written back to the memory, because
+// following a link into theater is as much a choice as pressing the button.
+function theaterPatch(
+  target: SelectedTarget | null,
+  override?: boolean,
+): { theater: boolean } {
+  const explicit = override ?? pendingTheater
+  // Always dropped, override or not: a route's flag belongs to the very next
+  // commit and nothing else.
+  pendingTheater = undefined
+  if (target === null) return { theater: false }
+  const key = theaterMemoryKey(target)
+  if (explicit === undefined) return { theater: readTheaterMemory(key) }
+  writeTheaterMemory(key, explicit)
+  return { theater: explicit }
 }
 
 // Resolve a route's target against a spine and commit it, or record not-found
@@ -2957,6 +3046,7 @@ function setRouteNotFound(sessionId: string): void {
     selectedSessionId: null,
     changes: emptyChanges(),
     mobileScreen: "home",
+    theater: false,
     routeNotFound: { kind: "agent", sessionId },
   })
   switchChangesSubscription(prev, null)
@@ -2969,7 +3059,7 @@ function setRouteNotFound(sessionId: string): void {
 const bootRoute: Route =
   typeof location !== "undefined"
     ? parseRoute(location.hash ?? "")
-    : { target: null, changes: false, editor: null, standalone: false }
+    : { target: null, changes: false, editor: null, standalone: false, theater: false }
 // All three halves are mutable: a popstate that beats the first spine
 // overwrites them with the address the browser actually moved to (see
 // `applyUrlRoute`), so the restore resolves that rather than a boot hash the
@@ -2977,6 +3067,7 @@ const bootRoute: Route =
 let pendingDeepLink: SelectedTarget | null = bootRoute.target
 let pendingDeepLinkChanges = bootRoute.changes
 let pendingDeepLinkEditor = bootRoute.editor
+let pendingDeepLinkTheater = bootRoute.theater
 
 // Route a normalized route target onto an already-resolved session: restore a
 // still-present terminal or extra tab, else fall back to the session-slot tab.
@@ -3052,6 +3143,7 @@ function restoreDeepLink(spine: Spine): void {
     changes: pendingDeepLinkChanges,
     editor: pendingDeepLinkEditor,
     standalone: state.standaloneEditor,
+    theater: pendingDeepLinkTheater,
   })
 }
 
@@ -3404,6 +3496,7 @@ function selectSessionRoute(
   setState({
     selectedTarget: { kind: "agent", sessionId: id, tabId: slotTab },
     selectedSessionId: id,
+    ...theaterPatch({ kind: "agent", sessionId: id, tabId: slotTab }),
     // Re-selecting the same session keeps its loaded data; a real switch enters
     // the loading window so the pane shows a spinner, not the previous session's
     // files.
@@ -3428,6 +3521,9 @@ function clearSelection(urlMode?: "replace", extra?: Partial<DuxState>): void {
   setState({
     selectedTarget: null,
     selectedSessionId: null,
+    // Nothing focused is nothing to fill the screen with, so home is never in
+    // theater; the pane's own memory is untouched and brings it back.
+    theater: false,
     changes: emptyChanges(),
     ...editorSelectionPatch(null),
     ...(extra ?? {}),
@@ -3475,12 +3571,20 @@ export function selectTab(
     // setState, threaded through when a remembered tab diverts an
     // `openEditor` selection here.
     extra?: Partial<DuxState>
+    // THE MODE THE SWITCH CARRIES. A tab switch made from inside theater (the
+    // floating pill's mini strip) must not consult the DESTINATION's memory:
+    // the user is looking at a full-screen pane and asked for a different tab
+    // in it, so the mode follows their attention and the destination remembers
+    // it from then on. Same override the route path arms, said at the call
+    // site instead of through module state.
+    theater?: boolean
   },
 ): void {
   const prev = state.selectedSessionId
   setState({
     selectedTarget: { kind: "agent", sessionId, tabId },
     selectedSessionId: sessionId,
+    ...theaterPatch({ kind: "agent", sessionId, tabId }, opts?.theater),
     changes: prev === sessionId ? state.changes : loadingChanges(sessionId),
     ...editorSelectionPatch({ kind: "agent", sessionId, tabId }),
     ...screenPatch(opts?.changes),
@@ -3551,6 +3655,7 @@ export function selectTerminal(
   setState({
     selectedTarget: { kind: "terminal", terminalId, owner },
     selectedSessionId: sessionId,
+    ...theaterPatch({ kind: "terminal", terminalId, owner }),
     // Switching from the agent to one of its own terminals keeps the same
     // session's loaded changes; only a different session (or a project
     // terminal, which has none) enters loading/empty.
@@ -3925,6 +4030,7 @@ export function openEditor(
   const editorPatch: Partial<DuxState> = {
     editorTarget: { root, initialPath, initialMode: effectiveMode },
     editorRoute: { root, mode: effectiveMode, path: initialPath },
+    ...theaterSuspendPatch(),
   }
   // Tab seeding first: it touches only `editorTabs`, which the URL never
   // serializes, so ordering it before the route commit changes nothing the
@@ -3973,7 +4079,14 @@ export function closeEditor(opts?: { urlMode?: "replace" }): void {
   // shell kept up over a closed editor is the boot spinner forever. Unreachable
   // from the standalone UI today (its body hides the Close button), so this is
   // defense in depth.
-  setState({ editorTarget: null, editorRoute: null, standaloneEditor: false })
+  setState({
+    editorTarget: null,
+    editorRoute: null,
+    standaloneEditor: false,
+    // Landing back on the pane restores whatever mode it remembers, which is
+    // the other half of the suspend `openEditor` wrote.
+    ...theaterResumePatch(),
+  })
   // Closing is a move too (Esc, the Close button): the push-key drops its
   // editor bit, so this pushes the closed position like any other navigation
   // between two real places. The popstate path never comes through here (see
@@ -4355,14 +4468,19 @@ export function reconnectSession(sessionId: string, force: boolean): void {
   // No latch: the reconnect dispatches a launch server-side, and dispatching is
   // what clears the tab's recorded failure, so the card cannot show for the
   // reconnect's own tab.
-  setState({
+  const reconnectTarget = {
+    kind: "agent" as const,
+    sessionId,
     // Reconnect is a session-slot-tab operation, so focus the session-slot tab.
-    selectedTarget: {
-      kind: "agent",
-      sessionId,
-      tabId: slotTabIdFor(sessionId),
-    },
+    tabId: slotTabIdFor(sessionId),
+  }
+  setState({
+    selectedTarget: reconnectTarget,
     selectedSessionId: sessionId,
+    // This IS a selection commit, so it restores the pane's remembered mode
+    // like every other one. Skipping it left the flag saying whatever the
+    // previously focused pane said, and the URL was written from that.
+    ...theaterPatch(reconnectTarget),
     terminalEpoch: state.terminalEpoch + 1,
   })
   // This focuses an agent like any other selection, so the URL has to say so
@@ -5689,6 +5807,88 @@ export function persistMacroOrder(macros: MacroView[]): Promise<boolean> {
     })
 }
 
+// --- Theater mode ----------------------------------------------------------
+//
+// One pane, no chrome. The header, the pull-request band and the tab strip
+// leave (on the phone shell, its own header takes their place in that list) and
+// the terminal takes the height they were using. Three acts reach these: the
+// expand button in the pane header, the floating pill's exit, and the
+// "Leave theater mode" item in the input `⋯` menu. Escape is a fourth, but only
+// where nothing typeable has focus (see `escExitsTheater`).
+//
+// BOTH DIRECTIONS PUSH, on the `closeEditor` precedent: closing a position is
+// a move between two real places, and replacing on the way out left the entry
+// entering pushed on the stack with nothing behind it, so a Back straight after
+// enter-then-exit did nothing at all. The accepted cost, stated rather than
+// discovered: that Back re-enters theater. Both directions write the pane's
+// memory, so coming back to the pane later comes back to the mode.
+
+// THEATER IS A MODIFIER ON A PANE, and neither the editor nor the phone's
+// changes screen is that pane: the address has no room for the modifier there
+// (see `theaterSerializable`), so leaving the live flag on would make state and
+// URL disagree about a mode the user can neither see nor leave. Opening either
+// SUSPENDS the mode and leaves the pane's memory alone; landing back on the
+// pane reads that memory again, so the two are one round trip.
+function theaterSuspendPatch(): { theater: boolean } {
+  return { theater: false }
+}
+
+function theaterResumePatch(): { theater: boolean } {
+  return {
+    theater:
+      state.selectedTarget === null
+        ? false
+        : readTheaterMemory(theaterMemoryKey(state.selectedTarget)),
+  }
+}
+
+/** Put the focused pane in theater. Nothing focused, nothing to do. */
+export function enterTheater(): void {
+  if (!state.selectedTarget || state.theater) return
+  writeTheaterMemory(theaterMemoryKey(state.selectedTarget), true)
+  setState({ theater: true })
+  syncUrl("push")
+}
+
+/** Give the chrome back. */
+export function exitTheater(): void {
+  if (!state.theater) return
+  writeTheaterMemory(theaterMemoryKey(state.selectedTarget), false)
+  setState({ theater: false })
+  syncUrl("push")
+}
+
+/** What the one button in the pane header calls. */
+export function toggleTheater(): void {
+  if (state.theater) exitTheater()
+  else enterTheater()
+}
+
+/**
+ * A mounted pane lost input ownership of its PTY: another device is driving it
+ * now, and the take-over card is about to cover the pane.
+ *
+ * Theater goes away, and so does the memory. Deciding what to do about a
+ * take-over wants the tabs, the pull-request band and the header in view, and a
+ * covered pane has not earned the whole screen; re-entering afterwards is a
+ * fresh press rather than something that happens to the user. Losing ownership
+ * itself stays sticky, exactly as the tenet says: only the layout comes back.
+ *
+ * Keyed on the PTY, not on the selection, so a pane that is no longer the
+ * focused one still forgets its own mode.
+ */
+export function noteTheaterOwnershipLost(
+  kind: "agent" | "terminal",
+  id: string,
+): void {
+  const key = theaterMemoryKeyForPty(kind, id)
+  clearTheaterMemory(key)
+  if (!state.theater) return
+  if (theaterMemoryKey(state.selectedTarget) !== key) return
+  setState({ theater: false })
+  syncUrl("replace")
+}
+
 // Open the mobile changes screen over the focused agent. It is a position of its
 // own in the URL (`#/agent/<sid>/changes`), so entering it pushes an entry and
 // the browser's Back leaves it. There is no matching "go to the terminal screen"
@@ -5696,7 +5896,7 @@ export function persistMacroOrder(macros: MacroView[]): Promise<boolean> {
 // target IS home, both through the ordinary selection functions.
 export function openChangesScreen(): void {
   if (!state.selectedTarget || state.mobileScreen === "changes") return
-  setState({ mobileScreen: "changes" })
+  setState({ mobileScreen: "changes", ...theaterSuspendPatch() })
   syncUrl()
 }
 
@@ -5720,7 +5920,7 @@ export function navigateUp(): void {
     refreshAttentionChrome()
   }
   if (state.mobileScreen === "changes" && state.selectedTarget) {
-    setState({ mobileScreen: "terminal" })
+    setState({ mobileScreen: "terminal", ...theaterResumePatch() })
     syncUrl(urlMode)
     return
   }
