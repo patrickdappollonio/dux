@@ -8,6 +8,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 use crate::engine::Engine;
+use crate::ids::TabIdRef;
 use crate::model::{AgentSession, PrInfo, PrState, Project, ProjectBranchStatus, ProviderKind};
 use crate::worker::{ResourceKind, ResourceStats};
 
@@ -1219,11 +1220,11 @@ impl Engine {
         // and calling it here per-session silently re-introduced the O(S * T) cost
         // `spine` was factored to eliminate.
         let has_output = std::iter::once(s.slot_tab_id())
-            .chain(support_tabs.iter().map(|t| t.id.as_str()))
+            .chain(support_tabs.iter().map(|t| TabIdRef::new(&t.id)))
             .any(|id| self.providers.get(id).is_some_and(|p| p.has_output()));
         let working = std::iter::once(s.slot_tab_id())
-            .chain(support_tabs.iter().map(|t| t.id.as_str()))
-            .any(|id| self.is_agent_streaming(id));
+            .chain(support_tabs.iter().map(|t| TabIdRef::new(&t.id)))
+            .any(|id| self.is_agent_streaming(id.as_str()));
         // Typing rolls up any-tab too, and is disjoint from `working` (which
         // excludes typing). Uses the shared any-tab rollup so the sidebar row and
         // the per-session read agree.
@@ -1231,8 +1232,8 @@ impl Engine {
         // Attention rolls up any-tab, exactly like `working`: the sidebar row
         // marks the agent if any of its tabs (session-slot or extra) is flagged.
         let needs_attention = std::iter::once(s.slot_tab_id())
-            .chain(support_tabs.iter().map(|t| t.id.as_str()))
-            .any(|id| self.tab_needs_attention(id));
+            .chain(support_tabs.iter().map(|t| TabIdRef::new(&t.id)))
+            .any(|id| self.tab_needs_attention(id.as_str()));
         // Tabs, session-slot first, then extras in creation order.
         let mut tabs = vec![self.tab_view(s.slot_tab_id(), self.running_provider_for(s), 0)];
         let mut support: Vec<_> = support_tabs.to_vec();
@@ -1244,10 +1245,10 @@ impl Engine {
         for (i, t) in support.into_iter().enumerate() {
             let effective = self
                 .running_provider_pins
-                .get(&t.id)
+                .get(TabIdRef::new(&t.id))
                 .cloned()
                 .unwrap_or_else(|| t.provider.clone());
-            tabs.push(self.tab_view(&t.id, effective, (i + 1) as u32));
+            tabs.push(self.tab_view(TabIdRef::new(&t.id), effective, (i + 1) as u32));
         }
         SessionView::from_session(
             s,
@@ -1265,14 +1266,16 @@ impl Engine {
 
     /// Project one tab id into an [`AgentTabView`] from the tab-keyed runtime maps.
     /// `order` is display position only; no tab is privileged.
-    fn tab_view(&self, id: &str, provider: ProviderKind, order: u32) -> AgentTabView {
+    fn tab_view(&self, id: &TabIdRef, provider: ProviderKind, order: u32) -> AgentTabView {
         AgentTabView {
-            id: id.to_string(),
+            // The wire keeps plain strings: an id leaving the engine is bytes a
+            // browser stores, not an id dux is still reasoning about.
+            id: id.as_str().to_string(),
             provider: provider.as_str().to_string(),
             order,
-            working: self.is_agent_streaming(id),
-            typing: self.is_typing(id),
-            needs_attention: self.tab_needs_attention(id),
+            working: self.is_agent_streaming(id.as_str()),
+            typing: self.is_typing(id.as_str()),
+            needs_attention: self.tab_needs_attention(id.as_str()),
             has_output: self
                 .providers
                 .get(id)
@@ -1441,6 +1444,8 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::ids::SessionIdRef;
+    use crate::ids::TabId;
 
     #[test]
     fn dux_version_is_projected() {
@@ -2004,7 +2009,7 @@ mod tests {
         engine.sessions.push(sample_session("s1", "p1", "feature"));
         // An extra tab of s1, with its own id.
         engine.agent_tabs.insert(
-            "t1".to_string(),
+            TabId::new("t1"),
             crate::model::AgentTab {
                 id: "t1".to_string(),
                 session_id: "s1".to_string(),
@@ -2063,7 +2068,7 @@ mod tests {
         engine.projects.push(sample_project("p1", "/repo"));
         engine.sessions.push(sample_session("s1", "p1", "feature"));
         engine.agent_tabs.insert(
-            "tab-b".to_string(),
+            TabId::new("tab-b"),
             crate::model::AgentTab {
                 id: "tab-b".to_string(),
                 session_id: "s1".to_string(),
@@ -2075,7 +2080,10 @@ mod tests {
 
         let vm = engine.spine();
         let session = &vm.sessions[0];
-        assert_eq!(session.slot_tab_id, engine.slot_tab_id_of("s1"));
+        assert_eq!(
+            session.slot_tab_id,
+            engine.slot_tab_id_of(SessionIdRef::new("s1")).as_str()
+        );
         assert_eq!(session.tabs[0].id, session.slot_tab_id);
         assert_ne!(session.tabs[1].id, session.slot_tab_id);
     }
@@ -2327,14 +2335,14 @@ mod tests {
             &[],
         )
         .expect("spawn cat provider");
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
 
         // Before any output, the session is not ready.
         assert!(!engine.spine().sessions[0].has_output);
 
         engine
             .providers
-            .get("s1")
+            .get(TabIdRef::new("s1"))
             .expect("provider exists")
             .write_bytes(b"hello\n")
             .expect("write to provider");
@@ -2722,7 +2730,7 @@ mod tests {
         let (mut engine, tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat/x"));
         engine.agent_tabs.insert(
-            "tab-b".to_string(),
+            TabId::new("tab-b"),
             crate::model::AgentTab {
                 id: "tab-b".to_string(),
                 session_id: "s1".to_string(),
@@ -2759,7 +2767,7 @@ mod tests {
         // already has when a file lands on a pane.
         let (mut engine, _tmp) = engine_with_two_tabs();
         engine.launched_drop_paste.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             launched(
                 "codex",
                 crate::config::WebDragDropPaste::SingleQuoted,
@@ -2767,7 +2775,7 @@ mod tests {
             ),
         );
         engine.launched_drop_paste.insert(
-            "tab-b".to_string(),
+            TabId::new("tab-b"),
             launched(
                 "codex",
                 crate::config::WebDragDropPaste::BackslashEscaped,
@@ -2801,7 +2809,7 @@ mod tests {
             "a tab with no live process has no launched profile"
         );
         engine.launched_drop_paste.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             launched(
                 "codex",
                 crate::config::WebDragDropPaste::SingleQuoted,
@@ -2813,7 +2821,7 @@ mod tests {
             Some("single_quoted".to_string()),
             "a launch publishes it on the same spine the launch refreshes"
         );
-        engine.clear_tab_runtime("s1");
+        engine.clear_tab_runtime(TabIdRef::new("s1"));
         assert_eq!(
             tab_drop_paste(&engine, "s1"),
             None,
@@ -2835,7 +2843,7 @@ mod tests {
         // in their own editor cannot be refused.
         let (mut engine, _tmp) = engine_with_two_tabs();
         engine.launched_drop_paste.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             launched(
                 "codex-nightly",
                 crate::config::WebDragDropPaste::SingleQuoted,
@@ -2867,7 +2875,7 @@ mod tests {
         // some process started with.
         let (mut engine, _tmp) = test_engine();
         engine.launched_drop_paste.insert(
-            "s2".to_string(),
+            TabId::new("s2"),
             launched(
                 "claude",
                 crate::config::WebDragDropPaste::BackslashEscaped,

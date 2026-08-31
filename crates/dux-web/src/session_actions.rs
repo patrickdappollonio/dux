@@ -865,6 +865,7 @@ fn engine_unavailable() -> Response {
 mod tests {
     use axum::body::to_bytes;
     use axum::http::{Request, StatusCode};
+    use dux_core::ids::TabId;
     use tower::ServiceExt;
 
     use tempfile::TempDir;
@@ -1098,7 +1099,7 @@ mod tests {
     #[tokio::test]
     async fn session_delete_reports_a_launch_refusal_as_conflict() {
         let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine, _| {
-            engine.mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch("s1".to_string()));
+            engine.mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
         });
 
         let response = send_json(

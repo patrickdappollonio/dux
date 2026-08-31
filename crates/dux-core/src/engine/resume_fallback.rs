@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::engine::events::EventReaction;
 use crate::engine::{Command, Engine, InFlightKey};
+use crate::ids::{TabId, TabIdRef};
 use crate::model::{AgentSession, ProviderKind, SessionStatus};
 use crate::worker::{AgentLaunchKind, AgentLaunchRequest};
 
@@ -110,7 +111,7 @@ impl Engine {
         kind: AgentLaunchKind,
     ) -> AgentLaunchRequest {
         // Session-slot launch: the slot tab id, provider == session.provider.
-        let tab_id = session.slot_tab_id().to_string();
+        let tab_id = session.slot_tab_id().to_owned();
         self.build_tab_launch_request(tab_id, None, session, resume, pty_size, kind)
     }
 
@@ -127,7 +128,7 @@ impl Engine {
     /// tab launched while another is already live/launching starts fresh.
     pub fn build_tab_launch_request(
         &self,
-        tab_id: String,
+        tab_id: TabId,
         tab_provider: Option<ProviderKind>,
         session: AgentSession,
         resume: bool,
@@ -176,6 +177,8 @@ impl Engine {
         tab_id: &str,
         pty_size: (u16, u16),
     ) -> Option<AgentLaunchRequest> {
+        // Transport-facing (the web relaunches a dormant tab by id): named here.
+        let tab_id = TabIdRef::new(tab_id);
         let tab = self.agent_tabs.get(tab_id)?;
         let session = self
             .sessions
@@ -196,7 +199,7 @@ impl Engine {
             )
         };
         Some(self.build_tab_launch_request(
-            tab_id.to_string(),
+            tab_id.to_owned(),
             Some(provider),
             session,
             resume,
@@ -218,8 +221,10 @@ impl Engine {
         pty_size: (u16, u16),
         status_message: String,
     ) -> ResumeFallbackOutcome {
+        // Transport-facing entry point: named here, at the door.
+        let tab_id = TabIdRef::new(tab_id);
         // 1. A launch already in flight for THIS tab: protect it, touch nothing.
-        if self.is_in_flight(&InFlightKey::AgentLaunch(tab_id.to_string())) {
+        if self.is_in_flight(&InFlightKey::AgentLaunch(tab_id.to_owned())) {
             return ResumeFallbackOutcome::InFlight;
         }
         // 2. Not (any longer) a candidate: nothing to retry.
@@ -229,7 +234,7 @@ impl Engine {
         // 3. Owning session gone: drop the stale candidate, fall through. Resume
         //    candidates are keyed by tab id, so resolve the owning session (the
         //    session-slot tab resolves to itself; an extra tab via its row).
-        let Some(session_id) = self.owning_session_for_tab(tab_id) else {
+        let Some(session_id) = self.owning_session_for_tab(tab_id.as_str()) else {
             self.resume_fallback_candidates.remove(tab_id);
             return ResumeFallbackOutcome::NotCandidate;
         };
@@ -268,7 +273,7 @@ impl Engine {
             )
         } else {
             self.build_tab_launch_request(
-                tab_id.to_string(),
+                tab_id.to_owned(),
                 Some(provider),
                 session,
                 false,
@@ -325,12 +330,12 @@ impl Engine {
     pub fn sweep_resume_fallbacks(&mut self, pty_size: (u16, u16)) -> Vec<EventReaction> {
         let mut reactions = Vec::new();
         // Snapshot the candidate ids: `retry_resume_fallback` mutates the map.
-        let candidates: Vec<String> = self.resume_fallback_candidates.keys().cloned().collect();
+        let candidates: Vec<TabId> = self.resume_fallback_candidates.keys().cloned().collect();
         for tab_id in candidates {
             let Some(&started_at) = self.resume_fallback_candidates.get(&tab_id) else {
                 continue;
             };
-            let Some(session_id) = self.owning_session_for_tab(&tab_id) else {
+            let Some(session_id) = self.owning_session_for_tab(tab_id.as_str()) else {
                 // Stale candidate with no owning session: drop it.
                 self.resume_fallback_candidates.remove(&tab_id);
                 continue;
@@ -386,7 +391,7 @@ impl Engine {
                 }
             ));
             if let ResumeFallbackOutcome::Retried { reaction } =
-                self.retry_resume_fallback(&tab_id, pty_size, status_message)
+                self.retry_resume_fallback(tab_id.as_str(), pty_size, status_message)
             {
                 // No hand-clearing here. The retry's teardown goes through
                 // `clear_tab_runtime`, which knows every tab-keyed map, so this
@@ -421,12 +426,12 @@ mod tests {
         // An extra, dormant tab (a row but no live provider).
         engine
             .agent_tabs
-            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
 
         let request = engine
             .dormant_tab_launch_request("tab-2", (24, 80))
             .expect("a dormant extra tab yields a launch request");
-        assert_eq!(request.tab_id, "tab-2");
+        assert_eq!(request.tab_id.as_str(), "tab-2");
         assert_eq!(request.provider.as_str(), "codex");
         // No live sibling of this provider, so it resumes; the sole live/
         // launching tab of its provider is eligible per `tab_resume_decision`.
@@ -523,14 +528,18 @@ mod tests {
             100,
         )
         .expect("spawn");
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
         engine
             .resume_fallback_candidates
-            .insert("s1".to_string(), Instant::now());
+            .insert(TabId::new("s1"), Instant::now());
 
         // Wait for the child to exit so the sweep sees `is_exited`.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !engine.providers.get("s1").is_some_and(|c| c.is_exited()) {
+        while !engine
+            .providers
+            .get(TabIdRef::new("s1"))
+            .is_some_and(|c| c.is_exited())
+        {
             assert!(Instant::now() < deadline, "child never exited");
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -538,15 +547,17 @@ mod tests {
         let reactions = engine.sweep_resume_fallbacks((24, 80));
         assert_eq!(reactions.len(), 1, "one retry reaction");
         assert!(
-            !engine.resume_fallback_candidates.contains_key("s1"),
+            !engine
+                .resume_fallback_candidates
+                .contains_key(TabIdRef::new("s1")),
             "the retried candidate is cleared"
         );
         assert!(
-            !engine.providers.contains_key("s1"),
+            !engine.providers.contains_key(TabIdRef::new("s1")),
             "the retry removed the exited provider"
         );
         assert!(
-            engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())),
+            engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))),
             "a fresh launch is now in flight"
         );
     }
@@ -569,19 +580,21 @@ mod tests {
         engine.sessions.push(session);
         // A long-lived provider (cat blocks on stdin, stays running, no output).
         let client = PtyClient::spawn("cat", &[], Path::new("."), 10, 40, 100).expect("spawn");
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
         engine
             .resume_fallback_candidates
-            .insert("s1".to_string(), Instant::now());
+            .insert(TabId::new("s1"), Instant::now());
 
         let reactions = engine.sweep_resume_fallbacks((24, 80));
         assert!(reactions.is_empty(), "no retry for a healthy resume");
         assert!(
-            engine.resume_fallback_candidates.contains_key("s1"),
+            engine
+                .resume_fallback_candidates
+                .contains_key(TabIdRef::new("s1")),
             "the candidate is kept for a later tick"
         );
         assert!(
-            engine.providers.contains_key("s1"),
+            engine.providers.contains_key(TabIdRef::new("s1")),
             "the provider stays live"
         );
     }
@@ -617,15 +630,19 @@ mod tests {
         engine.sessions.push(session);
         engine
             .resume_fallback_candidates
-            .insert("s1".to_string(), Instant::now());
-        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
+            .insert(TabId::new("s1"), Instant::now());
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
 
         let outcome = engine.retry_resume_fallback("s1", (24, 80), "msg".to_string());
 
         assert!(matches!(outcome, ResumeFallbackOutcome::InFlight));
         // Protected: candidate still present, in-flight key untouched.
-        assert!(engine.resume_fallback_candidates.contains_key("s1"));
-        assert!(engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
+        assert!(
+            engine
+                .resume_fallback_candidates
+                .contains_key(TabIdRef::new("s1"))
+        );
+        assert!(engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
     }
 
     #[test]
@@ -635,10 +652,10 @@ mod tests {
         engine.sessions.push(session);
         engine
             .resume_fallback_candidates
-            .insert("s1".to_string(), Instant::now());
+            .insert(TabId::new("s1"), Instant::now());
         engine
             .running_provider_pins
-            .insert("s1".to_string(), crate::model::ProviderKind::new("claude"));
+            .insert(TabId::new("s1"), crate::model::ProviderKind::new("claude"));
 
         let outcome = engine.retry_resume_fallback("s1", (24, 80), "fresh".to_string());
 
@@ -647,11 +664,19 @@ mod tests {
         // documentation-only: PtyClient can't be seeded without spawning a
         // real process, so the map is always empty here and this assert can't
         // fail — the load-bearing assertions are the candidate and pin removals.
-        assert!(!engine.resume_fallback_candidates.contains_key("s1"));
-        assert!(!engine.providers.contains_key("s1"));
-        assert!(!engine.running_provider_pins.contains_key("s1"));
+        assert!(
+            !engine
+                .resume_fallback_candidates
+                .contains_key(TabIdRef::new("s1"))
+        );
+        assert!(!engine.providers.contains_key(TabIdRef::new("s1")));
+        assert!(
+            !engine
+                .running_provider_pins
+                .contains_key(TabIdRef::new("s1"))
+        );
         // A launch is now in flight (dispatch marked the key).
-        assert!(engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
+        assert!(engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
     }
 
     #[test]
@@ -684,21 +709,25 @@ mod tests {
             sort_order: 1,
             created_at: chrono::Utc::now(),
         };
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         // The tab is pinned to "cat" (e.g. from a live run before this exit) —
         // that pin must win the capture, not the row's own provider above.
         engine
             .running_provider_pins
-            .insert("tab-1".to_string(), ProviderKind::new("cat"));
+            .insert(TabId::new("tab-1"), ProviderKind::new("cat"));
         engine
             .resume_fallback_candidates
-            .insert("tab-1".to_string(), Instant::now());
+            .insert(TabId::new("tab-1"), Instant::now());
 
         let outcome = engine.retry_resume_fallback("tab-1", (24, 80), "fresh".to_string());
         assert!(matches!(outcome, ResumeFallbackOutcome::Retried { .. }));
         // The pin is torn down as part of the retry regardless of which
         // provider was captured.
-        assert!(!engine.running_provider_pins.contains_key("tab-1"));
+        assert!(
+            !engine
+                .running_provider_pins
+                .contains_key(TabIdRef::new("tab-1"))
+        );
 
         // Drain the async launch job's result and feed it back through the
         // engine exactly like the real event loop would.
@@ -726,7 +755,7 @@ mod tests {
         }
         assert!(saw_ready, "the launch job never reported ready in time");
         assert!(
-            engine.providers.contains_key("tab-1"),
+            engine.providers.contains_key(TabIdRef::new("tab-1")),
             "a successful relaunch with the pinned provider must populate `providers`"
         );
     }
@@ -746,21 +775,25 @@ mod tests {
             sort_order: 1,
             created_at: chrono::Utc::now(),
         };
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         engine
             .resume_fallback_candidates
-            .insert("tab-1".to_string(), Instant::now());
+            .insert(TabId::new("tab-1"), Instant::now());
 
         let outcome = engine.retry_resume_fallback("tab-1", (24, 80), "fresh".to_string());
 
         assert!(matches!(outcome, ResumeFallbackOutcome::Retried { .. }));
         // Candidate torn down; the fresh relaunch is in flight under the TAB id.
-        assert!(!engine.resume_fallback_candidates.contains_key("tab-1"));
-        assert!(engine.is_in_flight(&InFlightKey::AgentLaunch("tab-1".to_string())));
+        assert!(
+            !engine
+                .resume_fallback_candidates
+                .contains_key(TabIdRef::new("tab-1"))
+        );
+        assert!(engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("tab-1"))));
         // No in-flight launch was created under the session id.
-        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
+        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
         // The extra tab's row survives (a fresh relaunch, not a close).
-        assert!(engine.agent_tabs.contains_key("tab-1"));
+        assert!(engine.agent_tabs.contains_key(TabIdRef::new("tab-1")));
     }
 
     #[test]
@@ -799,17 +832,17 @@ mod tests {
         // Everything the launch that just died had left keyed by this tab id.
         engine
             .resume_fallback_candidates
-            .insert("s1".to_string(), Instant::now());
+            .insert(TabId::new("s1"), Instant::now());
         engine.providers.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             crate::pty::PtyClient::spawn_with_env("cat", &[], tmp.path(), 24, 80, 1000, &[])
                 .expect("spawn the stale attempt's PTY"),
         );
         engine
             .running_provider_pins
-            .insert("s1".to_string(), ProviderKind::new("codex"));
+            .insert(TabId::new("s1"), ProviderKind::new("codex"));
         engine.launched_drop_paste.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             crate::engine::LaunchedDropPaste {
                 provider: "codex".to_string(),
                 form: crate::config::WebDragDropPaste::SingleQuoted,
@@ -818,15 +851,15 @@ mod tests {
         );
         engine.pty_activity.insert("s1".to_string(), Instant::now());
         engine.pty_input.insert("s1".to_string(), Instant::now());
-        engine.needs_attention.insert("s1".to_string());
+        engine.needs_attention.insert(TabId::new("s1"));
         engine.pty_progress.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             crate::pty::ProgressReport {
                 working: true,
                 at: Instant::now(),
             },
         );
-        engine.agent_viewed.insert("s1".to_string(), Instant::now());
+        engine.agent_viewed.insert(TabId::new("s1"), Instant::now());
 
         let outcome = engine.retry_resume_fallback("s1", (24, 80), "fresh".to_string());
         assert!(matches!(outcome, ResumeFallbackOutcome::Retried { .. }));
@@ -850,15 +883,23 @@ mod tests {
         assert!(saw_failed, "the launch job never reported failure in time");
 
         assert!(
-            !engine.providers.contains_key("s1"),
+            !engine.providers.contains_key(TabIdRef::new("s1")),
             "the stale attempt's PTY must not outlive the relaunch"
         );
         assert!(
-            !engine.launched_drop_paste.contains_key("s1"),
+            !engine.launched_drop_paste.contains_key(TabIdRef::new("s1")),
             "a dead process must not keep publishing its drop-paste profile"
         );
-        assert!(!engine.running_provider_pins.contains_key("s1"));
-        assert!(!engine.resume_fallback_candidates.contains_key("s1"));
+        assert!(
+            !engine
+                .running_provider_pins
+                .contains_key(TabIdRef::new("s1"))
+        );
+        assert!(
+            !engine
+                .resume_fallback_candidates
+                .contains_key(TabIdRef::new("s1"))
+        );
         assert!(
             !engine.pty_activity.contains_key("s1"),
             "stale activity would read as a working tab with no process"
@@ -867,14 +908,14 @@ mod tests {
             !engine.pty_input.contains_key("s1"),
             "stale input would read as a typing tab with no process"
         );
-        assert!(!engine.needs_attention.contains("s1"));
+        assert!(!engine.needs_attention.contains(TabIdRef::new("s1")));
         assert!(
-            !engine.pty_progress.contains_key("s1"),
+            !engine.pty_progress.contains_key(TabIdRef::new("s1")),
             "a stale progress override leaves a spinner on a dead tab"
         );
-        assert!(!engine.agent_viewed.contains_key("s1"));
+        assert!(!engine.agent_viewed.contains_key(TabIdRef::new("s1")));
         assert!(
-            !engine.is_in_flight(&crate::engine::InFlightKey::AgentLaunch("s1".to_string())),
+            !engine.is_in_flight(&crate::engine::InFlightKey::AgentLaunch(TabId::new("s1"))),
             "the failed relaunch must release its own in-flight key"
         );
     }
@@ -889,7 +930,7 @@ mod tests {
         let outcome = engine.retry_resume_fallback("s1", (24, 80), "msg".to_string());
 
         assert!(matches!(outcome, ResumeFallbackOutcome::NotCandidate));
-        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
+        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
     }
 
     #[test]
@@ -898,11 +939,15 @@ mod tests {
         // Candidate present but no matching session.
         engine
             .resume_fallback_candidates
-            .insert("ghost".to_string(), Instant::now());
+            .insert(TabId::new("ghost"), Instant::now());
 
         let outcome = engine.retry_resume_fallback("ghost", (24, 80), "msg".to_string());
 
         assert!(matches!(outcome, ResumeFallbackOutcome::NotCandidate));
-        assert!(!engine.resume_fallback_candidates.contains_key("ghost"));
+        assert!(
+            !engine
+                .resume_fallback_candidates
+                .contains_key(TabIdRef::new("ghost"))
+        );
     }
 }

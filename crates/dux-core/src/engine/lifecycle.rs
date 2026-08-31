@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::ids::{SessionIdRef, TabId, TabIdRef};
 use crate::model::{AgentSession, SessionStatus, TerminalOwner};
 use crate::pty::PtyClient;
 
@@ -360,7 +361,7 @@ impl Engine {
         // `PtyClient::try_wait` memoizes the status, so deferring costs nothing:
         // a reap observed on the first tick is still available on the tick that
         // finally prunes.
-        let exited_agents: Vec<(String, Option<bool>, bool, String)> = self
+        let exited_agents: Vec<(TabId, Option<bool>, bool, String)> = self
             .providers
             .iter_mut()
             .filter_map(|(id, client)| {
@@ -391,10 +392,10 @@ impl Engine {
             // matches a session id directly — resolve via the tab index first, or
             // the label falls back to a raw UUID and the session-state marks
             // silently no-op on the wrong key.
-            let owning = self.owning_session_for_tab(&tab_id);
+            let owning = self.owning_session_for_tab(tab_id.as_str());
             let is_session_slot = owning
                 .as_deref()
-                .is_some_and(|sid| self.is_slot_tab_of(sid, &tab_id));
+                .is_some_and(|sid| self.is_slot_tab_of(SessionIdRef::new(sid), &tab_id));
             // When the AGENT itself exits (its session-slot tab), re-check its PR
             // now: an exit commonly follows a merge, so the badge would otherwise
             // stay stale until the next background sync. This is the shared-exit
@@ -423,7 +424,7 @@ impl Engine {
                     };
                     (Some(TerminalOwner::Session(sid.clone())), label)
                 }
-                None => (None, tab_id.clone()),
+                None => (None, tab_id.as_str().to_string()),
             };
             // Clear EVERY runtime map keyed by this tab via the single-source
             // helper — not just providers/activity/input. In particular
@@ -466,10 +467,10 @@ impl Engine {
                 self.mark_session_status(sid, SessionStatus::Detached);
             }
             let tab_closed = clean_exit_closes_tab_row(is_session_slot, exit_success)
-                && self.remove_agent_tab_row(&tab_id);
+                && self.remove_agent_tab_row(tab_id.as_str());
             pruned.push(PrunedPty {
                 kind: PrunedPtyKind::Agent,
-                id: tab_id,
+                id: tab_id.as_str().to_string(),
                 owner,
                 agent_detached,
                 label,
@@ -558,6 +559,9 @@ impl Engine {
     /// can bring the agent back.
     pub fn kill_tab_runtime(&mut self, tab_id: &str) -> KillTabRuntimeOutcome {
         let session_id = self.owning_session_for_tab(tab_id);
+        // Transport-facing (a wire command's path segment): named here, at the
+        // door, before it touches any tab-keyed map.
+        let tab_id = TabIdRef::new(tab_id);
         if !self.providers.contains_key(tab_id) {
             return KillTabRuntimeOutcome {
                 killed: false,
@@ -612,13 +616,19 @@ impl Engine {
     /// than let it be lost. Returns `None` when it was captured on a terminating
     /// entry (or there was nothing to remove).
     #[must_use]
+    ///
+    /// The parameter is a TAB id. It was called `session_id` and typed `&str`,
+    /// which read as an agent-level operation and was not one: `providers` is
+    /// tab-keyed, `close_tab` passes an extra tab's id through here, and only the
+    /// slot tab's id happens to equal a session id. The type now says which
+    /// keyspace it is.
     pub fn begin_close_provider(
         &mut self,
-        session_id: &str,
+        tab_id: &TabIdRef,
         label: String,
         worktree_removal: Option<DeferredWorktreeRemoval>,
     ) -> Option<DeferredWorktreeRemoval> {
-        let Some(client) = self.providers.remove(session_id) else {
+        let Some(client) = self.providers.remove(tab_id) else {
             return worktree_removal;
         };
         client.terminate();
@@ -627,7 +637,7 @@ impl Engine {
             client,
             deadline,
             kind: PrunedPtyKind::Agent,
-            id: session_id.to_string(),
+            id: tab_id.as_str().to_string(),
             label,
             worktree_removal,
         });
@@ -939,10 +949,10 @@ impl Engine {
 
     /// Resolve live tab IDs so sessions owned only by an extra tab are detached.
     fn detach_shutdown_sessions(&mut self) {
-        let keys: Vec<String> = self.providers.keys().cloned().collect();
+        let keys: Vec<TabId> = self.providers.keys().cloned().collect();
         let mut session_ids: Vec<String> = keys
             .iter()
-            .filter_map(|id| self.owning_session_for_tab(id))
+            .filter_map(|id| self.owning_session_for_tab(id.as_str()))
             .collect();
         session_ids.sort();
         session_ids.dedup();
@@ -954,6 +964,7 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    use crate::ids::{TabId, TabIdRef};
     use std::path::Path;
     use std::thread::sleep;
     use std::time::{Duration, Instant};
@@ -997,11 +1008,11 @@ mod tests {
             .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.agent_tabs.insert(
-            "tab-clean".into(),
+            TabId::new("tab-clean"),
             sample_tab("tab-clean", "s1", "claude", 1),
         );
         engine.agent_tabs.insert(
-            "tab-crash".into(),
+            TabId::new("tab-crash"),
             sample_tab("tab-crash", "s1", "codex", 2),
         );
 
@@ -1017,8 +1028,8 @@ mod tests {
             )
             .expect("spawn sh")
         };
-        engine.providers.insert("tab-clean".into(), spawn("0"));
-        engine.providers.insert("tab-crash".into(), spawn("3"));
+        engine.providers.insert(TabId::new("tab-clean"), spawn("0"));
+        engine.providers.insert(TabId::new("tab-crash"), spawn("3"));
 
         // Wait until BOTH facts prune needs are in for both tabs, end of input
         // AND a reaped exit status, then prune ONCE.
@@ -1041,7 +1052,7 @@ mod tests {
             let all_done = ["tab-clean", "tab-crash"].iter().all(|id| {
                 engine
                     .providers
-                    .get_mut(*id)
+                    .get_mut(TabIdRef::new(id))
                     .is_some_and(|c| c.is_exited() && c.try_wait().is_some())
             });
             if all_done {
@@ -1064,7 +1075,7 @@ mod tests {
             "a clean extra-tab exit must close the tab row"
         );
         assert!(
-            !engine.agent_tabs.contains_key("tab-clean"),
+            !engine.agent_tabs.contains_key(TabIdRef::new("tab-clean")),
             "the cleanly-exited tab's row must be gone"
         );
 
@@ -1077,7 +1088,7 @@ mod tests {
             "a non-zero exit must keep the tab row for diagnosis/relaunch"
         );
         assert!(
-            engine.agent_tabs.contains_key("tab-crash"),
+            engine.agent_tabs.contains_key(TabIdRef::new("tab-crash")),
             "the crashed tab's dormant row must survive"
         );
     }
@@ -1114,7 +1125,7 @@ mod tests {
             &[],
         )
         .expect("spawn sh");
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
 
         let deadline = Instant::now() + Duration::from_secs(3);
         let pruned = loop {
@@ -1190,11 +1201,14 @@ mod tests {
             &[],
         )
         .expect("spawn sh");
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
 
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let client = engine.providers.get_mut("s1").expect("provider");
+            let client = engine
+                .providers
+                .get_mut(TabIdRef::new("s1"))
+                .expect("provider");
             if client.try_wait().is_some() {
                 break;
             }
@@ -1202,7 +1216,7 @@ mod tests {
             sleep(Duration::from_millis(5));
         }
         assert!(
-            !engine.providers["s1"].is_exited(),
+            !engine.providers[TabIdRef::new("s1")].is_exited(),
             "premise: the grandchild must still hold the PTY read side open, so \
              the reader has NOT reached EOF; without that this test proves nothing"
         );
@@ -1225,7 +1239,9 @@ mod tests {
         // Comfortably inside the drain grace, measured from the reap the fixture
         // already observed: the reader can never reach EOF here, so every pass in
         // this window must hold off.
-        let reaped_at = engine.providers["s1"].reaped_at().expect("reaped");
+        let reaped_at = engine.providers[TabIdRef::new("s1")]
+            .reaped_at()
+            .expect("reaped");
         while reaped_at.elapsed() < REAPED_DRAIN_GRACE / 2 {
             let pruned = engine.prune_exited_ptys();
             assert!(
@@ -1247,7 +1263,9 @@ mod tests {
     fn prune_takes_a_never_draining_pty_once_the_drain_grace_expires() {
         let worktree = tempfile::tempdir().expect("worktree dir");
         let (mut engine, _tmp) = engine_with_reaped_but_undrained_agent(worktree.path());
-        let reaped_at = engine.providers["s1"].reaped_at().expect("reaped");
+        let reaped_at = engine.providers[TabIdRef::new("s1")]
+            .reaped_at()
+            .expect("reaped");
 
         let deadline = Instant::now() + Duration::from_secs(10);
         let pruned = loop {
@@ -1274,7 +1292,7 @@ mod tests {
              try_wait yields it exactly once)"
         );
         assert!(
-            !engine.providers.contains_key("s1"),
+            !engine.providers.contains_key(TabIdRef::new("s1")),
             "the never-draining provider must be gone from the engine"
         );
     }
@@ -1327,12 +1345,12 @@ mod tests {
             &[],
         )
         .expect("spawn sh");
-        engine.providers.insert(tab_id.to_string(), client);
+        engine.providers.insert(TabId::new(tab_id), client);
 
         let deadline = Instant::now() + Duration::from_secs(5);
         // A 1ms poll keeps the observation as close to the EOF as possible, so
         // the shortest `linger` a caller can usefully pick stays generous.
-        while !engine.providers[tab_id].is_exited() {
+        while !engine.providers[TabIdRef::new(tab_id)].is_exited() {
             assert!(
                 Instant::now() < deadline,
                 "the reader never reached end of input"
@@ -1342,7 +1360,7 @@ mod tests {
         assert!(
             engine
                 .providers
-                .get_mut(tab_id)
+                .get_mut(TabIdRef::new(tab_id))
                 .expect("provider")
                 .try_wait()
                 .is_none(),
@@ -1367,7 +1385,9 @@ mod tests {
 
         // Comfortably inside the grace, measured from the EOF the fixture already
         // observed: the child cannot exit here, so every pass must hold off.
-        let eof_at = engine.providers["s1"].exited_at().expect("EOF stamped");
+        let eof_at = engine.providers[TabIdRef::new("s1")]
+            .exited_at()
+            .expect("EOF stamped");
         while eof_at.elapsed() < REAPED_DRAIN_GRACE / 2 {
             let pruned = engine.prune_exited_ptys();
             assert!(
@@ -1389,7 +1409,9 @@ mod tests {
         let worktree = tempfile::tempdir().expect("worktree dir");
         let (mut engine, _tmp) =
             engine_with_drained_but_unreaped_agent(worktree.path(), "s1", "30");
-        let eof_at = engine.providers["s1"].exited_at().expect("EOF stamped");
+        let eof_at = engine.providers[TabIdRef::new("s1")]
+            .exited_at()
+            .expect("EOF stamped");
 
         let deadline = Instant::now() + Duration::from_secs(10);
         let pruned = loop {
@@ -1414,7 +1436,7 @@ mod tests {
             "the status genuinely is unknown here, and the valve reports it as such"
         );
         assert!(
-            !engine.providers.contains_key("s1"),
+            !engine.providers.contains_key(TabIdRef::new("s1")),
             "the never-reaped provider must be gone from the engine"
         );
     }
@@ -1436,7 +1458,7 @@ mod tests {
             engine_with_drained_but_unreaped_agent(worktree.path(), "tab-x", "0.1");
         engine
             .agent_tabs
-            .insert("tab-x".into(), sample_tab("tab-x", "s1", "claude", 1));
+            .insert(TabId::new("tab-x"), sample_tab("tab-x", "s1", "claude", 1));
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let pruned = loop {
@@ -1459,7 +1481,7 @@ mod tests {
             "a clean extra-tab exit must close the tab row"
         );
         assert!(
-            !engine.agent_tabs.contains_key("tab-x"),
+            !engine.agent_tabs.contains_key(TabIdRef::new("tab-x")),
             "the cleanly-exited tab's row must be gone"
         );
     }
@@ -1530,10 +1552,10 @@ mod tests {
 
         // Clean-exiting agent (cat exits 0 on EOF).
         let client = spawn_cat(worktree.path());
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
         engine
             .providers
-            .get_mut("s1")
+            .get_mut(TabIdRef::new("s1"))
             .unwrap()
             .write_bytes(b"\x04")
             .unwrap();
@@ -1663,7 +1685,7 @@ mod tests {
 
         // A clean-exiting agent provider (cat exits 0 on EOF).
         let client = spawn_cat(worktree.path());
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
         // The activity and input stamps must die with the provider — a
         // long-running server would otherwise leak one entry per exited agent.
         engine.pty_activity.insert("s1".to_string(), Instant::now());
@@ -1672,7 +1694,7 @@ mod tests {
         // Ctrl-d (EOF) makes cat exit with status 0.
         engine
             .providers
-            .get_mut("s1")
+            .get_mut(TabIdRef::new("s1"))
             .unwrap()
             .write_bytes(b"\x04")
             .unwrap();
@@ -1727,10 +1749,10 @@ mod tests {
         engine.sessions.push(session);
 
         let client = spawn_cat(worktree.path());
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
         engine
             .providers
-            .get_mut("s1")
+            .get_mut(TabIdRef::new("s1"))
             .unwrap()
             .write_bytes(b"\x04")
             .unwrap();
@@ -1781,7 +1803,7 @@ mod tests {
             &[],
         )
         .expect("spawn sh");
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
 
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
@@ -2027,7 +2049,7 @@ mod tests {
         // there is something to kill.
         let worktree = engine.sessions[0].directory().to_string();
         let client = spawn_cat(Path::new(&worktree));
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
         assert_eq!(candidate_ids(&engine), vec!["s1".to_string()]);
 
         let outcome = engine.kill_tab_runtime("s1");
@@ -2047,7 +2069,7 @@ mod tests {
             "a killed agent must not be an auto-reopen candidate"
         );
         // Full teardown ran (the single-source clear), not just the provider drop.
-        assert!(!engine.providers.contains_key("s1"));
+        assert!(!engine.providers.contains_key(TabIdRef::new("s1")));
     }
 
     /// Killing one of several live tabs does not detach the agent (a sibling
@@ -2059,14 +2081,14 @@ mod tests {
         let worktree = engine.sessions[0].directory().to_string();
         engine
             .providers
-            .insert("s1".to_string(), spawn_cat(Path::new(&worktree)));
+            .insert(TabId::new("s1"), spawn_cat(Path::new(&worktree)));
         // An extra tab, also live.
         engine
             .agent_tabs
-            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "claude", 1));
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "claude", 1));
         engine
             .providers
-            .insert("tab-2".to_string(), spawn_cat(Path::new(&worktree)));
+            .insert(TabId::new("tab-2"), spawn_cat(Path::new(&worktree)));
 
         let outcome = engine.kill_tab_runtime("s1");
         assert!(outcome.killed);
@@ -2091,14 +2113,14 @@ mod tests {
         // The extra tab we close.
         engine
             .agent_tabs
-            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "claude", 1));
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "claude", 1));
         engine
             .session_store
-            .insert_agent_tab(engine.agent_tabs.get("tab-2").unwrap())
+            .insert_agent_tab(engine.agent_tabs.get(TabIdRef::new("tab-2")).unwrap())
             .unwrap();
         // A sibling (the session-slot tab) is mid-launch: no provider yet, but an
         // in-flight AgentLaunch key. `has_live_process` would miss this.
-        engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch("s1".to_string()));
+        engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
 
         let outcome = engine.close_tab("s1", "tab-2").expect("close ok");
         assert!(
@@ -2122,10 +2144,10 @@ mod tests {
         let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
         engine
             .agent_tabs
-            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "claude", 1));
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "claude", 1));
         engine
             .session_store
-            .insert_agent_tab(engine.agent_tabs.get("tab-2").unwrap())
+            .insert_agent_tab(engine.agent_tabs.get(TabIdRef::new("tab-2")).unwrap())
             .unwrap();
         // Nothing else of s1 is live (no provider, no in-flight): closing this
         // tab leaves the agent with no live tab.
@@ -2205,11 +2227,11 @@ mod tests {
 
         // A provider that does not exit on its own — it must be SIGTERMed.
         let client = spawn_cat(worktree.path());
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
 
         engine.shutdown_ptys(Duration::from_secs(2));
 
-        let client = engine.providers.get_mut("s1").unwrap();
+        let client = engine.providers.get_mut(TabIdRef::new("s1")).unwrap();
         assert!(
             client.is_exited() || client.try_wait().is_some(),
             "cat should have exited after SIGTERM"
@@ -2283,7 +2305,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(3);
         while !engine
             .providers
-            .get(id)
+            .get(TabIdRef::new(id))
             .expect("provider present")
             .has_output()
         {
@@ -2333,7 +2355,7 @@ mod tests {
         // `cat` exits promptly on SIGTERM, so the grace window is never hit.
         engine
             .providers
-            .insert("s1".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("s1"), spawn_cat(worktree.path()));
 
         let report = engine.shutdown_ptys(Duration::from_secs(5));
 
@@ -2371,7 +2393,7 @@ mod tests {
         // An agent that ignores SIGTERM: it must be force-killed at the deadline.
         engine
             .providers
-            .insert("s1".to_string(), spawn_sigterm_ignorer(worktree.path()));
+            .insert(TabId::new("s1"), spawn_sigterm_ignorer(worktree.path()));
         // Ensure the trap is installed before signalling, so SIGTERM doesn't kill
         // the shell during startup and bypass the force-kill path under test.
         wait_until_ready(&engine, "s1");
@@ -2390,7 +2412,7 @@ mod tests {
         );
 
         // force_terminate sent SIGKILL to the group; the child must now die.
-        let client = engine.providers.get_mut("s1").unwrap();
+        let client = engine.providers.get_mut(TabIdRef::new("s1")).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while !(client.is_exited() || client.try_wait().is_some()) {
             assert!(
@@ -2424,7 +2446,7 @@ mod tests {
 
         engine
             .providers
-            .insert("s1".to_string(), spawn_sigterm_ignorer(worktree.path()));
+            .insert(TabId::new("s1"), spawn_sigterm_ignorer(worktree.path()));
         wait_until_ready(&engine, "s1");
 
         // Flip the abort ~200ms into the (30s) wait from another thread.
@@ -2445,7 +2467,7 @@ mod tests {
         );
 
         // The straggler is still reaped by the force-kill.
-        let client = engine.providers.get_mut("s1").unwrap();
+        let client = engine.providers.get_mut(TabIdRef::new("s1")).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while !(client.is_exited() || client.try_wait().is_some()) {
             assert!(
@@ -2559,9 +2581,9 @@ mod tests {
 
         engine
             .providers
-            .insert("clean".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("clean"), spawn_cat(worktree.path()));
         engine.providers.insert(
-            "straggler".to_string(),
+            TabId::new("straggler"),
             spawn_sigterm_ignorer(worktree.path()),
         );
         wait_until_ready(&engine, "straggler");
@@ -2603,7 +2625,7 @@ mod tests {
 
         engine
             .providers
-            .insert("s1".to_string(), spawn_sigterm_ignorer(worktree.path()));
+            .insert(TabId::new("s1"), spawn_sigterm_ignorer(worktree.path()));
         wait_until_ready(&engine, "s1");
 
         let report = engine.shutdown_ptys(Duration::ZERO);
@@ -2620,7 +2642,7 @@ mod tests {
         );
 
         // The child must still be reaped by the immediate SIGKILL.
-        let client = engine.providers.get_mut("s1").unwrap();
+        let client = engine.providers.get_mut(TabIdRef::new("s1")).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while !(client.is_exited() || client.try_wait().is_some()) {
             assert!(
@@ -2649,7 +2671,7 @@ mod tests {
 
         engine
             .providers
-            .insert("s1".to_string(), spawn_sigterm_ignorer(worktree.path()));
+            .insert(TabId::new("s1"), spawn_sigterm_ignorer(worktree.path()));
         wait_until_ready(&engine, "s1");
         engine.config.terminal.command = "sh".to_string();
         engine.config.terminal.args = vec![
@@ -2676,7 +2698,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
         engine.providers.insert(
-            "straggler".to_string(),
+            TabId::new("straggler"),
             spawn_sigterm_ignorer(worktree.path()),
         );
         wait_until_ready(&engine, "straggler");
@@ -2708,9 +2730,9 @@ mod tests {
 
         engine
             .providers
-            .insert("clean-agent".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("clean-agent"), spawn_cat(worktree.path()));
         engine.providers.insert(
-            "forced-agent".to_string(),
+            TabId::new("forced-agent"),
             spawn_sigterm_ignorer(worktree.path()),
         );
         wait_until_ready(&engine, "forced-agent");
@@ -2760,10 +2782,10 @@ mod tests {
         engine.sessions.push(session);
         engine
             .agent_tabs
-            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
         engine
             .providers
-            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("tab-2"), spawn_cat(worktree.path()));
 
         let report = engine.shutdown_ptys(Duration::from_secs(2));
 
@@ -3169,7 +3191,7 @@ mod tests {
         // A live agent PTY that exits on SIGTERM.
         engine
             .providers
-            .insert("s1".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("s1"), spawn_cat(worktree.path()));
 
         let outcome = engine.begin_delete_session("s1", true);
         assert!(
@@ -3178,7 +3200,7 @@ mod tests {
         );
         // The agent PTY is gracefully closed: out of `providers`, into the
         // terminating set, with the worktree removal captured for after it exits.
-        assert!(!engine.providers.contains_key("s1"));
+        assert!(!engine.providers.contains_key(TabIdRef::new("s1")));
         assert_eq!(engine.terminating_ptys.len(), 1);
         assert_eq!(engine.terminating_ptys[0].kind, PrunedPtyKind::Agent);
         let req = engine.terminating_ptys[0]
@@ -3257,18 +3279,18 @@ mod tests {
         // keeps the session up.
         engine
             .providers
-            .insert("s1".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("s1"), spawn_cat(worktree.path()));
         engine
             .agent_tabs
-            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
         engine
             .providers
-            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("tab-2"), spawn_cat(worktree.path()));
 
         // Make the extra tab's PTY exit (Ctrl-d EOF).
         engine
             .providers
-            .get("tab-2")
+            .get(TabIdRef::new("tab-2"))
             .unwrap()
             .write_bytes(b"\x04")
             .unwrap();
@@ -3276,7 +3298,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(3);
         let pruned = loop {
             let pruned = engine.prune_exited_ptys();
-            if !pruned.is_empty() || !engine.providers.contains_key("tab-2") {
+            if !pruned.is_empty() || !engine.providers.contains_key(TabIdRef::new("tab-2")) {
                 break pruned;
             }
             assert!(Instant::now() < deadline, "extra tab never reported exit");
@@ -3334,13 +3356,13 @@ mod tests {
         // exits it is the agent's LAST live tab, so the agent detaches.
         engine
             .agent_tabs
-            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
         engine
             .providers
-            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("tab-2"), spawn_cat(worktree.path()));
         engine
             .providers
-            .get("tab-2")
+            .get(TabIdRef::new("tab-2"))
             .unwrap()
             .write_bytes(b"\x04")
             .unwrap();
@@ -3348,7 +3370,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let pruned = engine.prune_exited_ptys();
-            if !pruned.is_empty() || !engine.providers.contains_key("tab-2") {
+            if !pruned.is_empty() || !engine.providers.contains_key(TabIdRef::new("tab-2")) {
                 break;
             }
             assert!(Instant::now() < deadline, "extra tab never reported exit");
@@ -3384,35 +3406,37 @@ mod tests {
         engine.sessions.push(session);
         engine
             .agent_tabs
-            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
         engine
             .providers
-            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("tab-2"), spawn_cat(worktree.path()));
         // A retarget-while-live pinned the OLD provider so the UI kept showing it.
         // When the tab exits on its own, that pin must be cleared (else the dormant
         // tab shows the wrong provider forever + the map leaks).
         engine.running_provider_pins.insert(
-            "tab-2".to_string(),
+            TabId::new("tab-2"),
             crate::model::ProviderKind::new("claude"),
         );
 
         engine
             .providers
-            .get("tab-2")
+            .get(TabIdRef::new("tab-2"))
             .unwrap()
             .write_bytes(b"\x04")
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             engine.prune_exited_ptys();
-            if !engine.providers.contains_key("tab-2") {
+            if !engine.providers.contains_key(TabIdRef::new("tab-2")) {
                 break;
             }
             assert!(Instant::now() < deadline, "extra tab never reported exit");
             sleep(Duration::from_millis(50));
         }
         assert!(
-            !engine.running_provider_pins.contains_key("tab-2"),
+            !engine
+                .running_provider_pins
+                .contains_key(TabIdRef::new("tab-2")),
             "the exited tab's stale provider pin must be cleared"
         );
     }
@@ -3435,14 +3459,14 @@ mod tests {
         engine.sessions.push(session);
         engine
             .agent_tabs
-            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
         // Both the session-slot tab and the extra tab have a live PTY.
         engine
             .providers
-            .insert("s1".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("s1"), spawn_cat(worktree.path()));
         engine
             .providers
-            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("tab-2"), spawn_cat(worktree.path()));
 
         let outcome = engine.begin_delete_session("s1", true);
         assert!(matches!(
@@ -3489,13 +3513,13 @@ mod tests {
         engine.sessions.push(session);
         engine
             .agent_tabs
-            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
 
         // The session-slot tab is still live; "tab-2" was closed moments earlier and is
         // already a straggler in `terminating_ptys` (not in `providers` at all).
         engine
             .providers
-            .insert("s1".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("s1"), spawn_cat(worktree.path()));
         let far = Instant::now() + Duration::from_secs(60);
         engine.terminating_ptys.push(TerminatingPty {
             client: spawn_cat(worktree.path()),

@@ -1431,14 +1431,17 @@ impl App {
         };
         let session_id = session.id.clone();
         let tab_id = self.focused_tab_id(&session_id);
-        if self.engine.is_slot_tab_of(&session_id, &tab_id) {
+        if self
+            .engine
+            .is_slot_tab_of(SessionIdRef::new(&session_id), TabIdRef::new(&tab_id))
+        {
             self.prompt = PromptState::FirstTabCannotClose { session_id };
             return;
         }
         let provider = self
             .engine
             .agent_tabs
-            .get(&tab_id)
+            .get(TabIdRef::new(&tab_id))
             .map(|t| t.provider.as_str().to_string())
             .unwrap_or_else(|| session.provider.as_str().to_string());
         let provider_label = Self::title_case_word(&provider);
@@ -1499,7 +1502,7 @@ impl App {
         if let Some(tab_id) = tab_id
             && launched
         {
-            self.tui_launched_ptys.insert(tab_id);
+            self.tui_launched_ptys.insert(tab_id.as_str().to_string());
         }
         self.apply_reaction(reaction);
         launched
@@ -3930,7 +3933,7 @@ impl App {
                     KillableRuntimeKind::Agent.noun()
                 );
                 runtimes.push(KillableRuntime {
-                    id: RuntimeTargetId::Tab(tab_id.clone()),
+                    id: RuntimeTargetId::Tab(tab_id.as_str().to_string()),
                     kind: KillableRuntimeKind::Agent,
                     label: tab_label,
                     context: tab_context,
@@ -4115,7 +4118,10 @@ impl App {
                 RuntimeTargetId::Agent(session_id) => {
                     // An `Agent` target is the agent's session-slot tab; its
                     // extra tabs are listed as `Tab` targets of their own.
-                    let slot_tab_id = self.engine.slot_tab_id_of(session_id).to_string();
+                    let slot_tab_id = self
+                        .engine
+                        .slot_tab_id_of(SessionIdRef::new(session_id))
+                        .to_string();
                     if self.engine.kill_tab_runtime(&slot_tab_id).killed {
                         killed_agents += 1;
                         if selected_session_id.as_deref() == Some(session_id.as_str()) {
@@ -4723,7 +4729,7 @@ mod tests {
 
     fn seed_tab(app: &mut App, id: &str, session_id: &str, provider: &str, order: i64) {
         app.engine.agent_tabs.insert(
-            id.to_string(),
+            TabId::new(id),
             crate::model::AgentTab {
                 id: id.to_string(),
                 session_id: session_id.to_string(),
@@ -5673,7 +5679,7 @@ mod tests {
         let client =
             crate::pty::PtyClient::spawn("echo", &[], std::path::Path::new("/tmp"), 24, 80, 1000)
                 .expect("spawn echo for test");
-        app.engine.providers.insert(session_id.to_string(), client);
+        app.engine.providers.insert(TabId::new(session_id), client);
     }
 
     fn dummy_changed_file(path: &str) -> dux_core::model::ChangedFile {
@@ -6023,7 +6029,7 @@ mod tests {
             .detach_conflicting_worktree_session("/tmp/wt/a", "s2")
             .map(|d| d.label);
         assert!(label.is_some());
-        assert!(!app.engine.providers.contains_key("s1"));
+        assert!(!app.engine.providers.contains_key(TabIdRef::new("s1")));
     }
 
     #[test]
@@ -6039,7 +6045,7 @@ mod tests {
             .detach_conflicting_worktree_session("/tmp/wt/b", "s2")
             .map(|d| d.label);
         assert!(label.is_none());
-        assert!(app.engine.providers.contains_key("s1"));
+        assert!(app.engine.providers.contains_key(TabIdRef::new("s1")));
     }
 
     #[test]
@@ -6054,7 +6060,7 @@ mod tests {
             .detach_conflicting_worktree_session("/tmp/wt/a", "s1")
             .map(|d| d.label);
         assert!(label.is_none());
-        assert!(app.engine.providers.contains_key("s1"));
+        assert!(app.engine.providers.contains_key(TabIdRef::new("s1")));
     }
 
     #[test]
@@ -6070,7 +6076,7 @@ mod tests {
             .detach_conflicting_worktree_session("/tmp/wt/a", "s2")
             .map(|d| d.label);
         assert!(label.is_some());
-        assert!(!app.engine.providers.contains_key("s1"));
+        assert!(!app.engine.providers.contains_key(TabIdRef::new("s1")));
         let s1_session = app.engine.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(s1_session.status, SessionStatus::Detached);
     }
@@ -6757,7 +6763,7 @@ mod tests {
         // session id). Deleting the project must be refused up front, not silently
         // skip this session and then falsely claim success.
         app.engine
-            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch("s1".to_string()));
+            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
         app.selected_left = 0;
 
         app.delete_selected_project()
@@ -6889,7 +6895,7 @@ mod tests {
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![session], vec![project]);
         app.engine.agent_tabs.insert(
-            "tab-9".to_string(),
+            TabId::new("tab-9"),
             dux_core::model::AgentTab {
                 id: "tab-9".to_string(),
                 session_id: "s1".to_string(),
@@ -7103,21 +7109,21 @@ mod tests {
         let mut app = test_app_with_sessions(vec![session], vec![project]);
         mark_active(&mut app, "s1");
         app.engine
-            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch("s1".to_string()));
+            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
 
         let (killed_agents, _killed_terminals) =
             app.kill_runtime_targets(&[RuntimeTargetId::Agent("s1".to_string())]);
 
         assert_eq!(killed_agents, 1);
         assert!(
-            !app.engine.providers.contains_key("s1"),
+            !app.engine.providers.contains_key(TabIdRef::new("s1")),
             "provider must be dropped"
         );
         assert!(
             !app.engine
-                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
-                    "s1".to_string()
-                )),
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                    "s1"
+                ))),
             "killing the agent must clear its in-flight AgentLaunch key"
         );
     }
@@ -7135,26 +7141,28 @@ mod tests {
             sort_order: 0,
             created_at: Utc::now(),
         };
-        app.engine.agent_tabs.insert(tab.id.clone(), tab);
+        app.engine
+            .agent_tabs
+            .insert(TabId::new(tab.id.clone()), tab);
         mark_active(&mut app, "tab-1");
         app.engine
-            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(
-                "tab-1".to_string(),
-            ));
+            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                "tab-1",
+            )));
 
         let (killed_agents, _killed_terminals) =
             app.kill_runtime_targets(&[RuntimeTargetId::Tab("tab-1".to_string())]);
 
         assert_eq!(killed_agents, 1);
         assert!(
-            !app.engine.providers.contains_key("tab-1"),
+            !app.engine.providers.contains_key(TabIdRef::new("tab-1")),
             "provider must be dropped"
         );
         assert!(
             !app.engine
-                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
-                    "tab-1".to_string()
-                )),
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                    "tab-1"
+                ))),
             "killing the tab must clear its in-flight AgentLaunch key"
         );
     }
@@ -7177,7 +7185,7 @@ mod tests {
         app.rebuild_left_items();
         app.selected_left = 1;
         app.engine
-            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch("s1".to_string()));
+            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
 
         app.force_reconnect_agent().expect("force reconnect");
 

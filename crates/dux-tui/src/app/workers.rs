@@ -19,7 +19,7 @@ impl PruneViewContext {
             .engine
             .agent_tabs
             .iter()
-            .map(|(id, tab)| (id.clone(), tab.provider.as_str().to_string()))
+            .map(|(id, tab)| (id.as_str().to_string(), tab.provider.as_str().to_string()))
             .collect();
         Self {
             selected_session,
@@ -142,7 +142,10 @@ impl App {
         };
         let was_focused_tab = context.selected_session.as_deref() == Some(session_id)
             && context.focused_tab.as_deref() == Some(pty.id.as_str());
-        let support_provider = (!self.engine.is_slot_tab_of(session_id, &pty.id)).then(|| {
+        let support_provider = (!self
+            .engine
+            .is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(&pty.id)))
+        .then(|| {
             context
                 .tab_providers
                 .get(&pty.id)
@@ -208,8 +211,10 @@ impl App {
             return;
         };
         let focused = self.focused_tab_id(&current_id);
-        if !self.engine.is_slot_tab_of(&current_id, &focused)
-            && self.engine.providers.contains_key(&focused)
+        if !self
+            .engine
+            .is_slot_tab_of(SessionIdRef::new(&current_id), TabIdRef::new(&focused))
+            && self.engine.providers.contains_key(TabIdRef::new(&focused))
         {
             return;
         }
@@ -313,7 +318,7 @@ impl App {
     fn disarm_tui_launch_for_failed_event(&mut self, event: &WorkerEvent) {
         match event {
             WorkerEvent::AgentLaunchFailed(data) => {
-                self.tui_launched_ptys.remove(&data.request.tab_id);
+                self.tui_launched_ptys.remove(data.request.tab_id.as_str());
                 if matches!(data.request.kind, AgentLaunchKind::Create { .. }) {
                     self.create_agent_started_here = false;
                 }
@@ -1342,7 +1347,12 @@ impl App {
             AgentLaunchReadyView::CreateCommitted { .. }
                 | AgentLaunchReadyView::CreatePersistFailed { .. }
         ) && std::mem::take(&mut self.create_agent_started_here);
-        if (armed || created_here) && self.engine.providers.contains_key(&outcome.tab_id) {
+        if (armed || created_here)
+            && self
+                .engine
+                .providers
+                .contains_key(TabIdRef::new(&outcome.tab_id))
+        {
             self.claim_launched_pty(&outcome.tab_id);
         }
         // The engine's `detach_conflicting_worktree_session` already cleared every
@@ -1588,7 +1598,7 @@ fn session_owner_id(pty: &PrunedPty) -> Option<&str> {
 
 fn is_session_slot_prune(engine: &Engine, pty: &PrunedPty, session_id: &str) -> bool {
     pty.kind == PrunedPtyKind::Agent
-        && engine.is_slot_tab_of(session_id, &pty.id)
+        && engine.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(&pty.id))
         && session_owner_id(pty) == Some(session_id)
 }
 
@@ -1814,7 +1824,7 @@ mod tests {
             .id
             .clone();
         app.engine.agent_tabs.insert(
-            "tab-x".to_string(),
+            TabId::new("tab-x"),
             crate::model::AgentTab {
                 id: "tab-x".to_string(),
                 session_id: session_id.clone(),
@@ -1832,7 +1842,7 @@ mod tests {
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert("tab-x".to_string(), client);
+        app.engine.providers.insert(TabId::new("tab-x"), client);
         app.focused_tabs
             .insert(session_id.clone(), "tab-x".to_string());
         app.focus = FocusPane::Center;
@@ -1860,7 +1870,7 @@ mod tests {
         crate::app::test_support::wait_for_pty_eof(&mut app, "tab-x");
         app.drain_events();
         assert!(
-            !app.engine.providers.contains_key("tab-x"),
+            !app.engine.providers.contains_key(TabIdRef::new("tab-x")),
             "the exited tab should have been pruned"
         );
         app
@@ -1901,11 +1911,15 @@ mod tests {
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         // Seed the three runtime maps the teardown must clear.
-        app.engine.needs_attention.insert(session_id.clone());
+        app.engine
+            .needs_attention
+            .insert(TabId::new(session_id.clone()));
         app.engine.pty_progress.insert(
-            session_id.clone(),
+            TabId::new(session_id.clone()),
             dux_core::pty::ProgressReport {
                 working: true,
                 at: std::time::Instant::now(),
@@ -1913,7 +1927,7 @@ mod tests {
         );
         app.engine
             .agent_viewed
-            .insert(session_id.clone(), std::time::Instant::now());
+            .insert(TabId::new(session_id.clone()), std::time::Instant::now());
 
         // END OF INPUT *and* a reaped status: with either one missing the prune
         // is deliberately deferred inside REAPED_DRAIN_GRACE and one drain would
@@ -1921,17 +1935,28 @@ mod tests {
         crate::app::test_support::wait_for_pty_eof(&mut app, &session_id);
         app.drain_events();
 
-        assert!(!app.engine.providers.contains_key(&session_id), "pruned");
         assert!(
-            !app.engine.needs_attention.contains(&session_id),
+            !app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id)),
+            "pruned"
+        );
+        assert!(
+            !app.engine
+                .needs_attention
+                .contains(TabIdRef::new(&session_id)),
             "needs_attention must be cleared on exit prune"
         );
         assert!(
-            !app.engine.pty_progress.contains_key(&session_id),
+            !app.engine
+                .pty_progress
+                .contains_key(TabIdRef::new(&session_id)),
             "pty_progress must be cleared on exit prune"
         );
         assert!(
-            !app.engine.agent_viewed.contains_key(&session_id),
+            !app.engine
+                .agent_viewed
+                .contains_key(TabIdRef::new(&session_id)),
             "agent_viewed must be cleared on exit prune"
         );
     }
@@ -1944,7 +1969,7 @@ mod tests {
     fn focused_extra_tab_clean_exit_closes_the_tab_and_minimizes() {
         let app = drain_focused_extra_tab_exit("0");
         assert!(
-            !app.engine.agent_tabs.contains_key("tab-x"),
+            !app.engine.agent_tabs.contains_key(TabIdRef::new("tab-x")),
             "a clean exit must close the tab (delete its row)"
         );
         assert_agent_input_cleared(&app);
@@ -1968,7 +1993,7 @@ mod tests {
     fn focused_extra_tab_crash_keeps_the_dormant_tab() {
         let app = drain_focused_extra_tab_exit("3");
         assert!(
-            app.engine.agent_tabs.contains_key("tab-x"),
+            app.engine.agent_tabs.contains_key(TabIdRef::new("tab-x")),
             "a crash must keep the tab row for diagnosis/relaunch"
         );
         assert_agent_input_cleared(&app);
@@ -2179,7 +2204,9 @@ mod tests {
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(session.id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session.id.clone()), client);
         app.focus = FocusPane::Left;
 
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
@@ -2461,7 +2488,7 @@ mod tests {
         let (worker_tx, worker_rx) = mpsc::channel();
         let session = test_session(tmp.path());
         let request = AgentLaunchRequest {
-            tab_id: session.id.clone(),
+            tab_id: session.slot_tab_id().to_owned(),
             provider: session.provider.clone(),
             session,
             provider_config: crate::config::ProviderCommandConfig {

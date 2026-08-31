@@ -14,6 +14,7 @@ use chrono::Utc;
 
 use crate::config::Config;
 use crate::engine::{CreateLaunchOutcome, Engine, InFlightKey, ResolvedFinal};
+use crate::ids::{TabId, TabIdRef};
 use crate::logger;
 use crate::model::{
     AgentSession, GhStatus, PrState, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
@@ -867,7 +868,7 @@ impl Engine {
                 return (
                     AgentLaunchReadyOutcome {
                         session,
-                        tab_id: tab_id.clone(),
+                        tab_id: tab_id.as_str().to_string(),
                         pty_size,
                         detached_session_id: None,
                         wants_fullscreen,
@@ -926,7 +927,7 @@ impl Engine {
             return (
                 AgentLaunchReadyOutcome {
                     session,
-                    tab_id: tab_id.clone(),
+                    tab_id: tab_id.as_str().to_string(),
                     pty_size,
                     detached_session_id: detached.map(|d| d.id),
                     wants_fullscreen,
@@ -948,7 +949,7 @@ impl Engine {
             return (
                 AgentLaunchReadyOutcome {
                     session,
-                    tab_id: tab_id.clone(),
+                    tab_id: tab_id.as_str().to_string(),
                     pty_size,
                     detached_session_id: None,
                     wants_fullscreen,
@@ -972,7 +973,7 @@ impl Engine {
             return (
                 AgentLaunchReadyOutcome {
                     session,
-                    tab_id: tab_id.clone(),
+                    tab_id: tab_id.as_str().to_string(),
                     pty_size,
                     detached_session_id: None,
                     wants_fullscreen,
@@ -1024,7 +1025,7 @@ impl Engine {
         (
             AgentLaunchReadyOutcome {
                 session,
-                tab_id,
+                tab_id: tab_id.as_str().to_string(),
                 pty_size,
                 detached_session_id: detached.map(|d| d.id),
                 wants_fullscreen,
@@ -1198,12 +1199,12 @@ impl Engine {
     /// Retired by [`Engine::clear_tab_runtime`] when the process goes.
     fn record_launched_drop_paste(
         &mut self,
-        tab_id: &str,
+        tab_id: &TabIdRef,
         provider: &ProviderKind,
         provider_config: &crate::config::ProviderCommandConfig,
     ) {
         self.launched_drop_paste.insert(
-            tab_id.to_string(),
+            tab_id.to_owned(),
             crate::engine::LaunchedDropPaste {
                 provider: provider.as_str().to_string(),
                 form: provider_config.resolved_web_dragdrop_paste(),
@@ -1222,21 +1223,26 @@ impl Engine {
     ///
     /// Never name these maps at a call site: a partial list leaks every map it
     /// omits whenever the relaunch that call site dispatched then fails.
-    pub fn clear_tab_runtime(&mut self, tab_id: &str) {
+    ///
+    /// The three PTY maps below are keyed by the wider PTY keyspace (agent tabs
+    /// AND companion terminals share them), so they take the id's raw string;
+    /// everything else is tab-keyed and takes the id as itself. See
+    /// [`Engine::clear_terminal_runtime`] for the other half of that split.
+    pub fn clear_tab_runtime(&mut self, tab_id: &TabIdRef) {
         self.providers.remove(tab_id);
         self.running_provider_pins.remove(tab_id);
         self.launched_drop_paste.remove(tab_id);
         self.resume_fallback_candidates.remove(tab_id);
-        self.pty_activity.remove(tab_id);
-        self.pty_input.remove(tab_id);
-        self.pty_pointer.remove(tab_id);
+        self.pty_activity.remove(tab_id.as_str());
+        self.pty_input.remove(tab_id.as_str());
+        self.pty_pointer.remove(tab_id.as_str());
         // Attention/progress runtime state is torn down with the tab so a
         // detach/relaunch/delete can never leave a stale flag or a stuck
         // "working" progress override behind.
         self.needs_attention.remove(tab_id);
         self.pty_progress.remove(tab_id);
         self.agent_viewed.remove(tab_id);
-        self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.to_string()));
+        self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.to_owned()));
     }
 
     /// Drop the activity/input runtime entries for a companion terminal being
@@ -1552,10 +1558,10 @@ impl Engine {
         session: &AgentSession,
         worktree_removal: Option<super::DeferredWorktreeRemoval>,
     ) {
-        let live_tabs: Vec<String> = self
+        let live_tabs: Vec<TabId> = self
             .tab_ids_for_session(&session.id)
             .into_iter()
-            .filter(|id| self.providers.contains_key(id))
+            .filter(|id| self.providers.contains_key(id.as_ref_id()))
             .collect();
         let already_terminating: Vec<String> = self
             .terminating_ptys
@@ -1585,7 +1591,11 @@ impl Engine {
                 for id in &live_tabs {
                     let _ = self.begin_close_provider(id, session.display_label(), None);
                 }
-                let pending_ids = live_tabs.into_iter().chain(already_terminating).collect();
+                let pending_ids = live_tabs
+                    .into_iter()
+                    .map(|id| id.as_str().to_string())
+                    .chain(already_terminating)
+                    .collect();
                 self.pending_group_removals
                     .push(super::GroupWorktreeRemoval {
                         pending_ids,
@@ -1918,7 +1928,7 @@ impl Engine {
                     // entry once the row is actually gone, so a failed DB delete
                     // leaves a visible/closeable tab rather than an invisible
                     // ghost that still consumes a cap slot.
-                    match self.session_store.delete_agent_tab(&tab_id) {
+                    match self.session_store.delete_agent_tab(tab_id.as_str()) {
                         Ok(()) => {
                             self.agent_tabs.remove(&tab_id);
                         }
@@ -1931,7 +1941,7 @@ impl Engine {
                     AgentLaunchFailedOutcome::Tab {
                         agent_label: session.display_label(),
                         session_id: session.id,
-                        tab_id,
+                        tab_id: tab_id.as_str().to_string(),
                         message,
                     },
                     None,
@@ -3047,7 +3057,7 @@ mod tests {
             .unwrap()
             .expect("outcome");
         assert!(engine.sessions.is_empty());
-        assert!(!engine.providers.contains_key("s1"));
+        assert!(!engine.providers.contains_key(TabIdRef::new("s1")));
         assert_eq!(outcome.session.id, "s1");
         assert_eq!(outcome.project.as_ref().map(|p| p.id.as_str()), Some("p1"));
         assert!(!outcome.other_sessions_on_worktree);
@@ -3066,10 +3076,10 @@ mod tests {
         // session-slot tab activity stamp.
         engine
             .agent_tabs
-            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
         engine
             .running_provider_pins
-            .insert("tab-2".to_string(), ProviderKind::new("codex"));
+            .insert(TabId::new("tab-2"), ProviderKind::new("codex"));
         engine
             .pty_activity
             .insert("tab-2".to_string(), Instant::now());
@@ -3080,7 +3090,7 @@ mod tests {
         engine.note_pty_pointer("tab-2", crate::pty::PointerReport::Wheel);
         engine
             .resume_fallback_candidates
-            .insert("tab-2".to_string(), Instant::now());
+            .insert(TabId::new("tab-2"), Instant::now());
         engine.pty_activity.insert("s1".to_string(), Instant::now());
         engine.note_pty_pointer("s1", crate::pty::PointerReport::Wheel);
 
@@ -3095,8 +3105,16 @@ mod tests {
             assert!(!engine.pty_activity.contains_key(key));
             assert!(!engine.pty_input.contains_key(key));
             assert!(!engine.pty_pointer.contains_key(key));
-            assert!(!engine.running_provider_pins.contains_key(key));
-            assert!(!engine.resume_fallback_candidates.contains_key(key));
+            assert!(
+                !engine
+                    .running_provider_pins
+                    .contains_key(TabIdRef::new(key))
+            );
+            assert!(
+                !engine
+                    .resume_fallback_candidates
+                    .contains_key(TabIdRef::new(key))
+            );
         }
         assert!(engine.agent_tabs.is_empty());
     }
@@ -3514,16 +3532,16 @@ mod tests {
         // would inherit a form nobody configured.
         let (mut engine, _tmp) = test_engine();
         engine.launched_drop_paste.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             crate::engine::LaunchedDropPaste {
                 provider: "codex".to_string(),
                 form: crate::config::WebDragDropPaste::SingleQuoted,
                 command_name: "codex".to_string(),
             },
         );
-        engine.clear_tab_runtime("s1");
+        engine.clear_tab_runtime(TabIdRef::new("s1"));
         assert!(
-            !engine.launched_drop_paste.contains_key("s1"),
+            !engine.launched_drop_paste.contains_key(TabIdRef::new("s1")),
             "the launched paste profile must be torn down with the tab, like \
              every other tab-keyed runtime map"
         );
@@ -3547,16 +3565,16 @@ mod tests {
             .worktree_path = worktree.clone();
         engine.sessions.push(victim);
         engine.agent_tabs.insert(
-            "v-tab".to_string(),
+            TabId::new("v-tab"),
             sample_tab("v-tab", "victim", "codex", 1),
         );
         engine.providers.insert(
-            "victim".to_string(),
+            TabId::new("victim"),
             PtyClient::spawn_with_env("cat", &[], tmp.path(), 24, 80, 1000, &[]).unwrap(),
         );
         engine
             .running_provider_pins
-            .insert("v-tab".to_string(), ProviderKind::new("codex"));
+            .insert(TabId::new("v-tab"), ProviderKind::new("codex"));
         engine
             .pty_activity
             .insert("v-tab".to_string(), Instant::now());
@@ -3574,11 +3592,15 @@ mod tests {
         assert_eq!(detached.map(|d| d.id), Some("victim".to_string()));
         // Every tab of the victim is torn down (Main provider + the extra tab's
         // runtime maps)...
-        assert!(!engine.providers.contains_key("victim"));
+        assert!(!engine.providers.contains_key(TabIdRef::new("victim")));
         assert!(!engine.pty_activity.contains_key("v-tab"));
-        assert!(!engine.running_provider_pins.contains_key("v-tab"));
+        assert!(
+            !engine
+                .running_provider_pins
+                .contains_key(TabIdRef::new("v-tab"))
+        );
         // ...but its extra-tab ROW survives: the session still exists, detached.
-        assert!(engine.agent_tabs.contains_key("v-tab"));
+        assert!(engine.agent_tabs.contains_key(TabIdRef::new("v-tab")));
     }
 
     /// Two spellings of one directory are one directory. Under a raw string
@@ -3604,14 +3626,14 @@ mod tests {
             .worktree_path = real.to_string_lossy().to_string();
         engine.sessions.push(victim);
         engine.providers.insert(
-            "victim".to_string(),
+            TabId::new("victim"),
             PtyClient::spawn_with_env("cat", &[], &real, 24, 80, 1000, &[]).unwrap(),
         );
 
         let detached =
             engine.detach_conflicting_worktree_session(link.to_string_lossy().as_ref(), "req");
         assert_eq!(detached.map(|d| d.id), Some("victim".to_string()));
-        assert!(!engine.providers.contains_key("victim"));
+        assert!(!engine.providers.contains_key(TabIdRef::new("victim")));
     }
 
     #[test]
@@ -3631,12 +3653,12 @@ mod tests {
             .worktree_path = worktree.clone();
         engine.sessions.push(victim);
         engine.agent_tabs.insert(
-            "v-tab".to_string(),
+            TabId::new("v-tab"),
             sample_tab("v-tab", "victim", "codex", 1),
         );
         // Provider keyed under the EXTRA tab id, not the session/Main id.
         engine.providers.insert(
-            "v-tab".to_string(),
+            TabId::new("v-tab"),
             PtyClient::spawn_with_env("cat", &[], tmp.path(), 24, 80, 1000, &[]).unwrap(),
         );
 
@@ -3652,7 +3674,7 @@ mod tests {
         // tab-aware detection finds it and tears the live extra tab down.
         let detached = engine.detach_conflicting_worktree_session(&worktree, "req");
         assert_eq!(detached.map(|d| d.id), Some("victim".to_string()));
-        assert!(!engine.providers.contains_key("v-tab"));
+        assert!(!engine.providers.contains_key(TabIdRef::new("v-tab")));
     }
 
     #[test]
@@ -5339,7 +5361,7 @@ mod tests {
         let session = sample_session(session_id, "project-1", branch);
         AgentLaunchFailedData {
             request: AgentLaunchRequest {
-                tab_id: session.id.clone(),
+                tab_id: session.slot_tab_id().to_owned(),
                 provider: session.provider.clone(),
                 session,
                 provider_config: ProviderCommandConfig::default(),
@@ -5358,7 +5380,7 @@ mod tests {
     #[test]
     fn process_agent_launch_failed_create_clears_in_flight_and_returns_message() {
         let (mut engine, _tmp) = test_engine();
-        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
         engine.mark_in_flight(InFlightKey::CreateAgent);
         let data = make_failed_data(
             "s1",
@@ -5373,7 +5395,7 @@ mod tests {
             "boom",
         );
         let (outcome, _create_final) = engine.process_agent_launch_failed(data);
-        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
+        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
         assert!(!engine.is_in_flight(&InFlightKey::CreateAgent));
         assert!(
             matches!(outcome, AgentLaunchFailedOutcome::Create { message, .. } if message == "boom")
@@ -5386,7 +5408,7 @@ mod tests {
         let session = sample_session("s1", "project-1", "feat/x");
         let _ = engine.session_store.upsert_session(&session);
         engine.sessions.push(session);
-        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
 
         let data = make_failed_data(
             "s1",
@@ -5398,7 +5420,7 @@ mod tests {
         );
         let (outcome, _create_final) = engine.process_agent_launch_failed(data);
         assert!(matches!(outcome, AgentLaunchFailedOutcome::ResumeFallback));
-        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
+        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
         assert_eq!(engine.sessions[0].status, SessionStatus::Detached);
     }
 
@@ -5447,7 +5469,7 @@ mod tests {
         let session = sample_session(session_id, "project-1", branch);
         AgentLaunchFailedData {
             request: AgentLaunchRequest {
-                tab_id: tab_id.to_string(),
+                tab_id: TabId::new(tab_id),
                 provider: session.provider.clone(),
                 session,
                 provider_config: ProviderCommandConfig::default(),
@@ -5479,7 +5501,7 @@ mod tests {
             sort_order: 1,
             created_at: chrono::Utc::now(),
         };
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         let data = make_tab_failed_data("s1", "tab-1", "feat/x", true, "boom");
         let (outcome, _) = engine.process_agent_launch_failed(data);
@@ -5493,7 +5515,7 @@ mod tests {
         // must delete the row so it doesn't linger as a permanently-broken
         // dormant tab, both in memory and in SQLite.
         assert!(
-            !engine.agent_tabs.contains_key("tab-1"),
+            !engine.agent_tabs.contains_key(TabIdRef::new("tab-1")),
             "a fresh tab's row must be deleted in memory on first-launch failure"
         );
         assert!(
@@ -5525,7 +5547,7 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         let data = make_tab_failed_data("s1", "tab-1", "feat/x", false, "boom");
         let (outcome, _) = engine.process_agent_launch_failed(data);
@@ -5536,7 +5558,7 @@ mod tests {
                 if tab_id == "tab-1" && agent_label == "s1-title" && message == "boom"
         ));
         assert!(
-            engine.agent_tabs.contains_key("tab-1"),
+            engine.agent_tabs.contains_key(TabIdRef::new("tab-1")),
             "a not-fresh (explicit relaunch) tab's row must survive a failure so the user can retry"
         );
         assert!(
@@ -5791,11 +5813,11 @@ mod tests {
         engine.sessions.push(session);
         let tab = sample_tab("tab-1", "s1", "codex", 1);
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         // An extra tab whose launch is in flight is marked in-flight but not yet
         // in `providers`, so it is invisible to the live-tab check. Deleting must
         // refuse rather than race the worktree removal against the spawn.
-        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-1".to_string()));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-1")));
         let outcome = engine.begin_delete_session("s1", true);
         assert!(matches!(outcome, BeginDeleteSessionOutcome::TabLaunching));
     }
@@ -6139,7 +6161,7 @@ mod tests {
         engine.sessions.push(session);
         // Mark the session-slot tab's launch in flight, under the id
         // `AgentSession::slot_tab_id` resolves to for this fixture.
-        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
 
         let outcome = engine
             .do_delete_session("s1", true)
@@ -6287,9 +6309,9 @@ mod tests {
     fn apply_dispatch_agent_launch_returns_already_launching_when_pending() {
         let (mut engine, _tmp) = test_engine();
         let session = sample_session("s1", "p1", "feat/x");
-        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
         let request = AgentLaunchRequest {
-            tab_id: session.id.clone(),
+            tab_id: session.slot_tab_id().to_owned(),
             provider: session.provider.clone(),
             session,
             provider_config: ProviderCommandConfig::default(),

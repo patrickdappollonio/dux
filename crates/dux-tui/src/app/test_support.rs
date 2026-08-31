@@ -415,7 +415,7 @@ pub(crate) fn wait_for_pty_eof(app: &mut App, key: &str) {
     while !app
         .engine
         .providers
-        .get_mut(key)
+        .get_mut(dux_core::ids::TabIdRef::new(key))
         .is_some_and(|c| c.is_exited() && c.try_wait().is_some())
     {
         assert!(

@@ -55,6 +55,7 @@ use chrono::Utc;
 
 use crate::config::{Config, DuxPaths, ProjectConfig};
 use crate::config_queue::{ConfigWriteQueue, QuiesceGuard};
+use crate::ids::{SessionIdRef, TabId, TabIdRef};
 use crate::lockfile::SingleInstanceLock;
 use crate::model::{
     AgentSession, AgentTab, ChangedFile, CompanionTerminal, GhStatus, PrInfo, Project,
@@ -197,12 +198,12 @@ pub struct Engine {
     /// reload. Dropped (resuming the writer) when `ConfigReloadReady` lands.
     /// Constructed as `None`.
     pub reload_guard: Option<QuiesceGuard>,
-    pub providers: HashMap<String, PtyClient>,
+    pub providers: HashMap<TabId, PtyClient>,
     /// When a provider swap happens while the agent's PTY is still running,
     /// the currently-spawned provider is pinned here so UI labels keep
     /// showing what's actually running until the user exits and relaunches
     /// the agent. Cleared whenever the PTY is torn down.
-    pub running_provider_pins: HashMap<String, ProviderKind>,
+    pub running_provider_pins: HashMap<TabId, ProviderKind>,
     /// What each LIVE tab's process launched with, as far as a dropped file's
     /// path is concerned: the paste FORM and the COMMAND that identifies the CLI
     /// receiving it. Keyed by tab id.
@@ -229,14 +230,14 @@ pub struct Engine {
     /// edits in their own editor and dux reloads: there is no point at which a
     /// refusal could be delivered, and the reload would either have to be
     /// abandoned wholesale or silently keep a block the file no longer contains.
-    pub launched_drop_paste: HashMap<String, LaunchedDropPaste>,
+    pub launched_drop_paste: HashMap<TabId, LaunchedDropPaste>,
     pub companion_terminals: HashMap<String, CompanionTerminal>,
     /// Persisted **extra tabs** (secondary provider tabs), keyed by tab id with
     /// the owning `session_id` carried in the value (mirrors `companion_terminals`
     /// so ownership resolves O(1) with no side index). The session-slot tab has no entry —
     /// it is derived from the `AgentSession` row (see `AgentSession::slot_tab_id`). Seeded
     /// from `session_store.load_agent_tabs()` at construction.
-    pub agent_tabs: HashMap<String, AgentTab>,
+    pub agent_tabs: HashMap<TabId, AgentTab>,
     /// Agent/terminal PTYs that have been SIGTERMed on an individual delete or
     /// close and are being given a grace period to exit before they are
     /// force-killed (SIGKILL) — the non-blocking, per-PTY analogue of
@@ -325,7 +326,7 @@ pub struct Engine {
     /// Session IDs spawned with resume args and the wall-clock time the resume
     /// attempt began. Used for one-shot fallbacks when resume exits quickly or
     /// hangs without rendering visible output.
-    pub resume_fallback_candidates: HashMap<String, Instant>,
+    pub resume_fallback_candidates: HashMap<TabId, Instant>,
     /// Session IDs whose worktree is currently being removed by a background
     /// worker. Prevents duplicate delete requests from spawning a second
     /// worker while the first is still running; also drives the dimmed
@@ -456,7 +457,7 @@ pub struct Engine {
     /// Populated by [`Engine::poll_agent_signals`] (which suppresses a signal on
     /// a tab the user is engaged with) and cleared when the user looks at or
     /// tears down the tab. The sidebar rolls this up across an agent's tabs.
-    pub needs_attention: HashSet<String>,
+    pub needs_attention: HashSet<TabId>,
     /// The most recent `OSC 9;4` progress report per tab (keyed by tab id), with
     /// the moment the engine observed it. [`Engine::is_agent_streaming`] treats a
     /// fresh report as authoritative for the "working" indicator, overriding the
@@ -464,14 +465,14 @@ pub struct Engine {
     /// [`PROGRESS_AUTHORITY_WINDOW`]) is ignored and the heuristic resumes.
     /// Memory-only; dropped on tab teardown so a crashed agent can never leave a
     /// spinner stuck on.
-    pub pty_progress: HashMap<String, ProgressReport>,
+    pub pty_progress: HashMap<TabId, ProgressReport>,
     /// Wall-clock timestamp of when the user was last actively looking at each
     /// tab (keyed by tab id): the TUI stamps the focused-interactive agent tab
     /// each tick; the web stamps a tab on PTY subscribe (opening its live view).
     /// A fresh entry (within [`ATTENTION_ENGAGED_WINDOW`]) both suppresses a new
     /// attention signal and clears an existing one, so an agent you are already
     /// looking at never nags you. Typing is handled separately via `pty_input`.
-    pub agent_viewed: HashMap<String, Instant>,
+    pub agent_viewed: HashMap<TabId, Instant>,
     /// Wall-clock timestamp of the last companion-terminal foreground refresh.
     /// [`Engine::refresh_terminal_foregrounds`] throttles itself against this so
     /// callers can invoke it every tick while the actual `tcgetpgrp` probe runs
@@ -827,16 +828,18 @@ pub const ATTENTION_ENGAGED_WINDOW: Duration = Duration::from_secs(3);
 /// holding a disjoint mutable borrow of `needs_attention`, and so the windowing
 /// is unit-testable without a live PTY.
 fn attention_engaged(
-    viewed: &HashMap<String, Instant>,
+    viewed: &HashMap<TabId, Instant>,
+    // `pty_input` spans the whole PTY keyspace (tabs AND companion terminals),
+    // so it stays string-keyed and is probed with the tab id's raw string.
     typed: &HashMap<String, Instant>,
-    tab_id: &str,
+    tab_id: &TabIdRef,
     now: Instant,
 ) -> bool {
     viewed
         .get(tab_id)
         .is_some_and(|t| now.duration_since(*t) < ATTENTION_ENGAGED_WINDOW)
         || typed
-            .get(tab_id)
+            .get(tab_id.as_str())
             .is_some_and(|t| now.duration_since(*t) < AGENT_INPUT_SUPPRESSION_WINDOW)
 }
 
@@ -852,10 +855,10 @@ fn attention_engaged(
 ///   logged at debug level so the whole pipeline is diagnosable from `dux.log`
 ///   without adding default-level noise.
 fn apply_attention_decision(
-    needs_attention: &mut HashSet<String>,
-    fired: &[String],
+    needs_attention: &mut HashSet<TabId>,
+    fired: &[TabId],
     enabled: bool,
-    engaged: impl Fn(&str) -> bool,
+    engaged: impl Fn(&TabIdRef) -> bool,
 ) {
     if !enabled {
         needs_attention.clear();
@@ -1196,7 +1199,7 @@ impl Engine {
         // points at, never the session id read off the record.
         for (tab_id, provider) in &self.providers {
             if provider.take_received_data() {
-                self.pty_activity.insert(tab_id.clone(), now);
+                self.pty_activity.insert(tab_id.as_str().to_string(), now);
             }
         }
         // Companion terminals share the same activity map, keyed by their
@@ -1357,7 +1360,7 @@ impl Engine {
         }
         // No fresh (non-echo, non-repaint) output: consult the agent's own
         // OSC 9;4 report.
-        if let Some(report) = self.pty_progress.get(tab_id)
+        if let Some(report) = self.pty_progress.get(TabIdRef::new(tab_id))
             && report.at.elapsed() < PROGRESS_AUTHORITY_WINDOW
         {
             return report.working;
@@ -1439,8 +1442,8 @@ impl Engine {
 
         // Collect first: iterating `providers` borrows it immutably, so the
         // per-tab map mutations below must happen after the loop.
-        let mut progress_updates: Vec<(String, ProgressReport)> = Vec::new();
-        let mut fired: Vec<String> = Vec::new();
+        let mut progress_updates: Vec<(TabId, ProgressReport)> = Vec::new();
+        let mut fired: Vec<TabId> = Vec::new();
         for (tab_id, provider) in &self.providers {
             if let Some(report) = provider.progress_report() {
                 progress_updates.push((tab_id.clone(), report));
@@ -1460,7 +1463,7 @@ impl Engine {
         // borrow of `needs_attention` below is allowed alongside these reads.
         let viewed = &self.agent_viewed;
         let typed = &self.pty_input;
-        let engaged = |tab: &str| attention_engaged(viewed, typed, tab, now);
+        let engaged = |tab: &TabIdRef| attention_engaged(viewed, typed, tab, now);
         apply_attention_decision(&mut self.needs_attention, &fired, enabled, engaged);
     }
 
@@ -1547,9 +1550,13 @@ impl Engine {
     /// (TUI: the focused, interactive agent tab; web: a PTY subscribe). This both
     /// clears an existing attention flag immediately and suppresses a new one for
     /// [`ATTENTION_ENGAGED_WINDOW`] so an agent you are watching never nags you.
+    ///
+    /// Takes a plain `&str`: this is a transport-facing entry point and the id
+    /// arrives unclassified from a client. It is named as a tab id here, at the
+    /// door, which is where an unknown-kind id is supposed to be classified.
     pub fn note_agent_viewed(&mut self, tab_id: &str) {
-        self.agent_viewed.insert(tab_id.to_string(), Instant::now());
-        self.needs_attention.remove(tab_id);
+        self.agent_viewed.insert(TabId::new(tab_id), Instant::now());
+        self.needs_attention.remove(TabIdRef::new(tab_id));
     }
 
     /// Like [`Engine::note_agent_viewed`], but only when `tab_id` resolves to a
@@ -1567,7 +1574,7 @@ impl Engine {
     /// Whether the given tab currently has an unacknowledged attention signal.
     /// Keyed by TAB id; the sidebar rolls this up across an agent's tabs.
     pub fn tab_needs_attention(&self, tab_id: &str) -> bool {
-        self.needs_attention.contains(tab_id)
+        self.needs_attention.contains(TabIdRef::new(tab_id))
     }
 
     /// Whether ANY tab of the session (session-slot or extra) currently needs
@@ -1580,13 +1587,13 @@ impl Engine {
         }
         if self
             .needs_attention
-            .contains(self.slot_tab_id_of(session_id))
+            .contains(self.slot_tab_id_of(SessionIdRef::new(session_id)))
         {
             return true;
         }
         self.agent_tabs
             .values()
-            .any(|t| t.session_id == session_id && self.needs_attention.contains(&t.id))
+            .any(|t| t.session_id == session_id && self.tab_needs_attention(&t.id))
     }
 
     /// Whether ANY tab of the session (session-slot or extra) is currently
@@ -1594,7 +1601,7 @@ impl Engine {
     /// uses, mirroring `session_needs_attention` and the viewmodel's `working`
     /// field — so an agent whose non-slot tab is streaming still reads as working.
     pub fn session_is_streaming(&self, session_id: &str) -> bool {
-        if self.is_agent_streaming(self.slot_tab_id_of(session_id)) {
+        if self.is_agent_streaming(self.slot_tab_id_of(SessionIdRef::new(session_id)).as_str()) {
             return true;
         }
         self.agent_tabs
@@ -1607,7 +1614,7 @@ impl Engine {
     /// sidebar row can show a Typing cue whenever the user is typing into any of
     /// the agent's tabs.
     pub fn session_is_typing(&self, session_id: &str) -> bool {
-        if self.is_typing(self.slot_tab_id_of(session_id)) {
+        if self.is_typing(self.slot_tab_id_of(SessionIdRef::new(session_id)).as_str()) {
             return true;
         }
         self.agent_tabs
@@ -2846,7 +2853,7 @@ impl Engine {
                 let title = session.display_label();
                 let provider = self.running_provider_for(session);
                 targets.push(ResourceTarget {
-                    id: tab_id.clone(),
+                    id: tab_id.as_str().to_string(),
                     kind: ResourceKind::Agent,
                     label: format!("Agent ({}): {title}", provider.as_str()),
                     pid,
@@ -2865,7 +2872,7 @@ impl Engine {
                     .cloned()
                     .unwrap_or_else(|| tab.provider.clone());
                 targets.push(ResourceTarget {
-                    id: tab_id.clone(),
+                    id: tab_id.as_str().to_string(),
                     kind: ResourceKind::Agent,
                     label: format!("Tab ({}): {title}", provider.as_str()),
                     pid,
@@ -4156,7 +4163,7 @@ impl Engine {
     /// pinned (still-running) provider until it exits; otherwise it owns its
     /// configured provider — the session-slot tab's is `session.provider`, an
     /// extra tab's is its `agent_tabs` row provider.
-    pub fn tab_running_provider(&self, session: &AgentSession, tab_id: &str) -> ProviderKind {
+    pub fn tab_running_provider(&self, session: &AgentSession, tab_id: &TabIdRef) -> ProviderKind {
         if let Some(pinned) = self.running_provider_pins.get(tab_id) {
             return pinned.clone();
         }
@@ -4181,7 +4188,7 @@ impl Engine {
     pub fn tab_resume_decision(
         &self,
         session: &AgentSession,
-        tab_id: &str,
+        tab_id: &TabIdRef,
         provider: &ProviderKind,
         requested: bool,
     ) -> bool {
@@ -4207,14 +4214,14 @@ impl Engine {
     /// [`AgentSession::slot_tab_id`] so engine-side callers with an `Engine` in
     /// hand ask the same question in the same words. See that method for why the
     /// answer is not simply the session id forever.
-    pub fn slot_tab_id_for<'a>(&self, session: &'a AgentSession) -> &'a str {
+    pub fn slot_tab_id_for<'a>(&self, session: &'a AgentSession) -> &'a TabIdRef {
         session.slot_tab_id()
     }
 
     /// Whether `tab_id` names `session`'s session-slot tab. The engine-side
     /// spelling of [`AgentSession::is_slot_tab`]; no call site compares a tab id
     /// against a session id inline.
-    pub fn is_slot_tab(&self, session: &AgentSession, tab_id: &str) -> bool {
+    pub fn is_slot_tab(&self, session: &AgentSession, tab_id: &TabIdRef) -> bool {
         session.is_slot_tab(tab_id)
     }
 
@@ -4227,8 +4234,8 @@ impl Engine {
     /// guards refusal paths, where the safe answer to "is this the slot tab of an
     /// agent nobody has heard of" is no, while the other seeds enumerations,
     /// where dropping the key entirely would lose a runtime entry.
-    pub fn is_slot_tab_of(&self, session_id: &str, tab_id: &str) -> bool {
-        self.session_by_id(session_id)
+    pub fn is_slot_tab_of(&self, session_id: &SessionIdRef, tab_id: &TabIdRef) -> bool {
+        self.session_by_id(session_id.as_str())
             .is_some_and(|session| session.is_slot_tab(tab_id))
     }
 
@@ -4240,29 +4247,38 @@ impl Engine {
     /// The asymmetry with [`Self::is_slot_tab_of`], which answers `false` for the
     /// same unknown id, is deliberate: a fallback preserves those enumeration
     /// seeds, while a `false` preserves the refusals that ask the question.
-    pub fn slot_tab_id_of<'a>(&'a self, session_id: &'a str) -> &'a str {
-        self.session_by_id(session_id)
-            .map_or(session_id, |session| session.slot_tab_id())
+    pub fn slot_tab_id_of<'a>(&'a self, session_id: &'a SessionIdRef) -> &'a TabIdRef {
+        self.session_by_id(session_id.as_str())
+            // The fallback REINTERPRETS a session id as a tab id, which is only
+            // sound because the slot tab's id equals the session id today. It is
+            // spelled out rather than implicit precisely so it shows up as
+            // something to revisit when the slot becomes a stored pointer.
+            .map_or(TabIdRef::new(session_id.as_str()), |session| {
+                session.slot_tab_id()
+            })
     }
 
     /// The agent whose session-slot tab is `tab_id`, or `None` when `tab_id` is
     /// an extra tab or names nothing. The inverse of
     /// [`AgentSession::slot_tab_id`], and the one place that resolves a bare tab
     /// id back to the agent it is the first tab of.
-    pub fn session_for_slot_tab(&self, tab_id: &str) -> Option<&AgentSession> {
+    pub fn session_for_slot_tab(&self, tab_id: &TabIdRef) -> Option<&AgentSession> {
         self.sessions.iter().find(|s| s.is_slot_tab(tab_id))
     }
 
     /// Every runtime-map key owned by a session: its session-slot tab plus every
     /// extra tab id. The single source of truth for teardown fan-out — a
     /// full-session teardown must clear all of these, not just the slot tab.
-    pub fn tab_ids_for_session(&self, session_id: &str) -> Vec<String> {
-        let mut ids = vec![self.slot_tab_id_of(session_id).to_string()];
+    pub fn tab_ids_for_session(&self, session_id: &str) -> Vec<TabId> {
+        let mut ids = vec![
+            self.slot_tab_id_of(SessionIdRef::new(session_id))
+                .to_owned(),
+        ];
         ids.extend(
             self.agent_tabs
                 .values()
                 .filter(|t| t.session_id == session_id)
-                .map(|t| t.id.clone()),
+                .map(|t| TabId::new(t.id.clone())),
         );
         ids
     }
@@ -4298,18 +4314,25 @@ impl Engine {
                 .cmp(&b.sort_order)
                 .then_with(|| a.created_at.cmp(&b.created_at))
         });
-        std::iter::once(self.slot_tab_id_of(session_id).to_string())
-            .chain(extras.into_iter().map(|t| t.id.clone()))
-            .find(|id| {
-                self.providers.contains_key(id)
-                    || self.is_in_flight(&InFlightKey::AgentLaunch(id.clone()))
-            })
+        std::iter::once(
+            self.slot_tab_id_of(SessionIdRef::new(session_id))
+                .to_owned(),
+        )
+        .chain(extras.into_iter().map(|t| TabId::new(t.id.clone())))
+        .find(|id| {
+            self.providers.contains_key(id.as_ref_id())
+                || self.is_in_flight(&InFlightKey::AgentLaunch(id.clone()))
+        })
+        .map(|id| id.as_str().to_string())
     }
 
     /// Resolve a tab id back to the session that owns it. An extra tab resolves
     /// via its `agent_tabs` row; otherwise the id is looked up as some agent's
     /// session-slot tab. Returns `None` for an unknown id.
     pub fn owning_session_for_tab(&self, tab_id: &str) -> Option<String> {
+        // Transport-facing: the id arrives unclassified (a URL segment, a socket
+        // frame). Named as a tab id here, at the door.
+        let tab_id = TabIdRef::new(tab_id);
         if let Some(tab) = self.agent_tabs.get(tab_id) {
             return Some(tab.session_id.clone());
         }
@@ -4357,7 +4380,7 @@ impl Engine {
         // swap-while-running — later swaps don't change what's spawned.
         if running {
             self.running_provider_pins
-                .entry(updated.slot_tab_id().to_string())
+                .entry(updated.slot_tab_id().to_owned())
                 .or_insert_with(|| previous.clone());
         }
 
@@ -4435,11 +4458,11 @@ impl Engine {
             created_at: Utc::now(),
         };
         self.session_store.insert_agent_tab(&tab)?;
-        self.agent_tabs.insert(tab_id.clone(), tab);
+        self.agent_tabs.insert(TabId::new(tab_id.clone()), tab);
 
         let status_message = format!("Started a fresh {} tab.", provider.as_str());
         let request = self.build_tab_launch_request(
-            tab_id.clone(),
+            TabId::new(tab_id.clone()),
             Some(provider),
             session,
             false,
@@ -4470,7 +4493,7 @@ impl Engine {
             // (mirrors `close_tab` and `process_agent_launch_failed`'s Tab arm).
             match self.session_store.delete_agent_tab(&tab_id) {
                 Ok(()) => {
-                    self.agent_tabs.remove(&tab_id);
+                    self.agent_tabs.remove(TabIdRef::new(&tab_id));
                 }
                 Err(err) => crate::logger::error(&format!(
                     "failed to delete ghost extra tab {tab_id}: {err}",
@@ -4497,7 +4520,7 @@ impl Engine {
     /// removal already happened and the stale row is re-reconciled on the next
     /// restart at worst.
     pub fn remove_agent_tab_row(&mut self, tab_id: &str) -> bool {
-        if self.agent_tabs.remove(tab_id).is_none() {
+        if self.agent_tabs.remove(TabIdRef::new(tab_id)).is_none() {
             return false;
         }
         if let Err(err) = self.session_store.delete_agent_tab(tab_id) {
@@ -4513,10 +4536,12 @@ impl Engine {
     /// of its runtime-map entries. The session-slot tab's close is a separate path
     /// (`KillSessionPty`) — this is only for extra tabs.
     pub fn close_tab(&mut self, session_id: &str, tab_id: &str) -> anyhow::Result<CloseTabOutcome> {
-        if self.is_slot_tab_of(session_id, tab_id) {
+        // Transport-facing: two path segments arrive as bare strings, which is
+        // exactly the pair that used to be swappable. Named here, at the door.
+        if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id)) {
             anyhow::bail!("the session-slot tab cannot be closed as an extra tab");
         }
-        match self.agent_tabs.get(tab_id) {
+        match self.agent_tabs.get(TabIdRef::new(tab_id)) {
             Some(tab) if tab.session_id == session_id => {}
             Some(_) => anyhow::bail!("tab {tab_id} does not belong to session {session_id}"),
             None => anyhow::bail!("unknown tab: {tab_id}"),
@@ -4536,9 +4561,9 @@ impl Engine {
             .map(|s| s.display_label())
             .unwrap_or_else(|| tab_id.to_string());
         // No worktree removal is deferred on a tab close, so the return is None.
-        let _ = self.begin_close_provider(tab_id, label, None);
-        self.clear_tab_runtime(tab_id);
-        self.agent_tabs.remove(tab_id);
+        let _ = self.begin_close_provider(TabIdRef::new(tab_id), label, None);
+        self.clear_tab_runtime(TabIdRef::new(tab_id));
+        self.agent_tabs.remove(TabIdRef::new(tab_id));
         // Closing this tab may have removed the agent's last live process (its
         // session-slot tab already dormant). No tab is privileged, so recompute:
         // the agent detaches once nothing of it is live/launching. `any_tab_active`
@@ -4562,9 +4587,11 @@ impl Engine {
         tab_id: &str,
         provider: ProviderKind,
     ) -> anyhow::Result<ChangeAgentProviderOutcome> {
-        if self.is_slot_tab_of(session_id, tab_id) {
+        // Transport-facing, exactly as in `close_tab`: name the two segments.
+        if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id)) {
             return self.change_agent_provider(session_id, provider);
         }
+        let tab_id_ref = TabIdRef::new(tab_id);
 
         if !self
             .config
@@ -4575,26 +4602,26 @@ impl Engine {
             anyhow::bail!("provider \"{}\" is not configured", provider.as_str());
         }
 
-        let running = self.providers.contains_key(tab_id);
+        let running = self.providers.contains_key(tab_id_ref);
         // Persist first: read the previous value read-only and verify ownership,
         // write the DB, and only mutate the in-memory row after the write
         // succeeds — so a persistence failure leaves memory and SQLite in sync
         // (mirroring `create_tab`/`close_tab`).
         let previous = self
             .agent_tabs
-            .get(tab_id)
+            .get(tab_id_ref)
             .filter(|t| t.session_id == session_id)
             .map(|t| t.provider.clone())
             .ok_or_else(|| anyhow::anyhow!("unknown tab: {tab_id}"))?;
         self.session_store
             .update_agent_tab_provider(tab_id, provider.as_str())?;
-        if let Some(tab) = self.agent_tabs.get_mut(tab_id) {
+        if let Some(tab) = self.agent_tabs.get_mut(tab_id_ref) {
             tab.provider = provider.clone();
         }
 
         if running {
             self.running_provider_pins
-                .entry(tab_id.to_string())
+                .entry(tab_id_ref.to_owned())
                 .or_insert_with(|| previous.clone());
         }
 
@@ -4609,7 +4636,7 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(|session| self.tab_resume_decision(session, tab_id, &provider, true))
+            .map(|session| self.tab_resume_decision(session, tab_id_ref, &provider, true))
             .unwrap_or(false);
 
         Ok(ChangeAgentProviderOutcome {
@@ -4634,12 +4661,15 @@ impl Engine {
         if !self.sessions.iter().any(|s| s.id == session_id) {
             anyhow::bail!("unknown session: {session_id}");
         }
+        // The slot tab is represented as absence. That question goes to the
+        // resolver: it used to be an inline `id != session_id`, which is only
+        // right while the slot tab's id happens to equal the session id.
         let normalized = match tab_id {
             Some(id)
-                if id != session_id
+                if !self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(id))
                     && self
                         .agent_tabs
-                        .get(id)
+                        .get(TabIdRef::new(id))
                         .is_some_and(|t| t.session_id == session_id) =>
             {
                 Some(id.to_string())
@@ -4744,7 +4774,7 @@ mod tests {
         engine.projects.push(sample_project("p1", "/tmp/p1"));
         engine.sessions.push(sample_session("s1", "p1", "b1"));
         engine.agent_tabs.insert(
-            "tab-b".to_string(),
+            TabId::new("tab-b"),
             crate::model::AgentTab {
                 id: "tab-b".to_string(),
                 session_id: "s1".to_string(),
@@ -4761,29 +4791,35 @@ mod tests {
         let (engine, _tmp) = engine_with_an_extra_tab();
         let session = engine.session_by_id("s1").expect("session").clone();
 
-        let slot = engine.slot_tab_id_for(&session).to_string();
-        assert_eq!(slot, session.slot_tab_id());
-        assert_eq!(engine.slot_tab_id_of("s1"), slot);
+        let slot = engine.slot_tab_id_for(&session).to_owned();
+        assert_eq!(
+            engine.slot_tab_id_of(SessionIdRef::new("s1")),
+            slot.as_ref_id()
+        );
         assert!(engine.is_slot_tab(&session, &slot));
-        assert!(engine.is_slot_tab_of("s1", &slot));
+        assert!(engine.is_slot_tab_of(SessionIdRef::new("s1"), &slot));
 
         // The extra tab is not the slot tab, whichever way it is asked.
-        assert!(!engine.is_slot_tab(&session, "tab-b"));
-        assert!(!engine.is_slot_tab_of("s1", "tab-b"));
+        assert!(!engine.is_slot_tab(&session, TabIdRef::new("tab-b")));
+        assert!(!engine.is_slot_tab_of(SessionIdRef::new("s1"), TabIdRef::new("tab-b")));
     }
 
     #[test]
     fn session_for_slot_tab_is_the_inverse_and_ignores_extra_tabs() {
         let (engine, _tmp) = engine_with_an_extra_tab();
-        let slot = engine.slot_tab_id_of("s1").to_string();
+        let slot = engine.slot_tab_id_of(SessionIdRef::new("s1")).to_owned();
 
         assert_eq!(
             engine.session_for_slot_tab(&slot).map(|s| s.id.as_str()),
             Some("s1")
         );
         // An extra tab is somebody's tab but nobody's SLOT tab.
-        assert!(engine.session_for_slot_tab("tab-b").is_none());
-        assert!(engine.session_for_slot_tab("nope").is_none());
+        assert!(
+            engine
+                .session_for_slot_tab(TabIdRef::new("tab-b"))
+                .is_none()
+        );
+        assert!(engine.session_for_slot_tab(TabIdRef::new("nope")).is_none());
     }
 
     #[test]
@@ -4791,12 +4827,18 @@ mod tests {
         let (engine, _tmp) = engine_with_an_extra_tab();
 
         // No agent, so nothing can be its slot tab.
-        assert!(!engine.is_slot_tab_of("ghost", "ghost"));
-        assert!(!engine.is_slot_tab_of("ghost", "tab-b"));
+        assert!(!engine.is_slot_tab_of(SessionIdRef::new("ghost"), TabIdRef::new("ghost")));
+        assert!(!engine.is_slot_tab_of(SessionIdRef::new("ghost"), TabIdRef::new("tab-b")));
         // But the enumeration seeds still get a key rather than dropping one,
         // which is what the pre-resolver code did for a removed session.
-        assert_eq!(engine.slot_tab_id_of("ghost"), "ghost");
-        assert_eq!(engine.tab_ids_for_session("ghost"), vec!["ghost"]);
+        assert_eq!(
+            engine.slot_tab_id_of(SessionIdRef::new("ghost")).as_str(),
+            "ghost"
+        );
+        assert_eq!(
+            engine.tab_ids_for_session("ghost"),
+            vec![TabId::new("ghost")]
+        );
     }
 
     #[test]
@@ -4804,7 +4846,10 @@ mod tests {
         let (engine, _tmp) = engine_with_an_extra_tab();
         assert_eq!(
             engine.tab_ids_for_session("s1"),
-            vec![engine.slot_tab_id_of("s1").to_string(), "tab-b".to_string()]
+            vec![
+                engine.slot_tab_id_of(SessionIdRef::new("s1")).to_owned(),
+                TabId::new("tab-b")
+            ]
         );
     }
 
@@ -5522,7 +5567,7 @@ mod tests {
         // An extra tab of session s1 (its own tab id, session_id = s1) is streaming,
         // while the session-slot tab (s1) is idle.
         engine.agent_tabs.insert(
-            "s1-x".to_string(),
+            TabId::new("s1-x"),
             AgentTab {
                 id: "s1-x".to_string(),
                 session_id: "s1".to_string(),
@@ -5572,7 +5617,7 @@ mod tests {
     fn session_is_typing_rolls_up_any_tab() {
         let (mut engine, _tmp) = test_engine();
         engine.agent_tabs.insert(
-            "s1-x".to_string(),
+            TabId::new("s1-x"),
             AgentTab {
                 id: "s1-x".to_string(),
                 session_id: "s1".to_string(),
@@ -5695,7 +5740,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         // No output activity at all, but a fresh progress report says "working".
         engine.pty_progress.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             ProgressReport {
                 working: true,
                 at: Instant::now(),
@@ -5716,7 +5761,7 @@ mod tests {
         // printing must still light the indicator.
         engine.pty_activity.insert("s1".to_string(), Instant::now());
         engine.pty_progress.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             ProgressReport {
                 working: false,
                 at: Instant::now(),
@@ -5737,7 +5782,7 @@ mod tests {
         engine.pty_activity.insert("s1".to_string(), Instant::now());
         engine.pty_input.insert("s1".to_string(), Instant::now());
         engine.pty_progress.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             ProgressReport {
                 working: true,
                 at: Instant::now(),
@@ -5755,7 +5800,7 @@ mod tests {
         // The last progress report is older than the authority window, so the
         // output-activity heuristic takes over again.
         engine.pty_progress.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             ProgressReport {
                 working: true,
                 at: Instant::now() - (PROGRESS_AUTHORITY_WINDOW + Duration::from_millis(50)),
@@ -5919,7 +5964,7 @@ mod tests {
             let scrolled_at = engine.pty_pointer["s1"].at;
             engine.pty_activity.insert("s1".to_string(), scrolled_at);
             engine.pty_progress.insert(
-                "s1".to_string(),
+                TabId::new("s1"),
                 ProgressReport {
                     working: reported,
                     at: scrolled_at,
@@ -5984,7 +6029,7 @@ mod tests {
     #[test]
     fn note_agent_viewed_clears_attention_immediately() {
         let (mut engine, _tmp) = test_engine();
-        engine.needs_attention.insert("s1".to_string());
+        engine.needs_attention.insert(TabId::new("s1"));
         assert!(engine.tab_needs_attention("s1"));
         engine.note_agent_viewed("s1");
         assert!(
@@ -6000,54 +6045,69 @@ mod tests {
         let mut typed = HashMap::new();
 
         // Nothing recorded → not engaged.
-        assert!(!attention_engaged(&viewed, &typed, "s1", now));
+        assert!(!attention_engaged(
+            &viewed,
+            &typed,
+            TabIdRef::new("s1"),
+            now
+        ));
 
         // Fresh view → engaged.
-        viewed.insert("s1".to_string(), now);
-        assert!(attention_engaged(&viewed, &typed, "s1", now));
+        viewed.insert(TabId::new("s1"), now);
+        assert!(attention_engaged(&viewed, &typed, TabIdRef::new("s1"), now));
 
         // Stale view → not engaged.
         viewed.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             now - (ATTENTION_ENGAGED_WINDOW + Duration::from_millis(50)),
         );
-        assert!(!attention_engaged(&viewed, &typed, "s1", now));
+        assert!(!attention_engaged(
+            &viewed,
+            &typed,
+            TabIdRef::new("s1"),
+            now
+        ));
 
         // Fresh typing alone → engaged.
         typed.insert("s1".to_string(), now);
-        assert!(attention_engaged(&viewed, &typed, "s1", now));
+        assert!(attention_engaged(&viewed, &typed, TabIdRef::new("s1"), now));
 
         // Stale typing → not engaged.
         typed.insert(
             "s1".to_string(),
             now - (AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50)),
         );
-        assert!(!attention_engaged(&viewed, &typed, "s1", now));
+        assert!(!attention_engaged(
+            &viewed,
+            &typed,
+            TabIdRef::new("s1"),
+            now
+        ));
     }
 
     #[test]
     fn clear_tab_runtime_drops_attention_and_progress() {
         let (mut engine, _tmp) = test_engine();
-        engine.needs_attention.insert("s1".to_string());
+        engine.needs_attention.insert(TabId::new("s1"));
         engine.pty_progress.insert(
-            "s1".to_string(),
+            TabId::new("s1"),
             ProgressReport {
                 working: true,
                 at: Instant::now(),
             },
         );
-        engine.agent_viewed.insert("s1".to_string(), Instant::now());
-        engine.clear_tab_runtime("s1");
+        engine.agent_viewed.insert(TabId::new("s1"), Instant::now());
+        engine.clear_tab_runtime(TabIdRef::new("s1"));
         assert!(!engine.tab_needs_attention("s1"));
-        assert!(!engine.pty_progress.contains_key("s1"));
-        assert!(!engine.agent_viewed.contains_key("s1"));
+        assert!(!engine.pty_progress.contains_key(TabIdRef::new("s1")));
+        assert!(!engine.agent_viewed.contains_key(TabIdRef::new("s1")));
     }
 
     #[test]
     fn note_agent_viewed_if_known_gates_on_a_real_tab() {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        engine.needs_attention.insert("s1".to_string());
+        engine.needs_attention.insert(TabId::new("s1"));
 
         // A bogus id (stale deep link, race, retry) is a no-op: it neither stamps
         // `agent_viewed` nor touches the flag.
@@ -6060,25 +6120,28 @@ mod tests {
 
         // A real session id both stamps engagement and clears the flag.
         engine.note_agent_viewed_if_known("s1");
-        assert!(engine.agent_viewed.contains_key("s1"));
+        assert!(engine.agent_viewed.contains_key(TabIdRef::new("s1")));
         assert!(!engine.tab_needs_attention("s1"));
     }
 
     #[test]
     fn apply_attention_decision_sets_flag_when_not_engaged() {
         let mut set = HashSet::new();
-        apply_attention_decision(&mut set, &["s1".to_string()], true, |_| false);
-        assert!(set.contains("s1"), "a fired, unengaged tab must be flagged");
+        apply_attention_decision(&mut set, &[TabId::new("s1")], true, |_| false);
+        assert!(
+            set.contains(TabIdRef::new("s1")),
+            "a fired, unengaged tab must be flagged"
+        );
     }
 
     #[test]
     fn apply_attention_decision_suppresses_and_clears_when_engaged() {
         let mut set = HashSet::new();
-        set.insert("s1".to_string());
+        set.insert(TabId::new("s1"));
         // Engaged: the fired signal is suppressed AND the existing flag is cleared.
-        apply_attention_decision(&mut set, &["s1".to_string()], true, |_| true);
+        apply_attention_decision(&mut set, &[TabId::new("s1")], true, |_| true);
         assert!(
-            !set.contains("s1"),
+            !set.contains(TabIdRef::new("s1")),
             "engagement must both suppress the new signal and clear the old flag"
         );
     }
@@ -6086,19 +6149,19 @@ mod tests {
     #[test]
     fn apply_attention_decision_clears_stale_flag_without_a_new_signal() {
         let mut set = HashSet::new();
-        set.insert("s1".to_string());
+        set.insert(TabId::new("s1"));
         // No new signal this tick, but the user is now engaged → clear.
-        apply_attention_decision(&mut set, &[], true, |tab| tab == "s1");
-        assert!(!set.contains("s1"));
+        apply_attention_decision(&mut set, &[], true, |tab| tab.as_str() == "s1");
+        assert!(!set.contains(TabIdRef::new("s1")));
     }
 
     #[test]
     fn apply_attention_decision_retains_flag_while_unengaged() {
         let mut set = HashSet::new();
-        set.insert("s1".to_string());
+        set.insert(TabId::new("s1"));
         apply_attention_decision(&mut set, &[], true, |_| false);
         assert!(
-            set.contains("s1"),
+            set.contains(TabIdRef::new("s1")),
             "an unviewed flag must persist across ticks"
         );
     }
@@ -6106,8 +6169,8 @@ mod tests {
     #[test]
     fn apply_attention_decision_disabled_clears_everything() {
         let mut set = HashSet::new();
-        set.insert("s1".to_string());
-        apply_attention_decision(&mut set, &["s2".to_string()], false, |_| false);
+        set.insert(TabId::new("s1"));
+        apply_attention_decision(&mut set, &[TabId::new("s2")], false, |_| false);
         assert!(set.is_empty(), "the feature being off must drop every flag");
     }
 
@@ -6135,11 +6198,11 @@ mod tests {
             },
         )
         .expect("spawn signaling pty");
-        engine.providers.insert(tab.to_string(), client);
+        engine.providers.insert(TabId::new(tab), client);
         for _ in 0..200 {
             if engine
                 .providers
-                .get(tab)
+                .get(TabIdRef::new(tab))
                 .and_then(|p| p.progress_report())
                 .is_some()
             {
@@ -6166,7 +6229,7 @@ mod tests {
         assert!(
             engine
                 .pty_progress
-                .get("s1")
+                .get(TabIdRef::new("s1"))
                 .expect("progress recorded")
                 .working,
             "the 9;4;1 progress report must feed the working override"
@@ -6189,7 +6252,7 @@ mod tests {
             "a tab the user is viewing must not be flagged"
         );
         // Progress is still captured regardless of engagement.
-        assert!(engine.pty_progress.contains_key("s1"));
+        assert!(engine.pty_progress.contains_key(TabIdRef::new("s1")));
     }
 
     #[test]
@@ -6207,7 +6270,7 @@ mod tests {
         assert!(
             engine
                 .pty_progress
-                .get("s1")
+                .get(TabIdRef::new("s1"))
                 .expect("progress recorded")
                 .working,
             "progress still feeds the working indicator even with attention off"
@@ -6237,7 +6300,7 @@ mod tests {
             },
         )
         .expect("spawn passthrough pty");
-        engine.providers.insert(tab.to_string(), client);
+        engine.providers.insert(TabId::new(tab), client);
         // Gate readiness on the passthrough RING being non-empty, not on the
         // progress report. The reader loop sets the progress slot earlier in the
         // same scan pass than it pushes captures into the ring, so a progress-based
@@ -6246,7 +6309,7 @@ mod tests {
         for _ in 0..200 {
             if engine
                 .providers
-                .get(tab)
+                .get(TabIdRef::new(tab))
                 .map(|p| p.passthrough_pending())
                 .unwrap_or(0)
                 > 0
@@ -8043,7 +8106,7 @@ mod tests {
             &[],
         )
         .expect("spawn cat provider");
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
 
         let outcome = engine
             .change_agent_provider("s1", ProviderKind::new("codex"))
@@ -8059,7 +8122,10 @@ mod tests {
         // through the same resolver: the write and the read cannot drift apart.
         let slot = engine.sessions[0].slot_tab_id().to_string();
         assert_eq!(
-            engine.running_provider_pins.get(&slot).map(|p| p.as_str()),
+            engine
+                .running_provider_pins
+                .get(TabIdRef::new(&slot))
+                .map(|p| p.as_str()),
             Some("claude")
         );
         assert_eq!(
@@ -8074,13 +8140,16 @@ mod tests {
             .change_agent_provider("s1", ProviderKind::new("gemini"))
             .expect("second swap while running");
         assert_eq!(
-            engine.running_provider_pins.get(&slot).map(|p| p.as_str()),
+            engine
+                .running_provider_pins
+                .get(TabIdRef::new(&slot))
+                .map(|p| p.as_str()),
             Some("claude"),
             "the pin records what's actually spawned, not the latest selection"
         );
 
         // Clean up so the PTY doesn't outlive the test.
-        engine.providers.remove("s1");
+        engine.providers.remove(TabIdRef::new("s1"));
     }
 
     #[test]
@@ -8107,7 +8176,7 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         engine
             .set_last_focused_tab("s1", Some("tab-1"))
@@ -8158,7 +8227,7 @@ mod tests {
         engine.session_store.insert_agent_tab(&foreign_tab).unwrap();
         engine
             .agent_tabs
-            .insert(foreign_tab.id.clone(), foreign_tab);
+            .insert(TabId::new(foreign_tab.id.clone()), foreign_tab);
 
         engine
             .set_last_focused_tab("s1", Some("tab-2"))
@@ -8218,11 +8287,11 @@ mod tab_ops_tests {
             created_at: chrono::Utc::now(),
         };
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         let mk = |engine: &Engine| {
             engine.build_tab_launch_request(
-                "tab-1".into(),
+                TabId::new("tab-1"),
                 Some(ProviderKind::new("codex")),
                 session.clone(),
                 true,
@@ -8241,7 +8310,7 @@ mod tab_ops_tests {
         // A DIFFERENT-provider tab launching alongside does NOT block resume:
         // each CLI keeps its own directory-scoped conversation. The session-slot
         // id "s1" runs the session's own provider (claude).
-        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".into()));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
         assert!(
             mk(&engine).resume,
             "a claude tab in flight does not block a codex tab's resume"
@@ -8249,8 +8318,10 @@ mod tab_ops_tests {
 
         // A SECOND codex tab already launching makes this one start fresh.
         let other = support_tab("tab-2", "s1", "codex");
-        engine.agent_tabs.insert(other.id.clone(), other);
-        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-2".into()));
+        engine
+            .agent_tabs
+            .insert(TabId::new(other.id.clone()), other);
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-2")));
         assert!(!mk(&engine).resume, "a second live codex tab starts fresh");
     }
 
@@ -8264,10 +8335,10 @@ mod tab_ops_tests {
         engine.sessions.push(session.clone());
         let oc = support_tab("tab-oc", "s1", "opencode");
         engine.session_store.insert_agent_tab(&oc).unwrap();
-        engine.agent_tabs.insert(oc.id.clone(), oc);
+        engine.agent_tabs.insert(TabId::new(oc.id.clone()), oc);
 
         // The opencode tab is already up when the claude session-slot launches.
-        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-oc".into()));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-oc")));
         let main = engine.build_agent_launch_request(
             session.clone(),
             true,
@@ -8282,9 +8353,9 @@ mod tab_ops_tests {
         );
 
         // ...and the opencode tab itself resumes despite the live claude one.
-        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".into()));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
         let oc_req = engine.build_tab_launch_request(
-            "tab-oc".into(),
+            TabId::new("tab-oc"),
             Some(ProviderKind::new("opencode")),
             session,
             true,
@@ -8317,9 +8388,9 @@ mod tab_ops_tests {
         );
         assert!(main.resume);
         // A live SAME-provider (claude) tab makes the session-slot tab start fresh.
-        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-x".into()));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-x")));
         let tab = support_tab("tab-x", "s1", "claude");
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         let main2 = engine.build_agent_launch_request(
             session,
             true,
@@ -8346,15 +8417,15 @@ mod tab_ops_tests {
         session.started_providers = vec!["claude".into()];
         engine.sessions.push(session.clone());
         let tab = support_tab("tab-x", "s1", "claude");
-        engine.agent_tabs.insert(tab.id.clone(), tab);
-        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-x".into()));
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-x")));
 
         assert!(
             engine.should_resume_session(&session),
             "the session provider is resume-eligible on its own"
         );
         assert!(
-            !engine.tab_resume_decision(&session, &session.id, &session.provider, true),
+            !engine.tab_resume_decision(&session, session.slot_tab_id(), &session.provider, true),
             "a live same-provider extra tab downgrades the session-slot launch to fresh"
         );
     }
@@ -8381,8 +8452,8 @@ mod tab_ops_tests {
         // A live same-provider extra tab: `should_resume_session` still reports
         // eligible, but `tab_resume_decision` downgrades to fresh.
         let tab = support_tab("tab-x", "s1", "claude");
-        engine.agent_tabs.insert(tab.id.clone(), tab);
-        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-x".into()));
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-x")));
         assert!(
             engine.should_resume_session(&session),
             "precondition: the collision-blind check still says resume"
@@ -8420,7 +8491,7 @@ mod tab_ops_tests {
         engine.sessions.push(session);
         engine
             .providers
-            .insert("s1".to_string(), spawn_cat(tmp.path()));
+            .insert(TabId::new("s1"), spawn_cat(tmp.path()));
 
         match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
             ReconnectPlan::AlreadyConnected { message } => {
@@ -8461,8 +8532,8 @@ mod tab_ops_tests {
         session.provider = ProviderKind::new("claude");
         engine.sessions.push(session.clone());
         let tab = support_tab("tab-x", "s1", "claude");
-        engine.agent_tabs.insert(tab.id.clone(), tab);
-        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-x".into()));
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-x")));
 
         let outcome = engine
             .change_agent_provider("s1", ProviderKind::new("claude"))
@@ -8496,7 +8567,7 @@ mod tab_ops_tests {
         session.started_providers = vec!["claude".into()];
         session.provider = ProviderKind::new("claude");
         engine.sessions.push(session);
-        let slot = engine.slot_tab_id_of("s1").to_string();
+        let slot = engine.slot_tab_id_of(SessionIdRef::new("s1")).to_owned();
         engine.mark_in_flight(InFlightKey::AgentLaunch(slot.clone()));
 
         match engine
@@ -8553,7 +8624,7 @@ mod tab_ops_tests {
         for i in 0..19 {
             let tab = support_tab(&format!("t{i}"), "s1", "codex");
             engine.session_store.insert_agent_tab(&tab).unwrap();
-            engine.agent_tabs.insert(tab.id.clone(), tab);
+            engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         }
         let err = engine
             .create_tab("s1", ProviderKind::new("codex"), (24, 80))
@@ -8592,12 +8663,15 @@ mod tab_ops_tests {
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         let tab = support_tab("tab-1", "s1", "claude");
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         engine
             .change_tab_provider("s1", "tab-1", ProviderKind::new("codex"))
             .unwrap();
-        assert_eq!(engine.agent_tabs["tab-1"].provider.as_str(), "codex");
+        assert_eq!(
+            engine.agent_tabs[TabIdRef::new("tab-1")].provider.as_str(),
+            "codex"
+        );
         // The session's own provider is untouched.
         assert_eq!(engine.sessions[0].provider.as_str(), "claude");
     }
@@ -8612,7 +8686,7 @@ mod tab_ops_tests {
         engine.mark_session_provider_started("s1", &ProviderKind::new("codex"));
         let tab = support_tab("tab-1", "s1", "claude");
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         let outcome = engine
             .change_tab_provider("s1", "tab-1", ProviderKind::new("codex"))
@@ -8629,7 +8703,7 @@ mod tab_ops_tests {
         engine.sessions.push(sample_session("s1", "p1", "claude"));
         let tab = support_tab("tab-1", "s1", "claude");
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         let outcome = engine
             .change_tab_provider("s1", "tab-1", ProviderKind::new("codex"))
@@ -8650,14 +8724,14 @@ mod tab_ops_tests {
             created_at: chrono::Utc::now(),
         };
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         engine
             .pty_activity
             .insert("tab-1".to_string(), Instant::now());
 
         engine.close_tab("s1", "tab-1").unwrap();
         assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 0);
-        assert!(!engine.agent_tabs.contains_key("tab-1"));
+        assert!(!engine.agent_tabs.contains_key(TabIdRef::new("tab-1")));
         assert!(!engine.pty_activity.contains_key("tab-1"));
     }
 
@@ -8686,10 +8760,10 @@ mod tab_ops_tests {
             created_at: chrono::Utc::now(),
         };
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         engine
             .providers
-            .insert("tab-1".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("tab-1"), spawn_cat(worktree.path()));
 
         engine.close_tab("s1", "tab-1").unwrap();
 
@@ -8723,14 +8797,14 @@ mod tab_ops_tests {
             created_at: chrono::Utc::now(),
         };
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         engine
             .providers
-            .insert("tab-1".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("tab-1"), spawn_cat(worktree.path()));
         // The session-slot tab (id == "s1") is the live sibling that survives.
         engine
             .providers
-            .insert("s1".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("s1"), spawn_cat(worktree.path()));
 
         engine.close_tab("s1", "tab-1").unwrap();
 
@@ -8760,11 +8834,11 @@ mod tab_ops_tests {
             created_at: chrono::Utc::now(),
         };
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         let session = engine.sessions[0].clone();
 
         let request = engine.build_tab_launch_request(
-            "tab-1".into(),
+            TabId::new("tab-1"),
             Some(ProviderKind::new("codex")),
             session,
             false,
@@ -8780,7 +8854,7 @@ mod tab_ops_tests {
         });
 
         // The extra tab's PTY is tracked under its own key...
-        assert!(engine.providers.contains_key("tab-1"));
+        assert!(engine.providers.contains_key(TabIdRef::new("tab-1")));
         // ...but the session stays Main-scoped: not flipped to Active.
         assert_eq!(engine.sessions[0].status, SessionStatus::Detached);
     }
@@ -8793,7 +8867,7 @@ mod tab_ops_tests {
         // Note: NO agent_tabs row for "tab-1" — simulates a close that raced the
         // in-flight launch.
         let request = engine.build_tab_launch_request(
-            "tab-1".into(),
+            TabId::new("tab-1"),
             Some(ProviderKind::new("codex")),
             session,
             false,
@@ -8808,7 +8882,7 @@ mod tab_ops_tests {
             client: spawn_cat(tmp.path()),
         });
         // The ghost launch must not resurrect a provider under the dead tab id.
-        assert!(!engine.providers.contains_key("tab-1"));
+        assert!(!engine.providers.contains_key(TabIdRef::new("tab-1")));
     }
 
     #[test]
@@ -8816,7 +8890,7 @@ mod tab_ops_tests {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         let tab = support_tab("tab-1", "s1", "codex");
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         assert_eq!(engine.first_live_tab("s1"), None);
     }
@@ -8826,11 +8900,11 @@ mod tab_ops_tests {
         let (mut engine, tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         let tab = support_tab("tab-1", "s1", "codex");
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         // Session-slot "s1" has no provider; the extra tab does.
         engine
             .providers
-            .insert("tab-1".into(), spawn_cat(tmp.path()));
+            .insert(TabId::new("tab-1"), spawn_cat(tmp.path()));
 
         assert_eq!(engine.first_live_tab("s1"), Some("tab-1".to_string()));
     }
@@ -8840,11 +8914,13 @@ mod tab_ops_tests {
         let (mut engine, tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         let tab = support_tab("tab-1", "s1", "codex");
-        engine.agent_tabs.insert(tab.id.clone(), tab);
-        engine.providers.insert("s1".into(), spawn_cat(tmp.path()));
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         engine
             .providers
-            .insert("tab-1".into(), spawn_cat(tmp.path()));
+            .insert(TabId::new("s1"), spawn_cat(tmp.path()));
+        engine
+            .providers
+            .insert(TabId::new("tab-1"), spawn_cat(tmp.path()));
 
         assert_eq!(engine.first_live_tab("s1"), Some("s1".to_string()));
     }
@@ -8857,16 +8933,20 @@ mod tab_ops_tests {
         earlier.sort_order = 2;
         let mut later = support_tab("tab-1", "s1", "codex");
         later.sort_order = 1;
-        engine.agent_tabs.insert(earlier.id.clone(), earlier);
-        engine.agent_tabs.insert(later.id.clone(), later);
+        engine
+            .agent_tabs
+            .insert(TabId::new(earlier.id.clone()), earlier);
+        engine
+            .agent_tabs
+            .insert(TabId::new(later.id.clone()), later);
         // Both are live; the lower sort_order ("tab-1") should win, not
         // insertion/HashMap order.
         engine
             .providers
-            .insert("tab-2".into(), spawn_cat(tmp.path()));
+            .insert(TabId::new("tab-2"), spawn_cat(tmp.path()));
         engine
             .providers
-            .insert("tab-1".into(), spawn_cat(tmp.path()));
+            .insert(TabId::new("tab-1"), spawn_cat(tmp.path()));
 
         assert_eq!(engine.first_live_tab("s1"), Some("tab-1".to_string()));
     }
@@ -8876,8 +8956,8 @@ mod tab_ops_tests {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         let tab = support_tab("tab-1", "s1", "codex");
-        engine.agent_tabs.insert(tab.id.clone(), tab);
-        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-1".into()));
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-1")));
 
         assert_eq!(engine.first_live_tab("s1"), Some("tab-1".to_string()));
     }
@@ -8952,7 +9032,7 @@ mod resource_monitor_targets_tests {
 
         engine
             .providers
-            .insert("s1".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("s1"), spawn_cat(worktree.path()));
         engine.sync_has_active_processes();
         assert_eq!(engine.running_process_count(), 2);
 
@@ -8985,9 +9065,9 @@ mod resource_monitor_targets_tests {
         // The session-slot tab (tab id == session id) plus one extra tab.
         engine
             .providers
-            .insert("s1".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("s1"), spawn_cat(worktree.path()));
         engine.agent_tabs.insert(
-            "tab-2".to_string(),
+            TabId::new("tab-2"),
             AgentTab {
                 id: "tab-2".to_string(),
                 session_id: "s1".to_string(),
@@ -8998,7 +9078,7 @@ mod resource_monitor_targets_tests {
         );
         engine
             .providers
-            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+            .insert(TabId::new("tab-2"), spawn_cat(worktree.path()));
         engine.companion_terminals.insert(
             "term-1".to_string(),
             CompanionTerminal {

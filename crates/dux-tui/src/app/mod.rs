@@ -61,6 +61,7 @@ use crate::statusline::{BUSY_TIMEOUT, KeyedStatusController, StatusTone};
 use crate::storage::SessionStore;
 use crate::theme::Theme;
 use dux_core::engine::{Command, Engine};
+use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
 pub(crate) use dux_core::model::CompanionTerminal;
 pub(crate) use dux_core::model::{TerminalOwner, TerminalOwnerRef};
 
@@ -3542,7 +3543,10 @@ impl App {
             running_provider_pins: HashMap::new(),
             launched_drop_paste: Default::default(),
             companion_terminals: HashMap::new(),
-            agent_tabs: agent_tabs.into_iter().map(|t| (t.id.clone(), t)).collect(),
+            agent_tabs: agent_tabs
+                .into_iter()
+                .map(|t| (TabId::new(t.id.clone()), t))
+                .collect(),
             terminating_ptys: Vec::new(),
             pending_group_removals: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
@@ -6034,7 +6038,7 @@ impl App {
     pub(crate) fn remote_viewer_count(&self, session_id: &str, tab_ids: &[String]) -> usize {
         let tabs: usize = tab_ids
             .iter()
-            .filter_map(|tab_id| self.engine.providers.get(tab_id))
+            .filter_map(|tab_id| self.engine.providers.get(TabIdRef::new(tab_id)))
             .map(|client| client.subscriber_count())
             .sum();
         tabs + self
@@ -6314,7 +6318,7 @@ impl App {
                 let tab_id = self.focused_tab_id(&session_id);
                 self.engine
                     .providers
-                    .contains_key(&tab_id)
+                    .contains_key(TabIdRef::new(&tab_id))
                     .then_some(tab_id)
             }
             SessionSurface::Terminal => {
@@ -6331,7 +6335,9 @@ impl App {
         match self.session_surface {
             SessionSurface::Agent => {
                 let session_id = self.selected_session()?.id.clone();
-                self.engine.providers.get(&self.focused_tab_id(&session_id))
+                self.engine
+                    .providers
+                    .get(TabIdRef::new(&self.focused_tab_id(&session_id)))
             }
             SessionSurface::Terminal => {
                 let id = self.active_terminal_id.as_ref()?;
@@ -6352,18 +6358,19 @@ impl App {
     /// the engine's persisted `AgentSession.last_focused_tab` via the shared
     /// resolver so the remembered tab survives a restart too.
     pub(crate) fn focused_tab_id(&self, session_id: &str) -> String {
+        let session_ref = SessionIdRef::new(session_id);
         match self.focused_tabs.get(session_id) {
-            Some(id) if self.engine.is_slot_tab_of(session_id, id) => id.clone(),
+            Some(id) if self.engine.is_slot_tab_of(session_ref, TabIdRef::new(id)) => id.clone(),
             Some(id)
                 if self
                     .engine
                     .agent_tabs
-                    .get(id)
+                    .get(TabIdRef::new(id))
                     .is_some_and(|t| t.session_id == session_id) =>
             {
                 id.clone()
             }
-            Some(_) => self.engine.slot_tab_id_of(session_id).to_string(),
+            Some(_) => self.engine.slot_tab_id_of(session_ref).to_string(),
             None => match self.engine.session_by_id(session_id) {
                 Some(session) => {
                     let live_extra_ids = self
@@ -6371,7 +6378,7 @@ impl App {
                         .agent_tabs
                         .values()
                         .filter(|t| t.session_id == session_id)
-                        .map(|t| t.id.as_str());
+                        .map(|t| TabIdRef::new(&t.id));
                     session.resolved_focused_tab(live_extra_ids).to_string()
                 }
                 None => session_id.to_string(),
@@ -6389,7 +6396,8 @@ impl App {
         // truth `Engine::tab_running_provider` owns; the TUI's other tab-label
         // helper (`tab_provider_label` in render.rs) also delegates to it so the
         // two call sites can't drift.
-        self.engine.tab_running_provider(session, &tab)
+        self.engine
+            .tab_running_provider(session, TabIdRef::new(&tab))
     }
 
     /// Ordered tab ids for a session: Main (session id) first, then Support
@@ -6407,7 +6415,11 @@ impl App {
                 .then_with(|| a.created_at.cmp(&b.created_at))
         });
         let mut ids = Vec::with_capacity(support.len() + 1);
-        ids.push(self.engine.slot_tab_id_of(session_id).to_string());
+        ids.push(
+            self.engine
+                .slot_tab_id_of(SessionIdRef::new(session_id))
+                .to_string(),
+        );
         ids.extend(support.into_iter().map(|t| t.id.clone()));
         ids
     }
@@ -6426,7 +6438,9 @@ impl App {
     pub(crate) fn set_focused_tab(&mut self, session_id: &str, tab_id: &str) {
         // The slot tab is the default focus, so focusing it is recorded as "no
         // memory" on both the in-process map and the persisted column.
-        let is_slot = self.engine.is_slot_tab_of(session_id, tab_id);
+        let is_slot = self
+            .engine
+            .is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id));
         if is_slot {
             self.focused_tabs.remove(session_id);
         } else {
@@ -6518,7 +6532,7 @@ impl App {
                     None => return false,
                 };
                 let tab_id = self.focused_tab_id(&session_id);
-                let provider = self.engine.providers.get(&tab_id);
+                let provider = self.engine.providers.get(TabIdRef::new(&tab_id));
                 (tab_id, provider)
             }
             SessionSurface::Terminal => {
@@ -8452,11 +8466,15 @@ leading_branch = "main"
         let client =
             crate::pty::PtyClient::spawn("cat", &[], std::path::Path::new("/tmp"), 24, 80, 1000)
                 .expect("spawn cat for test");
-        app.engine.providers.insert("session-1".to_string(), client);
+        app.engine.providers.insert(TabId::new("session-1"), client);
 
         app.shutdown_agents_gracefully();
 
-        let client = app.engine.providers.get_mut("session-1").unwrap();
+        let client = app
+            .engine
+            .providers
+            .get_mut(TabIdRef::new("session-1"))
+            .unwrap();
         assert!(
             client.is_exited() || client.try_wait().is_some(),
             "cat should have exited after the graceful SIGTERM on quit"
@@ -8497,11 +8515,17 @@ leading_branch = "main"
             1000,
         )
         .expect("spawn sigterm-ignorer for test");
-        app.engine.providers.insert("session-1".to_string(), client);
+        app.engine.providers.insert(TabId::new("session-1"), client);
 
         // Wait until the trap is installed before quitting.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while !app.engine.providers.get("session-1").unwrap().has_output() {
+        while !app
+            .engine
+            .providers
+            .get(TabIdRef::new("session-1"))
+            .unwrap()
+            .has_output()
+        {
             assert!(
                 std::time::Instant::now() < deadline,
                 "ignorer never readied"

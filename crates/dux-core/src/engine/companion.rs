@@ -351,6 +351,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::ids::TabId;
     use crate::model::TerminalOwner;
 
     #[test]
@@ -374,7 +375,7 @@ mod tests {
             .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.agent_tabs.insert(
-            "tab-9".to_string(),
+            TabId::new("tab-9"),
             crate::model::AgentTab {
                 id: "tab-9".to_string(),
                 session_id: "s1".to_string(),
@@ -650,7 +651,7 @@ mod tests {
             .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.agent_tabs.insert(
-            "tab-9".to_string(),
+            TabId::new("tab-9"),
             crate::model::AgentTab {
                 id: "tab-9".to_string(),
                 session_id: "s1".to_string(),

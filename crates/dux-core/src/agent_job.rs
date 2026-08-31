@@ -967,7 +967,7 @@ fn run_create_standalone_agent_job(
     let (cols, rows) = term_size;
     let request = AgentLaunchRequest {
         // Create is always the session-slot tab. (Evaluated before `session` is moved.)
-        tab_id: session.slot_tab_id().to_string(),
+        tab_id: session.slot_tab_id().to_owned(),
         provider: session.provider.clone(),
         // A brand-new standalone agent starts a fresh conversation; the dynamic
         // per-provider resume rule applies to later launches like any agent's.
@@ -1173,7 +1173,7 @@ fn launch_managed_create(
     let request = AgentLaunchRequest {
         // Create is always the session-slot tab, effective provider ==
         // session.provider. (Evaluated before `session` is moved.)
-        tab_id: session.slot_tab_id().to_string(),
+        tab_id: session.slot_tab_id().to_owned(),
         provider: session.provider.clone(),
         session,
         provider_config: provider_cfg,

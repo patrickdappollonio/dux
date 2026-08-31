@@ -1,3 +1,4 @@
+use crate::ids::TabId;
 use std::collections::HashSet;
 
 /// Typed key into the `Engine::in_flight` set. Every command or worker
@@ -10,7 +11,12 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum InFlightKey {
     CreateAgent,
-    AgentLaunch(String),
+    /// A provider launch is in flight for this TAB. Keyed by tab id, never by
+    /// session id: `Engine::tab_resume_decision` reads this key to decide whether
+    /// a launching sibling already owns a provider's conversation, and it asks
+    /// per tab. The type says so, because the slot tab's id equals its session id
+    /// today and the two were interchangeable by accident (see [`crate::ids`]).
+    AgentLaunch(TabId),
     /// An intentional git branch rename is in flight for this session id (the
     /// worker running `git::rename_branch` that later posts
     /// `BranchRenameCompleted`). While set, the branch-sync poller must NOT

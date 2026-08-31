@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use crate::config::{Config, ProviderCommandConfig};
 use crate::engine::StatusUpdate;
+use crate::ids::TabId;
 use crate::model::{AgentSession, ChangedFile, Project, ProjectBranchStatus, ProviderKind};
 use crate::pty::PtyClient;
 use crate::storage::StoredPr;
@@ -272,10 +273,12 @@ pub enum AgentLaunchKind {
 pub struct AgentLaunchRequest {
     pub session: AgentSession,
     /// The tab this launch belongs to and the key under which its PTY / runtime
-    /// state is tracked. Equals `session.id` for the session-slot tab; a distinct id for
-    /// an extra tab. Intentionally has no `Default` so every construction site
-    /// must set it explicitly (a missed site is a compile error).
-    pub tab_id: String,
+    /// state is tracked. Resolves to `AgentSession::slot_tab_id` for the
+    /// session-slot tab; a distinct id for an extra tab. Intentionally has no
+    /// `Default` so every construction site must set it explicitly (a missed site
+    /// is a compile error), and typed as a [`TabId`] so a construction site
+    /// cannot reach for `session.id` instead of asking the resolver.
+    pub tab_id: TabId,
     /// The effective provider for this tab. Equals `session.provider` for the
     /// session-slot tab; may differ for an extra tab that was retargeted.
     pub provider: ProviderKind,

@@ -14,6 +14,7 @@ use dux_core::config::{server_bind_settings_changed, server_console_settings_cha
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
+use dux_core::ids::{TabId, TabIdRef};
 use dux_core::model::TerminalOwner;
 use dux_core::pty::{PtyClient, PtyViewerGuard};
 use dux_core::statusline::{
@@ -359,9 +360,11 @@ pub enum EngineRequest {
 /// This unifies the write/resize path so the same input/resize routing serves
 /// both agents and terminals via whichever id the connection is subscribed to.
 fn pty_for<'a>(engine: &'a Engine, id: &str) -> Option<&'a PtyClient> {
+    // The id's kind is exactly what this lookup decides, so it arrives as a plain
+    // string and is named per probe rather than up front.
     engine
         .providers
-        .get(id)
+        .get(TabIdRef::new(id))
         .or_else(|| engine.companion_terminals.get(id).map(|t| &t.client))
 }
 
@@ -693,7 +696,11 @@ const LAUNCH_TIMEOUT: Duration = dux_core::statusline::BUSY_TIMEOUT;
 /// is held until `engine.providers` contains the session (success) or the
 /// deadline passes (timeout).
 struct PendingSubscribe {
-    session_id: String,
+    /// The TAB whose provider this subscribe is waiting on. It was called
+    /// `session_id` and typed `String`, which is only right for a slot tab: a
+    /// subscribe to an extra tab parks its own tab id here, and both the
+    /// `providers` probe and the `AgentLaunch` guard below are tab-keyed.
+    tab_id: TabId,
     reply: Option<oneshot::Sender<Result<PtySubscription, String>>>,
     deadline: Instant,
 }
@@ -1974,7 +1981,7 @@ pub(crate) struct EngineService {
     /// Per-tick snapshot of the engine's needs-attention set, carried across ticks
     /// so a set/clear can bump the spine-change gate promptly instead of waiting
     /// for the ~2s backstop (see `poll_attention_transitions`).
-    prev_attention: std::collections::HashSet<String>,
+    prev_attention: std::collections::HashSet<TabId>,
     /// Tick counter for throttling the spine fingerprint/cache check (see
     /// `SPINE_CHECK_TICK_INTERVAL`) so it is evaluated ~every 250ms rather than
     /// every tick.
@@ -2342,19 +2349,19 @@ impl EngineService {
     fn resolve_pending_subscribes(&mut self, engine: &mut Engine) {
         let now = Instant::now();
         self.pending.retain_mut(|p| {
-            if let Some(client) = engine.providers.get(&p.session_id) {
+            if let Some(client) = engine.providers.get(p.tab_id.as_ref_id()) {
                 if let Some(reply) = p.reply.take() {
                     let _ = reply.send(Ok(client.subscribe_with_repaint()));
                 }
                 false
-            } else if !engine.is_in_flight(&InFlightKey::AgentLaunch(p.session_id.clone())) {
+            } else if !engine.is_in_flight(&InFlightKey::AgentLaunch(p.tab_id.clone())) {
                 // The launch worker finished but no provider came up: it failed.
                 // Fail fast with a clear message instead of waiting for the timeout;
                 // the specific error was already broadcast on the status stream.
                 if let Some(reply) = p.reply.take() {
                     let _ = reply.send(Err(format!(
                         "Agent failed to launch for session {}. Check dux.log for details.",
-                        p.session_id
+                        p.tab_id
                     )));
                 }
                 false
@@ -3134,7 +3141,7 @@ fn poll_streaming_transitions(
 /// so the comparison and occasional clone are cheap.
 fn poll_attention_transitions(
     engine: &Engine,
-    prev_attention: &mut std::collections::HashSet<String>,
+    prev_attention: &mut std::collections::HashSet<TabId>,
     version: &mut u64,
 ) {
     if engine.needs_attention != *prev_attention {
@@ -3145,7 +3152,9 @@ fn poll_attention_transitions(
 
 fn handle_pty_write(engine: &mut Engine, id: String, bytes: Vec<u8>) {
     let wrote = pty_for(engine, &id).is_some_and(|client| client.write_bytes(&bytes).is_ok());
-    if wrote && (engine.providers.contains_key(&id) || engine.companion_terminals.contains_key(&id))
+    if wrote
+        && (engine.providers.contains_key(TabIdRef::new(&id))
+            || engine.companion_terminals.contains_key(&id))
     {
         engine.note_pty_write(&id, &bytes);
     }
@@ -3416,9 +3425,12 @@ fn handle_request(
             // slot tab's owner is not stored, it is resolved. Callers that must
             // accept the slot tab ask `is_slot_tab` first (the tab PTY socket
             // and the REST tab verbs all do).
-            let owner = match engine.session_for_slot_tab(&tab_id) {
+            let owner = match engine.session_for_slot_tab(TabIdRef::new(&tab_id)) {
                 Some(_) => None,
-                None => engine.agent_tabs.get(&tab_id).map(|t| t.session_id.clone()),
+                None => engine
+                    .agent_tabs
+                    .get(TabIdRef::new(&tab_id))
+                    .map(|t| t.session_id.clone()),
             };
             let _ = reply.send(owner);
         }
@@ -3665,13 +3677,13 @@ fn handle_subscribe(
     // via `note_pty_input` on `WritePty`, and the client's periodic viewed ping
     // keeps it down while foregrounded.
     engine.note_agent_viewed_if_known(&session_id);
-    if let Some(client) = engine.providers.get(&session_id) {
+    if let Some(client) = engine.providers.get(TabIdRef::new(&session_id)) {
         let _ = reply.send(Ok(client.subscribe_with_repaint()));
         return;
     }
     match launch_agent(engine, &session_id) {
         Ok(()) => pending.push(PendingSubscribe {
-            session_id,
+            tab_id: TabId::new(session_id),
             reply: Some(reply),
             deadline: Instant::now() + LAUNCH_TIMEOUT,
         }),
@@ -3726,12 +3738,15 @@ fn create_agent_tab_inner(
 fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> {
     // A launch is already running for THIS id (session or tab): just wait for it.
     // The guard keys by the subscribed id, matching the tab-keyed in-flight lock.
-    if engine.is_in_flight(&InFlightKey::AgentLaunch(subscribed_id.to_string())) {
+    // Transport-facing: the subscribed id is a tab id (companion terminals ride
+    // a different request), named here at the door.
+    let subscribed_tab = TabIdRef::new(subscribed_id);
+    if engine.is_in_flight(&InFlightKey::AgentLaunch(subscribed_tab.to_owned())) {
         return Ok(());
     }
     // session-slot tab: the subscribed id names some agent's first tab ->
     // resume-eligible reconnect.
-    if let Some(session) = engine.session_for_slot_tab(subscribed_id).cloned() {
+    if let Some(session) = engine.session_for_slot_tab(subscribed_tab).cloned() {
         // Derive the message from the ACTUAL resume decision, not just
         // `should_resume_session`: a live same-provider extra tab downgrades the
         // session-slot launch to fresh (per-provider collision), and the toast
@@ -3780,7 +3795,7 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
     // `agent_reconnect_status_message` (which would name the wrong provider).
     let tab = engine
         .agent_tabs
-        .get(subscribed_id)
+        .get(subscribed_tab)
         .cloned()
         .ok_or_else(|| format!("unknown session {subscribed_id}"))?;
     // Refuse to (re)launch an extra tab into a session that is mid-deletion: its
@@ -4137,15 +4152,15 @@ mod tests {
 
         assert_eq!(launched, 1, "exactly the eligible session launches");
         assert!(
-            engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
-                "s-reopen".to_string()
-            )),
+            engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                "s-reopen"
+            ))),
             "the eligible session's launch must be dispatched (in-flight)"
         );
         assert!(
-            !engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
-                "s-optout".to_string()
-            )),
+            !engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                "s-optout"
+            ))),
             "the opted-out session must not launch"
         );
     }
@@ -5471,7 +5486,7 @@ mod tests {
         // We mutate the set directly to drive transitions deterministically.
         let mut engine = engine_seed;
 
-        let mut prev: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut prev: std::collections::HashSet<TabId> = std::collections::HashSet::new();
         let mut version = 0u64;
 
         // No change yet.
@@ -5479,7 +5494,7 @@ mod tests {
         assert_eq!(version, 0, "an empty, unchanged set must not bump");
 
         // Set → transition.
-        engine.needs_attention.insert("s1".to_string());
+        engine.needs_attention.insert(TabId::new("s1"));
         poll_attention_transitions(&engine, &mut prev, &mut version);
         assert_eq!(version, 1, "raising the flag must bump the version");
 
@@ -5501,7 +5516,7 @@ mod tests {
         seed_session(&paths, "s1");
         let mut engine = bootstrap_engine(&paths).expect("bootstrap");
         // The agent is flagged for attention before anyone opens it.
-        engine.needs_attention.insert("s1".to_string());
+        engine.needs_attention.insert(TabId::new("s1"));
         let (handle, _join) = spawn_engine_thread(engine);
 
         // It starts flagged in the spine projection.
@@ -6167,7 +6182,7 @@ mod tests {
             &[],
         )
         .expect("spawn sh");
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
         engine = one_loop_iteration(engine);
         assert!(
             flag.load(Ordering::Relaxed),
@@ -6178,7 +6193,7 @@ mod tests {
         // `providers`, and the flag has to follow it back down.
         engine
             .providers
-            .get("s1")
+            .get(TabIdRef::new("s1"))
             .expect("provider")
             .write_bytes(b"\n")
             .expect("write to pty");

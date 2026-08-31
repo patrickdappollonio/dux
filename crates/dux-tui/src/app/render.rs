@@ -2694,7 +2694,7 @@ impl App {
     /// session's running provider; an extra tab to its pin/row provider).
     fn tab_provider_label(&self, session: &AgentSession, tab_id: &str) -> String {
         self.engine
-            .tab_running_provider(session, tab_id)
+            .tab_running_provider(session, TabIdRef::new(tab_id))
             .as_str()
             .to_string()
     }
@@ -3429,7 +3429,7 @@ impl App {
         let session_active = match active_surface {
             SessionSurface::Agent => focused_tab
                 .as_ref()
-                .is_some_and(|id| self.engine.providers.contains_key(id)),
+                .is_some_and(|id| self.engine.providers.contains_key(TabIdRef::new(id))),
             SessionSurface::Terminal => terminal_status.is_running(),
         };
         AgentTerminalContext {
@@ -3699,7 +3699,9 @@ impl App {
         context: &AgentTerminalContext,
     ) {
         let dormant_support = match (&context.session_id, &context.focused_tab) {
-            (Some(session_id), Some(tab_id)) => !self.engine.is_slot_tab_of(session_id, tab_id),
+            (Some(session_id), Some(tab_id)) => !self
+                .engine
+                .is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id)),
             _ => false,
         };
         match context.active_surface {
@@ -7124,9 +7126,12 @@ impl App {
             .engine
             .tab_ids_for_session(session_id)
             .into_iter()
-            .filter(|id| self.engine.providers.contains_key(id))
+            .filter(|id| self.engine.providers.contains_key(id.as_ref_id()))
             .count();
-        let will_detach = close_tab_detaches(self.engine.providers.contains_key(tab_id), live_tabs);
+        let will_detach = close_tab_detaches(
+            self.engine.providers.contains_key(TabIdRef::new(tab_id)),
+            live_tabs,
+        );
         let outer = self.themed_overlay_block("Close Tab");
         let inner = outer.inner(area);
         outer.render(area, frame.buffer_mut());
@@ -11103,7 +11108,7 @@ impl App {
             let remote = self
                 .engine
                 .providers
-                .get(&self.focused_tab_id(&session.id))
+                .get(TabIdRef::new(&self.focused_tab_id(&session.id)))
                 .map(|client| client.subscriber_count())
                 .and_then(remote_viewers_segment)
                 .map(|segment| format!(" · {segment}"))
@@ -12898,7 +12903,9 @@ mod tests {
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.focus = FocusPane::Left;
         app.rebuild_left_items();
 
@@ -12930,7 +12937,7 @@ mod tests {
         let provider = app
             .engine
             .providers
-            .get(&session_id)
+            .get(TabIdRef::new(&session_id))
             .expect("the seeded provider");
         let (one, _rx1) = provider.subscribe();
         let (two, _rx2) = provider.subscribe();
@@ -12980,7 +12987,9 @@ mod tests {
         )
         .expect("spawn pty");
         let (_guard, _rx) = client.subscribe();
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
 
         let title = app.center_pane_agent_title();
         assert!(
@@ -13075,7 +13084,7 @@ mod tests {
             .expect("spawn pty");
             let (guard, _rx) = client.subscribe();
             guards.push((guard, _rx));
-            app.engine.providers.insert(tab_id, client);
+            app.engine.providers.insert(TabId::new(tab_id), client);
         }
 
         assert_eq!(
@@ -14234,7 +14243,7 @@ mod tests {
         app.engine
             .pty_activity
             .insert("tab-2".to_string(), Instant::now());
-        app.engine.needs_attention.insert("tab-2".to_string());
+        app.engine.needs_attention.insert(TabId::new("tab-2"));
         app.start_time = Instant::now() - Duration::from_millis(800);
 
         let backend = TestBackend::new(80, 24);
@@ -14448,7 +14457,7 @@ mod tests {
     /// `sessions.rs`/`input.rs` (there is no shared test util for this).
     fn seed_render_tab(app: &mut App, session_id: &str, tab_id: &str, provider: &str, order: i64) {
         app.engine.agent_tabs.insert(
-            tab_id.to_string(),
+            TabId::new(tab_id),
             dux_core::model::AgentTab {
                 id: tab_id.to_string(),
                 session_id: session_id.to_string(),
@@ -14669,7 +14678,7 @@ mod tests {
         }
 
         // Close the middle tab: opencode moves from position 3 to position 2.
-        app.engine.agent_tabs.remove("tab-2");
+        app.engine.agent_tabs.remove(TabIdRef::new("tab-2"));
         let labels = render_labels(&mut app);
         assert!(
             labels.contains("│ 2 │   opencode"),
@@ -15154,7 +15163,9 @@ mod tests {
         let session = app.engine.sessions[0].clone();
         app.engine.config.ui.attention_indicator = true;
         app.engine.pending_deletions.insert(session.id.clone());
-        app.engine.needs_attention.insert(session.id.clone());
+        app.engine
+            .needs_attention
+            .insert(TabId::new(session.id.clone()));
         app.engine
             .pty_activity
             .insert(session.id.clone(), Instant::now());
@@ -15272,7 +15283,9 @@ mod tests {
         );
 
         // Only tab 1 is flagged (and tab 2 keeps working).
-        app.engine.needs_attention.insert(session_id.clone());
+        app.engine
+            .needs_attention
+            .insert(TabId::new(session_id.clone()));
         let cells = tab_strip_label_row(&mut app, 80);
         let flagged = &cells[tab_glyph_col(&app, &session_id) as usize];
         assert_eq!(
@@ -15430,7 +15443,7 @@ mod tests {
             app.engine
                 .pty_activity
                 .insert("tab-2".to_string(), Instant::now());
-            app.engine.needs_attention.insert("tab-2".to_string());
+            app.engine.needs_attention.insert(TabId::new("tab-2"));
 
             let cells = tab_strip_label_row(&mut app, 80);
             assert_eq!(
@@ -15448,7 +15461,7 @@ mod tests {
     fn the_pill_honors_the_attention_indicator_preference() {
         let (mut app, _session_id) = tab_activity_app(800);
         app.engine.config.ui.attention_indicator = false;
-        app.engine.needs_attention.insert("tab-2".to_string());
+        app.engine.needs_attention.insert(TabId::new("tab-2"));
 
         let cells = tab_strip_label_row(&mut app, 80);
         assert_eq!(
@@ -15486,7 +15499,7 @@ mod tests {
                 .insert("tab-2".to_string(), Instant::now());
             // Flagged as well as streaming: the attention dot blinks, so it is
             // gated by the same guard as the spinner.
-            app.engine.needs_attention.insert("tab-2".to_string());
+            app.engine.needs_attention.insert(TabId::new("tab-2"));
 
             let cells = tab_strip_label_row(&mut app, 80);
             assert_eq!(
@@ -15512,8 +15525,10 @@ mod tests {
         let session_id = app.engine.sessions[0].id.clone();
         app.engine.sessions[0].status = crate::model::SessionStatus::Exited;
         seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
-        app.engine.needs_attention.insert("tab-2".to_string());
-        app.engine.needs_attention.insert(session_id.clone());
+        app.engine.needs_attention.insert(TabId::new("tab-2"));
+        app.engine
+            .needs_attention
+            .insert(TabId::new(session_id.clone()));
         // Deep in the blink's HOLD phase, where a live dot would certainly show.
         app.start_time = Instant::now() - Duration::from_millis(1500);
         assert!(app.attention_blink_on(), "test setup: the blink is visible");
@@ -15593,7 +15608,7 @@ mod tests {
                         .insert("tab-2".to_string(), Instant::now());
                 }
                 2 => {
-                    app.engine.needs_attention.insert("tab-2".to_string());
+                    app.engine.needs_attention.insert(TabId::new("tab-2"));
                 }
                 _ => {}
             }
@@ -15642,7 +15657,7 @@ mod tests {
                         .pty_activity
                         .insert(format!("tab-{i}"), Instant::now());
                 }
-                app.engine.needs_attention.insert("tab-3".to_string());
+                app.engine.needs_attention.insert(TabId::new("tab-3"));
             }
             let _ = tab_strip_label_row(&mut app, 34);
             let mut regions: Vec<(String, Rect)> = app.agent_tab_regions.clone();
@@ -15725,7 +15740,9 @@ mod tests {
         )
         .expect("spawn pty");
         assert!(!client.has_output(), "test setup: the PTY is still loading");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.session_surface = SessionSurface::Agent;
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Left;
@@ -15809,7 +15826,7 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
 
         // Enter interactive fullscreen agent mode.
         app.input_target = InputTarget::Agent;
@@ -15861,7 +15878,7 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
 
         // Inline agent view: no fullscreen overlay, center pane focused.
         app.input_target = InputTarget::Agent;
@@ -15909,7 +15926,7 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.session_surface = SessionSurface::Agent;
         app
     }
@@ -16228,7 +16245,7 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 200)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.session_surface = SessionSurface::Agent;
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
@@ -16355,7 +16372,7 @@ mod tests {
         for id in [&first_id, &second_id] {
             let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
                 .expect("spawn pty");
-            app.engine.providers.insert(id.clone(), client);
+            app.engine.providers.insert(TabId::new(id.clone()), client);
         }
 
         let select = |app: &mut App, index: usize| {
@@ -16401,7 +16418,7 @@ mod tests {
             app.last_pty_resize_target.as_deref(),
             Some(second_id.as_str())
         );
-        let snapshot = app.engine.providers[&second_id].snapshot();
+        let snapshot = app.engine.providers[TabIdRef::new(&second_id)].snapshot();
         assert_eq!(
             (snapshot.rows, snapshot.cols),
             pane,
@@ -16409,11 +16426,11 @@ mod tests {
         );
 
         // A redraw with neither the pane nor the target moving still dedupes.
-        app.engine.providers[&second_id]
+        app.engine.providers[TabIdRef::new(&second_id)]
             .resize(9, 9)
             .expect("resize");
         draw(&mut app);
-        let snapshot = app.engine.providers[&second_id].snapshot();
+        let snapshot = app.engine.providers[TabIdRef::new(&second_id)].snapshot();
         assert_eq!(
             (snapshot.rows, snapshot.cols),
             (9, 9),
@@ -16441,7 +16458,7 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 6, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
 
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
@@ -16539,7 +16556,7 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 6, 80, 2000)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
 
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
@@ -16619,7 +16636,7 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 6, 80, 2000)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
 
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
@@ -16725,7 +16742,7 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
 
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
@@ -17336,7 +17353,7 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
 
         // Non-interactive: the pane is visible but input is NOT routed to it.
         app.session_surface = SessionSurface::Agent;
@@ -18744,11 +18761,13 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.focus = FocusPane::Center;
         let mut terminal = Terminal::new(RecordingBackend::new(160, 40)).expect("terminal");
         for _ in 0..200 {
-            let snapshot = app.engine.providers[&session_id].snapshot();
+            let snapshot = app.engine.providers[TabIdRef::new(&session_id)].snapshot();
             if snapshot
                 .cells
                 .iter()
@@ -18777,11 +18796,11 @@ mod tests {
             "Help did not isolate itself from the workspace"
         );
 
-        app.engine.providers[&session_id]
+        app.engine.providers[TabIdRef::new(&session_id)]
             .write_bytes(b"continue\n")
             .expect("write to agent");
         for _ in 0..200 {
-            let snapshot = app.engine.providers[&session_id].snapshot();
+            let snapshot = app.engine.providers[TabIdRef::new(&session_id)].snapshot();
             if snapshot
                 .cells
                 .iter()

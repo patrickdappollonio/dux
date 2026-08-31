@@ -48,6 +48,7 @@ use crate::engine::{
     EventReaction, FinishDeleteSessionOutcome, ProjectPersistenceView, StatusUpdate,
     WorktreeRemoval,
 };
+use crate::ids::{SessionIdRef, TabIdRef};
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
 use crate::statusline::StatusScope;
 use crate::worker::{
@@ -2062,7 +2063,7 @@ impl Engine {
         // `desired_running` on detach so startup auto-reopen does not relaunch a
         // deliberately-killed agent) is the single-source `kill_tab_runtime`,
         // shared with the TUI kill overlay so both surfaces agree.
-        let outcome = self.kill_tab_runtime(session.slot_tab_id());
+        let outcome = self.kill_tab_runtime(session.slot_tab_id().as_str());
         if !outcome.killed {
             // No live PTY -> nothing to kill. Idempotent success so a
             // double-click or a kill racing a natural exit is not an error. The
@@ -2306,7 +2307,7 @@ impl Engine {
     ) -> anyhow::Result<(WireStatus, bool)> {
         let provider = self
             .agent_tabs
-            .get(tab_id)
+            .get(TabIdRef::new(tab_id))
             .map(|t| t.provider.as_str().to_string());
         let outcome = self.close_tab(session_id, tab_id)?;
         Ok((
@@ -2330,7 +2331,9 @@ impl Engine {
         tab_id: &str,
         provider: &str,
     ) -> anyhow::Result<WireStatus> {
-        if self.is_slot_tab_of(session_id, tab_id) {
+        // Two adjacent wire path segments: named at the door before the
+        // slot-ness question that used to be able to take them in either order.
+        if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id)) {
             return self.change_agent_provider_wire(session_id, provider);
         }
         if !self.config.providers.commands.contains_key(provider) {
@@ -3571,7 +3574,7 @@ impl Engine {
             EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
                 AgentLaunchReadyView::Reconnect { status_message }
                 | AgentLaunchReadyView::ResumeFallback { status_message, .. } => {
-                    if !self.is_slot_tab(&outcome.session, &outcome.tab_id) {
+                    if !self.is_slot_tab(&outcome.session, TabIdRef::new(&outcome.tab_id)) {
                         // Support-tab launch success: no op is stashed under a tab
                         // id, so emit a status KEYED `tab-launch-<tab_id>` (matching
                         // the failure path) rather than an unkeyed one — otherwise an
@@ -4399,6 +4402,7 @@ mod tests {
         sample_project, sample_session, sample_standalone_session, settle_gh_probe, test_engine,
     };
     use crate::engine::{DeleteTerminalView, InFlightKey};
+    use crate::ids::TabId;
     use crate::model::AgentSession;
     use crate::statusline::StatusTone;
     use crate::worker::WorkerEvent;
@@ -6094,7 +6098,7 @@ mod tests {
             &[],
         )
         .expect("spawn cat provider");
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
         engine.mark_session_status("s1", crate::model::SessionStatus::Active);
         engine.mark_session_desired_running("s1", true);
         // Seed an auxiliary resume-state map the kill must also clear.
@@ -6115,7 +6119,7 @@ mod tests {
         );
         // PTY removed from the live map and the session detached (not deleted).
         assert!(
-            !engine.providers.contains_key("s1"),
+            !engine.providers.contains_key(TabIdRef::new("s1")),
             "provider must be dropped"
         );
         assert!(
@@ -6169,9 +6173,9 @@ mod tests {
             &[],
         )
         .expect("spawn cat provider");
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
         engine.mark_session_status("s1", crate::model::SessionStatus::Active);
-        engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch("s1".to_string()));
+        engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
 
         engine
             .apply_wire(WireCommand::KillSessionPty {
@@ -6180,7 +6184,7 @@ mod tests {
             .expect("apply kill");
 
         assert!(
-            !engine.is_in_flight(&crate::engine::InFlightKey::AgentLaunch("s1".to_string())),
+            !engine.is_in_flight(&crate::engine::InFlightKey::AgentLaunch(TabId::new("s1"))),
             "kill_session_pty must clear the in-flight AgentLaunch key for the killed tab"
         );
     }
@@ -6205,7 +6209,7 @@ mod tests {
             .worktree_path = wt.to_string_lossy().to_string();
         engine.sessions.push(session);
         // Simulate a stale in-flight marker left behind by a prior launch.
-        engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch("s1".to_string()));
+        engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
 
         let outcome = engine
             .apply_wire(WireCommand::ReconnectSession {
@@ -6257,7 +6261,7 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         let spawn = |name: &str| {
             crate::pty::PtyClient::spawn_with_env(
@@ -6271,8 +6275,8 @@ mod tests {
             )
             .expect("spawn provider")
         };
-        engine.providers.insert("s1".to_string(), spawn("cat"));
-        engine.providers.insert("tab-2".to_string(), spawn("cat"));
+        engine.providers.insert(TabId::new("s1"), spawn("cat"));
+        engine.providers.insert(TabId::new("tab-2"), spawn("cat"));
         engine.mark_session_status("s1", crate::model::SessionStatus::Active);
         engine.mark_session_desired_running("s1", true);
 
@@ -6289,17 +6293,20 @@ mod tests {
         );
         // EVERY tab's provider is gone — not just the session-slot one.
         assert!(
-            !engine.providers.contains_key("s1"),
+            !engine.providers.contains_key(TabIdRef::new("s1")),
             "session-slot tab stopped"
         );
-        assert!(!engine.providers.contains_key("tab-2"), "extra tab stopped");
+        assert!(
+            !engine.providers.contains_key(TabIdRef::new("tab-2")),
+            "extra tab stopped"
+        );
         // The agent is detached (not deleted) and its rows survive.
         assert_eq!(
             engine.sessions[0].status,
             crate::model::SessionStatus::Detached
         );
         assert!(
-            engine.agent_tabs.contains_key("tab-2"),
+            engine.agent_tabs.contains_key(TabIdRef::new("tab-2")),
             "detach keeps tab rows (reopenable)"
         );
         assert!(
@@ -8142,7 +8149,7 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         engine.session_store.insert_agent_tab(&tab).unwrap();
-        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         let outcome = engine
             .apply_wire(WireCommand::SetLastFocusedTab {
@@ -9443,7 +9450,7 @@ mod tests {
         // The launch was dispatched: the in-flight guard is set and a busy
         // status was surfaced.
         assert!(
-            engine.is_in_flight(&crate::engine::InFlightKey::AgentLaunch("s1".to_string())),
+            engine.is_in_flight(&crate::engine::InFlightKey::AgentLaunch(TabId::new("s1"))),
             "reconnect should mark the launch in-flight"
         );
         let status = outcome.status.expect("reconnect surfaces a busy status");
@@ -9662,7 +9669,7 @@ mod tests {
             &[],
         )
         .expect("spawn cat provider");
-        engine.providers.insert("s1".to_string(), client);
+        engine.providers.insert(TabId::new("s1"), client);
 
         let outcome = engine
             .apply_wire(WireCommand::ChangeAgentProvider {
@@ -9680,12 +9687,15 @@ mod tests {
         // Provider is persisted to the new one; the pin keeps the old one for labels.
         assert_eq!(engine.sessions[0].provider.as_str(), "codex");
         assert_eq!(
-            engine.running_provider_pins.get("s1").map(|p| p.as_str()),
+            engine
+                .running_provider_pins
+                .get(TabIdRef::new("s1"))
+                .map(|p| p.as_str()),
             Some("claude")
         );
 
         // Clean up so the PTY doesn't outlive the test.
-        engine.providers.remove("s1");
+        engine.providers.remove(TabIdRef::new("s1"));
     }
 
     // ---- L2: attach existing managed worktree -----------------------------

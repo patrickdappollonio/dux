@@ -15,6 +15,7 @@ use anyhow::Result;
 use dux_core::config::{Config, DuxPaths};
 use dux_core::config_queue::ConfigWriteQueue;
 use dux_core::engine::{ConfigSurface, Engine, InFlightSet, ReloadCompletionGuard};
+use dux_core::ids::TabId;
 use dux_core::lockfile::SingleInstanceLock;
 use dux_core::model::GhStatus;
 use dux_core::storage::SessionStore;
@@ -151,7 +152,10 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         running_provider_pins: HashMap::new(),
         launched_drop_paste: Default::default(),
         companion_terminals: HashMap::new(),
-        agent_tabs: agent_tabs.into_iter().map(|t| (t.id.clone(), t)).collect(),
+        agent_tabs: agent_tabs
+            .into_iter()
+            .map(|t| (TabId::new(t.id.clone()), t))
+            .collect(),
         terminating_ptys: Vec::new(),
         pending_group_removals: Vec::new(),
         gh_status: GhStatus::Unknown,

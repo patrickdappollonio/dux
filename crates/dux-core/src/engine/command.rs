@@ -11,6 +11,7 @@ use crate::engine::events::{
     StatusUpdate, WorktreeRemoval,
 };
 use crate::engine::{CommandWorkerSpec, Engine, InFlightKey};
+use crate::ids::TabIdRef;
 use crate::model::Project;
 use crate::worker::{
     AgentLaunchFailedData, AgentLaunchRequest, CreateAgentRequest, ProjectPersistenceAction,
@@ -473,6 +474,9 @@ impl Engine {
                 // View keeps `session_id` for UI correlation. For the session-slot
                 // tab these are equal.
                 let tab_id = request.tab_id.clone();
+                // The View is a surface payload, so it carries the id as a plain
+                // string; the engine-side decisions above keep the typed form.
+                let tab_id_view = tab_id.as_str().to_string();
                 // Guard the shared launch chokepoint against a session whose
                 // worktree is mid-removal. `create_tab` and the web extra-tab
                 // launch branch already check `closing_sessions` themselves,
@@ -492,7 +496,7 @@ impl Engine {
                     return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
                         DispatchAgentLaunchView {
                             session_id,
-                            tab_id,
+                            tab_id: tab_id_view,
                             launched: false,
                             status: Some(StatusUpdate::error(format!(
                                 "Agent \"{}\" is being deleted and cannot be launched.",
@@ -508,7 +512,7 @@ impl Engine {
                     return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
                         DispatchAgentLaunchView {
                             session_id,
-                            tab_id,
+                            tab_id: tab_id_view,
                             launched: false,
                             status: Some(StatusUpdate::info(format!(
                                 "Agent \"{}\" is already launching.",
@@ -545,7 +549,7 @@ impl Engine {
                     EventReaction::Nothing => Ok(EventReaction::DispatchAgentLaunchView(Box::new(
                         DispatchAgentLaunchView {
                             session_id,
-                            tab_id: tab_id.clone(),
+                            tab_id: tab_id_view.clone(),
                             launched: true,
                             status: None,
                         },
@@ -553,7 +557,7 @@ impl Engine {
                     EventReaction::Status(status) => Ok(EventReaction::DispatchAgentLaunchView(
                         Box::new(DispatchAgentLaunchView {
                             session_id,
-                            tab_id,
+                            tab_id: tab_id_view,
                             launched: false,
                             status: Some(status),
                         }),
@@ -1081,7 +1085,10 @@ impl Engine {
     fn run_macro(&mut self, target_id: &str, name: &str) -> anyhow::Result<EventReaction> {
         // Resolve the target's surface: an agent provider is `Agent`, a companion
         // terminal is `Terminal`. Unknown id → error.
-        let surface = if self.providers.contains_key(target_id) {
+        // `target_id` is a PTY id of unknown kind: a macro target may be an agent
+        // tab or a companion terminal, and which one is exactly what this probe
+        // decides. Named as a tab id only for the tab-keyed probe.
+        let surface = if self.providers.contains_key(TabIdRef::new(target_id)) {
             crate::model::SessionSurface::Agent
         } else if self.companion_terminals.contains_key(target_id) {
             crate::model::SessionSurface::Terminal
@@ -1116,7 +1123,7 @@ impl Engine {
         // same order the web actor's `pty_for` uses.
         let client = self
             .providers
-            .get(target_id)
+            .get(TabIdRef::new(target_id))
             .or_else(|| self.companion_terminals.get(target_id).map(|t| &t.client));
         if let Some(client) = client {
             client.write_bytes(&payload)?;
@@ -1372,6 +1379,7 @@ fn run_project_refresh(
 mod tests {
     use super::*;
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::ids::TabId;
     use crate::statusline::StatusTone;
 
     fn session_ids_for(engine: &Engine, project_id: &str) -> Vec<String> {
@@ -1612,7 +1620,7 @@ mod tests {
         engine.sessions.push(session);
         // Mark the session-slot tab's launch in flight, under the id
         // `AgentSession::slot_tab_id` resolves to for this fixture.
-        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
 
         let reaction = engine
             .apply(Command::DeleteProject {
@@ -1671,7 +1679,7 @@ mod tests {
             _ => panic!("expected DispatchAgentLaunchView"),
         }
         // No in-flight launch key was set (the guard returned before dispatch).
-        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
+        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
     }
 
     #[test]
@@ -2135,7 +2143,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine
             .providers
-            .insert("sess-1".to_string(), spawn_cat_v_pty());
+            .insert(TabId::new("sess-1"), spawn_cat_v_pty());
         insert_macro(&mut engine, "greet", "first\nsecond", MacroSurface::Agent);
 
         let reaction = engine
@@ -2153,7 +2161,7 @@ mod tests {
         }
 
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let rendered = rendered_snapshot(engine.providers.get("sess-1").unwrap());
+        let rendered = rendered_snapshot(engine.providers.get(TabIdRef::new("sess-1")).unwrap());
         assert!(
             rendered.contains("first") && rendered.contains("second"),
             "both halves should be visible; got: {rendered:?}"
@@ -2209,7 +2217,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine
             .providers
-            .insert("sess-1".to_string(), spawn_cat_v_pty());
+            .insert(TabId::new("sess-1"), spawn_cat_v_pty());
 
         let reaction = engine
             .apply(Command::RunMacro {
@@ -2236,7 +2244,7 @@ mod tests {
         // Agent target, but the macro is terminal-only.
         engine
             .providers
-            .insert("sess-1".to_string(), spawn_cat_v_pty());
+            .insert(TabId::new("sess-1"), spawn_cat_v_pty());
         insert_macro(&mut engine, "ls", "ls -la", MacroSurface::Terminal);
 
         let reaction = engine

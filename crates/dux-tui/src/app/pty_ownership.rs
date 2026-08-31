@@ -490,12 +490,16 @@ impl App {
     /// chokepoint is given a target and must resize THAT child, not whatever the
     /// cursor happens to be on by the time it runs.
     fn pty_client_for(&self, pty_id: &str) -> Option<&PtyClient> {
-        self.engine.providers.get(pty_id).or_else(|| {
-            self.engine
-                .companion_terminals
-                .get(pty_id)
-                .map(|terminal| &terminal.client)
-        })
+        // A pty id of unknown kind: which map answers is the classification.
+        self.engine
+            .providers
+            .get(TabIdRef::new(pty_id))
+            .or_else(|| {
+                self.engine
+                    .companion_terminals
+                    .get(pty_id)
+                    .map(|terminal| &terminal.client)
+            })
     }
 
     /// Drop an armed take-over that is no longer about the pane in front of the
@@ -981,7 +985,7 @@ mod tests {
         app.center_mode = CenterMode::Agent;
         app.session_surface = SessionSurface::Agent;
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             crate::pty::PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), script.to_string()],
@@ -1002,7 +1006,7 @@ mod tests {
             if app
                 .engine
                 .providers
-                .get("session-1")
+                .get(TabIdRef::new("session-1"))
                 .is_some_and(|client| client.has_output())
             {
                 return;
@@ -1128,7 +1132,7 @@ mod tests {
         let grid = app
             .engine
             .providers
-            .get("session-1")
+            .get(TabIdRef::new("session-1"))
             .and_then(|client| client.grid_size());
         assert_eq!(
             grid,
@@ -1197,7 +1201,7 @@ mod tests {
         let grid = app
             .engine
             .providers
-            .get("session-1")
+            .get(TabIdRef::new("session-1"))
             .and_then(|client| client.grid_size());
         assert_ne!(
             grid,
@@ -1215,7 +1219,7 @@ mod tests {
         app.center_mode = CenterMode::Agent;
         app.session_surface = SessionSurface::Agent;
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             crate::pty::PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), format!("printf {CHILD_MARKER}; sleep 5")],
@@ -1260,7 +1264,7 @@ mod tests {
             app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
         let session_id = app.engine.sessions[0].id.clone();
         app.engine.agent_tabs.insert(
-            "tab-2".to_string(),
+            TabId::new("tab-2"),
             dux_core::model::AgentTab {
                 id: "tab-2".to_string(),
                 session_id: session_id.clone(),
@@ -1436,7 +1440,7 @@ mod tests {
         assert_eq!(
             app.engine
                 .providers
-                .get("session-1")
+                .get(TabIdRef::new("session-1"))
                 .map(|client| client.scrollback_offset()),
             Some(0),
             "the OFFSET has to go home with the mode. Retiring the mode alone \
@@ -1736,7 +1740,7 @@ mod tests {
         let (mut app, _recorded, _seat) = app_with_the_card_up();
         let session_id = app.engine.sessions[0].id.clone();
         app.engine.agent_tabs.insert(
-            "tab-2".to_string(),
+            TabId::new("tab-2"),
             dux_core::model::AgentTab {
                 id: "tab-2".to_string(),
                 session_id,
@@ -1782,7 +1786,7 @@ mod tests {
     #[test]
     fn a_dormant_tab_has_no_card_and_keeps_its_launch_key() {
         let (mut app, _recorded, _seat) = app_with_the_card_up();
-        app.engine.providers.remove("session-1");
+        app.engine.providers.remove(TabIdRef::new("session-1"));
         assert_eq!(
             app.focused_pty_takeover_card(),
             None,
@@ -2186,7 +2190,7 @@ mod tests {
         // Serving with NO live pty under the cursor: a dormant tab has no
         // ownership question and so no card either.
         let (mut app, _recorded, _seat) = app_with_a_live_pty();
-        app.engine.providers.remove("session-1");
+        app.engine.providers.remove(TabIdRef::new("session-1"));
         app.take_over_focused_pty();
         assert_eq!(app.pending_pty_takeover, None);
         assert!(app.status.most_recent_tui().is_none());
@@ -2232,7 +2236,7 @@ mod tests {
         );
         app.engine
             .providers
-            .get("session-1")
+            .get(TabIdRef::new("session-1"))
             .expect("the pty is live")
             .resize(40, 20)
             .expect("the browser's resize reaches the child");
@@ -2245,7 +2249,7 @@ mod tests {
         let demoted_grid = app
             .engine
             .providers
-            .get("session-1")
+            .get(TabIdRef::new("session-1"))
             .and_then(|client| client.grid_size());
         assert_eq!(
             demoted_grid,
@@ -2271,7 +2275,7 @@ mod tests {
         let healed = app
             .engine
             .providers
-            .get("session-1")
+            .get(TabIdRef::new("session-1"))
             .and_then(|client| client.grid_size())
             .expect("the pty is live");
         assert_ne!(
@@ -2602,7 +2606,7 @@ mod tests {
         let grid = app
             .engine
             .providers
-            .get("session-1")
+            .get(TabIdRef::new("session-1"))
             .and_then(|client| client.grid_size());
         assert_ne!(
             grid,
@@ -2637,7 +2641,7 @@ mod tests {
         let grid = app
             .engine
             .providers
-            .get("session-1")
+            .get(TabIdRef::new("session-1"))
             .and_then(|client| client.grid_size());
         assert_ne!(
             grid,
@@ -2755,7 +2759,7 @@ mod tests {
         let grid = app
             .engine
             .providers
-            .get("session-1")
+            .get(TabIdRef::new("session-1"))
             .and_then(|client| client.grid_size());
         assert_ne!(
             grid,

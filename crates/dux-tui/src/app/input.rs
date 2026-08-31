@@ -2059,7 +2059,7 @@ impl App {
             .scroll_mode
             .iter()
             .filter(|id| {
-                !self.engine.providers.contains_key(*id)
+                !self.engine.providers.contains_key(TabIdRef::new(id))
                     && !self.engine.companion_terminals.contains_key(*id)
             })
             .cloned()
@@ -9062,7 +9062,7 @@ impl App {
         self.engine.spawn_foreground_pr_check(&session_id);
         // Resolve the FOCUSED tab so activation acts on the visible tab.
         let tab_id = self.focused_tab_id(&session_id);
-        if self.engine.providers.contains_key(&tab_id) {
+        if self.engine.providers.contains_key(TabIdRef::new(&tab_id)) {
             self.reset_pty_scrollback();
             self.input_target = InputTarget::Agent;
             self.fullscreen_overlay = FullscreenOverlay::Agent;
@@ -9070,7 +9070,10 @@ impl App {
             self.set_info(format!(
                 "Fullscreen. Keys go to the agent verbatim. Press {exit_key} to minimize."
             ));
-        } else if !self.engine.is_slot_tab_of(&session_id, &tab_id) {
+        } else if !self
+            .engine
+            .is_slot_tab_of(SessionIdRef::new(&session_id), TabIdRef::new(&tab_id))
+        {
             // Dormant extra tab: launch it (only when the caller allows it).
             // Resume eligibility is decided dynamically by
             // `tab_resume_decision` inside the launch — this tab may resume
@@ -10812,6 +10815,7 @@ fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: 
 
 #[cfg(test)]
 mod tests {
+    use dux_core::ids::{TabId, TabIdRef};
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -13770,7 +13774,7 @@ not_a_real_action = ["x"]
         let worktree = std::path::Path::new(&worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.providers.insert(
-            app.engine.sessions[0].id.clone(),
+            TabId::new(app.engine.sessions[0].id.clone()),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn agent"),
         );
         app.engine.companion_terminals.insert(
@@ -14033,11 +14037,11 @@ not_a_real_action = ["x"]
         });
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn first"),
         );
         app.engine.providers.insert(
-            "session-2".to_string(),
+            TabId::new("session-2"),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn second"),
         );
 
@@ -14057,8 +14061,16 @@ not_a_real_action = ["x"]
             .unwrap();
         app.resolve_confirm_kill_running(true);
 
-        assert!(app.engine.providers.contains_key("session-1"));
-        assert!(!app.engine.providers.contains_key("session-2"));
+        assert!(
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new("session-1"))
+        );
+        assert!(
+            !app.engine
+                .providers
+                .contains_key(TabIdRef::new("session-2"))
+        );
     }
 
     #[test]
@@ -14293,7 +14305,7 @@ not_a_real_action = ["x"]
         ));
         // Attach a claude tab to the first agent.
         app.engine.agent_tabs.insert(
-            "tab-claude".to_string(),
+            TabId::new("tab-claude"),
             crate::model::AgentTab {
                 id: "tab-claude".to_string(),
                 session_id: "s-codex".to_string(),
@@ -14522,7 +14534,7 @@ not_a_real_action = ["x"]
         );
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn agent"),
         );
         app.engine.companion_terminals.insert(
@@ -15703,7 +15715,7 @@ not_a_real_action = ["x"]
         assert!(
             app.engine
                 .resume_fallback_candidates
-                .contains_key(&session.id)
+                .contains_key(TabIdRef::new(&session.id))
         );
         assert_eq!(
             app.engine
@@ -17153,7 +17165,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
@@ -17184,7 +17196,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn(
                 "sh",
                 &[
@@ -17250,7 +17262,7 @@ not_a_real_action = ["x"]
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
         app.center_mode = CenterMode::Agent;
@@ -18764,7 +18776,7 @@ not_a_real_action = ["x"]
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
         app.center_mode = CenterMode::Agent;
@@ -18854,7 +18866,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Left;
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
@@ -18885,7 +18897,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
@@ -18951,7 +18963,7 @@ not_a_real_action = ["x"]
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 1000)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.session_surface = SessionSurface::Agent;
 
         // Last row of the 24-row grid, just past the 5-character sentinel.
@@ -19006,7 +19018,7 @@ not_a_real_action = ["x"]
             scrollback,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.session_surface = SessionSurface::Agent;
         for _ in 0..200 {
             app.refresh_snapshot_buf();
@@ -19693,7 +19705,7 @@ not_a_real_action = ["x"]
 
     fn seed_input_tab(app: &mut App, session_id: &str, tab_id: &str, provider: &str, order: i64) {
         app.engine.agent_tabs.insert(
-            tab_id.to_string(),
+            TabId::new(tab_id),
             crate::model::AgentTab {
                 id: tab_id.to_string(),
                 session_id: session_id.to_string(),
@@ -19973,7 +19985,7 @@ not_a_real_action = ["x"]
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.session_surface = SessionSurface::Agent;
 
         // Poll until the child's own escape sequences have been parsed, rather
@@ -20277,7 +20289,9 @@ not_a_real_action = ["x"]
             .map(|s| s.id.clone())
             .expect("a selected session");
         let tab_id = app.focused_tab_id(&session_id);
-        app.engine.needs_attention.insert(tab_id.clone());
+        app.engine
+            .needs_attention
+            .insert(TabId::new(tab_id.clone()));
         tab_id
     }
 
@@ -23105,7 +23119,9 @@ cyan = "#00ffff"
         let provider =
             PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn test agent");
         let session_id = app.engine.sessions[0].id.clone();
-        app.engine.providers.insert(session_id.clone(), provider);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), provider);
         // Insert a companion terminal to simulate a running terminal.
         let term_client =
             PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn test terminal");
@@ -23224,7 +23240,9 @@ cyan = "#00ffff"
             1_000,
         )
         .expect("spawn test agent");
-        app.engine.providers.insert(session_id.clone(), provider);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), provider);
 
         app.rebuild_left_items();
         app.selected_left = app
@@ -23259,7 +23277,9 @@ cyan = "#00ffff"
             .expect("load sessions");
         assert_eq!(persisted[0].provider.as_str(), "opencode");
         assert!(
-            app.engine.providers.contains_key(&session_id),
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id)),
             "the old PTY keeps running until the user exits it"
         );
         assert_eq!(
@@ -23287,7 +23307,7 @@ cyan = "#00ffff"
         );
 
         // Clean up so the PTY doesn't outlive the test.
-        app.engine.providers.remove(&session_id);
+        app.engine.providers.remove(TabIdRef::new(&session_id));
     }
 
     #[test]
@@ -23617,7 +23637,7 @@ cyan = "#00ffff"
             assert!(std::time::Instant::now() < deadline, "fill never echoed");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        app.engine.providers.insert("session-1".to_string(), client);
+        app.engine.providers.insert(TabId::new("session-1"), client);
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
         app.input_target = InputTarget::Agent;
@@ -23625,13 +23645,21 @@ cyan = "#00ffff"
 
         // The user wheel-scrolled up to read history: the view stops tracking
         // the live edge.
-        let provider = app.engine.providers.get("session-1").expect("provider");
+        let provider = app
+            .engine
+            .providers
+            .get(TabIdRef::new("session-1"))
+            .expect("provider");
         provider.set_scrollback(20);
         assert_eq!(provider.scrollback_offset(), 20, "scrolled back");
 
         app.exit_interactive_mode();
 
-        let provider = app.engine.providers.get("session-1").expect("provider");
+        let provider = app
+            .engine
+            .providers
+            .get(TabIdRef::new("session-1"))
+            .expect("provider");
         assert_eq!(
             provider.scrollback_offset(),
             0,
@@ -23645,7 +23673,10 @@ cyan = "#00ffff"
             .expect("write marker");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
         while !viewport_contains(
-            app.engine.providers.get("session-1").expect("provider"),
+            app.engine
+                .providers
+                .get(TabIdRef::new("session-1"))
+                .expect("provider"),
             "marker-after-exit",
         ) {
             assert!(
@@ -23763,7 +23794,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         app.engine.providers.insert(
-            session_id,
+            TabId::new(session_id),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 30".to_string()],
@@ -23859,7 +23890,7 @@ cyan = "#00ffff"
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         let session_id = app.engine.sessions[0].id.clone();
         app.engine.providers.insert(
-            session_id,
+            TabId::new(session_id),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
@@ -23902,7 +23933,7 @@ cyan = "#00ffff"
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
@@ -23958,9 +23989,9 @@ cyan = "#00ffff"
 
         assert!(
             app.engine
-                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
-                    "session-1".into()
-                )),
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                    "session-1"
+                ))),
             "the fullscreen toggle is an explicit action and must launch a dormant tab"
         );
         assert!(
@@ -23987,9 +24018,9 @@ cyan = "#00ffff"
 
         assert!(
             app.engine
-                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
-                    "session-1".into()
-                )),
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                    "session-1"
+                ))),
             "the migrated key is the fullscreen toggle, an explicit action that launches"
         );
         assert!(
@@ -24019,9 +24050,9 @@ cyan = "#00ffff"
         assert_eq!(app.input_target, InputTarget::None);
         assert!(
             !app.engine
-                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
-                    "session-1".into()
-                )),
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                    "session-1"
+                ))),
             "minimizing a dormant fullscreen must not dispatch a launch"
         );
     }
@@ -24038,9 +24069,9 @@ cyan = "#00ffff"
 
         assert!(
             app.engine
-                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
-                    "session-1".into()
-                )),
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                    "session-1"
+                ))),
             "Enter (the explicit activate action) must still launch a dormant tab"
         );
         assert!(
@@ -24057,7 +24088,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         app.engine.providers.insert(
-            session_id.clone(),
+            TabId::new(session_id.clone()),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 30".to_string()],
@@ -24100,7 +24131,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         app.engine.providers.insert(
-            session_id,
+            TabId::new(session_id),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 30".to_string()],
@@ -24154,9 +24185,9 @@ cyan = "#00ffff"
 
         assert!(
             app.engine
-                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
-                    "session-1".into()
-                )),
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                    "session-1"
+                ))),
             "ReconnectAgent (the explicit reconnect action) must still launch a dormant tab"
         );
         assert!(
@@ -26875,29 +26906,35 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
         app.engine
             .resume_fallback_candidates
-            .insert(session_id.clone(), std::time::Instant::now());
+            .insert(TabId::new(session_id.clone()), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
         // Wait for the process to exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            app.engine.providers.contains_key(&session_id)
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id))
                 && !app
                     .engine
-                    .is_in_flight(&InFlightKey::AgentLaunch(session_id.clone()))
+                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(session_id.clone())))
                 && app.status.text().contains("No prior session to resume")
         });
 
         // The fallback should have spawned a fresh session, so the provider
         // is still present and the session is active (not detached).
         assert!(
-            app.engine.providers.contains_key(&session_id),
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id)),
             "provider should still be present after fallback retry"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
@@ -26909,7 +26946,7 @@ cyan = "#00ffff"
         assert!(
             !app.engine
                 .resume_fallback_candidates
-                .contains_key(&session_id),
+                .contains_key(TabIdRef::new(&session_id)),
             "candidate should have been removed after fallback"
         );
         assert!(
@@ -26933,12 +26970,14 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "seq 1 30".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn with output");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
         app.engine
             .resume_fallback_candidates
-            .insert(session_id.clone(), std::time::Instant::now());
+            .insert(TabId::new(session_id.clone()), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
@@ -26954,7 +26993,7 @@ cyan = "#00ffff"
         assert!(
             !app.engine
                 .resume_fallback_candidates
-                .contains_key(&session_id),
+                .contains_key(TabIdRef::new(&session_id)),
             "candidate should have been removed even when skipped"
         );
     }
@@ -26986,29 +27025,35 @@ cyan = "#00ffff"
         ];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn one-liner");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
         app.engine
             .resume_fallback_candidates
-            .insert(session_id.clone(), std::time::Instant::now());
+            .insert(TabId::new(session_id.clone()), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
         // Wait for the process to produce its one line and exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            app.engine.providers.contains_key(&session_id)
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id))
                 && !app
                     .engine
-                    .is_in_flight(&InFlightKey::AgentLaunch(session_id.clone()))
+                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(session_id.clone())))
                 && app.status.text().contains("No prior session to resume")
         });
 
         // Despite having output, the fallback should trigger because the
         // output is minimal (one line, no scrollback).
         assert!(
-            app.engine.providers.contains_key(&session_id),
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id)),
             "provider should still be present after fallback retry"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
@@ -27032,7 +27077,9 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
         // Deliberately not adding to resume_fallback_candidates.
@@ -27041,12 +27088,16 @@ cyan = "#00ffff"
 
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            !app.engine.providers.contains_key(&session_id)
+            !app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id))
         });
 
         // Without being a candidate, the session should just go to detached.
         assert!(
-            !app.engine.providers.contains_key(&session_id),
+            !app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id)),
             "provider should have been removed"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Detached);
@@ -27064,14 +27115,18 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "exit 0".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn zero-exit");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.engine.mark_session_desired_running(&session_id, true);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            !app.engine.providers.contains_key(&session_id)
+            !app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id))
         });
 
         assert!(!app.engine.sessions[0].desired_running);
@@ -27095,14 +27150,18 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
             .expect("spawn nonzero-exit");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.engine.mark_session_desired_running(&session_id, true);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            !app.engine.providers.contains_key(&session_id)
+            !app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id))
         });
 
         assert!(app.engine.sessions[0].desired_running);
@@ -27129,7 +27188,9 @@ cyan = "#00ffff"
         ];
         let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
             .expect("spawn nonzero-output");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.engine.mark_session_desired_running(&session_id, true);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
@@ -27167,14 +27228,20 @@ cyan = "#00ffff"
 
         app.restore_sessions();
         drain_until(&mut app, |app| {
-            app.engine.providers.contains_key(&session_id)
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id))
                 && !app
                     .engine
-                    .is_in_flight(&InFlightKey::AgentLaunch(session_id.clone()))
+                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(session_id.clone())))
                 && app.engine.sessions[0].status == SessionStatus::Active
         });
 
-        assert!(app.engine.providers.contains_key(&session_id));
+        assert!(
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id))
+        );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
     }
 
@@ -27229,33 +27296,39 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn hung resume");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
         app.engine.resume_fallback_candidates.insert(
-            session_id.clone(),
+            TabId::new(session_id.clone()),
             std::time::Instant::now() - std::time::Duration::from_millis(20),
         );
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
         drain_until(&mut app, |app| {
-            app.engine.providers.contains_key(&session_id)
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id))
                 && !app
                     .engine
-                    .is_in_flight(&InFlightKey::AgentLaunch(session_id.clone()))
+                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(session_id.clone())))
                 && app.status.text().contains("Resume timed out")
         });
 
         assert!(
-            app.engine.providers.contains_key(&session_id),
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id)),
             "provider should still be present after timeout fallback"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
         assert!(
             !app.engine
                 .resume_fallback_candidates
-                .contains_key(&session_id),
+                .contains_key(TabIdRef::new(&session_id)),
             "candidate should have been removed after timeout fallback"
         );
         assert!(
@@ -27288,7 +27361,9 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn fresh hang");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
 
@@ -27296,7 +27371,11 @@ cyan = "#00ffff"
         std::thread::sleep(std::time::Duration::from_millis(30));
         app.drain_events();
 
-        assert!(app.engine.providers.contains_key(&session_id));
+        assert!(
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id))
+        );
         assert!(app.engine.resume_fallback_candidates.is_empty());
     }
 
@@ -27316,7 +27395,7 @@ cyan = "#00ffff"
         ];
         let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 5, 40, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
 
         // Enter interactive agent mode.
         app.input_target = InputTarget::Agent;
@@ -27353,7 +27432,7 @@ cyan = "#00ffff"
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
@@ -27720,7 +27799,9 @@ cyan = "#00ffff"
             ];
             let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
                 .expect("spawn pty");
-            app.engine.providers.insert(session_id.clone(), client);
+            app.engine
+                .providers
+                .insert(TabId::new(session_id.clone()), client);
             app.input_target = InputTarget::Agent;
             app.session_surface = SessionSurface::Agent;
             app.fullscreen_overlay = FullscreenOverlay::Agent;
@@ -27792,7 +27873,7 @@ cyan = "#00ffff"
     fn a_torn_down_surface_drops_its_scroll_mode_in_silence() {
         let mut app = app_with_scrolled_back_pty();
         let session_id = app.engine.sessions[0].id.clone();
-        app.engine.providers.remove(&session_id);
+        app.engine.providers.remove(TabIdRef::new(&session_id));
 
         app.reconcile_scroll_mode();
 
@@ -27816,7 +27897,9 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "sleep 30".to_string()];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(other.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(other.clone()), client);
         app.engine.sessions[0].id = other;
 
         assert!(
@@ -27935,7 +28018,9 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "sleep 30".to_string()];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(other.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(other.clone()), client);
         app.engine.sessions[0].id = other;
 
         // Snap THAT surface to its live edge. It is already there; the point is
@@ -27973,7 +28058,9 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id.clone(), client);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), client);
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
         (app, session_id)
@@ -28284,7 +28371,7 @@ cyan = "#00ffff"
             1_000,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.session_surface = SessionSurface::Agent;
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
@@ -28385,7 +28472,7 @@ cyan = "#00ffff"
             if app
                 .engine
                 .providers
-                .get_mut(&session_id)
+                .get_mut(TabIdRef::new(&session_id))
                 .expect("provider")
                 .try_wait()
                 .is_some()
@@ -28484,7 +28571,7 @@ cyan = "#00ffff"
         let mut app = app_with_minimized_typeable_agent();
         app.engine.config.ui.tab_reaches_agent = true;
         let session_id = app.engine.sessions[0].id.clone();
-        app.engine.providers.remove(&session_id);
+        app.engine.providers.remove(TabIdRef::new(&session_id));
         assert!(
             !app.center_typeable(),
             "test setup: a provider-less agent must not be typeable"
@@ -29362,7 +29449,7 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 5, 40, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
 
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
@@ -30083,7 +30170,7 @@ cyan = "#00ffff"
 
         // Spawn a real PTY so write_bytes has somewhere to go.
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30121,7 +30208,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30170,7 +30257,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30196,7 +30283,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30354,7 +30441,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
 
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30395,7 +30482,7 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
         app.engine.providers.insert(
-            "session-1".to_string(),
+            TabId::new("session-1"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30438,7 +30525,7 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert("session-1".to_string(), client);
+        app.engine.providers.insert(TabId::new("session-1"), client);
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Feed 100 'x' characters — they should all be forwarded.
@@ -31334,7 +31421,7 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.input_target = InputTarget::Agent;
         app.session_surface = crate::model::SessionSurface::Agent;
 
@@ -31400,7 +31487,7 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.input_target = InputTarget::Agent;
         app.session_surface = crate::model::SessionSurface::Agent;
 
@@ -31460,7 +31547,7 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
         app.session_surface = crate::model::SessionSurface::Agent;
@@ -31578,7 +31665,7 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
+        app.engine.providers.insert(TabId::new(session_id), client);
         app.selected_left = 1;
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
@@ -32252,7 +32339,9 @@ cyan = "#00ffff"
             1_000,
         )
         .expect("spawn test agent");
-        app.engine.providers.insert(session_id.clone(), pty);
+        app.engine
+            .providers
+            .insert(TabId::new(session_id.clone()), pty);
 
         app.rebuild_left_items();
         app.selected_left = app
@@ -32313,8 +32402,10 @@ cyan = "#00ffff"
         // above; the swap is otherwise reflected in the agent tab strip.
 
         // Tearing down the PTY clears the pin — the next launch will be opencode.
-        app.engine.providers.remove(&session_id);
-        app.engine.running_provider_pins.remove(&session_id);
+        app.engine.providers.remove(TabIdRef::new(&session_id));
+        app.engine
+            .running_provider_pins
+            .remove(TabIdRef::new(&session_id));
         assert_eq!(
             app.engine
                 .running_provider_for(&app.engine.sessions[0])
@@ -32341,7 +32432,7 @@ cyan = "#00ffff"
 
     fn insert_support_tab(app: &mut App, session_id: &str, tab_id: &str) {
         app.engine.agent_tabs.insert(
-            tab_id.to_string(),
+            TabId::new(tab_id),
             dux_core::model::AgentTab {
                 id: tab_id.to_string(),
                 session_id: session_id.to_string(),
@@ -32365,7 +32456,7 @@ cyan = "#00ffff"
         insert_support_tab(&mut app, &session_id, &tab_id);
         app.engine
             .providers
-            .insert(tab_id.clone(), spawn_test_provider(&worktree));
+            .insert(TabId::new(tab_id.clone()), spawn_test_provider(&worktree));
         app.set_focused_tab(&session_id, &tab_id);
 
         app.prompt = PromptState::ConfirmCloseTab {
@@ -32379,7 +32470,7 @@ cyan = "#00ffff"
             .expect("handle close");
 
         assert!(
-            !app.engine.agent_tabs.contains_key(&tab_id),
+            !app.engine.agent_tabs.contains_key(TabIdRef::new(&tab_id)),
             "closing an extra tab must delete its row"
         );
         assert_eq!(
@@ -32402,11 +32493,11 @@ cyan = "#00ffff"
         insert_support_tab(&mut app, &session_id, "tab-1");
         app.engine
             .providers
-            .insert("tab-1".to_string(), spawn_test_provider(&worktree));
+            .insert(TabId::new("tab-1"), spawn_test_provider(&worktree));
         insert_support_tab(&mut app, &session_id, "tab-2");
         app.engine
             .providers
-            .insert("tab-2".to_string(), spawn_test_provider(&worktree));
+            .insert(TabId::new("tab-2"), spawn_test_provider(&worktree));
         app.set_focused_tab(&session_id, "tab-1");
         app.focus = FocusPane::Center;
 
@@ -32419,7 +32510,7 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .expect("handle close");
 
-        assert!(!app.engine.agent_tabs.contains_key("tab-1"));
+        assert!(!app.engine.agent_tabs.contains_key(TabIdRef::new("tab-1")));
         assert_eq!(
             app.focused_tab_id(&session_id),
             "tab-2",
@@ -32439,9 +32530,10 @@ cyan = "#00ffff"
                 .managed_worktree()
                 .expect("managed test session"),
         );
-        app.engine
-            .providers
-            .insert(session_id.clone(), spawn_test_provider(&worktree));
+        app.engine.providers.insert(
+            TabId::new(session_id.clone()),
+            spawn_test_provider(&worktree),
+        );
         app.selected_left = app
             .left_items()
             .iter()
@@ -32460,7 +32552,9 @@ cyan = "#00ffff"
             "the first tab must raise the warning"
         );
         assert!(
-            app.engine.providers.contains_key(&session_id),
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id)),
             "the first tab's PTY must survive the close gesture"
         );
         assert_eq!(
@@ -32481,9 +32575,10 @@ cyan = "#00ffff"
                 .managed_worktree()
                 .expect("managed test session"),
         );
-        app.engine
-            .providers
-            .insert(session_id.clone(), spawn_test_provider(&worktree));
+        app.engine.providers.insert(
+            TabId::new(session_id.clone()),
+            spawn_test_provider(&worktree),
+        );
         app.prompt = PromptState::FirstTabCannotClose {
             session_id: session_id.clone(),
         };
@@ -32492,7 +32587,11 @@ cyan = "#00ffff"
             .expect("dismiss the warning");
 
         assert!(matches!(app.prompt, PromptState::None));
-        assert!(app.engine.providers.contains_key(&session_id));
+        assert!(
+            app.engine
+                .providers
+                .contains_key(TabIdRef::new(&session_id))
+        );
     }
 
     #[test]
@@ -32507,11 +32606,11 @@ cyan = "#00ffff"
         insert_support_tab(&mut app, &session_id, "tab-1");
         app.engine
             .providers
-            .insert("tab-1".to_string(), spawn_test_provider(&worktree));
+            .insert(TabId::new("tab-1"), spawn_test_provider(&worktree));
         insert_support_tab(&mut app, &session_id, "tab-2");
         app.engine
             .providers
-            .insert("tab-2".to_string(), spawn_test_provider(&worktree));
+            .insert(TabId::new("tab-2"), spawn_test_provider(&worktree));
         app.set_focused_tab(&session_id, "tab-1");
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
@@ -32525,9 +32624,11 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .expect("handle close");
 
-        let in_flight_before = app
-            .engine
-            .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch("tab-2".into()));
+        let in_flight_before =
+            app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                    "tab-2",
+                )));
         assert!(!in_flight_before, "tab-2 already has a live provider");
 
         // Ctrl-g in the non-interactive Center pane should enter interactive
@@ -32539,7 +32640,9 @@ cyan = "#00ffff"
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
         assert!(
             !app.engine
-                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch("tab-2".into())),
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                    "tab-2"
+                ))),
             "no new launch should have been dispatched for the live sibling"
         );
     }
@@ -32581,7 +32684,7 @@ cyan = "#00ffff"
         insert_support_tab(&mut app, &session_id, &tab_id);
         app.engine
             .providers
-            .insert(tab_id.clone(), spawn_test_provider(&worktree));
+            .insert(TabId::new(tab_id.clone()), spawn_test_provider(&worktree));
 
         let snapshot = app.running_runtime_snapshot();
         assert!(
@@ -32595,11 +32698,11 @@ cyan = "#00ffff"
             app.kill_runtime_targets(&[RuntimeTargetId::Tab(tab_id.clone())]);
         assert_eq!(agents, 1, "killing the extra tab counts as an agent kill");
         assert!(
-            !app.engine.providers.contains_key(&tab_id),
+            !app.engine.providers.contains_key(TabIdRef::new(&tab_id)),
             "killing an extra tab stops its process"
         );
         assert!(
-            app.engine.agent_tabs.contains_key(&tab_id),
+            app.engine.agent_tabs.contains_key(TabIdRef::new(&tab_id)),
             "killing an extra tab keeps its row (it becomes dormant)"
         );
     }
@@ -34601,7 +34704,7 @@ cyan = "#00ffff"
                 let session_id = app.engine.sessions[0].id.clone();
                 app.engine
                     .providers
-                    .insert(session_id, spawn_idle_pty(&worktree));
+                    .insert(TabId::new(session_id), spawn_idle_pty(&worktree));
                 assert!(
                     !app.begin_quit(),
                     "a running agent must ask before quitting"
@@ -34656,7 +34759,7 @@ cyan = "#00ffff"
                 let session_id = app.engine.sessions[0].id.clone();
                 app.engine
                     .providers
-                    .insert(session_id, spawn_idle_pty(&worktree));
+                    .insert(TabId::new(session_id), spawn_idle_pty(&worktree));
                 app.open_kill_running().expect("open the kill picker");
                 app.open_confirm_kill_running_action(KillRunningAction::Hovered)
                     .expect("open the kill confirmation");

@@ -418,6 +418,7 @@ fn engine_unavailable() -> Response {
 mod tests {
     use axum::body::Body;
     use axum::http::Request;
+    use dux_core::ids::TabId;
     use std::path::Path;
     use tower::ServiceExt;
 
@@ -655,7 +656,7 @@ mod tests {
             .unwrap();
         drop(store);
         let mut engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
-        engine.mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch("s1".to_string()));
+        engine.mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
         (tmp, crate::server::router(handle))
     }

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
+use crate::ids::TabIdRef;
 use crate::pty::PtyClient;
 
 /// GitHub CLI availability status.
@@ -633,13 +634,17 @@ impl AgentSession {
     /// slot-ness decision in both crates routes through it (or through
     /// [`AgentSession::is_slot_tab`] and the `Engine` wrappers) rather than
     /// comparing a tab id against `self.id` inline.
-    pub fn slot_tab_id(&self) -> &str {
-        &self.id
+    /// The answer is a [`TabIdRef`], not a `&str`, so the equality that makes it
+    /// the session id today cannot be relied on by accident: a caller wanting a
+    /// tab id has to come here for it rather than reach for `session.id`, which
+    /// no longer type-checks in a tab-id position. See [`crate::ids`].
+    pub fn slot_tab_id(&self) -> &TabIdRef {
+        TabIdRef::new(&self.id)
     }
 
     /// Whether `tab_id` names this agent's session-slot tab. See
     /// [`AgentSession::slot_tab_id`].
-    pub fn is_slot_tab(&self, tab_id: &str) -> bool {
+    pub fn is_slot_tab(&self, tab_id: &TabIdRef) -> bool {
         self.slot_tab_id() == tab_id
     }
 
@@ -647,11 +652,15 @@ impl AgentSession {
     /// extra tab of this session; the session-slot tab otherwise. `None`, the
     /// slot tab's own id, and a closed/foreign tab id all resolve to the
     /// session-slot tab.
+    ///
+    /// `last_focused_tab` is a remembered string of unknown provenance (it comes
+    /// back out of SQLite), so it is named as a tab id here, at the point where
+    /// it is first compared against one.
     pub fn resolved_focused_tab<'a>(
         &'a self,
-        live_extra_tab_ids: impl IntoIterator<Item = &'a str>,
-    ) -> &'a str {
-        match self.last_focused_tab.as_deref() {
+        live_extra_tab_ids: impl IntoIterator<Item = &'a TabIdRef>,
+    ) -> &'a TabIdRef {
+        match self.last_focused_tab.as_deref().map(TabIdRef::new) {
             Some(id)
                 if !self.is_slot_tab(id) && live_extra_tab_ids.into_iter().any(|t| t == id) =>
             {
@@ -1029,7 +1038,7 @@ mod tests {
         // storage shape, so the day it becomes a stored pointer only the value
         // below moves.
         let session = session_with_focus(None);
-        assert_eq!(session.slot_tab_id(), "s1");
+        assert_eq!(session.slot_tab_id().as_str(), "s1");
     }
 
     #[test]
@@ -1037,40 +1046,54 @@ mod tests {
         // TWIN of the web's `isFirstTab` cases in `lib/agentTabs.test.ts`, which
         // asks the same question of the published `slot_tab_id` field.
         let session = session_with_focus(None);
-        assert!(session.is_slot_tab(session.slot_tab_id().to_string().as_str()));
-        assert!(!session.is_slot_tab("t1"));
-        assert!(!session.is_slot_tab(""));
+        assert!(session.is_slot_tab(session.slot_tab_id()));
+        assert!(!session.is_slot_tab(TabIdRef::new("t1")));
+        assert!(!session.is_slot_tab(TabIdRef::new("")));
     }
 
     #[test]
     fn resolved_focused_tab_none_falls_back_to_session_slot() {
         let session = session_with_focus(None);
-        assert_eq!(session.resolved_focused_tab(["t1"]), "s1");
+        assert_eq!(
+            session.resolved_focused_tab([TabIdRef::new("t1")]).as_str(),
+            "s1"
+        );
     }
 
     #[test]
     fn resolved_focused_tab_session_id_falls_back_to_session_slot() {
         let session = session_with_focus(Some("s1"));
-        assert_eq!(session.resolved_focused_tab(["t1"]), "s1");
+        assert_eq!(
+            session.resolved_focused_tab([TabIdRef::new("t1")]).as_str(),
+            "s1"
+        );
     }
 
     #[test]
     fn resolved_focused_tab_gone_tab_falls_back_to_session_slot() {
         let session = session_with_focus(Some("gone"));
-        assert_eq!(session.resolved_focused_tab(["t1"]), "s1");
+        assert_eq!(
+            session.resolved_focused_tab([TabIdRef::new("t1")]).as_str(),
+            "s1"
+        );
     }
 
     #[test]
     fn resolved_focused_tab_live_extra_tab_wins() {
         let session = session_with_focus(Some("t1"));
-        assert_eq!(session.resolved_focused_tab(["t1", "t2"]), "t1");
+        assert_eq!(
+            session
+                .resolved_focused_tab([TabIdRef::new("t1"), TabIdRef::new("t2")])
+                .as_str(),
+            "t1"
+        );
     }
 
     #[test]
     fn resolved_focused_tab_empty_live_set_falls_back() {
         let session = session_with_focus(Some("t1"));
-        let empty: Vec<&str> = Vec::new();
-        assert_eq!(session.resolved_focused_tab(empty), "s1");
+        let empty: Vec<&TabIdRef> = Vec::new();
+        assert_eq!(session.resolved_focused_tab(empty).as_str(), "s1");
     }
 
     fn managed() -> AgentWorkspace {
