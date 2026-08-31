@@ -153,6 +153,41 @@ so and offers to try again. And if the connection is really gone, the blocking
 > typing into a dead terminal. All four of those live under `[server]` in your config
 > file; see [Server mode](/docs/server-mode#the-server-config-keys).
 
+### Theater mode: one pane, no chrome
+
+The expand button in the terminal's header, next to **Macros…**, hands the whole screen
+to the terminal. The header, the pull-request band and the tab strip slide away and the
+terminal grows into the space they were using; on a phone the app header goes with them.
+The compose box and the terminal keys stay exactly as you had them, and the input `⋯`
+menu keeps offering to show or hide either one, so theater is as bare or as equipped as
+you want it. The top bar is not on that list while theater is on: it is one of the things
+this mode took away, and it comes back with the rest when you leave.
+
+A small floating pill in the bottom-right corner is the only thing left over the
+terminal. It holds the way out, the macro picker, and, when the agent has more than one
+tab, a marker for the tabs you can no longer see: it bobs while one of them is working
+and shows the attention dot when one needs you. Tap it and the tab pills fold out inline,
+so you can switch tab without leaving the mode. On an agent with a single tab, and on a
+plain terminal, the pill is just the macros button and the way out.
+
+The button you came in by is not a way back, because the header it lives in is one of the
+things that left. On a computer there are three ways out: the pill, `Escape` whenever you
+are not typing into the message box or the terminal itself, and your browser's Back
+button. On a phone there is a fourth, **Leave theater mode** in the input `⋯` menu, which
+is there for the times the pill ends up under the keyboard. If the pill's tab list is
+folded out, the first `Escape` puts that away and the next one leaves the mode.
+
+Back works because theater is part of the address: a link copied in theater opens in
+theater on whatever device you send it to. Opening the file editor or the changes screen
+steps out of the mode, since neither of those is the terminal; closing them puts you back
+in it.
+
+> [!TIP]
+> Theater is remembered per tab, in that browser, so the agent you like watching
+> full-screen comes back full-screen and the others do not. If another device takes over
+> the terminal, theater ends and the memory goes with it, so you always come back to the
+> full layout to decide what to do next.
+
 ### One writer, many watchers
 
 Every device pointed at the same terminal sees the same output at the same time, but

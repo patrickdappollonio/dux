@@ -14,6 +14,11 @@ one tab, and the strip stays hidden until you add a second. Turn on **Always sho
 strip** (Preferences on the web, or the palette in the terminal UI) if you would rather see
 it from the first tab on.
 
+> [!NOTE]
+> The browser's [theater mode](/docs/web-workspace#theater-mode-one-pane-no-chrome) takes
+> the strip away along with the rest of the chrome. The tabs are not gone: the floating
+> pill in the corner marks the ones you cannot see and folds them out for switching.
+
 ## Every tab is equal
 
 There is no "main" tab and no "support" tab. Every tab is a provider session in the
