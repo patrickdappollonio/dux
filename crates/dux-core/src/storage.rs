@@ -441,12 +441,29 @@ impl SessionStore {
             );
             "#,
         )?;
-        // Both slot-tab passes run last: they write `agent_tabs` rows, so the
-        // table has to exist, and a failure in either aborts the open. A
+        // The slot-tab passes run last: they write `agent_tabs` rows, so the
+        // table has to exist, and a failure in any of them aborts the open. A
         // workspace whose first tabs are unaddressable is worse than a startup
         // that says why it stopped.
+        self.sweep_orphan_agent_tabs()?;
         self.backfill_slot_tabs()?;
         self.heal_slot_tab_pointers()?;
+        Ok(())
+    }
+
+    /// Drop any `agent_tabs` row whose owning session is gone.
+    ///
+    /// Belt-and-suspenders for rows an older binary (which predates the cascade,
+    /// and the table) could have left behind when deleting a session. It runs
+    /// here rather than in a reader so it happens exactly once per open, ahead of
+    /// the two repair passes below, which both reason about "the session's tabs".
+    fn sweep_orphan_agent_tabs(&self) -> Result<()> {
+        self.conn
+            .execute(
+                "delete from agent_tabs where session_id not in (select id from agent_sessions)",
+                [],
+            )
+            .context("failed to sweep tab rows whose agent no longer exists")?;
         Ok(())
     }
 
@@ -515,11 +532,16 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Repair a slot pointer that names an `agent_tabs` row which is no longer
-    /// there, out loud.
+    /// Repair a slot pointer that names no tab of its own session, out loud.
     ///
-    /// Distinct from [`Self::backfill_slot_tabs`] on purpose. A NULL pointer means
-    /// "not migrated yet" and its first tab has to be minted; a DANGLING pointer
+    /// "No tab of its own session" covers both a row that is gone and a row that
+    /// belongs to some other agent: a pointer across sessions would otherwise
+    /// resolve, and the slot of one agent would be a tab living in another's
+    /// strip.
+    ///
+    /// Distinct from [`Self::backfill_slot_tabs`] on purpose. An EMPTY pointer
+    /// (NULL or blank, spelled the same way in both passes) means "not migrated
+    /// yet" and its first tab has to be minted; a DANGLING pointer
     /// means the row it named is gone, and the honest repair is to hand the slot
     /// to the session's oldest surviving tab (which the user is already looking
     /// at) rather than mint a tab nothing has ever run in. Only a session with no
@@ -529,7 +551,8 @@ impl SessionStore {
             let mut stmt = self.conn.prepare(
                 "select s.id, s.slot_tab_id, s.provider, s.created_at from agent_sessions s \
                  where s.slot_tab_id is not null and trim(s.slot_tab_id) <> '' \
-                   and not exists (select 1 from agent_tabs t where t.id = s.slot_tab_id)",
+                   and not exists (select 1 from agent_tabs t \
+                                   where t.id = s.slot_tab_id and t.session_id = s.id)",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
@@ -548,16 +571,32 @@ impl SessionStore {
             .unchecked_transaction()
             .context("failed to start the slot tab repair")?;
         for (session_id, stale, provider, created_at) in dangling {
-            let oldest: Option<String> = tx
+            let oldest: Option<(String, String)> = tx
                 .query_row(
-                    "select id from agent_tabs where session_id = ?1 \
+                    "select id, provider from agent_tabs where session_id = ?1 \
                      order by sort_order, created_at limit 1",
                     params![session_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
             let (tab_id, how) = match oldest {
-                Some(id) => (id, "its oldest surviving tab"),
+                Some((id, adopted_provider)) => {
+                    // `agent_sessions.provider` mirrors the SLOT tab's provider
+                    // and is what a launch reads, so the mirror has to move with
+                    // the slot. Leaving it behind would relaunch the vanished
+                    // tab's provider in the adopted tab's PTY.
+                    tx.execute(
+                        "update agent_sessions set provider = ?2 where id = ?1",
+                        params![session_id, adopted_provider],
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to move the provider mirror to the adopted slot tab \
+                             for session {session_id}"
+                        )
+                    })?;
+                    (id, "its oldest surviving tab")
+                }
                 None => {
                     let tab_id = uuid::Uuid::new_v4().to_string();
                     tx.execute(
@@ -652,15 +691,10 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Load every extra tab, ordered so a session's tabs come out in a stable
-    /// creation order. A cheap orphan sweep first drops any rows whose owning
-    /// session no longer exists — belt-and-suspenders for tabs an older binary
-    /// (which predates this table) could have left behind when deleting a session.
+    /// Load every tab, the slot tab included, ordered so a session's tabs come
+    /// out in a stable creation order. A plain reader: orphan rows are swept once
+    /// per open by [`Self::sweep_orphan_agent_tabs`], not on every read.
     pub fn load_agent_tabs(&self) -> Result<Vec<AgentTab>> {
-        self.conn.execute(
-            "delete from agent_tabs where session_id not in (select id from agent_sessions)",
-            [],
-        )?;
         let mut stmt = self.conn.prepare(
             "select id, session_id, provider, sort_order, created_at \
              from agent_tabs order by session_id, sort_order, created_at",
@@ -678,8 +712,8 @@ impl SessionStore {
     /// The engine's in-memory `agent_tabs` map holds the extras; the slot tab is
     /// reached through the session record's pointer, which is also the mirror of
     /// its provider (see [`Self::set_slot_provider`]). Sessions and tabs are
-    /// joined, so an orphan row cannot come back out even if the sweep in
-    /// [`Self::load_agent_tabs`] has not run.
+    /// joined, so an orphan row cannot come back out even if
+    /// [`Self::sweep_orphan_agent_tabs`] has not run.
     pub fn load_extra_agent_tabs(&self) -> Result<Vec<AgentTab>> {
         let mut stmt = self.conn.prepare(
             "select t.id, t.session_id, t.provider, t.sort_order, t.created_at \
@@ -1324,6 +1358,17 @@ impl SessionStore {
         // `sort_order`. Do NOT copy `initial_branch`'s treatment below: that
         // one IS in the SET list (its immutability is engine discipline), and
         // adding `branch_provenance` beside it would break this guarantee.
+        //
+        // `slot_tab_id` joins them, for the same shape of reason. The pointer is
+        // identity: it is written once by `create_session` and afterwards only by
+        // the migration's repair passes, which are the only code that knows
+        // whether a session still needs its first tab MINTED or has a live tab to
+        // ADOPT. A hot-path UPDATE cannot know that, and one that writes the
+        // pointer back turns the first answer into the second: the read path
+        // hands a pre-pointer row the session's own id as a stand-in, and
+        // re-upserting it would store that stand-in as a real pointer, so the
+        // next open sees a dangling id and adopts tab 2 instead of minting tab 1.
+        // INSERT-but-not-SET, following `sort_order` and `branch_provenance`.
         let updated = conn.execute(
             r#"
             update agent_sessions set
@@ -1340,8 +1385,7 @@ impl SessionStore {
                 updated_at=?12,
                 initial_branch=?13,
                 workspace_kind=?14,
-                folder_path=?15,
-                slot_tab_id=?16
+                folder_path=?15
             where id = ?1
             "#,
             params![
@@ -1360,7 +1404,6 @@ impl SessionStore {
                 initial_branch,
                 workspace_kind,
                 folder_path,
-                session.slot_tab_id,
             ],
         )?;
         if updated > 0 {
@@ -2368,19 +2411,43 @@ mod tests {
     }
 
     #[test]
-    fn load_agent_tabs_sweeps_orphans_with_no_session() {
+    fn migrate_sweeps_orphan_tabs_with_no_session() {
         let store = test_store();
         let now = Utc::now();
-        store.upsert_session(&test_session("s1", now, now)).unwrap();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        store.create_session(&session).unwrap();
         store.insert_agent_tab(&test_tab("t1", "s1", 1)).unwrap();
         // A row whose session was removed by an older binary that didn't cascade.
         store
             .insert_agent_tab(&test_tab("orphan", "gone", 1))
             .unwrap();
 
+        store.migrate().unwrap();
+
+        let loaded: Vec<String> = store
+            .load_agent_tabs()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(loaded, vec!["slot-1".to_string(), "t1".to_string()]);
+    }
+
+    #[test]
+    fn load_agent_tabs_is_a_plain_reader_and_sweeps_nothing() {
+        let store = test_store();
+        store
+            .insert_agent_tab(&test_tab("orphan", "gone", 1))
+            .unwrap();
+
         let loaded = store.load_agent_tabs().unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, "t1");
+
+        assert_eq!(
+            loaded.len(),
+            1,
+            "the sweep belongs to migrate(), so a read must not delete rows"
+        );
     }
 
     /// A session row shaped the way this branch's dev databases are: a real
@@ -2582,7 +2649,10 @@ mod tests {
         let now = Utc::now();
         let mut session = test_session("s1", now, now);
         session.slot_tab_id = "slot-1".to_string();
+        session.provider = crate::model::ProviderKind::new("claude");
         store.create_session(&session).unwrap();
+        // `test_tab` builds codex tabs, so the adopted tab's provider differs
+        // from the vanished slot tab's.
         store.insert_agent_tab(&test_tab("t2", "s1", 1)).unwrap();
         store.insert_agent_tab(&test_tab("t3", "s1", 2)).unwrap();
         // The slot row vanished without the pointer moving with it.
@@ -2594,6 +2664,102 @@ mod tests {
             slot_pointer(&store, "s1").as_deref(),
             Some("t2"),
             "the oldest surviving tab takes the slot"
+        );
+        assert_eq!(
+            store.load_sessions().unwrap()[0].provider.as_str(),
+            "codex",
+            "the session's provider mirror must follow the slot it now points at"
+        );
+    }
+
+    #[test]
+    fn migrate_treats_a_blank_pointer_the_same_as_a_missing_one_and_mints() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        store.create_session(&session).unwrap();
+        store.insert_agent_tab(&test_tab("t2", "s1", 1)).unwrap();
+        // A hand-edited row, or one written by a build that spelled "no pointer
+        // yet" as the empty string.
+        store
+            .conn
+            .execute(
+                "update agent_sessions set slot_tab_id = '' where id = 's1'",
+                [],
+            )
+            .unwrap();
+
+        store.migrate().unwrap();
+
+        let pointer = slot_pointer(&store, "s1").expect("healed");
+        assert!(
+            pointer != "t2" && pointer != "slot-1",
+            "a blank pointer means unmigrated, so a fresh first tab is minted \
+             rather than tab 2 being adopted, got {pointer}"
+        );
+        assert_eq!(store.count_agent_tabs("s1").unwrap(), 3);
+    }
+
+    #[test]
+    fn migrate_treats_a_pointer_at_another_sessions_tab_as_dangling() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut first = test_session("s1", now, now);
+        first.slot_tab_id = "slot-1".to_string();
+        store.create_session(&first).unwrap();
+        let mut second = test_session("s2", now, now);
+        second.slot_tab_id = "slot-2".to_string();
+        store.create_session(&second).unwrap();
+        // s1's slot now names a tab that lives in s2's strip.
+        store
+            .conn
+            .execute(
+                "update agent_sessions set slot_tab_id = 'slot-2' where id = 's1'",
+                [],
+            )
+            .unwrap();
+
+        store.migrate().unwrap();
+
+        assert_eq!(
+            slot_pointer(&store, "s1").as_deref(),
+            Some("slot-1"),
+            "a pointer into another agent's tabs is dangling, so s1 adopts its \
+             own oldest tab"
+        );
+        assert_eq!(
+            slot_pointer(&store, "s2").as_deref(),
+            Some("slot-2"),
+            "the other agent is untouched"
+        );
+    }
+
+    #[test]
+    fn upserting_a_pre_pivot_session_still_leaves_its_first_tab_to_be_minted() {
+        let store = test_store();
+        pre_pivot_session(&store, "s1", "claude");
+        store.insert_agent_tab(&test_tab("t2", "s1", 1)).unwrap();
+        store.insert_agent_tab(&test_tab("t3", "s1", 2)).unwrap();
+
+        // The commonest write there is: load the agent, then re-upsert it on a
+        // status change. The loaded record carries the read path's stand-in
+        // pointer; storing it would turn "not migrated" into "dangling".
+        let loaded = store.load_sessions().unwrap();
+        assert_eq!(loaded.len(), 1);
+        store.upsert_session(&loaded[0]).unwrap();
+
+        store.migrate().unwrap();
+
+        assert_eq!(
+            store.count_agent_tabs("s1").unwrap(),
+            3,
+            "the agent's first tab must be minted, leaving its three tabs intact"
+        );
+        let pointer = slot_pointer(&store, "s1").expect("migrated");
+        assert!(
+            pointer != "t2" && pointer != "t3" && pointer != "s1",
+            "the minted tab takes the slot, not an existing tab, got {pointer}"
         );
     }
 
