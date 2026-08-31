@@ -4704,6 +4704,10 @@ impl App {
                         "⚠",
                         "gh CLI not authenticated — run: gh auth login".to_string(),
                     ),
+                    GhStatus::Unreachable => (
+                        "⚠",
+                        "gh CLI could not be reached — dux is retrying periodically".to_string(),
+                    ),
                     GhStatus::Available => {
                         let count = self.engine.pr_statuses.len();
                         let noun = if count == 1 { "session" } else { "sessions" };

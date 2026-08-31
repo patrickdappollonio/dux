@@ -2363,10 +2363,14 @@ impl Engine {
             crate::gh::GhProbe::Transient(reason) => {
                 logger::info(&format!(
                     "[gh-integration] gh host probe did not decide ({reason}); \
-                     keeping the last known host policy",
+                     keeping the last known host policy, and dux will retry",
                 ));
+                // A transient answer never overwrites a decision dux already
+                // holds. It only names the state dux is genuinely in when it
+                // has never had one: unreachable, not logged out. Recording it
+                // as NotAuthenticated is the bug this variant exists for.
                 if matches!(self.gh_status, GhStatus::Unknown) {
-                    GhStatus::NotAuthenticated
+                    GhStatus::Unreachable
                 } else {
                     self.gh_status
                 }

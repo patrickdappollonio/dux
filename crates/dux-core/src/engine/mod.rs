@@ -6882,8 +6882,9 @@ mod tests {
 
         assert_eq!(
             engine.gh_status,
-            GhStatus::NotAuthenticated,
-            "the status must leave Unknown so the interface reports something",
+            GhStatus::Unreachable,
+            "the status must leave Unknown, and say dux could not ask rather \
+             than claiming the user is logged out",
         );
         assert_eq!(
             eligible(&engine),
@@ -7013,7 +7014,7 @@ mod tests {
         settle_gh_probe(&mut engine);
         assert_eq!(
             engine.gh_status,
-            GhStatus::NotAuthenticated,
+            GhStatus::Unreachable,
             "a first probe that fails transiently must still leave Unknown",
         );
         assert_eq!(

@@ -18,8 +18,18 @@ pub enum GhStatus {
     Unknown,
     /// `gh` binary not found on PATH.
     NotInstalled,
-    /// `gh` found but `gh auth status` failed.
+    /// `gh` found, and it said plainly that nobody is logged in. Authoritative:
+    /// only a login changes it, so dux does not keep asking.
     NotAuthenticated,
+    /// `gh` found, but it could not be consulted: it timed out, failed to
+    /// launch, or answered with a rate limit, an API error or a network fault.
+    ///
+    /// NOT authoritative. It is the honest name for "dux does not know yet",
+    /// and it exists because recording it as [`Self::NotAuthenticated`] latched
+    /// a momentary HTTP 403 into "you are logged out" for the whole run, hiding
+    /// every pull-request affordance on both surfaces until dux restarted. dux
+    /// re-probes on a timer while the status sits here.
+    Unreachable,
     /// `gh` installed and authenticated.
     Available,
 }

@@ -685,25 +685,32 @@ struct AuthStatusOutput {
 
 /// One account under one host key.
 ///
-/// All three fields are REQUIRED, so a record missing one, or carrying null or
-/// the wrong type in one, fails to deserialize and takes the whole response
-/// down with it. That is deliberate, and it is the difference between "gh says
-/// no" and "dux could not read what gh said". They were previously optional,
-/// which produced two decisive-looking answers out of records that decided
-/// nothing: a missing or null `active` yielded an empty but successfully parsed
-/// host set, which is a decisive "gh serves nothing" that turns every GitHub
-/// feature off and replaces the last known good policy; and a missing or null
-/// `host` alongside a successful, active record qualified the MAP KEY on the
-/// strength of a record that never said which host it describes.
+/// `state`, `active` and `host` are REQUIRED, so a record missing one, or
+/// carrying null or the wrong type in one, fails to deserialize and takes the
+/// whole response down with it. That is deliberate, and it is the difference
+/// between "gh says no" and "dux could not read what gh said". They were
+/// previously optional, which produced two decisive-looking answers out of
+/// records that decided nothing: a missing or null `active` yielded an empty but
+/// successfully parsed host set, which is a decisive "gh serves nothing" that
+/// turns every GitHub feature off and replaces the last known good policy; and a
+/// missing or null `host` alongside a successful, active record qualified the MAP
+/// KEY on the strength of a record that never said which host it describes.
 ///
 /// A response containing an unreadable record is therefore transient (see
 /// [`decide_gh_probe`]), which preserves the last known good policy. gh 2.95.0
 /// emits all three fields on every account.
+///
+/// `error` is the exception and defaults, because gh tags it `omitempty` and so
+/// omits it entirely on a healthy account. Its ABSENCE therefore says nothing
+/// and must not be able to fail the parse; it is `state` that says whether the
+/// account works, and this only says why when it does not.
 #[derive(serde::Deserialize)]
 struct AuthStatusAccount {
     state: String,
     active: bool,
     host: String,
+    #[serde(default)]
+    error: String,
 }
 
 impl AuthStatusAccount {
@@ -740,19 +747,57 @@ impl AuthStatusAccount {
 /// Neither the map keys nor the exit code can stand in for `state`: `gh` lists
 /// every host it merely KNOWS, including one whose login has expired, and in
 /// JSON mode it exits zero regardless.
+///
+/// Test-only: the decision needs the failures behind an empty set too, so it
+/// calls [`parse_auth_status`]. This narrower view is what the qualification
+/// rules are asserted through.
+#[cfg(test)]
 pub(crate) fn parse_auth_status_hosts(stdout: &str) -> Option<BTreeSet<String>> {
+    parse_auth_status(stdout).map(|reading| reading.eligible)
+}
+
+/// Everything the decision needs out of one machine-readable answer: which
+/// hosts work, and what `gh` said about the ones that do not.
+///
+/// The failures are kept because an empty `eligible` is not one answer but
+/// several. `gh` holding no credential at all, `gh` holding one GitHub rejected,
+/// and `gh` being unable to reach GitHub all reduce to "no host qualified", and
+/// only the last of the three is worth retrying. See [`decide_gh_probe`].
+pub(crate) struct AuthStatusReading {
+    /// Hosts whose ACTIVE account reports success.
+    eligible: BTreeSet<String>,
+    /// `gh`'s own `error` text for every ACTIVE account that did not qualify,
+    /// in host order. Inactive accounts are skipped: dux never names an account
+    /// when it calls `gh`, so a sibling's failure is not this call's problem.
+    active_errors: Vec<String>,
+}
+
+/// Parse the stdout of `gh auth status --active --json hosts` into the eligible
+/// hosts plus the failures behind the ones that are missing. `None` when the
+/// output is not that shape; see [`parse_auth_status_hosts`].
+pub(crate) fn parse_auth_status(stdout: &str) -> Option<AuthStatusReading> {
     let parsed: AuthStatusOutput = serde_json::from_str(stdout.trim()).ok()?;
-    let mut eligible = BTreeSet::new();
+    let mut reading = AuthStatusReading {
+        eligible: BTreeSet::new(),
+        active_errors: Vec::new(),
+    };
     for (key, accounts) in &parsed.hosts {
         let key = key.trim().to_ascii_lowercase();
         if key.is_empty() {
             continue;
         }
         if accounts.iter().any(|account| account.qualifies(&key)) {
-            eligible.insert(key);
+            reading.eligible.insert(key);
+            continue;
         }
+        reading.active_errors.extend(
+            accounts
+                .iter()
+                .filter(|account| account.active && !account.error.trim().is_empty())
+                .map(|account| account.error.trim().to_string()),
+        );
     }
-    Some(eligible)
+    Some(reading)
 }
 
 /// Whether `gh`'s own diagnostics say it did not UNDERSTAND the call, as opposed
@@ -796,6 +841,166 @@ fn diagnostic_says_gh_cannot_do_this(output: &std::process::Output) -> bool {
         || text.contains("unknown json field")
 }
 
+/// Text in an account's `error` that means GitHub REJECTED the credential.
+///
+/// Measured on gh 2.95.0 against a live api.github.com with a token GitHub does
+/// not know, in both the shapes `gh` produces:
+///
+/// ```text
+/// GH_TOKEN:   non-200 OK status code: 401 Unauthorized body: "{ … "message": "Bad credentials" … }"
+/// hosts.yml:  HTTP 401: Bad credentials (https://api.github.com/)
+/// ```
+///
+/// This is the one account failure that is genuinely decisive: the token is
+/// bad, and asking again in five minutes cannot make it good. Checked BEFORE
+/// [`AUTH_STATUS_TRANSIENT_ERROR_MARKERS`] so a body that happens to quote a
+/// retryable-looking word cannot rescue a rejected credential.
+const AUTH_STATUS_CREDENTIAL_ERROR_MARKERS: &[&str] =
+    &["bad credentials", "401 unauthorized", "http 401"];
+
+/// Text in an account's `error` that means the call never got a verdict on the
+/// login: GitHub rate-limited it, answered a server error, or the request did
+/// not arrive at all.
+///
+/// The connection group is measured on gh 2.95.0 with every outbound connection
+/// refused; `gh` surfaces Go's transport error verbatim, which is why the entries
+/// read like Go's net stack rather than like `gh`:
+///
+/// ```text
+/// Post "https://api.github.com/graphql": proxyconnect tcp: dial tcp 127.0.0.1:1: connect: connection refused
+/// ```
+///
+/// The status-code group is NOT measured (a rate limit cannot be provoked on
+/// demand): it is the measured `HTTP <code>: <message>` shape above carrying the
+/// statuses GitHub documents for an exhausted quota (403 and 429) and the ones a
+/// proxy or an outage produces (5xx). A record that matches neither table keeps
+/// the decisive reading, so this list can only ever RESCUE an answer from being
+/// latched, never invent a failure.
+const AUTH_STATUS_TRANSIENT_ERROR_MARKERS: &[&str] = &[
+    "rate limit",
+    "http 403",
+    "403 forbidden",
+    "http 429",
+    "429 too many requests",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "internal server error",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "connection refused",
+    "connection reset",
+    "no such host",
+    "network is unreachable",
+    "temporary failure in name resolution",
+    "i/o timeout",
+    "context deadline exceeded",
+    "timeout",
+    "timed out",
+    "tls handshake",
+    "proxyconnect",
+];
+
+/// The first account error that says the probe never got an answer, or `None`
+/// when every failure present decides against the user (or there is no failure
+/// text at all, which is what `gh` holding no credential looks like).
+fn auth_status_transient_reason(errors: &[String]) -> Option<String> {
+    errors.iter().find_map(|error| {
+        let lowered = error.to_ascii_lowercase();
+        let rejected = AUTH_STATUS_CREDENTIAL_ERROR_MARKERS
+            .iter()
+            .any(|marker| lowered.contains(marker));
+        let retryable = AUTH_STATUS_TRANSIENT_ERROR_MARKERS
+            .iter()
+            .any(|marker| lowered.contains(marker));
+        (!rejected && retryable).then(|| error.clone())
+    })
+}
+
+/// `gh`'s own sentence for "there is no login here at all", which is the one
+/// answer from the plain fallback that genuinely decides against the user.
+///
+/// Measured on gh 2.95.0, where `gh auth status` with an empty config prints
+/// exactly `You are not logged into any GitHub hosts. To log in, run: gh auth
+/// login` and exits 1. Matched as a substring and case-insensitively rather than
+/// exactly, because `gh` wraps it in a banner and has moved the surrounding
+/// punctuation between releases while this clause stayed put.
+fn plain_status_says_logged_out(output: &std::process::Output) -> bool {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    )
+    .to_ascii_lowercase();
+    text.contains("not logged in")
+}
+
+/// Text in a plain `gh auth status` that does not decide whether the user is
+/// logged in.
+///
+/// There is exactly one entry, and that is a measurement rather than a
+/// shortcut. On gh 2.95.0 a refused token and a dead network produce BYTE FOR
+/// BYTE the same diagnostic:
+///
+/// ```text
+/// github.com
+///   X Failed to log in to github.com using token (GH_TOKEN)
+///   - Active account: true
+///   - The token in GH_TOKEN is invalid.
+/// ```
+///
+/// That was measured twice for each of the two credential sources (an env token
+/// and a `hosts.yml` login), once against a live api.github.com with a token
+/// GitHub rejects and once with every outbound connection refused, and the four
+/// runs differed only in naming the source. `gh` never mentions the network, a
+/// status code, or a rate limit here, which is why the previous table of
+/// HTTP-and-Go phrases matched none of the output this path actually sees.
+///
+/// Faced with a shape that cannot distinguish them, dux retries: a genuinely bad
+/// token keeps producing this same answer, and the sentence the user is shown
+/// carries `gh`'s own line, so nothing is hidden by the choice. Deciding the
+/// other way is what stranded a working login behind a momentary outage for the
+/// rest of the run.
+///
+/// Everything here is measured on gh 2.95.0. This path only ever RUNS on a `gh`
+/// too old to understand `--json`, whose wording could not be measured; an
+/// answer this table does not recognise keeps the old decisive reading, so an
+/// older `gh` is no worse off than before.
+const PLAIN_STATUS_TRANSIENT_MARKERS: &[&str] = &["failed to log in to"];
+
+/// The transient phrase this output carries, if any, as the diagnostic line it
+/// came from so the log can name the real reason.
+fn plain_status_transient_reason(output: &std::process::Output) -> Option<String> {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let carries_marker = |line: &str| {
+        let lowered = line.to_ascii_lowercase();
+        PLAIN_STATUS_TRANSIENT_MARKERS
+            .iter()
+            .any(|marker| lowered.contains(marker))
+    };
+    // The whole diagnostic is several lines of banner; the line carrying the
+    // marker is the one worth putting in the log, minus the cross `gh` bullets
+    // it with, which reads as a stray letter inside dux's own sentence.
+    let line = text
+        .lines()
+        .find(|line| carries_marker(line))?
+        .trim()
+        .trim_start_matches(['X', 'x', '✗', '✘'])
+        .trim()
+        .to_string();
+    Some(if line.is_empty() {
+        format!("gh auth status {}", output.status)
+    } else {
+        line
+    })
+}
+
 /// Decide the probe's outcome from the machine-readable call, running the plain
 /// `gh auth status` fallback ONLY when `gh` says it did not understand it.
 pub(crate) fn decide_gh_probe(
@@ -818,15 +1023,32 @@ pub(crate) fn decide_gh_probe(
     // Step 1. A parseable answer IS the answer, whatever the exit status, and
     // nothing is unioned onto it. The status carries no information here: in
     // JSON mode `gh` exits zero even when a known host is broken.
-    if let Some(eligible) = parse_auth_status_hosts(&String::from_utf8_lossy(&output.stdout)) {
+    if let Some(reading) = parse_auth_status(&String::from_utf8_lossy(&output.stdout)) {
+        // A host that works decides on its own merits. Availability is
+        // deliberately not keyed off the exit status: plain `gh auth status`
+        // exits non-zero when ANY known host has a problem, which would let one
+        // stale token disable every GitHub feature on every host.
+        if !reading.eligible.is_empty() {
+            return GhProbe::Decided {
+                available: true,
+                policy: GithubHostPolicy::Hosts(reading.eligible),
+            };
+        }
+        // Nothing qualified, which is where the three different answers `gh`
+        // collapses into one empty host set have to be told apart. An account
+        // that could not reach GitHub has decided nothing, and recording it as
+        // "not authenticated" is what used to switch every GitHub feature off
+        // for the rest of the run. No accounts at all, and an account GitHub
+        // rejected, both decide.
+        if let Some(reason) = auth_status_transient_reason(&reading.active_errors) {
+            return GhProbe::Transient(format!(
+                "gh auth status could not reach GitHub ({reason}); \
+                 keeping the last known host policy",
+            ));
+        }
         return GhProbe::Decided {
-            // GitHub is available when at least one host reports success,
-            // deliberately not keyed off the exit status: plain `gh auth
-            // status` exits non-zero when ANY known host has a problem, which
-            // would let one stale token disable every GitHub feature on every
-            // host.
-            available: !eligible.is_empty(),
-            policy: GithubHostPolicy::Hosts(eligible),
+            available: false,
+            policy: GithubHostPolicy::Hosts(reading.eligible),
         };
     }
 
@@ -852,10 +1074,26 @@ pub(crate) fn decide_gh_probe(
             GH_CALL_TIMEOUT.as_secs()
         )),
         GhCallOutcome::Failed(msg) => GhProbe::Transient(format!("could not run gh: {msg}")),
-        GhCallOutcome::Completed(output) => GhProbe::Decided {
-            available: output.status.success(),
-            policy: GithubHostPolicy::LegacyNameRule,
-        },
+        GhCallOutcome::Completed(output) => {
+            // A non-zero exit decides against the user only when `gh` is talking
+            // about the login. When it is reporting a rate limit, an API error
+            // or a network fault, it has decided nothing: treating that as "not
+            // authenticated" is what used to switch every GitHub feature off
+            // until the next restart.
+            if !output.status.success()
+                && !plain_status_says_logged_out(&output)
+                && let Some(reason) = plain_status_transient_reason(&output)
+            {
+                return GhProbe::Transient(format!(
+                    "gh auth status could not reach GitHub ({reason}); \
+                     keeping the last known host policy",
+                ));
+            }
+            GhProbe::Decided {
+                available: output.status.success(),
+                policy: GithubHostPolicy::LegacyNameRule,
+            }
+        }
     }
 }
 
@@ -2455,6 +2693,216 @@ mod host_policy_tests {
                 "auth status".to_string(),
             ],
             "exactly one plain retry, after the machine-readable call",
+        );
+    }
+
+    #[test]
+    fn a_missing_gh_is_reported_as_not_installed() {
+        // `probe_github_hosts` (unlike the `_with` variant) is the one that
+        // consults PATH, and a name nothing on PATH resolves is the case.
+        assert_eq!(
+            probe_github_hosts(OsStr::new("dux-no-such-gh-binary")),
+            GhProbe::NotInstalled,
+        );
+    }
+
+    /// `gh auth status` (no `--json`) on gh 2.95.0 with no login anywhere.
+    /// stdout is empty, this is stderr, and the exit code is 1.
+    const MEASURED_PLAIN_NO_LOGIN: &str =
+        "You are not logged into any GitHub hosts. To log in, run: gh auth login\n";
+
+    /// `gh auth status` on gh 2.95.0 with a token in `GH_TOKEN` that GitHub
+    /// rejects. Measured twice, once against a live api.github.com and once
+    /// with every outbound connection refused, and the two runs were byte for
+    /// byte identical: this shape cannot tell a bad token from a dead network.
+    const MEASURED_PLAIN_TOKEN_REFUSED: &str = "github.com\n  \
+         X Failed to log in to github.com using token (GH_TOKEN)\n  \
+         - Active account: true\n  \
+         - The token in GH_TOKEN is invalid.\n";
+
+    /// The same failure for a login stored in `hosts.yml` rather than an
+    /// environment token, measured the same two ways with the same result.
+    const MEASURED_PLAIN_ACCOUNT_REFUSED: &str = "github.com\n  \
+         X Failed to log in to github.com account octocat (/home/u/.config/gh/hosts.yml)\n  \
+         - Active account: true\n  \
+         - The token in /home/u/.config/gh/hosts.yml is invalid.\n  \
+         - To re-authenticate, run: gh auth login -h github.com\n  \
+         - To forget about this account, run: gh auth logout -h github.com -u octocat\n";
+
+    #[test]
+    fn a_plain_status_saying_not_logged_in_is_decisive() {
+        // gh's own sentence for a machine with no login at all. It decides, and
+        // it must keep deciding: retrying it forever would be noise.
+        let probe = decide_gh_probe(
+            GhCallOutcome::Completed(completed_with_stderr(1, "", "unknown flag: --json")),
+            || GhCallOutcome::Completed(completed_with_stderr(1, "", MEASURED_PLAIN_NO_LOGIN)),
+        );
+        assert_eq!(
+            probe,
+            GhProbe::Decided {
+                available: false,
+                policy: GithubHostPolicy::LegacyNameRule,
+            },
+        );
+    }
+
+    #[test]
+    fn a_plain_status_that_could_not_log_in_is_transient() {
+        // The measured ambiguity: this is what a refused token AND a dead
+        // network both print. Retrying is the safe reading of a shape that
+        // cannot distinguish them.
+        for measured in [MEASURED_PLAIN_TOKEN_REFUSED, MEASURED_PLAIN_ACCOUNT_REFUSED] {
+            let probe = decide_gh_probe(
+                GhCallOutcome::Completed(completed_with_stderr(1, "", "unknown flag: --json")),
+                || GhCallOutcome::Completed(completed_with_stderr(1, "", measured)),
+            );
+            let GhProbe::Transient(reason) = probe else {
+                panic!("an ambiguous login failure decides nothing, got {probe:?}");
+            };
+            assert!(
+                reason.contains("Failed to log in to github.com"),
+                "the real diagnostic line is kept for the log, got {reason}",
+            );
+            assert!(
+                !reason.contains("X Failed"),
+                "gh's cross glyph is stripped from the sentence dux shows, got {reason}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_status_timing_out_is_transient() {
+        let probe = decide_gh_probe(
+            GhCallOutcome::Completed(completed_with_stderr(1, "", "unknown flag: --json")),
+            || GhCallOutcome::TimedOut,
+        );
+        assert!(matches!(probe, GhProbe::Transient(_)), "got {probe:?}");
+    }
+
+    #[test]
+    fn a_plain_status_that_succeeds_is_available() {
+        let probe = decide_gh_probe(
+            GhCallOutcome::Completed(completed_with_stderr(1, "", "unknown flag: --json")),
+            || GhCallOutcome::Completed(completed(0, "")),
+        );
+        assert_eq!(
+            probe,
+            GhProbe::Decided {
+                available: true,
+                policy: GithubHostPolicy::LegacyNameRule,
+            },
+        );
+    }
+
+    /// `gh auth status --active --json hosts` on gh 2.95.0 with no login
+    /// anywhere. Note the exit code: ZERO, with the not-logged-in sentence on
+    /// stderr and this on stdout.
+    const MEASURED_JSON_NO_ACCOUNTS: &str = r#"{"hosts":{}}"#;
+
+    /// The same call with a `GH_TOKEN` set and every outbound connection
+    /// refused (measured through a proxy pointed at a closed port).
+    const MEASURED_JSON_NETWORK_DOWN: &str = r#"{"hosts":{"github.com":[{"state":"error","error":"Post \"https://api.github.com/graphql\": proxyconnect tcp: dial tcp 127.0.0.1:1: connect: connection refused","active":true,"host":"github.com","login":"","tokenSource":"GH_TOKEN","gitProtocol":"https"}]}}"#;
+
+    /// The same call with a `GH_TOKEN` GitHub rejects, reached over a live
+    /// network. gh reports the raw non-200 body for an environment token.
+    const MEASURED_JSON_BAD_ENV_TOKEN: &str = r#"{"hosts":{"github.com":[{"state":"error","error":"non-200 OK status code: 401 Unauthorized body: \"{\r\n  \"message\": \"Bad credentials\",\r\n  \"documentation_url\": \"https://docs.github.com/rest\",\r\n  \"status\": \"401\"\r\n}\"","active":true,"host":"github.com","login":"","tokenSource":"GH_TOKEN","gitProtocol":"https"}]}}"#;
+
+    /// The same rejection for a login stored in `hosts.yml`, which gh reports
+    /// in its own shorter `HTTP <code>: <message>` form.
+    const MEASURED_JSON_BAD_STORED_TOKEN: &str = r#"{"hosts":{"github.com":[{"state":"error","error":"HTTP 401: Bad credentials (https://api.github.com/)","active":true,"host":"github.com","login":"octocat","tokenSource":"/home/u/.config/gh/hosts.yml","gitProtocol":"https"}]}}"#;
+
+    /// NOT measured: a rate limit could not be provoked on demand here. It is
+    /// [`MEASURED_JSON_BAD_STORED_TOKEN`]'s shape, which was measured, carrying
+    /// the status and message GitHub's REST API documents for an exhausted
+    /// quota.
+    const MIRRORED_JSON_RATE_LIMITED: &str = r#"{"hosts":{"github.com":[{"state":"error","error":"HTTP 403: API rate limit exceeded for user ID 583231. (https://api.github.com/)","active":true,"host":"github.com","login":"octocat","tokenSource":"keyring","gitProtocol":"https"}]}}"#;
+
+    fn json_probe(stdout: &str) -> GhProbe {
+        decide_gh_probe(GhCallOutcome::Completed(completed(0, stdout)), || {
+            panic!("a machine-readable answer must never reach the plain fallback")
+        })
+    }
+
+    #[test]
+    fn a_json_answer_with_no_accounts_at_all_is_decisively_logged_out() {
+        // Nothing to retry: gh holds no credential, so waiting changes nothing
+        // until the user runs `gh auth login`.
+        assert_eq!(
+            json_probe(MEASURED_JSON_NO_ACCOUNTS),
+            GhProbe::Decided {
+                available: false,
+                policy: GithubHostPolicy::Hosts(BTreeSet::new()),
+            },
+        );
+    }
+
+    #[test]
+    fn a_json_account_that_could_not_reach_github_is_transient() {
+        let probe = json_probe(MEASURED_JSON_NETWORK_DOWN);
+        let GhProbe::Transient(reason) = probe else {
+            panic!("an unreachable API decides nothing, got {probe:?}");
+        };
+        assert!(
+            reason.contains("connection refused"),
+            "gh's own error text is kept for the log, got {reason}",
+        );
+    }
+
+    #[test]
+    fn a_json_account_that_is_rate_limited_is_transient() {
+        let probe = json_probe(MIRRORED_JSON_RATE_LIMITED);
+        let GhProbe::Transient(reason) = probe else {
+            panic!("a rate limit decides nothing, got {probe:?}");
+        };
+        assert!(
+            reason.contains("rate limit"),
+            "gh's own error text is kept for the log, got {reason}",
+        );
+    }
+
+    #[test]
+    fn a_json_account_whose_credentials_are_rejected_is_decisive() {
+        // A 401 is GitHub saying the token itself is no good. Retrying it every
+        // few minutes would never produce a different answer.
+        for measured in [MEASURED_JSON_BAD_ENV_TOKEN, MEASURED_JSON_BAD_STORED_TOKEN] {
+            assert_eq!(
+                json_probe(measured),
+                GhProbe::Decided {
+                    available: false,
+                    policy: GithubHostPolicy::Hosts(BTreeSet::new()),
+                },
+                "a rejected credential decides",
+            );
+        }
+    }
+
+    #[test]
+    fn one_working_host_is_not_undone_by_an_unreachable_sibling() {
+        // Transience is only consulted when NOTHING qualified: a host that
+        // works keeps the GitHub features on whatever its siblings report.
+        let mixed = r#"{"hosts":{
+            "git.company.example":[{"state":"error","error":"Post \"https://git.company.example/api/graphql\": dial tcp: connect: connection refused","active":true,"host":"git.company.example"}],
+            "github.com":[{"state":"success","active":true,"host":"github.com"}]
+        }}"#;
+        assert_eq!(
+            hosts(&json_probe(mixed)),
+            vec!["github.com".to_string()],
+            "a reachable host still qualifies",
+        );
+    }
+
+    #[test]
+    fn an_unclassifiable_account_error_still_decides() {
+        // The classification only ever RESCUES an answer from being decisive.
+        // Text that matches neither table keeps the old reading rather than
+        // retrying something dux cannot recognise forever.
+        let odd = r#"{"hosts":{"github.com":[{"state":"error","error":"something dux has never seen","active":true,"host":"github.com"}]}}"#;
+        assert_eq!(
+            json_probe(odd),
+            GhProbe::Decided {
+                available: false,
+                policy: GithubHostPolicy::Hosts(BTreeSet::new()),
+            },
         );
     }
 
