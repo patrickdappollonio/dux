@@ -10,7 +10,9 @@ git worktree. Claude thinking about the refactor in one tab, Codex sanity-checki
 migration in another, both editing the *same* checkout.
 
 Tabs live in a strip at the top of the agent's terminal. A brand-new agent has exactly
-one tab, and the strip stays hidden until you add a second.
+one tab, and the strip stays hidden until you add a second. Turn on **Always show tab
+strip** (Preferences on the web, or the palette in the terminal UI) if you would rather see
+it from the first tab on.
 
 ## Every tab is equal
 
@@ -80,7 +82,8 @@ dux remembers, per agent, whichever tab you had focused last. Jump to a differen
 and back (on the web, a sidebar click or the plain `#/agent/<id>` link; in the terminal
 UI, reselecting the agent) and you land on that same tab. The memory survives restarts and is shared
 between the terminal UI and the web. A tab you closed is never resurrected by it; you
-land on the agent's default tab instead.
+land on the agent's first tab instead, and so does a deep link to a tab that has since
+been closed.
 
 > [!NOTE]
 > An explicit deep link always wins over the remembered tab, and following one does not
@@ -111,9 +114,10 @@ file carries as a commented-out row ready to fill in.
 
 ## Closing tabs
 
-Every tab closes, the **first** one included, and closing one ends that session, so dux
-asks you to confirm. Closing the agent's **last running** tab detaches the whole agent: it
-leaves the sidebar's active list but stays in Projects, ready to reopen.
+Every tab closes, the **first** one included, as long as the agent has another tab to
+fall back on. Closing one ends that session, so dux asks you to confirm. Closing the
+agent's **last running** tab detaches the whole agent: it leaves the sidebar's active list
+but stays in Projects, ready to reopen.
 
 ![A tab's menu open over the tab strip, offering Change provider and Close tab.](/screens/agent-tab-actions-menu.png)
 
@@ -152,8 +156,11 @@ means the newest conversation in the worktree rather than a specific tab's.
 On the web, selecting the agent starts its **first tab** right there: that is the tab the
 agent is, and asking for the agent is asking for it. Extra tabs wait: each says it isn't
 running until you click *Start session*, so a tab you added deliberately does not spring
-back to life just because you looked at it. In the terminal UI, press the key the tab
-names.
+back to life just because you looked at it.
+
+The terminal UI never starts anything just because you looked at it, the first tab
+included. A dormant extra tab shows a *Tab not running* card naming the key that launches
+it, and a detached agent comes back through the reconnect action.
 
 There is one exception, and it is the useful one. If a tab's **last run ended badly** (it
 failed to launch, or the provider exited with an error), that tab waits for you too, first

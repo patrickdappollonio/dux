@@ -141,7 +141,9 @@ An agent can run more than one provider session in its single shared worktree, a
 With two or more, a strip of pills appears atop the terminal, each a live provider session
 against the same files. Add one with the split **+** button (the main button uses the
 project's default provider, the caret lets you pick), switch with a click, retarget or close
-from a pill's `⋯` menu. There is no privileged "main" tab.
+from a pill's `⋯` menu. There is no privileged "main" tab: closing the agent's first tab
+hands its place to the next tab in the strip, and only an agent's very last tab refuses to
+close (detach the agent instead).
 
 Resume is automatic and decided per provider, never a toggle. A launching tab resumes its
 provider's prior conversation when it is the only live tab of that provider, and starts fresh
@@ -151,10 +153,16 @@ closing a tab and the per-agent tab cap, is in [Agent tabs](/docs/agent-tabs).
 
 ### Dormant tabs after a restart
 
-When the server restarts, an agent's **extra** tabs come back **dormant**: each shows a card
-saying it is not running, with a **Start session** button, and nothing launches until you ask.
-Opening the agent's own tab is different: that view is the terminal, so opening it starts or
-resumes the agent's provider.
+When the server restarts, every one of an agent's tabs comes back **dormant**, with no
+process behind it. An **extra** tab shows a card saying it is not running, with a **Start
+session** button, and nothing launches until you ask. The agent's **first** tab is the
+exception: selecting the agent starts it, because asking for the agent is asking for that
+tab.
+
+A tab whose last run ended badly (it failed to launch, or the provider exited with an
+error) waits for you too, first tab included: it shows the same card, and only **Start
+session** retries it. That is deliberate, so a tab that cannot come up does not relaunch
+every time you open the agent.
 
 Starting a dormant tab picks up that provider's most recent conversation in the worktree,
 unless another tab of the same provider is already running or the provider cannot resume, in
