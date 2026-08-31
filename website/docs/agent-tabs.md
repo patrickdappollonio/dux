@@ -111,25 +111,28 @@ file carries as a commented-out row ready to fill in.
 
 ## Closing tabs
 
-An agent's **first** tab cannot be closed: it lives as long as the agent does. Every tab
-you add after it closes freely, and closing one ends that session, so dux asks you to
-confirm. Closing the agent's **last running** tab detaches the whole agent: it leaves the
-sidebar's active list but stays in Projects, ready to reopen.
+Every tab closes, the **first** one included, and closing one ends that session, so dux
+asks you to confirm. Closing the agent's **last running** tab detaches the whole agent: it
+leaves the sidebar's active list but stays in Projects, ready to reopen.
 
 ![A tab's menu open over the tab strip, offering Change provider and Close tab.](/screens/agent-tab-actions-menu.png)
 
 A separate **Detach agent** action stops every one of the agent's tabs at once and parks
 it in Projects. Deleting the agent takes every tab with it.
 
-### The first tab stays
+### Closing the first tab hands its place on
+
+Closing an agent's first tab promotes the **next tab** to first, and the confirmation
+names it before you commit. The promoted tab is untouched otherwise: same conversation,
+same process if it was running, same link. It simply becomes the tab the agent opens on.
 
 > [!IMPORTANT]
-> The close gesture on an agent's first tab does not close it, and it no longer stops
-> the agent behind it either, which is what it used to do. On the web its *Close tab*
-> entry is greyed out and says why; in the terminal UI the close key answers with a note
-> instead of a confirmation. Add as many more tabs as you like and close those freely.
-> To stop what the agent is running, detach it, or use the Task Manager's **Stop** on
-> the agent's row, which still works exactly as before.
+> An agent always has a first tab, so its **only** tab cannot be closed. dux says so
+> rather than closing it, in the same words on both surfaces: on the web the *Close tab*
+> entry is greyed out with the reason above it, and in the terminal UI the close key
+> answers with that note instead of a confirmation. Add another tab first, or detach the
+> agent to stop everything it is running (the Task Manager's **Stop** on the agent's row
+> does the same).
 
 ### Closing a tab is one-way
 

@@ -552,6 +552,72 @@ describe("store agent-tab lifecycle", () => {
     })
   })
 
+  it("falls back out loud from a link naming the tab a promotion closed", async () => {
+    // A bookmark or a second browser tab can still be pointing at the tab that
+    // held the slot when a promotion closed it. It is a vanished target like
+    // any other: the selection is rewritten to the agent's current first tab
+    // rather than left on an id nothing answers for.
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        {
+          id: "s1",
+          slot_tab_id: "t1",
+          workspace: {
+            kind: "managed",
+            project_id: "p1",
+            branch_name: "",
+            initial_branch: "",
+            branch_provenance: "created",
+            source_branch: "",
+            worktree_path: "",
+          },
+          terminals: [],
+          tabs: [
+            { id: "t1", has_live_process: true },
+            { id: "t2", has_live_process: true },
+          ],
+        },
+      ],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    mod.selectTab("s1", "t1")
+
+    // Somebody else's promotion: t2 holds the slot and t1 is gone.
+    spineBody = {
+      ...(spineBody as { projects: unknown; sidebar: unknown }),
+      sessions: [
+        {
+          ...(spineBody as { sessions: Record<string, unknown>[] }).sessions[0],
+          slot_tab_id: "t2",
+          tabs: [{ id: "t2", has_live_process: true }],
+        },
+      ],
+    }
+    fireSessionsChanged()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().selectedTarget).toEqual({
+        kind: "agent",
+        sessionId: "s1",
+        tabId: "t2",
+      })
+    })
+    expect(
+      mod.routeHash({
+        target: mod.getSnapshot().selectedTarget,
+        changes: false,
+        editor: null,
+        standalone: false,
+      }),
+    ).toBe("#/agent/s1")
+    // The fallback is out loud: the address bar was rewritten, not just the
+    // selection.
+    await vi.waitFor(() => {
+      expect(fakeLocation.hash).toBe("#/agent/s1")
+    })
+  })
+
   it("retargetTab PATCHes the tab with a configured provider", async () => {
     const mod = await loadStore()
     const ok = await mod.retargetTab("s1", "b2", "opencode")
