@@ -797,11 +797,9 @@ async fn nested_tab_pty_socket_enforces_session_ownership() {
 
 /// One session's SLOT tab is refused at ANOTHER session's per-tab address.
 ///
-/// This refusal only became reachable when the slot tab gained a per-tab address:
-/// before, `s2` in the `:tab` slot was rejected for being a slot tab at all, so
-/// the ownership check never got a say. `both_address_forms_of_the_slot_tab_reach_the_same_pty`
-/// covers the same id dialled under its OWN session, which is what makes this a
-/// test about ownership rather than about the address being unknown.
+/// `both_address_forms_of_the_slot_tab_reach_the_same_pty` covers the same id
+/// dialled under its OWN session, which is what makes this a test about
+/// ownership rather than about the address being unknown.
 #[tokio::test]
 async fn nested_tab_pty_socket_refuses_another_sessions_slot_tab() {
     let (addr, _tmp) = boot().await;

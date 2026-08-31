@@ -628,13 +628,10 @@ impl Engine {
     /// to wait for, so the caller must dispatch the removal immediately rather
     /// than let it be lost. Returns `None` when it was captured on a terminating
     /// entry (or there was nothing to remove).
-    #[must_use]
     ///
-    /// The parameter is a TAB id. It was called `session_id` and typed `&str`,
-    /// which read as an agent-level operation and was not one: `providers` is
-    /// tab-keyed, `close_tab` passes an extra tab's id through here, and only the
-    /// slot tab's id happened to equal a session id. The type now says which
-    /// keyspace it is.
+    /// Takes a TAB id, never a session id: `providers` is tab-keyed and
+    /// `close_tab` passes an extra tab's id through here.
+    #[must_use]
     pub fn begin_close_provider(
         &mut self,
         tab_id: &TabIdRef,

@@ -4355,8 +4355,8 @@ export function reconnectSession(sessionId: string, force: boolean): void {
       ),
     )
   // No latch: the reconnect dispatches a launch server-side, and dispatching is
-  // what clears any recorded failure for the tab, so the card this used to hide
-  // behind a latch no longer shows for the reconnect's own tab.
+  // what clears the tab's recorded failure, so the card cannot show for the
+  // reconnect's own tab.
   setState({
     // Reconnect is a session-slot-tab operation, so focus the session-slot tab.
     selectedTarget: {

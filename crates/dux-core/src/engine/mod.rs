@@ -5147,8 +5147,8 @@ mod tests {
         // No agent, so nothing can be its slot tab.
         assert!(!engine.is_slot_tab_of(SessionIdRef::new("ghost"), TabIdRef::new("ghost")));
         assert!(!engine.is_slot_tab_of(SessionIdRef::new("ghost"), TabIdRef::new("tab-b")));
-        // But the enumeration seeds still get a key rather than dropping one,
-        // which is what the pre-resolver code did for a removed session.
+        // But the fallback still yields a key, so enumerating a removed session
+        // produces one rather than dropping it.
         assert_eq!(
             engine.slot_tab_id_of(SessionIdRef::new("ghost")).as_str(),
             "ghost"
@@ -7115,9 +7115,8 @@ mod tests {
     #[test]
     fn a_config_reload_re_asks_gh_while_it_is_unusable() {
         let _guard = crate::logger::level_test_guard();
-        // Journey: dux booted while GitHub was rate-limiting, so the status sits
-        // at Unreachable. The user fixes things and reloads the config rather
-        // than waiting out the retry timer; the reload must ask again.
+        // A reload is the escape hatch out of Unreachable: it re-asks `gh`
+        // rather than making the user wait out the retry timer.
         let (mut engine, _tmp) = test_engine();
         let dir = tempfile::tempdir().expect("tempdir");
         engine.gh_probe.program = stand_in_gh_serving(dir.path(), &["github.com"]).into();
@@ -7137,10 +7136,9 @@ mod tests {
 
     #[test]
     fn the_scheduled_re_check_recovers_from_a_transient_first_probe() {
-        // The measured journey: dux boots while GitHub is rate-limiting, so the
-        // first probe decides nothing. Once the interval passes, the tick that
-        // every surface runs asks again, and GitHub features come back with no
-        // restart.
+        // An Unreachable first probe is not final: once the interval passes, the
+        // tick every surface runs asks again, and GitHub features come back with
+        // no restart.
         let (mut engine, _tmp) = test_engine();
         let dir = tempfile::tempdir().expect("tempdir");
         engine.github_integration_enabled = true;
@@ -7428,7 +7426,7 @@ mod tests {
         assert_eq!(engine.config.defaults.provider, "codex");
     }
 
-    // -- Config writer on the engine: env/macros now save through the queue. --
+    // -- Config writer on the engine: env and macros save through the queue. --
 
     #[test]
     fn persist_global_env_writes_through_queue() {
@@ -10025,9 +10023,9 @@ mod tab_ops_tests {
             .projects
             .push(crate::engine::test_support::sample_project("p1", "/tmp/p1"));
         agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
-        // Closing the slot took the agent's last live process, so the promotion
-        // detached it and dropped the reopen intent. This models the next
-        // startup, with the agent left running and its intent set again.
+        // A promotion that takes the agent's last live process detaches it and
+        // drops the reopen intent, so the startup this fixture stands for is one
+        // where the agent was left running and its intent set again.
         engine.sessions[0].desired_running = true;
         engine.sessions[0].auto_reopen_enabled = true;
 
@@ -10076,8 +10074,8 @@ mod tab_ops_tests {
 
     #[test]
     fn resume_fallback_retry_after_a_promotion_relaunches_the_slot_as_the_agents_own() {
-        // The retry decides slot-ness AT FIRING TIME. The candidate was seeded
-        // while t2 was an extra tab; by the time it fires t2 is the slot, so the
+        // The retry decides slot-ness AT FIRING TIME: the candidate is seeded
+        // while t2 is an extra tab and fires once t2 holds the slot, so the
         // relaunch must be the agent's own (a session-slot launch, whose failure
         // detaches the agent) rather than a tab-scoped one.
         //

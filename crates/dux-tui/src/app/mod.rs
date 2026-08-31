@@ -3899,7 +3899,7 @@ impl App {
         self.note_focused_agent_viewed();
         self.engine.poll_agent_signals();
         // Re-ask `gh` when the periodic re-check is due, so a rate limit or a
-        // brief outage at boot stops needing a restart to clear.
+        // brief outage at boot clears without a restart.
         self.engine.poll_gh_probe_schedule();
         self.tick_count = self.tick_count.wrapping_add(1);
         self.reconcile_scroll_mode();
@@ -8282,9 +8282,8 @@ leading_branch = "main"
     }
 
     /// The palette gates the pull-request commands on the LIVE status, so a
-    /// re-check that finds `gh` working brings them back without a restart.
-    /// This is the terminal UI's half of the latched-probe bug: the same engine
-    /// value the web publishes is read here on every keystroke.
+    /// re-check that finds `gh` working brings them back without a restart. The
+    /// same engine value the web publishes is read here on every keystroke.
     #[test]
     fn palette_gating_follows_the_live_gh_status() {
         let mut app = test_support::test_app(test_support::default_bindings());

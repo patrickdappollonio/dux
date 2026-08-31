@@ -1221,17 +1221,14 @@ impl Engine {
         s: &AgentSession,
         extra_tabs: &[&crate::model::AgentTab],
     ) -> SessionView {
-        // The sidebar-facing status reflects ANY live tab: the agent is "active"
-        // when any of its tabs (session-slot or extra) has a live PTY. (The
-        // persisted `desired_running` auto-reopen intent stays agent-level and is
-        // NOT churned by transient per-tab activity — that's set/cleared on the
-        // delete/detach paths, not here.)
-        // Derive tab ids from the already-computed `extra_tabs` slice (plus the
-        // session-slot id) instead of re-scanning the whole `agent_tabs` map via
-        // `tab_ids_for_session` — that full scan is exactly what `extra_tabs`
-        // was precomputed to avoid (`spine`'s single O(total tabs) grouping pass),
-        // and calling it here per-session silently re-introduced the O(S * T) cost
-        // `spine` was factored to eliminate.
+        // The sidebar-facing status ORs over ANY live tab, session-slot or extra.
+        // The persisted `desired_running` auto-reopen intent stays agent-level and
+        // is set or cleared on the delete and detach paths, never by transient
+        // per-tab activity here.
+        // Tab ids come from the precomputed `extra_tabs` slice plus the
+        // session-slot id, never from `tab_ids_for_session`: that rescans the
+        // whole `agent_tabs` map, so calling it per session costs
+        // O(sessions * tabs) and undoes `spine`'s single grouping pass.
         let has_output = std::iter::once(s.slot_tab_id())
             .chain(extra_tabs.iter().map(|t| TabIdRef::new(&t.id)))
             .any(|id| self.providers.get(id).is_some_and(|p| p.has_output()));

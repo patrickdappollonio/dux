@@ -704,9 +704,8 @@ const LAUNCH_TIMEOUT: Duration = dux_core::statusline::BUSY_TIMEOUT;
 /// is held until `engine.providers` contains the session (success) or the
 /// deadline passes (timeout).
 struct PendingSubscribe {
-    /// The TAB whose provider this subscribe is waiting on. It was called
-    /// `session_id` and typed `String`, which is only right for a slot tab: a
-    /// subscribe to an extra tab parks its own tab id here, and both the
+    /// The TAB whose provider this subscribe is waiting on, never a session id:
+    /// a subscribe to an extra tab parks its own tab id here, and both the
     /// `providers` probe and the `AgentLaunch` guard below are tab-keyed.
     tab_id: TabId,
     reply: Option<oneshot::Sender<Result<PtySubscription, String>>>,
@@ -2084,11 +2083,10 @@ impl EngineService {
             let _ = self.status.send(status);
         }
         // `gh_available` rides the bootstrap document, which a browser fetches
-        // at connect and then only on `config.changed`. So a flip in whether
-        // GitHub features work rides the same signal: without it a browser goes
-        // on hiding (or offering) the pull-request entries until it is reloaded,
-        // which is the whole reason a momentary rate limit used to need a
-        // restart to clear.
+        // at connect and then only on `config.changed`, so a flip in whether
+        // GitHub features work has to ride that same signal: without it a
+        // browser keeps hiding (or offering) the pull-request entries, and a
+        // momentary rate limit stands until the page is reloaded.
         if peek_gh_availability_changed(reaction).is_some() {
             let _ = self.config_reload_tx.send(());
         }

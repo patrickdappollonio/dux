@@ -714,8 +714,7 @@ describe("store agent-tab lifecycle", () => {
 
   // The latch bridges the press until the launch answers, EITHER WAY. A retry
   // that fails again must put the diagnosis card back rather than leave the
-  // latch pinning it out of sight forever, which is what a timer used to have to
-  // clean up.
+  // latch pinning it out of sight forever.
   it("drops the started-dormant latch when the spine reports the run failed", async () => {
     spineBody = spineWithExtraTab(false)
     const mod = await loadStore()
@@ -745,8 +744,8 @@ describe("store agent-tab lifecycle", () => {
   })
 
   // A reconnect needs no latch of its own: dispatching a launch is what clears
-  // the tab's recorded failure server-side, so the card the latch used to hide
-  // does not show over a reconnect in the first place.
+  // the tab's recorded failure server-side, so the card does not show over a
+  // reconnect in the first place.
   it("reconnectSession focuses the session-slot tab without latching it", async () => {
     spineBody = spineWithDormantSlot()
     const mod = await loadStore()

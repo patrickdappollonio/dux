@@ -211,10 +211,9 @@ describe("dormantTabNeedsCard", () => {
   })
 
   // After a promotion the slot is a tab whose id is nothing like the session's,
-  // so the one-click rule has to travel with the POINTER. The promoted tab gets
-  // the first-tab treatment (start on selection, card only after a failed run)
-  // and every sibling, the tab that used to be addressed by the session id
-  // included, gets the extra-tab treatment.
+  // so the one-click rule travels with the POINTER: the promoted tab gets the
+  // first-tab treatment (start on selection, card only after a failed run) and
+  // every sibling gets the extra-tab treatment.
   it("applies the first-tab rule to a promoted slot and the extra-tab rule to its siblings", () => {
     const promoted = withSlot("t2")
     const healthy = extraTab("t2", false)
@@ -260,7 +259,7 @@ describe("dormantTabNeedsCard", () => {
     expect(
       dormantTabNeedsCard(agentTarget("s1", "t2"), stale, promoted, [], "t2"),
     ).toBe(false)
-    // The tab the close destroyed no longer gets the rule, even while the stale
+    // The tab the close destroyed does not get the rule, even while the stale
     // spine still calls it the slot.
     expect(
       dormantTabNeedsCard(

@@ -159,9 +159,7 @@ describe("auto-focus the agent this client created", () => {
 
   // A brand-new agent's first tab needs no latch to keep the "Start session"
   // card away while its provider comes up: nothing has failed for it, and a
-  // healthy dormant first tab shows the pane, not the card. The latch this used
-  // to arm needed a timer behind it, because a create whose launch failed had no
-  // other way to retire it.
+  // healthy dormant first tab shows the pane, not the card.
   it("focuses the created agent without latching its first tab", async () => {
     const mod = await loadStore()
     await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
