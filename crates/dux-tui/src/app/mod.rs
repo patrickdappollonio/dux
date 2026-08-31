@@ -4360,6 +4360,7 @@ impl App {
                 // never here.
                 self.retire_pending_link_click();
                 self.row_drag = None;
+                self.end_terminal_selection_drag();
                 self.terminal_focus.on_focus_lost();
                 false
             }

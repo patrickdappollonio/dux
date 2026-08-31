@@ -10060,10 +10060,57 @@ impl App {
             self.focus = FocusPane::Center;
             if double_click {
                 self.activate_center_agent_from_mouse();
+            } else {
+                self.begin_windowed_terminal_selection(mouse);
             }
             return;
         }
         self.handle_files_pointer_target(target, mouse);
+    }
+
+    /// Anchor a local text selection on the MINIMIZED agent grid.
+    ///
+    /// The maximized pane reads its mouse through the raw interactive path,
+    /// which selects whenever the child is not tracking the mouse; the
+    /// minimized pane is the same live surface and answers the same way. Only a
+    /// press the child will never see reaches here: `handle_center_link_press`
+    /// and `begin_center_mouse_forward` have already claimed the presses that
+    /// belong to a mouse-tracking child, so what is left is a child with no
+    /// mouse mode, or the shift hatch that makes a press dux's selection even
+    /// over one that has it on.
+    ///
+    /// The remaining gates are the forward's own, for the same reasons: a
+    /// surface that is not the agent grid, a dormant one, and the two modal
+    /// surfaces that suspend the pane have nothing to select.
+    fn begin_windowed_terminal_selection(&mut self, mouse: &MouseEvent) {
+        if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
+            || !matches!(self.center_mode, CenterMode::Agent)
+            || self.macro_bar.is_some()
+            || self.resize_mode
+            || self.selected_terminal_surface_client().is_none()
+        {
+            return;
+        }
+        self.handle_terminal_selection_mouse(*mouse);
+    }
+
+    fn terminal_selection_is_dragging(&self) -> bool {
+        self.terminal_selection
+            .as_ref()
+            .is_some_and(|selection| selection.dragging)
+    }
+
+    /// End a live selection drag while keeping what it highlighted.
+    ///
+    /// The release that would have ended it may never arrive: the pointer can
+    /// leave for another window, and the take-over card can swallow the release
+    /// over a pane somebody else claimed mid-drag. A gesture left marked as
+    /// dragging would then be finished by an unrelated later event, so a new
+    /// press and a lost focus retire it, the same rule the row drag follows.
+    pub(crate) fn end_terminal_selection_drag(&mut self) {
+        if let Some(selection) = self.terminal_selection.as_mut() {
+            selection.dragging = false;
+        }
     }
 
     /// Arm a drag-to-reorder gesture on the agent row the press landed on.
@@ -10204,6 +10251,7 @@ impl App {
         // unrelated click somewhere else entirely. Arming happens further down, so
         // a press on a row still starts its own gesture.
         self.row_drag = None;
+        self.end_terminal_selection_drag();
         if windowed && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
             self.mouse_drag = Some(drag);
             self.update_dragged_panes(mouse.column, mouse.row);
@@ -10266,6 +10314,13 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) if self.mouse_drag.take().is_some() => {
                 self.persist_pane_widths();
+            }
+            // A selection drag on the minimized grid. The press that started it
+            // cleared the row drag, so the two can never be live at once.
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                if windowed && self.terminal_selection_is_dragging() =>
+            {
+                self.handle_terminal_selection_mouse(mouse);
             }
             // The divider drag returns before the sidebar hit-test ever runs, so
             // a pane resize and a row reorder can never be live at once; these
@@ -17460,6 +17515,153 @@ not_a_real_action = ["x"]
         assert!(
             !rendered.contains("[<"),
             "no mouse mode means no forwarded reports; got {rendered:?}"
+        );
+    }
+
+    /// The minimized pane is a live terminal surface, so a drag over it selects
+    /// text and the release copies it, exactly as the maximized pane does. The
+    /// child here has no mouse tracking, so there is nobody else the gesture
+    /// could belong to.
+    #[test]
+    fn windowed_drag_over_a_child_without_mouse_mode_selects_and_copies() {
+        let mut app = test_app(default_bindings());
+        install_feedable_pty(&mut app);
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+
+        // agent_term is (21,1,55,16), so screen (21,1) is child cell (0,0),
+        // where the fixture's READY sentinel starts.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 21, 1));
+        assert!(
+            app.terminal_selection
+                .as_ref()
+                .is_some_and(|selection| selection.dragging),
+            "the press anchors a selection on the minimized grid"
+        );
+
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 25, 1));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 25, 1));
+
+        let selection = app
+            .terminal_selection
+            .clone()
+            .expect("the release keeps the selection it made");
+        assert!(!selection.dragging, "the release ends the drag");
+        assert_eq!(selection.anchor, TermGridPos { row: 0, col: 0 });
+        assert_eq!(selection.end, TermGridPos { row: 0, col: 4 });
+        assert_eq!(
+            app.terminal_selection_text(),
+            "READY",
+            "and the copy path has the dragged text to hand to the clipboard"
+        );
+    }
+
+    /// A press that goes nowhere is still a plain click: anchor equals end, so
+    /// the release retires the selection instead of copying an empty string,
+    /// and the double click that maximizes the pane is untouched.
+    #[test]
+    fn a_windowed_click_that_never_moves_selects_nothing() {
+        let mut app = test_app(default_bindings());
+        install_feedable_pty(&mut app);
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 21, 1));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 21, 1));
+        assert!(app.terminal_selection.is_none());
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 21, 1));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 21, 1));
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::Agent,
+            "the double click still maximizes"
+        );
+    }
+
+    /// A selection drag retires on the events that mean its release will never
+    /// come back, the same rule the sidebar row drag follows. Without it a
+    /// press on the sidebar would be finished later by a drag over the grid.
+    #[test]
+    fn a_windowed_selection_drag_retires_on_focus_loss_and_on_the_next_press() {
+        for retire in ["focus loss", "next press"] {
+            let mut app = test_app(default_bindings());
+            install_feedable_pty(&mut app);
+            install_mouse_layout(&mut app);
+            app.selected_left = 1;
+            app.center_mode = CenterMode::Agent;
+            app.focus = FocusPane::Center;
+
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 21, 1));
+            assert!(
+                app.terminal_selection_is_dragging(),
+                "test setup ({retire})"
+            );
+
+            if retire == "focus loss" {
+                app.handle_terminal_event(crossterm::event::Event::FocusLost);
+            } else {
+                app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+            }
+
+            assert!(
+                !app.terminal_selection_is_dragging(),
+                "the gesture is over ({retire})"
+            );
+            app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 25, 1));
+            assert_eq!(
+                app.terminal_selection
+                    .as_ref()
+                    .map(|selection| selection.end),
+                Some(TermGridPos { row: 0, col: 0 }),
+                "so a later drag extends nothing ({retire})"
+            );
+        }
+    }
+
+    /// Shift is dux's selection modifier on the maximized pane; the minimized
+    /// pane answers a shift drag the same way, so a mouse-tracking child does
+    /// not get to keep the one gesture that reads its output.
+    #[test]
+    fn windowed_shift_drag_selects_locally_over_a_mouse_mode_child() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1002h");
+        app.focus = FocusPane::Center;
+
+        // A real gesture always follows a frame; the press stamps the grid the
+        // last frame was read from, and an unstamped one reads as drifted.
+        app.refresh_snapshot_buf();
+
+        let shift = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::SHIFT,
+        };
+        app.handle_mouse(shift(MouseEventKind::Down(MouseButton::Left), 25, 3));
+        app.handle_mouse(shift(MouseEventKind::Drag(MouseButton::Left), 30, 3));
+        app.handle_mouse(shift(MouseEventKind::Up(MouseButton::Left), 30, 3));
+
+        let selection = app
+            .terminal_selection
+            .clone()
+            .expect("a shift drag selects locally");
+        assert!(!selection.dragging);
+        assert_eq!(selection.anchor, TermGridPos { row: 2, col: 4 });
+        assert_eq!(selection.end, TermGridPos { row: 2, col: 9 });
+        assert_eq!(
+            app.center_mouse_forward, None,
+            "and nothing was forwarded to the child"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = forwarded_echo(&app);
+        assert!(
+            !rendered.contains("[<"),
+            "a shift drag is dux's selection, not the child's; got {rendered:?}"
         );
     }
 
