@@ -654,7 +654,7 @@ impl AgentSession {
     /// has to come here (or to [`AgentSession::is_slot_tab`] and the `Engine`
     /// wrappers) rather than compare a tab id against `self.id` inline.
     /// The answer is a [`TabIdRef`], not a `&str`, so a caller wanting a tab id
-    /// cannot reach for `session.id` instead: that no longer type-checks in a
+    /// cannot reach for `session.id` instead: that does not type-check in a
     /// tab-id position. See [`crate::ids`].
     pub fn slot_tab_id(&self) -> &TabIdRef {
         TabIdRef::new(&self.slot_tab_id)

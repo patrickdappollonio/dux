@@ -688,13 +688,13 @@ struct AuthStatusOutput {
 /// `state`, `active` and `host` are REQUIRED, so a record missing one, or
 /// carrying null or the wrong type in one, fails to deserialize and takes the
 /// whole response down with it. That is deliberate, and it is the difference
-/// between "gh says no" and "dux could not read what gh said". They were
-/// previously optional, which produced two decisive-looking answers out of
-/// records that decided nothing: a missing or null `active` yielded an empty but
+/// between "gh says no" and "dux could not read what gh said". Optional fields
+/// would instead produce two decisive-looking answers out of records that decide
+/// nothing: a missing or null `active` yields an empty but
 /// successfully parsed host set, which is a decisive "gh serves nothing" that
 /// turns every GitHub feature off and replaces the last known good policy; and a
-/// missing or null `host` alongside a successful, active record qualified the MAP
-/// KEY on the strength of a record that never said which host it describes.
+/// missing or null `host` alongside a successful, active record qualifies the MAP
+/// KEY on the strength of a record that never says which host it describes.
 ///
 /// A response containing an unreadable record is therefore transient (see
 /// [`decide_gh_probe`]), which preserves the last known good policy. gh 2.95.0
@@ -1037,9 +1037,9 @@ pub(crate) fn decide_gh_probe(
         // Nothing qualified, which is where the three different answers `gh`
         // collapses into one empty host set have to be told apart. An account
         // that could not reach GitHub has decided nothing, and recording it as
-        // "not authenticated" is what used to switch every GitHub feature off
-        // for the rest of the run. No accounts at all, and an account GitHub
-        // rejected, both decide.
+        // "not authenticated" would switch every GitHub feature off for the rest
+        // of the run. No accounts at all, and an account GitHub rejected, both
+        // decide.
         if let Some(reason) = auth_status_transient_reason(&reading.active_errors) {
             return GhProbe::Transient(format!(
                 "gh auth status could not reach GitHub ({reason}); \
@@ -1078,8 +1078,8 @@ pub(crate) fn decide_gh_probe(
             // A non-zero exit decides against the user only when `gh` is talking
             // about the login. When it is reporting a rate limit, an API error
             // or a network fault, it has decided nothing: treating that as "not
-            // authenticated" is what used to switch every GitHub feature off
-            // until the next restart.
+            // authenticated" would switch every GitHub feature off until the next
+            // restart.
             if !output.status.success()
                 && !plain_status_says_logged_out(&output)
                 && let Some(reason) = plain_status_transient_reason(&output)

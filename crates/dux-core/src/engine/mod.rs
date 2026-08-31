@@ -1615,9 +1615,8 @@ impl Engine {
         self.failed_tab_runs.contains(TabIdRef::new(tab_id))
     }
 
-    /// Record that this tab's last run ended badly. Called from the two places
-    /// that observe a bad ending: the launch-failed event and the non-zero-exit
-    /// prune.
+    /// Record that this tab's last run ended badly. Called wherever a bad ending
+    /// is observed: the launch-failed event and the non-zero-exit prune.
     pub fn mark_tab_run_failed(&mut self, tab_id: &TabIdRef) {
         self.failed_tab_runs.insert(tab_id.to_owned());
     }
@@ -4829,7 +4828,7 @@ impl Engine {
     /// map the tab keyed is cleared.
     pub fn close_tab(&mut self, session_id: &str, tab_id: &str) -> anyhow::Result<CloseTabOutcome> {
         // Transport-facing: two path segments arrive as bare strings, which is
-        // exactly the pair that used to be swappable. Named here, at the door.
+        // exactly the pair a caller can swap unnoticed. Named here, at the door.
         let promoted = if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id))
         {
             Some(
@@ -4878,9 +4877,9 @@ impl Engine {
             // agent's last live process the auto-reopen intent goes with it
             // rather than resurrecting the agent at the next startup sweep. An
             // extra tab's close is not that gesture and leaves the intent alone.
-            // This is a deliberate departure from the plan's "the promotion
-            // transfers nothing": the intent belongs to the gesture, not to the
-            // tab, and leaving it set would reopen an agent the user just closed.
+            // The promotion transfers nothing else, but the intent belongs to the
+            // gesture rather than to the tab, and leaving it set would reopen an
+            // agent the user just closed.
             if promoted.is_some() {
                 self.mark_session_desired_running(session_id, false);
             }
@@ -4974,8 +4973,8 @@ impl Engine {
             anyhow::bail!("unknown session: {session_id}");
         }
         // The slot tab is represented as absence. That question goes to the
-        // resolver: it used to be an inline `id != session_id`, which stopped
-        // being right the moment the slot became a stored pointer.
+        // resolver, never to an inline `id != session_id`: the slot is a stored
+        // pointer, so it is not answerable by comparing against the session id.
         let normalized = match tab_id {
             Some(id)
                 if !self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(id))

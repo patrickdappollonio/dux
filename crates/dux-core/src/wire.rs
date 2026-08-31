@@ -2366,8 +2366,8 @@ impl Engine {
         tab_id: &str,
         provider: &str,
     ) -> anyhow::Result<WireStatus> {
-        // Two adjacent wire path segments: named at the door before the
-        // slot-ness question that used to be able to take them in either order.
+        // Two adjacent wire path segments: named at the door, before a slot-ness
+        // question that would otherwise accept them in either order.
         if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id)) {
             return self.change_agent_provider_wire(session_id, provider);
         }

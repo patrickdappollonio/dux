@@ -14,7 +14,7 @@ pub enum InFlightKey {
     /// A provider launch is in flight for this TAB. Keyed by tab id, never by
     /// session id: `Engine::tab_resume_decision` reads this key to decide whether
     /// a launching sibling already owns a provider's conversation, and it asks
-    /// per tab. The type says so, because the two keyspaces used to be
+    /// per tab. The type says so, because as bare strings the two keyspaces are
     /// interchangeable by accident (see [`crate::ids`]).
     AgentLaunch(TabId),
     /// An intentional git branch rename is in flight for this session id (the
