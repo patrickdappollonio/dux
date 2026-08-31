@@ -330,7 +330,7 @@ mod tests {
     fn session(worktree: &Path) -> AgentSession {
         AgentSession {
             id: "session-1".to_string(),
-            slot_tab_id: "session-1".to_string(),
+            slot_tab_id: "session-1-slot".to_string(),
             provider: ProviderKind::new("codex"),
             title: None,
             started_providers: Vec::new(),

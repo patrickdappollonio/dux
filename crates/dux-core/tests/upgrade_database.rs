@@ -668,7 +668,7 @@ fn old_state_survives_a_write_a_close_and_a_reopen() {
         store
             .upsert_session(&AgentSession {
                 id: "sess-folder".to_string(),
-                slot_tab_id: "sess-folder".to_string(),
+                slot_tab_id: "sess-folder-slot".to_string(),
                 provider: ProviderKind::from_str("claude"),
                 title: Some("My Notes".to_string()),
                 started_providers: Vec::new(),
@@ -796,7 +796,7 @@ fn a_migrated_title_is_not_re_frozen_when_a_later_agent_leaves_it_null() {
     store
         .upsert_session(&AgentSession {
             id: "sess-new".to_string(),
-            slot_tab_id: "sess-new".to_string(),
+            slot_tab_id: "sess-new-slot".to_string(),
             provider: ProviderKind::new("claude"),
             title: None,
             started_providers: Vec::new(),
@@ -962,9 +962,9 @@ fn opening_a_database_this_build_created_is_a_no_op_the_second_time() {
             })
             .expect("upsert project");
         store
-            .upsert_session(&AgentSession {
+            .create_session(&AgentSession {
                 id: "s1".to_string(),
-                slot_tab_id: "s1".to_string(),
+                slot_tab_id: "s1-slot".to_string(),
                 provider: ProviderKind::new("codex"),
                 title: Some("fresh".to_string()),
                 started_providers: vec!["codex".to_string()],
@@ -986,12 +986,21 @@ fn opening_a_database_this_build_created_is_a_no_op_the_second_time() {
                     },
                 ),
             })
-            .expect("upsert session");
+            .expect("create session");
     }
 
     let store = SessionStore::open(&path).expect("reopen");
     let sessions = store.load_sessions().expect("load");
     assert_eq!(sessions.len(), 1);
+    // The agent's identity is the part a second open must not silently repair:
+    // its pointer still names the tab created with it, and that tab is still
+    // the only one. A session built by hand with a pointer at no row would be
+    // healed on the reopen, and this baseline would be measuring the heal.
+    assert_eq!(sessions[0].slot_tab_id, "s1-slot");
+    let tabs = store.load_agent_tabs().expect("tabs");
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(tabs[0].id, "s1-slot");
+    assert_eq!(tabs[0].session_id, "s1");
     assert_eq!(sessions[0].title.as_deref(), Some("fresh"));
     assert!(sessions[0].desired_running);
     assert!(!sessions[0].auto_reopen_enabled);

@@ -640,7 +640,7 @@ mod tests {
         };
         let sessions = vec![AgentSession {
             id: "session-1".to_string(),
-            slot_tab_id: "session-1".to_string(),
+            slot_tab_id: "session-1-slot".to_string(),
             provider: ProviderKind::new("codex"),
             title: None,
             started_providers: Vec::new(),
@@ -765,7 +765,7 @@ mod tests {
         std::os::unix::fs::symlink(&occupied, &link).unwrap();
         let sessions = vec![AgentSession {
             id: "sa1".to_string(),
-            slot_tab_id: "sa1".to_string(),
+            slot_tab_id: "sa1-slot".to_string(),
             provider: ProviderKind::new("claude"),
             title: Some("notes".to_string()),
             started_providers: Vec::new(),

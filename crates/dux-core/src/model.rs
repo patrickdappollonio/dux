@@ -992,7 +992,7 @@ mod tests {
         let now = Utc::now();
         AgentSession {
             id: "sa1".to_string(),
-            slot_tab_id: "sa1".to_string(),
+            slot_tab_id: "sa1-slot".to_string(),
             provider: ProviderKind::new("claude"),
             workspace: AgentWorkspace::Folder(FolderWorkspace {
                 folder_path: folder_path.to_string(),

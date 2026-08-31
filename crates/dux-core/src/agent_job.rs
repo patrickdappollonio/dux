@@ -1497,7 +1497,7 @@ mod tests {
     fn fork_source_session(worktree: &Path) -> AgentSession {
         AgentSession {
             id: "src-1".to_string(),
-            slot_tab_id: "src-1".to_string(),
+            slot_tab_id: "src-1-slot".to_string(),
             provider: ProviderKind::new("cat"),
             title: None,
             started_providers: Vec::new(),

@@ -424,7 +424,7 @@ mod tests {
         let now = Utc::now();
         AgentSession {
             id: "session-1".to_string(),
-            slot_tab_id: "session-1".to_string(),
+            slot_tab_id: "session-1-slot".to_string(),
             provider: ProviderKind::from_str("codex"),
             title: None,
             started_providers: Vec::new(),

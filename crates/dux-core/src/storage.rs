@@ -1825,7 +1825,7 @@ fn test_session(
 ) -> crate::model::AgentSession {
     crate::model::AgentSession {
         id: id.to_string(),
-        slot_tab_id: id.to_string(),
+        slot_tab_id: format!("{id}-slot"),
         provider: crate::model::ProviderKind::new("claude"),
         title: None,
         started_providers: Vec::new(),
@@ -1887,7 +1887,7 @@ mod tests {
         let now = Utc::now();
         AgentSession {
             id: id.to_string(),
-            slot_tab_id: id.to_string(),
+            slot_tab_id: format!("{id}-slot"),
             provider: crate::model::ProviderKind::new("claude"),
             workspace: AgentWorkspace::Folder(FolderWorkspace {
                 folder_path: folder.to_string(),
