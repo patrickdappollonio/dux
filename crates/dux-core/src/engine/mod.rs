@@ -4336,14 +4336,6 @@ impl Engine {
         self.sessions.iter().find(|s| s.id == session_id)
     }
 
-    /// The id of `session`'s session-slot tab. Thin wrapper over
-    /// [`AgentSession::slot_tab_id`] so engine-side callers with an `Engine` in
-    /// hand ask the same question in the same words. See that method for why the
-    /// answer is not simply the session id forever.
-    pub fn slot_tab_id_for<'a>(&self, session: &'a AgentSession) -> &'a TabIdRef {
-        session.slot_tab_id()
-    }
-
     /// Whether `tab_id` names `session`'s session-slot tab. The engine-side
     /// spelling of [`AgentSession::is_slot_tab`]; no call site compares a tab id
     /// against a session id inline.
@@ -5118,7 +5110,7 @@ mod tests {
         let (engine, _tmp) = engine_with_an_extra_tab();
         let session = engine.session_by_id("s1").expect("session").clone();
 
-        let slot = engine.slot_tab_id_for(&session).to_owned();
+        let slot = session.slot_tab_id().to_owned();
         assert_eq!(
             engine.slot_tab_id_of(SessionIdRef::new("s1")),
             slot.as_ref_id()
