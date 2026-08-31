@@ -14,6 +14,7 @@ import {
   type AgentChipsInput,
   type HeaderChip,
 } from "@/lib/headerSubject"
+import { changesSummary } from "@/lib/changesSummary"
 import {
   changesPaneEffectivelyHidden,
   changesSpacerPercent,
@@ -221,6 +222,11 @@ export function InsetHeader() {
   // the terminal pane that just grew under it.
   const spacer = changesSpacerPercent(dux)
 
+  // What the reopen control says about the pane it brings back. Null while no
+  // agent is in view, which is also the state in which the phone draws no ±N
+  // control at all.
+  const summary = changesSummary(dux.changes, session?.id)
+
   return (
     <header className="relative flex h-12 shrink-0 items-center gap-2 border-b px-3">
       {/* The upward continuation of the changes-panel divider. Absolutely
@@ -306,9 +312,17 @@ export function InsetHeader() {
             outside the pane: the sidebar's rail-only expand button applied to
             the right panel. Same persisted preference write as the hide item;
             outline variant so it reads as one family with the AppMenu trigger
-            beside it. Icon only, deliberately: unlike Macros and Settings it is
-            transient chrome that exists only while the pane is away. Desktop
-            only by construction: InsetHeader mounts only in DesktopShell.
+            beside it. Desktop only by construction: InsetHeader mounts only
+            in DesktopShell.
+
+            It carries the same +/- summary the phone's changes control does,
+            out of the one shared helper, because while the pane is away nothing
+            else on this surface says how much the agent has changed. The count
+            is DATA rather than a label, so it is the deliberate exception to
+            keeping transient chrome icon-only: it widens the control and leaves
+            the cluster's one height token alone. With no agent in view there is
+            nothing for a count to be about, and the control is the bare icon it
+            has always been, which is also what the phone draws there.
 
             It shows for a ZERO-WIDTH pane as well, not just a hidden one. A
             divider dragged off the edge leaves the pane at 0% with the
@@ -320,11 +334,18 @@ export function InsetHeader() {
           <SimpleTooltip content="Show Changes pane">
             <Button
               variant="outline"
-              size="icon"
-              aria-label="Show Changes pane"
+              size={summary ? "default" : "icon"}
+              aria-label={
+                summary
+                  ? `Show Changes pane, ${summary.countLabel}`
+                  : "Show Changes pane"
+              }
               onClick={() => showChangesPane()}
             >
               <PanelRightOpen />
+              {summary ? (
+                <span className="tabular-nums">{summary.label}</span>
+              ) : null}
             </Button>
           </SimpleTooltip>
         )}

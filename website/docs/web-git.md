@@ -77,7 +77,8 @@ The pane header's `⋯` **Actions** menu carries the rest:
 - **Hide Changes pane** tucks the whole pane away. Dragging the split all the way closed
   does the same, though only when you let go: drag past the snap and back out before
   releasing and the pane stays. Either way a button appears on the right of the header to
-  bring it back at a sensible width, and the **Show the Changes pane** row in
+  bring it back at a sensible width, carrying the agent's changed-file count so you can
+  still see at a glance how much has moved, and the **Show the Changes pane** row in
   **Preferences** is the other way in, since hiding the pane takes this menu with it.
 
 ## The PR banner

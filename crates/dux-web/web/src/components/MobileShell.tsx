@@ -36,6 +36,7 @@ import {
   shouldShowTabStrip,
   slotTabIdOf,
 } from "@/lib/agentTabs"
+import { changesSummary, type ChangesSummary } from "@/lib/changesSummary"
 import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
@@ -380,7 +381,7 @@ interface TerminalHeaderProps {
   target: SelectedTarget
   focusedTab: AgentTabView | undefined
   projectName: string | undefined
-  changeCount: number
+  changes: ChangesSummary
 }
 
 function TerminalHeader({
@@ -388,7 +389,7 @@ function TerminalHeader({
   target,
   focusedTab,
   projectName,
-  changeCount,
+  changes,
 }: TerminalHeaderProps) {
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
@@ -432,10 +433,10 @@ function TerminalHeader({
         variant="outline"
         size="lg"
         className="min-w-11 shrink-0"
-        aria-label={`${changeCount} changed files`}
+        aria-label={changes.countLabel}
         onClick={() => openChangesScreen()}
       >
-        ±{changeCount}
+        {changes.label}
       </Button>
       <DropdownMenu>
         <DropdownMenuTrigger
@@ -540,10 +541,9 @@ function TerminalScreen() {
       ? tabs.find((tab) => tab.id === selectedTarget.tabId)
       : undefined
   const slotTabId = slotTabIdOf(session.id, session, pendingSlotTab)
-  const changeCount =
-    changes.sessionId === selectedSessionId && changes.phase === "loaded"
-      ? changes.staged.length + changes.unstaged.length
-      : 0
+  // The ±N summary, from the helper the desktop header's reopen control reads
+  // too. Non-null here because this screen has a session.
+  const changesControl = changesSummary(changes, session.id)
   const projectName = spine?.projects.find(
     (project) => project.id === workspaceProjectId(session.workspace),
   )?.name
@@ -557,7 +557,7 @@ function TerminalScreen() {
             target={selectedTarget}
             focusedTab={focusedTab}
             projectName={projectName}
-            changeCount={changeCount}
+            changes={changesControl}
           />
           {selectedTarget.kind === "agent" &&
           shouldShowTabStrip(tabs, bootstrap?.always_show_tab_strip ?? false) ? (

@@ -119,7 +119,10 @@ describe("InsetHeader app menu", () => {
     const macros = screen.getByRole("button", { name: /run a macro/i })
     expect(settings.className).toContain("h-8")
     expect(macros.className).toContain("h-8")
-    expect(reopen.className).toContain("size-8")
+    // The reopen control carries the changed-file count here (an agent is
+    // selected), so it is a text-bearing control on the same height token
+    // rather than a square.
+    expect(reopen.className).toContain("h-8")
     // …and no control in the row forces its own height on top of the token.
     for (const el of [settings, reopen, macros]) {
       expect(el.className).not.toMatch(/\bh-(9|10|11)\b/)
@@ -610,6 +613,115 @@ describe("InsetHeader show-Changes button", () => {
     expect(
       screen.queryByRole("button", { name: /show changes pane/i }),
     ).toBeNull()
+  })
+})
+
+// The reopen control carries the phone's ±N summary, from the one shared
+// helper, so the two surfaces cannot say different things about the same
+// worktree while the list itself is off screen.
+describe("InsetHeader show-Changes summary", () => {
+  function hiddenWith(changes: unknown): DuxState {
+    return {
+      ...stateFor("main", "main"),
+      bootstrap: { show_changes_pane: false },
+      changes,
+    } as unknown as DuxState
+  }
+
+  const changedFile = (path: string, status: string) => ({
+    path,
+    status,
+    additions: 0,
+    deletions: 0,
+    binary: false,
+  })
+
+  it("puts the changed-file count on the button while the pane is hidden", () => {
+    mockState = hiddenWith({
+      sessionId: "s1",
+      phase: "loaded",
+      rev: 1,
+      staged: [changedFile("a.rs", "M")],
+      unstaged: [changedFile("b.rs", "??"), changedFile("c.rs", "D")],
+    })
+    render(<InsetHeader />)
+    const button = screen.getByRole("button", { name: /show changes pane/i })
+    expect(button.textContent).toBe("±3")
+    // The icon stays: the count is what the pane holds, the glyph is what the
+    // press does.
+    expect(button.querySelector("svg")).toBeTruthy()
+    expect(button.getAttribute("aria-label")).toBe(
+      "Show Changes pane, 3 changed files",
+    )
+  })
+
+  it("shows the ±0 zero state, exactly as the phone does", () => {
+    mockState = hiddenWith({
+      sessionId: "s1",
+      phase: "loaded",
+      rev: 1,
+      staged: [],
+      unstaged: [],
+    })
+    render(<InsetHeader />)
+    expect(
+      screen.getByRole("button", { name: /show changes pane/i }).textContent,
+    ).toBe("±0")
+  })
+
+  it("keeps the cluster's one height token when it carries the number", () => {
+    mockState = hiddenWith({
+      sessionId: "s1",
+      phase: "loaded",
+      rev: 1,
+      staged: [changedFile("a.rs", "M")],
+      unstaged: [],
+    })
+    render(<InsetHeader />)
+    const button = screen.getByRole("button", { name: /show changes pane/i })
+    const settings = screen.getByRole("button", { name: /^settings$/i })
+    expect(button.className).toContain("h-8")
+    expect(settings.className).toContain("h-8")
+    // The number widens the control; it must never make it taller, and it must
+    // not go back to being a fixed square.
+    expect(button.className).not.toMatch(/(?:^|\s)size-\d/)
+    expect(button.className).not.toMatch(/\bh-(9|10|11)\b/)
+  })
+
+  it("stays a bare icon when no agent is in view", () => {
+    // A focused project terminal has no session, so there is no worktree the
+    // count would be about. The phone draws no ±N control there either.
+    mockState = {
+      selectedSessionId: null,
+      selectedTarget: null,
+      changesPanePercent: 26,
+      bootstrap: { show_changes_pane: false },
+      spine: { projects: [], sessions: [] },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    const button = screen.getByRole("button", { name: /show changes pane/i })
+    expect(button.textContent).toBe("")
+    expect(button.className).toContain("size-8")
+  })
+
+  it("carries no summary while the pane itself is on screen", () => {
+    // The pane lists the files; nothing in the header repeats the count.
+    mockState = {
+      ...stateFor("main", "main"),
+      bootstrap: { show_changes_pane: true },
+      changes: {
+        sessionId: "s1",
+        phase: "loaded",
+        rev: 1,
+        staged: [changedFile("a.rs", "M")],
+        unstaged: [],
+      },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    expect(
+      screen.queryByRole("button", { name: /show changes pane/i }),
+    ).toBeNull()
+    expect(document.body.textContent).not.toContain("±1")
   })
 })
 
