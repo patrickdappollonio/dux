@@ -127,8 +127,10 @@ use crate::server::AppState;
 /// dependency for no gain.
 #[derive(Deserialize)]
 struct DropQuery {
-    /// The PTY the pane is attached to: a terminal id, an agent's session id, or
-    /// an extra tab's id. The engine resolves all three.
+    /// The PTY the pane is attached to, as the PANE addresses it: a terminal
+    /// id, a tab id, or the bare agent id a client uses for whichever tab holds
+    /// the session slot. The engine resolves all of them, and the handler
+    /// resolves this one before it asks anything else about it.
     pty: String,
     /// The dropped filename, as the browser reported it. Validated, never
     /// rewritten.
@@ -269,6 +271,33 @@ async fn hold_a_file_drop_permit(
     next.run(req).await
 }
 
+/// The refusal for a pane id nothing answers to.
+///
+/// It NAMES THE ID, and that is the whole reason it exists as a function. The
+/// bare "unknown terminal or agent" it replaces was indistinguishable from a
+/// refusal about a pane the user was looking at while it was live, so a bug that
+/// resolved the wrong keyspace read to everyone (owner and maintainer alike) as
+/// a truthful answer about a missing agent. Saying which id was asked about
+/// turns that into a report somebody can act on.
+///
+/// The id is echoed back CHAR-truncated: the length bound is checked by the
+/// caller, but the over-length case is one of the callers, so this cannot lean
+/// on it. Byte slicing would panic inside a multi-byte character.
+fn unknown_pane(pane_id: &str) -> String {
+    const SHOWN: usize = 64;
+    let mut shown: String = pane_id.chars().take(SHOWN).collect();
+    if pane_id.chars().nth(SHOWN).is_some() {
+        shown.push('…');
+    }
+    // Lower-case and clause-shaped, because the browser reads it as the reason
+    // half of "Could not save <file>: <reason>".
+    format!(
+        "nothing on this server answers to the id \"{shown}\", so there was \
+         nowhere to put it. The pane may have been closed or detached since the \
+         page loaded; reload and try the file again."
+    )
+}
+
 async fn upload_dropped_file(
     State(state): State<AppState>,
     Query(query): Query<DropQuery>,
@@ -285,8 +314,26 @@ async fn upload_dropped_file(
             .into_response();
     }
     if !id_within_bound(&query.pty) {
-        return (StatusCode::NOT_FOUND, "unknown terminal or agent").into_response();
+        return (StatusCode::NOT_FOUND, unknown_pane(&query.pty)).into_response();
     }
+
+    // THE ID IS CANONICALIZED ONCE, HERE, BEFORE ANYTHING IS ASKED ABOUT IT.
+    //
+    // A pane addresses its PTY with whichever id its surface holds, and for an
+    // agent's slot tab that is the SESSION id: the tab's own id is generated and
+    // the client's URL grammar spells "whichever tab is in the slot" with the
+    // one id a hash can carry before a spine has named the real one. The PTY
+    // socket route resolves that spelling already, so everything below has to
+    // resolve it the same way or the first tab of every agent (the one pane
+    // every agent has) answers "unknown" to an upload while it is visibly live.
+    //
+    // Resolving it here rather than inside each lookup is what keeps the
+    // courtesy check honest: input ownership is recorded against the REAL pty
+    // key by the terminal socket, so a check asked with the placeholder would
+    // quietly find nothing and pass a drop it should have refused.
+    let Some(pty) = state.engine.pty_key_for_pane_id(query.pty.clone()).await else {
+        return (StatusCode::NOT_FOUND, unknown_pane(&query.pty)).into_response();
+    };
 
     // The courtesy check. See the module docs: the websocket's own write check
     // is what actually enforces input authority. This only exists so a viewer
@@ -299,7 +346,7 @@ async fn upload_dropped_file(
     // apply to it.
     if query.dir.is_none()
         && let Some(conn) = query.conn
-        && state.input_held_by_someone_else(&query.pty, conn)
+        && state.input_held_by_someone_else(&pty, conn)
     {
         return (
             StatusCode::CONFLICT,
@@ -332,22 +379,19 @@ async fn upload_dropped_file(
         Some(dir) => {
             state
                 .engine
-                .file_drop_tree_destination(query.pty.clone(), dir)
+                .file_drop_tree_destination(pty.clone(), dir)
                 .await
         }
-        None => state.engine.file_drop_destination(query.pty.clone()).await,
+        None => state.engine.file_drop_destination(pty.clone()).await,
     };
     let Some(destination) = destination else {
-        return (StatusCode::NOT_FOUND, "unknown terminal or agent").into_response();
+        return (StatusCode::NOT_FOUND, unknown_pane(&query.pty)).into_response();
     };
 
     // Which agent, if any, would want to hear that its files changed. Asked
     // BEFORE the write so the containment check can run inside the same blocking
     // task as the write itself, rather than costing the response a second hop.
-    let refresh_target = state
-        .engine
-        .file_drop_refresh_target(query.pty.clone())
-        .await;
+    let refresh_target = state.engine.file_drop_refresh_target(pty.clone()).await;
     let worktree = refresh_target.as_ref().map(|(_, w)| w.clone());
 
     let filename = query.filename.clone();
@@ -886,6 +930,123 @@ mod tests {
             std::fs::read_to_string(uploads.join(".gitignore")).unwrap(),
             "*\n"
         );
+    }
+
+    /// The way a BROWSER actually addresses an agent's first tab.
+    ///
+    /// The slot tab's id is generated and the session merely points at it, so
+    /// the client's URL grammar spells "whichever tab is in the slot" as the
+    /// SESSION id, and the pane carries that placeholder into every id it
+    /// sends, this upload included. The agent PTY socket accepts the same
+    /// spelling and resolves it server-side, so the upload route has to resolve
+    /// it too, or the one pane every agent has cannot attach a file at all.
+    ///
+    /// Every other test in this file names the slot tab by its real id, which
+    /// is a spelling the browser has no way to produce for this pane.
+    mod addressed_by_the_bare_agent_id {
+        use super::*;
+
+        #[tokio::test]
+        async fn a_pane_drop_lands_in_the_upload_directory() {
+            let (_tmp, wt, app) = router().await;
+            let resp = app
+                .oneshot(drop_req("pty=s1&filename=shot.png", b"png".to_vec()))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "a live agent's own pane must not be refused as unknown: {}",
+                body_text(resp).await
+            );
+            assert_eq!(
+                std::fs::read(wt.join(".dux/uploads/shot.png")).unwrap(),
+                b"png"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_tree_drop_lands_in_the_folder_that_was_dropped_on() {
+            // The editor's file tree addresses an agent root by its session id
+            // too (`rootPtyId`), so it regressed with the pane.
+            let (_tmp, wt, app) = router().await;
+            std::fs::create_dir_all(wt.join("assets")).unwrap();
+            let resp = app
+                .oneshot(drop_req(
+                    "pty=s1&filename=logo.png&dir=assets",
+                    b"bytes".to_vec(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
+            assert_eq!(std::fs::read(wt.join("assets/logo.png")).unwrap(), b"bytes");
+        }
+
+        #[tokio::test]
+        async fn a_pane_drop_is_refused_while_another_device_holds_the_terminal() {
+            // The courtesy check reads the same ownership map the terminal
+            // socket writes, and the socket records the SLOT TAB's id. Asked
+            // with the placeholder spelling it must still find that record, or
+            // the check silently never fires for the one pane every agent has.
+            let world = drop_world().await;
+            let slot = world
+                .handle
+                .slot_tab_id("s1".to_string())
+                .await
+                .expect("the fixture agent has a slot tab");
+            world.state.give_input_to(&slot, 7);
+
+            let resp = world
+                .app
+                .clone()
+                .oneshot(drop_req(
+                    "pty=s1&filename=shot.png&conn=99",
+                    b"png".to_vec(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            assert!(
+                !world.wt.join(".dux").exists(),
+                "a refused drop must write nothing"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_drop_refreshes_that_agent_s_changed_files() {
+            let world = drop_world().await;
+            let (generation, _) = world.refreshes();
+
+            let resp = world.drop_on("s1", "shot.png").await;
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let (generation_after, refreshes) = world.refreshes();
+            assert!(
+                generation_after > generation,
+                "the cache must be invalidated"
+            );
+            assert_eq!(refreshes.len(), 1, "got {refreshes:?}");
+            assert_eq!(
+                std::fs::canonicalize(&refreshes[0]).unwrap(),
+                std::fs::canonicalize(&world.wt).unwrap(),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_over_long_id_is_refused_without_echoing_all_of_it() {
+        // The length bound is checked before anything else, so its refusal
+        // is the one place the echoed id has not already been bounded.
+        // Truncation is by CHARACTER: byte slicing panics inside a
+        // multi-byte one, and a name full of them is exactly what a client
+        // can send.
+        let world = drop_world().await;
+        let long: String = std::iter::repeat_n('é', 4096).collect();
+        let resp = world.drop_on(&long, "notes.md").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let msg = body_text(resp).await;
+        assert!(msg.contains('…'), "got: {msg}");
+        assert!(msg.chars().count() < 300, "the whole id was echoed back");
     }
 
     #[tokio::test]
@@ -1532,6 +1693,13 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            let msg = body_text(resp).await;
+            assert!(
+                msg.contains("\"nobody\""),
+                "the refusal has to name the id it was asked about, or a \
+                 resolver bug about a LIVE pane reads as the truth about a \
+                 missing one: {msg}"
+            );
         }
     }
 

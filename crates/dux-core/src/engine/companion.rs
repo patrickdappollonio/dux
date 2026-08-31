@@ -341,12 +341,44 @@ impl Engine {
         Some((session.id.clone(), PathBuf::from(session.directory())))
     }
 
+    /// The runtime PTY key a PANE's addressed id names, or `None` when nothing
+    /// on this workspace answers to it.
+    ///
+    /// A pane addresses its PTY with whichever id its surface holds, and for an
+    /// agent's slot tab that is not always the tab's own id. The slot tab's id
+    /// is generated and the session merely points at it, so the browser's URL
+    /// grammar spells "whichever tab is in the slot" as the SESSION id: a hash
+    /// is parsed before any spine has named the real one, and the pane carries
+    /// that placeholder into every id it sends afterwards. The agent PTY socket
+    /// route already resolves that spelling (it streams
+    /// `slot_tab_id`, never the path's session id), and this is the same
+    /// resolution for every other seam that takes a pane id.
+    ///
+    /// The answer is a key into the runtime maps: a companion terminal id, or a
+    /// tab id. It is never a session id, which is exactly the point.
+    pub fn pty_key_for_pane_id(&self, pane_id: &str) -> Option<String> {
+        if self.companion_terminals.contains_key(pane_id) {
+            return Some(pane_id.to_string());
+        }
+        if self.owning_session_for_tab(pane_id).is_some() {
+            return Some(pane_id.to_string());
+        }
+        self.session_by_id(pane_id)
+            .map(|session| session.slot_tab_id().to_string())
+    }
+
     /// The agent session a pane's pty id belongs to: the agent whose
-    /// session-slot tab it is, or the session owning that extra tab. Routed
-    /// through `owning_session_for_tab` so this pane-side lookup and the rest of
-    /// the engine resolve a bare tab id the same single way.
+    /// session-slot tab it is, or the session owning that extra tab. The id is
+    /// canonicalized first, so the bare per-agent spelling a browser sends for
+    /// a slot tab resolves here exactly as it does on the PTY socket, and then
+    /// routed through `owning_session_for_tab` so this pane-side lookup and the
+    /// rest of the engine resolve a tab id the same single way.
+    ///
+    /// A companion terminal id canonicalizes to itself and owns no session, so
+    /// it answers `None` here; every caller matches terminals first anyway.
     fn session_behind_pty(&self, pty_id: &str) -> Option<&crate::model::AgentSession> {
-        let session_id = self.owning_session_for_tab(pty_id)?;
+        let tab_id = self.pty_key_for_pane_id(pty_id)?;
+        let session_id = self.owning_session_for_tab(&tab_id)?;
         self.session_by_id(&session_id)
     }
 }
@@ -413,6 +445,85 @@ mod tests {
         assert!(
             engine.file_drop_destination("nobody").is_none(),
             "an unknown pty id must not resolve to a directory"
+        );
+    }
+
+    #[test]
+    fn a_pane_addressed_by_the_bare_agent_id_resolves_to_the_slot_tab() {
+        // The client's URL grammar spells "whichever tab is in the slot" as the
+        // SESSION id, because the slot tab's own id is generated and a hash can
+        // be parsed before any spine names it. The agent PTY socket resolves
+        // that spelling server-side, so every other id-taking seam must resolve
+        // it the same way or the first tab is the one pane nothing works on.
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.agent_tabs.insert(
+            TabId::new("tab-9"),
+            crate::model::AgentTab {
+                id: "tab-9".to_string(),
+                session_id: "s1".to_string(),
+                provider: crate::model::ProviderKind::new("claude"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (terminal, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("companion terminal");
+
+        assert_eq!(
+            engine.pty_key_for_pane_id("s1").as_deref(),
+            Some("s1-slot"),
+            "the bare agent id is the slot tab's alias"
+        );
+        for already_canonical in ["s1-slot", "tab-9", terminal.as_str()] {
+            assert_eq!(
+                engine.pty_key_for_pane_id(already_canonical).as_deref(),
+                Some(already_canonical),
+                "a real pty key answers itself"
+            );
+        }
+        assert!(engine.pty_key_for_pane_id("nobody").is_none());
+
+        // And the alias reaches the destinations, since that is what the upload
+        // route asks with.
+        match engine.file_drop_destination("s1") {
+            Some(crate::file_drop::FileDropDestination::AgentUploads {
+                worktree: root, ..
+            }) => {
+                assert_eq!(root, worktree.path());
+            }
+            other => panic!("the bare agent id resolved to {other:?}"),
+        }
+        match engine.file_drop_tree_destination("s1", "assets") {
+            Some(crate::file_drop::FileDropDestination::WorktreeDirectory {
+                worktree: root,
+                relative,
+            }) => {
+                assert_eq!(root, worktree.path());
+                assert_eq!(relative, "assets");
+            }
+            other => panic!("the bare agent id resolved to {other:?}"),
+        }
+        assert_eq!(
+            engine
+                .file_drop_refresh_target("s1")
+                .map(|(id, _)| id)
+                .as_deref(),
+            Some("s1")
         );
     }
 

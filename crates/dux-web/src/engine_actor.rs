@@ -173,6 +173,10 @@ pub enum EngineRequest {
         String,
         oneshot::Sender<Option<dux_core::engine::SessionGitAccess>>,
     ),
+    /// The runtime PTY key a pane's addressed id names, resolving the bare
+    /// per-agent spelling of a slot tab the way the agent PTY socket does.
+    /// `None` when nothing answers to the id.
+    PtyKeyForPaneId(String, oneshot::Sender<Option<String>>),
     /// Where a file dropped onto the pane showing this pty id should be saved.
     /// The pty id may be a terminal, an agent's first tab, or an extra tab; the
     /// engine resolves all three. A terminal answers with a PLAN rather
@@ -1167,6 +1171,27 @@ impl EngineHandle {
         }
     }
 
+    /// The runtime PTY key a pane's addressed `pane_id` names: a terminal id or
+    /// a tab id, with the bare per-agent spelling of a slot tab resolved to that
+    /// tab. `None` when the id names nothing or the engine thread is gone.
+    ///
+    /// A route holding a pane id resolves it HERE, once, before asking anything
+    /// else about it, so a lookup against a runtime map keyed by the real pty
+    /// (input ownership, say) and a lookup that resolves the id itself cannot
+    /// answer about two different things.
+    pub async fn pty_key_for_pane_id(&self, pane_id: String) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::PtyKeyForPaneId(pane_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     /// Resolve `pty_id` to a file-drop destination. `None` when the pty id is
     /// unknown or the engine thread is gone.
     pub async fn file_drop_destination(
@@ -1807,6 +1832,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::SlotTabId(..)
         | EngineRequest::SessionWorktree(..)
         | EngineRequest::SessionGitAccess(..)
+        | EngineRequest::PtyKeyForPaneId(..)
         | EngineRequest::FileDropDestination(..)
         | EngineRequest::FileDropTreeDestination(..)
         | EngineRequest::FileDropRefreshTarget(..)
@@ -3510,6 +3536,9 @@ fn handle_request(
         }
         EngineRequest::CreateAgentBranchPlan(project_id, name, reply) => {
             handle_create_agent_branch_plan(engine, project_id, name, reply);
+        }
+        EngineRequest::PtyKeyForPaneId(pane_id, reply) => {
+            let _ = reply.send(engine.pty_key_for_pane_id(&pane_id));
         }
         EngineRequest::FileDropDestination(pty_id, reply) => {
             let _ = reply.send(engine.file_drop_destination(&pty_id));
@@ -6406,6 +6435,11 @@ mod tests {
                 false,
             ),
             (
+                "PtyKeyForPaneId",
+                EngineRequest::PtyKeyForPaneId("s1".into(), dead_reply()),
+                false,
+            ),
+            (
                 "FileDropDestination",
                 EngineRequest::FileDropDestination("s1".into(), dead_reply()),
                 false,
@@ -6601,7 +6635,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            41,
+            42,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );
