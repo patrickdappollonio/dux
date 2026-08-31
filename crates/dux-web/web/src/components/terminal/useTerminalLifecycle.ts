@@ -60,10 +60,12 @@ import { registerTerminalSocketCallbacks } from "./socketCallbacks"
 import { disposeTerminalLifecycle } from "./lifecycleCleanup"
 
 /// The streamed target: an agent tab, or a companion terminal of either owner.
-/// `id` is the FOCUSED TAB id for an agent (the session-slot tab's equals
-/// `sessionId`; an extra tab's does not) and the terminal id for a terminal.
+/// `id` is the FOCUSED TAB id for an agent and the terminal id for a terminal.
+/// `slotTabId` is the agent's slot tab as the spine names it, absent only while
+/// the spine has not arrived; slot-ness is decided against it, never against
+/// the session id.
 export type TerminalTarget =
-  | { kind: "agent"; id: string; sessionId: string }
+  | { kind: "agent"; id: string; sessionId: string; slotTabId?: string }
   | { kind: "terminal"; id: string; owner: TerminalOwnerRef }
 
 /// Everything the lifecycle needs that is neither a read-only setting nor one
@@ -165,16 +167,17 @@ export function useTerminalLifecycle(
   // The PTY socket URL for THIS target, derived from the target and nothing
   // else. For an agent, the session-slot tab uses the session PTY route and an
   // extra tab its own nested route; a terminal uses its owner's nested route.
-  // The target carries ids and no session record, so slot-ness is asked of the
-  // id-only helper the URL grammar shares. Both forms are valid for the slot tab
-  // now: the server serves it at its own `/tabs/:tab/pty` address too, and the
-  // bare per-agent route is a convenience alias onto the identical PTY. The
-  // choice below stays with the alias (no behavior change, and it keeps the slot
-  // tab out of the per-tab socket quota); the stable per-tab form is what tab
-  // promotion will move it to.
+  // Slot-ness is decided against the spine's `slotTabId`, because the slot tab's
+  // id is generated and the session id is only a placeholder for it. Both forms
+  // are valid for the slot tab now: the server serves it at its own
+  // `/tabs/:tab/pty` address too, and the bare per-agent route is a convenience
+  // alias onto the identical PTY. The choice below stays with the alias (no
+  // behavior change, and it keeps the slot tab out of the per-tab socket quota);
+  // the stable per-tab form is what tab promotion will move it to.
+  const slotTabId = target.kind === "agent" ? target.slotTabId : undefined
   const ptyUrl =
     target.kind === "agent"
-      ? isSlotTabTarget(target.sessionId, target.id)
+      ? isSlotTabTarget(target.sessionId, target.id, slotTabId)
         ? agentPtyUrl(target.sessionId)
         : tabPtyUrl(target.sessionId, target.id)
       : terminalSocketUrl(target.owner, target.id)
@@ -394,6 +397,7 @@ export function useTerminalLifecycle(
       kind,
       id,
       sessionId,
+      slotTabId,
       live,
       connId,
       resize,

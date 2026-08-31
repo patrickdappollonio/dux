@@ -15,6 +15,7 @@ fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
     let n = chrono::Utc::now();
     dux_core::model::AgentSession {
         id: id.to_string(),
+        slot_tab_id: format!("{id}-slot"),
         provider: dux_core::model::ProviderKind::new("claude"),
         title: None,
         started_providers: Vec::new(),
@@ -75,10 +76,10 @@ async fn boot_with_tab_per_agent(tab_per_agent: u32) -> (SocketAddr, tempfile::T
             })
             .unwrap();
         store
-            .upsert_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
+            .create_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
             .unwrap();
         store
-            .upsert_session(&sample_session("s2", wt2.to_string_lossy().as_ref()))
+            .create_session(&sample_session("s2", wt2.to_string_lossy().as_ref()))
             .unwrap();
     }
     let mut engine = bootstrap_engine(&paths).unwrap();
@@ -145,7 +146,7 @@ async fn boot_with_broken_provider() -> (SocketAddr, tempfile::TempDir) {
             })
             .unwrap();
         store
-            .upsert_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
+            .create_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
             .unwrap();
     }
     let mut engine = bootstrap_engine(&paths).unwrap();
@@ -258,6 +259,24 @@ where
     }
 }
 
+/// The id of the agent's session-slot tab, as the wire reports it. Never
+/// assume it equals the session id: it is a generated tab id that the session
+/// row merely points at.
+async fn slot_tab_id(client: &reqwest::Client, addr: SocketAddr, id: &str) -> String {
+    let session: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    session["slot_tab_id"]
+        .as_str()
+        .expect("the spine names the slot tab")
+        .to_string()
+}
+
 fn tab_has_live_process(session: &serde_json::Value, tab_id: &str) -> bool {
     session["tabs"]
         .as_array()
@@ -356,8 +375,9 @@ async fn delete_first_tab_is_refused_with_a_reason() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
 
+    let slot = slot_tab_id(&client, addr, "s1").await;
     let resp = client
-        .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/s1"))
+        .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/{slot}"))
         .send()
         .await
         .unwrap();
@@ -382,7 +402,7 @@ async fn delete_first_tab_is_refused_with_a_reason() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|t| t["id"].as_str() == Some("s1")),
+            .any(|t| t["id"].as_str() == Some(slot.as_str())),
         "the first tab is still there: {session}"
     );
 }
@@ -936,12 +956,17 @@ async fn both_address_forms_of_the_slot_tab_reach_the_same_pty() {
         .await
         .unwrap();
     assert!(launch.status().is_success(), "reconnect should launch s1");
-    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, "s1")).await;
+    let slot = slot_tab_id(&client, addr, "s1").await;
+    assert_ne!(
+        slot, "s1",
+        "the slot tab is a generated id the session points at, not the session id"
+    );
+    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &slot)).await;
 
     let bare = format!("ws://{addr}/ws/sessions/s1/pty");
-    // The slot tab's own stable address: `:tab` equals the slot tab id, which is
-    // the session id today.
-    let per_tab = format!("ws://{addr}/ws/sessions/s1/tabs/s1/pty");
+    // The slot tab's own stable address. The bare form has to resolve it through
+    // the session's pointer, which is the whole point of the round trip below.
+    let per_tab = format!("ws://{addr}/ws/sessions/s1/tabs/{slot}/pty");
 
     /// Write `line` on `writer` and wait for it to come back on `reader`,
     /// retrying the write: input is gated on pty ownership, and a previous

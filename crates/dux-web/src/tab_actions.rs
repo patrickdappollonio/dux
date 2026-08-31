@@ -26,7 +26,7 @@
 //!   `{ "tab_id", "provider" }`. 404 when `:id` is unknown; 400 when the provider
 //!   is not configured.
 //! - `DELETE /api/v1/sessions/:id/tabs/:tab`       - close one tab. The agent's
-//!   FIRST tab (`:tab == :id`, the session-slot tab, which has no row) cannot be
+//!   FIRST tab (the session-slot tab, the one the session's pointer names) cannot be
 //!   closed and is refused with a 400 saying why; any other tab is closed and
 //!   its row removed, returning 200 + `{ "detached": <bool> }` (closing an
 //!   agent's LAST live tab detaches it). A `:tab` not owned by `:id` is a 404.
@@ -146,7 +146,7 @@ async fn delete_tab(
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp.into_response();
     }
-    // The agent's first tab cannot be closed: it has no row of its own and it
+    // The agent's first tab cannot be closed: it holds the session slot and it
     // lives as long as the agent does. This route is reachable by hand as well
     // as from the browser (whose menu item is disabled), so it refuses out loud
     // rather than quietly doing something else. It used to stop that tab's

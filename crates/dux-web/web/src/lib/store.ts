@@ -1820,8 +1820,16 @@ function slotTabIdFor(sessionId: string): string {
 // Slot-ness for the same imperative actions. Twin of `slotTabIdFor`, and the
 // only way this module answers the question when it holds two ids rather than a
 // session record.
+//
+// The PLACEHOLDER spelling counts too. A target built before any spine arrived
+// (a parsed hash, the editor's flattened root) names the slot tab by the
+// session id, because that is the URL grammar's way of saying "the first tab,
+// whichever it is". Both spellings must answer the same, or the same position
+// serializes to two different hashes depending on when it was built. A real
+// extra tab can never collide with it: tab ids are generated and a session's
+// own id is never handed out as one.
 function isSlotTabOf(sessionId: string, tabId: string): boolean {
-  return tabId === slotTabIdFor(sessionId)
+  return tabId === slotTabIdFor(sessionId) || isSlotTabTarget(sessionId, tabId)
 }
 
 // Move the user to a real destination when what they were looking at no longer
@@ -2275,7 +2283,9 @@ function selectionHash(target: SelectedTarget | null): string {
     }
   }
   const base = `#/agent/${encodeURIComponent(target.sessionId)}`
-  return isSlotTabTarget(target.sessionId, target.tabId)
+  // Spine-aware: the slot tab's real id is a generated one, and emitting it as
+  // a `/tab/` segment would change every bookmark an agent already has.
+  return isSlotTabOf(target.sessionId, target.tabId)
     ? base
     : `${base}/tab/${encodeURIComponent(target.tabId)}`
 }
@@ -3689,7 +3699,7 @@ export function closeStopAgent(): void {
 }
 
 // Close an EXTRA tab via REST. Only extra tabs can be closed: the agent's first
-// tab has no row of its own, lives as long as the agent
+// tab holds the session slot and lives as long as the agent
 // does, and the route refuses it with a 400, so no caller may send one here (the
 // tab strip disables the menu item, and the Task Manager's first-tab row stops
 // the agent through `killSessionPty` instead). Closing an extra tab destroys it

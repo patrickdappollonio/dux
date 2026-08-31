@@ -12894,6 +12894,7 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let client = PtyClient::spawn(
             "/bin/sh",
             &["-c".to_string(), "sleep 30".to_string()],
@@ -12905,7 +12906,7 @@ mod tests {
         .expect("spawn pty");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.focus = FocusPane::Left;
         app.rebuild_left_items();
 
@@ -12937,7 +12938,7 @@ mod tests {
         let provider = app
             .engine
             .providers
-            .get(TabIdRef::new(&session_id))
+            .get(TabIdRef::new(&slot_tab))
             .expect("the seeded provider");
         let (one, _rx1) = provider.subscribe();
         let (two, _rx2) = provider.subscribe();
@@ -12965,7 +12966,7 @@ mod tests {
     #[test]
     fn the_center_pane_caption_names_the_watchers_of_the_tab_it_shows() {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.rebuild_left_items();
         app.selected_left = app
             .left_items_cache
@@ -12989,7 +12990,7 @@ mod tests {
         let (_guard, _rx) = client.subscribe();
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
 
         let title = app.center_pane_agent_title();
         assert!(
@@ -13070,9 +13071,10 @@ mod tests {
     fn the_remote_count_sums_over_an_agents_tabs() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
         let mut guards = Vec::new();
-        for tab_id in [session_id.clone(), "tab-2".to_string()] {
+        for tab_id in [slot_tab, "tab-2".to_string()] {
             let client = PtyClient::spawn(
                 "/bin/sh",
                 &["-c".to_string(), "sleep 30".to_string()],
@@ -15099,13 +15101,17 @@ mod tests {
     /// A two-tab app whose session is Active (the guard the working cue needs),
     /// with the app clock pinned so the blink phase and spinner frame are
     /// deterministic.
-    fn tab_activity_app(elapsed_ms: u64) -> (App, String) {
+    /// Returns the app, the session's id, and its SLOT TAB's id. The two are
+    /// different strings, and the callers need both: a pill's region and an
+    /// activity key are tab-keyed, while focusing a tab is session-keyed.
+    fn tab_activity_app(elapsed_ms: u64) -> (App, String, String) {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.sessions[0].status = crate::model::SessionStatus::Active;
         seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
         app.start_time = Instant::now() - Duration::from_millis(elapsed_ms);
-        (app, session_id)
+        (app, session_id, slot_tab)
     }
 
     /// The column of a pill's one-cell activity slot: the box's left border,
@@ -15165,7 +15171,7 @@ mod tests {
         app.engine.pending_deletions.insert(session.id.clone());
         app.engine
             .needs_attention
-            .insert(TabId::new(session.id.clone()));
+            .insert(session.slot_tab_id().to_owned());
         app.engine
             .pty_activity
             .insert(session.id.clone(), Instant::now());
@@ -15250,11 +15256,11 @@ mod tests {
         // 800ms into the cycle: the blink holds visible for another 1.2s, and
         // the spinner is asserted by frame membership below, so the frame
         // boundary does not matter.
-        let (mut app, session_id) = tab_activity_app(800);
+        let (mut app, _session_id, slot_tab) = tab_activity_app(800);
 
         // Idle: both slots blank.
         let cells = tab_strip_label_row(&mut app, 80);
-        for tab in [session_id.as_str(), "tab-2"] {
+        for tab in [slot_tab.as_str(), "tab-2"] {
             let col = tab_glyph_col(&app, tab) as usize;
             assert_eq!(
                 cells[col].0, " ",
@@ -15277,7 +15283,7 @@ mod tests {
             "the working tab must carry a frame of the agent list's shared spinner"
         );
         assert_eq!(
-            cells[tab_glyph_col(&app, &session_id) as usize].0,
+            cells[tab_glyph_col(&app, &slot_tab) as usize].0,
             " ",
             "its idle sibling must stay blank"
         );
@@ -15285,9 +15291,9 @@ mod tests {
         // Only tab 1 is flagged (and tab 2 keeps working).
         app.engine
             .needs_attention
-            .insert(TabId::new(session_id.clone()));
+            .insert(TabId::new(slot_tab.clone()));
         let cells = tab_strip_label_row(&mut app, 80);
-        let flagged = &cells[tab_glyph_col(&app, &session_id) as usize];
+        let flagged = &cells[tab_glyph_col(&app, &slot_tab) as usize];
         assert_eq!(
             flagged.0,
             crate::theme::ATTENTION_GLYPH,
@@ -15314,7 +15320,7 @@ mod tests {
     /// keeps the lifecycle color and reserves the accent for attention.
     #[test]
     fn a_working_pills_spinner_wears_the_agent_rows_glyph_tone() {
-        let (mut app, session_id) = tab_activity_app(800);
+        let (mut app, session_id, _slot_tab) = tab_activity_app(800);
         app.set_focused_tab(&session_id, "tab-2");
         app.engine
             .pty_activity
@@ -15439,7 +15445,7 @@ mod tests {
     #[test]
     fn a_working_and_flagged_pill_never_falls_back_to_the_spinner() {
         for (elapsed, expected) in [(800u64, crate::theme::ATTENTION_GLYPH), (650, " ")] {
-            let (mut app, _session_id) = tab_activity_app(elapsed);
+            let (mut app, _session_id, _slot_tab) = tab_activity_app(elapsed);
             app.engine
                 .pty_activity
                 .insert("tab-2".to_string(), Instant::now());
@@ -15459,7 +15465,7 @@ mod tests {
     /// setting turns off the attention cue, not every cue).
     #[test]
     fn the_pill_honors_the_attention_indicator_preference() {
-        let (mut app, _session_id) = tab_activity_app(800);
+        let (mut app, _session_id, _slot_tab) = tab_activity_app(800);
         app.engine.config.ui.attention_indicator = false;
         app.engine.needs_attention.insert(TabId::new("tab-2"));
 
@@ -15492,7 +15498,7 @@ mod tests {
             crate::model::SessionStatus::Detached,
             crate::model::SessionStatus::Exited,
         ] {
-            let (mut app, _session_id) = tab_activity_app(800);
+            let (mut app, _session_id, _slot_tab) = tab_activity_app(800);
             app.engine.sessions[0].status = status;
             app.engine
                 .pty_activity
@@ -15523,12 +15529,13 @@ mod tests {
     fn a_flagged_non_active_agent_loses_the_dot_on_both_surfaces() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.sessions[0].status = crate::model::SessionStatus::Exited;
         seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
         app.engine.needs_attention.insert(TabId::new("tab-2"));
         app.engine
             .needs_attention
-            .insert(TabId::new(session_id.clone()));
+            .insert(TabId::new(slot_tab.clone()));
         // Deep in the blink's HOLD phase, where a live dot would certainly show.
         app.start_time = Instant::now() - Duration::from_millis(1500);
         assert!(app.attention_blink_on(), "test setup: the blink is visible");
@@ -15555,7 +15562,7 @@ mod tests {
     /// idle focused pill's slot is blank and no dot appears anywhere in the strip.
     #[test]
     fn the_focused_pill_carries_no_active_marker() {
-        let (mut app, session_id) = tab_activity_app(800);
+        let (mut app, session_id, _slot_tab) = tab_activity_app(800);
         app.set_focused_tab(&session_id, "tab-2");
 
         let cells = tab_strip_label_row(&mut app, 80);
@@ -15576,7 +15583,7 @@ mod tests {
     /// while the unfocused one does not.
     #[test]
     fn the_focused_pill_stays_readable_without_color() {
-        let (mut app, session_id) = tab_activity_app(800);
+        let (mut app, session_id, _slot_tab) = tab_activity_app(800);
         app.set_focused_tab(&session_id, "tab-2");
 
         let cells = tab_strip_label_row(&mut app, 80);
@@ -15600,7 +15607,7 @@ mod tests {
     fn a_pills_geometry_does_not_move_when_its_activity_changes() {
         let mut geometry = Vec::new();
         for state in 0..3 {
-            let (mut app, session_id) = tab_activity_app(800);
+            let (mut app, _session_id, slot_tab) = tab_activity_app(800);
             match state {
                 1 => {
                     app.engine
@@ -15616,7 +15623,7 @@ mod tests {
             let mut regions: Vec<(String, Rect)> = app.agent_tab_regions.clone();
             regions.sort_by(|a, b| a.0.cmp(&b.0));
             assert!(
-                regions.iter().any(|(id, _)| *id == session_id),
+                regions.iter().any(|(id, _)| *id == slot_tab),
                 "both pills must be recorded"
             );
             geometry.push(regions);
@@ -15729,7 +15736,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let client = PtyClient::spawn(
             "/bin/sh",
             &["-c".to_string(), "sleep 30".to_string()],
@@ -15742,7 +15749,7 @@ mod tests {
         assert!(!client.has_output(), "test setup: the PTY is still loading");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.session_surface = SessionSurface::Agent;
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Left;
@@ -15762,7 +15769,7 @@ mod tests {
         );
         assert_eq!(
             app.last_pty_resize_target.as_deref(),
-            Some(session_id.as_str())
+            Some(slot_tab.as_str())
         );
         let rendered = buffer_rows(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("Starting"), "loading card: {rendered}");
@@ -15815,7 +15822,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         // `ESC[5;9H` moves the cursor to row 5, col 9 (1-based) = row 4, col 8
         // (0-based); printing 'X' there advances it to row 4, col 9 (0-based).
@@ -15826,7 +15833,9 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
 
         // Enter interactive fullscreen agent mode.
         app.input_target = InputTarget::Agent;
@@ -15871,14 +15880,16 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let args = vec![
             "-c".to_string(),
             "printf '\\033[5;9HX'; sleep 30".to_string(),
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
 
         // Inline agent view: no fullscreen overlay, center pane focused.
         app.input_target = InputTarget::Agent;
@@ -15919,14 +15930,16 @@ mod tests {
     /// (row 4, col 9), for the caret-placement tests below.
     fn app_with_parked_agent_cursor() -> App {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let args = vec![
             "-c".to_string(),
             "printf '\\033[5;9HX'; sleep 30".to_string(),
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.session_surface = SessionSurface::Agent;
         app
     }
@@ -16236,7 +16249,7 @@ mod tests {
     #[test]
     fn a_scrolled_back_typeable_pane_shows_no_caret() {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         // Enough lines to overflow the pane even after the first render
         // resizes the PTY to the pane's height, so real history remains.
         let args = vec![
@@ -16245,7 +16258,9 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 200)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.session_surface = SessionSurface::Agent;
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
@@ -16356,20 +16371,21 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        let first_id = app.engine.sessions[0].id.clone();
+        let first_slot = app.engine.sessions[0].slot_tab_id().to_string();
         let mut second = app.engine.sessions[0].clone();
         second.id = "session-two".to_string();
+        second.slot_tab_id = "session-two-slot".to_string();
         second
             .workspace
             .as_managed_mut()
             .expect("managed test session")
             .branch_name = "second".to_string();
-        let second_id = second.id.clone();
+        let second_slot = second.slot_tab_id().to_string();
         app.engine.sessions.push(second);
         app.rebuild_left_items();
 
         let args = vec!["-c".to_string(), "sleep 30".to_string()];
-        for id in [&first_id, &second_id] {
+        for id in [&first_slot, &second_slot] {
             let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
                 .expect("spawn pty");
             app.engine.providers.insert(TabId::new(id.clone()), client);
@@ -16403,7 +16419,7 @@ mod tests {
         );
         assert_eq!(
             app.last_pty_resize_target.as_deref(),
-            Some(first_id.as_str())
+            Some(first_slot.as_str())
         );
 
         // Same pane, different agent. Comparing geometry alone says "nothing
@@ -16416,9 +16432,9 @@ mod tests {
         );
         assert_eq!(
             app.last_pty_resize_target.as_deref(),
-            Some(second_id.as_str())
+            Some(second_slot.as_str())
         );
-        let snapshot = app.engine.providers[TabIdRef::new(&second_id)].snapshot();
+        let snapshot = app.engine.providers[TabIdRef::new(&second_slot)].snapshot();
         assert_eq!(
             (snapshot.rows, snapshot.cols),
             pane,
@@ -16426,11 +16442,11 @@ mod tests {
         );
 
         // A redraw with neither the pane nor the target moving still dedupes.
-        app.engine.providers[TabIdRef::new(&second_id)]
+        app.engine.providers[TabIdRef::new(&second_slot)]
             .resize(9, 9)
             .expect("resize");
         draw(&mut app);
-        let snapshot = app.engine.providers[TabIdRef::new(&second_id)].snapshot();
+        let snapshot = app.engine.providers[TabIdRef::new(&second_slot)].snapshot();
         assert_eq!(
             (snapshot.rows, snapshot.cols),
             (9, 9),
@@ -16449,7 +16465,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         // Print more lines than the 6-row grid holds so there is real history
         // to scroll into, then stay alive.
         let args = vec![
@@ -16458,7 +16474,9 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 6, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
 
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
@@ -16547,7 +16565,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         // More lines than the 6-row grid holds, so there is real history to
         // scroll into, then stay alive.
         let args = vec![
@@ -16556,7 +16574,9 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 6, 80, 2000)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
 
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
@@ -16625,7 +16645,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         // Wide CJK lines first, then narrow ASCII ones, so scrolling replaces
         // double-width glyphs (and their spacers) with single-width text.
         let args = vec![
@@ -16636,7 +16656,9 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 6, 80, 2000)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
 
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
@@ -16734,7 +16756,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         // Park the PTY cursor at row 4, col 9 (0-based), same as the #258 tests.
         let args = vec![
             "-c".to_string(),
@@ -16742,7 +16764,9 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
 
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
@@ -17345,7 +17369,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         // Red foreground on blue background, at a known cell.
         let args = vec![
             "-c".to_string(),
@@ -17353,7 +17377,9 @@ mod tests {
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
 
         // Non-interactive: the pane is visible but input is NOT routed to it.
         app.session_surface = SessionSurface::Agent;
@@ -18754,7 +18780,7 @@ mod tests {
         use ratatui::Terminal;
 
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let args = vec![
             "-c".to_string(),
             "stty -echo; printf BEFORE; IFS= read -r line; printf '\rAFTER '; sleep 30".to_string(),
@@ -18763,11 +18789,11 @@ mod tests {
             .expect("spawn pty");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.focus = FocusPane::Center;
         let mut terminal = Terminal::new(RecordingBackend::new(160, 40)).expect("terminal");
         for _ in 0..200 {
-            let snapshot = app.engine.providers[TabIdRef::new(&session_id)].snapshot();
+            let snapshot = app.engine.providers[TabIdRef::new(&slot_tab)].snapshot();
             if snapshot
                 .cells
                 .iter()
@@ -18796,11 +18822,11 @@ mod tests {
             "Help did not isolate itself from the workspace"
         );
 
-        app.engine.providers[TabIdRef::new(&session_id)]
+        app.engine.providers[TabIdRef::new(&slot_tab)]
             .write_bytes(b"continue\n")
             .expect("write to agent");
         for _ in 0..200 {
-            let snapshot = app.engine.providers[TabIdRef::new(&session_id)].snapshot();
+            let snapshot = app.engine.providers[TabIdRef::new(&slot_tab)].snapshot();
             if snapshot
                 .cells
                 .iter()

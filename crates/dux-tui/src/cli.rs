@@ -943,6 +943,7 @@ mod tests {
         store
             .upsert_session(&AgentSession {
                 id: "sa1".to_string(),
+                slot_tab_id: "sa1".to_string(),
                 provider: ProviderKind::new("claude"),
                 workspace: dux_core::model::AgentWorkspace::Folder(
                     dux_core::model::FolderWorkspace {
@@ -1008,6 +1009,7 @@ mod tests {
         store
             .upsert_session(&AgentSession {
                 id: "m1".to_string(),
+                slot_tab_id: "m1".to_string(),
                 provider: ProviderKind::new("claude"),
                 workspace: dux_core::model::AgentWorkspace::Managed(
                     dux_core::model::ManagedWorkspace {
@@ -1035,6 +1037,7 @@ mod tests {
         store
             .upsert_session(&AgentSession {
                 id: "sa1".to_string(),
+                slot_tab_id: "sa1".to_string(),
                 provider: ProviderKind::new("claude"),
                 workspace: dux_core::model::AgentWorkspace::Folder(
                     dux_core::model::FolderWorkspace {
@@ -1880,6 +1883,7 @@ mod tests {
             store
                 .upsert_session(&AgentSession {
                     id: id.to_string(),
+                    slot_tab_id: id.to_string(),
                     provider: ProviderKind::new("claude"),
                     title: None,
                     started_providers: Vec::new(),
@@ -1950,6 +1954,7 @@ mod tests {
         let now = Utc::now();
         let session = AgentSession {
             id: "wt".to_string(),
+            slot_tab_id: "wt".to_string(),
             provider: ProviderKind::new("claude"),
             title: None,
             started_providers: Vec::new(),
@@ -2044,6 +2049,7 @@ mod tests {
         let now = Utc::now();
         let session = AgentSession {
             id: "wt".to_string(),
+            slot_tab_id: "wt".to_string(),
             provider: ProviderKind::new("claude"),
             title: None,
             started_providers: Vec::new(),

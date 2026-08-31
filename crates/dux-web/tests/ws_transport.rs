@@ -25,6 +25,7 @@ fn sample_session(
     let now = chrono::Utc::now();
     dux_core::model::AgentSession {
         id: id.to_string(),
+        slot_tab_id: format!("{id}-slot"),
         provider: dux_core::model::ProviderKind::new("claude"),
         title: Some(format!("{id}-title")),
         started_providers: Vec::new(),
@@ -74,7 +75,7 @@ async fn boot() -> (SocketAddr, tempfile::TempDir) {
             })
             .unwrap();
         store
-            .upsert_session(&sample_session(
+            .create_session(&sample_session(
                 "s1",
                 "p1",
                 "feat",
@@ -163,7 +164,7 @@ async fn boot_with_repo() -> (SocketAddr, tempfile::TempDir) {
             })
             .unwrap();
         store
-            .upsert_session(&sample_session(
+            .create_session(&sample_session(
                 "s1",
                 "p1",
                 "feat",
@@ -525,7 +526,7 @@ async fn boot_with_gated_startup_command() -> (SocketAddr, std::path::PathBuf, t
             })
             .unwrap();
         store
-            .upsert_session(&sample_session(
+            .create_session(&sample_session(
                 "s1",
                 "p1",
                 "feat",
@@ -1094,7 +1095,7 @@ async fn boot_two_sessions() -> (SocketAddr, tempfile::TempDir) {
             })
             .unwrap();
         store
-            .upsert_session(&sample_session(
+            .create_session(&sample_session(
                 "s1",
                 "p1",
                 "feat",
@@ -1102,7 +1103,7 @@ async fn boot_two_sessions() -> (SocketAddr, tempfile::TempDir) {
             ))
             .unwrap();
         store
-            .upsert_session(&sample_session(
+            .create_session(&sample_session(
                 "s2",
                 "p1",
                 "feat2",
@@ -1227,7 +1228,7 @@ async fn first_binary_input_claims_an_unowned_pty_and_announces_its_owner() {
     let owner = next_event_frame(&mut events, "pty.owner", Duration::from_secs(8))
         .await
         .expect("first input must announce the new owner");
-    assert_eq!(owner["id"].as_str(), Some("s1"));
+    assert_eq!(owner["id"].as_str(), Some("s1-slot"));
     assert_eq!(owner["owner"].as_str(), Some(connection_id));
 }
 
@@ -1747,7 +1748,7 @@ async fn an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner() {
     let claimed = next_pty_owner(&mut events)
         .await
         .expect("the claim must broadcast a pty.owner");
-    assert_eq!(claimed["id"].as_str(), Some("s1"));
+    assert_eq!(claimed["id"].as_str(), Some("s1-slot"));
     let claim_owner = claimed["owner"]
         .as_str()
         .expect("a claim names its owner")
@@ -1761,7 +1762,7 @@ async fn an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner() {
     let cleared = next_pty_owner(&mut events)
         .await
         .expect("the owner's disconnect must broadcast an owner-cleared pty.owner");
-    assert_eq!(cleared["id"].as_str(), Some("s1"));
+    assert_eq!(cleared["id"].as_str(), Some("s1-slot"));
     assert!(
         cleared.get("owner").is_none() || cleared["owner"].is_null(),
         "an owner-cleared event names nobody, so every client reads it as 'not \

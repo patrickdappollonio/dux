@@ -418,7 +418,6 @@ fn engine_unavailable() -> Response {
 mod tests {
     use axum::body::Body;
     use axum::http::Request;
-    use dux_core::ids::TabId;
     use std::path::Path;
     use tower::ServiceExt;
 
@@ -630,8 +629,9 @@ mod tests {
         let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
         let now = chrono::Utc::now();
         store
-            .upsert_session(&dux_core::model::AgentSession {
+            .create_session(&dux_core::model::AgentSession {
                 id: "s1".to_string(),
+                slot_tab_id: "s1-slot".to_string(),
                 provider: dux_core::model::ProviderKind::new("claude"),
                 title: None,
                 started_providers: Vec::new(),
@@ -656,7 +656,11 @@ mod tests {
             .unwrap();
         drop(store);
         let mut engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
-        engine.mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
+        engine.mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(
+            engine
+                .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+                .to_owned(),
+        ));
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
         (tmp, crate::server::router(handle))
     }

@@ -1415,7 +1415,7 @@ impl App {
                 // the "Launching…"/"Starting fresh…" busy. Falls back to an
                 // anonymous info when no op is stashed (e.g. a launch not driven
                 // through the reconnect dispatch sites).
-                // Key by tab id: the session-slot tab's == its session id (resolves its
+                // Key by tab id, which the slot pointer names (resolves its
                 // pending reconnect op as before), but an extra-tab launch has no
                 // op under its tab id, so it falls through to an anonymous status
                 // instead of resolving the session-slot tab's op with the wrong message.
@@ -1766,6 +1766,7 @@ mod tests {
     fn test_session(worktree: &Path) -> AgentSession {
         AgentSession {
             id: "session-1".to_string(),
+            slot_tab_id: "session-1-slot".to_string(),
             provider: ProviderKind::from_str("custom"),
             title: None,
             started_providers: Vec::new(),
@@ -2206,11 +2207,11 @@ mod tests {
         .expect("spawn pty");
         app.engine
             .providers
-            .insert(TabId::new(session.id.clone()), client);
+            .insert(session.slot_tab_id().to_owned(), client);
         app.focus = FocusPane::Left;
 
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
-            tab_id: session.id.clone(),
+            tab_id: session.slot_tab_id().to_string(),
             session: session.clone(),
             pty_size: (80, 24),
             detached_session_id: None,
@@ -2571,6 +2572,7 @@ mod tests {
         let now = Utc::now();
         let source_session = AgentSession {
             id: "session-1".to_string(),
+            slot_tab_id: "session-1-slot".to_string(),
             provider: ProviderKind::from_str("codex"),
             title: None,
             started_providers: Vec::new(),

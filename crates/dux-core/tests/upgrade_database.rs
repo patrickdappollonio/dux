@@ -317,7 +317,12 @@ fn a_first_release_database_with_no_projects_table_at_all_opens_and_keeps_its_se
 
     // The tables added since are usable straight away.
     assert_eq!(store.last_seen_version().expect("app state"), None);
-    assert!(store.load_agent_tabs().expect("tabs").is_empty());
+    // Opening an old database migrates every agent's first tab into a real
+    // `agent_tabs` row, so an upgraded workspace comes up with one tab each and
+    // no extras.
+    let tabs = store.load_agent_tabs().expect("tabs");
+    assert_eq!(tabs.len(), store.load_sessions().expect("sessions").len());
+    assert!(store.load_extra_agent_tabs().expect("extras").is_empty());
     assert!(store.load_prs("sess-1").expect("prs").is_empty());
     assert_eq!(store.next_changes_rev("sess-1").expect("rev"), 1);
 }
@@ -526,21 +531,35 @@ fn tables_added_since_are_created_empty_and_immediately_usable() {
         Some("v0.7.0".to_string())
     );
 
-    // `agent_tabs`: zero rows, so every old agent comes up with just its
-    // session-slot tab.
-    assert!(store.load_agent_tabs().expect("load tabs").is_empty());
+    // `agent_tabs`: the migration gave every old agent a real first-tab row,
+    // pointed at by its session, and nothing extra.
+    let sessions = store.load_sessions().expect("load sessions");
+    let tabs = store.load_agent_tabs().expect("load tabs");
+    assert_eq!(tabs.len(), sessions.len());
+    for session in &sessions {
+        assert!(
+            tabs.iter()
+                .any(|t| t.id == session.slot_tab_id && t.session_id == session.id),
+            "every migrated agent points at a first tab of its own"
+        );
+        assert_ne!(
+            session.slot_tab_id, session.id,
+            "the migrated first tab gets a generated id"
+        );
+    }
+    assert!(store.load_extra_agent_tabs().expect("extras").is_empty());
     store
         .insert_agent_tab(&AgentTab {
             id: "tab-x".to_string(),
             session_id: "sess-1".to_string(),
             provider: ProviderKind::new("codex"),
-            sort_order: 0,
+            sort_order: 1,
             created_at: Utc::now(),
         })
         .expect("insert tab");
-    let tabs = store.load_agent_tabs().expect("load tabs");
-    assert_eq!(tabs.len(), 1);
-    assert_eq!(tabs[0].session_id, "sess-1");
+    let extras = store.load_extra_agent_tabs().expect("load extras");
+    assert_eq!(extras.len(), 1);
+    assert_eq!(extras[0].session_id, "sess-1");
 
     // `changes_rev`: a fresh counter that starts handing out revisions.
     assert_eq!(store.next_changes_rev("sess-1").expect("rev"), 1);
@@ -649,6 +668,7 @@ fn old_state_survives_a_write_a_close_and_a_reopen() {
         store
             .upsert_session(&AgentSession {
                 id: "sess-folder".to_string(),
+                slot_tab_id: "sess-folder".to_string(),
                 provider: ProviderKind::from_str("claude"),
                 title: Some("My Notes".to_string()),
                 started_providers: Vec::new(),
@@ -776,6 +796,7 @@ fn a_migrated_title_is_not_re_frozen_when_a_later_agent_leaves_it_null() {
     store
         .upsert_session(&AgentSession {
             id: "sess-new".to_string(),
+            slot_tab_id: "sess-new".to_string(),
             provider: ProviderKind::new("claude"),
             title: None,
             started_providers: Vec::new(),
@@ -943,6 +964,7 @@ fn opening_a_database_this_build_created_is_a_no_op_the_second_time() {
         store
             .upsert_session(&AgentSession {
                 id: "s1".to_string(),
+                slot_tab_id: "s1".to_string(),
                 provider: ProviderKind::new("codex"),
                 title: Some("fresh".to_string()),
                 started_providers: vec!["codex".to_string()],

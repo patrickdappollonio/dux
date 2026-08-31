@@ -749,7 +749,7 @@ pub struct TerminalView {
 
 /// One provider tab of an agent, projected for the tab strip. `order == 0` is
 /// the **session-slot tab**, the one named by `SessionView::slot_tab_id`, which
-/// has no row of its own; it is also the one tab a user cannot close. No tab is
+/// is named by the session's stored pointer; it is the one tab a user cannot close. No tab is
 /// privileged for RESUME: that is decided per provider by liveness at launch
 /// (see `Engine::tab_resume_decision`), not by position.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1990,7 +1990,9 @@ mod tests {
         // PtyClient: the projection only reads `is_agent_streaming`, which keys
         // off this map, so a fresh timestamp is sufficient and avoids spawning
         // a child process in a unit test.
-        engine.pty_activity.insert("s1".to_string(), Instant::now());
+        engine
+            .pty_activity
+            .insert("s1-slot".to_string(), Instant::now());
 
         let vm = engine.spine();
 
@@ -2033,7 +2035,7 @@ mod tests {
 
         // Tabs: session-slot first, then the extra tab, each with its own flags.
         assert_eq!(session.tabs.len(), 2);
-        assert_eq!(session.tabs[0].id, "s1");
+        assert_eq!(session.tabs[0].id, "s1-slot");
         assert_eq!(session.tabs[0].order, 0);
         assert!(!session.tabs[0].working);
         assert_eq!(session.tabs[1].id, "t1");
@@ -2054,7 +2056,7 @@ mod tests {
 
         let vm = engine.spine();
         assert_eq!(vm.sessions[0].tabs.len(), 1);
-        assert_eq!(vm.sessions[0].tabs[0].id, "s1");
+        assert_eq!(vm.sessions[0].tabs[0].id, "s1-slot");
         assert_eq!(vm.sessions[0].tabs[0].order, 0);
     }
 
@@ -2335,14 +2337,14 @@ mod tests {
             &[],
         )
         .expect("spawn cat provider");
-        engine.providers.insert(TabId::new("s1"), client);
+        engine.providers.insert(TabId::new("s1-slot"), client);
 
         // Before any output, the session is not ready.
         assert!(!engine.spine().sessions[0].has_output);
 
         engine
             .providers
-            .get(TabIdRef::new("s1"))
+            .get(TabIdRef::new("s1-slot"))
             .expect("provider exists")
             .write_bytes(b"hello\n")
             .expect("write to provider");
@@ -2767,7 +2769,7 @@ mod tests {
         // already has when a file lands on a pane.
         let (mut engine, _tmp) = engine_with_two_tabs();
         engine.launched_drop_paste.insert(
-            TabId::new("s1"),
+            TabId::new("s1-slot"),
             launched(
                 "codex",
                 crate::config::WebDragDropPaste::SingleQuoted,
@@ -2783,7 +2785,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            tab_drop_paste(&engine, "s1").map(|d| d.form),
+            tab_drop_paste(&engine, "s1-slot").map(|d| d.form),
             Some("single_quoted".to_string()),
             "each live tab keeps the form its own process launched with"
         );
@@ -2804,12 +2806,12 @@ mod tests {
         // resolving the OLD entry.
         let (mut engine, _tmp) = engine_with_two_tabs();
         assert_eq!(
-            tab_drop_paste(&engine, "s1"),
+            tab_drop_paste(&engine, "s1-slot"),
             None,
             "a tab with no live process has no launched profile"
         );
         engine.launched_drop_paste.insert(
-            TabId::new("s1"),
+            TabId::new("s1-slot"),
             launched(
                 "codex",
                 crate::config::WebDragDropPaste::SingleQuoted,
@@ -2817,13 +2819,13 @@ mod tests {
             ),
         );
         assert_eq!(
-            tab_drop_paste(&engine, "s1").map(|d| d.form),
+            tab_drop_paste(&engine, "s1-slot").map(|d| d.form),
             Some("single_quoted".to_string()),
             "a launch publishes it on the same spine the launch refreshes"
         );
-        engine.clear_tab_runtime(TabIdRef::new("s1"));
+        engine.clear_tab_runtime(TabIdRef::new("s1-slot"));
         assert_eq!(
-            tab_drop_paste(&engine, "s1"),
+            tab_drop_paste(&engine, "s1-slot"),
             None,
             "and a termination retires it on that same spine"
         );
@@ -2843,7 +2845,7 @@ mod tests {
         // in their own editor cannot be refused.
         let (mut engine, _tmp) = engine_with_two_tabs();
         engine.launched_drop_paste.insert(
-            TabId::new("s1"),
+            TabId::new("s1-slot"),
             launched(
                 "codex-nightly",
                 crate::config::WebDragDropPaste::SingleQuoted,
@@ -2851,7 +2853,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            tab_drop_paste(&engine, "s1").map(|d| d.form),
+            tab_drop_paste(&engine, "s1-slot").map(|d| d.form),
             Some("single_quoted".to_string()),
             "a live process keeps what it launched with, even once config no \
              longer names its provider"

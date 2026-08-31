@@ -2,14 +2,13 @@
 //! **session ids** (an agent's primary key) and **tab ids** (a provider tab's
 //! key, which is also the key of every tab-scoped runtime map).
 //!
-//! Today an agent's first tab, its **session-slot tab**, has a tab id equal to
-//! the session id (see [`crate::model::AgentSession::slot_tab_id`]). That
-//! equality is a storage accident on its way out: the slot becomes a stored
-//! pointer so the first tab can be closed by promoting a sibling. While it
-//! holds, every `&str` id is silently interchangeable, so passing a session id
-//! positionally into a tab-id parameter compiles, runs, and is invisible to a
-//! text search. It is only correct by coincidence, and it stops being correct
-//! the moment the slot moves.
+//! An agent's first tab, its **session-slot tab**, is named by a stored pointer
+//! (see [`crate::model::AgentSession::slot_tab_id`]). Its id used to BE the
+//! session id, and while that held every `&str` id was silently
+//! interchangeable: passing a session id positionally into a tab-id parameter
+//! compiled, ran, and was invisible to a text search. The pointer ended the
+//! coincidence, and these types are what turned the remaining mix-ups into
+//! compile errors rather than runtime surprises.
 //!
 //! These types make that class of mistake a compile error at the seams where it
 //! is dangerous, and nowhere else. They are an **in-engine discipline**: the
@@ -80,6 +79,7 @@
 //! fn wants_a_tab(_: &TabIdRef) {}
 //! # let session = dux_core::model::AgentSession {
 //! #     id: "s1".to_string(),
+//! #     slot_tab_id: "slot-1".to_string(),
 //! #     provider: dux_core::model::ProviderKind::new("claude"),
 //! #     workspace: dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
 //! #         folder_path: "/tmp".to_string(),
@@ -270,9 +270,9 @@ mod tests {
 
     #[test]
     fn the_two_keyspaces_are_not_interchangeable_even_when_the_strings_match() {
-        // The slot tab's id equals its session id today, so these two hold the
-        // same bytes; the types still keep them apart, which is the only reason
-        // the mix-up becomes a compile error rather than a silent success.
+        // Two ids that happen to hold the same bytes are still two keyspaces;
+        // the types keep them apart, which is the only reason the mix-up
+        // becomes a compile error rather than a silent success.
         let session = SessionId::new("s1");
         let tab = TabId::new("s1");
         assert_eq!(session.as_str(), tab.as_str());

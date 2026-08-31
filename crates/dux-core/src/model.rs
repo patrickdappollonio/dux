@@ -518,6 +518,13 @@ impl AgentWorkspace {
 #[derive(Clone, Debug)]
 pub struct AgentSession {
     pub id: String,
+    /// The id of this agent's **session-slot tab**: a pointer into `agent_tabs`,
+    /// stored in the session row. Read it through
+    /// [`AgentSession::slot_tab_id`], never directly, so slot-ness stays one
+    /// question with one answer. Every tab, the first one included, has its own
+    /// `agent_tabs` row, and this names which of them currently occupies the
+    /// slot. It is a generated id and is deliberately NOT the session id.
+    pub slot_tab_id: String,
     pub provider: ProviderKind,
     /// Where this agent lives and what dux may do there. See [`AgentWorkspace`].
     pub workspace: AgentWorkspace,
@@ -625,21 +632,19 @@ impl AgentSession {
         true
     }
 
-    /// The id of this agent's **session-slot tab**: its first tab, the one that
-    /// has no `agent_tabs` row of its own and that the user cannot close.
+    /// The id of this agent's **session-slot tab**: its first tab, the one the
+    /// user cannot close.
     ///
-    /// Today that id IS the session id, because the slot tab is synthesized from
-    /// this record rather than stored. It becomes a stored pointer when tab
-    /// promotion lands, so this method is the one place that has to change: every
-    /// slot-ness decision in both crates routes through it (or through
-    /// [`AgentSession::is_slot_tab`] and the `Engine` wrappers) rather than
-    /// comparing a tab id against `self.id` inline.
-    /// The answer is a [`TabIdRef`], not a `&str`, so the equality that makes it
-    /// the session id today cannot be relied on by accident: a caller wanting a
-    /// tab id has to come here for it rather than reach for `session.id`, which
-    /// no longer type-checks in a tab-id position. See [`crate::ids`].
+    /// A stored pointer into `agent_tabs`, read from the
+    /// [`slot_tab_id`](AgentSession::slot_tab_id) column. It is a generated tab
+    /// id and never the session id, so every slot-ness decision in both crates
+    /// has to come here (or to [`AgentSession::is_slot_tab`] and the `Engine`
+    /// wrappers) rather than compare a tab id against `self.id` inline.
+    /// The answer is a [`TabIdRef`], not a `&str`, so a caller wanting a tab id
+    /// cannot reach for `session.id` instead: that no longer type-checks in a
+    /// tab-id position. See [`crate::ids`].
     pub fn slot_tab_id(&self) -> &TabIdRef {
-        TabIdRef::new(&self.id)
+        TabIdRef::new(&self.slot_tab_id)
     }
 
     /// Whether `tab_id` names this agent's session-slot tab. See
@@ -671,11 +676,12 @@ impl AgentSession {
     }
 }
 
-/// A persisted **extra tab** (a secondary provider tab) belonging to an agent
-/// session. The session-slot tab is synthesized from the `AgentSession` row and has no
-/// `AgentTab`; only tabs 2..N are stored here. Kept in SQLite (derived runtime
+/// A persisted provider tab belonging to an agent session. EVERY tab is one of
+/// these, the agent's first included; which of them occupies the session slot is
+/// the session record's `slot_tab_id` pointer. Kept in SQLite (derived runtime
 /// state), never in portable config. `sort_order` is an append-only stamp that
-/// fixes creation order (Main renders first, then these by `sort_order`).
+/// fixes strip order: the slot tab is written at 0 and extras are appended above
+/// it, so the strip renders slot-first.
 #[derive(Clone, Debug)]
 pub struct AgentTab {
     pub id: String,
@@ -933,6 +939,10 @@ mod tests {
         let now = Utc::now();
         AgentSession {
             id: "s1".to_string(),
+            // Deliberately not the session id: the slot is a stored pointer at
+            // a generated tab id, and a fixture that reused the session id
+            // would let a comparison against `id` pass by coincidence.
+            slot_tab_id: "slot-1".to_string(),
             provider: ProviderKind::new("claude"),
             workspace: crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
                 project_id: "p1".to_string(),
@@ -982,6 +992,7 @@ mod tests {
         let now = Utc::now();
         AgentSession {
             id: "sa1".to_string(),
+            slot_tab_id: "sa1".to_string(),
             provider: ProviderKind::new("claude"),
             workspace: AgentWorkspace::Folder(FolderWorkspace {
                 folder_path: folder_path.to_string(),
@@ -1032,13 +1043,12 @@ mod tests {
 
     #[test]
     fn slot_tab_id_names_the_agents_first_tab() {
-        // The one resolver every slot-ness decision routes through. Today the
-        // answer is the session id, because the slot tab is synthesized from the
-        // session record rather than stored; this test pins the contract, not the
-        // storage shape, so the day it becomes a stored pointer only the value
-        // below moves.
+        // The one resolver every slot-ness decision routes through: the answer
+        // is whatever the session's stored pointer names, and it is NOT the
+        // session id.
         let session = session_with_focus(None);
-        assert_eq!(session.slot_tab_id().as_str(), "s1");
+        assert_eq!(session.slot_tab_id().as_str(), "slot-1");
+        assert_ne!(session.slot_tab_id().as_str(), session.id);
     }
 
     #[test]
@@ -1049,6 +1059,8 @@ mod tests {
         assert!(session.is_slot_tab(session.slot_tab_id()));
         assert!(!session.is_slot_tab(TabIdRef::new("t1")));
         assert!(!session.is_slot_tab(TabIdRef::new("")));
+        // The session id is not a tab id, and slot-ness must not say it is.
+        assert!(!session.is_slot_tab(TabIdRef::new(&session.id)));
     }
 
     #[test]
@@ -1056,16 +1068,18 @@ mod tests {
         let session = session_with_focus(None);
         assert_eq!(
             session.resolved_focused_tab([TabIdRef::new("t1")]).as_str(),
-            "s1"
+            "slot-1"
         );
     }
 
     #[test]
     fn resolved_focused_tab_session_id_falls_back_to_session_slot() {
+        // A remembered value naming the SESSION is not a tab at all, so it
+        // resolves to the slot the way any other unusable memory does.
         let session = session_with_focus(Some("s1"));
         assert_eq!(
             session.resolved_focused_tab([TabIdRef::new("t1")]).as_str(),
-            "s1"
+            "slot-1"
         );
     }
 
@@ -1074,7 +1088,7 @@ mod tests {
         let session = session_with_focus(Some("gone"));
         assert_eq!(
             session.resolved_focused_tab([TabIdRef::new("t1")]).as_str(),
-            "s1"
+            "slot-1"
         );
     }
 
@@ -1093,7 +1107,7 @@ mod tests {
     fn resolved_focused_tab_empty_live_set_falls_back() {
         let session = session_with_focus(Some("t1"));
         let empty: Vec<&TabIdRef> = Vec::new();
-        assert_eq!(session.resolved_focused_tab(empty).as_str(), "s1");
+        assert_eq!(session.resolved_focused_tab(empty).as_str(), "slot-1");
     }
 
     fn managed() -> AgentWorkspace {

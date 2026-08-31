@@ -235,7 +235,7 @@ pub struct Engine {
     /// Persisted **extra tabs** (secondary provider tabs), keyed by tab id with
     /// the owning `session_id` carried in the value (mirrors `companion_terminals`
     /// so ownership resolves O(1) with no side index). The session-slot tab has no entry —
-    /// it is derived from the `AgentSession` row (see `AgentSession::slot_tab_id`). Seeded
+    /// it is reached through the session's stored pointer (see `AgentSession::slot_tab_id`). Seeded
     /// from `session_store.load_agent_tabs()` at construction.
     pub agent_tabs: HashMap<TabId, AgentTab>,
     /// Agent/terminal PTYs that have been SIGTERMed on an individual delete or
@@ -4120,7 +4120,7 @@ impl Engine {
     /// pane title doesn't lie about what's actually on screen.
     pub fn running_provider_for(&self, session: &AgentSession) -> ProviderKind {
         // The pin map is keyed by TAB id, so the agent's own pane reads the pin
-        // under its session-slot tab rather than under the session id.
+        // under its session-slot tab, which the session's pointer names.
         self.running_provider_pins
             .get(session.slot_tab_id())
             .cloned()
@@ -4249,10 +4249,12 @@ impl Engine {
     /// seeds, while a `false` preserves the refusals that ask the question.
     pub fn slot_tab_id_of<'a>(&'a self, session_id: &'a SessionIdRef) -> &'a TabIdRef {
         self.session_by_id(session_id.as_str())
-            // The fallback REINTERPRETS a session id as a tab id, which is only
-            // sound because the slot tab's id equals the session id today. It is
-            // spelled out rather than implicit precisely so it shows up as
-            // something to revisit when the slot becomes a stored pointer.
+            // The fallback REINTERPRETS a session id as a tab id. Nothing
+            // makes that a real tab any more, and it is not meant to be one: it
+            // is a stable placeholder key for a session the map has already
+            // forgotten, so an enumeration keeps its seed instead of silently
+            // dropping an entry. Every live session answers from its pointer
+            // above and never reaches here.
             .map_or(TabIdRef::new(session_id.as_str()), |session| {
                 session.slot_tab_id()
             })
@@ -4269,6 +4271,10 @@ impl Engine {
     /// Every runtime-map key owned by a session: its session-slot tab plus every
     /// extra tab id. The single source of truth for teardown fan-out — a
     /// full-session teardown must clear all of these, not just the slot tab.
+    ///
+    /// The slot id comes from the session's stored pointer, and the extras from
+    /// the in-memory map, which holds exactly the tabs that are not in the slot
+    /// (see `SessionStore::load_extra_agent_tabs`).
     pub fn tab_ids_for_session(&self, session_id: &str) -> Vec<TabId> {
         let mut ids = vec![
             self.slot_tab_id_of(SessionIdRef::new(session_id))
@@ -4369,11 +4375,15 @@ impl Engine {
             .contains_key(self.sessions[index].slot_tab_id());
         let previous = self.sessions[index].provider.clone();
 
+        // The slot tab's row and the session's mirrored `provider` move
+        // together, through the one write site that owns both.
+        let updated_at = Utc::now();
+        self.session_store
+            .set_slot_provider(session_id, provider.as_str(), updated_at)?;
         let session = &mut self.sessions[index];
         session.provider = provider.clone();
-        session.updated_at = Utc::now();
+        session.updated_at = updated_at;
         let updated = session.clone();
-        self.session_store.upsert_session(&updated)?;
 
         // Pin the still-running provider so UI labels stay truthful until the
         // user exits and relaunches the agent. Only set on the first
@@ -4437,10 +4447,10 @@ impl Engine {
             anyhow::bail!("provider \"{}\" is not configured", provider.as_str());
         }
 
-        // Per-agent cap (the `+ 1` accounts for the session-slot tab, which has
-        // no `agent_tabs` row of its own).
+        // Per-agent cap. Every tab is a row, the slot tab included, so the
+        // stored count is the whole count.
         let max_per_agent = i64::from(self.agent_tabs_max());
-        if self.session_store.count_agent_tabs(session_id)? + 1 >= max_per_agent {
+        if self.session_store.count_agent_tabs(session_id)? >= max_per_agent {
             anyhow::bail!("this agent already has the maximum of {max_per_agent} tabs",);
         }
 
@@ -4662,8 +4672,8 @@ impl Engine {
             anyhow::bail!("unknown session: {session_id}");
         }
         // The slot tab is represented as absence. That question goes to the
-        // resolver: it used to be an inline `id != session_id`, which is only
-        // right while the slot tab's id happens to equal the session id.
+        // resolver: it used to be an inline `id != session_id`, which stopped
+        // being right the moment the slot became a stored pointer.
         let normalized = match tab_id {
             Some(id)
                 if !self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(id))
@@ -6107,7 +6117,7 @@ mod tests {
     fn note_agent_viewed_if_known_gates_on_a_real_tab() {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        engine.needs_attention.insert(TabId::new("s1"));
+        engine.needs_attention.insert(TabId::new("s1-slot"));
 
         // A bogus id (stale deep link, race, retry) is a no-op: it neither stamps
         // `agent_viewed` nor touches the flag.
@@ -6116,12 +6126,12 @@ mod tests {
             engine.agent_viewed.is_empty(),
             "a bogus id must not leak an agent_viewed entry"
         );
-        assert!(engine.tab_needs_attention("s1"));
+        assert!(engine.tab_needs_attention("s1-slot"));
 
-        // A real session id both stamps engagement and clears the flag.
-        engine.note_agent_viewed_if_known("s1");
-        assert!(engine.agent_viewed.contains_key(TabIdRef::new("s1")));
-        assert!(!engine.tab_needs_attention("s1"));
+        // A real tab id both stamps engagement and clears the flag.
+        engine.note_agent_viewed_if_known("s1-slot");
+        assert!(engine.agent_viewed.contains_key(TabIdRef::new("s1-slot")));
+        assert!(!engine.tab_needs_attention("s1-slot"));
     }
 
     #[test]
@@ -8106,7 +8116,7 @@ mod tests {
             &[],
         )
         .expect("spawn cat provider");
-        engine.providers.insert(TabId::new("s1"), client);
+        engine.providers.insert(TabId::new("s1-slot"), client);
 
         let outcome = engine
             .change_agent_provider("s1", ProviderKind::new("codex"))
@@ -8149,7 +8159,7 @@ mod tests {
         );
 
         // Clean up so the PTY doesn't outlive the test.
-        engine.providers.remove(TabIdRef::new("s1"));
+        engine.providers.remove(TabIdRef::new("s1-slot"));
     }
 
     #[test]
@@ -8491,7 +8501,7 @@ mod tab_ops_tests {
         engine.sessions.push(session);
         engine
             .providers
-            .insert(TabId::new("s1"), spawn_cat(tmp.path()));
+            .insert(TabId::new("s1-slot"), spawn_cat(tmp.path()));
 
         match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
             ReconnectPlan::AlreadyConnected { message } => {
@@ -8619,8 +8629,12 @@ mod tab_ops_tests {
     #[test]
     fn create_tab_rejects_when_the_per_agent_cap_is_reached() {
         let (mut engine, _tmp) = test_engine();
-        engine.sessions.push(sample_session("s1", "p1", "feat"));
-        // Default cap is 20 incl. Main → 19 Support rows fills it.
+        let session = sample_session("s1", "p1", "feat");
+        // The slot tab is a row like any other, so the cap counts rows and the
+        // fixture has to write one.
+        engine.session_store.create_session(&session).unwrap();
+        engine.sessions.push(session);
+        // Default cap is 20 tabs → the slot row plus 19 extras fills it.
         for i in 0..19 {
             let tab = support_tab(&format!("t{i}"), "s1", "codex");
             engine.session_store.insert_agent_tab(&tab).unwrap();
@@ -8650,8 +8664,9 @@ mod tab_ops_tests {
     fn change_tab_provider_main_delegates_to_change_agent_provider() {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let slot = engine.slot_tab_id_of(SessionIdRef::new("s1")).to_string();
         engine
-            .change_tab_provider("s1", "s1", ProviderKind::new("codex"))
+            .change_tab_provider("s1", &slot, ProviderKind::new("codex"))
             .unwrap();
         // Delegation mutates the session's own provider (the session-slot tab).
         assert_eq!(engine.sessions[0].provider.as_str(), "codex");
@@ -8804,7 +8819,7 @@ mod tab_ops_tests {
         // The session-slot tab (id == "s1") is the live sibling that survives.
         engine
             .providers
-            .insert(TabId::new("s1"), spawn_cat(worktree.path()));
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
 
         engine.close_tab("s1", "tab-1").unwrap();
 
@@ -8917,12 +8932,12 @@ mod tab_ops_tests {
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         engine
             .providers
-            .insert(TabId::new("s1"), spawn_cat(tmp.path()));
+            .insert(TabId::new("s1-slot"), spawn_cat(tmp.path()));
         engine
             .providers
             .insert(TabId::new("tab-1"), spawn_cat(tmp.path()));
 
-        assert_eq!(engine.first_live_tab("s1"), Some("s1".to_string()));
+        assert_eq!(engine.first_live_tab("s1"), Some("s1-slot".to_string()));
     }
 
     #[test]
@@ -9062,10 +9077,10 @@ mod resource_monitor_targets_tests {
         session.title = Some("fix-auth".to_string());
         engine.sessions.push(session);
 
-        // The session-slot tab (tab id == session id) plus one extra tab.
+        // The session-slot tab plus one extra tab.
         engine
             .providers
-            .insert(TabId::new("s1"), spawn_cat(worktree.path()));
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
         engine.agent_tabs.insert(
             TabId::new("tab-2"),
             AgentTab {
@@ -9097,8 +9112,8 @@ mod resource_monitor_targets_tests {
         // Every target carries the id the UI joins on, not just a label.
         let slot = targets
             .iter()
-            .find(|t| t.id == "s1")
-            .expect("the session-slot tab is a target keyed by session id");
+            .find(|t| t.id == "s1-slot")
+            .expect("the session-slot tab is a target keyed by its own tab id");
         assert_eq!(slot.kind, ResourceKind::Agent);
         assert!(slot.label.contains("fix-auth"), "label: {}", slot.label);
         assert!(slot.pid > 0);

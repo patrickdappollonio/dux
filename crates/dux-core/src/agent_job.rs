@@ -912,6 +912,7 @@ fn run_create_standalone_agent_job(
     }
     let session = AgentSession {
         id: Uuid::new_v4().to_string(),
+        slot_tab_id: Uuid::new_v4().to_string(),
         provider: provider.clone(),
         workspace: AgentWorkspace::Folder(FolderWorkspace {
             folder_path: folder.to_string_lossy().to_string(),
@@ -1055,6 +1056,7 @@ fn launch_managed_create(
     };
     let session = AgentSession {
         id: Uuid::new_v4().to_string(),
+        slot_tab_id: Uuid::new_v4().to_string(),
         provider,
         workspace: AgentWorkspace::Managed(managed.clone()),
         title,
@@ -1495,6 +1497,7 @@ mod tests {
     fn fork_source_session(worktree: &Path) -> AgentSession {
         AgentSession {
             id: "src-1".to_string(),
+            slot_tab_id: "src-1".to_string(),
             provider: ProviderKind::new("cat"),
             title: None,
             started_providers: Vec::new(),

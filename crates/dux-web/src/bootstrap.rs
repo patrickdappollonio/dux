@@ -105,7 +105,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         )
     })?;
     let sessions = session_store.load_sessions()?;
-    let agent_tabs = session_store.load_agent_tabs()?;
+    let agent_tabs = session_store.load_extra_agent_tabs()?;
     let projects = dux_core::project_browser::load_projects(
         &session_store.load_projects()?,
         &session_store.load_project_created_ats()?,

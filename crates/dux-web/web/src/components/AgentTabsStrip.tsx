@@ -242,8 +242,8 @@ function TabPill({
               </DropdownMenuSubContent>
             </DropdownMenuSub>
             <DropdownMenuSeparator />
-            {/* The agent's FIRST tab (its id equals the session id) cannot be
-                closed: it has no row of its own and lives as long as the agent
+            {/* The agent's FIRST tab (the one the session's slot pointer
+                names) cannot be closed: it lives as long as the agent
                 does. The item stays in the menu and renders DISABLED rather
                 than disappearing, so the gesture reads as deactivated instead
                 of missing, and the tooltip says why. The span is load-bearing:

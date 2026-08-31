@@ -17,17 +17,27 @@ export function isFirstTab(session: SessionView, tabId: string): boolean {
 
 // Slot-ness for the layers that hold two ids and no session record: the URL
 // grammar (which parses a hash before any spine has arrived), the PTY socket
-// URL choice, and the selection target those two build. They cannot ask the
-// server, so they carry the rule instead of the answer, and this is the ONE
-// place that spells it out: today an agent's slot tab id is its session id.
-// Callers with a `SessionView` must use `isFirstTab` rather than this.
-export function isSlotTabTarget(sessionId: string, tabId: string): boolean {
-  return tabId === slotTabTargetId(sessionId)
+// URL choice, and the selection target those two build.
+//
+// An agent's slot tab id is a GENERATED id its session merely points at, so the
+// session id is only a PLACEHOLDER for "whichever tab is in the slot" and is
+// right just while the real one is unknown. Pass `slotTabId` whenever the spine
+// has published it; every answer that gates behavior must, because without it
+// this says "not the slot tab" about the slot tab. Callers holding a
+// `SessionView` use `isFirstTab` instead.
+export function isSlotTabTarget(
+  sessionId: string,
+  tabId: string,
+  slotTabId?: string,
+): boolean {
+  return tabId === (slotTabId ?? slotTabTargetId(sessionId))
 }
 
-// The tab id those same id-only layers use to mean "this agent's first tab":
-// the bare `#/agent/<sid>` address, the standalone editor's flattened target,
-// and a fresh selection of an agent. Twin of `isSlotTabTarget`; see its note.
+// The PLACEHOLDER tab id those same id-only layers use to mean "this agent's
+// first tab, whichever it is": the bare `#/agent/<sid>` address, the standalone
+// editor's flattened target, and a fresh selection of an agent. It is resolved
+// to the real slot tab id as soon as the spine names one. Twin of
+// `isSlotTabTarget`; see its note.
 export function slotTabTargetId(sessionId: string): string {
   return sessionId
 }
@@ -63,8 +73,8 @@ export function isFocusedTabDormant(
 // client closed it while this client's PTY
 // socket was retrying). A gone tab's socket must stop reconnecting instead of
 // retrying forever against a route that will keep 404ing. Only meaningful for an
-// extra tab (the session-slot tab has no row of its own; its owning session's
-// presence is the authoritative signal there, handled separately).
+// extra tab (the session-slot tab's disappearance is its whole agent's, which
+// is the authoritative signal there and is handled separately).
 export function isTabGone(tabs: AgentTabView[], tabId: string): boolean {
   return !tabs.some((t) => t.id === tabId)
 }

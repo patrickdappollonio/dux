@@ -1620,7 +1620,7 @@ mod tests {
         engine.sessions.push(session);
         // Mark the session-slot tab's launch in flight, under the id
         // `AgentSession::slot_tab_id` resolves to for this fixture.
-        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
 
         let reaction = engine
             .apply(Command::DeleteProject {

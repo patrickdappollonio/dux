@@ -422,6 +422,7 @@ mod tests {
         let n = chrono::Utc::now();
         dux_core::model::AgentSession {
             id: id.to_string(),
+            slot_tab_id: format!("{id}-slot"),
             provider: dux_core::model::ProviderKind::new("claude"),
             title: None,
             started_providers: Vec::new(),
@@ -502,7 +503,7 @@ mod tests {
                 })
                 .unwrap();
             store
-                .upsert_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
+                .create_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
                 .unwrap();
         }
         let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
@@ -640,7 +641,7 @@ mod tests {
                 })
                 .unwrap();
             store
-                .upsert_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
+                .create_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
                 .unwrap();
         }
         let mut engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
@@ -701,7 +702,7 @@ mod tests {
         let (generation, refreshes) = world.refreshes();
         assert!(refreshes.is_empty(), "nothing has refreshed yet");
 
-        let resp = world.drop_on("s1", "shot.png").await;
+        let resp = world.drop_on("s1-slot", "shot.png").await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let (generation_after, refreshes) = world.refreshes();
@@ -839,7 +840,7 @@ mod tests {
         let world = drop_world().await;
         let (generation, _) = world.refreshes();
 
-        let resp = world.drop_on("s1", "..%2F..%2Fescaped.png").await;
+        let resp = world.drop_on("s1-slot", "..%2F..%2Fescaped.png").await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         let (generation_after, refreshes) = world.refreshes();
@@ -856,7 +857,7 @@ mod tests {
         let (_tmp, wt, app) = router().await;
         let resp = app
             .oneshot(drop_req(
-                "pty=s1&filename=Screen%20Shot.png",
+                "pty=s1-slot&filename=Screen%20Shot.png",
                 b"\x89PNG-ish".to_vec(),
             ))
             .await
@@ -907,7 +908,7 @@ mod tests {
         let text = "エラーログ\r\nline two\n🙂 done";
         let resp = app
             .oneshot(drop_req(
-                "pty=s1&filename=pasted-2026-08-09-141530.txt",
+                "pty=s1-slot&filename=pasted-2026-08-09-141530.txt",
                 text.as_bytes().to_vec(),
             ))
             .await
@@ -939,7 +940,7 @@ mod tests {
         // non-hidden path so the parent-creating walk is exercised too.
         let (_tmp, wt, app) = router_with_upload_directory("tmp/dux/drops").await;
         let resp = app
-            .oneshot(drop_req("pty=s1&filename=shot.png", b"png".to_vec()))
+            .oneshot(drop_req("pty=s1-slot&filename=shot.png", b"png".to_vec()))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -992,12 +993,12 @@ mod tests {
         let (_tmp, _wt, app) = router().await;
         let first = app
             .clone()
-            .oneshot(drop_req("pty=s1&filename=shot.png", b"one".to_vec()))
+            .oneshot(drop_req("pty=s1-slot&filename=shot.png", b"one".to_vec()))
             .await
             .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
         let second = app
-            .oneshot(drop_req("pty=s1&filename=shot.png", b"two".to_vec()))
+            .oneshot(drop_req("pty=s1-slot&filename=shot.png", b"two".to_vec()))
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::OK);
@@ -1017,7 +1018,7 @@ mod tests {
         let (tmp, _wt, app) = router().await;
         let resp = app
             .oneshot(drop_req(
-                "pty=s1&filename=..%2F..%2Fescaped.png",
+                "pty=s1-slot&filename=..%2F..%2Fescaped.png",
                 b"x".to_vec(),
             ))
             .await
@@ -1038,7 +1039,7 @@ mod tests {
         // the limit and the setting that moves it.
         let (_tmp, wt, app) = router_with_limits(16, 4).await;
         let resp = app
-            .oneshot(drop_req("pty=s1&filename=big.png", vec![0u8; 4096]))
+            .oneshot(drop_req("pty=s1-slot&filename=big.png", vec![0u8; 4096]))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -1056,7 +1057,7 @@ mod tests {
     async fn a_zero_size_cap_switches_file_drop_off() {
         let (_tmp, wt, app) = router_with_limits(0, 4).await;
         let resp = app
-            .oneshot(drop_req("pty=s1&filename=shot.png", b"x".to_vec()))
+            .oneshot(drop_req("pty=s1-slot&filename=shot.png", b"x".to_vec()))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -1110,7 +1111,7 @@ mod tests {
                 })
                 .unwrap();
             store
-                .upsert_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
+                .create_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
                 .unwrap();
         }
         let mut engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
@@ -1198,7 +1199,7 @@ mod tests {
             std::fs::create_dir_all(wt.join("assets")).unwrap();
 
             let resp = app
-                .oneshot(tree_drop("s1", "logo.png", "assets"))
+                .oneshot(tree_drop("s1-slot", "logo.png", "assets"))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "{}", "folder drop");
@@ -1226,7 +1227,10 @@ mod tests {
             // Empty space is the ROOT, and the root travels as the empty
             // string, so this also pins that encoding.
             let (_tmp, wt, app) = router().await;
-            let resp = app.oneshot(tree_drop("s1", "notes.md", "")).await.unwrap();
+            let resp = app
+                .oneshot(tree_drop("s1-slot", "notes.md", ""))
+                .await
+                .unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
             let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
             assert_eq!(
@@ -1245,7 +1249,7 @@ mod tests {
             for name in ["one.md", "two.md", "three.md"] {
                 let resp = app
                     .clone()
-                    .oneshot(tree_drop("s1", name, "docs"))
+                    .oneshot(tree_drop("s1-slot", name, "docs"))
                     .await
                     .unwrap();
                 assert_eq!(resp.status(), StatusCode::OK, "saving {name}");
@@ -1266,7 +1270,10 @@ mod tests {
             let (_tmp, wt, app) = router().await;
             std::fs::write(wt.join("notes.md"), "mine\n").unwrap();
 
-            let resp = app.oneshot(tree_drop("s1", "notes.md", "")).await.unwrap();
+            let resp = app
+                .oneshot(tree_drop("s1-slot", "notes.md", ""))
+                .await
+                .unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
             let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
 
@@ -1289,7 +1296,7 @@ mod tests {
             let (_tmp, wt, app) = router().await;
             let resp = app
                 .oneshot(tree_drop(
-                    "s1",
+                    "s1-slot",
                     "%E8%A8%AD%E8%A8%88%E3%83%A1%E3%83%A2.md",
                     "",
                 ))
@@ -1305,7 +1312,7 @@ mod tests {
         async fn a_directory_escaping_the_worktree_is_refused_and_writes_nothing() {
             let (tmp, wt, app) = router().await;
             let resp = app
-                .oneshot(tree_drop("s1", "escaped.png", "..%2F.."))
+                .oneshot(tree_drop("s1-slot", "escaped.png", "..%2F.."))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1320,7 +1327,7 @@ mod tests {
             let (_tmp, wt, app) = router().await;
             std::fs::create_dir_all(wt.join(".git/hooks")).unwrap();
             let resp = app
-                .oneshot(tree_drop("s1", "pre-commit", ".git%2Fhooks"))
+                .oneshot(tree_drop("s1-slot", "pre-commit", ".git%2Fhooks"))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1338,7 +1345,7 @@ mod tests {
             let (_tmp, wt, app) = router().await;
             std::fs::write(wt.join("README.md"), "x").unwrap();
             let resp = app
-                .oneshot(tree_drop("s1", "logo.png", "README.md"))
+                .oneshot(tree_drop("s1-slot", "logo.png", "README.md"))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1354,7 +1361,7 @@ mod tests {
             // assertion, while every other refusal on this path is a sentence.
             let (_tmp, wt, app) = router().await;
             let resp = app
-                .oneshot(tree_drop("s1", "logo.png", "nope"))
+                .oneshot(tree_drop("s1-slot", "logo.png", "nope"))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1385,9 +1392,9 @@ mod tests {
         async fn a_tree_drop_is_saved_even_while_another_device_holds_the_terminal() {
             let world = drop_world().await;
             // Somebody ELSE owns input on this agent's PTY.
-            world.state.give_input_to("s1", 7);
+            world.state.give_input_to("s1-slot", 7);
             assert!(
-                world.state.input_held_by_someone_else("s1", 99),
+                world.state.input_held_by_someone_else("s1-slot", 99),
                 "the fixture must actually put input in another connection's hands"
             );
 
@@ -1395,7 +1402,7 @@ mod tests {
                 .app
                 .clone()
                 .oneshot(drop_req(
-                    "pty=s1&filename=notes.md&dir=&conn=99",
+                    "pty=s1-slot&filename=notes.md&dir=&conn=99",
                     b"bytes".to_vec(),
                 ))
                 .await
@@ -1417,13 +1424,13 @@ mod tests {
         #[tokio::test]
         async fn a_pane_drop_is_refused_while_another_device_holds_the_terminal() {
             let world = drop_world().await;
-            world.state.give_input_to("s1", 7);
+            world.state.give_input_to("s1-slot", 7);
 
             let resp = world
                 .app
                 .clone()
                 .oneshot(drop_req(
-                    "pty=s1&filename=shot.png&conn=99",
+                    "pty=s1-slot&filename=shot.png&conn=99",
                     b"png".to_vec(),
                 ))
                 .await
@@ -1448,7 +1455,7 @@ mod tests {
             let resp = world
                 .app
                 .clone()
-                .oneshot(tree_drop("s1", "notes.md", ""))
+                .oneshot(tree_drop("s1-slot", "notes.md", ""))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
@@ -1565,7 +1572,7 @@ mod tests {
             app.clone().oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/file-drop?pty=s1&filename=slow.png")
+                    .uri("/api/v1/file-drop?pty=s1-slot&filename=slow.png")
                     .body(first_body)
                     .unwrap(),
             ),
@@ -1585,7 +1592,7 @@ mod tests {
             app.oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/file-drop?pty=s1&filename=second.png")
+                    .uri("/api/v1/file-drop?pty=s1-slot&filename=second.png")
                     .body(second_body)
                     .unwrap(),
             ),
@@ -1663,7 +1670,7 @@ mod tests {
             app.clone().oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/file-drop?pty=s1&filename=slow.png")
+                    .uri("/api/v1/file-drop?pty=s1-slot&filename=slow.png")
                     .body(first_body)
                     .unwrap(),
             ),
@@ -1678,7 +1685,10 @@ mod tests {
         let started = tokio::time::Instant::now();
         let second = tokio::time::timeout(
             TOLERABLE_WAIT,
-            app.oneshot(drop_req("pty=s1&filename=second.png", b"second".to_vec())),
+            app.oneshot(drop_req(
+                "pty=s1-slot&filename=second.png",
+                b"second".to_vec(),
+            )),
         )
         .await
         .expect(

@@ -865,7 +865,6 @@ fn engine_unavailable() -> Response {
 mod tests {
     use axum::body::to_bytes;
     use axum::http::{Request, StatusCode};
-    use dux_core::ids::TabId;
     use tower::ServiceExt;
 
     use tempfile::TempDir;
@@ -1048,8 +1047,9 @@ mod tests {
         let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
         let now = chrono::Utc::now();
         store
-            .upsert_session(&dux_core::model::AgentSession {
+            .create_session(&dux_core::model::AgentSession {
                 id: id.to_string(),
+                slot_tab_id: format!("{id}-slot"),
                 provider: dux_core::model::ProviderKind::new("claude"),
                 title: Some("seeded".to_string()),
                 started_providers: Vec::new(),
@@ -1099,7 +1099,11 @@ mod tests {
     #[tokio::test]
     async fn session_delete_reports_a_launch_refusal_as_conflict() {
         let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine, _| {
-            engine.mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
+            engine.mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(
+                engine
+                    .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+                    .to_owned(),
+            ));
         });
 
         let response = send_json(
@@ -1191,8 +1195,9 @@ mod tests {
         let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
         let now = chrono::Utc::now();
         store
-            .upsert_session(&dux_core::model::AgentSession {
+            .create_session(&dux_core::model::AgentSession {
                 id: id.to_string(),
+                slot_tab_id: format!("{id}-slot"),
                 provider: dux_core::model::ProviderKind::new("claude"),
                 title: Some("seeded".to_string()),
                 started_providers: Vec::new(),

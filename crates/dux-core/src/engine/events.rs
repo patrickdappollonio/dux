@@ -854,7 +854,10 @@ impl Engine {
         if let AgentLaunchKind::Create { status_op_id, .. } = &request.kind {
             let status_op_id = status_op_id.clone();
             self.clear_in_flight(&InFlightKey::CreateAgent);
-            if let Err(err) = self.session_store.upsert_session(&session) {
+            // A brand-new agent's session row, its first tab's row and the
+            // pointer between them land in one transaction: a session whose slot
+            // tab is missing has a PTY address nothing resolves.
+            if let Err(err) = self.session_store.create_session(&session) {
                 logger::error(&format!(
                     "session store upsert failed for {}: {err}",
                     session.id,
@@ -3091,8 +3094,10 @@ mod tests {
         engine
             .resume_fallback_candidates
             .insert(TabId::new("tab-2"), Instant::now());
-        engine.pty_activity.insert("s1".to_string(), Instant::now());
-        engine.note_pty_pointer("s1", crate::pty::PointerReport::Wheel);
+        engine
+            .pty_activity
+            .insert("s1-slot".to_string(), Instant::now());
+        engine.note_pty_pointer("s1-slot", crate::pty::PointerReport::Wheel);
 
         engine
             .finish_delete_session("s1")
@@ -3101,7 +3106,7 @@ mod tests {
 
         // Every tab's runtime state is gone (Main AND Support), and the
         // extra-tab record is dropped from the in-memory map.
-        for key in ["s1", "tab-2"] {
+        for key in ["s1-slot", "tab-2"] {
             assert!(!engine.pty_activity.contains_key(key));
             assert!(!engine.pty_input.contains_key(key));
             assert!(!engine.pty_pointer.contains_key(key));
@@ -3569,7 +3574,7 @@ mod tests {
             sample_tab("v-tab", "victim", "codex", 1),
         );
         engine.providers.insert(
-            TabId::new("victim"),
+            TabId::new("victim-slot"),
             PtyClient::spawn_with_env("cat", &[], tmp.path(), 24, 80, 1000, &[]).unwrap(),
         );
         engine
@@ -3592,7 +3597,7 @@ mod tests {
         assert_eq!(detached.map(|d| d.id), Some("victim".to_string()));
         // Every tab of the victim is torn down (Main provider + the extra tab's
         // runtime maps)...
-        assert!(!engine.providers.contains_key(TabIdRef::new("victim")));
+        assert!(!engine.providers.contains_key(TabIdRef::new("victim-slot")));
         assert!(!engine.pty_activity.contains_key("v-tab"));
         assert!(
             !engine
@@ -3626,14 +3631,14 @@ mod tests {
             .worktree_path = real.to_string_lossy().to_string();
         engine.sessions.push(victim);
         engine.providers.insert(
-            TabId::new("victim"),
+            TabId::new("victim-slot"),
             PtyClient::spawn_with_env("cat", &[], &real, 24, 80, 1000, &[]).unwrap(),
         );
 
         let detached =
             engine.detach_conflicting_worktree_session(link.to_string_lossy().as_ref(), "req");
         assert_eq!(detached.map(|d| d.id), Some("victim".to_string()));
-        assert!(!engine.providers.contains_key(TabIdRef::new("victim")));
+        assert!(!engine.providers.contains_key(TabIdRef::new("victim-slot")));
     }
 
     #[test]
@@ -5380,7 +5385,7 @@ mod tests {
     #[test]
     fn process_agent_launch_failed_create_clears_in_flight_and_returns_message() {
         let (mut engine, _tmp) = test_engine();
-        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
         engine.mark_in_flight(InFlightKey::CreateAgent);
         let data = make_failed_data(
             "s1",
@@ -5395,7 +5400,7 @@ mod tests {
             "boom",
         );
         let (outcome, _create_final) = engine.process_agent_launch_failed(data);
-        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
+        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1-slot"))));
         assert!(!engine.is_in_flight(&InFlightKey::CreateAgent));
         assert!(
             matches!(outcome, AgentLaunchFailedOutcome::Create { message, .. } if message == "boom")
@@ -5408,7 +5413,7 @@ mod tests {
         let session = sample_session("s1", "project-1", "feat/x");
         let _ = engine.session_store.upsert_session(&session);
         engine.sessions.push(session);
-        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
 
         let data = make_failed_data(
             "s1",
@@ -5420,7 +5425,7 @@ mod tests {
         );
         let (outcome, _create_final) = engine.process_agent_launch_failed(data);
         assert!(matches!(outcome, AgentLaunchFailedOutcome::ResumeFallback));
-        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
+        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1-slot"))));
         assert_eq!(engine.sessions[0].status, SessionStatus::Detached);
     }
 
@@ -6161,7 +6166,7 @@ mod tests {
         engine.sessions.push(session);
         // Mark the session-slot tab's launch in flight, under the id
         // `AgentSession::slot_tab_id` resolves to for this fixture.
-        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
 
         let outcome = engine
             .do_delete_session("s1", true)
@@ -6309,7 +6314,7 @@ mod tests {
     fn apply_dispatch_agent_launch_returns_already_launching_when_pending() {
         let (mut engine, _tmp) = test_engine();
         let session = sample_session("s1", "p1", "feat/x");
-        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1")));
+        engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
         let request = AgentLaunchRequest {
             tab_id: session.slot_tab_id().to_owned(),
             provider: session.provider.clone(),

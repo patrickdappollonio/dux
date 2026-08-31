@@ -39,6 +39,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { isFirstTab } from "@/lib/agentTabs"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useTypingSurface } from "@/hooks/use-typing-surface"
@@ -793,7 +794,14 @@ function terminalTargetView(
     hasOutput: terminalHasOutput(props, records),
     providerName: terminalProviderName(props.kind, records),
     spineInputOwner: terminalSpineInputOwner(props.kind, records),
-    isSessionSlotTab: props.kind === "agent" && props.id === ids.sessionId,
+    // Slot-ness comes from the session record the spine published, never from
+    // an id comparison: the slot tab's id is generated and is not the session
+    // id. Before the spine arrives there is no session, and the answer is the
+    // safe `false` (this only gates ejecting the user to the welcome screen).
+    isSessionSlotTab:
+      props.kind === "agent" &&
+      !!records.session &&
+      isFirstTab(records.session, props.id),
   }
 }
 

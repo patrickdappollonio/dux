@@ -120,10 +120,20 @@ describe("isSlotTabTarget", () => {
   // The id-only twin, for the URL grammar and the PTY socket URL choice, which
   // hold two ids and no session record. It carries the rule rather than the
   // answer, so it is pinned separately from `isFirstTab`.
-  it("names the session's own id as the slot tab", () => {
+  it("falls back to the session id as a placeholder when no slot id is known", () => {
     expect(slotTabTargetId("s1")).toBe("s1")
     expect(isSlotTabTarget("s1", "s1")).toBe(true)
     expect(isSlotTabTarget("s1", "tab-1")).toBe(false)
+  })
+
+  // The real slot tab carries a GENERATED id, so a caller that knows it must
+  // pass it: without it the helper calls the slot tab an extra tab, which arms
+  // an extra tab's socket-retry guard over the one socket that must reconnect
+  // forever.
+  it("prefers the slot id the spine published over the placeholder", () => {
+    expect(isSlotTabTarget("s1", "slot-abc", "slot-abc")).toBe(true)
+    expect(isSlotTabTarget("s1", "s1", "slot-abc")).toBe(false)
+    expect(isSlotTabTarget("s1", "tab-1", "slot-abc")).toBe(false)
   })
 })
 

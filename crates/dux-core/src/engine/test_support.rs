@@ -147,6 +147,10 @@ pub(crate) fn sample_session(id: &str, project_id: &str, branch: &str) -> AgentS
     let now = Utc::now();
     AgentSession {
         id: id.to_string(),
+        // Deliberately NOT the session id: the slot tab is a stored pointer at a
+        // generated id, and a fixture that reused the session id would hide
+        // every place still assuming the two are the same string.
+        slot_tab_id: format!("{id}-slot"),
         provider: ProviderKind::new("claude"),
         workspace: crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
             project_id: project_id.to_string(),
@@ -174,6 +178,10 @@ pub(crate) fn sample_standalone_session(id: &str, folder: &str) -> AgentSession 
     let now = Utc::now();
     AgentSession {
         id: id.to_string(),
+        // Deliberately NOT the session id: the slot tab is a stored pointer at a
+        // generated id, and a fixture that reused the session id would hide
+        // every place still assuming the two are the same string.
+        slot_tab_id: format!("{id}-slot"),
         provider: ProviderKind::new("claude"),
         workspace: crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
             folder_path: folder.to_string(),

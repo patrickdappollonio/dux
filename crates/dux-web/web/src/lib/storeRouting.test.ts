@@ -132,7 +132,11 @@ function makeSpine(
       updated_at: "2026-01-01T00:00:00Z",
       working: s.working ?? false,
       needs_attention: false,
-      tabs: [{ id: s.id }, ...(s.tabs ?? []).map((id) => ({ id }))],
+      // The slot tab is a GENERATED id the session points at, deliberately not
+      // the session id, so a URL that names the agent by the bare form has to
+      // come from the pointer rather than from the two strings matching.
+      slot_tab_id: `${s.id}-slot`,
+      tabs: [{ id: `${s.id}-slot` }, ...(s.tabs ?? []).map((id) => ({ id }))],
     })) as unknown as Spine["sessions"],
     // Every terminal, of every owner, in one flat owner-tagged collection: the
     // sessions' terminals in session order, then the projects' in project order.
@@ -439,7 +443,7 @@ describe("a deleted agent never throws the user out of dux", () => {
     expect(mod.getSnapshot().selectedTarget).toEqual({
       kind: "agent",
       sessionId: "s1",
-      tabId: "s1",
+      tabId: "s1-slot",
     })
     // Out loud: the address bar must stop naming the dead terminal.
     expect(loc.hash).toBe("#/agent/s1")
@@ -523,7 +527,7 @@ describe("a deleted agent never throws the user out of dux", () => {
     expect(mod.getSnapshot().selectedTarget).toEqual({
       kind: "agent",
       sessionId: "s1",
-      tabId: "s1",
+      tabId: "s1-slot",
     })
     // Only the invalid part of the route is corrected: the tab is gone, but
     // changed files are session-scoped, so the screen being read survives.

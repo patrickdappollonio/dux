@@ -1421,7 +1421,7 @@ impl App {
     }
 
     /// Close-tab entry point. The agent's FIRST tab (the session-slot tab,
-    /// whose id equals the session id) cannot be closed at all: it lives as
+    /// named by the session's slot pointer) cannot be closed at all: it lives as
     /// long as the agent does, so the gesture raises a warning that says so
     /// instead of a confirmation that would have stopped its provider. Any
     /// other tab opens the confirmation dialog, which ends that tab for good.
@@ -4575,6 +4575,7 @@ mod tests {
         let now = Utc::now();
         AgentSession {
             id: id.to_string(),
+            slot_tab_id: format!("{id}-slot"),
             provider: ProviderKind::from_str(provider),
             title: None,
             started_providers: Vec::new(),
@@ -4749,7 +4750,7 @@ mod tests {
         seed_tab(&mut app, "other", "s2", "claude", 1);
         assert_eq!(
             app.session_tab_ids("s1"),
-            vec!["s1".to_string(), "t1".to_string(), "t2".to_string()]
+            vec!["s1-slot".to_string(), "t1".to_string(), "t2".to_string()]
         );
     }
 
@@ -4758,14 +4759,14 @@ mod tests {
         let mut app =
             test_app_with_sessions(vec![make_session("s1", "codex", "/tmp/w1")], Vec::new());
         seed_tab(&mut app, "t1", "s1", "claude", 1);
-        // Default is Main (the session id).
-        assert_eq!(app.focused_tab_id("s1"), "s1");
+        // Default is the session-slot tab.
+        assert_eq!(app.focused_tab_id("s1"), "s1-slot");
         app.set_focused_tab("s1", "t1");
         assert_eq!(app.focused_tab_id("s1"), "t1");
-        // A stored-but-missing tab clamps back to Main.
+        // A stored-but-missing tab clamps back to the slot tab.
         app.focused_tabs
             .insert("s1".to_string(), "gone".to_string());
-        assert_eq!(app.focused_tab_id("s1"), "s1");
+        assert_eq!(app.focused_tab_id("s1"), "s1-slot");
         // Teardown prune drops the LOCAL entry. `set_focused_tab` also wrote the
         // choice through to the engine's persisted `last_focused_tab`, so the
         // resolver now falls back to that remembered value rather than Main
@@ -4776,9 +4777,9 @@ mod tests {
         app.set_focused_tab("s1", "t1");
         app.clear_focused_tab_for_session("s1");
         assert_eq!(app.focused_tab_id("s1"), "t1");
-        // With no engine memory either, it clamps to Main.
+        // With no engine memory either, it clamps to the slot tab.
         app.engine.sessions[0].last_focused_tab = None;
-        assert_eq!(app.focused_tab_id("s1"), "s1");
+        assert_eq!(app.focused_tab_id("s1"), "s1-slot");
     }
 
     #[test]
@@ -4800,7 +4801,7 @@ mod tests {
         let mut app =
             test_app_with_sessions(vec![make_session("s1", "codex", "/tmp/w1")], Vec::new());
         app.engine.sessions[0].last_focused_tab = Some("gone".to_string());
-        assert_eq!(app.focused_tab_id("s1"), "s1");
+        assert_eq!(app.focused_tab_id("s1"), "s1-slot");
     }
 
     #[test]
@@ -5674,12 +5675,18 @@ mod tests {
     }
 
     /// Inserts a dummy PtyClient placeholder into `app.engine.providers` so that the
-    /// session appears "active" without actually spawning a process.
+    /// session appears "active" without actually spawning a process. `providers`
+    /// is tab-keyed, so the client lands under the agent's slot tab, which the
+    /// resolver names.
     fn mark_active(app: &mut App, session_id: &str) {
         let client =
             crate::pty::PtyClient::spawn("echo", &[], std::path::Path::new("/tmp"), 24, 80, 1000)
                 .expect("spawn echo for test");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        let slot = app
+            .engine
+            .slot_tab_id_of(dux_core::ids::SessionIdRef::new(session_id))
+            .to_owned();
+        app.engine.providers.insert(slot, client);
     }
 
     fn dummy_changed_file(path: &str) -> dux_core::model::ChangedFile {
@@ -6029,7 +6036,7 @@ mod tests {
             .detach_conflicting_worktree_session("/tmp/wt/a", "s2")
             .map(|d| d.label);
         assert!(label.is_some());
-        assert!(!app.engine.providers.contains_key(TabIdRef::new("s1")));
+        assert!(!app.engine.providers.contains_key(TabIdRef::new("s1-slot")));
     }
 
     #[test]
@@ -6045,7 +6052,7 @@ mod tests {
             .detach_conflicting_worktree_session("/tmp/wt/b", "s2")
             .map(|d| d.label);
         assert!(label.is_none());
-        assert!(app.engine.providers.contains_key(TabIdRef::new("s1")));
+        assert!(app.engine.providers.contains_key(TabIdRef::new("s1-slot")));
     }
 
     #[test]
@@ -6060,7 +6067,7 @@ mod tests {
             .detach_conflicting_worktree_session("/tmp/wt/a", "s1")
             .map(|d| d.label);
         assert!(label.is_none());
-        assert!(app.engine.providers.contains_key(TabIdRef::new("s1")));
+        assert!(app.engine.providers.contains_key(TabIdRef::new("s1-slot")));
     }
 
     #[test]
@@ -6076,7 +6083,7 @@ mod tests {
             .detach_conflicting_worktree_session("/tmp/wt/a", "s2")
             .map(|d| d.label);
         assert!(label.is_some());
-        assert!(!app.engine.providers.contains_key(TabIdRef::new("s1")));
+        assert!(!app.engine.providers.contains_key(TabIdRef::new("s1-slot")));
         let s1_session = app.engine.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(s1_session.status, SessionStatus::Detached);
     }
@@ -6447,22 +6454,22 @@ mod tests {
 
         app.engine
             .pty_activity
-            .insert("s1".to_string(), std::time::Instant::now());
+            .insert("s1-slot".to_string(), std::time::Instant::now());
         app.engine
             .pty_input
-            .insert("s1".to_string(), std::time::Instant::now());
-        assert!(app.engine.pty_activity.contains_key("s1"));
-        assert!(app.engine.pty_input.contains_key("s1"));
+            .insert("s1-slot".to_string(), std::time::Instant::now());
+        assert!(app.engine.pty_activity.contains_key("s1-slot"));
+        assert!(app.engine.pty_input.contains_key("s1-slot"));
 
         app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
             .expect("finish succeeds");
 
         assert!(
-            !app.engine.pty_activity.contains_key("s1"),
+            !app.engine.pty_activity.contains_key("s1-slot"),
             "deleting a session must drop its pty_activity entry",
         );
         assert!(
-            !app.engine.pty_input.contains_key("s1"),
+            !app.engine.pty_input.contains_key("s1-slot"),
             "deleting a session must drop its pty_input entry",
         );
     }
@@ -6763,7 +6770,9 @@ mod tests {
         // session id). Deleting the project must be refused up front, not silently
         // skip this session and then falsely claim success.
         app.engine
-            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
+            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                "s1-slot",
+            )));
         app.selected_left = 0;
 
         app.delete_selected_project()
@@ -6905,7 +6914,7 @@ mod tests {
             },
         );
         let now = std::time::Instant::now();
-        for id in ["s1", "tab-9"] {
+        for id in ["s1-slot", "tab-9"] {
             app.engine.pty_activity.insert(id.to_string(), now);
             app.engine.pty_input.insert(id.to_string(), now);
             app.engine.pty_pointer.insert(
@@ -6918,7 +6927,7 @@ mod tests {
         }
         app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
             .expect("delete");
-        for id in ["s1", "tab-9"] {
+        for id in ["s1-slot", "tab-9"] {
             assert!(!app.engine.pty_activity.contains_key(id), "activity {id}");
             assert!(!app.engine.pty_input.contains_key(id), "input {id}");
             assert!(!app.engine.pty_pointer.contains_key(id), "pointer {id}");
@@ -7109,14 +7118,16 @@ mod tests {
         let mut app = test_app_with_sessions(vec![session], vec![project]);
         mark_active(&mut app, "s1");
         app.engine
-            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
+            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                "s1-slot",
+            )));
 
         let (killed_agents, _killed_terminals) =
             app.kill_runtime_targets(&[RuntimeTargetId::Agent("s1".to_string())]);
 
         assert_eq!(killed_agents, 1);
         assert!(
-            !app.engine.providers.contains_key(TabIdRef::new("s1")),
+            !app.engine.providers.contains_key(TabIdRef::new("s1-slot")),
             "provider must be dropped"
         );
         assert!(
@@ -7185,7 +7196,9 @@ mod tests {
         app.rebuild_left_items();
         app.selected_left = 1;
         app.engine
-            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new("s1")));
+            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
+                "s1-slot",
+            )));
 
         app.force_reconnect_agent().expect("force reconnect");
 

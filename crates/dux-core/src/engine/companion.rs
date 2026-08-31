@@ -326,15 +326,18 @@ impl Engine {
     /// neither has an agent pane listing changed files. The match is exhaustive
     /// so a fourth kind of owner has to be answered for here.
     pub fn file_drop_refresh_target(&self, pty_id: &str) -> Option<(String, PathBuf)> {
-        let session_id = match self.companion_terminals.get(pty_id) {
+        // The two branches resolve DIFFERENT keyspaces and must not share a
+        // lookup: a companion terminal names its owner by SESSION id, while a
+        // bare pane id is a TAB id. They were the same string only while the
+        // slot tab's id was the same string as the session id.
+        let session = match self.companion_terminals.get(pty_id) {
             Some(terminal) => match terminal.owner.as_ref() {
-                crate::model::TerminalOwnerRef::Session(id) => id,
+                crate::model::TerminalOwnerRef::Session(id) => self.session_by_id(id)?,
                 crate::model::TerminalOwnerRef::Project(_)
                 | crate::model::TerminalOwnerRef::Standalone => return None,
             },
-            None => pty_id,
+            None => self.session_behind_pty(pty_id)?,
         };
-        let session = self.session_behind_pty(session_id)?;
         Some((session.id.clone(), PathBuf::from(session.directory())))
     }
 
@@ -385,7 +388,7 @@ mod tests {
             },
         );
 
-        for pty_id in ["s1", "tab-9"] {
+        for pty_id in ["s1-slot", "tab-9"] {
             let dest = engine
                 .file_drop_destination(pty_id)
                 .unwrap_or_else(|| panic!("{pty_id} should resolve to a destination"));
@@ -435,7 +438,7 @@ mod tests {
 
         engine.config.ui.upload_directory = "tmp/dropped".to_string();
         engine.config.ui.upload_write_gitignore = false;
-        match engine.file_drop_destination("s1") {
+        match engine.file_drop_destination("s1-slot") {
             Some(crate::file_drop::FileDropDestination::AgentUploads {
                 relative,
                 write_gitignore,
@@ -448,7 +451,7 @@ mod tests {
         }
 
         engine.config.ui.upload_directory = "/etc".to_string();
-        match engine.file_drop_destination("s1") {
+        match engine.file_drop_destination("s1-slot") {
             Some(crate::file_drop::FileDropDestination::AgentUploads { relative, .. }) => {
                 assert_eq!(
                     relative,
@@ -481,7 +484,7 @@ mod tests {
             ));
         engine.config.ui.upload_write_gitignore = true;
 
-        let seeded = |engine: &super::Engine| match engine.file_drop_destination("sa1") {
+        let seeded = |engine: &super::Engine| match engine.file_drop_destination("sa1-slot") {
             Some(crate::file_drop::FileDropDestination::AgentUploads {
                 write_gitignore, ..
             }) => write_gitignore,
@@ -673,7 +676,7 @@ mod tests {
             .create_standalone_terminal(24, 80)
             .expect("standalone terminal");
 
-        for pty_id in ["s1", "tab-9", session_terminal.as_str()] {
+        for pty_id in ["s1-slot", "tab-9", session_terminal.as_str()] {
             assert_eq!(
                 engine.file_drop_refresh_target(pty_id),
                 Some(("s1".to_string(), std::path::PathBuf::from(worktree.path()))),

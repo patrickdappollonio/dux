@@ -781,14 +781,14 @@ mod tests {
                 })
                 .unwrap();
             store
-                .upsert_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
+                .create_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
                 .unwrap();
             // A standalone agent in a plain directory: no repository, so every
             // mutating route must be refused by the workspace chokepoint.
             let plain = root.join("plain");
             std::fs::create_dir_all(&plain).unwrap();
             store
-                .upsert_session(&standalone_session("sa1", plain.to_string_lossy().as_ref()))
+                .create_session(&standalone_session("sa1", plain.to_string_lossy().as_ref()))
                 .unwrap();
         }
         let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
@@ -838,6 +838,7 @@ mod tests {
         let now = chrono::Utc::now();
         dux_core::model::AgentSession {
             id: id.to_string(),
+            slot_tab_id: format!("{id}-slot"),
             provider: dux_core::model::ProviderKind::new("claude"),
             title: None,
             started_providers: Vec::new(),

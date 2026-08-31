@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::config::ProjectConfig;
 use crate::model::{AgentSession, AgentTab, ProviderKind, SessionStatus};
@@ -310,6 +310,22 @@ impl SessionStore {
         // Deliberately OMITTED from `upsert_session`'s SET/INSERT lists (same rationale
         // as `sort_order`): a dedicated setter owns it so status/config churn can't reset it.
         ensure_column(&self.conn, "agent_sessions", "last_focused_tab", "text")?;
+        // Which `agent_tabs` row currently occupies this agent's session slot:
+        // its first tab, the one the user cannot close. Every tab is a row, so
+        // this is a pointer rather than a synthesized identity, and moving it is
+        // what promoting a sibling tab into the slot will mean.
+        //
+        // NULL means one thing only, and only for as long as `migrate()` is
+        // running: "this session predates the pointer and has not been migrated
+        // yet". `backfill_slot_tabs` below closes that window on every open, and
+        // `heal_slot_tab_pointers` closes the other one (a pointer naming a row
+        // that is gone). After `migrate()` returns, a session with no usable
+        // pointer is a bug, not a state the read path tolerates.
+        //
+        // The table is created further down (`create table if not exists
+        // agent_tabs`), and both passes below run after it, because they write
+        // rows into it.
+        ensure_column(&self.conn, "agent_sessions", "slot_tab_id", "text")?;
         self.conn.execute_batch(
             r#"
             create table if not exists session_prs (
@@ -393,11 +409,11 @@ impl SessionStore {
             );
             "#,
         )?;
-        // extra tabs (secondary provider tabs). Additive and backward
-        // compatible: existing databases start with zero rows and behave exactly
-        // as before. The session-slot tab has no row here — it is derived from the
-        // `agent_sessions` row. Rows are removed when the owning session (or its
-        // project) is deleted (see `delete_session`/`remove_project_records`).
+        // One row per provider tab, the agent's FIRST tab included: the
+        // session-slot tab is a row like any other, named by
+        // `agent_sessions.slot_tab_id`. Rows are removed when the owning session
+        // (or its project) is deleted (see
+        // `delete_session`/`remove_project_records`).
         self.conn.execute_batch(
             r#"
             create table if not exists agent_tabs (
@@ -425,6 +441,148 @@ impl SessionStore {
             );
             "#,
         )?;
+        // Both slot-tab passes run last: they write `agent_tabs` rows, so the
+        // table has to exist, and a failure in either aborts the open. A
+        // workspace whose first tabs are unaddressable is worse than a startup
+        // that says why it stopped.
+        self.backfill_slot_tabs()?;
+        self.heal_slot_tab_pointers()?;
+        Ok(())
+    }
+
+    /// Give every session that predates the slot pointer a real first-tab row,
+    /// in one transaction.
+    ///
+    /// A pre-pointer session's first tab was synthesized from the session record
+    /// and had no row, so the row is MINTED here rather than adopted from the
+    /// session's existing tabs: adopting one would silently turn tab 2 into tab 1
+    /// and lose a tab. The minted row sorts strictly before every tab the session
+    /// already has, so the strip's `(sort_order, created_at)` order is exactly
+    /// what the user last saw with the first tab back at the front.
+    ///
+    /// Idempotent: a session with a pointer is not touched, so a second run
+    /// changes nothing.
+    fn backfill_slot_tabs(&self) -> Result<()> {
+        let pending: Vec<(String, String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "select id, provider, created_at from agent_sessions \
+                 where slot_tab_id is null or trim(slot_tab_id) = ''",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get::<_, String>(2)?))
+            })?;
+            let mut pending = Vec::new();
+            for row in rows {
+                pending.push(row?);
+            }
+            pending
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let count = pending.len();
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("failed to start the slot tab migration")?;
+        for (session_id, provider, created_at) in pending {
+            let tab_id = uuid::Uuid::new_v4().to_string();
+            // One below whatever the session's existing tabs start at, so the
+            // minted first tab leads the strip and every extra tab keeps the
+            // position it had.
+            let sort_order: i64 = tx.query_row(
+                "select coalesce(min(sort_order), 1) - 1 from agent_tabs where session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
+                 values (?1, ?2, ?3, ?4, ?5)",
+                params![tab_id, session_id, provider, sort_order, created_at],
+            )
+            .with_context(|| format!("failed to mint the slot tab row for session {session_id}"))?;
+            tx.execute(
+                "update agent_sessions set slot_tab_id = ?2 where id = ?1",
+                params![session_id, tab_id],
+            )
+            .with_context(|| format!("failed to record the slot tab for session {session_id}"))?;
+        }
+        tx.commit()
+            .context("failed to commit the slot tab migration")?;
+        crate::logger::info(&format!(
+            "one-time migration: gave {count} session(s) a stored first tab"
+        ));
+        Ok(())
+    }
+
+    /// Repair a slot pointer that names an `agent_tabs` row which is no longer
+    /// there, out loud.
+    ///
+    /// Distinct from [`Self::backfill_slot_tabs`] on purpose. A NULL pointer means
+    /// "not migrated yet" and its first tab has to be minted; a DANGLING pointer
+    /// means the row it named is gone, and the honest repair is to hand the slot
+    /// to the session's oldest surviving tab (which the user is already looking
+    /// at) rather than mint a tab nothing has ever run in. Only a session with no
+    /// tabs left at all falls back to minting one.
+    fn heal_slot_tab_pointers(&self) -> Result<()> {
+        let dangling: Vec<(String, String, String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "select s.id, s.slot_tab_id, s.provider, s.created_at from agent_sessions s \
+                 where s.slot_tab_id is not null and trim(s.slot_tab_id) <> '' \
+                   and not exists (select 1 from agent_tabs t where t.id = s.slot_tab_id)",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            let mut dangling = Vec::new();
+            for row in rows {
+                dangling.push(row?);
+            }
+            dangling
+        };
+        if dangling.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("failed to start the slot tab repair")?;
+        for (session_id, stale, provider, created_at) in dangling {
+            let oldest: Option<String> = tx
+                .query_row(
+                    "select id from agent_tabs where session_id = ?1 \
+                     order by sort_order, created_at limit 1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let (tab_id, how) = match oldest {
+                Some(id) => (id, "its oldest surviving tab"),
+                None => {
+                    let tab_id = uuid::Uuid::new_v4().to_string();
+                    tx.execute(
+                        "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
+                         values (?1, ?2, ?3, 0, ?4)",
+                        params![tab_id, session_id, provider, created_at],
+                    )
+                    .with_context(|| {
+                        format!("failed to mint a replacement slot tab for session {session_id}")
+                    })?;
+                    (tab_id, "a freshly minted tab")
+                }
+            };
+            tx.execute(
+                "update agent_sessions set slot_tab_id = ?2 where id = ?1",
+                params![session_id, tab_id],
+            )
+            .with_context(|| format!("failed to repair the slot tab for session {session_id}"))?;
+            crate::logger::warn(&format!(
+                "agent {session_id} pointed at a first tab ({stale}) that no longer exists; \
+                 gave the slot to {how} ({tab_id})"
+            ));
+        }
+        tx.commit()
+            .context("failed to commit the slot tab repair")?;
         Ok(())
     }
 
@@ -507,21 +665,64 @@ impl SessionStore {
             "select id, session_id, provider, sort_order, created_at \
              from agent_tabs order by session_id, sort_order, created_at",
         )?;
-        let rows = stmt.query_map([], |row| {
-            let created_at: String = row.get(4)?;
-            Ok(AgentTab {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                provider: ProviderKind::from_str(row.get::<_, String>(2)?.as_str()),
-                sort_order: row.get(3)?,
-                created_at: parse_time(&created_at).unwrap_or_else(Utc::now),
-            })
-        })?;
+        let rows = stmt.query_map([], read_agent_tab)?;
         let mut tabs = Vec::new();
         for row in rows {
             tabs.push(row?);
         }
         Ok(tabs)
+    }
+
+    /// Every tab EXCEPT the one currently occupying its session's slot.
+    ///
+    /// The engine's in-memory `agent_tabs` map holds the extras; the slot tab is
+    /// reached through the session record's pointer, which is also the mirror of
+    /// its provider (see [`Self::set_slot_provider`]). Sessions and tabs are
+    /// joined, so an orphan row cannot come back out even if the sweep in
+    /// [`Self::load_agent_tabs`] has not run.
+    pub fn load_extra_agent_tabs(&self) -> Result<Vec<AgentTab>> {
+        let mut stmt = self.conn.prepare(
+            "select t.id, t.session_id, t.provider, t.sort_order, t.created_at \
+             from agent_tabs t join agent_sessions s on s.id = t.session_id \
+             where s.slot_tab_id is null or t.id <> s.slot_tab_id \
+             order by t.session_id, t.sort_order, t.created_at",
+        )?;
+        let rows = stmt.query_map([], read_agent_tab)?;
+        let mut tabs = Vec::new();
+        for row in rows {
+            tabs.push(row?);
+        }
+        Ok(tabs)
+    }
+
+    /// Retarget the provider of the tab occupying a session's slot, and the
+    /// session's own `provider` column with it.
+    ///
+    /// `agent_sessions.provider` is a MIRROR of the slot tab's provider, kept
+    /// because every read path in both surfaces asks the session for it. This is
+    /// the one place either value is written, so the two cannot drift.
+    pub fn set_slot_provider(
+        &self,
+        session_id: &str,
+        provider: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("failed to start retargeting the agent's provider")?;
+        tx.execute(
+            "update agent_tabs set provider = ?2 where id = \
+             (select slot_tab_id from agent_sessions where id = ?1)",
+            params![session_id, provider],
+        )?;
+        tx.execute(
+            "update agent_sessions set provider = ?2, updated_at = ?3 where id = ?1",
+            params![session_id, provider, updated_at.to_rfc3339()],
+        )?;
+        tx.commit()
+            .context("failed to commit the agent's new provider")?;
+        Ok(())
     }
 
     /// Retarget an extra tab's provider (effective on its next launch).
@@ -550,9 +751,8 @@ impl SessionStore {
         Ok(value)
     }
 
-    /// Number of extra tabs for one session (excludes the session-slot tab, which has
-    /// no row). The per-agent cap counts Main as tab 1, so the create path checks
-    /// `count_agent_tabs(session_id) + 1 >= max_per_agent`.
+    /// How many tabs one session has, the slot tab included: every tab is a
+    /// row, so this is the number the per-agent cap is compared against directly.
     pub fn count_agent_tabs(&self, session_id: &str) -> Result<i64> {
         let count: i64 = self.conn.query_row(
             "select count(*) from agent_tabs where session_id = ?1",
@@ -1045,7 +1245,45 @@ impl SessionStore {
         Ok(result)
     }
 
+    /// Persist a brand-new agent: its session row, its first tab's
+    /// `agent_tabs` row, and the pointer between them, in ONE transaction.
+    ///
+    /// Every tab is a row, so a session and its first tab are created together
+    /// or not at all: a session row with no slot tab names a PTY address nothing
+    /// resolves, and a tab row with no session is an orphan the next load sweeps
+    /// away. The slot row sorts at 0, below the 1-based `sort_order` every extra
+    /// tab is appended at, so the first tab leads the strip.
+    ///
+    /// Existing sessions keep going through [`Self::upsert_session`], which is
+    /// the hot path status churn takes and which never touches `agent_tabs`.
+    pub fn create_session(&self, session: &AgentSession) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("failed to start creating the agent")?;
+        tx.execute(
+            "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
+             values (?1, ?2, ?3, 0, ?4)",
+            params![
+                session.slot_tab_id,
+                session.id,
+                session.provider.as_str(),
+                session.created_at.to_rfc3339(),
+            ],
+        )
+        .with_context(|| format!("failed to write the first tab of agent {}", session.id))?;
+        Self::upsert_session_in(&tx, session)?;
+        tx.commit().context("failed to commit the new agent")?;
+        Ok(())
+    }
+
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
+        Self::upsert_session_in(&self.conn, session)
+    }
+
+    /// The body of [`Self::upsert_session`], parameterized over the connection so
+    /// [`Self::create_session`] can run it inside its transaction.
+    fn upsert_session_in(conn: &Connection, session: &AgentSession) -> Result<()> {
         // Flatten the workspace into the row's columns ONCE, here, so no SQL
         // below reaches into the enum. A folder row writes empty text into the
         // git columns (`project_id` is NOT NULL, and the rest predate the
@@ -1086,7 +1324,7 @@ impl SessionStore {
         // `sort_order`. Do NOT copy `initial_branch`'s treatment below: that
         // one IS in the SET list (its immutability is engine discipline), and
         // adding `branch_provenance` beside it would break this guarantee.
-        let updated = self.conn.execute(
+        let updated = conn.execute(
             r#"
             update agent_sessions set
                 project_path=?2,
@@ -1102,7 +1340,8 @@ impl SessionStore {
                 updated_at=?12,
                 initial_branch=?13,
                 workspace_kind=?14,
-                folder_path=?15
+                folder_path=?15,
+                slot_tab_id=?16
             where id = ?1
             "#,
             params![
@@ -1121,6 +1360,7 @@ impl SessionStore {
                 initial_branch,
                 workspace_kind,
                 folder_path,
+                session.slot_tab_id,
             ],
         )?;
         if updated > 0 {
@@ -1139,16 +1379,16 @@ impl SessionStore {
         // the honest reading of "the top" for an agent whose group is the whole
         // list.
         let new_sort_order = if workspace_kind == "folder" {
-            self.min_session_sort_order_overall()?.unwrap_or(1) - 1
+            min_session_sort_order_overall_in(conn)?.unwrap_or(1) - 1
         } else {
-            self.min_session_sort_order(project_id)?.unwrap_or(1) - 1
+            min_session_sort_order_in(conn, project_id)?.unwrap_or(1) - 1
         };
-        self.conn.execute(
+        conn.execute(
             r#"
             insert into agent_sessions
-                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at, initial_branch, branch_provenance, workspace_kind, folder_path)
+                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at, initial_branch, branch_provenance, workspace_kind, folder_path, slot_tab_id)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             "#,
             params![
                 session.id,
@@ -1170,6 +1410,7 @@ impl SessionStore {
                 branch_provenance,
                 workspace_kind,
                 folder_path,
+                session.slot_tab_id,
             ],
         )?;
         Ok(())
@@ -1179,24 +1420,14 @@ impl SessionStore {
     /// are none. The placement rule for a standalone agent, which has no project
     /// whose top it could be placed at.
     pub fn min_session_sort_order_overall(&self) -> Result<Option<i64>> {
-        self.conn
-            .query_row("select min(sort_order) from agent_sessions", [], |row| {
-                row.get::<_, Option<i64>>(0)
-            })
-            .context("failed to compute the overall min session sort order")
+        min_session_sort_order_overall_in(&self.conn)
     }
 
     /// The smallest `sort_order` currently assigned to any session in
     /// `project_id`, or `None` when the project has no sessions yet. Used to
     /// place a new session one position above the current top.
     pub fn min_session_sort_order(&self, project_id: &str) -> Result<Option<i64>> {
-        self.conn
-            .query_row(
-                "select min(sort_order) from agent_sessions where project_id = ?1",
-                params![project_id],
-                |row| row.get::<_, Option<i64>>(0),
-            )
-            .context("failed to compute min session sort order")
+        min_session_sort_order_in(&self.conn, project_id)
     }
 
     /// Assign positions `0..n` to exactly `ordered_ids`, in that order, scoped
@@ -1318,7 +1549,7 @@ impl SessionStore {
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch, last_focused_tab, branch_provenance, workspace_kind, folder_path
+            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch, last_focused_tab, branch_provenance, workspace_kind, folder_path, slot_tab_id
             from agent_sessions
             order by sort_order asc, updated_at desc
             "#,
@@ -1396,6 +1627,14 @@ impl SessionStore {
             };
             Ok(Some(AgentSession {
                 id: row.get(0)?,
+                // `migrate()` has already run by the time anything reads, so a
+                // usable pointer is guaranteed. The fallback is defence for a
+                // row written by a build that is not this one; it restores the
+                // pre-pivot identity rather than inventing an unaddressable id.
+                slot_tab_id: row
+                    .get::<_, Option<String>>(19)?
+                    .filter(|id| !id.trim().is_empty())
+                    .unwrap_or_else(|| row.get::<_, String>(0).unwrap_or_default()),
                 provider: crate::model::ProviderKind::from_str(row.get::<_, String>(2)?.as_str()),
                 workspace,
                 title: row.get(6)?,
@@ -1440,7 +1679,7 @@ impl SessionStore {
         // Drop the per-session changed-files revision counter too, so a deleted
         // session leaves no housekeeping rows behind.
         tx.execute("delete from changes_rev where session_id = ?1", params![id])?;
-        // Drop the session's extra tabs (the session-slot tab has no row).
+        // Drop every tab the session owns, its slot tab included.
         tx.execute("delete from agent_tabs where session_id = ?1", params![id])?;
         tx.execute("delete from agent_sessions where id = ?1", params![id])?;
         tx.commit()?;
@@ -1543,6 +1782,7 @@ fn test_session(
 ) -> crate::model::AgentSession {
     crate::model::AgentSession {
         id: id.to_string(),
+        slot_tab_id: id.to_string(),
         provider: crate::model::ProviderKind::new("claude"),
         title: None,
         started_providers: Vec::new(),
@@ -1604,6 +1844,7 @@ mod tests {
         let now = Utc::now();
         AgentSession {
             id: id.to_string(),
+            slot_tab_id: id.to_string(),
             provider: crate::model::ProviderKind::new("claude"),
             workspace: AgentWorkspace::Folder(FolderWorkspace {
                 folder_path: folder.to_string(),
@@ -2140,6 +2381,292 @@ mod tests {
         let loaded = store.load_agent_tabs().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "t1");
+    }
+
+    /// A session row shaped the way this branch's dev databases are: a real
+    /// session with no `slot_tab_id` pointer and no first-tab row, because the
+    /// slot tab was synthesized from the session record rather than stored.
+    fn pre_pivot_session(store: &SessionStore, id: &str, provider: &str) {
+        let now = Utc::now();
+        let mut session = test_session(id, now, now);
+        session.provider = crate::model::ProviderKind::new(provider);
+        store.upsert_session(&session).unwrap();
+        store
+            .conn
+            .execute(
+                "update agent_sessions set slot_tab_id = null where id = ?1",
+                params![id],
+            )
+            .unwrap();
+    }
+
+    fn slot_pointer(store: &SessionStore, id: &str) -> Option<String> {
+        store
+            .conn
+            .query_row(
+                "select slot_tab_id from agent_sessions where id = ?1",
+                params![id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn create_session_writes_the_session_its_slot_tab_row_and_the_pointer_at_once() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        session.provider = crate::model::ProviderKind::new("codex");
+        store.create_session(&session).unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].slot_tab_id, "slot-1");
+        let tabs = store.load_agent_tabs().unwrap();
+        assert_eq!(tabs.len(), 1, "the first tab is a row like any other");
+        assert_eq!(tabs[0].id, "slot-1");
+        assert_eq!(tabs[0].session_id, "s1");
+        assert_eq!(tabs[0].provider.as_str(), "codex");
+    }
+
+    #[test]
+    fn create_session_writes_nothing_at_all_when_the_slot_tab_row_cannot_be_written() {
+        let store = test_store();
+        let now = Utc::now();
+        // Somebody else already holds this tab id, so the slot row's INSERT
+        // fails. The session row must not survive on its own: a session with no
+        // slot tab is exactly the half-created state the transaction exists to
+        // prevent.
+        store
+            .upsert_session(&test_session("other", now, now))
+            .unwrap();
+        store
+            .insert_agent_tab(&test_tab("slot-1", "other", 1))
+            .unwrap();
+
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        assert!(store.create_session(&session).is_err());
+        assert!(
+            store.load_sessions().unwrap().iter().all(|s| s.id != "s1"),
+            "the session row must roll back with the slot tab row"
+        );
+    }
+
+    #[test]
+    fn create_session_places_the_slot_row_before_every_tab_added_later() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        store.create_session(&session).unwrap();
+        let next = store.max_tab_sort_order("s1").unwrap().unwrap_or(0) + 1;
+        store.insert_agent_tab(&test_tab("t2", "s1", next)).unwrap();
+
+        let ids: Vec<String> = store
+            .load_agent_tabs()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, vec!["slot-1".to_string(), "t2".to_string()]);
+    }
+
+    #[test]
+    fn migration_mints_a_slot_tab_row_for_a_session_that_predates_the_pointer() {
+        let store = test_store();
+        pre_pivot_session(&store, "s1", "codex");
+        assert_eq!(slot_pointer(&store, "s1"), None);
+
+        store.migrate().unwrap();
+
+        let pointer = slot_pointer(&store, "s1").expect("the migration sets the pointer");
+        assert_ne!(
+            pointer, "s1",
+            "the slot tab gets a generated id, not the session id"
+        );
+        let tabs = store.load_agent_tabs().unwrap();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].id, pointer);
+        assert_eq!(
+            tabs[0].provider.as_str(),
+            "codex",
+            "the minted row carries the provider the session was running"
+        );
+    }
+
+    #[test]
+    fn migration_keeps_every_existing_extra_tab_after_the_minted_first_row() {
+        let store = test_store();
+        pre_pivot_session(&store, "s1", "claude");
+        store.insert_agent_tab(&test_tab("t2", "s1", 1)).unwrap();
+        store.insert_agent_tab(&test_tab("t3", "s1", 2)).unwrap();
+
+        store.migrate().unwrap();
+
+        let pointer = slot_pointer(&store, "s1").unwrap();
+        let ids: Vec<String> = store
+            .load_agent_tabs()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, vec![pointer, "t2".to_string(), "t3".to_string()]);
+    }
+
+    #[test]
+    fn migration_is_a_no_op_on_a_second_run() {
+        let store = test_store();
+        pre_pivot_session(&store, "s1", "claude");
+        store.migrate().unwrap();
+        let pointer = slot_pointer(&store, "s1").unwrap();
+        let before = store.load_agent_tabs().unwrap();
+
+        store.migrate().unwrap();
+
+        assert_eq!(slot_pointer(&store, "s1").unwrap(), pointer);
+        let after = store.load_agent_tabs().unwrap();
+        assert_eq!(after.len(), before.len());
+        assert_eq!(after[0].id, before[0].id);
+    }
+
+    #[test]
+    fn a_failed_slot_tab_migration_aborts_the_open_rather_than_half_migrating() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        {
+            let store = SessionStore::open(&path).unwrap();
+            pre_pivot_session(&store, "s1", "claude");
+            // A corrupted `agent_tabs` the minting INSERT cannot satisfy. The
+            // table already exists, so `create table if not exists` leaves it
+            // alone and the migration's INSERT is the thing that fails.
+            store
+                .conn
+                .execute_batch(
+                    "drop table agent_tabs; \
+                     create table agent_tabs ( \
+                        id text primary key, \
+                        session_id text not null, \
+                        provider text not null, \
+                        sort_order integer not null default 0, \
+                        created_at text not null, \
+                        unsatisfiable text not null \
+                     );",
+                )
+                .unwrap();
+        }
+
+        let err = match SessionStore::open(&path) {
+            Ok(_) => panic!("a failed migration must stop startup"),
+            Err(err) => err,
+        };
+        assert!(
+            format!("{err:#}").contains("slot tab"),
+            "the failure must name what could not be migrated, got: {err:#}"
+        );
+        let conn = Connection::open(&path).unwrap();
+        let pointer: Option<String> = conn
+            .query_row(
+                "select slot_tab_id from agent_sessions where id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pointer, None, "a failed migration leaves nothing behind");
+    }
+
+    #[test]
+    fn migrate_heals_a_pointer_that_names_no_row_by_adopting_the_oldest_tab() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        store.create_session(&session).unwrap();
+        store.insert_agent_tab(&test_tab("t2", "s1", 1)).unwrap();
+        store.insert_agent_tab(&test_tab("t3", "s1", 2)).unwrap();
+        // The slot row vanished without the pointer moving with it.
+        store.delete_agent_tab("slot-1").unwrap();
+
+        store.migrate().unwrap();
+
+        assert_eq!(
+            slot_pointer(&store, "s1").as_deref(),
+            Some("t2"),
+            "the oldest surviving tab takes the slot"
+        );
+    }
+
+    #[test]
+    fn migrate_heals_a_dangling_pointer_with_no_tabs_left_by_minting_one() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        session.provider = crate::model::ProviderKind::new("codex");
+        store.create_session(&session).unwrap();
+        store.delete_agent_tab("slot-1").unwrap();
+
+        store.migrate().unwrap();
+
+        let pointer = slot_pointer(&store, "s1").expect("healed");
+        assert_ne!(pointer, "slot-1");
+        let tabs = store.load_agent_tabs().unwrap();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].id, pointer);
+        assert_eq!(tabs[0].provider.as_str(), "codex");
+    }
+
+    #[test]
+    fn deleting_a_session_removes_its_slot_tab_row_with_the_rest() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        store.create_session(&session).unwrap();
+        store.insert_agent_tab(&test_tab("t2", "s1", 1)).unwrap();
+
+        store.delete_session("s1").unwrap();
+
+        assert_eq!(store.count_agent_tabs("s1").unwrap(), 0);
+        assert!(store.load_agent_tabs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_slot_provider_moves_the_row_and_the_session_mirror_together() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        session.provider = crate::model::ProviderKind::new("claude");
+        store.create_session(&session).unwrap();
+
+        store.set_slot_provider("s1", "codex", Utc::now()).unwrap();
+
+        assert_eq!(store.load_sessions().unwrap()[0].provider.as_str(), "codex");
+        assert_eq!(
+            store.load_agent_tabs().unwrap()[0].provider.as_str(),
+            "codex"
+        );
+    }
+
+    #[test]
+    fn count_agent_tabs_counts_the_slot_row_too_and_extras_omit_it() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        store.create_session(&session).unwrap();
+        store.insert_agent_tab(&test_tab("t2", "s1", 1)).unwrap();
+
+        assert_eq!(store.count_agent_tabs("s1").unwrap(), 2);
+        let extras: Vec<String> = store
+            .load_extra_agent_tabs()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(extras, vec!["t2".to_string()]);
     }
 
     #[test]
@@ -3566,6 +4093,39 @@ mod pr_tests {
 /// Adds `column` to `table` if it is missing. Returns `true` when the column
 /// was just added by this call, `false` when it already existed. Callers that
 /// need a one-time backfill of a newly-added column branch on the return value.
+/// Read one `agent_tabs` row. Shared by every tab query so the slot tab and an
+/// extra tab can never be decoded differently.
+fn read_agent_tab(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentTab> {
+    let created_at: String = row.get(4)?;
+    Ok(AgentTab {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        provider: ProviderKind::from_str(row.get::<_, String>(2)?.as_str()),
+        sort_order: row.get(3)?,
+        created_at: parse_time(&created_at).unwrap_or_else(Utc::now),
+    })
+}
+
+/// See [`SessionStore::min_session_sort_order_overall`]. Parameterized over the
+/// connection so the insert path can run inside `create_session`'s transaction.
+fn min_session_sort_order_overall_in(conn: &Connection) -> Result<Option<i64>> {
+    conn.query_row("select min(sort_order) from agent_sessions", [], |row| {
+        row.get::<_, Option<i64>>(0)
+    })
+    .context("failed to compute the overall min session sort order")
+}
+
+/// See [`SessionStore::min_session_sort_order`]. Parameterized over the
+/// connection for the same reason as its sibling above.
+fn min_session_sort_order_in(conn: &Connection, project_id: &str) -> Result<Option<i64>> {
+    conn.query_row(
+        "select min(sort_order) from agent_sessions where project_id = ?1",
+        params![project_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .context("failed to compute min session sort order")
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("pragma table_info({table})"))?;
     let existing = stmt

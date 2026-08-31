@@ -104,6 +104,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         .expect("seed project");
     let session = AgentSession {
         id: "session-1".to_string(),
+        slot_tab_id: "session-1-slot".to_string(),
         provider: ProviderKind::from_str("codex"),
         title: None,
         started_providers: Vec::new(),

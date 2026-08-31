@@ -13774,7 +13774,7 @@ not_a_real_action = ["x"]
         let worktree = std::path::Path::new(&worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.providers.insert(
-            TabId::new(app.engine.sessions[0].id.clone()),
+            app.engine.sessions[0].slot_tab_id().to_owned(),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn agent"),
         );
         app.engine.companion_terminals.insert(
@@ -14008,6 +14008,7 @@ not_a_real_action = ["x"]
         let now = Utc::now();
         app.engine.sessions.push(AgentSession {
             id: "session-2".to_string(),
+            slot_tab_id: "session-2-slot".to_string(),
             provider: ProviderKind::from_str("claude"),
             title: None,
             started_providers: Vec::new(),
@@ -14037,11 +14038,11 @@ not_a_real_action = ["x"]
         });
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn first"),
         );
         app.engine.providers.insert(
-            TabId::new("session-2"),
+            TabId::new("session-2-slot"),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn second"),
         );
 
@@ -14064,12 +14065,12 @@ not_a_real_action = ["x"]
         assert!(
             app.engine
                 .providers
-                .contains_key(TabIdRef::new("session-1"))
+                .contains_key(TabIdRef::new("session-1-slot"))
         );
         assert!(
             !app.engine
                 .providers
-                .contains_key(TabIdRef::new("session-2"))
+                .contains_key(TabIdRef::new("session-2-slot"))
         );
     }
 
@@ -14087,6 +14088,7 @@ not_a_real_action = ["x"]
         for name in ["charlie", "alpha", "bravo"] {
             let session = AgentSession {
                 id: format!("session-{name}"),
+                slot_tab_id: format!("session-{name}-slot"),
                 provider: ProviderKind::from_str("codex"),
                 title: None,
                 started_providers: Vec::new(),
@@ -14159,6 +14161,7 @@ not_a_real_action = ["x"]
     ) -> AgentSession {
         AgentSession {
             id: id.to_string(),
+            slot_tab_id: format!("{id}-slot"),
             provider: ProviderKind::from_str("codex"),
             title: None,
             started_providers: Vec::new(),
@@ -14475,6 +14478,7 @@ not_a_real_action = ["x"]
         for name in ["charlie", "alpha", "bravo"] {
             let session = AgentSession {
                 id: format!("session-{name}"),
+                slot_tab_id: format!("session-{name}-slot"),
                 provider: ProviderKind::from_str("codex"),
                 title: None,
                 started_providers: Vec::new(),
@@ -14534,7 +14538,7 @@ not_a_real_action = ["x"]
         );
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn agent"),
         );
         app.engine.companion_terminals.insert(
@@ -15474,6 +15478,7 @@ not_a_real_action = ["x"]
         for name in ["alpha", "bravo"] {
             app.engine.sessions.push(AgentSession {
                 id: format!("session-{name}"),
+                slot_tab_id: format!("session-{name}-slot"),
                 provider: ProviderKind::from_str("codex"),
                 title: None,
                 started_providers: Vec::new(),
@@ -15668,6 +15673,7 @@ not_a_real_action = ["x"]
         std::fs::create_dir_all(&worktree).expect("imported worktree");
         let session = AgentSession {
             id: "imported-session".to_string(),
+            slot_tab_id: "imported-session-slot".to_string(),
             provider: ProviderKind::from_str("codex"),
             title: Some("imported".to_string()),
             started_providers: vec!["codex".to_string()],
@@ -15715,7 +15721,7 @@ not_a_real_action = ["x"]
         assert!(
             app.engine
                 .resume_fallback_candidates
-                .contains_key(TabIdRef::new(&session.id))
+                .contains_key(session.slot_tab_id())
         );
         assert_eq!(
             app.engine
@@ -17165,7 +17171,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
@@ -17196,7 +17202,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn(
                 "sh",
                 &[
@@ -17251,7 +17257,7 @@ not_a_real_action = ["x"]
     /// every byte the child receives in caret notation, so the child's own
     /// grid is the proof of what was forwarded.
     fn install_mouse_forward_child(app: &mut App, decsets: &str) {
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let cmd = format!("stty raw -echo; printf '{decsets}'; exec cat -v");
         let client = PtyClient::spawn(
             "/bin/sh",
@@ -17262,7 +17268,9 @@ not_a_real_action = ["x"]
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
         app.center_mode = CenterMode::Agent;
@@ -17327,9 +17335,9 @@ not_a_real_action = ["x"]
             Some(0),
             "the press must arm the forwarding drag state"
         );
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         assert!(
-            app.engine.pty_pointer.contains_key(&session_id),
+            app.engine.pty_pointer.contains_key(&slot_tab),
             "a forwarded press must stamp the pointer window, not typing"
         );
         wait_for_forwarded_echo(&app, "[<0;10;5M");
@@ -17461,8 +17469,8 @@ not_a_real_action = ["x"]
     fn windowed_click_is_not_forwarded_while_scrolled_back() {
         let mut app = test_app(default_bindings());
         install_mouse_forward_child(&mut app, "\\033[?1000h");
-        let session_id = app.engine.sessions[0].id.clone();
-        app.scroll_mode.insert(session_id);
+        app.scroll_mode
+            .insert(app.engine.sessions[0].slot_tab_id().to_string());
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
 
@@ -17734,8 +17742,8 @@ not_a_real_action = ["x"]
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
-        let session_id = app.engine.sessions[0].id.clone();
-        app.scroll_mode.insert(session_id);
+        app.scroll_mode
+            .insert(app.engine.sessions[0].slot_tab_id().to_string());
         app.focus = FocusPane::Left;
 
         let ctrl = MouseEvent {
@@ -17824,8 +17832,8 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         let rx = recording_opener(&mut app);
-        let session_id = app.engine.sessions[0].id.clone();
-        app.scroll_mode.insert(session_id);
+        app.scroll_mode
+            .insert(app.engine.sessions[0].slot_tab_id().to_string());
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/history");
         // A snapshot taken well above the live edge resolves the same point to
         // the same cell: adding the offset anywhere in the lookup moves it.
@@ -18179,7 +18187,7 @@ not_a_real_action = ["x"]
 
         assert_eq!(
             app.selected_terminal_surface_id().as_deref(),
-            Some(session_id.as_str()),
+            Some(app.engine.sessions[0].slot_tab_id().as_str()),
             "test setup: the original surface is back on screen"
         );
         assert!(
@@ -18760,7 +18768,7 @@ not_a_real_action = ["x"]
     #[test]
     fn release_is_not_written_when_the_child_dropped_mouse_mode_mid_drag() {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         // Enable tracking, swallow the 10-byte press report, then DISABLE
         // tracking, then echo everything else: the release (if wrongly
         // written) would render as visible `^[[<0;10;5m` text.
@@ -18776,7 +18784,9 @@ not_a_real_action = ["x"]
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
         app.center_mode = CenterMode::Agent;
@@ -18866,7 +18876,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Left;
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
@@ -18897,7 +18907,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
@@ -18956,14 +18966,16 @@ not_a_real_action = ["x"]
     /// `wait_for_agent_cursor` timeout rather than as "the sentinel is no longer
     /// the last thing written".
     fn install_scrolled_pty(app: &mut App, lines: usize) {
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let args = vec![
             "-c".to_string(),
             "seq 1 200; printf READY; sleep 30".to_string(),
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 1000)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.session_surface = SessionSurface::Agent;
 
         // Last row of the 24-row grid, just past the 5-character sentinel.
@@ -19004,7 +19016,7 @@ not_a_real_action = ["x"]
     /// out of step would make the fixture lie about which regime it is in.
     fn install_feedable_pty_with_scrollback(app: &mut App, scrollback: usize) {
         app.engine.config.ui.agent_scrollback_lines = scrollback;
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let args = vec![
             "-c".to_string(),
             "stty -echo; printf 'READY\\n'; cat".to_string(),
@@ -19018,7 +19030,9 @@ not_a_real_action = ["x"]
             scrollback,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.session_surface = SessionSurface::Agent;
         for _ in 0..200 {
             app.refresh_snapshot_buf();
@@ -19770,9 +19784,10 @@ not_a_real_action = ["x"]
             app.center_mode = CenterMode::Agent;
             app.focus = FocusPane::Center;
 
+            let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
             assert_eq!(
                 app.focused_tab_id(&session_id),
-                session_id,
+                slot_tab,
                 "the fixture must start on the session-slot tab or this proves nothing"
             );
 
@@ -19781,7 +19796,7 @@ not_a_real_action = ["x"]
 
             assert_eq!(
                 app.focused_tab_id(&session_id),
-                session_id,
+                slot_tab,
                 "{key:?} must stay on the same tab: the plain arrows belong to the agent now"
             );
         }
@@ -19978,14 +19993,16 @@ not_a_real_action = ["x"]
     #[test]
     fn wheel_over_maximized_agent_still_forwards_to_the_child() {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let args = vec![
             "-c".to_string(),
             "stty raw -echo; printf '\\033[?1049h\\033[?1000h'; exec cat -v".to_string(),
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.session_surface = SessionSurface::Agent;
 
         // Poll until the child's own escape sequences have been parsed, rather
@@ -20243,6 +20260,7 @@ not_a_real_action = ["x"]
         let now = Utc::now();
         app.engine.sessions.push(AgentSession {
             id: "session-2".to_string(),
+            slot_tab_id: "session-2-slot".to_string(),
             provider: ProviderKind::from_str("codex"),
             title: None,
             started_providers: Vec::new(),
@@ -21136,7 +21154,7 @@ not_a_real_action = ["x"]
         // which drives the spinner + shimmer, so the loop must animate.
         app.engine
             .pty_activity
-            .insert("s1".to_string(), std::time::Instant::now());
+            .insert("s1-slot".to_string(), std::time::Instant::now());
         assert!(app.any_row_animating());
     }
 
@@ -23119,9 +23137,10 @@ cyan = "#00ffff"
         let provider =
             PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn test agent");
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), provider);
+            .insert(TabId::new(slot_tab.clone()), provider);
         // Insert a companion terminal to simulate a running terminal.
         let term_client =
             PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn test terminal");
@@ -23224,7 +23243,15 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.engine.sessions[0].provider = ProviderKind::from_str("codex");
         app.engine.sessions[0].status = SessionStatus::Active;
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
+        // The swap writes the slot tab's row and the session's mirrored
+        // provider through one UPDATE, so the fixture's agent has to exist in
+        // storage the way a real one always does.
+        let seeded = app.engine.sessions[0].clone();
+        app.engine
+            .session_store
+            .create_session(&seeded)
+            .expect("persist the fixture agent");
 
         let worktree = std::path::Path::new(
             app.engine.sessions[0]
@@ -23242,7 +23269,7 @@ cyan = "#00ffff"
         .expect("spawn test agent");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), provider);
+            .insert(TabId::new(slot_tab.clone()), provider);
 
         app.rebuild_left_items();
         app.selected_left = app
@@ -23277,9 +23304,7 @@ cyan = "#00ffff"
             .expect("load sessions");
         assert_eq!(persisted[0].provider.as_str(), "opencode");
         assert!(
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id)),
+            app.engine.providers.contains_key(TabIdRef::new(&slot_tab)),
             "the old PTY keeps running until the user exits it"
         );
         assert_eq!(
@@ -23307,7 +23332,7 @@ cyan = "#00ffff"
         );
 
         // Clean up so the PTY doesn't outlive the test.
-        app.engine.providers.remove(TabIdRef::new(&session_id));
+        app.engine.providers.remove(TabIdRef::new(&slot_tab));
     }
 
     #[test]
@@ -23637,7 +23662,9 @@ cyan = "#00ffff"
             assert!(std::time::Instant::now() < deadline, "fill never echoed");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        app.engine.providers.insert(TabId::new("session-1"), client);
+        app.engine
+            .providers
+            .insert(TabId::new("session-1-slot"), client);
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
         app.input_target = InputTarget::Agent;
@@ -23648,7 +23675,7 @@ cyan = "#00ffff"
         let provider = app
             .engine
             .providers
-            .get(TabIdRef::new("session-1"))
+            .get(TabIdRef::new("session-1-slot"))
             .expect("provider");
         provider.set_scrollback(20);
         assert_eq!(provider.scrollback_offset(), 20, "scrolled back");
@@ -23658,7 +23685,7 @@ cyan = "#00ffff"
         let provider = app
             .engine
             .providers
-            .get(TabIdRef::new("session-1"))
+            .get(TabIdRef::new("session-1-slot"))
             .expect("provider");
         assert_eq!(
             provider.scrollback_offset(),
@@ -23675,7 +23702,7 @@ cyan = "#00ffff"
         while !viewport_contains(
             app.engine
                 .providers
-                .get(TabIdRef::new("session-1"))
+                .get(TabIdRef::new("session-1-slot"))
                 .expect("provider"),
             "marker-after-exit",
         ) {
@@ -23792,9 +23819,9 @@ cyan = "#00ffff"
     #[test]
     fn exit_interactive_message_promises_typing_while_the_pane_types() {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.providers.insert(
-            TabId::new(session_id),
+            TabId::new(slot_tab.clone()),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 30".to_string()],
@@ -23888,9 +23915,9 @@ cyan = "#00ffff"
         let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["ctrl-e"])]);
         let mut app = test_app(bindings);
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.providers.insert(
-            TabId::new(session_id),
+            TabId::new(slot_tab.clone()),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
@@ -23933,7 +23960,7 @@ cyan = "#00ffff"
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
@@ -23990,7 +24017,7 @@ cyan = "#00ffff"
         assert!(
             app.engine
                 .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
-                    "session-1"
+                    "session-1-slot"
                 ))),
             "the fullscreen toggle is an explicit action and must launch a dormant tab"
         );
@@ -24019,7 +24046,7 @@ cyan = "#00ffff"
         assert!(
             app.engine
                 .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
-                    "session-1"
+                    "session-1-slot"
                 ))),
             "the migrated key is the fullscreen toggle, an explicit action that launches"
         );
@@ -24051,7 +24078,7 @@ cyan = "#00ffff"
         assert!(
             !app.engine
                 .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
-                    "session-1"
+                    "session-1-slot"
                 ))),
             "minimizing a dormant fullscreen must not dispatch a launch"
         );
@@ -24070,7 +24097,7 @@ cyan = "#00ffff"
         assert!(
             app.engine
                 .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
-                    "session-1"
+                    "session-1-slot"
                 ))),
             "Enter (the explicit activate action) must still launch a dormant tab"
         );
@@ -24086,9 +24113,9 @@ cyan = "#00ffff"
     #[test]
     fn enter_from_left_on_a_live_agent_focuses_the_windowed_typeable_pane() {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.providers.insert(
-            TabId::new(session_id.clone()),
+            TabId::new(slot_tab.clone()),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 30".to_string()],
@@ -24102,7 +24129,8 @@ cyan = "#00ffff"
         app.focus = FocusPane::Left;
         // Park the pane in scroll mode so the snap to the live edge is
         // observable (Enter must land at the live edge, not in history).
-        app.scroll_mode.insert(session_id);
+        app.scroll_mode
+            .insert(app.engine.sessions[0].slot_tab_id().to_string());
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
@@ -24129,9 +24157,9 @@ cyan = "#00ffff"
     #[test]
     fn ctrl_g_from_left_on_a_live_agent_opens_fullscreen() {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.providers.insert(
-            TabId::new(session_id),
+            TabId::new(slot_tab.clone()),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "printf ready; sleep 30".to_string()],
@@ -24186,7 +24214,7 @@ cyan = "#00ffff"
         assert!(
             app.engine
                 .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
-                    "session-1"
+                    "session-1-slot"
                 ))),
             "ReconnectAgent (the explicit reconnect action) must still launch a dormant tab"
         );
@@ -26897,6 +26925,7 @@ cyan = "#00ffff"
             },
         );
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let worktree = std::path::Path::new(
             app.engine.sessions[0]
                 .managed_worktree()
@@ -26908,33 +26937,29 @@ cyan = "#00ffff"
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
         app.engine
             .resume_fallback_candidates
-            .insert(TabId::new(session_id.clone()), std::time::Instant::now());
+            .insert(TabId::new(slot_tab.clone()), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
         // Wait for the process to exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id))
+            app.engine.providers.contains_key(TabIdRef::new(&slot_tab))
                 && !app
                     .engine
-                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(session_id.clone())))
+                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(slot_tab.clone())))
                 && app.status.text().contains("No prior session to resume")
         });
 
         // The fallback should have spawned a fresh session, so the provider
         // is still present and the session is active (not detached).
         assert!(
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id)),
+            app.engine.providers.contains_key(TabIdRef::new(&slot_tab)),
             "provider should still be present after fallback retry"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
@@ -26946,7 +26971,7 @@ cyan = "#00ffff"
         assert!(
             !app.engine
                 .resume_fallback_candidates
-                .contains_key(TabIdRef::new(&session_id)),
+                .contains_key(TabIdRef::new(&slot_tab)),
             "candidate should have been removed after fallback"
         );
         assert!(
@@ -26960,6 +26985,7 @@ cyan = "#00ffff"
     fn resume_fallback_skipped_when_pty_had_substantial_output() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let worktree = std::path::Path::new(
             app.engine.sessions[0]
                 .managed_worktree()
@@ -26972,12 +26998,12 @@ cyan = "#00ffff"
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn with output");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
         app.engine
             .resume_fallback_candidates
-            .insert(TabId::new(session_id.clone()), std::time::Instant::now());
+            .insert(TabId::new(slot_tab.clone()), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
@@ -26993,7 +27019,7 @@ cyan = "#00ffff"
         assert!(
             !app.engine
                 .resume_fallback_candidates
-                .contains_key(TabIdRef::new(&session_id)),
+                .contains_key(TabIdRef::new(&slot_tab)),
             "candidate should have been removed even when skipped"
         );
     }
@@ -27011,6 +27037,7 @@ cyan = "#00ffff"
             },
         );
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let worktree = std::path::Path::new(
             app.engine.sessions[0]
                 .managed_worktree()
@@ -27027,33 +27054,29 @@ cyan = "#00ffff"
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn one-liner");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
         app.engine
             .resume_fallback_candidates
-            .insert(TabId::new(session_id.clone()), std::time::Instant::now());
+            .insert(TabId::new(slot_tab.clone()), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
         // Wait for the process to produce its one line and exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id))
+            app.engine.providers.contains_key(TabIdRef::new(&slot_tab))
                 && !app
                     .engine
-                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(session_id.clone())))
+                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(slot_tab.clone())))
                 && app.status.text().contains("No prior session to resume")
         });
 
         // Despite having output, the fallback should trigger because the
         // output is minimal (one line, no scrollback).
         assert!(
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id)),
+            app.engine.providers.contains_key(TabIdRef::new(&slot_tab)),
             "provider should still be present after fallback retry"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
@@ -27068,6 +27091,7 @@ cyan = "#00ffff"
     fn no_fallback_for_non_candidate_sessions() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let worktree = std::path::Path::new(
             app.engine.sessions[0]
                 .managed_worktree()
@@ -27079,7 +27103,7 @@ cyan = "#00ffff"
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
         // Deliberately not adding to resume_fallback_candidates.
@@ -27088,16 +27112,12 @@ cyan = "#00ffff"
 
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            !app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id))
+            !app.engine.providers.contains_key(TabIdRef::new(&slot_tab))
         });
 
         // Without being a candidate, the session should just go to detached.
         assert!(
-            !app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id)),
+            !app.engine.providers.contains_key(TabIdRef::new(&slot_tab)),
             "provider should have been removed"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Detached);
@@ -27107,6 +27127,7 @@ cyan = "#00ffff"
     fn zero_exit_clears_desired_running() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let worktree = std::path::Path::new(
             app.engine.sessions[0]
                 .managed_worktree()
@@ -27117,16 +27138,14 @@ cyan = "#00ffff"
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn zero-exit");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.engine.mark_session_desired_running(&session_id, true);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            !app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id))
+            !app.engine.providers.contains_key(TabIdRef::new(&slot_tab))
         });
 
         assert!(!app.engine.sessions[0].desired_running);
@@ -27142,6 +27161,7 @@ cyan = "#00ffff"
     fn nonzero_exit_keeps_desired_running() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let worktree = std::path::Path::new(
             app.engine.sessions[0]
                 .managed_worktree()
@@ -27152,16 +27172,14 @@ cyan = "#00ffff"
             .expect("spawn nonzero-exit");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.engine.mark_session_desired_running(&session_id, true);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            !app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id))
+            !app.engine.providers.contains_key(TabIdRef::new(&slot_tab))
         });
 
         assert!(app.engine.sessions[0].desired_running);
@@ -27177,6 +27195,7 @@ cyan = "#00ffff"
     fn quick_nonzero_exit_reports_minimal_output() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let worktree = std::path::Path::new(
             app.engine.sessions[0]
                 .managed_worktree()
@@ -27190,7 +27209,7 @@ cyan = "#00ffff"
             .expect("spawn nonzero-output");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.engine.mark_session_desired_running(&session_id, true);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
@@ -27213,7 +27232,7 @@ cyan = "#00ffff"
     #[test]
     fn startup_auto_reopens_eligible_sessions() {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.config.providers.commands.insert(
             "codex".to_string(),
             crate::config::ProviderCommandConfig {
@@ -27228,20 +27247,14 @@ cyan = "#00ffff"
 
         app.restore_sessions();
         drain_until(&mut app, |app| {
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id))
+            app.engine.providers.contains_key(TabIdRef::new(&slot_tab))
                 && !app
                     .engine
-                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(session_id.clone())))
+                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(slot_tab.clone())))
                 && app.engine.sessions[0].status == SessionStatus::Active
         });
 
-        assert!(
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id))
-        );
+        assert!(app.engine.providers.contains_key(TabIdRef::new(&slot_tab)));
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
     }
 
@@ -27288,6 +27301,7 @@ cyan = "#00ffff"
         );
         app.engine.sessions[0].provider = ProviderKind::from_str("opencode");
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let worktree = std::path::Path::new(
             app.engine.sessions[0]
                 .managed_worktree()
@@ -27298,37 +27312,33 @@ cyan = "#00ffff"
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn hung resume");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
         app.engine.resume_fallback_candidates.insert(
-            TabId::new(session_id.clone()),
+            TabId::new(slot_tab.clone()),
             std::time::Instant::now() - std::time::Duration::from_millis(20),
         );
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
         drain_until(&mut app, |app| {
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id))
+            app.engine.providers.contains_key(TabIdRef::new(&slot_tab))
                 && !app
                     .engine
-                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(session_id.clone())))
+                    .is_in_flight(&InFlightKey::AgentLaunch(TabId::new(slot_tab.clone())))
                 && app.status.text().contains("Resume timed out")
         });
 
         assert!(
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id)),
+            app.engine.providers.contains_key(TabIdRef::new(&slot_tab)),
             "provider should still be present after timeout fallback"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
         assert!(
             !app.engine
                 .resume_fallback_candidates
-                .contains_key(TabIdRef::new(&session_id)),
+                .contains_key(TabIdRef::new(&slot_tab)),
             "candidate should have been removed after timeout fallback"
         );
         assert!(
@@ -27353,6 +27363,7 @@ cyan = "#00ffff"
         );
         app.engine.sessions[0].provider = ProviderKind::from_str("opencode");
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let worktree = std::path::Path::new(
             app.engine.sessions[0]
                 .managed_worktree()
@@ -27363,7 +27374,7 @@ cyan = "#00ffff"
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn fresh hang");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
 
@@ -27371,11 +27382,7 @@ cyan = "#00ffff"
         std::thread::sleep(std::time::Duration::from_millis(30));
         app.drain_events();
 
-        assert!(
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id))
-        );
+        assert!(app.engine.providers.contains_key(TabIdRef::new(&slot_tab)));
         assert!(app.engine.resume_fallback_candidates.is_empty());
     }
 
@@ -27385,7 +27392,7 @@ cyan = "#00ffff"
     /// enough scrollback history so we can engage scroll mode.
     fn app_with_scrolled_back_pty() -> App {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         // Spawn a shell that prints enough lines to fill the 5-row terminal
         // and produce scrollback history, then sleeps to stay alive.
@@ -27395,7 +27402,9 @@ cyan = "#00ffff"
         ];
         let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 5, 40, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
 
         // Enter interactive agent mode.
         app.input_target = InputTarget::Agent;
@@ -27425,14 +27434,16 @@ cyan = "#00ffff"
     /// already entered the mode by the time it returns.
     fn app_with_history_at_the_live_edge() -> App {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let args = vec![
             "-c".to_string(),
             "printf 'L%s\\n' 1 2 3 4 5 6 7 8 9 10 11 12; sleep 30".to_string(),
         ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
@@ -27612,11 +27623,11 @@ cyan = "#00ffff"
     #[test]
     fn scroll_mode_drops_the_keystroke_and_says_so() {
         let mut app = app_with_scrolled_back_pty();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         assert!(app.process_raw_input_bytes(b"x").is_ok());
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "a keystroke in scroll mode must not reach the PTY"
         );
 
@@ -27737,14 +27748,14 @@ cyan = "#00ffff"
     #[test]
     fn the_batch_that_ends_scroll_mode_still_drops_its_keystroke() {
         let mut app = app_with_scrolled_back_pty();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.selected_terminal_surface_client()
             .unwrap()
             .set_scrollback(0);
 
         assert!(app.process_raw_input_bytes(b"x").is_ok());
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "the keystroke that raced the mode's death must not reach the PTY"
         );
         assert!(!app.scroll_mode_active(), "the mode ended in that batch");
@@ -27753,7 +27764,7 @@ cyan = "#00ffff"
         // The NEXT keystroke is forwarded normally: the user has been told.
         assert!(app.process_raw_input_bytes(b"y").is_ok());
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "typing must work again once the mode is over"
         );
     }
@@ -27786,7 +27797,7 @@ cyan = "#00ffff"
             ("full reset", "\\033c"),
         ] {
             let mut app = test_app(default_bindings());
-            let session_id = app.engine.sessions[0].id.clone();
+            let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
             // Print history, then block on `read` so the escape is emitted only
             // once the test says so, i.e. strictly after the user has scrolled
             // back. `sleep` afterwards keeps the child (and its grid) alive.
@@ -27801,7 +27812,7 @@ cyan = "#00ffff"
                 .expect("spawn pty");
             app.engine
                 .providers
-                .insert(TabId::new(session_id.clone()), client);
+                .insert(TabId::new(slot_tab.clone()), client);
             app.input_target = InputTarget::Agent;
             app.session_surface = SessionSurface::Agent;
             app.fullscreen_overlay = FullscreenOverlay::Agent;
@@ -27858,7 +27869,7 @@ cyan = "#00ffff"
             // dangerous in the first place.
             assert!(app.process_raw_input_bytes(b"z").is_ok());
             assert!(
-                app.engine.pty_input.contains_key(&session_id),
+                app.engine.pty_input.contains_key(&slot_tab),
                 "{name}: the child took the view back, so typing must reach it"
             );
         }
@@ -27872,8 +27883,8 @@ cyan = "#00ffff"
     #[test]
     fn a_torn_down_surface_drops_its_scroll_mode_in_silence() {
         let mut app = app_with_scrolled_back_pty();
-        let session_id = app.engine.sessions[0].id.clone();
-        app.engine.providers.remove(TabIdRef::new(&session_id));
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
+        app.engine.providers.remove(TabIdRef::new(&slot_tab));
 
         app.reconcile_scroll_mode();
 
@@ -27900,7 +27911,7 @@ cyan = "#00ffff"
         app.engine
             .providers
             .insert(TabId::new(other.clone()), client);
-        app.engine.sessions[0].id = other;
+        app.engine.sessions[0].slot_tab_id = other;
 
         assert!(
             !app.scroll_mode_active(),
@@ -28002,7 +28013,7 @@ cyan = "#00ffff"
     #[test]
     fn snapping_another_surface_to_its_live_edge_leaves_this_ones_scroll_mode_alone() {
         let mut app = app_with_scrolled_back_pty();
-        let first = app.engine.sessions[0].id.clone();
+        let first = app.engine.sessions[0].slot_tab_id().to_string();
         let parked_at = app
             .selected_terminal_surface_client()
             .unwrap()
@@ -28012,8 +28023,8 @@ cyan = "#00ffff"
             "test setup: the first surface is scrolled back"
         );
 
-        // Move to a second live surface (the id swap is this file's established
-        // way to move the selection between agents).
+        // Move to a second live surface (swapping the slot pointer is this
+        // file's established way to move the selection between agents).
         let other = "another-session".to_string();
         let args = vec!["-c".to_string(), "sleep 30".to_string()];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
@@ -28021,14 +28032,14 @@ cyan = "#00ffff"
         app.engine
             .providers
             .insert(TabId::new(other.clone()), client);
-        app.engine.sessions[0].id = other;
+        app.engine.sessions[0].slot_tab_id = other;
 
         // Snap THAT surface to its live edge. It is already there; the point is
         // that the action names one surface and must touch only that one.
         app.reset_pty_scrollback();
 
         // Back to the first surface, exactly where the user left it.
-        app.engine.sessions[0].id = first.clone();
+        app.engine.sessions[0].slot_tab_id = first.clone();
 
         assert_eq!(
             app.selected_terminal_surface_client()
@@ -28052,28 +28063,30 @@ cyan = "#00ffff"
 
     /// Helper: an App focused on a live agent PTY in interactive mode, not
     /// scrolled back, so forwarded input actually reaches the PTY.
+    /// Returns the app and the live PTY's key, which is the agent's SLOT TAB
+    /// id: every caller uses it to probe a pty-keyed map.
     fn app_with_live_agent_pty() -> (App, String) {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), client);
+            .insert(TabId::new(slot_tab.clone()), client);
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
-        (app, session_id)
+        (app, slot_tab)
     }
 
     #[test]
     fn typing_into_agent_records_input_for_indicator_suppression() {
-        let (mut app, session_id) = app_with_live_agent_pty();
-        assert!(!app.engine.pty_input.contains_key(&session_id));
+        let (mut app, slot_tab) = app_with_live_agent_pty();
+        assert!(!app.engine.pty_input.contains_key(&slot_tab));
 
         app.process_raw_input_bytes(b"x").unwrap();
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "typing into the focused agent must record input so the echo isn't \
              mistaken for the agent working"
         );
@@ -28087,19 +28100,19 @@ cyan = "#00ffff"
     /// working. ToggleFullscreen's default binding is Ctrl-g (0x07).
     #[test]
     fn input_flushed_on_the_exit_interactive_path_still_records_pty_input() {
-        let (mut app, session_id) = app_with_live_agent_pty();
+        let (mut app, slot_tab) = app_with_live_agent_pty();
 
         app.process_raw_input_bytes(b"x\x07").unwrap();
 
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "bytes flushed to the PTY on an early-return path must still record input"
         );
     }
 
     #[test]
     fn pending_bytes_seeded_through_the_compatibility_buffer_complete_one_sequence() {
-        let (mut app, session_id) = app_with_live_agent_pty();
+        let (mut app, slot_tab) = app_with_live_agent_pty();
         app.raw_input_buf = b"\x1b[".to_vec();
 
         app.process_raw_input_bytes(b"A").unwrap();
@@ -28107,14 +28120,14 @@ cyan = "#00ffff"
         assert!(app.raw_input_buf.is_empty());
         assert!(app.raw_input_parser.pending().is_empty());
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "the completed arrow sequence must reach the focused PTY"
         );
     }
 
     #[test]
     fn macro_bar_interception_flushes_and_stamps_earlier_bytes() {
-        let (mut app, session_id) = app_with_live_agent_pty();
+        let (mut app, slot_tab) = app_with_live_agent_pty();
         app.engine.config.macros.entries.insert(
             "test".to_string(),
             crate::config::MacroEntry {
@@ -28133,7 +28146,7 @@ cyan = "#00ffff"
         assert!(app.raw_input_buf.is_empty());
         assert!(app.raw_input_parser.pending().is_empty());
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "bytes before the intercept must be flushed and stamped first"
         );
     }
@@ -28146,7 +28159,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         enter_scroll_mode(&mut app, 3);
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         assert!(
             app.terminal_selection.is_some(),
             "the fixture must start selected"
@@ -28159,7 +28172,7 @@ cyan = "#00ffff"
             "a typed key retires the selection even when scroll mode drops it"
         );
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "a dropped key must not stamp PTY input"
         );
     }
@@ -28169,11 +28182,11 @@ cyan = "#00ffff"
         // Arrow keys are bound to line-scroll but pass through to the PTY when
         // not scrolled back. They echo back like typing, so they must also
         // record input — the earlier Forward-only check missed this path.
-        let (mut app, session_id) = app_with_live_agent_pty();
+        let (mut app, slot_tab) = app_with_live_agent_pty();
 
         app.process_raw_input_bytes(b"\x1b[A").unwrap();
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "arrow-key passthrough reaches the agent PTY and must record input"
         );
     }
@@ -28183,11 +28196,11 @@ cyan = "#00ffff"
         // When scrolled back, keystrokes are suppressed and never reach the
         // PTY, so there is no echo to discount — nothing should be recorded.
         let mut app = app_with_scrolled_back_pty();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         app.process_raw_input_bytes(b"x").unwrap();
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "input suppressed by scrollback must not record a stamp"
         );
     }
@@ -28200,6 +28213,7 @@ cyan = "#00ffff"
         // never feeds the agent's working state).
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
@@ -28223,7 +28237,7 @@ cyan = "#00ffff"
             "typing into a companion terminal must record input under the terminal id"
         );
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "a terminal keystroke must never stamp the owning agent's id"
         );
     }
@@ -28240,18 +28254,18 @@ cyan = "#00ffff"
         fill_and_select_l30(&mut app);
         set_forward_scroll(&mut app, true);
         app.input_target = InputTarget::Agent;
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
             .expect("raw input");
 
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "scrolling is not typing, so a forwarded wheel must not stamp the \
              typing window"
         );
         assert!(
-            app.engine.recent_pointer_input(&session_id),
+            app.engine.recent_pointer_input(&slot_tab),
             "it must stamp the pointer window, so the child's repaint is not \
              read as the agent working"
         );
@@ -28266,7 +28280,7 @@ cyan = "#00ffff"
         install_mouse_layout(&mut app);
         fill_and_select_l30(&mut app);
         set_forward_scroll(&mut app, true);
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         app.handle_center_mouse_wheel(MouseEvent {
             kind: MouseEventKind::ScrollUp,
@@ -28276,11 +28290,11 @@ cyan = "#00ffff"
         });
 
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "a wheel is never typing, on any path"
         );
         assert!(
-            app.engine.recent_pointer_input(&session_id),
+            app.engine.recent_pointer_input(&slot_tab),
             "the non-interactive wheel path must stamp the pointer window too"
         );
     }
@@ -28290,16 +28304,16 @@ cyan = "#00ffff"
     /// keystroke, and must leave the pointer window alone.
     #[test]
     fn typing_still_stamps_only_the_typing_window() {
-        let (mut app, session_id) = app_with_live_agent_pty();
+        let (mut app, slot_tab) = app_with_live_agent_pty();
 
         app.process_raw_input_bytes(b"x").unwrap();
 
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "a real keystroke still records input for echo suppression"
         );
         assert!(
-            !app.engine.recent_pointer_input(&session_id),
+            !app.engine.recent_pointer_input(&slot_tab),
             "and it must not stamp the pointer window"
         );
     }
@@ -28360,7 +28374,7 @@ cyan = "#00ffff"
     /// visible Tab can ask for `cat -vT`.
     fn app_with_minimized_typeable_echo_child(prelude: &str, echo_cmd: &str) -> App {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let cmd = format!("stty raw -echo; printf '{prelude}'; printf 'READY'; exec {echo_cmd}");
         let client = PtyClient::spawn(
             "/bin/sh",
@@ -28371,7 +28385,9 @@ cyan = "#00ffff"
             1_000,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.session_surface = SessionSurface::Agent;
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
@@ -28463,7 +28479,7 @@ cyan = "#00ffff"
     #[test]
     fn ctrl_c_minimized_forwards_sigint_to_the_agent() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         tap_center(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
 
@@ -28472,7 +28488,7 @@ cyan = "#00ffff"
             if app
                 .engine
                 .providers
-                .get_mut(TabIdRef::new(&session_id))
+                .get_mut(TabIdRef::new(&slot_tab))
                 .expect("provider")
                 .try_wait()
                 .is_some()
@@ -28497,7 +28513,7 @@ cyan = "#00ffff"
     #[test]
     fn tab_still_moves_focus_and_never_reaches_the_pty() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         tap_center(&mut app, KeyCode::Tab, KeyModifiers::NONE);
 
@@ -28507,7 +28523,7 @@ cyan = "#00ffff"
             "Tab must keep moving focus between panes"
         );
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "Tab must not be forwarded to the agent"
         );
     }
@@ -28516,12 +28532,12 @@ cyan = "#00ffff"
     #[test]
     fn shift_tab_still_moves_focus_while_typeable() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         tap_center(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
 
         assert_ne!(app.focus, FocusPane::Center);
-        assert!(!app.engine.pty_input.contains_key(&session_id));
+        assert!(!app.engine.pty_input.contains_key(&slot_tab));
     }
 
     /// With `tab_reaches_agent` on, both Tab and Shift-Tab are typed into the
@@ -28570,8 +28586,8 @@ cyan = "#00ffff"
     fn tab_cycles_on_a_dormant_agent_when_the_option_is_on() {
         let mut app = app_with_minimized_typeable_agent();
         app.engine.config.ui.tab_reaches_agent = true;
-        let session_id = app.engine.sessions[0].id.clone();
-        app.engine.providers.remove(TabIdRef::new(&session_id));
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
+        app.engine.providers.remove(TabIdRef::new(&slot_tab));
         assert!(
             !app.center_typeable(),
             "test setup: a provider-less agent must not be typeable"
@@ -28592,7 +28608,7 @@ cyan = "#00ffff"
     #[test]
     fn tab_from_the_typeable_pane_moves_focus_while_the_option_is_off() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         assert!(
             !app.engine.config.ui.tab_reaches_agent,
             "test setup: the option is off by default"
@@ -28602,7 +28618,7 @@ cyan = "#00ffff"
 
         assert_ne!(app.focus, FocusPane::Center, "Tab must move panes");
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "and must not reach the agent"
         );
     }
@@ -28616,6 +28632,7 @@ cyan = "#00ffff"
         let mut app = app_with_minimized_typeable_agent();
         app.engine.config.ui.tab_reaches_agent = true;
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.config.macros.entries.insert(
             "greet".to_string(),
             crate::config::MacroEntry {
@@ -28636,7 +28653,7 @@ cyan = "#00ffff"
             "Tab must move the dialog's focus to the confirm button"
         );
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "a dialog's Tab must not also reach the agent"
         );
     }
@@ -28648,6 +28665,7 @@ cyan = "#00ffff"
         let mut app = app_with_minimized_typeable_agent();
         app.engine.config.ui.tab_reaches_agent = true;
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.config.macros.entries.insert(
             "greet".to_string(),
             crate::config::MacroEntry {
@@ -28667,7 +28685,7 @@ cyan = "#00ffff"
             "Tab must complete the macro name"
         );
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "the completing Tab must not also reach the agent"
         );
     }
@@ -28820,7 +28838,7 @@ cyan = "#00ffff"
     #[test]
     fn q_types_into_a_live_agent_but_still_quits_from_left() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         tap_center(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
 
@@ -28829,7 +28847,7 @@ cyan = "#00ffff"
             "q while typeable must not begin a quit"
         );
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "q while typeable must be forwarded to the agent"
         );
 
@@ -28847,12 +28865,13 @@ cyan = "#00ffff"
     fn question_mark_and_brackets_type_into_a_live_agent() {
         let mut app = app_with_minimized_typeable_agent();
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         for ch in ['?', '[', ']'] {
             app.engine.pty_input.remove(&session_id);
             tap_center(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
             assert!(
-                app.engine.pty_input.contains_key(&session_id),
+                app.engine.pty_input.contains_key(&slot_tab),
                 "{ch:?} must be forwarded to the agent while typeable"
             );
         }
@@ -28868,12 +28887,12 @@ cyan = "#00ffff"
     #[test]
     fn esc_with_nothing_to_close_forwards_to_the_agent() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         tap_center(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "Esc with no overlay open must be forwarded to the agent"
         );
     }
@@ -28882,14 +28901,14 @@ cyan = "#00ffff"
     #[test]
     fn esc_with_an_overlay_open_closes_it_and_forwards_nothing() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.help_scroll = Some(0);
 
         tap_center(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
         assert!(app.help_scroll.is_none(), "Esc must close the help overlay");
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "an Esc that closed an overlay must not also reach the agent"
         );
     }
@@ -28903,6 +28922,7 @@ cyan = "#00ffff"
         let mut app = app_with_minimized_typeable_agent();
         app.engine.config.ui.tab_reaches_agent = true;
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let mut fill = String::new();
         for n in 0..40 {
             fill.push_str(&format!("L{n:02}\n"));
@@ -28919,7 +28939,7 @@ cyan = "#00ffff"
         ] {
             tap_center(&mut app, code, mods);
             assert!(
-                !app.engine.pty_input.contains_key(&session_id),
+                !app.engine.pty_input.contains_key(&slot_tab),
                 "{code:?} while scrolled back must not reach the agent"
             );
             assert_eq!(
@@ -28938,6 +28958,7 @@ cyan = "#00ffff"
     fn scrolled_back_minimized_scroll_keys_win_and_typing_is_suppressed() {
         let mut app = app_with_minimized_typeable_agent();
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let mut fill = String::new();
         for n in 0..40 {
             fill.push_str(&format!("L{n:02}\n"));
@@ -28950,7 +28971,7 @@ cyan = "#00ffff"
         // Plain typing is suppressed: nothing written, nothing stamped.
         tap_center(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "typing while scrolled back must be suppressed, not forwarded"
         );
 
@@ -28983,13 +29004,13 @@ cyan = "#00ffff"
     #[test]
     fn pgup_minimized_forwards_to_a_page_owning_child() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         set_forward_scroll(&mut app, true);
 
         tap_center(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
 
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "PgUp must be forwarded to a page-owning child"
         );
         assert_eq!(
@@ -29005,7 +29026,7 @@ cyan = "#00ffff"
     #[test]
     fn pgup_minimized_scrolls_locally_for_a_normal_buffer_child() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         set_forward_scroll(&mut app, false);
         let mut fill = String::new();
         for n in 0..40 {
@@ -29024,7 +29045,7 @@ cyan = "#00ffff"
             "PgUp must scroll dux's own scrollback for a normal-buffer child"
         );
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "a local page scroll must not stamp the typing window"
         );
     }
@@ -29034,7 +29055,7 @@ cyan = "#00ffff"
     #[test]
     fn typing_is_inert_when_the_focused_agent_is_not_live() {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
         assert!(!app.center_typeable());
@@ -29048,7 +29069,7 @@ cyan = "#00ffff"
         }
 
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "there is no PTY to type into, so nothing may be stamped"
         );
         assert!(matches!(app.prompt, PromptState::None));
@@ -29061,16 +29082,16 @@ cyan = "#00ffff"
     #[test]
     fn minimized_typing_stamps_the_typing_window_for_the_focused_surface() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         tap_center(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
 
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "a minimized keystroke must record input for echo suppression"
         );
         assert!(
-            !app.engine.recent_pointer_input(&session_id),
+            !app.engine.recent_pointer_input(&slot_tab),
             "typing must not stamp the pointer window"
         );
     }
@@ -29080,7 +29101,7 @@ cyan = "#00ffff"
     #[test]
     fn an_open_prompt_swallows_typing_before_the_pty() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.prompt = PromptState::Command {
             input: TextInput::new(),
             selected: 0,
@@ -29089,7 +29110,7 @@ cyan = "#00ffff"
         tap_center(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
 
         assert!(
-            !app.engine.pty_input.contains_key(&session_id),
+            !app.engine.pty_input.contains_key(&slot_tab),
             "a keystroke consumed by a prompt must never reach the PTY"
         );
         match &app.prompt {
@@ -29105,7 +29126,7 @@ cyan = "#00ffff"
     #[test]
     fn enter_types_into_a_live_agent_instead_of_fullscreening() {
         let mut app = app_with_minimized_typeable_agent();
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         tap_center(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
@@ -29116,7 +29137,7 @@ cyan = "#00ffff"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "Enter must be forwarded to the agent as a keystroke"
         );
     }
@@ -29444,12 +29465,14 @@ cyan = "#00ffff"
     /// and a mouse layout so we can test click-outside-overlay behavior.
     fn app_with_interactive_agent_pty() -> App {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 5, 40, 100)
             .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
 
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
@@ -30170,7 +30193,7 @@ cyan = "#00ffff"
 
         // Spawn a real PTY so write_bytes has somewhere to go.
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30208,7 +30231,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30257,7 +30280,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30283,7 +30306,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30441,7 +30464,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
 
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30482,7 +30505,7 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), "cat; sleep 0.5".to_string()],
@@ -30525,7 +30548,9 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(TabId::new("session-1"), client);
+        app.engine
+            .providers
+            .insert(TabId::new("session-1-slot"), client);
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Feed 100 'x' characters — they should all be forwarded.
@@ -31411,7 +31436,7 @@ cyan = "#00ffff"
         // literal `^[[200` and `^[[201` strings. If the text is sent as-is,
         // only the macro text will appear.
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let client = PtyClient::spawn(
             "sh",
             &["-c".to_string(), "stty raw -echo; exec cat -v".to_string()],
@@ -31421,7 +31446,9 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.input_target = InputTarget::Agent;
         app.session_surface = crate::model::SessionSurface::Agent;
 
@@ -31477,7 +31504,7 @@ cyan = "#00ffff"
         // works, the `^[` and `^M` markers will appear between the two
         // halves of the macro text.
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let client = PtyClient::spawn(
             "sh",
             &["-c".to_string(), "stty raw -echo; exec cat -v".to_string()],
@@ -31487,7 +31514,9 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.input_target = InputTarget::Agent;
         app.session_surface = crate::model::SessionSurface::Agent;
 
@@ -31537,7 +31566,7 @@ cyan = "#00ffff"
     /// overlay, no interactive input target), one agent-surface macro.
     fn minimized_typeable_app_with_macro() -> crate::app::App {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let client = PtyClient::spawn(
             "sh",
             &["-c".to_string(), "stty raw -echo; exec cat -v".to_string()],
@@ -31547,7 +31576,9 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
         app.session_surface = crate::model::SessionSurface::Agent;
@@ -31654,7 +31685,7 @@ cyan = "#00ffff"
     /// windowed, and typeable.
     fn typeable_app_with_paste_child(decsets: &str) -> crate::app::App {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let cmd = format!("stty raw -echo; printf '{decsets}'; exec cat -v");
         let client = PtyClient::spawn(
             "/bin/sh",
@@ -31665,7 +31696,9 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.engine.providers.insert(TabId::new(session_id), client);
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
         app.selected_left = 1;
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
@@ -31724,9 +31757,9 @@ cyan = "#00ffff"
             rendered.contains("[200~hi"),
             "the open marker must precede the verbatim text; got {rendered:?}"
         );
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         assert!(
-            app.engine.pty_input.contains_key(&session_id),
+            app.engine.pty_input.contains_key(&slot_tab),
             "a paste is typing: it must stamp the input window"
         );
     }
@@ -32322,7 +32355,7 @@ cyan = "#00ffff"
         app.engine.projects[0].default_provider = ProviderKind::from_str("codex");
         app.engine.sessions[0].provider = ProviderKind::from_str("codex");
         app.engine.sessions[0].status = SessionStatus::Active;
-        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         // Spawn a real PTY so the session looks live.
         let worktree = std::path::Path::new(
@@ -32341,7 +32374,7 @@ cyan = "#00ffff"
         .expect("spawn test agent");
         app.engine
             .providers
-            .insert(TabId::new(session_id.clone()), pty);
+            .insert(TabId::new(slot_tab.clone()), pty);
 
         app.rebuild_left_items();
         app.selected_left = app
@@ -32402,10 +32435,10 @@ cyan = "#00ffff"
         // above; the swap is otherwise reflected in the agent tab strip.
 
         // Tearing down the PTY clears the pin — the next launch will be opencode.
-        app.engine.providers.remove(TabIdRef::new(&session_id));
+        app.engine.providers.remove(TabIdRef::new(&slot_tab));
         app.engine
             .running_provider_pins
-            .remove(TabIdRef::new(&session_id));
+            .remove(TabIdRef::new(&slot_tab));
         assert_eq!(
             app.engine
                 .running_provider_for(&app.engine.sessions[0])
@@ -32475,7 +32508,7 @@ cyan = "#00ffff"
         );
         assert_eq!(
             app.focused_tab_id(&session_id),
-            session_id,
+            app.engine.sessions[0].slot_tab_id().as_str(),
             "falls back to session-slot when no live sibling remains"
         );
     }
@@ -32525,15 +32558,15 @@ cyan = "#00ffff"
     fn close_gesture_on_the_first_tab_warns_instead_of_killing_its_pty() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let worktree = std::path::PathBuf::from(
             &app.engine.sessions[0]
                 .managed_worktree()
                 .expect("managed test session"),
         );
-        app.engine.providers.insert(
-            TabId::new(session_id.clone()),
-            spawn_test_provider(&worktree),
-        );
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), spawn_test_provider(&worktree));
         app.selected_left = app
             .left_items()
             .iter()
@@ -32552,9 +32585,7 @@ cyan = "#00ffff"
             "the first tab must raise the warning"
         );
         assert!(
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id)),
+            app.engine.providers.contains_key(TabIdRef::new(&slot_tab)),
             "the first tab's PTY must survive the close gesture"
         );
         assert_eq!(
@@ -32570,15 +32601,15 @@ cyan = "#00ffff"
     fn the_first_tab_warning_dismisses_and_leaves_the_agent_alone() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let worktree = std::path::PathBuf::from(
             &app.engine.sessions[0]
                 .managed_worktree()
                 .expect("managed test session"),
         );
-        app.engine.providers.insert(
-            TabId::new(session_id.clone()),
-            spawn_test_provider(&worktree),
-        );
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), spawn_test_provider(&worktree));
         app.prompt = PromptState::FirstTabCannotClose {
             session_id: session_id.clone(),
         };
@@ -32587,11 +32618,7 @@ cyan = "#00ffff"
             .expect("dismiss the warning");
 
         assert!(matches!(app.prompt, PromptState::None));
-        assert!(
-            app.engine
-                .providers
-                .contains_key(TabIdRef::new(&session_id))
-        );
+        assert!(app.engine.providers.contains_key(TabIdRef::new(&slot_tab)));
     }
 
     #[test]
@@ -34701,10 +34728,10 @@ cyan = "#00ffff"
                         .managed_worktree()
                         .expect("managed test session"),
                 );
-                let session_id = app.engine.sessions[0].id.clone();
+                let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
                 app.engine
                     .providers
-                    .insert(TabId::new(session_id), spawn_idle_pty(&worktree));
+                    .insert(TabId::new(slot_tab.clone()), spawn_idle_pty(&worktree));
                 assert!(
                     !app.begin_quit(),
                     "a running agent must ask before quitting"
@@ -34756,10 +34783,10 @@ cyan = "#00ffff"
                         .managed_worktree()
                         .expect("managed test session"),
                 );
-                let session_id = app.engine.sessions[0].id.clone();
+                let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
                 app.engine
                     .providers
-                    .insert(TabId::new(session_id), spawn_idle_pty(&worktree));
+                    .insert(TabId::new(slot_tab.clone()), spawn_idle_pty(&worktree));
                 app.open_kill_running().expect("open the kill picker");
                 app.open_confirm_kill_running_action(KillRunningAction::Hovered)
                     .expect("open the kill confirmation");

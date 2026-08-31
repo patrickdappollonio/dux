@@ -2121,7 +2121,7 @@ pub(crate) enum PromptState {
         focus: ConfirmFocus, // Cancel (default) or Close
     },
     /// Raised when the close-tab gesture lands on the agent's FIRST tab (the
-    /// session-slot tab, whose id equals the session id). That tab lives as
+    /// session-slot tab, named by the session's slot pointer). That tab lives as
     /// long as the agent does, so there is nothing to confirm: the modal is a
     /// warning with a single dismiss button that says why and points at the
     /// two things the user can actually do instead (add more tabs, or detach
@@ -3486,7 +3486,7 @@ impl App {
             &session_store,
         )?;
         let sessions = session_store.load_sessions()?;
-        let agent_tabs = session_store.load_agent_tabs()?;
+        let agent_tabs = session_store.load_extra_agent_tabs()?;
         let (worker_tx, worker_rx) = mpsc::channel();
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let branch_sync_sessions = Arc::new(Mutex::new(Vec::new()));
@@ -6802,6 +6802,7 @@ mod tests {
         let now = Utc::now() + chrono::Duration::seconds(created_offset);
         AgentSession {
             id: id.to_string(),
+            slot_tab_id: format!("{id}-slot"),
             provider: ProviderKind::from_str("codex"),
             title: None,
             started_providers: Vec::new(),
@@ -8466,14 +8467,16 @@ leading_branch = "main"
         let client =
             crate::pty::PtyClient::spawn("cat", &[], std::path::Path::new("/tmp"), 24, 80, 1000)
                 .expect("spawn cat for test");
-        app.engine.providers.insert(TabId::new("session-1"), client);
+        app.engine
+            .providers
+            .insert(TabId::new("session-1-slot"), client);
 
         app.shutdown_agents_gracefully();
 
         let client = app
             .engine
             .providers
-            .get_mut(TabIdRef::new("session-1"))
+            .get_mut(TabIdRef::new("session-1-slot"))
             .unwrap();
         assert!(
             client.is_exited() || client.try_wait().is_some(),
@@ -8515,14 +8518,16 @@ leading_branch = "main"
             1000,
         )
         .expect("spawn sigterm-ignorer for test");
-        app.engine.providers.insert(TabId::new("session-1"), client);
+        app.engine
+            .providers
+            .insert(TabId::new("session-1-slot"), client);
 
         // Wait until the trap is installed before quitting.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while !app
             .engine
             .providers
-            .get(TabIdRef::new("session-1"))
+            .get(TabIdRef::new("session-1-slot"))
             .unwrap()
             .has_output()
         {

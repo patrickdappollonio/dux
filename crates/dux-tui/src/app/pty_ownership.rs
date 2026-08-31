@@ -768,21 +768,21 @@ mod tests {
         let (mut app, recorded, seat) = app_with_a_live_pty();
         // The claim is a deliberate act (here, a launch started on this surface);
         // the resize that follows is the ordinary one the render pass sends.
-        app.claim_launched_pty("session-1");
+        app.claim_launched_pty("session-1-slot");
 
-        assert!(app.resize_pty_if_permitted("session-1", 24, 80));
+        assert!(app.resize_pty_if_permitted("session-1-slot", 24, 80));
         let published = recorded.lock().expect("not poisoned").published.clone();
         assert_eq!(
             published,
             vec![
                 PtyOwnershipEvent::Claimed {
-                    pty_id: "session-1".to_string(),
+                    pty_id: "session-1-slot".to_string(),
                     conn_id: seat.conn_id,
                     epoch: 1,
                     device: TUI_DEVICE_LABEL.to_string(),
                 },
                 PtyOwnershipEvent::GridApplied {
-                    pty_id: "session-1".to_string(),
+                    pty_id: "session-1-slot".to_string(),
                     rows: 24,
                     cols: 80,
                     seq: 1,
@@ -985,7 +985,7 @@ mod tests {
         app.center_mode = CenterMode::Agent;
         app.session_surface = SessionSurface::Agent;
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             crate::pty::PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), script.to_string()],
@@ -1006,7 +1006,7 @@ mod tests {
             if app
                 .engine
                 .providers
-                .get(TabIdRef::new("session-1"))
+                .get(TabIdRef::new("session-1-slot"))
                 .is_some_and(|client| client.has_output())
             {
                 return;
@@ -1080,7 +1080,7 @@ mod tests {
             app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
         let browser = seat.owners.next_conn_id();
         seat.owners
-            .claim_for_resize("session-1", browser, false, None, device, |_| {})
+            .claim_for_resize("session-1-slot", browser, false, None, device, |_| {})
             .epoch
             .expect("the browser claimed the pty");
         wait_for_child_output(&app);
@@ -1132,7 +1132,7 @@ mod tests {
         let grid = app
             .engine
             .providers
-            .get(TabIdRef::new("session-1"))
+            .get(TabIdRef::new("session-1-slot"))
             .and_then(|client| client.grid_size());
         assert_eq!(
             grid,
@@ -1184,7 +1184,7 @@ mod tests {
             app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
         // Driving it because this surface started it. Drawing the pane would not
         // have been enough, deliberately: see `claim_launched_pty`.
-        app.claim_launched_pty("session-1");
+        app.claim_launched_pty("session-1-slot");
         wait_for_child_output(&app);
 
         let rows = render_rows(&mut app, 160, 40);
@@ -1201,7 +1201,7 @@ mod tests {
         let grid = app
             .engine
             .providers
-            .get(TabIdRef::new("session-1"))
+            .get(TabIdRef::new("session-1-slot"))
             .and_then(|client| client.grid_size());
         assert_ne!(
             grid,
@@ -1219,7 +1219,7 @@ mod tests {
         app.center_mode = CenterMode::Agent;
         app.session_surface = SessionSurface::Agent;
         app.engine.providers.insert(
-            TabId::new("session-1"),
+            TabId::new("session-1-slot"),
             crate::pty::PtyClient::spawn(
                 "sh",
                 &["-c".to_string(), format!("printf {CHILD_MARKER}; sleep 5")],
@@ -1245,7 +1245,9 @@ mod tests {
         let (mut app, _recorded, seat) =
             app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
         let browser = seat.owners.next_conn_id();
-        seat.owners.claim("session-1", browser).expect("claimed");
+        seat.owners
+            .claim("session-1-slot", browser)
+            .expect("claimed");
         wait_for_child_output(&app);
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
@@ -1274,7 +1276,9 @@ mod tests {
             },
         );
         let browser = seat.owners.next_conn_id();
-        seat.owners.claim("session-1", browser).expect("claimed");
+        seat.owners
+            .claim("session-1-slot", browser)
+            .expect("claimed");
         wait_for_child_output(&app);
 
         let flat = flowed(&render_rows(&mut app, 160, 40));
@@ -1381,7 +1385,7 @@ mod tests {
         let (mut app, _recorded, _seat) = app_with_a_live_pty();
         app.focus = FocusPane::Center;
         app.input_target = InputTarget::Agent;
-        app.claim_launched_pty("session-1");
+        app.claim_launched_pty("session-1-slot");
         wait_for_child_output(&app);
         let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
         terminal
@@ -1399,7 +1403,9 @@ mod tests {
         app.input_target = InputTarget::Agent;
         wait_for_child_output(&app);
         let browser = seat.owners.next_conn_id();
-        seat.owners.claim("session-1", browser).expect("claimed");
+        seat.owners
+            .claim("session-1-slot", browser)
+            .expect("claimed");
         let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
         terminal
             .draw(|frame| app.render(frame))
@@ -1422,7 +1428,9 @@ mod tests {
         assert!(app.scroll_mode_active(), "test setup: scrolled back");
 
         let browser = seat.owners.next_conn_id();
-        seat.owners.claim("session-1", browser).expect("claimed");
+        seat.owners
+            .claim("session-1-slot", browser)
+            .expect("claimed");
         let flat = flowed(&render_rows(&mut app, 160, 40));
 
         assert!(
@@ -1440,7 +1448,7 @@ mod tests {
         assert_eq!(
             app.engine
                 .providers
-                .get(TabIdRef::new("session-1"))
+                .get(TabIdRef::new("session-1-slot"))
                 .map(|client| client.scrollback_offset()),
             Some(0),
             "the OFFSET has to go home with the mode. Retiring the mode alone \
@@ -1452,16 +1460,16 @@ mod tests {
         // browser letting go is not enough on its own: nothing passive claims,
         // so the card stays up saying "Running in the background" until it is
         // pressed.
-        assert!(seat.owners.release("session-1", browser).is_some());
+        assert!(seat.owners.release("session-1-slot", browser).is_some());
         assert!(
             app.focused_pty_is_covered_by_card(),
             "a pty nobody drives is still covered"
         );
-        app.claim_launched_pty("session-1");
+        app.claim_launched_pty("session-1-slot");
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .expect("the key is handled");
         assert!(
-            app.engine.is_typing("session-1"),
+            app.engine.is_typing("session-1-slot"),
             "with the card gone and the offset home, typing reaches the child"
         );
     }
@@ -1541,7 +1549,7 @@ mod tests {
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
         // Driving it, so there is an uncovered pane to start the drag on.
-        app.claim_launched_pty("session-1");
+        app.claim_launched_pty("session-1-slot");
 
         app.process_raw_input_bytes(b"\x1b[<0;6;6M")
             .expect("the press is handled");
@@ -1554,7 +1562,14 @@ mod tests {
 
         let browser = seat.owners.next_conn_id();
         seat.owners
-            .claim_for_resize("session-1", browser, true, None, Some("Chrome"), |_| {})
+            .claim_for_resize(
+                "session-1-slot",
+                browser,
+                true,
+                None,
+                Some("Chrome"),
+                |_| {},
+            )
             .epoch
             .expect("the browser takes the pty over mid-drag");
         app.process_raw_input_bytes(b"\x1b[<0;20;6m")
@@ -1576,7 +1591,7 @@ mod tests {
         let (mut app, _recorded, _seat) = app_with_the_card_up();
 
         app.take_over_focused_pty();
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
+        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
 
         app.set_info("a marker nothing else writes".to_string());
         app.take_over_focused_pty();
@@ -1586,7 +1601,7 @@ mod tests {
             message, "a marker nothing else writes",
             "the second press must not write a second status: {message}"
         );
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
+        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
     }
 
     // ── The card's keys and its button ──────────────────────────────────────
@@ -1602,7 +1617,14 @@ mod tests {
         app.focus = FocusPane::Center;
         let browser = seat.owners.next_conn_id();
         seat.owners
-            .claim_for_resize("session-1", browser, false, None, Some("Chrome"), |_| {})
+            .claim_for_resize(
+                "session-1-slot",
+                browser,
+                false,
+                None,
+                Some("Chrome"),
+                |_| {},
+            )
             .epoch
             .expect("the browser claimed the pty");
         (app, recorded, seat)
@@ -1627,6 +1649,7 @@ mod tests {
                 .send(url.to_string());
             Ok(())
         });
+        // `pr_statuses` is keyed by SESSION id, not by tab.
         app.engine.pr_statuses.insert(
             "session-1".to_string(),
             crate::model::PrInfo {
@@ -1690,11 +1713,11 @@ mod tests {
             app.handle_key(key).expect("the key is handled");
             assert_eq!(
                 app.pending_pty_takeover.as_deref(),
-                Some("session-1"),
+                Some("session-1-slot"),
                 "{key:?} must arm the take-over the card's button arms"
             );
             assert!(
-                !app.engine.is_typing("session-1"),
+                !app.engine.is_typing("session-1-slot"),
                 "and it must never reach the child: {key:?}"
             );
         }
@@ -1710,7 +1733,7 @@ mod tests {
             .expect("the key is handled");
         assert_eq!(app.pending_pty_takeover, None);
         assert!(
-            !app.engine.is_typing("session-1"),
+            !app.engine.is_typing("session-1-slot"),
             "a covered pane writes nothing to the child"
         );
     }
@@ -1786,7 +1809,7 @@ mod tests {
     #[test]
     fn a_dormant_tab_has_no_card_and_keeps_its_launch_key() {
         let (mut app, _recorded, _seat) = app_with_the_card_up();
-        app.engine.providers.remove(TabIdRef::new("session-1"));
+        app.engine.providers.remove(TabIdRef::new("session-1-slot"));
         assert_eq!(
             app.focused_pty_takeover_card(),
             None,
@@ -1820,11 +1843,11 @@ mod tests {
 
         assert_eq!(
             app.pending_pty_takeover.as_deref(),
-            Some("session-1"),
+            Some("session-1-slot"),
             "the raw path must reach the same take-over the windowed key does"
         );
         assert!(
-            !seat.owners.is_owner("session-1", seat.conn_id),
+            !seat.owners.is_owner("session-1-slot", seat.conn_id),
             "arming is not claiming: the resize that carries the claim is next"
         );
         assert!(
@@ -1849,7 +1872,9 @@ mod tests {
             app.fullscreen_overlay = FullscreenOverlay::Agent;
             if driven_elsewhere {
                 let browser = seat.owners.next_conn_id();
-                seat.owners.claim("session-1", browser).expect("claimed");
+                seat.owners
+                    .claim("session-1-slot", browser)
+                    .expect("claimed");
             }
 
             app.process_raw_input_bytes(b" ")
@@ -1857,12 +1882,12 @@ mod tests {
 
             assert_eq!(
                 app.pending_pty_takeover.as_deref(),
-                Some("session-1"),
+                Some("session-1-slot"),
                 "Space must press the card's button here as it does in the \
                  windowed pane (driven elsewhere: {driven_elsewhere})"
             );
             assert!(
-                !app.engine.is_typing("session-1"),
+                !app.engine.is_typing("session-1-slot"),
                 "and it must never reach the child (driven elsewhere: \
                  {driven_elsewhere})"
             );
@@ -1878,14 +1903,14 @@ mod tests {
         app.focus = FocusPane::Center;
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.claim_launched_pty("session-1");
+        app.claim_launched_pty("session-1-slot");
 
         app.process_raw_input_bytes(b" ")
             .expect("the key is handled");
 
         assert_eq!(app.pending_pty_takeover, None);
         assert!(
-            app.engine.is_typing("session-1"),
+            app.engine.is_typing("session-1-slot"),
             "a space typed into a terminal this surface drives is a space"
         );
     }
@@ -1956,7 +1981,7 @@ mod tests {
             row: 11,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
+        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
         assert_eq!(
             app.takeover_press, None,
             "the press is spent by the release"
@@ -2054,7 +2079,7 @@ mod tests {
         // Two ordinary agent rows, the first of them the one with the live pty.
         let base = app.engine.sessions[0].clone();
         app.engine.sessions.clear();
-        for id in ["session-1", "session-2"] {
+        for id in ["session-1-slot", "session-2-slot"] {
             let mut session = base.clone();
             session.id = id.to_string();
             session.status = crate::model::SessionStatus::Active;
@@ -2071,7 +2096,9 @@ mod tests {
 
         // Another device drives the pty, so the card covers the center pane.
         let browser = seat.owners.next_conn_id();
-        seat.owners.claim("session-1", browser).expect("claimed");
+        seat.owners
+            .claim("session-1-slot", browser)
+            .expect("claimed");
         assert!(app.focused_pty_is_covered_by_card(), "the card is up");
 
         let press = |kind, column, row| MouseEvent {
@@ -2093,7 +2120,7 @@ mod tests {
         let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(
             order,
-            vec!["session-1", "session-2"],
+            vec!["session-1-slot", "session-2-slot"],
             "the abandoned drag must not fire on a later click",
         );
     }
@@ -2120,9 +2147,11 @@ mod tests {
             app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
             if card_up {
                 let browser = seat.owners.next_conn_id();
-                seat.owners.claim("session-1", browser).expect("claimed");
+                seat.owners
+                    .claim("session-1-slot", browser)
+                    .expect("claimed");
             } else {
-                app.claim_launched_pty("session-1");
+                app.claim_launched_pty("session-1-slot");
             }
 
             // An SGR left press at column 6, row 6 (the wire is 1-based).
@@ -2181,8 +2210,8 @@ mod tests {
 
         // Serving with a live pty, but this surface is already the driver.
         let (mut app, _recorded, seat) = app_with_a_live_pty();
-        app.claim_launched_pty("session-1");
-        assert!(seat.owners.is_owner("session-1", seat.conn_id));
+        app.claim_launched_pty("session-1-slot");
+        assert!(seat.owners.is_owner("session-1-slot", seat.conn_id));
         app.take_over_focused_pty();
         assert_eq!(app.pending_pty_takeover, None);
         assert!(app.status.most_recent_tui().is_none());
@@ -2190,7 +2219,7 @@ mod tests {
         // Serving with NO live pty under the cursor: a dormant tab has no
         // ownership question and so no card either.
         let (mut app, _recorded, _seat) = app_with_a_live_pty();
-        app.engine.providers.remove(TabIdRef::new("session-1"));
+        app.engine.providers.remove(TabIdRef::new("session-1-slot"));
         app.take_over_focused_pty();
         assert_eq!(app.pending_pty_takeover, None);
         assert!(app.status.most_recent_tui().is_none());
@@ -2221,7 +2250,7 @@ mod tests {
         let browser_seq = seat
             .owners
             .claim_for_resize(
-                "session-1",
+                "session-1-slot",
                 browser,
                 false,
                 None,
@@ -2232,11 +2261,11 @@ mod tests {
             .expect("the browser claimed the pty");
         assert!(
             seat.owners
-                .accept_grid_apply("session-1", browser_seq, 40, 20)
+                .accept_grid_apply("session-1-slot", browser_seq, 40, 20)
         );
         app.engine
             .providers
-            .get(TabIdRef::new("session-1"))
+            .get(TabIdRef::new("session-1-slot"))
             .expect("the pty is live")
             .resize(40, 20)
             .expect("the browser's resize reaches the child");
@@ -2249,7 +2278,7 @@ mod tests {
         let demoted_grid = app
             .engine
             .providers
-            .get(TabIdRef::new("session-1"))
+            .get(TabIdRef::new("session-1-slot"))
             .and_then(|client| client.grid_size());
         assert_eq!(
             demoted_grid,
@@ -2258,7 +2287,7 @@ mod tests {
         );
 
         // The browser goes away, so the pty is unowned again.
-        assert!(seat.owners.release("session-1", browser).is_some());
+        assert!(seat.owners.release("session-1-slot", browser).is_some());
 
         // The user presses the card's button. The claim rides the next render,
         // which must send this pane's geometry even though the pane has not
@@ -2268,14 +2297,14 @@ mod tests {
             .draw(|frame| app.render(frame))
             .expect("render succeeds");
         assert!(
-            seat.owners.is_owner("session-1", seat.conn_id),
+            seat.owners.is_owner("session-1-slot", seat.conn_id),
             "a flagged claim on an unowned pty is granted"
         );
 
         let healed = app
             .engine
             .providers
-            .get(TabIdRef::new("session-1"))
+            .get(TabIdRef::new("session-1-slot"))
             .and_then(|client| client.grid_size())
             .expect("the pty is live");
         assert_ne!(
@@ -2296,7 +2325,7 @@ mod tests {
         let browser = seat.owners.next_conn_id();
         seat.owners
             .claim_for_resize(
-                "session-1",
+                "session-1-slot",
                 browser,
                 false,
                 None,
@@ -2305,11 +2334,11 @@ mod tests {
             )
             .epoch
             .expect("the browser claimed the pty");
-        app.last_pty_resize_target = Some("session-1".to_string());
+        app.last_pty_resize_target = Some("session-1-slot".to_string());
 
         app.take_over_focused_pty();
 
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
+        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
         assert_eq!(app.last_pty_resize_target, None);
         let (_, message) = app.status.most_recent_tui().expect("a status was set");
         assert!(
@@ -2321,7 +2350,9 @@ mod tests {
         // sentinel rather than a blank where a device should be.
         let (mut app, _recorded, seat) = app_with_a_live_pty();
         let browser = seat.owners.next_conn_id();
-        seat.owners.claim("session-1", browser).expect("claimed");
+        seat.owners
+            .claim("session-1-slot", browser)
+            .expect("claimed");
         app.take_over_focused_pty();
         let (_, message) = app.status.most_recent_tui().expect("a status was set");
         assert!(
@@ -2337,12 +2368,14 @@ mod tests {
     fn an_armed_take_over_is_dropped_when_the_user_moves_to_another_terminal() {
         let (mut app, _recorded, seat) = app_with_a_live_pty();
         let browser = seat.owners.next_conn_id();
-        seat.owners.claim("session-1", browser).expect("claimed");
+        seat.owners
+            .claim("session-1-slot", browser)
+            .expect("claimed");
         app.take_over_focused_pty();
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
+        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
 
         // The render pass is about a different pty now.
-        app.expire_stale_pty_takeover(Some("session-2"));
+        app.expire_stale_pty_takeover(Some("session-2-slot"));
         assert_eq!(
             app.pending_pty_takeover, None,
             "an arm for a pane the user left must not survive to fire later"
@@ -2355,9 +2388,9 @@ mod tests {
 
         // And a render pass about the armed pty leaves it alone, or the intent
         // could never be spent at all.
-        app.pending_pty_takeover = Some("session-1".to_string());
-        app.expire_stale_pty_takeover(Some("session-1"));
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1"));
+        app.pending_pty_takeover = Some("session-1-slot".to_string());
+        app.expire_stale_pty_takeover(Some("session-1-slot"));
+        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
     }
 
     /// Ctrl-g in interactive mode: the default ToggleFullscreen binding, which
@@ -2382,7 +2415,7 @@ mod tests {
             .expect("the toggle is handled");
 
         assert!(
-            !seat.owners.is_owner("session-1", seat.conn_id),
+            !seat.owners.is_owner("session-1-slot", seat.conn_id),
             "a key the child never sees must not make this surface the driver"
         );
         assert!(
@@ -2404,7 +2437,7 @@ mod tests {
             .expect("the page key is handled");
 
         assert!(
-            !seat.owners.is_owner("session-1", seat.conn_id),
+            !seat.owners.is_owner("session-1-slot", seat.conn_id),
             "scrolling back is not driving the terminal"
         );
         assert!(recorded.lock().expect("not poisoned").published.is_empty());
@@ -2426,11 +2459,11 @@ mod tests {
             .expect("the keystroke is handled");
 
         assert!(
-            !seat.owners.is_owner("session-1", seat.conn_id),
+            !seat.owners.is_owner("session-1-slot", seat.conn_id),
             "only the card's button claims a pty nobody drives"
         );
         assert!(
-            !app.engine.is_typing("session-1"),
+            !app.engine.is_typing("session-1-slot"),
             "and the key reaches nothing"
         );
         assert!(recorded.lock().expect("not poisoned").published.is_empty());
@@ -2457,9 +2490,11 @@ mod tests {
             app.last_pty_size = (10, 10);
             if demoted {
                 let browser = seat.owners.next_conn_id();
-                seat.owners.claim("session-1", browser).expect("claimed");
+                seat.owners
+                    .claim("session-1-slot", browser)
+                    .expect("claimed");
             } else {
-                app.claim_launched_pty("session-1");
+                app.claim_launched_pty("session-1-slot");
             }
             let palette_key = app.bindings.label_for(Action::OpenPalette);
             assert_eq!(
@@ -2477,7 +2512,7 @@ mod tests {
                  cannot write to the child (demoted: {demoted})"
             );
             assert_eq!(
-                app.engine.is_typing("session-1"),
+                app.engine.is_typing("session-1-slot"),
                 !demoted,
                 "the chord must reach the child exactly when this surface may write \
                  to it (demoted: {demoted})"
@@ -2509,16 +2544,18 @@ mod tests {
 
             if demoted {
                 let browser = seat.owners.next_conn_id();
-                seat.owners.claim("session-1", browser).expect("claimed");
+                seat.owners
+                    .claim("session-1-slot", browser)
+                    .expect("claimed");
             } else {
-                app.claim_launched_pty("session-1");
+                app.claim_launched_pty("session-1-slot");
             }
 
             app.process_raw_input_bytes(PAGE_UP_BYTES)
                 .expect("the page key is handled");
 
             assert_eq!(
-                app.engine.is_typing("session-1"),
+                app.engine.is_typing("session-1-slot"),
                 !demoted,
                 "a page key must reach the child only when this surface may write \
                  to it (demoted: {demoted})"
@@ -2538,13 +2575,13 @@ mod tests {
         let _ = render_rows(&mut app, 160, 40);
 
         assert_eq!(
-            app.pty_driver("session-1"),
+            app.pty_driver("session-1-slot"),
             PtyDriver::Free,
             "looking at a terminal is not driving it"
         );
         let browser = seat.owners.next_conn_id();
         let claim = seat.owners.claim_for_resize(
-            "session-1",
+            "session-1-slot",
             browser,
             false,
             None,
@@ -2556,7 +2593,7 @@ mod tests {
             "the browser that started the agent must be able to attach to it"
         );
         assert!(
-            seat.owners.is_owner("session-1", browser),
+            seat.owners.is_owner("session-1-slot", browser),
             "and its plain attach claims the pty nobody was driving"
         );
     }
@@ -2570,7 +2607,7 @@ mod tests {
         let browser = seat.owners.next_conn_id();
         seat.owners
             .claim_for_resize(
-                "session-1",
+                "session-1-slot",
                 browser,
                 false,
                 None,
@@ -2585,7 +2622,7 @@ mod tests {
         }
 
         assert!(
-            seat.owners.is_owner("session-1", browser),
+            seat.owners.is_owner("session-1-slot", browser),
             "repeated frames must not accumulate into a claim"
         );
     }
@@ -2599,21 +2636,21 @@ mod tests {
     fn a_launch_started_here_claims_its_pty_and_the_next_frame_sizes_the_child() {
         let (mut app, _recorded, seat) = app_with_a_live_pty();
 
-        app.claim_launched_pty("session-1");
-        assert_eq!(app.pty_driver("session-1"), PtyDriver::Mine);
+        app.claim_launched_pty("session-1-slot");
+        assert_eq!(app.pty_driver("session-1-slot"), PtyDriver::Mine);
 
         let _ = render_rows(&mut app, 160, 40);
         let grid = app
             .engine
             .providers
-            .get(TabIdRef::new("session-1"))
+            .get(TabIdRef::new("session-1-slot"))
             .and_then(|client| client.grid_size());
         assert_ne!(
             grid,
             Some((10, 10)),
             "the render pass sized the child this surface drives"
         );
-        assert!(seat.owners.is_owner("session-1", seat.conn_id));
+        assert!(seat.owners.is_owner("session-1-slot", seat.conn_id));
     }
 
     /// A launch never steals. Starting a tab here while a browser drives that
@@ -2622,11 +2659,13 @@ mod tests {
     fn a_launch_started_here_never_takes_a_pty_another_device_drives() {
         let (mut app, _recorded, seat) = app_with_a_live_pty();
         let browser = seat.owners.next_conn_id();
-        seat.owners.claim("session-1", browser).expect("claimed");
+        seat.owners
+            .claim("session-1-slot", browser)
+            .expect("claimed");
 
-        app.claim_launched_pty("session-1");
+        app.claim_launched_pty("session-1-slot");
 
-        assert!(seat.owners.is_owner("session-1", browser));
+        assert!(seat.owners.is_owner("session-1-slot", browser));
     }
 
     /// With nothing serving there is no seat, no registry and no gate, so a
@@ -2641,7 +2680,7 @@ mod tests {
         let grid = app
             .engine
             .providers
-            .get(TabIdRef::new("session-1"))
+            .get(TabIdRef::new("session-1-slot"))
             .and_then(|client| client.grid_size());
         assert_ne!(
             grid,
@@ -2703,7 +2742,7 @@ mod tests {
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             dux_core::model::CompanionTerminal {
-                owner: dux_core::model::TerminalOwner::Session("session-1".to_string()),
+                owner: dux_core::model::TerminalOwner::Session("session-1-slot".to_string()),
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client: crate::pty::PtyClient::spawn(
@@ -2739,7 +2778,7 @@ mod tests {
         let (mut app, _recorded, seat) = app_with_a_live_pty();
         let _ = render_rows(&mut app, 160, 40);
         assert_eq!(
-            app.pty_driver("session-1"),
+            app.pty_driver("session-1-slot"),
             PtyDriver::Free,
             "the frame before the press claimed nothing"
         );
@@ -2747,19 +2786,19 @@ mod tests {
         app.take_over_focused_pty();
         assert_eq!(
             app.pending_pty_takeover.as_deref(),
-            Some("session-1"),
+            Some("session-1-slot"),
             "the press arms the claim; the render pass carries it"
         );
 
         let _ = render_rows(&mut app, 160, 40);
         assert!(
-            seat.owners.is_owner("session-1", seat.conn_id),
+            seat.owners.is_owner("session-1-slot", seat.conn_id),
             "a flagged claim on an unowned pty is granted"
         );
         let grid = app
             .engine
             .providers
-            .get(TabIdRef::new("session-1"))
+            .get(TabIdRef::new("session-1-slot"))
             .and_then(|client| client.grid_size());
         assert_ne!(
             grid,
@@ -2784,15 +2823,15 @@ mod tests {
         app.focus = FocusPane::Center;
 
         assert!(
-            !app.may_type_into_pty("session-1"),
+            !app.may_type_into_pty("session-1-slot"),
             "the only act that claims a free pty is the card's button"
         );
-        assert!(!seat.owners.is_owner("session-1", seat.conn_id));
+        assert!(!seat.owners.is_owner("session-1-slot", seat.conn_id));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .expect("the key is handled");
         assert!(
-            !app.engine.is_typing("session-1"),
+            !app.engine.is_typing("session-1-slot"),
             "a covered pane writes nothing to the child"
         );
         assert!(
@@ -2815,7 +2854,7 @@ mod tests {
             !flat.contains("Running in the background"),
             "no seat, no card: {flat}"
         );
-        assert!(app.may_type_into_pty("session-1"));
+        assert!(app.may_type_into_pty("session-1-slot"));
     }
 
     /// The raw fullscreen path reaches the same button on a free pty, through
@@ -2838,11 +2877,11 @@ mod tests {
 
         assert_eq!(
             app.pending_pty_takeover.as_deref(),
-            Some("session-1"),
+            Some("session-1-slot"),
             "the raw path must reach the same take-over the windowed key does"
         );
         assert!(
-            !app.engine.is_typing("session-1"),
+            !app.engine.is_typing("session-1-slot"),
             "and the bytes must never reach the child"
         );
     }
@@ -2872,7 +2911,7 @@ mod tests {
 
         assert_eq!(
             app.pending_pty_takeover.as_deref(),
-            Some("session-1"),
+            Some("session-1-slot"),
             "a press and release inside the button takes the pty over"
         );
     }
@@ -2969,7 +3008,7 @@ mod tests {
     fn ready_view(app: &App, view: AgentLaunchReadyView) -> AgentLaunchReadyOutcome {
         AgentLaunchReadyOutcome {
             session: app.engine.sessions[0].clone(),
-            tab_id: "session-1".to_string(),
+            tab_id: "session-1-slot".to_string(),
             pty_size: (24, 80),
             detached_session_id: None,
             wants_fullscreen: false,
@@ -3019,7 +3058,7 @@ mod tests {
         app.apply_agent_launch_ready_view(outcome);
 
         assert_eq!(
-            app.pty_driver("session-1"),
+            app.pty_driver("session-1-slot"),
             PtyDriver::Free,
             "the browser's own create must not be claimed by this surface"
         );
@@ -3080,7 +3119,7 @@ mod tests {
         let flat = flowed(&render_rows(&mut app, 160, 40));
 
         assert_eq!(
-            app.pty_driver("session-1"),
+            app.pty_driver("session-1-slot"),
             PtyDriver::Free,
             "nobody acted, so nobody drives it yet"
         );
@@ -3092,7 +3131,7 @@ mod tests {
         app.take_over_focused_pty();
         let flat = flowed(&render_rows(&mut app, 160, 40));
         assert!(
-            seat.owners.is_owner("session-1", seat.conn_id),
+            seat.owners.is_owner("session-1-slot", seat.conn_id),
             "the press is what claims it"
         );
         assert!(

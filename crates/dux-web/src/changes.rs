@@ -812,6 +812,7 @@ mod tests {
         let n = now();
         dux_core::model::AgentSession {
             id: id.to_string(),
+            slot_tab_id: format!("{id}-slot"),
             provider: dux_core::model::ProviderKind::new("claude"),
             title: None,
             started_providers: Vec::new(),
@@ -898,10 +899,10 @@ mod tests {
                 })
                 .unwrap();
             store
-                .upsert_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
+                .create_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
                 .unwrap();
             store
-                .upsert_session(&sample_session("s_err", wt_err.to_string_lossy().as_ref()))
+                .create_session(&sample_session("s_err", wt_err.to_string_lossy().as_ref()))
                 .unwrap();
         }
         let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();

@@ -15,6 +15,7 @@ fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
     let n = chrono::Utc::now();
     dux_core::model::AgentSession {
         id: id.to_string(),
+        slot_tab_id: format!("{id}-slot"),
         provider: dux_core::model::ProviderKind::new("claude"),
         title: None,
         started_providers: Vec::new(),
@@ -72,7 +73,7 @@ async fn boot() -> (SocketAddr, tempfile::TempDir) {
             })
             .unwrap();
         store
-            .upsert_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
+            .create_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
             .unwrap();
     }
     let engine = bootstrap_engine(&paths).unwrap();

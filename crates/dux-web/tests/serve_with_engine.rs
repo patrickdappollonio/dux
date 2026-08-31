@@ -26,6 +26,7 @@ fn sample_session(
     let now = chrono::Utc::now();
     dux_core::model::AgentSession {
         id: id.to_string(),
+        slot_tab_id: format!("{id}-slot"),
         provider: dux_core::model::ProviderKind::new("claude"),
         title: Some(format!("{id}-title")),
         started_providers: Vec::new(),
@@ -77,7 +78,7 @@ fn build_engine() -> (Engine, tempfile::TempDir) {
             })
             .unwrap();
         store
-            .upsert_session(&sample_session(
+            .create_session(&sample_session(
                 "s1",
                 "p1",
                 "feat",

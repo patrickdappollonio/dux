@@ -3848,8 +3848,9 @@ mod tests {
                 .unwrap();
             let now = chrono::Utc::now();
             store
-                .upsert_session(&dux_core::model::AgentSession {
+                .create_session(&dux_core::model::AgentSession {
                     id: "s1".to_string(),
+                    slot_tab_id: "s1-slot".to_string(),
                     provider: dux_core::model::ProviderKind::new("claude"),
                     title: None,
                     started_providers: Vec::new(),
@@ -6212,8 +6213,9 @@ mod tests {
             let now = chrono::Utc::now();
             for sid in ["s1", "s2"] {
                 store
-                    .upsert_session(&dux_core::model::AgentSession {
+                    .create_session(&dux_core::model::AgentSession {
                         id: sid.to_string(),
+                        slot_tab_id: format!("{sid}-slot"),
                         provider: dux_core::model::ProviderKind::new("claude"),
                         title: None,
                         started_providers: Vec::new(),

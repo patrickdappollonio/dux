@@ -4090,6 +4090,7 @@ mod tests {
         let now = chrono::Utc::now();
         dux_core::model::AgentSession {
             id: id.to_string(),
+            slot_tab_id: format!("{id}-slot"),
             provider: dux_core::model::ProviderKind::new("claude"),
             title: Some(format!("{id}-title")),
             started_providers: Vec::new(),
@@ -4136,7 +4137,7 @@ mod tests {
                 paths.root.to_string_lossy().as_ref(),
             );
             eligible.auto_reopen_enabled = true;
-            store.upsert_session(&eligible).unwrap();
+            store.create_session(&eligible).unwrap();
             // Same intent but the per-agent opt-in is off: must be skipped.
             let opted_out = sample_session(
                 "s-optout",
@@ -4144,7 +4145,7 @@ mod tests {
                 "other",
                 paths.root.to_string_lossy().as_ref(),
             );
-            store.upsert_session(&opted_out).unwrap();
+            store.create_session(&opted_out).unwrap();
         }
         let mut engine = bootstrap_engine(&paths).expect("bootstrap");
 
@@ -4152,9 +4153,11 @@ mod tests {
 
         assert_eq!(launched, 1, "exactly the eligible session launches");
         assert!(
-            engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
-                "s-reopen"
-            ))),
+            engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
+                engine
+                    .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s-reopen"))
+                    .to_owned()
+            )),
             "the eligible session's launch must be dispatched (in-flight)"
         );
         assert!(
@@ -4195,7 +4198,7 @@ mod tests {
         {
             let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
             store
-                .upsert_session(&sample_session(
+                .create_session(&sample_session(
                     "s1",
                     "p1",
                     "feat",
@@ -4206,7 +4209,10 @@ mod tests {
         let mut engine = bootstrap_engine(&paths).expect("bootstrap");
         engine.closing_sessions.insert("s1".to_string());
 
-        let err = launch_agent(&mut engine, "s1").expect_err("closing session must refuse");
+        let slot = engine
+            .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+            .to_string();
+        let err = launch_agent(&mut engine, &slot).expect_err("closing session must refuse");
         assert!(
             err.contains("being deleted"),
             "refusal message should be surfaced verbatim: {err}"
@@ -4219,7 +4225,7 @@ mod tests {
         {
             let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
             store
-                .upsert_session(&sample_session(
+                .create_session(&sample_session(
                     "s1",
                     "p1",
                     "feat",
@@ -4286,7 +4292,7 @@ mod tests {
         {
             let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
             store
-                .upsert_session(&sample_session(
+                .create_session(&sample_session(
                     "s1",
                     "p1",
                     "feat",
@@ -4346,7 +4352,7 @@ mod tests {
         {
             let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
             store
-                .upsert_session(&sample_session(
+                .create_session(&sample_session(
                     "s1",
                     "p1",
                     "feat",
@@ -4994,7 +5000,7 @@ mod tests {
     fn seed_session(paths: &DuxPaths, id: &str) {
         let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
         store
-            .upsert_session(&sample_session(
+            .create_session(&sample_session(
                 id,
                 "p1",
                 "feat",
@@ -5232,7 +5238,12 @@ mod tests {
         );
 
         // Take-over: a connection claims the session-slot tab's PTY.
-        owners.claim("s1", 42);
+        owners.claim(
+            engine
+                .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+                .as_str(),
+            42,
+        );
         check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         assert_eq!(
             rx.try_recv(),
@@ -5248,7 +5259,17 @@ mod tests {
         // Steady state: the owner typing away bumps nothing, so further checks
         // must not churn (no event, no re-serialize).
         let serializes_after_claim = check.fp_call_count;
-        assert!(owners.may_write("s1", 42, None).allowed);
+        assert!(
+            owners
+                .may_write(
+                    engine
+                        .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+                        .as_str(),
+                    42,
+                    None
+                )
+                .allowed
+        );
         check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         assert_eq!(
             check.fp_call_count, serializes_after_claim,
@@ -5258,7 +5279,12 @@ mod tests {
 
         // The owner disconnects: the release must clear the published field so
         // a crashed device never leaves the agent permanently owned.
-        owners.release("s1", 42);
+        owners.release(
+            engine
+                .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+                .as_str(),
+            42,
+        );
         check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         assert_eq!(
             rx.try_recv(),
@@ -5298,7 +5324,12 @@ mod tests {
         );
 
         // A real change: an input-ownership claim moves the sessions half.
-        owners.claim("s1", 42);
+        owners.claim(
+            engine
+                .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+                .as_str(),
+            42,
+        );
         check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         assert!(
             workspace_rx.has_changed().unwrap(),
@@ -5387,7 +5418,10 @@ mod tests {
         seed_session(&paths, "s2");
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let owners = crate::pty_owners::PtySizeOwners::default();
-        owners.claim("s2", 9);
+        let s2_slot = engine
+            .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s2"))
+            .to_string();
+        owners.claim(&s2_slot, 9);
 
         let spine = owned_spine(&engine, &owners);
         let owner_of = |sid: &str| {
@@ -5398,7 +5432,11 @@ mod tests {
                 .expect("session present")
                 .tabs
                 .iter()
-                .find(|t| t.id == sid)
+                .find(|t| {
+                    t.id == engine
+                        .slot_tab_id_of(dux_core::ids::SessionIdRef::new(sid))
+                        .as_str()
+                })
                 .expect("session-slot tab present")
                 .input_owner
                 .clone()
@@ -5494,7 +5532,9 @@ mod tests {
         assert_eq!(version, 0, "an empty, unchanged set must not bump");
 
         // Set → transition.
-        engine.needs_attention.insert(TabId::new("s1"));
+        engine
+            .needs_attention
+            .insert(engine.sessions[0].slot_tab_id().to_owned());
         poll_attention_transitions(&engine, &mut prev, &mut version);
         assert_eq!(version, 1, "raising the flag must bump the version");
 
@@ -5516,7 +5556,8 @@ mod tests {
         seed_session(&paths, "s1");
         let mut engine = bootstrap_engine(&paths).expect("bootstrap");
         // The agent is flagged for attention before anyone opens it.
-        engine.needs_attention.insert(TabId::new("s1"));
+        let slot = engine.sessions[0].slot_tab_id().to_string();
+        engine.needs_attention.insert(TabId::new(slot.clone()));
         let (handle, _join) = spawn_engine_thread(engine);
 
         // It starts flagged in the spine projection.
@@ -5532,7 +5573,7 @@ mod tests {
         );
 
         // A viewed ping for the real tab clears it.
-        handle.note_viewed("s1".to_string());
+        handle.note_viewed(slot);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         loop {
@@ -5823,7 +5864,7 @@ mod tests {
         {
             let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
             store
-                .upsert_session(&sample_session(
+                .create_session(&sample_session(
                     "s1",
                     "p1",
                     "feat",

@@ -15,6 +15,9 @@ type TerminalSocketCallbackOptions = {
   kind: "agent" | "terminal"
   id: string
   sessionId: string | null
+  /// The agent's slot tab as the spine names it, absent only while the spine
+  /// has not arrived. Slot-ness is decided against this, never the session id.
+  slotTabId?: string
   live: LiveSettings
   connId: ConnectionIdentity
   resize: ResizeCoordinator
@@ -55,6 +58,7 @@ export function registerTerminalSocketCallbacks(
     kind,
     id,
     sessionId,
+    slotTabId,
     live,
     connId,
     resize,
@@ -108,14 +112,14 @@ export function registerTerminalSocketCallbacks(
   }
 
   // Extra tabs only: the session-slot tab's disappearance is its session's, not
-  // a tab row's. The callback holds ids and no session record, so slot-ness is
-  // asked of the id-only helper. That is the right helper here rather than a
-  // weaker substitute for `isFirstTab`: these are the same two ids the socket
-  // URL was just built from, through the same rule, so this must answer exactly
-  // what the URL choice answered, session record or not.
+  // a tab row's. Slot-ness is asked of the same helper, with the same
+  // `slotTabId`, that the socket URL was just built from, so this must answer
+  // exactly what the URL choice answered. Getting it wrong here would arm an
+  // extra tab's retry guard over the slot tab, and an empty or not-yet-arrived
+  // tab list would then read as "the tab is gone" and stop it reconnecting.
   if (
     kind === "agent" &&
-    (sessionId === null || !isSlotTabTarget(sessionId, id))
+    (sessionId === null || !isSlotTabTarget(sessionId, id, slotTabId))
   ) {
     pty.shouldRetry = () => !isTabGone(live.current.sessionTabs ?? [], id)
     pty.onGone = () => handleTabGone(id)
