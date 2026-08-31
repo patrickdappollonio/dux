@@ -1,9 +1,8 @@
 ---
-// The pink "what's new" stamp for the hero. One definition, rendered twice by
-// Hero.astro (floating at the large breakpoint, in flow below it), so the two
-// placements can never drift apart.
+// The pink "what's new" stamp for the hero, where it sits in flow beside the
+// logo and the version pill.
 //
-// Pink on purpose: cyan (--color-accent) is already carrying the headline glow
+// Pink on purpose: cyan (--color-accent) is already carrying the headline accent
 // and the primary button, so a cyan badge would read as more of the same thing.
 // Renders nothing when WHATS_NEW_BADGE is null, which is how the badge retires.
 import { WHATS_NEW_BADGE, WHATS_NEW_HREF } from "../lib/version";

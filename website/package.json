@@ -34,11 +34,13 @@
     "rehype-slug": "^6.0.0",
     "remark-gemoji": "^8.0.0",
     "sharp": "^0.35.3",
-    "tailwindcss": "^4.3.3"
+    "tailwindcss": "^4.3.3",
+    "three": "0.170.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
+    "@types/three": "0.170.0",
     "vitest": "^4.1.8"
   },
   "allowScripts": {

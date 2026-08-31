@@ -1,7 +1,9 @@
 ---
 // A compact, build-time strip of live download counters, sized to sit directly
-// under the install widget in the hero. Any counter whose lookup fails is
-// dropped; if all fail, nothing renders.
+// under the install widget in the install section. Any counter whose lookup
+// fails is dropped; if all fail, nothing renders. The hero states the same
+// totals as a single line; this is the breakdown, beside the thing being
+// counted.
 import { getReleaseDownloads, getNpmTotal, formatCount } from "../lib/stats";
 
 const repo = "patrickdappollonio/dux";

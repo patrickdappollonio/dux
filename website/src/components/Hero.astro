@@ -1,115 +1,330 @@
 ---
-import InstallTabs from "./InstallTabs.astro";
-import PondRipples from "./PondRipples.astro";
-import Stats from "./Stats.astro";
 import WhatsNewBadge from "./WhatsNewBadge.astro";
+import {
+  fallbackBackgroundImage,
+  fallbackBackgroundPosition,
+  fallbackBackgroundSize,
+  inkCss,
+} from "../lib/heroFleet";
+import { getReleaseDownloads, getNpmTotal, formatCount } from "../lib/stats";
 import { getLatestVersion } from "../lib/version";
 
 // Read at build time from the repository's latest published release, so the
 // pill cannot go stale. `null` on any lookup failure, in which case the pill
-// simply drops the version segment. See src/lib/version.ts for why it is derived
-// rather than written down.
+// does not render. See src/lib/version.ts for why it is derived rather than
+// written down.
 const version = await getLatestVersion("patrickdappollonio/dux");
+
+// Build-time social proof, split the same way the install section's counters
+// are: where the counters come from, then the total. Either half may fail, so
+// each segment renders only when its own lookup resolved and the total only
+// when both did, leaving no hole either way.
+const [downloads, npm] = await Promise.all([
+  getReleaseDownloads("patrickdappollonio/dux"),
+  getNpmTotal("@patrickdappollonio/dux"),
+]);
+const installSegments: string[] = [];
+if (downloads !== null)
+  installSegments.push(`${formatCount(downloads)} GitHub + Homebrew`);
+if (npm !== null) installSegments.push(`${formatCount(npm)} npm`);
+if (downloads !== null && npm !== null)
+  installSegments.push(`${formatCount(downloads + npm)} installs total`);
+
+// Generated rather than written down, so the layer the canvas crossfades over
+// cannot drift from the shader it is standing in for.
+const fallback = [
+  `background-color: ${inkCss()}`,
+  `background-image: ${fallbackBackgroundImage("--hero-fold-h")}`,
+  `background-size: ${fallbackBackgroundSize()}`,
+  `background-position: ${fallbackBackgroundPosition("--hero-fold-h")}`,
+].join("; ");
 ---
 
-<section class="relative overflow-hidden pt-12 pb-20 sm:pt-20 sm:pb-28">
-  <div class="absolute inset-0 grid-bg pointer-events-none opacity-60"></div>
+<section class="hero-fold flex items-end" data-hero>
+  <div class="hero-base" aria-hidden="true" style={fallback}></div>
+  {/* The copy carries the whole meaning; the fleet is decoration. */}
+  <canvas data-hero-canvas aria-hidden="true"></canvas>
+  <div class="hero-scrim" aria-hidden="true"></div>
 
-  {/* Sits directly on top of the grid and below the content, so the ripples
-      light the grid's intersections rather than the copy. */}
-  <PondRipples />
-
-  <div class="container-app relative">
-    <div class="grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">
-      <div class="min-w-0">
-        <div class="mb-5 flex flex-wrap items-center gap-3">
-          <img
-            src="/dux-logo.png"
-            alt="dux: a duck conductor with a baton"
-            width="56"
-            height="56"
-            class="h-14 w-14 object-contain drop-shadow-[0_0_24px_rgba(0,212,255,0.25)]"
-          />
-          <span class="pill">
-            <span class="h-1.5 w-1.5 rounded-full bg-[color:var(--color-success)] animate-pulse"></span>
-            {version && <>{version} · </>}macOS + Linux + WSL
-          </span>
-          {/* The what's-new stamp sits beside the version pill at every width,
-              in normal flow: in flow it cannot collide with the headline and
-              needs no reserved gutter above `lg`. */}
-          <span><WhatsNewBadge /></span>
-        </div>
-
-        {/* No `relative` and no right-hand reservation: nothing floats over the
-            headline any more, so it gets the full container width back at
-            every breakpoint. */}
-        <div class="mt-5">
-          <h1 class="heading text-4xl font-bold leading-[1.05] tracking-tight sm:text-5xl lg:text-6xl">
-            Your AI agents
-            <br class="hidden sm:block" />
-            deserve a
-            <span class="relative inline-block"
-              ><span class="relative z-10 text-[color:var(--color-accent)] glow-text">proper office</span
-              ><span
-                aria-hidden="true"
-                class="absolute -bottom-1 left-0 right-0 h-2 bg-[color:var(--color-accent)]/20 -skew-x-12 -z-0"
-              ></span></span>.
-          </h1>
-        </div>
-
-        <p class="mt-6 max-w-xl text-base leading-relaxed text-[color:var(--color-muted)] sm:text-lg">
-          <strong class="text-[color:var(--color-text)]">dux</strong>{" "}
-          <span class="text-[color:var(--color-dim)]">(pronounced "<em>dooks</em>")</span>{" "}
-          runs multiple AI coding agents in parallel, each in its own git worktree (or straight in a folder you already have). It has two front ends over one engine: a terminal UI, and a web UI you start with <span class="mono text-[color:var(--color-text)]">dux server</span>.
-        </p>
-
-        <p class="mt-4 max-w-xl text-base leading-relaxed text-[color:var(--color-muted)] sm:text-lg">
-          Same projects, same agents, same worktrees, whichever one you happen to be looking at. No protocol layers. No adapters. Just real CLIs in real terminals. And it's all yours to tune: every setting, down to every keybinding dux controls, is <strong class="text-[color:var(--color-text)]">configurable</strong> and documented inline in the config file.
-        </p>
-
-        <div class="mt-8 flex flex-wrap items-center gap-3">
-          <a href="#install" class="btn-primary">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="8 17 12 21 16 17"></polyline>
-              <line x1="12" y1="12" x2="12" y2="21"></line>
-              <path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"></path>
-            </svg>
-            Install dux
-          </a>
-          <a
-            href="https://github.com/patrickdappollonio/dux"
-            target="_blank"
-            rel="noopener"
-            class="btn-ghost"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.8 10.9.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.6-1.3-1.6-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.4 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2.9-.3 1.9-.4 2.9-.4s2 .1 2.9.4c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.7.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.3-5.3 5.6.4.3.8 1 .8 2.1v3.1c0 .3.2.7.8.5C20.2 21.4 23.5 17.1 23.5 12 23.5 5.7 18.3.5 12 .5z"/>
-            </svg>
-            Star on GitHub
-          </a>
-          <a href="#demo" class="text-sm text-[color:var(--color-muted)] hover:text-[color:var(--color-accent)] inline-flex items-center gap-1">
-            watch the demo
-            <span aria-hidden="true">↓</span>
-          </a>
-        </div>
-
-        {/* Two columns, so this list only ever grows by an EVEN number or the
-            last row goes ragged. It is six items; make it eight. */}
-        <ul class="mt-8 grid grid-cols-2 gap-x-6 gap-y-2 text-xs text-[color:var(--color-dim)] sm:text-sm">
-          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Claude, Codex, Copilot, OpenCode</li>
-          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Any CLI as a provider</li>
-          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Git worktree per agent</li>
-          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Full git staging area</li>
-          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Terminal UI and web UI, one engine</li>
-          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Same workspace from your phone</li>
-        </ul>
+  <div class="container-app hero-copy pt-16 pb-20 sm:pt-24 sm:pb-24">
+    <div class="hero-column">
+      <div class="mb-7 flex flex-wrap items-center gap-3">
+        <img
+          src="/dux-logo.png"
+          alt="dux: a duck conductor with a baton"
+          width="56"
+          height="56"
+          class="h-14 w-14 object-contain drop-shadow-[0_0_24px_rgba(0,212,255,0.25)]"
+        />
+        {/* Platforms moved down to the line under the button, so the pill is
+            the version and nothing else. */}
+        {
+          version && (
+            <span class="pill">
+              <span class="h-1.5 w-1.5 rounded-full bg-[color:var(--color-success)] animate-pulse" />
+              {version}
+            </span>
+          )
+        }
+        <WhatsNewBadge />
       </div>
 
-      <div class="relative min-w-0">
-        <InstallTabs />
-        <Stats />
-        <div class="absolute -inset-x-8 -bottom-16 -z-10 h-40 rounded-full bg-[color:var(--color-accent)]/10 blur-3xl"></div>
+      <h1 class="hero-headline">
+        {/* The full stop used to sit outside the accent span, which is an
+            inline-block and therefore an atomic inline: at narrow widths the
+            browser stranded the dot on a line of its own. A word joiner does
+            not fix that, measured rather than assumed, because at those widths
+            no other break opportunity fits and the browser breaks anyway.
+            Binding the whole phrase into one nowrap unit does not fix it
+            either: "proper office." is wider than a 320px column, so it
+            overflowed the viewport instead.
+
+            So each word is its own accent unit, which restores the break
+            between them, and the dot lives inside the second unit's nowrap box
+            where nothing can strand it. Each unit's underline is anchored to a
+            wrapper holding only its word, so the rule never reaches under the
+            dot; the leading unit's rule is extended by one character cell (the
+            headline is monospaced, so 1ch is exactly the space's advance) and
+            the two bars meet as the single continuous rule the design asks
+            for. The cost, stated rather than discovered: when the two words do
+            land on different lines, the first bar hangs one cell past
+            "proper". */}
+        Your AI agents deserve a <span class="hero-mark"
+          ><span class="hero-mark-words"
+            ><span class="hero-mark-word">proper</span><span
+              aria-hidden="true"
+              class="hero-mark-rule hero-mark-rule-lead"></span></span
+          ></span
+        > <span class="hero-mark"
+          ><span class="hero-mark-words"
+            ><span class="hero-mark-word">office</span><span
+              aria-hidden="true"
+              class="hero-mark-rule"></span></span
+          >.</span
+        >
+      </h1>
+
+      <p class="hero-sub">
+        dux runs multiple AI coding agents in parallel, each in its own git
+        worktree. A terminal UI and a web UI over one engine, whichever you
+        happen to be looking at.
+      </p>
+
+      <div class="hero-cta">
+        <a class="btn-primary" href="#install">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <polyline points="8 17 12 21 16 17"></polyline>
+            <line x1="12" y1="12" x2="12" y2="21"></line>
+            <path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"></path>
+          </svg>
+          Install dux
+        </a>
+        <span class="hero-meta">
+          <span class="hero-plat">macOS + Linux + WSL</span>
+          {
+            installSegments.map((seg) => (
+              <span class="hero-seg">
+                <span class="hero-plat" aria-hidden="true">
+                  &#183;
+                </span>
+                <span class="hero-plat">{seg}</span>
+              </span>
+            ))
+          }
+        </span>
       </div>
     </div>
   </div>
 </section>
+
+<style>
+  /* The hero owns the fold: the viewport minus the sticky header (h-14). The
+     custom property is the CSS layer's idea of the hero's height, which the
+     scene overwrites with the measured one at mount; this default is what a
+     scripts-off visit gets, where there is no shader to disagree with it. */
+  .hero-fold {
+    position: relative;
+    min-height: calc(100svh - 3.5rem);
+    overflow: hidden;
+    isolation: isolate;
+    --hero-fold-h: calc(100svh - 3.5rem);
+  }
+
+  .hero-fold canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    z-index: 0;
+    /* Crossfades in over the CSS layer on its first rendered frame, so the
+       handoff is not a pop. With no script it never arrives and the CSS layer
+       simply IS the background; with WebGL refused the canvas is hidden
+       outright, same result. */
+    opacity: 0;
+    transition: opacity 260ms ease;
+  }
+
+  .hero-fold canvas.is-live {
+    opacity: 1;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hero-fold canvas {
+      transition: none;
+    }
+  }
+
+  /* The pure-CSS rendition of the background pass, painted under the canvas.
+     Its gradients are generated from the same field list the shader is, so the
+     two agree on ink, anchors, tones, amplitudes and lattice pitch. */
+  .hero-base {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+  }
+
+  .hero-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background:
+      linear-gradient(
+        to top,
+        color-mix(in oklab, var(--color-ink) 96%, transparent) 0%,
+        color-mix(in oklab, var(--color-ink) 84%, transparent) 34%,
+        transparent 66%
+      ),
+      linear-gradient(
+        to right,
+        color-mix(in oklab, var(--color-ink) 82%, transparent) 0%,
+        color-mix(in oklab, var(--color-ink) 40%, transparent) 30%,
+        transparent 52%
+      );
+  }
+
+  .hero-copy {
+    position: relative;
+    z-index: 2;
+    width: 100%;
+  }
+
+  .hero-column {
+    max-width: 37rem;
+  }
+
+  /* Sizing lives here rather than in Tailwind arbitrary values: a `clamp()` or
+     `calc()` with spaces inside a class name is silently dropped. */
+  .hero-headline {
+    font-family: var(--font-display);
+    letter-spacing: -0.028em;
+    text-wrap: balance;
+    line-height: 1.03;
+    font-weight: 700;
+    font-size: clamp(2.35rem, 5.4vw, 4.2rem);
+    color: var(--color-text);
+  }
+
+  .hero-mark {
+    display: inline-block;
+    white-space: nowrap;
+  }
+
+  /* The underline's containing block: the words alone, so the rule cannot reach
+     under the full stop that shares the nowrap unit with them. */
+  .hero-mark-words {
+    position: relative;
+    display: inline-block;
+  }
+
+  .hero-mark-word {
+    position: relative;
+    z-index: 1;
+    color: var(--color-accent);
+  }
+
+  .hero-mark-rule {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -0.05em;
+    height: 0.14em;
+    transform: skewX(-12deg);
+    background: color-mix(in oklab, var(--color-accent) 22%, transparent);
+  }
+
+  /* Bridges the space between the two accent units so the underline reads as
+     one bar. `ch` is the advance of a character cell, which in a monospaced
+     face is exactly a space. */
+  .hero-mark-rule-lead {
+    right: -1ch;
+  }
+
+  .hero-sub {
+    text-wrap: balance;
+    color: var(--color-text);
+    font-size: clamp(1.05rem, 1.45vw, 1.3rem);
+    line-height: 1.6;
+    margin-top: 1.5rem;
+  }
+
+  .hero-cta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-top: 2.25rem;
+  }
+
+  .hero-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  /* The separator travels with the segment it introduces, so a wrap can never
+     leave a lone middot hanging at the end of a line. */
+  .hero-seg {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .hero-plat {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--color-muted);
+  }
+</style>
+
+<script>
+  import { mountHeroScene } from "../lib/heroScene";
+
+  const hero = document.querySelector<HTMLElement>("[data-hero]");
+  const canvas = hero?.querySelector<HTMLCanvasElement>("[data-hero-canvas]");
+  // A refused context leaves the CSS layer as the background, which is the same
+  // thing a scripts-off visitor gets.
+  const scene = hero && canvas ? mountHeroScene(hero, canvas) : null;
+  if (canvas && !scene) {
+    canvas.style.display = "none";
+  }
+  // The site has no view transitions today, so this never fires; it is the
+  // cheap insurance that adding them later does not leak a renderer per swap.
+  document.addEventListener("astro:before-swap", () => scene?.destroy(), {
+    once: true,
+  });
+</script>

@@ -1,5 +1,6 @@
 ---
 import InstallTabs from "./InstallTabs.astro";
+import Stats from "./Stats.astro";
 ---
 
 <section class="py-16 sm:py-24">
@@ -38,6 +39,7 @@ import InstallTabs from "./InstallTabs.astro";
     <div class="grid items-start gap-6 lg:grid-cols-[1.1fr_0.9fr]">
       <div class="min-w-0 space-y-5">
         <InstallTabs />
+        <Stats />
         <div class="rounded-lg border border-dashed border-[color:var(--color-border)] bg-[color:var(--color-panel-2)]/60 p-4 text-xs text-[color:var(--color-muted)]">
           <strong class="text-[color:var(--color-text)]">Prefer to read it first?</strong>{" "}
           Of course you do. <a href="/install.sh" class="text-[color:var(--color-accent)] hover:underline mono">view install.sh</a> or grab it straight from the <a href="https://github.com/patrickdappollonio/dux/releases/latest" class="text-[color:var(--color-accent)] hover:underline">latest release</a>.

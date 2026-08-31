@@ -202,10 +202,6 @@
     50% { opacity: 0; }
   }
 
-  .glow-text {
-    text-shadow: 0 0 18px color-mix(in oklab, var(--color-accent) 50%, transparent);
-  }
-
   /* Anchor targets sit on the first content wrapper inside a section, not on
      the padded section itself, whose top padding would land as an empty band
      under the header. So this only has to clear the sticky header (h-14,
