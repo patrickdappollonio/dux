@@ -39,6 +39,7 @@ import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
 import { CustomizeWebappDialog } from "@/components/CustomizeWebappDialog"
 import { InsetHeader } from "@/components/InsetHeader"
+import { TheaterChrome } from "@/components/TheaterChrome"
 import { TerminalArea } from "@/components/TerminalArea"
 import {
   ResizableHandle,
@@ -51,6 +52,7 @@ import {
 } from "@/components/ui/sidebar"
 import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useTheaterEscape, useTheaterGesture } from "@/hooks/use-theater"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { useChangesPaneController } from "@/hooks/use-changes-pane-controller"
 import {
@@ -140,7 +142,15 @@ export function DesktopShell() {
     >
       <AppSidebar />
       <SidebarInset className="flex h-svh min-h-0 flex-col overflow-hidden">
-        <InsetHeader />
+        {/* The pane header is the first of the two chrome stacks theater takes
+            away. The other is the pull-request band plus the tab strip, inside
+            TerminalArea; both collapse on the same flag and the ONE gesture
+            above pays for the single refit between them. The sidebar and the
+            Changes pane stay: theater is about the chrome stacked ON the pane,
+            and both of those are already yours to put away. */}
+        <TheaterChrome hidden={dux.theater}>
+          <InsetHeader />
+        </TheaterChrome>
         <div className="min-h-0 flex-1">
           <ResizablePanelGroup
             orientation="horizontal"
@@ -272,6 +282,11 @@ function MobileApp() {
 function App() {
   const { standaloneEditor } = useDux()
   const isMobile = useIsMobile()
+  // Both mounted ABOVE the shell switch, so they are one instance for the whole
+  // page rather than one per shell: the gesture must not restart because a
+  // rotation swapped shells, and two Escape listeners would exit twice.
+  useTheaterGesture()
+  useTheaterEscape()
   // The standalone editor is checked BEFORE isMobile, deliberately: phones
   // must reach it (it is their one editor surface, best-effort by decision),
   // and an isMobile-first ladder would never let them past the mobile shell.

@@ -1,4 +1,4 @@
-import { Suspense } from "react"
+import { Suspense, type ReactNode } from "react"
 
 import { AgentNotFound } from "@/components/AgentNotFound"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
@@ -6,6 +6,8 @@ import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { DormantTabCard } from "@/components/DormantTabCard"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { PrBanner } from "@/components/PrBanner"
+import { TheaterChrome } from "@/components/TheaterChrome"
+import { TheaterPill } from "@/components/TheaterPill"
 import { Welcome } from "@/components/Welcome"
 import {
   dormantTabNeedsCard,
@@ -62,11 +64,13 @@ function LiveTerminalPane({
   paneKey,
   targetId,
   slotTabId,
+  overlay,
 }: {
   target: SelectedTarget
   paneKey: string
   targetId: string
   slotTabId: string | undefined
+  overlay: ReactNode
 }) {
   if (target.kind === "agent") {
     return (
@@ -76,6 +80,7 @@ function LiveTerminalPane({
         id={targetId}
         sessionId={target.sessionId}
         slotTabId={slotTabId}
+        overlay={overlay}
       />
     )
   }
@@ -85,6 +90,7 @@ function LiveTerminalPane({
       kind="terminal"
       id={targetId}
       owner={target.owner}
+      overlay={overlay}
     />
   )
 }
@@ -96,6 +102,7 @@ function TerminalSurface({
   slotTabId,
   dormant,
   focusedTab,
+  overlay,
 }: {
   target: SelectedTarget
   paneKey: string
@@ -103,15 +110,22 @@ function TerminalSurface({
   slotTabId: string | undefined
   dormant: boolean
   focusedTab: AgentTabView | undefined
+  overlay: ReactNode
 }) {
+  // A dormant tab has no pane to paint over, so the overlay rides the column
+  // itself. There are no input rows under a card, which is exactly what makes
+  // that safe here and unsafe over a live terminal.
   if (dormant && focusedTab && target.kind === "agent") {
     return (
-      <DormantTabCard
-        sessionId={target.sessionId}
-        tabId={focusedTab.id}
-        provider={focusedTab.provider}
-        lastRunFailed={focusedTab.last_run_failed === true}
-      />
+      <>
+        <DormantTabCard
+          sessionId={target.sessionId}
+          tabId={focusedTab.id}
+          provider={focusedTab.provider}
+          lastRunFailed={focusedTab.last_run_failed === true}
+        />
+        {overlay}
+      </>
     )
   }
   return (
@@ -122,6 +136,7 @@ function TerminalSurface({
           paneKey={paneKey}
           targetId={targetId}
           slotTabId={slotTabId}
+          overlay={overlay}
         />
       </Suspense>
     </ChunkBoundary>
@@ -142,6 +157,7 @@ export function TerminalArea() {
     bootstrap,
     selectedSessionId,
     selectedTarget,
+    theater,
     terminalEpoch,
     startedDormantTabs,
     pendingSlotTab,
@@ -229,14 +245,20 @@ export function TerminalArea() {
   // simply invisible and the loop can never start.
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <PrLane pr={pr} atBottom={bannerAtBottom} position="top" />
-      <AgentTabLane
-        target={selectedTarget}
-        session={session}
-        tabs={tabs}
-        bootstrap={bootstrap}
-      />
-      <div className="min-h-0 flex-1 overflow-hidden">
+      {/* The pane's own chrome stack, and the one real loss theater costs: the
+          pull-request band is a status glance and a click target in the same
+          strip. It is one tap away again through the pill's exit, and theater
+          is a mode you enter deliberately. */}
+      <TheaterChrome hidden={theater}>
+        <PrLane pr={pr} atBottom={bannerAtBottom} position="top" />
+        <AgentTabLane
+          target={selectedTarget}
+          session={session}
+          tabs={tabs}
+          bootstrap={bootstrap}
+        />
+      </TheaterChrome>
+      <div className="relative min-h-0 flex-1 overflow-hidden">
         <TerminalSurface
           target={selectedTarget}
           paneKey={paneKey}
@@ -244,9 +266,16 @@ export function TerminalArea() {
           slotTabId={slotTabId}
           dormant={dormant}
           focusedTab={focusedTab}
+          overlay={
+            theater ? (
+              <TheaterPill target={selectedTarget} session={session} />
+            ) : null
+          }
         />
       </div>
-      <PrLane pr={pr} atBottom={bannerAtBottom} position="bottom" />
+      <TheaterChrome hidden={theater}>
+        <PrLane pr={pr} atBottom={bannerAtBottom} position="bottom" />
+      </TheaterChrome>
     </div>
   )
 }

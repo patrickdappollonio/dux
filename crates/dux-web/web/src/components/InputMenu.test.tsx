@@ -16,8 +16,10 @@ vi.mock("@/lib/store", async (importOriginal) => {
     ...actual,
     useDux: () => mockState,
     setMobileBarVisibility: (...a: unknown[]) => setMobileBarVisibility(...a),
+    exitTheater: (...a: unknown[]) => exitTheater(...a),
   }
 })
+const exitTheater = vi.fn()
 const setTypingSurface = vi.fn()
 vi.mock("@/lib/typingSurface", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/typingSurface")>()
@@ -59,6 +61,7 @@ const ALL_OFF: InputMenuGates = {
   surfaceSwitch: false,
   keysToggle: false,
   topBarToggle: false,
+  theaterExit: false,
 }
 
 function state(topBar = true, keys = true): DuxState {
@@ -109,6 +112,17 @@ describe("InputMenu", () => {
     // operating system's own file picker.
     fireEvent.click(screen.getByText("Attach a file…"))
     expect(onAttach).toHaveBeenCalledTimes(1)
+  })
+
+  it("carries the way out of theater, and only while theater is on", () => {
+    // The input ⋯ renders in EVERY bar state, which is what makes it the exit
+    // that still works on a phone whose floating pill is under the keyboard.
+    open({ keysToggle: true })
+    expect(screen.queryByText("Leave theater mode")).toBeNull()
+    cleanup()
+    open({ theaterExit: true })
+    fireEvent.click(screen.getByText("Leave theater mode"))
+    expect(exitTheater).toHaveBeenCalledTimes(1)
   })
 
   it("hides Attach a file… when the caller says so", () => {

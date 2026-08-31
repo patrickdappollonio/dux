@@ -6,7 +6,7 @@ import {
   Settings,
   X,
 } from "lucide-react"
-import { Suspense, useState, type ReactElement } from "react"
+import { Suspense, useState, type ReactElement, type ReactNode } from "react"
 
 import { AgentNotFound } from "@/components/AgentNotFound"
 import { LauncherCorner } from "@/components/LauncherCorner"
@@ -21,6 +21,9 @@ import { AgentActionsMenu, FlatAgentList } from "@/components/FlatAgentList"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { TheaterChrome } from "@/components/TheaterChrome"
+import { TheaterPill } from "@/components/TheaterPill"
+import { TheaterToggle } from "@/components/TheaterToggle"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -155,8 +158,14 @@ function AgentlessTerminalScreen({
   // which is on screen in every bar state, or from Preferences.
   const topBarVisible = mobileTopBarVisible(duxState)
   const isMobile = useIsMobile()
+  // On the phone shell the app header IS the chrome stack theater takes away,
+  // and it goes whatever the top-bar preference says: theater is the stronger,
+  // deliberate statement of the same intent. The preference is untouched
+  // underneath it, so leaving theater lands back on whichever bars the user had.
+  const theater = duxState.theater
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <TheaterChrome hidden={theater}>
       {topBarVisible ? (
         <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
           {/* Up to the hub, by name. A relative history step would walk out
@@ -182,6 +191,7 @@ function AgentlessTerminalScreen({
               text under it). Hiding the top bar hides it with the header —
               the same more-space trade the tab strip makes; restore is the
               input ⋯ menu below the terminal, or Preferences. */}
+          <TheaterToggle size="mobile" />
           <MacroPopover
             variant="icon"
             target={{ kind: "terminal", terminalId, owner }}
@@ -218,6 +228,10 @@ function AgentlessTerminalScreen({
                   surfaceSwitch: false,
                   keysToggle: isMobile,
                   topBarToggle: isMobile,
+                  // Same reason as the agent screen's header menu: this menu
+                  // lives in the header theater takes away, so it is never on
+                  // screen in theater and carries no exit.
+                  theaterExit: false,
                 }}
                 trailingSeparator
               />
@@ -252,7 +266,8 @@ function AgentlessTerminalScreen({
           </DropdownMenu>
         </header>
       ) : null}
-      <div className="min-h-0 flex-1">
+      </TheaterChrome>
+      <div className="relative min-h-0 flex-1">
         <ChunkBoundary>
           <Suspense fallback={null}>
             <LazyTerminalPane
@@ -428,6 +443,7 @@ function TerminalHeader({
           </a>
         </SimpleTooltip>
       ) : null}
+      <TheaterToggle size="mobile" />
       <MacroPopover variant="icon" target={target} />
       <Button
         variant="outline"
@@ -466,6 +482,7 @@ interface TerminalViewportProps {
   paneKey: string
   targetId: string
   slotTabId: string | undefined
+  overlay: ReactNode
 }
 
 function TerminalViewport({
@@ -475,15 +492,23 @@ function TerminalViewport({
   paneKey,
   targetId,
   slotTabId,
+  overlay,
 }: TerminalViewportProps) {
+  // Same rule as the desktop shell's: over a live terminal the overlay belongs
+  // inside the pane's own positioned box, because the compose row and the
+  // terminal keys sit under the terminal in this column. A dormant card has no
+  // input rows, so there it rides the column.
   if (dormant && focusedTab && target.kind === "agent") {
     return (
-      <DormantTabCard
-        sessionId={target.sessionId}
-        tabId={focusedTab.id}
-        provider={focusedTab.provider}
-        lastRunFailed={focusedTab.last_run_failed === true}
-      />
+      <>
+        <DormantTabCard
+          sessionId={target.sessionId}
+          tabId={focusedTab.id}
+          provider={focusedTab.provider}
+          lastRunFailed={focusedTab.last_run_failed === true}
+        />
+        {overlay}
+      </>
     )
   }
 
@@ -497,6 +522,7 @@ function TerminalViewport({
             id={targetId}
             sessionId={target.sessionId}
             slotTabId={slotTabId}
+            overlay={overlay}
           />
         ) : (
           <LazyTerminalPane
@@ -504,6 +530,7 @@ function TerminalViewport({
             kind="terminal"
             id={targetId}
             owner={target.owner}
+            overlay={overlay}
           />
         )}
       </Suspense>
@@ -550,26 +577,34 @@ function TerminalScreen() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      {mobileTopBarVisible(duxState) ? (
-        <>
-          <TerminalHeader
-            session={session}
-            target={selectedTarget}
-            focusedTab={focusedTab}
-            projectName={projectName}
-            changes={changesControl}
-          />
-          {selectedTarget.kind === "agent" &&
-          shouldShowTabStrip(tabs, bootstrap?.always_show_tab_strip ?? false) ? (
-            <AgentTabsStrip
+      {/* The phone shell's chrome stack: its header AND the tab strip, which is
+          what "the app header goes with them" means here. Both leave on the one
+          flag, and the strip's pills come back inside the floating pill. */}
+      <TheaterChrome hidden={duxState.theater}>
+        {mobileTopBarVisible(duxState) ? (
+          <>
+            <TerminalHeader
               session={session}
-              activeTabId={selectedTarget.tabId}
-              maxTabs={bootstrap?.agent_tabs_max}
+              target={selectedTarget}
+              focusedTab={focusedTab}
+              projectName={projectName}
+              changes={changesControl}
             />
-          ) : null}
-        </>
-      ) : null}
-      <div className="min-h-0 flex-1">
+            {selectedTarget.kind === "agent" &&
+            shouldShowTabStrip(
+              tabs,
+              bootstrap?.always_show_tab_strip ?? false,
+            ) ? (
+              <AgentTabsStrip
+                session={session}
+                activeTabId={selectedTarget.tabId}
+                maxTabs={bootstrap?.agent_tabs_max}
+              />
+            ) : null}
+          </>
+        ) : null}
+      </TheaterChrome>
+      <div className="relative min-h-0 flex-1">
         <TerminalViewport
           target={selectedTarget}
           focusedTab={focusedTab}
@@ -583,6 +618,11 @@ function TerminalScreen() {
           paneKey={paneKey}
           targetId={targetId}
           slotTabId={slotTabId}
+          overlay={
+            duxState.theater ? (
+              <TheaterPill target={selectedTarget} session={session} />
+            ) : null
+          }
         />
       </div>
     </div>

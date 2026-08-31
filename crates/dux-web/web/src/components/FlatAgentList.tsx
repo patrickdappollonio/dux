@@ -273,6 +273,10 @@ export function AgentActionsMenu({
           surfaceSwitch: false,
           keysToggle: context === "terminal" && isMobile,
           topBarToggle: context === "terminal" && isMobile,
+          // This menu hangs off the phone header, which is one of the things
+          // theater takes away, so it is never on screen while theater is on
+          // and has nothing to offer a way out of.
+          theaterExit: false,
         }}
         trailingSeparator
       />

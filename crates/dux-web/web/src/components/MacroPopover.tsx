@@ -61,7 +61,12 @@ export function MacroPopover({
   // than popping the soft keyboard by focusing a terminal textarea. A PICK
   // that landed in the compose draft is the one exception, resolved in
   // `resolveFinalFocus` below: focus follows the macro into the draft.
-  variant?: "labeled" | "icon"
+  // "pill" is the floating theater pill's round 40px ghost button: the pill is
+  // one rounded control, and a square outline button inside it would read as a
+  // second surface. It stays this component rather than being hand-rolled
+  // there, so the picker, its focus rules and its target filtering cannot drift
+  // into a copy.
+  variant?: "labeled" | "icon" | "pill"
 }) {
   const { bootstrap } = useDux()
   const [open, setOpen] = useState(false)
@@ -119,7 +124,10 @@ export function MacroPopover({
           and on a phone icon-only is the default because space is scarce. Do
           not give it a label back.
 
-          Both variants are `outline` to match the desktop header's controls. Its height
+          The labeled and icon variants are `outline` to match the desktop
+          header's controls; the pill variant is deliberately not, because it
+          lives inside the floating theater pill, which is one rounded surface
+          and would read as two if a bordered button sat in it. Its height
           comes from the button's default `h-8` token, which is exactly the
           `size="icon"` (`size-8`) height of the icon-only buttons next to it,
           so the label changes the WIDTH and nothing else.
@@ -133,7 +141,14 @@ export function MacroPopover({
           floor. See MobileShell.tsx's header for the full justification. */}
       <PopoverTrigger
         render={
-          variant === "icon" ? (
+          variant === "pill" ? (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-10 shrink-0 rounded-full"
+              aria-label="Run a macro"
+            />
+          ) : variant === "icon" ? (
             <Button
               variant="outline"
               size="lg"
@@ -146,7 +161,7 @@ export function MacroPopover({
         }
       >
         <SquareSlash />
-        {variant === "icon" ? null : <>Macros…</>}
+        {variant === "labeled" ? <>Macros…</> : null}
       </PopoverTrigger>
       <PopoverContent
         align="end"

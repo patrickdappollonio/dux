@@ -10,6 +10,11 @@ import {
 import type { DuxState } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
+import {
+  beginLayoutGesture,
+  endLayoutGesture,
+  layoutGestureDepth,
+} from "@/lib/layoutGesture"
 import { installXtermMouseModel } from "@/lib/xtermMouseModel"
 import { VIEWER_MIN_FONT_SIZE } from "@/lib/viewerFit"
 import { replayWaitMs } from "@/lib/connectionTiming"
@@ -423,6 +428,9 @@ vi.mock("@/lib/ptySocket", async (importOriginal) => {
 })
 
 let mockState: DuxState
+// The pane's theater seam, spied so the ownership-transition rule can be
+// observed without a store and a localStorage behind it.
+const theaterOwnershipLost = vi.fn()
 // The compose drafts live in the real store, which is module state that outlives
 // one test. Cleared per test through the real setter (the ids these suites use).
 vi.mock("@/lib/store", async (importOriginal) => {
@@ -434,6 +442,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
   return {
     ...actual,
     useDux: () => ({ ...mockState, composeDrafts: actual.useDux().composeDrafts }),
+    noteTheaterOwnershipLost: (...a: unknown[]) => theaterOwnershipLost(...a),
   }
 })
 
@@ -554,6 +563,9 @@ beforeEach(() => {
   TermStub.instances = []
   FitStub.fits = 0
   FitStub.nextDims = null
+  theaterOwnershipLost.mockReset()
+  // A failed assertion must not leave the whole file's panes wedged in a hold.
+  while (layoutGestureDepth() > 0) endLayoutGesture()
   notifyRegistrations.length = 0
   disposeAgentNotifications.mockClear()
   toastError.mockClear()
@@ -4591,5 +4603,149 @@ describe("TerminalPane does not summon the keyboard before it has reconciled", (
     // Moving focus here would destroy the half-typed text and its candidate
     // popup, so it does not happen.
     expect(document.activeElement).not.toBe(composeTextarea())
+  })
+})
+
+// THEATER'S THREE SEAMS INSIDE THE PANE: where an overlay is painted, when
+// losing the PTY takes the mode away, and the hold an animated layout gesture
+// puts on this pane's own refit.
+describe("TerminalPane and theater mode", () => {
+  const desktopWidth = window.innerWidth
+  let pointerStub: MatchMediaStub | null = null
+  const goMobile = () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+    pointerStub = stubCoarsePointer()
+  }
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+    pointerStub?.restore()
+    pointerStub = null
+  })
+
+  const overlay = <div data-testid="pane-overlay" />
+
+  it("paints an overlay over the terminal, never over the input rows", () => {
+    // The bug this pins: anchored to the pane COLUMN, the floating pill landed
+    // on the Send button, because the compose row and the terminal keys are
+    // rows of that column under the terminal. Its positioning context has to be
+    // the terminal's own box, which contains the terminal and nothing else.
+    goMobile()
+    render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" overlay={overlay} />,
+    )
+    const send = screen.getByRole("button", { name: "Send" })
+    const anchor = screen.getByTestId("pane-overlay").parentElement
+    if (!anchor) throw new Error("the overlay has no positioning context")
+    expect(anchor.className).toContain("relative")
+    expect(anchor.contains(screen.getByTestId("terminal-container"))).toBe(true)
+    expect(anchor.contains(send)).toBe(false)
+  })
+
+  it("puts the overlay in the same box on the desktop shell", () => {
+    render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" overlay={overlay} />,
+    )
+    const anchor = screen.getByTestId("pane-overlay").parentElement
+    if (!anchor) throw new Error("the overlay has no positioning context")
+    expect(anchor.contains(screen.getByTestId("terminal-container"))).toBe(true)
+  })
+
+  it("says nothing about ownership on a watcher's FIRST honest handshake", () => {
+    // `isOwner` is a foreground guess until the server answers, so the first
+    // real verdict is not a demotion. Treating it as one made a shared theater
+    // link, opened while another device drives, enter theater and immediately
+    // leave it with the pane's memory wiped.
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onConnected("conn-self", "conn-other"))
+    expect(screen.getByText("Active on another device")).toBeTruthy()
+    expect(theaterOwnershipLost).not.toHaveBeenCalled()
+  })
+
+  it("reports a real demotion, once, after the verdict has landed", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onConnected("conn-self", null))
+    expect(theaterOwnershipLost).not.toHaveBeenCalled()
+    // Another device takes the pty over, announced on the events stream.
+    act(() => notifyPtyOwner("s1", "conn-other", "Pixel"))
+    expect(theaterOwnershipLost).toHaveBeenCalledTimes(1)
+    expect(theaterOwnershipLost).toHaveBeenCalledWith("agent", "s1")
+  })
+
+  it("stops offering a top bar theater has already taken away", () => {
+    goMobile()
+    mockState = { ...makeState(), theater: true } as DuxState
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
+    // The item promised to show a bar this mode removes, which is a lie about
+    // what the press does. The way OUT of the mode is what belongs here.
+    expect(screen.queryByText(/top bar/i)).toBeNull()
+    expect(screen.getByText("Leave theater mode")).toBeTruthy()
+  })
+
+  it("keeps the top-bar item outside theater", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
+    expect(screen.getByText(/top bar/i)).toBeTruthy()
+    expect(screen.queryByText("Leave theater mode")).toBeNull()
+  })
+
+  it("registers a hold that really does coalesce a gesture's frames into one fit", () => {
+    // The registry has its own unit tests; this one pins the WIRING, so the
+    // holder the lifecycle registers is the pane's actual resize coordinator
+    // rather than a plausible-looking pair of callbacks.
+    vi.useFakeTimers()
+    const roCallbacks: (() => void)[] = []
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(cb: () => void) {
+          roCallbacks.push(cb)
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+    try {
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      const pty = last()
+      pty.sendResize.mockClear()
+      const term = TermStub.instances.at(-1)
+      if (!term) throw new Error("no terminal constructed")
+
+      beginLayoutGesture()
+      // Two animation frames of the chrome collapsing, at two geometries the
+      // layout is only passing through.
+      term.rows = 30
+      act(() => {
+        roCallbacks.forEach((cb) => cb())
+        vi.advanceTimersByTime(250)
+      })
+      term.rows = 40
+      act(() => {
+        roCallbacks.forEach((cb) => cb())
+        vi.advanceTimersByTime(250)
+      })
+      expect(pty.sendResize).not.toHaveBeenCalled()
+
+      endLayoutGesture()
+      act(() => {
+        vi.advanceTimersByTime(250)
+      })
+      expect(pty.sendResize).toHaveBeenCalledTimes(1)
+      expect(pty.sendResize).toHaveBeenCalledWith(40, 80)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

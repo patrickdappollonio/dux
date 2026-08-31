@@ -38,6 +38,7 @@ import { shouldSendViewed, visibleSinceAfterTransition } from "@/lib/viewedPing"
 import { createHeartbeat, type Heartbeat } from "@/lib/heartbeat"
 import { onServerRunUnconfirmed } from "@/lib/serverRun"
 import { registerPageLifecycle } from "@/lib/pageLifecycle"
+import { registerLayoutGestureHolder } from "@/lib/layoutGesture"
 import type { ConnState } from "@/lib/types"
 import type { TerminalOwnerRef } from "@/lib/store"
 import { ownerSessionId } from "@/lib/terminalOwner"
@@ -475,7 +476,22 @@ export function useTerminalLifecycle(
     }
     document.addEventListener("visibilitychange", noteVisibility)
 
-    return () =>
+    // THE PANE'S HALF OF THE ONE-REFIT RULE. An animated layout gesture outside
+    // this pane (theater mode taking the chrome away) moves the host box on
+    // every frame of its transition, and the ResizeObserver would answer each
+    // frame with a fit. The gesture takes the same hold a touch scroll takes,
+    // for the whole transition, so those frames coalesce into exactly one fit
+    // at the geometry it settled on and one resize frame on the wire.
+    const unregisterLayoutGesture = registerLayoutGestureHolder({
+      hold: () => resize.setHolding(true),
+      release: () => {
+        resize.setHolding(false)
+        resize.flushHeld()
+      },
+    })
+
+    return () => {
+      unregisterLayoutGesture()
       disposeTerminalLifecycle({
         resize,
         takeoverIntent,
@@ -496,6 +512,7 @@ export function useTerminalLifecycle(
         fitAddonRef,
         terminalSetup,
       })
+    }
     // The lifecycle owns the terminal's whole lifetime and re-runs ONLY when the
     // streamed target changes. Every other input reaches its closures through
     // the live-settings container, a channel, or a port, all of which are

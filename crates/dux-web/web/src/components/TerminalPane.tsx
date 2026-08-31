@@ -51,9 +51,14 @@ import {
   ejectSelectionForReconnect,
   mobileAccessoryBarVisible,
   mobileTopBarVisible,
+  noteTheaterOwnershipLost,
   useDux,
 } from "@/lib/store"
 import type { DuxState, TerminalOwnerRef } from "@/lib/store"
+import {
+  theaterOwnershipStep,
+  theaterOwnershipWatchStart,
+} from "@/lib/theater"
 import type { PtySocket } from "@/lib/ptySocket"
 import { matchOwner, ownerProjectId, ownerSessionId } from "@/lib/terminalOwner"
 import { terminalsForOwner } from "@/lib/terminals"
@@ -89,7 +94,15 @@ import {
 import type { TakeoverIntent } from "@/components/terminal/channels"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
-type TerminalPaneProps =
+// WHAT THE PANE PAINTS OVER ITS OWN TERMINAL. Today that is the floating
+// theater pill, and the reason it comes in as a prop rather than being mounted
+// by the shells beside the pane is geometric: the pane column holds the compose
+// row and the terminal keys UNDER the terminal, so anything positioned against
+// that column lands on the Send button. The terminal's own box is the only
+// positioning context that means "over the terminal, and over nothing else".
+type TerminalPaneOverlayProp = { overlay?: ReactNode }
+
+type TerminalPaneProps = (
   // The streamed target: an agent tab, or a companion terminal of either owner.
   // `id` is the FOCUSED TAB id for an agent and the terminal id for a terminal.
   // The owner (session id for an agent, `TerminalOwnerRef` for a terminal) is
@@ -103,6 +116,8 @@ type TerminalPaneProps =
   // spine; it is absent only while the spine has not arrived.
   | { kind: "agent"; id: string; sessionId: string; slotTabId?: string }
   | { kind: "terminal"; id: string; owner: TerminalOwnerRef }
+) &
+  TerminalPaneOverlayProp
 
 export function TerminalPane(props: TerminalPaneProps) {
   const { kind, id } = props
@@ -131,6 +146,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     surfaceToggleOffered,
     accessoryBarVisible,
     topBarVisible,
+    theater,
     session,
     hasOutput,
     providerName,
@@ -232,6 +248,34 @@ export function TerminalPane(props: TerminalPaneProps) {
     ptyRef,
     setReconnecting,
   })
+
+  // LOSING OWNERSHIP LEAVES THEATER, and forgets that this pane was ever in it.
+  // Another device is driving now and the take-over card is about to cover the
+  // pane: deciding what to do about that wants the tabs, the pull-request band
+  // and the header back in view, and a covered pane has not earned the whole
+  // screen. Only the LAYOUT comes back; losing ownership stays as sticky as it
+  // ever was, and re-entering theater afterwards is a fresh press.
+  //
+  // On the TRANSITION only, never on the verdict itself. A backgrounded tab
+  // attaches as a watcher without stealing anything, and clearing the memory of
+  // a pane merely being observed would quietly undo a mode the user set up on
+  // the device that is driving.
+  //
+  // AND NOT BEFORE THE FIRST HONEST VERDICT. `isOwner` is a foreground guess
+  // until the handshake answers, so a watcher's first real answer looked exactly
+  // like a demotion: a shared theater link opened on a device somebody else is
+  // driving entered the mode, "lost" ownership it never had, and cleared the
+  // pane's memory on the way out. `theaterOwnershipStep` is where that rule
+  // lives, so it is testable without a socket.
+  const ownerWatchRef = useRef(theaterOwnershipWatchStart)
+  useEffect(() => {
+    const step = theaterOwnershipStep(ownerWatchRef.current, {
+      handshakeSeen,
+      isOwner,
+    })
+    ownerWatchRef.current = step.state
+    if (step.lost) noteTheaterOwnershipLost(kind, id)
+  }, [handshakeSeen, isOwner, kind, id])
 
   // THE VIEWER-GRID MACHINE: the honest badge and the bounce-heal. One PTY has
   // one authoritative grid, the owner's, and a viewer rendering the same bytes
@@ -417,6 +461,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     composeBarEnabled,
     isMobile,
     topBarVisible,
+    theater,
   })
 
   const everReady = useEverReady(hasOutput)
@@ -669,6 +714,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       takeoverLabel={takeoverLabel}
       ownerPresent={ownerPresent}
       takeOver={takeOver}
+      overlay={props.overlay}
     />
   )
 
@@ -862,6 +908,7 @@ function terminalTouchSettings(
     ),
     accessoryBarVisible: mobileAccessoryBarVisible(duxState),
     topBarVisible: mobileTopBarVisible(duxState),
+    theater: duxState.theater,
   }
 }
 
@@ -876,6 +923,7 @@ type TerminalInputLayoutInputs = {
   composeBarEnabled: boolean
   isMobile: boolean
   topBarVisible: boolean
+  theater: boolean
 }
 
 function terminalInputLayout(input: TerminalInputLayoutInputs) {
@@ -892,7 +940,14 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
         input.typingSurface,
       ),
     keysToggle: input.isOwner && input.touchSurfaces,
-    topBarToggle: input.isMobile,
+    // Not in theater: the top bar is one of the things theater took away, and
+    // an item offering to show a bar this mode has already removed is a lie
+    // about what the press will do. Leaving theater brings back whichever bars
+    // the preference had.
+    topBarToggle: input.isMobile && !input.theater,
+    // Offered to EVERY viewer, owner or not: a watcher can put a pane in
+    // theater too, and the way back must not depend on owning the input.
+    theaterExit: input.theater,
   }
   const menuHasItems = inputMenuHasItems(inputMenuGates)
   const ownerNeedsMenuRow =
@@ -1033,6 +1088,7 @@ type TerminalPaneSurfaceProps = {
   takeoverLabel: string | null
   ownerPresent: boolean
   takeOver: () => void
+  overlay: ReactNode
 }
 
 function TerminalPaneSurface({
@@ -1055,6 +1111,7 @@ function TerminalPaneSurface({
   takeoverLabel,
   ownerPresent,
   takeOver,
+  overlay,
 }: TerminalPaneSurfaceProps) {
   return (
     <div
@@ -1126,6 +1183,7 @@ function TerminalPaneSurface({
         ownerPresent={ownerPresent}
         takeOver={takeOver}
       />
+      {overlay}
     </div>
   )
 }

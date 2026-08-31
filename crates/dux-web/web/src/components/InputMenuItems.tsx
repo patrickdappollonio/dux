@@ -2,6 +2,7 @@ import {
   Keyboard,
   KeyboardOff,
   MessageSquare,
+  Minimize2,
   PanelTopClose,
   PanelTopOpen,
   Paperclip,
@@ -13,6 +14,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu"
 import {
+  exitTheater,
   mobileAccessoryBarVisible,
   mobileTopBarVisible,
   setMobileBarVisibility,
@@ -105,6 +107,16 @@ export function InputMenuItems({
         >
           {topBarVisible ? <PanelTopClose /> : <PanelTopOpen />}
           {topBarVisible ? "Hide top bar" : "Show top bar"}
+        </DropdownMenuItem>
+      ) : null}
+      {/* The guaranteed way out of theater. It is a way BACK only, so there is
+          no matching "Enter theater mode": entering is the header's expand
+          button, and this menu exists precisely for the state where that header
+          is not on screen. Same two-arrow glyph as the button it undoes. */}
+      {gates.theaterExit ? (
+        <DropdownMenuItem onClick={() => exitTheater()}>
+          <Minimize2 />
+          Leave theater mode
         </DropdownMenuItem>
       ) : null}
       {trailingSeparator && inputMenuHasItems(gates) ? (
