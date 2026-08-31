@@ -37,6 +37,7 @@ const { AgentTabsStrip } = await import("./AgentTabsStrip")
 function session(): SessionView {
   return {
     id: "s1",
+    slot_tab_id: "s1",
     workspace: {
       kind: "managed",
       project_id: "p1",

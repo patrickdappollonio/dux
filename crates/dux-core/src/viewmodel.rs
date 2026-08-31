@@ -582,9 +582,14 @@ pub struct SessionView {
     /// is NO pull request to hang it off: it is what lets a surface offer the
     /// way back.
     pub pr_autodetect_suppressed: bool,
-    /// Provider tabs for this session: the session-slot tab (`tabs[0]`, `id ==
-    /// session id`) first, then extra tabs in creation order. Always non-empty.
-    /// The client shows the tab strip only when `tabs.len() >= 2`.
+    /// The id of this agent's **session-slot tab**: its first tab, the one the
+    /// user cannot close. Published so the browser never has to infer slot-ness
+    /// from the session id (see `AgentSession::slot_tab_id`); every slot-ness
+    /// decision in the web client reads this field.
+    pub slot_tab_id: String,
+    /// Provider tabs for this session: the session-slot tab (`tabs[0]`, the one
+    /// named by `slot_tab_id`) first, then extra tabs in creation order. Always
+    /// non-empty. The client shows the tab strip only when `tabs.len() >= 2`.
     pub tabs: Vec<AgentTabView>,
     /// Whether the session's PTY has emitted any output yet. The web UI shows a
     /// readiness spinner until this is true.
@@ -1011,6 +1016,7 @@ impl SessionView {
             auto_reopen_enabled: s.auto_reopen_enabled,
             pr: pr.map(|pr| PrView::from_pr(pr, pr_overridden)),
             pr_autodetect_suppressed,
+            slot_tab_id: s.slot_tab_id().to_string(),
             tabs,
             has_output,
             working,
@@ -2045,6 +2051,33 @@ mod tests {
         assert_eq!(vm.sessions[0].tabs.len(), 1);
         assert_eq!(vm.sessions[0].tabs[0].id, "s1");
         assert_eq!(vm.sessions[0].tabs[0].order, 0);
+    }
+
+    #[test]
+    fn the_session_view_publishes_which_tab_is_the_slot_tab() {
+        // The browser reads `slot_tab_id` instead of comparing a tab id against
+        // the session id, so the wire has to carry it, and `tabs[0]` has to be
+        // the tab it names. TWIN of the web's `isFirstTab` cases in
+        // `lib/agentTabs.test.ts`; keep the two in lockstep.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+        engine.agent_tabs.insert(
+            "tab-b".to_string(),
+            crate::model::AgentTab {
+                id: "tab-b".to_string(),
+                session_id: "s1".to_string(),
+                provider: ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        let vm = engine.spine();
+        let session = &vm.sessions[0];
+        assert_eq!(session.slot_tab_id, engine.slot_tab_id_of("s1"));
+        assert_eq!(session.tabs[0].id, session.slot_tab_id);
+        assert_ne!(session.tabs[1].id, session.slot_tab_id);
     }
 
     #[test]

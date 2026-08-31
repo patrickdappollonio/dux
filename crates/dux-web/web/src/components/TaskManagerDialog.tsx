@@ -230,7 +230,10 @@ function TaskManagerBody() {
     // in the list, relaunchable); an extra tab's row CLOSES that tab for good.
     // Routing the first tab through the close dialog would confirm and then be
     // refused by the server, leaving no way to stop an agent from here at all.
-    if (isFirstTab(row.sessionId, row.targetId)) {
+    // The row already carries that answer: `nested` was resolved from the
+    // session record when the row was built, so re-deriving slot-ness from the
+    // two ids here would be a second, weaker copy of the same rule.
+    if (!row.nested) {
       openStopAgent(row.sessionId)
       return
     }
@@ -739,8 +742,9 @@ function ConfirmStopAgentDialog() {
   // Sibling tabs that would keep running. Counted by liveness, because a dormant
   // tab left over from a restart keeps nothing alive.
   const liveSiblings =
-    session?.tabs.filter((t) => t.id !== session.id && t.has_live_process)
-      .length ?? 0
+    session?.tabs.filter(
+      (t) => !isFirstTab(session, t.id) && t.has_live_process,
+    ).length ?? 0
 
   // Closes itself when the agent leaves the live view model, like every other
   // target-keyed dialog.

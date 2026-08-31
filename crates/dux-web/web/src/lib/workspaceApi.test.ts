@@ -60,6 +60,9 @@ describe("fetchWorkspace", () => {
           typing: false,
           needs_attention: false,
           last_focused_tab: null,
+          // A session that omits `slot_tab_id` (an older server, which kept the
+          // first tab's id equal to the session id) is coerced to that id.
+          slot_tab_id: "s1",
         },
       ],
     })

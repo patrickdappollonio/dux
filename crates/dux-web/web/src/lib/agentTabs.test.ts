@@ -4,10 +4,12 @@ import {
   defaultProviderForSession,
   isFocusedTabDormant,
   isFirstTab,
+  isSlotTabTarget,
   isTabGone,
   resolveFocusedTab,
   shouldRefireFocusPut,
   shouldShowTabStrip,
+  slotTabTargetId,
   tabLabels,
 } from "./agentTabs"
 import { branchDriftOf } from "@/lib/agentWorkspace"
@@ -99,9 +101,29 @@ describe("shouldShowTabStrip", () => {
 })
 
 describe("isFirstTab", () => {
-  it("is true only for the tab whose id equals the session id", () => {
-    expect(isFirstTab("s1", "s1")).toBe(true)
-    expect(isFirstTab("s1", "tab-1")).toBe(false)
+  // Slot-ness is whatever the server published on `slot_tab_id`, never a
+  // comparison against the session id. Today the server publishes the session
+  // id, which the first case pins; the second pins that the helper reads the
+  // FIELD by making the two disagree.
+  it("is true only for the tab the session names as its slot tab", () => {
+    const s = sessionWithTabs("s1", [], null)
+    expect(isFirstTab(s, "s1")).toBe(true)
+    expect(isFirstTab(s, "tab-1")).toBe(false)
+
+    const moved = { ...s, slot_tab_id: "tab-1" }
+    expect(isFirstTab(moved, "tab-1")).toBe(true)
+    expect(isFirstTab(moved, "s1")).toBe(false)
+  })
+})
+
+describe("isSlotTabTarget", () => {
+  // The id-only twin, for the URL grammar and the PTY socket URL choice, which
+  // hold two ids and no session record. It carries the rule rather than the
+  // answer, so it is pinned separately from `isFirstTab`.
+  it("names the session's own id as the slot tab", () => {
+    expect(slotTabTargetId("s1")).toBe("s1")
+    expect(isSlotTabTarget("s1", "s1")).toBe(true)
+    expect(isSlotTabTarget("s1", "tab-1")).toBe(false)
   })
 })
 
@@ -233,6 +255,7 @@ function sessionWithTabs(
 ): SessionView {
   return {
     id,
+    slot_tab_id: id,
     tabs,
     last_focused_tab: lastFocusedTab,
   } as unknown as SessionView

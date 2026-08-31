@@ -63,8 +63,8 @@ export interface PrView {
 
 // One provider tab of an agent, mirroring the Rust `AgentTabView`. Tabs are
 // generic provider sessions in the agent's shared worktree, in creation order
-// (`tabs[0]` is the session-slot tab whose `id === session.id`, an implementation
-// detail — no tab is privileged). Resume is decided dynamically at launch: a tab
+// (`tabs[0]` is the session-slot tab, the one named by `SessionView.slot_tab_id`
+// — no tab is privileged). Resume is decided dynamically at launch: a tab
 // resumes the worktree's prior conversation only when it is the sole tab coming up
 // (no other tab live/launching); concurrent tabs start fresh. `has_live_process`
 // is false for a tab with no running PTY (a tab reopened dormant after a restart)
@@ -179,7 +179,13 @@ export interface SessionView {
    * gates the menu's "Resume PR autodetection" way back. An older server omits
    * it, which reads as false. */
   pr_autodetect_suppressed?: boolean
-  /** The agent's provider tabs in creation order (`tabs[0].id === id`). A session
+  /** The id of this agent's session-slot tab: its first tab, the one the user
+   * cannot close. Read it through `isFirstTab` in `lib/agentTabs.ts` rather than
+   * comparing a tab id against the session id. An older server omits it;
+   * `normalizeWorkspace` fills it with the session id, which is what such a
+   * server meant by it. */
+  slot_tab_id: string
+  /** The agent's provider tabs in creation order (`tabs[0].id === slot_tab_id`). A session
    * always has at least one tab; the tab strip renders only when there are two or
    * more. See `AgentTabView`. An older server that predates tabs (e.g. after a
    * binary downgrade, seen by an already-open client) omits the field;

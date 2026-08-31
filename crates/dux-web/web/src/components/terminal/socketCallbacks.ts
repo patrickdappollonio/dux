@@ -1,4 +1,4 @@
-import { isTabGone } from "@/lib/agentTabs"
+import { isSlotTabTarget, isTabGone } from "@/lib/agentTabs"
 import type { Heartbeat } from "@/lib/heartbeat"
 import type { HandshakeOwner } from "@/lib/ptyOwnership"
 import type { PtySocket } from "@/lib/ptySocket"
@@ -107,7 +107,16 @@ export function registerTerminalSocketCallbacks(
     notePtyConn(connectionState)
   }
 
-  if (kind === "agent" && id !== sessionId) {
+  // Extra tabs only: the session-slot tab's disappearance is its session's, not
+  // a tab row's. The callback holds ids and no session record, so slot-ness is
+  // asked of the id-only helper. That is the right helper here rather than a
+  // weaker substitute for `isFirstTab`: these are the same two ids the socket
+  // URL was just built from, through the same rule, so this must answer exactly
+  // what the URL choice answered, session record or not.
+  if (
+    kind === "agent" &&
+    (sessionId === null || !isSlotTabTarget(sessionId, id))
+  ) {
     pty.shouldRetry = () => !isTabGone(live.current.sessionTabs ?? [], id)
     pty.onGone = () => handleTabGone(id)
   }

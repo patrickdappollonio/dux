@@ -37,6 +37,7 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
     has_output: false,
     working: false,
     needs_attention: false,
+    slot_tab_id: "s1",
     created_at: "",
     updated_at: "",
     ...overrides,

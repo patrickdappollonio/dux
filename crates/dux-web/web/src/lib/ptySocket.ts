@@ -132,8 +132,8 @@ export function terminalSocketUrl(
 
 // An extra tab's PTY socket URL, nested under its owning session so the server
 // can enforce that the tab belongs to that session. Used ONLY for extra tabs;
-// the session-slot tab keeps `agentPtyUrl` (its `tab_id === session_id`, served by
-// the existing `/ws/sessions/:id/pty` route). Connecting launches the extra
+// the session-slot tab keeps `agentPtyUrl` (served by the existing
+// `/ws/sessions/:id/pty` route). Connecting launches the extra
 // tab's provider fresh (there is no resume for extra tabs).
 export function tabPtyUrl(sessionId: string, tabId: string): string {
   return `${wsScheme()}//${location.host}/ws/sessions/${encodeURIComponent(

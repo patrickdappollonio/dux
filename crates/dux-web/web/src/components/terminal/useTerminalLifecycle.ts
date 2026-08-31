@@ -33,6 +33,7 @@ import {
   tabPtyUrl,
   terminalSocketUrl,
 } from "@/lib/ptySocket"
+import { isSlotTabTarget } from "@/lib/agentTabs"
 import { shouldSendViewed, visibleSinceAfterTransition } from "@/lib/viewedPing"
 import { createHeartbeat, type Heartbeat } from "@/lib/heartbeat"
 import { onServerRunUnconfirmed } from "@/lib/serverRun"
@@ -162,12 +163,13 @@ export function useTerminalLifecycle(
   const sessionId =
     target.kind === "agent" ? target.sessionId : ownerSessionId(target.owner)
   // The PTY socket URL for THIS target, derived from the target and nothing
-  // else. For an agent, the session-slot tab (`id === sessionId`) uses the
-  // session PTY route and an extra tab its own nested route; a terminal uses
-  // its owner's nested route.
+  // else. For an agent, the session-slot tab uses the session PTY route and an
+  // extra tab its own nested route; a terminal uses its owner's nested route.
+  // The target carries ids and no session record, so slot-ness is asked of the
+  // id-only helper the URL grammar shares.
   const ptyUrl =
     target.kind === "agent"
-      ? target.id === target.sessionId
+      ? isSlotTabTarget(target.sessionId, target.id)
         ? agentPtyUrl(target.sessionId)
         : tabPtyUrl(target.sessionId, target.id)
       : terminalSocketUrl(target.owner, target.id)

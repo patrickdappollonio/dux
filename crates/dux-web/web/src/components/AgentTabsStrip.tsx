@@ -145,7 +145,7 @@ function TabPill({
   active: boolean
   providers: string[]
 }) {
-  const isFirstTab = tabIsFirst(session.id, tab.id)
+  const isFirstTab = tabIsFirst(session, tab.id)
 
   function select() {
     selectTab(session.id, tab.id)

@@ -1034,6 +1034,8 @@ mod tests {
 
     #[test]
     fn is_slot_tab_accepts_only_the_slot_tab_id() {
+        // TWIN of the web's `isFirstTab` cases in `lib/agentTabs.test.ts`, which
+        // asks the same question of the published `slot_tab_id` field.
         let session = session_with_focus(None);
         assert!(session.is_slot_tab(session.slot_tab_id().to_string().as_str()));
         assert!(!session.is_slot_tab("t1"));

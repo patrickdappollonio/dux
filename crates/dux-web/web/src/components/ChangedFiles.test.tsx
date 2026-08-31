@@ -207,6 +207,7 @@ describe("ChangedFiles for a standalone agent", () => {
         sessions: [
           {
             id: "sa1",
+            slot_tab_id: "sa1",
             title: "notes",
             provider: "claude",
             status: "active",

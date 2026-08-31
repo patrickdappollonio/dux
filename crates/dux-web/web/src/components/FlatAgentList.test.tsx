@@ -129,6 +129,7 @@ function makeSession(
     working: false,
     typing: false,
     needs_attention: false,
+    slot_tab_id: over.id,
     created_at: "2026-07-17T12:00:00Z",
     updated_at: "2026-07-17T12:00:00Z",
     ...over,

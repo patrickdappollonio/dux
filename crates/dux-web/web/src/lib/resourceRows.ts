@@ -23,6 +23,7 @@ import { matchWireOwner, ownerKey } from "./terminalOwner"
 import { groupTerminalsByOwnerKey, terminalTitle } from "./terminals"
 import type { ProjectView, SessionView, TerminalView } from "./types"
 import { sessionLabel } from "@/lib/agentWorkspace"
+import { isFirstTab } from "@/lib/agentTabs"
 
 export type TaskRowKind = "dux" | "agent" | "terminal" | "total"
 
@@ -34,7 +35,11 @@ export interface TaskRow {
   name: string
   /** Secondary text (provider, foreground command), or null. */
   detail: string | null
-  /** An extra tab, rendered indented under its agent's session-slot tab. */
+  /** An extra tab, rendered indented under its agent's session-slot tab. On an
+   * agent row this is exactly "not this agent's first tab", resolved here from
+   * the session record, and it is the row's authoritative slot-ness answer: a
+   * consumer reads `!nested` rather than deriving slot-ness a second way from
+   * the two ids. Always false for the dux, TOTAL and terminal rows. */
   nested: boolean
   /** Whether this row offers a Stop control (dux and TOTAL do not). */
   stoppable: boolean
@@ -171,12 +176,12 @@ export function taskManagerRows(
     // live PTY, so they are not a running task (matching the modal this
     // replaces). This gate must NOT reach the terminals loop below.
     if (session.status === "active") {
-      // The session-slot tab (id === session id) leads the group; extra tabs
-      // nest under it in creation order. `sort_order` is append-only, so
-      // `order` is a stable sort key.
+      // The session-slot tab leads the group; extra tabs nest under it in
+      // creation order. `sort_order` is append-only, so `order` is a stable
+      // sort key.
       const tabs = [...session.tabs].sort((a, b) => {
-        if (a.id === session.id) return -1
-        if (b.id === session.id) return 1
+        if (isFirstTab(session, a.id)) return -1
+        if (isFirstTab(session, b.id)) return 1
         return a.order - b.order
       })
 
@@ -185,7 +190,7 @@ export function taskManagerRows(
       let nestedIndex = 0
 
       for (const tab of tabs) {
-        const isSlot = tab.id === session.id
+        const isSlot = isFirstTab(session, tab.id)
         if (!isSlot) nestedIndex += 1
         rows.push({
           key: `tab:${tab.id}`,
@@ -196,11 +201,10 @@ export function taskManagerRows(
           detail: isSlot ? tab.provider : null,
           nested: !isSlot,
           // A dormant tab has no process but is still actionable, so it keeps
-          // its Stop control. No discriminator field is needed for WHICH act
-          // that is: the session-slot tab is the one whose id equals the
-          // session id, so the dialog `handleStop` opens is decided from
-          // `sessionId`/`targetId` through the shared `isFirstTab`. A first tab
-          // STOPS the agent (it cannot be closed); an extra tab is closed.
+          // its Stop control. WHICH act that is rides on `nested`, resolved
+          // just above through the shared `isFirstTab`: a first tab STOPS the
+          // agent (it cannot be closed); an extra tab is closed. `handleStop`
+          // reads that flag rather than asking the question over again.
           stoppable: true,
           stopLabel: isSlot
             ? `Stop ${label}`

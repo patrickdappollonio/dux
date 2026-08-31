@@ -49,7 +49,7 @@ export const tabsApi = {
   // Close an EXTRA tab: the tab is destroyed, and the agent detaches when it was
   // the last live one. The 200 body carries that authoritative `{ detached }`
   // outcome rather than leaving the caller to guess from a pre-close snapshot.
-  // The agent's FIRST tab (`tabId === sessionId`) cannot be closed and the route
+  // The agent's FIRST tab (the session-slot tab) cannot be closed and the route
   // refuses it with a 400, so nothing should send one here.
   remove: (sessionId: string, tabId: string) =>
     request<ClosedTab | undefined>(

@@ -27,6 +27,7 @@ function session(id: string, needs_attention: boolean): SessionView {
     has_output: true,
     working: false,
     needs_attention,
+    slot_tab_id: id,
     created_at: "",
     updated_at: "",
   } as SessionView

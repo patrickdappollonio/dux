@@ -106,6 +106,7 @@ function session(over: Partial<SessionView> & { id: string }): SessionView {
     has_output: false,
     working: false,
     needs_attention: false,
+    slot_tab_id: over.id,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     ...over,

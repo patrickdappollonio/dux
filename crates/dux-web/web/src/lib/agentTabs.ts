@@ -7,12 +7,29 @@ import type { AgentTabView, SessionView } from "./types"
 import type { SelectedTarget } from "./store"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
 
-// The agent's FIRST tab: the session-slot tab, whose id equals the session id.
-// It has no row of its own and lives as long as the agent does, so it can never
-// be closed. Named rather than open-coded, because the comparison reads like an
-// accident wherever it appears.
-export function isFirstTab(sessionId: string, tabId: string): boolean {
-  return tabId === sessionId
+// The agent's FIRST tab: the session-slot tab, named by the server on
+// `SessionView.slot_tab_id`. It lives as long as the agent does, so it can never
+// be closed. Every slot-ness decision with a session in hand asks this, and
+// nothing compares a tab id against a session id itself.
+export function isFirstTab(session: SessionView, tabId: string): boolean {
+  return tabId === session.slot_tab_id
+}
+
+// Slot-ness for the layers that hold two ids and no session record: the URL
+// grammar (which parses a hash before any spine has arrived), the PTY socket
+// URL choice, and the selection target those two build. They cannot ask the
+// server, so they carry the rule instead of the answer, and this is the ONE
+// place that spells it out: today an agent's slot tab id is its session id.
+// Callers with a `SessionView` must use `isFirstTab` rather than this.
+export function isSlotTabTarget(sessionId: string, tabId: string): boolean {
+  return tabId === slotTabTargetId(sessionId)
+}
+
+// The tab id those same id-only layers use to mean "this agent's first tab":
+// the bare `#/agent/<sid>` address, the standalone editor's flattened target,
+// and a fresh selection of an agent. Twin of `isSlotTabTarget`; see its note.
+export function slotTabTargetId(sessionId: string): string {
+  return sessionId
 }
 
 // Whether the focused tab is currently DORMANT (no live process, and not
@@ -46,7 +63,7 @@ export function isFocusedTabDormant(
 // client closed it while this client's PTY
 // socket was retrying). A gone tab's socket must stop reconnecting instead of
 // retrying forever against a route that will keep 404ing. Only meaningful for an
-// extra tab (a session-slot tab has no row of its own; its owning session's
+// extra tab (the session-slot tab has no row of its own; its owning session's
 // presence is the authoritative signal there, handled separately).
 export function isTabGone(tabs: AgentTabView[], tabId: string): boolean {
   return !tabs.some((t) => t.id === tabId)
@@ -91,19 +108,18 @@ export function tabLabels(tabs: AgentTabView[]): string[] {
 // is intentionally untouched by this helper). Mirrors the shared resolution rule
 // (`AgentSession::resolved_focused_tab` in dux-core): the remembered
 // `last_focused_tab` wins only when it is present AND still names a live tab in
-// `session.tabs`; otherwise (no memory, it equals the session-slot id, or it
-// names a tab that has since closed) falls back to the session-slot tab
-// (`session.id`).
+// `session.tabs`; otherwise (no memory, it names the session-slot tab, or it
+// names a tab that has since closed) falls back to the session-slot tab.
 export function resolveFocusedTab(session: SessionView): string {
   const remembered = session.last_focused_tab
   if (
     remembered &&
-    remembered !== session.id &&
+    !isFirstTab(session, remembered) &&
     session.tabs.some((t) => t.id === remembered)
   ) {
     return remembered
   }
-  return session.id
+  return session.slot_tab_id
 }
 
 // Decide whether a fire-and-forget `PUT .../focused-tab` response must trigger

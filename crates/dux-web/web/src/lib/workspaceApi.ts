@@ -90,9 +90,15 @@ export type RawWorkspace = Omit<
   sessions: Array<
     Omit<
       SessionView,
-      "tabs" | "needs_attention" | "typing" | "last_focused_tab" | "workspace"
+      | "tabs"
+      | "needs_attention"
+      | "typing"
+      | "last_focused_tab"
+      | "workspace"
+      | "slot_tab_id"
     > & {
       tabs?: RawTab[]
+      slot_tab_id?: string
       needs_attention?: boolean
       typing?: boolean
       last_focused_tab?: string | null
@@ -227,6 +233,11 @@ export function normalizeWorkspace(raw: RawWorkspace): Spine {
         // An older server that predates tab-focus memory omits the field; treat
         // missing the same as an explicit null ("no memory recorded").
         last_focused_tab: s.last_focused_tab ?? null,
+        // An older server that predates the published slot pointer omits the
+        // field. Such a server keeps the first tab's id equal to the session id,
+        // so that is exactly what it meant; filling it here means every consumer
+        // reads one required field instead of re-deriving the rule.
+        slot_tab_id: s.slot_tab_id ?? s.id,
       }
     }),
   }

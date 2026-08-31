@@ -68,7 +68,13 @@ import {
   fetchWorkspace,
   normalizeWorkspace,
 } from "./workspaceApi"
-import { resolveFocusedTab, shouldRefireFocusPut } from "./agentTabs"
+import {
+  isFirstTab,
+  isSlotTabTarget,
+  resolveFocusedTab,
+  shouldRefireFocusPut,
+  slotTabTargetId,
+} from "./agentTabs"
 import {
   activateTab as editorActivateTabPure,
   closeTab as editorCloseTabPure,
@@ -140,7 +146,8 @@ export type { EditorRoot } from "./editorRoot"
 // breadcrumb, changed files); a terminal target carries its OWNER, which is a
 // session or a project, and a project terminal has no session context at all.
 export type SelectedTarget =
-  // An agent tab. `tabId === sessionId` for the session-slot tab; an extra tab carries
+  // An agent tab. `tabId` is the session's `slot_tab_id` for the session-slot
+  // tab; an extra tab carries
   // its own id. The streamed PTY and all per-tab UI resolve from `tabId`, while
   // session-scoped UI keeps using `sessionId`.
   | { kind: "agent"; sessionId: string; tabId: string }
@@ -1802,6 +1809,21 @@ function reconcilePendingTerminalOrder(
   return ordersMatch(serverIds, pending) ? null : pending
 }
 
+// The slot tab id for an agent this client is acting on. Resolved from the live
+// spine when the agent is in it, and from the id-only rule when it is not (an
+// action fired against a session the spine has not caught up with yet).
+function slotTabIdFor(sessionId: string): string {
+  const session = state.spine?.sessions.find((s) => s.id === sessionId)
+  return session?.slot_tab_id ?? slotTabTargetId(sessionId)
+}
+
+// Slot-ness for the same imperative actions. Twin of `slotTabIdFor`, and the
+// only way this module answers the question when it holds two ids rather than a
+// session record.
+function isSlotTabOf(sessionId: string, tabId: string): boolean {
+  return tabId === slotTabIdFor(sessionId)
+}
+
 // Move the user to a real destination when what they were looking at no longer
 // exists in the latest spine. Agents persist after exiting (their session stays,
 // marked detached), so they only vanish on deletion; terminals are removed
@@ -1821,7 +1843,7 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
     if (!session) {
       navigateAfterVanish(spine, previous, target.sessionId)
     } else if (
-      target.tabId !== target.sessionId &&
+      !isFirstTab(session, target.tabId) &&
       !session.tabs.some((t) => t.id === target.tabId)
     ) {
       // A REWRITE, like every other vanish path: the user did not ask to leave
@@ -1973,7 +1995,7 @@ function focusNewlyCreatedSession(spine: Spine): void {
   // The create started this agent's first tab, so latch it: the spine can
   // reach us before the PTY is up, and without this the brand-new agent would
   // greet its creator with the dormant "Start session" card.
-  markTabStarted(created.id)
+  markTabStarted(created.slot_tab_id)
   selectSession(created.id)
 }
 
@@ -2217,21 +2239,20 @@ function parseSelectionHash(hash: string): SelectedTarget | null {
     if (m[2] === "tab") {
       const tabId = decodeURIComponent(m[3])
       if (!tabId) return null
-      // A self-aliased `#/agent/<sid>/tab/<sid>` is the session-slot tab written the
-      // long way — normalize to the canonical bare session-slot target so there is only
-      // ever one representation of the session-slot tab (a real extra tab never has
-      // `tabId === sessionId`).
+      // A self-aliased `#/agent/<sid>/tab/<sid>` is the session-slot tab written
+      // the long way — `selectionHash` normalizes it back to the canonical bare
+      // form on the way out, so there is only ever one representation of it.
       return { kind: "agent", sessionId, tabId }
     }
-    return { kind: "agent", sessionId, tabId: sessionId }
+    return { kind: "agent", sessionId, tabId: slotTabTargetId(sessionId) }
   } catch {
     return null
   }
 }
 
 // The hash for a target (or the bare path when nothing is selected). The `/tab/`
-// segment is emitted ONLY for an extra tab; the session-slot tab (`tabId === sessionId`)
-// stays the bare `#/agent/<sid>` so existing bookmarks remain valid.
+// segment is emitted ONLY for an extra tab; the session-slot tab stays the bare
+// `#/agent/<sid>` so existing bookmarks remain valid.
 function selectionHash(target: SelectedTarget | null): string {
   if (!target) return ""
   if (target.kind === "terminal") {
@@ -2254,7 +2275,7 @@ function selectionHash(target: SelectedTarget | null): string {
     }
   }
   const base = `#/agent/${encodeURIComponent(target.sessionId)}`
-  return target.tabId === target.sessionId
+  return isSlotTabTarget(target.sessionId, target.tabId)
     ? base
     : `${base}/tab/${encodeURIComponent(target.tabId)}`
 }
@@ -2438,7 +2459,11 @@ export function routeHash(route: Route): string {
 // A terminal target is already its own whole spelling.
 function standaloneTarget(target: SelectedTarget): SelectedTarget {
   if (target.kind === "terminal") return target
-  return { kind: "agent", sessionId: target.sessionId, tabId: target.sessionId }
+  return {
+    kind: "agent",
+    sessionId: target.sessionId,
+    tabId: slotTabTargetId(target.sessionId),
+  }
 }
 
 // The screen a route puts the mobile shell on. This is the whole derivation:
@@ -2486,7 +2511,11 @@ export function standaloneEditorHash(
 // session-slot tab, and a terminal root is itself.
 function targetForRoot(root: EditorRoot): SelectedTarget {
   if (root.kind === "terminal") return root
-  return { kind: "agent", sessionId: root.sessionId, tabId: root.sessionId }
+  return {
+    kind: "agent",
+    sessionId: root.sessionId,
+    tabId: slotTabTargetId(root.sessionId),
+  }
 }
 
 // The route the app currently holds in state.
@@ -2943,7 +2972,7 @@ function applyDeepLinkSelection(
     return
   }
   if (
-    target.tabId !== target.sessionId &&
+    !isFirstTab(session, target.tabId) &&
     session.tabs.some((t) => t.id === target.tabId)
   ) {
     // An extra-tab deep link: restore it only if the tab still exists, else fall
@@ -3320,15 +3349,16 @@ function selectSessionRoute(
     selectTab(id, focusedTab, { urlMode, changes, extra })
     return
   }
+  const slotTab = session ? session.slot_tab_id : slotTabTargetId(id)
   setState({
-    // Selecting a session focuses its session-slot tab (tabId === sessionId).
-    selectedTarget: { kind: "agent", sessionId: id, tabId: id },
+    // Selecting a session focuses its session-slot tab.
+    selectedTarget: { kind: "agent", sessionId: id, tabId: slotTab },
     selectedSessionId: id,
     // Re-selecting the same session keeps its loaded data; a real switch enters
     // the loading window so the pane shows a spinner, not the previous session's
     // files.
     changes: prev === id ? state.changes : loadingChanges(id),
-    ...editorSelectionPatch({ kind: "agent", sessionId: id, tabId: id }),
+    ...editorSelectionPatch({ kind: "agent", sessionId: id, tabId: slotTab }),
     ...screenPatch(changes),
     ...(extra ?? {}),
   })
@@ -3374,14 +3404,14 @@ export function ejectSelectionForReconnect(): void {
   lastClearWasReconnectEject = true
 }
 
-// Focus a specific provider tab of a session. `tabId === sessionId` focuses the
-// session-slot tab (equivalent to `selectSession`). The changed files belong to the
-// SESSION, so the subscription/fetch key off `sessionId` regardless of tab.
+// Focus a specific provider tab of a session. Naming the session-slot tab is
+// equivalent to `selectSession`. The changed files belong to the SESSION, so the
+// subscription/fetch key off `sessionId` regardless of tab.
 //
 // Persists the choice as the agent's remembered tab-focus (fire-and-forget,
 // no status/toast) so a later `selectSession` restores it, on this client or
 // any other sharing the same server. `tabsApi.setFocusedTab` itself normalizes
-// `tabId === sessionId` to "clear the memory" server-side. Pass `persist:
+// the session-slot tab to "clear the memory" server-side. Pass `persist:
 // false` for a selection that must not rewrite the workspace-shared memory
 // (e.g. `restoreDeepLink`, which only follows a link, it doesn't set intent).
 export function selectTab(
@@ -3410,7 +3440,7 @@ export function selectTab(
   syncUrl(opts?.urlMode)
   if (prev !== sessionId) loadChanges(sessionId)
   if (opts?.persist === false) return
-  persistFocusedTab(sessionId, tabId === sessionId ? null : tabId)
+  persistFocusedTab(sessionId, isSlotTabOf(sessionId, tabId) ? null : tabId)
 }
 
 // Per-session bookkeeping for the fire-and-forget focus-tab PUT. `selectTab`
@@ -3659,7 +3689,7 @@ export function closeStopAgent(): void {
 }
 
 // Close an EXTRA tab via REST. Only extra tabs can be closed: the agent's first
-// tab (`tabId === sessionId`) has no row of its own, lives as long as the agent
+// tab has no row of its own, lives as long as the agent
 // does, and the route refuses it with a 400, so no caller may send one here (the
 // tab strip disables the menu item, and the Task Manager's first-tab row stops
 // the agent through `killSessionPty` instead). Closing an extra tab destroys it
@@ -3690,7 +3720,7 @@ export function closeTab(sessionId: string, tabId: string): void {
       // would resolve the remembered tab against that stale spine, which
       // can still name the tab we just deleted, so use `selectTab` to
       // pick the session-slot tab without consulting that memory.
-      selectTab(sessionId, sessionId)
+      selectTab(sessionId, slotTabIdFor(sessionId))
     })
     .catch((e) =>
       notifyError(e instanceof Error ? e.message : "Could not close the tab."),
@@ -4293,10 +4323,14 @@ export function reconnectSession(sessionId: string, force: boolean): void {
   // A reconnect IS a launch the user asked for, so latch its tab before
   // focusing: until the relaunched provider reports live, the tab still looks
   // dormant and would otherwise be covered by the "Start session" card.
-  markTabStarted(sessionId)
+  markTabStarted(slotTabIdFor(sessionId))
   setState({
     // Reconnect is a session-slot-tab operation, so focus the session-slot tab.
-    selectedTarget: { kind: "agent", sessionId, tabId: sessionId },
+    selectedTarget: {
+      kind: "agent",
+      sessionId,
+      tabId: slotTabIdFor(sessionId),
+    },
     selectedSessionId: sessionId,
     terminalEpoch: state.terminalEpoch + 1,
   })
