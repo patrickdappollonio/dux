@@ -1422,35 +1422,53 @@ impl App {
         seek_fullscreen || !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
     }
 
-    /// Close-tab entry point. The agent's FIRST tab (the session-slot tab,
-    /// named by the session's slot pointer) cannot be closed at all: it lives as
-    /// long as the agent does, so the gesture raises a warning that says so
-    /// instead of a confirmation that would have stopped its provider. Any
-    /// other tab opens the confirmation dialog, which ends that tab for good.
+    /// Close-tab entry point. Every tab opens the confirmation dialog, the tab
+    /// in the session slot included: closing that one hands the slot to the
+    /// next tab in strip order, and the dialog names the successor. The one
+    /// close there is no dialog for is an agent's ONLY tab, because an agent
+    /// always has a slot and the engine refuses it; that gesture says so on the
+    /// status line rather than confirming something that cannot happen.
     pub(crate) fn close_focused_tab_prompt(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
         };
         let session_id = session.id.clone();
         let tab_id = self.focused_tab_id(&session_id);
-        if self
+        let closing_the_slot = self
             .engine
-            .is_slot_tab_of(SessionIdRef::new(&session_id), TabIdRef::new(&tab_id))
-        {
-            self.prompt = PromptState::FirstTabCannotClose { session_id };
-            return;
-        }
-        let provider = self
+            .is_slot_tab_of(SessionIdRef::new(&session_id), TabIdRef::new(&tab_id));
+        // Both names come from the strip the user is looking at
+        // (`Engine::tab_prose_label`), so a repeated provider carries the pill's
+        // own disambiguating suffix and the status line after the close, built
+        // the same way, cannot name a different tab than this dialog did.
+        let promoted_label = if closing_the_slot {
+            let successor = self
+                .engine
+                .successor_slot_tab(SessionIdRef::new(&session_id))
+                .map(|t| TabId::new(t.id.clone()));
+            let Some(label) = successor.and_then(|id| {
+                self.engine
+                    .tab_prose_label(SessionIdRef::new(&session_id), id.as_ref_id())
+            }) else {
+                // The engine refuses this close, so there is nothing to confirm.
+                // Its own sentence, so the browser's disabled menu item and this
+                // line say the same thing in the same words.
+                self.set_warning(dux_core::agent_tabs::ONLY_TAB_CLOSE_REFUSAL);
+                return;
+            };
+            Some(label)
+        } else {
+            None
+        };
+        let provider_label = self
             .engine
-            .agent_tabs
-            .get(TabIdRef::new(&tab_id))
-            .map(|t| t.provider.as_str().to_string())
-            .unwrap_or_else(|| session.provider.as_str().to_string());
-        let provider_label = Self::title_case_word(&provider);
+            .tab_prose_label(SessionIdRef::new(&session_id), TabIdRef::new(&tab_id))
+            .unwrap_or_else(|| Self::title_case_word(session.provider.as_str()));
         self.prompt = PromptState::ConfirmCloseTab {
             session_id,
             tab_id,
             provider_label,
+            promoted_label,
             focus: ConfirmFocus::Cancel,
         };
     }
@@ -4027,7 +4045,7 @@ impl App {
             .visible_indices(&prompt.runtimes, kill_running_matches)
     }
 
-    fn title_case_word(word: &str) -> String {
+    pub(super) fn title_case_word(word: &str) -> String {
         let mut chars = word.chars();
         match chars.next() {
             Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),

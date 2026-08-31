@@ -7113,14 +7113,13 @@ impl App {
             session_id,
             tab_id,
             provider_label,
+            promoted_label,
             focus,
         } = &self.prompt
         else {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(56, 30, frame.area());
-        self.clear_overlay_area(frame, area);
         // Closing the agent's last LIVE tab detaches the agent instead of ending
         // a single tab; word the copy accordingly. Counted by LIVENESS, not by
         // how many tabs exist: an agent reopened after a restart can have
@@ -7136,19 +7135,6 @@ impl App {
             self.engine.providers.contains_key(TabIdRef::new(tab_id)),
             live_tabs,
         );
-        let outer = self.themed_overlay_block("Close Tab");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
         let agent_name = self
             .engine
             .sessions
@@ -7157,7 +7143,7 @@ impl App {
             .map(|s| self.session_label(s))
             .unwrap_or_else(|| session_id.clone());
 
-        let tail = confirm_close_tab_tail(will_detach);
+        let tail = confirm_close_tab_tail(will_detach, promoted_label.as_deref());
         let lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -7175,10 +7161,32 @@ impl App {
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                tail,
+                tail.as_str(),
                 Style::default().fg(self.theme.warning_fg),
             )),
         ];
+        // Size to the WRAPPED prose, the way the other prose modals here do (see
+        // `render_delete_agent_frame`): the body does not scroll, and a fixed
+        // percentage clipped the whole tail on an 80x24 terminal, which is
+        // exactly where the promotion sentence has to be readable.
+        let dialog_width = 60u16.min(frame.area().width.max(1));
+        let inner_width = dialog_width.saturating_sub(2);
+        let body_height = wrapped_line_count(&lines, inner_width, false);
+        let area = centered_rect_exact(dialog_width, 2 + body_height + 1 + 3, frame.area());
+        self.clear_overlay_area(frame, area);
+        let outer = self.themed_overlay_block("Close Tab");
+        let inner = outer.inner(area);
+        outer.render(area, frame.buffer_mut());
+
+        let [body_area, _, buttons_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(body_height),
+                Constraint::Length(1),
+                Constraint::Length(3),
+            ])
+            .areas(inner);
+
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .render(body_area, frame.buffer_mut());
@@ -7225,96 +7233,6 @@ impl App {
             cancel_button: cancel_area,
             confirm_button: confirm_area,
         };
-    }
-
-    /// The first tab's warning. Prose plus one dismiss button: the gesture that
-    /// opened it has no effect, so there is nothing to confirm and nothing to
-    /// cancel, only something to explain.
-    fn render_first_tab_cannot_close_prompt(&mut self, frame: &mut Frame) {
-        let PromptState::FirstTabCannotClose { session_id } = &self.prompt else {
-            return;
-        };
-        self.render_dim_overlay(frame);
-
-        let agent_name = self
-            .engine
-            .sessions
-            .iter()
-            .find(|s| &s.id == session_id)
-            .map(|s| self.session_label(s))
-            .unwrap_or_else(|| session_id.clone());
-
-        let mut lines = vec![
-            Line::from(""),
-            Line::from(vec![
-                Span::raw(" This is the first tab on "),
-                Span::styled(
-                    agent_name.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("."),
-            ]),
-            Line::from(""),
-        ];
-        let body = first_tab_cannot_close_lines(
-            &self.bindings.label_for(Action::NewTab),
-            &self.bindings.label_for(Action::OpenPalette),
-            &self.bindings.label_for(Action::KillRunning),
-        );
-        let last = body.len().saturating_sub(1);
-        for (i, text) in body.into_iter().enumerate() {
-            lines.push(Line::from(Span::styled(
-                text,
-                Style::default().fg(self.theme.warning_fg),
-            )));
-            if i != last {
-                lines.push(Line::from(""));
-            }
-        }
-
-        // Size to the WRAPPED prose, the way the other prose modals here do
-        // (see `render_delete_agent_frame`): a fixed percentage clipped this
-        // copy on an 80x24 terminal, and the body does not scroll.
-        let dialog_width = 60u16.min(frame.area().width.max(1));
-        let inner_width = dialog_width.saturating_sub(2);
-        let body_height = wrapped_line_count(&lines, inner_width, false);
-        let area = centered_rect_exact(dialog_width, 2 + body_height + 1 + 3, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("First Tab Stays");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(body_height),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .render(body_area, frame.buffer_mut());
-
-        let btn_width = shared_button_width(&["Got it"]);
-        let ok_area = Rect {
-            x: buttons_area.x + buttons_area.width.saturating_sub(btn_width) / 2,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        Button::new("Got it")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::FirstTabCannotCloseOk,
-                self.pressed_button,
-                true,
-                true,
-            ))
-            .render(frame, ok_area, &self.theme);
-
-        self.overlay_layout.active = OverlayMouseLayout::FirstTabCannotClose { ok_button: ok_area };
     }
 
     fn render_confirm_quit_prompt(&mut self, frame: &mut Frame) {
@@ -9842,9 +9760,6 @@ impl App {
                 self.render_confirm_delete_terminal_prompt(frame)
             }
             PromptState::ConfirmCloseTab { .. } => self.render_confirm_close_tab_prompt(frame),
-            PromptState::FirstTabCannotClose { .. } => {
-                self.render_first_tab_cannot_close_prompt(frame)
-            }
             PromptState::ConfirmQuit { .. } => self.render_confirm_quit_prompt(frame),
             PromptState::ConfirmDiscardFile { .. } => {
                 self.render_confirm_discard_file_prompt(frame)
@@ -12079,54 +11994,25 @@ fn close_tab_detaches(closing_tab_is_live: bool, live_tabs: usize) -> bool {
     }
 }
 
-/// The `ConfirmCloseTab` dialog's warning tail. Only EXTRA tabs reach this
-/// dialog (the first tab cannot be closed at all), so the copy is always about
-/// a row dux deletes for good; the only question left is whether the close
-/// takes the agent's last live tab with it, which detaches the agent.
-fn confirm_close_tab_tail(will_detach: bool) -> &'static str {
-    if will_detach {
+/// The `ConfirmCloseTab` dialog's warning tail. Two independent consequences,
+/// each stated only when it applies: whether the close takes the agent's last
+/// live tab with it (which detaches the agent), and whether it hands the
+/// session slot on (which it does when the closed tab is the one holding it,
+/// and `successor` then names the tab taking its place). Mirrors the web's
+/// `ConfirmCloseTabDialog.tsx` so the two surfaces promise the same thing.
+fn confirm_close_tab_tail(will_detach: bool, successor: Option<&str>) -> String {
+    let mut tail = if will_detach {
         " It's this agent's last live tab, so the agent detaches and stays in Projects, reopenable."
+            .to_string()
     } else {
-        " dux deletes this tab for good. A new tab always starts fresh, so use your provider's own history command to get back to this conversation."
+        " dux deletes this tab for good. A new tab always starts fresh, so use your provider's own history command to get back to this conversation.".to_string()
+    };
+    if let Some(successor) = successor {
+        tail.push_str(&format!(
+            " The next tab, {successor}, takes its place as the agent's first tab."
+        ));
     }
-}
-
-/// How to name an action in prose: its key when the user has one bound, and the
-/// palette command that runs it when they do not. `label_for` answers with an
-/// empty string for an unbound action, and both actions the first-tab warning
-/// points at (`new-agent-tab` and `kill-running`) ship UNBOUND, so without this
-/// the prose renders an empty parenthetical. Never hardcode a key at a call
-/// site; every label arrives already resolved through the bindings.
-fn key_or_palette_command(key: &str, command: &str, palette_key: &str) -> String {
-    if key.is_empty() {
-        format!("{command} from the palette ({palette_key})")
-    } else {
-        key.to_string()
-    }
-}
-
-/// The body of the first-tab warning, below the sentence naming the agent.
-///
-/// Three short sentences, deliberately: the modal sizes itself to this prose,
-/// and a wall of text in a dialog whose only button says "Got it" is text
-/// nobody reads. Pure so the wording, and the unbound-key fallback, can be
-/// asserted without rendering.
-fn first_tab_cannot_close_lines(
-    new_tab_key: &str,
-    palette_key: &str,
-    kill_running_key: &str,
-) -> Vec<String> {
-    vec![
-        " dux can't close the first tab: it lives as long as the agent does.".to_string(),
-        format!(
-            " Add more tabs with {} and close those freely.",
-            key_or_palette_command(new_tab_key, "new-agent-tab", palette_key)
-        ),
-        format!(
-            " To stop everything this agent is running, detach it with {}.",
-            key_or_palette_command(kill_running_key, "kill-running", palette_key)
-        ),
-    ]
+    tail
 }
 
 #[cfg(test)]
@@ -13848,23 +13734,94 @@ mod tests {
         assert_ne!(osc8_link_id(uri), osc8_link_id("https://other.example"));
     }
 
-    /// Only extra tabs reach the close-tab confirmation, and closing one while
-    /// siblings are live is destructive (the row is permanently deleted). The
-    /// way back is a NEW tab, which always starts fresh, so the copy points at
-    /// the provider's own history command rather than promising a resume.
+    /// Closing a tab while siblings are live is destructive (the row is
+    /// permanently deleted). The way back is a NEW tab, which always starts
+    /// fresh, so the copy points at the provider's own history command rather
+    /// than promising a resume.
     #[test]
     fn confirm_close_tab_tail_is_destructive_for_extra_tab_with_siblings() {
-        let tail = confirm_close_tab_tail(false);
+        let tail = confirm_close_tab_tail(false, None);
         assert!(tail.contains("deletes this tab for good"), "tail: {tail}");
         assert!(tail.contains("always starts fresh"), "tail: {tail}");
         assert!(tail.contains("history command"), "tail: {tail}");
+        assert!(!tail.contains("takes its place"), "tail: {tail}");
     }
 
     /// Closing the agent's last LIVE tab detaches the whole agent, which is the
     /// non-destructive-but-detaching copy.
     #[test]
     fn confirm_close_tab_tail_last_live_tab_detaches() {
-        assert!(confirm_close_tab_tail(true).contains("last live tab"));
+        assert!(confirm_close_tab_tail(true, None).contains("last live tab"));
+    }
+
+    /// Closing the tab in the session slot hands the slot on, so the tail names
+    /// the successor. That is a separate fact from detaching, and both are said
+    /// when both apply (a dormant successor takes the slot AND the agent
+    /// detaches, because the close took its last live process).
+    #[test]
+    fn confirm_close_tab_tail_names_the_tab_taking_the_slot() {
+        let tail = confirm_close_tab_tail(false, Some("Codex"));
+        assert!(
+            tail.contains("The next tab, Codex, takes its place as the agent's first tab."),
+            "tail: {tail}"
+        );
+        assert!(tail.contains("deletes this tab for good"), "tail: {tail}");
+
+        let both = confirm_close_tab_tail(true, Some("Codex"));
+        assert!(both.contains("last live tab"), "tail: {both}");
+        assert!(both.contains("takes its place"), "tail: {both}");
+    }
+
+    /// The close-tab dialog's body does not scroll, and the promotion tail is
+    /// the longest copy it can carry, so the modal must actually FIT the
+    /// smallest terminal dux supports. Rendered rather than reasoned about,
+    /// because that is exactly what the arithmetic gets wrong.
+    #[test]
+    fn the_close_tab_dialog_fits_an_eighty_by_twenty_four_terminal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
+        app.prompt = PromptState::ConfirmCloseTab {
+            session_id,
+            tab_id: slot_tab,
+            provider_label: "Claude".to_string(),
+            promoted_label: Some("Codex".to_string()),
+            focus: ConfirmFocus::Cancel,
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buffer = terminal.backend().buffer().clone();
+        let width = buffer.area.width as usize;
+        let screen = buffer
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect::<Vec<_>>()
+            .chunks(width)
+            .map(|row| row.concat())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // The tail's last words, taken from the same pure copy the modal
+        // renders, so a wording change cannot silently defeat the check.
+        let tail = confirm_close_tab_tail(false, Some("Codex"));
+        let last_words = tail.rsplit(' ').take(3).collect::<Vec<_>>();
+        for word in last_words {
+            assert!(
+                screen.contains(word),
+                "the promotion tail is clipped at 80x24; looked for {word:?} in:\n{screen}"
+            );
+        }
+        assert!(
+            screen.contains("Cancel") && screen.contains("Close"),
+            "the buttons are clipped at 80x24:\n{screen}"
+        );
     }
 
     /// The detach decision is about LIVENESS, not about how many tabs exist. A
@@ -13877,117 +13834,6 @@ mod tests {
         assert!(!close_tab_detaches(true, 2));
         assert!(close_tab_detaches(false, 0));
         assert!(!close_tab_detaches(false, 1));
-    }
-
-    /// `Action::NewTab` ships UNBOUND, so the warning must name the palette
-    /// command rather than an empty key label. Both labels arrive resolved
-    /// through the bindings, never hardcoded.
-    #[test]
-    fn first_tab_warning_names_the_palette_when_new_tab_is_unbound() {
-        let lines = first_tab_cannot_close_lines("", "Ctrl-p", "Ctrl-x");
-        let body = lines.join(" ");
-        assert!(body.contains("lives as long as the agent does"), "{body}");
-        assert!(
-            body.contains("new-agent-tab from the palette (Ctrl-p)"),
-            "{body}"
-        );
-        assert!(body.contains("detach it with Ctrl-x"), "{body}");
-    }
-
-    /// `Action::KillRunning` ships UNBOUND too, so the detach sentence has the
-    /// same problem and takes the same fallback. Without it the prose rendered
-    /// an empty parenthetical.
-    #[test]
-    fn first_tab_warning_names_the_palette_when_kill_running_is_unbound() {
-        let lines = first_tab_cannot_close_lines("Ctrl-t", "Ctrl-p", "");
-        let body = lines.join(" ");
-        assert!(
-            body.contains("detach it with kill-running from the palette (Ctrl-p)"),
-            "{body}"
-        );
-        assert!(!body.contains("()"), "empty parenthetical: {body}");
-    }
-
-    /// The default bindings leave BOTH actions unbound, which is the shipped
-    /// case: neither sentence may render an empty parenthetical.
-    #[test]
-    fn first_tab_warning_has_no_empty_parenthetical_with_both_unbound() {
-        let body = first_tab_cannot_close_lines("", "Ctrl-p", "").join(" ");
-        assert!(!body.contains("()"), "empty parenthetical: {body}");
-        assert!(
-            body.contains("new-agent-tab from the palette (Ctrl-p)"),
-            "{body}"
-        );
-        assert!(
-            body.contains("kill-running from the palette (Ctrl-p)"),
-            "{body}"
-        );
-    }
-
-    /// The warning's body does not scroll, so the modal must actually FIT the
-    /// smallest terminal dux supports. A fixed-percentage rect clipped this copy
-    /// at 80x24, hiding the last sentence and the button with it; rendered here
-    /// rather than reasoned about, because that is what the arithmetic got wrong.
-    #[test]
-    fn the_first_tab_warning_fits_an_eighty_by_twenty_four_terminal() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
-        app.prompt = PromptState::FirstTabCannotClose { session_id };
-
-        // The tail of the LAST prose sentence, taken from the same pure copy the
-        // modal renders, so rebinding an action cannot silently defeat the check.
-        let body = first_tab_cannot_close_lines(
-            &app.bindings.label_for(Action::NewTab),
-            &app.bindings.label_for(Action::OpenPalette),
-            &app.bindings.label_for(Action::KillRunning),
-        );
-        let last_word = body
-            .last()
-            .expect("the warning has body copy")
-            .rsplit(' ')
-            .next()
-            .expect("a last word")
-            .to_string();
-
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render frame");
-        let buffer = terminal.backend().buffer().clone();
-        let width = buffer.area.width as usize;
-        let cells: Vec<String> = buffer
-            .content()
-            .iter()
-            .map(|c| c.symbol().to_string())
-            .collect();
-        let screen = cells
-            .chunks(width)
-            .map(|row| row.concat())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(
-            screen.contains(&last_word),
-            "the last prose line is clipped at 80x24; looked for {last_word:?} in:\n{screen}"
-        );
-        assert!(
-            screen.contains("Got it"),
-            "the dismiss button is clipped at 80x24:\n{screen}"
-        );
-    }
-
-    /// Once the user binds keys to these actions, the warning names those keys
-    /// instead of sending them to the palette.
-    #[test]
-    fn first_tab_warning_names_the_bound_new_tab_key() {
-        let lines = first_tab_cannot_close_lines("Ctrl-t", "Ctrl-p", "Ctrl-x");
-        let body = lines.join(" ");
-        assert!(body.contains("with Ctrl-t"), "{body}");
-        assert!(body.contains("with Ctrl-x"), "{body}");
-        assert!(!body.contains("palette"), "{body}");
     }
 
     /// Render-level regression for the drift crumb gate: when the agent's

@@ -2110,26 +2110,20 @@ pub(crate) enum PromptState {
         foreground_cmd: Option<String>,
         focus: ConfirmFocus, // Cancel (default) or Delete
     },
-    /// Close an EXTRA agent tab. Closing it ends that tab's session for good
-    /// (destructive), so it defaults to Cancel. The session-slot tab never
-    /// reaches this prompt: it cannot be closed at all, and the close gesture
-    /// raises [`PromptState::FirstTabCannotClose`] instead.
+    /// Close one agent tab. Closing it ends that tab's session for good
+    /// (destructive), so it defaults to Cancel. The tab in the session slot
+    /// reaches this prompt like any other: closing it hands the slot to the
+    /// next tab in strip order.
     ConfirmCloseTab {
         session_id: String,
         tab_id: String,
         provider_label: String,
+        /// The provider label of the tab that will take the session slot, set
+        /// only when the tab being closed is the one holding it. The dialog
+        /// names it, because "this tab goes" and "that tab becomes the agent's
+        /// first" are two different promises and the user is owed both.
+        promoted_label: Option<String>,
         focus: ConfirmFocus, // Cancel (default) or Close
-    },
-    /// Raised when the close-tab gesture lands on the agent's FIRST tab (the
-    /// session-slot tab, named by the session's slot pointer). That tab lives as
-    /// long as the agent does, so there is nothing to confirm: the modal is a
-    /// warning with a single dismiss button that says why and points at the
-    /// two things the user can actually do instead (add more tabs, or detach
-    /// the whole agent).
-    FirstTabCannotClose {
-        /// The agent whose first tab the gesture landed on, so the prose can
-        /// name it.
-        session_id: String,
     },
     ConfirmQuit {
         agent_count: usize,
@@ -3029,9 +3023,6 @@ pub(crate) enum OverlayMouseLayout {
     ConfirmCloseTab {
         cancel_button: Rect,
         confirm_button: Rect,
-    },
-    FirstTabCannotClose {
-        ok_button: Rect,
     },
     ConfirmDeleteMacro {
         cancel_button: Rect,
