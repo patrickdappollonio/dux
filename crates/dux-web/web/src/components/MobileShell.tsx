@@ -460,6 +460,7 @@ interface TerminalViewportProps {
   dormant: boolean
   paneKey: string
   targetId: string
+  slotTabId: string | undefined
 }
 
 function TerminalViewport({
@@ -468,6 +469,7 @@ function TerminalViewport({
   dormant,
   paneKey,
   targetId,
+  slotTabId,
 }: TerminalViewportProps) {
   if (dormant && focusedTab && target.kind === "agent") {
     return (
@@ -489,6 +491,7 @@ function TerminalViewport({
             kind="agent"
             id={targetId}
             sessionId={target.sessionId}
+            slotTabId={slotTabId}
           />
         ) : (
           <LazyTerminalPane
@@ -572,6 +575,7 @@ function TerminalScreen() {
           )}
           paneKey={paneKey}
           targetId={targetId}
+          slotTabId={session?.slot_tab_id}
         />
       </div>
     </div>

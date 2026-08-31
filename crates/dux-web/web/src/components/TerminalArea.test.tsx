@@ -273,6 +273,35 @@ describe("TerminalArea dormant-tab gating (G-T4)", () => {
   })
 })
 
+describe("TerminalArea slot tab identity", () => {
+  // The pane decides the PTY route and arms the extra-tab "the tab is gone,
+  // stop reconnecting" guard from whether its target is the slot tab. That
+  // answer needs the spine's generated slot tab id: without it the pane falls
+  // back to comparing the tab id against the SESSION id, which is never true
+  // for a slot tab any more, so the agent's first tab is treated as an extra
+  // tab and an empty tab list reads as "this tab was closed".
+  it("hands the pane the spine's slot tab id for the agent's first tab", async () => {
+    const spine = dormantSpine()
+    spine!.sessions[0].slot_tab_id = "s1-slot"
+    spine!.sessions[0].tabs[0].id = "s1-slot"
+    mockState = makeState({
+      spine,
+      selectedSessionId: "s1",
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1-slot" },
+    })
+    render(<TerminalArea />)
+
+    expect(await screen.findByTestId("terminal-pane-stub")).toBeTruthy()
+    expect(paneProps).toHaveLength(1)
+    expect(paneProps[0]).toMatchObject({
+      kind: "agent",
+      id: "s1-slot",
+      sessionId: "s1",
+      slotTabId: "s1-slot",
+    })
+  })
+})
+
 describe("TerminalArea project terminals", () => {
   it("mounts the pane with the PROJECT owner and never the dormant agent card", async () => {
     // With a required string `sessionId` on the terminal target, this area

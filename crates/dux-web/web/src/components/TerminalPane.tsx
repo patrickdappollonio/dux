@@ -91,13 +91,17 @@ import { sessionLabel } from "@/lib/agentWorkspace"
 
 type TerminalPaneProps =
   // The streamed target: an agent tab, or a companion terminal of either owner.
-  // `id` is the FOCUSED TAB id for an agent (the session-slot tab's equals
-  // `sessionId`; an extra tab's does not) and the terminal id for a terminal.
+  // `id` is the FOCUSED TAB id for an agent and the terminal id for a terminal.
   // The owner (session id for an agent, `TerminalOwnerRef` for a terminal) is
   // passed explicitly: it builds the nested PTY socket URL and the macro
   // target, and the spine may not yet list a just-created terminal when this
   // pane first mounts.
-  | { kind: "agent"; id: string; sessionId: string }
+  //
+  // `slotTabId` is the agent's slot tab as the spine names it, a generated id
+  // the session merely points at. Slot-ness is decided against it, never
+  // against the session id, so it must be passed by every caller that has the
+  // spine; it is absent only while the spine has not arrived.
+  | { kind: "agent"; id: string; sessionId: string; slotTabId?: string }
   | { kind: "terminal"; id: string; owner: TerminalOwnerRef }
 
 export function TerminalPane(props: TerminalPaneProps) {

@@ -1483,6 +1483,31 @@ describe("TerminalPane project-terminal owner resolution", () => {
     expect(last().url).toMatch(/\/ws\/projects\/p1\/terminals\/pt-1\/pty$/)
   })
 
+  // The slot tab's id is generated and is NOT the session id, so the pane can
+  // only recognise it from the `slotTabId` the spine names. Told nothing, it
+  // falls back to the session-id placeholder, answers "not the slot tab" about
+  // the slot tab, and arms the extra-tab "this tab was closed, stop
+  // reconnecting" guard over an agent's first tab.
+  it("opens the per-agent alias for the slot tab named by the spine", () => {
+    const base = makeState()
+    const session = base.spine!.sessions[0] as unknown as {
+      slot_tab_id: string
+      tabs: { id: string }[]
+    }
+    session.slot_tab_id = "s1-slot"
+    session.tabs[0].id = "s1-slot"
+    mockState = base
+    render(
+      <TerminalPane
+        kind="agent"
+        id="s1-slot"
+        sessionId="s1"
+        slotTabId="s1-slot"
+      />,
+    )
+    expect(last().url).toMatch(/\/ws\/sessions\/s1\/pty$/)
+  })
+
   it("titles desktop notifications with the project name, not 'Agent'", () => {
     mockState = projectState(true)
     render(

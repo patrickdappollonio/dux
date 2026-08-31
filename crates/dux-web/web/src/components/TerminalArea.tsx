@@ -57,10 +57,12 @@ function LiveTerminalPane({
   target,
   paneKey,
   targetId,
+  slotTabId,
 }: {
   target: SelectedTarget
   paneKey: string
   targetId: string
+  slotTabId: string | undefined
 }) {
   if (target.kind === "agent") {
     return (
@@ -69,6 +71,7 @@ function LiveTerminalPane({
         kind="agent"
         id={targetId}
         sessionId={target.sessionId}
+        slotTabId={slotTabId}
       />
     )
   }
@@ -86,12 +89,14 @@ function TerminalSurface({
   target,
   paneKey,
   targetId,
+  slotTabId,
   dormant,
   focusedTab,
 }: {
   target: SelectedTarget
   paneKey: string
   targetId: string
+  slotTabId: string | undefined
   dormant: boolean
   focusedTab: AgentTabView | undefined
 }) {
@@ -112,6 +117,7 @@ function TerminalSurface({
           target={target}
           paneKey={paneKey}
           targetId={targetId}
+          slotTabId={slotTabId}
         />
       </Suspense>
     </ChunkBoundary>
@@ -159,9 +165,9 @@ export function TerminalArea() {
     spine?.sessions.find((s) => s.id === selectedSessionId)?.pr ?? null
   const bannerAtBottom = bootstrap?.pr_banner_position === "bottom"
 
-  // For an agent the streamed id is the FOCUSED TAB id (the session-slot tab's equals the
-  // session id); for a terminal it is the terminal id. Key by that id so
-  // switching tabs/terminals remounts the pane cleanly.
+  // For an agent the streamed id is the FOCUSED TAB id; for a terminal it is
+  // the terminal id. Key by that id so switching tabs/terminals remounts the
+  // pane cleanly.
   const targetId =
     selectedTarget.kind === "terminal"
       ? selectedTarget.terminalId
@@ -228,6 +234,7 @@ export function TerminalArea() {
           target={selectedTarget}
           paneKey={paneKey}
           targetId={targetId}
+          slotTabId={session?.slot_tab_id}
           dormant={dormant}
           focusedTab={focusedTab}
         />
