@@ -1097,6 +1097,40 @@ pub(crate) fn decide_gh_probe(
     }
 }
 
+/// Whether the periodic `gh` re-check is due, as a pure function of the four
+/// things that decide it. The engine owns the clock; this owns the rule.
+///
+/// The rule, in order:
+///
+/// * The integration being off means dux asks nothing at all. Turning it on is
+///   its own immediate probe, so there is nothing to catch up on here.
+/// * [`GhStatus::Available`] stops the timer. Everything works, so polling `gh`
+///   forever would be a process spawn every few minutes for no answer anybody
+///   is waiting for. A later failure moves the status off Available and the
+///   timer starts again on its own, which is why this reads the status live
+///   rather than latching a "we are done" flag.
+/// * A zero interval means the user disabled the periodic re-check. The
+///   on-demand re-check on both surfaces is unaffected.
+/// * A probe that has never run is not due here: the surfaces run the startup
+///   probe themselves, and answering "due" before it lands would double it.
+pub fn gh_reprobe_is_due(
+    status: crate::model::GhStatus,
+    integration_enabled: bool,
+    since_last_probe: Option<Duration>,
+    interval: Duration,
+) -> bool {
+    if !integration_enabled || matches!(status, crate::model::GhStatus::Available) {
+        return false;
+    }
+    if interval.is_zero() {
+        return false;
+    }
+    match since_last_probe {
+        Some(elapsed) => elapsed >= interval,
+        None => false,
+    }
+}
+
 /// Ask `gh` which hosts it can serve. Runs on a background worker; both calls
 /// are bounded so a wedged credential helper cannot park the probe.
 ///
@@ -2694,6 +2728,82 @@ mod host_policy_tests {
             ],
             "exactly one plain retry, after the machine-readable call",
         );
+    }
+
+    /// The retry schedule, as the pure rule the engine consults every tick.
+    mod reprobe_schedule {
+        use super::super::gh_reprobe_is_due;
+        use crate::model::GhStatus;
+        use std::time::Duration;
+
+        const INTERVAL: Duration = Duration::from_secs(300);
+
+        #[test]
+        fn an_unavailable_gh_is_re_checked_once_the_interval_has_passed() {
+            for status in [
+                GhStatus::Unknown,
+                GhStatus::NotInstalled,
+                GhStatus::NotAuthenticated,
+                GhStatus::Unreachable,
+            ] {
+                assert!(
+                    gh_reprobe_is_due(status, true, Some(Duration::from_secs(300)), INTERVAL),
+                    "{status:?} is not a working gh, so it is re-checked",
+                );
+                assert!(
+                    !gh_reprobe_is_due(status, true, Some(Duration::from_secs(299)), INTERVAL),
+                    "{status:?} waits out the interval",
+                );
+            }
+        }
+
+        #[test]
+        fn a_working_gh_stops_the_timer_and_a_later_failure_restarts_it() {
+            assert!(
+                !gh_reprobe_is_due(
+                    GhStatus::Available,
+                    true,
+                    Some(Duration::from_secs(9_000)),
+                    INTERVAL,
+                ),
+                "nothing is waiting on an answer, so dux stops spawning gh",
+            );
+            // The rule reads the status live rather than latching, so the same
+            // clock with a failed status is due again immediately.
+            assert!(gh_reprobe_is_due(
+                GhStatus::Unreachable,
+                true,
+                Some(Duration::from_secs(9_000)),
+                INTERVAL,
+            ));
+        }
+
+        #[test]
+        fn the_integration_being_off_asks_nothing() {
+            assert!(!gh_reprobe_is_due(
+                GhStatus::Unreachable,
+                false,
+                Some(Duration::from_secs(9_000)),
+                INTERVAL,
+            ));
+        }
+
+        #[test]
+        fn a_zero_interval_disables_the_timer() {
+            assert!(!gh_reprobe_is_due(
+                GhStatus::Unreachable,
+                true,
+                Some(Duration::from_secs(9_000)),
+                Duration::ZERO,
+            ));
+        }
+
+        #[test]
+        fn a_probe_that_has_never_run_is_not_due_here() {
+            // The surfaces run the startup probe themselves; answering "due"
+            // before it lands would spawn a second one alongside it.
+            assert!(!gh_reprobe_is_due(GhStatus::Unknown, true, None, INTERVAL));
+        }
     }
 
     #[test]

@@ -49,6 +49,11 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     // an unrecognized clipboard_passthrough so the per-tick host forward can parse
     // silently. The warning is from_config_str's side effect.
     let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
+    // Same idea for an out-of-range `gh` re-check interval: warn once here and
+    // correct it in memory. Its read path is the engine tick, which this surface
+    // runs tens of times a second on the thread that draws, so a warning left to
+    // the read would be a log flood for the whole run.
+    dux_core::config::correct_github_probe_interval(&mut config.ui);
     Ok(config)
 }
 
@@ -521,6 +526,13 @@ fn config_schema() -> Vec<ConfigEntry> {
                 "# Enable GitHub PR tracking for agent sessions.\n# Requires the `gh` CLI installed and authenticated (`gh auth login`).\n# When enabled, a PR pill is shown in the agent pane for branches with\n# an open, merged, or closed pull request. Toggle at runtime from the TUI\n# command palette, or the web UI's Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.github_integration),
+        },
+        ConfigEntry::Field {
+            key: "github_probe_interval_secs",
+            comment: Some(CommentSource::Static(
+                "# Seconds between re-checks of the `gh` CLI while dux cannot use it.\n# dux asks `gh` once at startup. If that answer is anything other than\n# \"installed and logged in\" -- including a GitHub rate limit, an API error or\n# a network fault, none of which say whether you are logged in -- dux keeps\n# asking on this interval until `gh` works, then stops asking. Without it a\n# momentary failure hid every pull-request feature until dux restarted.\n# Set to 0 to disable the periodic re-check; you can always re-check on demand\n# from the TUI command palette or the web UI's app menu.\n# Any other value is clamped to between 30 seconds and 21600 seconds (6 hours),\n# and dux logs a warning once when it clamps one.",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.github_probe_interval_secs),
         },
         ConfigEntry::Field {
             key: "pr_poll_interval_seconds",
@@ -2785,6 +2797,39 @@ name = "test"
         );
     }
 
+    /// The `gh` re-check interval is only understandable alongside the reason it
+    /// exists, so the template must carry both: the value, and that dux keeps
+    /// asking while GitHub features are unavailable.
+    #[test]
+    fn canonical_template_documents_the_github_probe_interval() {
+        let rendered = render_default_config();
+        assert!(rendered.contains("github_probe_interval_secs = 300"));
+        assert!(
+            rendered.contains("re-checks of the `gh` CLI"),
+            "the comment must say what the setting does: {rendered}"
+        );
+        assert!(
+            rendered.contains("Set to 0 to disable the periodic re-check"),
+            "the comment must say how to turn it off: {rendered}"
+        );
+        // The clamp is silent otherwise: a user who writes 5 gets 30 and would
+        // never know where the number came from. The template is the
+        // documentation, so it states both bounds, and these assertions pin the
+        // prose to the constants that actually enforce them.
+        assert!(
+            rendered.contains(&format!(
+                "clamped to between {} seconds and {} seconds",
+                dux_core::config::MIN_GITHUB_PROBE_INTERVAL_SECONDS,
+                dux_core::config::MAX_GITHUB_PROBE_INTERVAL_SECONDS,
+            )),
+            "the comment must state the clamp with the real bounds: {rendered}"
+        );
+        assert!(
+            rendered.contains("logs a warning once"),
+            "the comment must say the clamp is announced: {rendered}"
+        );
+    }
+
     #[test]
     fn default_config_round_trips_through_toml() {
         let rendered = render_default_config();
@@ -3590,6 +3635,40 @@ args = [\"-l\"]
         assert_eq!(
             mode, 0o600,
             "first-created config must be 0600, got {mode:o}"
+        );
+    }
+
+    /// The terminal UI never goes through `load_config`, so the correction that
+    /// keeps the engine tick from re-warning has to happen here too. Without it
+    /// the surface with the fastest tick is the one that floods.
+    #[test]
+    fn ensure_config_corrects_an_out_of_range_github_probe_interval() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        let body = render_default_config().replace(
+            "github_probe_interval_secs = 300",
+            "github_probe_interval_secs = 1",
+        );
+        fs::write(&paths.config_path, &body).expect("seed config");
+
+        let config = ensure_config(&paths).expect("ensure");
+        assert_eq!(
+            config.ui.github_probe_interval_secs,
+            dux_core::config::MIN_GITHUB_PROBE_INTERVAL_SECONDS,
+        );
+        assert_eq!(
+            dux_core::config::github_probe_interval_load_warning(
+                config.ui.github_probe_interval_secs
+            ),
+            None,
+            "the value the engine tick reads must have nothing left to warn about",
         );
     }
 

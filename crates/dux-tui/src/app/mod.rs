@@ -3906,6 +3906,9 @@ impl App {
         // Mark the visible tab before signals can raise or clear its attention state.
         self.note_focused_agent_viewed();
         self.engine.poll_agent_signals();
+        // Re-ask `gh` when the periodic re-check is due, so a rate limit or a
+        // brief outage at boot stops needing a restart to clear.
+        self.engine.poll_gh_probe_schedule();
         self.tick_count = self.tick_count.wrapping_add(1);
         self.reconcile_scroll_mode();
         self.status.tick(Instant::now(), BUSY_TIMEOUT);

@@ -318,6 +318,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "pr_poll_interval_seconds",
         config.ui.pr_poll_interval_seconds,
     );
+    patch_table_u16(
+        doc,
+        "ui",
+        "github_probe_interval_secs",
+        config.ui.github_probe_interval_secs,
+    );
     patch_table_bool(doc, "ui", "copy_on_select", config.ui.copy_on_select);
     patch_table_str(
         doc,

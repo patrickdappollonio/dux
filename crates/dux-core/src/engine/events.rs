@@ -2396,8 +2396,26 @@ impl Engine {
             self.spawn_pr_sync_worker();
             self.spawn_initial_pr_refresh();
         } else {
+            // Names the probe result honestly and, when dux has not given up on
+            // it, says so: a reader of `dux.log` should never have to guess
+            // whether a bad answer is permanent.
+            let retry = if self.github_integration_enabled {
+                let interval = self.github_probe_interval();
+                if interval.is_zero() {
+                    "; the periodic re-check is disabled, so re-check on demand \
+                     from the command palette or the web app menu"
+                        .to_string()
+                } else {
+                    format!(
+                        "; dux will retry every {}s until GitHub features work again",
+                        interval.as_secs(),
+                    )
+                }
+            } else {
+                String::new()
+            };
             logger::info(&format!(
-                "[gh-integration] gh status: {:?}, integration enabled: {}",
+                "[gh-integration] gh status: {:?}, integration enabled: {}{retry}",
                 status, self.github_integration_enabled,
             ));
             if decisive {

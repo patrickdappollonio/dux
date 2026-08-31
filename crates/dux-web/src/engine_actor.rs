@@ -2250,6 +2250,11 @@ impl EngineService {
         // "working" override truthful and maintains the per-tab attention flag.
         engine.poll_agent_signals();
 
+        // Re-ask `gh` when the periodic re-check is due. The terminal UI runs
+        // this from its own run loop, so while the background server is on this
+        // sweep does not run at all and the probe is not doubled.
+        engine.poll_gh_probe_schedule();
+
         // The two change-detection polls also run inside `check_spine`, which is
         // where they matter for a surface that does no sweeping. Keeping them here
         // as well preserves this loop's original ordering. Precisely: they are

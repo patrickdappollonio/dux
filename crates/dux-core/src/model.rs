@@ -18,8 +18,10 @@ pub enum GhStatus {
     Unknown,
     /// `gh` binary not found on PATH.
     NotInstalled,
-    /// `gh` found, and it said plainly that nobody is logged in. Authoritative:
-    /// only a login changes it, so dux does not keep asking.
+    /// `gh` found, and it said plainly that nobody is logged in. Authoritative
+    /// about what `gh` reported, so it never overwrites a working state on a
+    /// guess; dux still re-checks on its timer, because `gh auth login` in
+    /// another terminal is exactly how this state ends.
     NotAuthenticated,
     /// `gh` found, but it could not be consulted: it timed out, failed to
     /// launch, or answered with a rate limit, an API error or a network fault.

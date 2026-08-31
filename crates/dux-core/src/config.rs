@@ -330,6 +330,78 @@ pub fn normalized_pr_poll_interval(seconds: u16) -> u16 {
     seconds
 }
 
+/// Default seconds between re-checks of `gh` while dux cannot use it. Five
+/// minutes is short enough that a rate limit or a brief outage clears itself
+/// long before anyone thinks to restart dux, and long enough that a machine
+/// with no `gh` login at all spends almost nothing on asking.
+pub const DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS: u16 = 300;
+
+/// Hard ceiling on the `gh` re-check interval (6 hours), matching the PR poll's
+/// ceiling: past that the re-check has stopped being a recovery path.
+pub const MAX_GITHUB_PROBE_INTERVAL_SECONDS: u16 = 21_600;
+
+/// Floor on a *nonzero* `gh` re-check interval. `0` disables the periodic
+/// re-check entirely (the on-demand re-check is always available); any positive
+/// value below this is clamped up, because each probe spawns `gh` and a mistyped
+/// `1` would spawn one every second.
+pub const MIN_GITHUB_PROBE_INTERVAL_SECONDS: u16 = 30;
+
+/// Normalize a configured `github_probe_interval_secs`: `0` means "never
+/// re-check on a timer" and is preserved; anything else is clamped into
+/// `[MIN_GITHUB_PROBE_INTERVAL_SECONDS, MAX_GITHUB_PROBE_INTERVAL_SECONDS]`.
+///
+/// Deliberately PURE, for the same reason as [`normalized_terminal_font_size`]:
+/// the periodic re-check consults this from the engine tick, which the terminal
+/// UI runs tens of times a second on its own thread, so a warning here would be
+/// a log flood rather than a message. The on-disk value is warned about and
+/// corrected exactly once, where a config is taken in
+/// ([`correct_github_probe_interval`]), which leaves this a no-op clamp on every
+/// later read.
+pub fn normalized_github_probe_interval(seconds: u16) -> u16 {
+    if seconds == 0 {
+        return 0;
+    }
+    seconds.clamp(
+        MIN_GITHUB_PROBE_INTERVAL_SECONDS,
+        MAX_GITHUB_PROBE_INTERVAL_SECONDS,
+    )
+}
+
+/// The warning a config load emits for a `ui.github_probe_interval_secs` outside
+/// the clamp, or `None` for a value already usable (`0` included, which disables
+/// the periodic re-check rather than being out of range).
+///
+/// Split out from the logging so the message can be asserted directly, mirroring
+/// [`terminal_font_size_load_warning`].
+pub fn github_probe_interval_load_warning(seconds: u16) -> Option<String> {
+    if seconds == 0
+        || (MIN_GITHUB_PROBE_INTERVAL_SECONDS..=MAX_GITHUB_PROBE_INTERVAL_SECONDS)
+            .contains(&seconds)
+    {
+        return None;
+    }
+    Some(format!(
+        "ui.github_probe_interval_secs = {seconds} is outside the valid range \
+         {MIN_GITHUB_PROBE_INTERVAL_SECONDS}..={MAX_GITHUB_PROBE_INTERVAL_SECONDS} and is \
+         being clamped (use 0 to disable the periodic re-check of the gh CLI)."
+    ))
+}
+
+/// Warn once about an out-of-range `ui.github_probe_interval_secs` and correct it
+/// in memory, so every later read of it is already valid.
+///
+/// Called from both places a config is taken in: `load_config` (which serves
+/// `dux server` and the web) and the terminal UI's `ensure_config`. Both of those
+/// cover startup AND reload, so a user who edits the value to something silly is
+/// told once per load rather than once per engine tick.
+pub fn correct_github_probe_interval(ui: &mut UiConfig) {
+    if let Some(warning) = github_probe_interval_load_warning(ui.github_probe_interval_secs) {
+        crate::logger::warn(&warning);
+        ui.github_probe_interval_secs =
+            normalized_github_probe_interval(ui.github_probe_interval_secs);
+    }
+}
+
 /// Hard ceiling on `ui.status_clear_seconds` (the settings-PATCH endpoint
 /// clamps to this). One hour is far longer than any useful auto-clear delay;
 /// `0` ("never auto-clear") is a separate, always-allowed value handled by the
@@ -1343,6 +1415,16 @@ pub struct UiConfig {
     /// entirely (updates then come only from those events). Clamped to
     /// [`MAX_PR_POLL_INTERVAL_SECONDS`].
     pub pr_poll_interval_seconds: u16,
+    /// Seconds between re-checks of the `gh` CLI while dux cannot use it.
+    ///
+    /// dux asks `gh` once at startup. When that answer is anything but "installed
+    /// and logged in" (including a rate limit, an API error or a network fault,
+    /// none of which say anything about your login) it asks again on this
+    /// interval until `gh` works, then stops asking. `0` disables the periodic
+    /// re-check; the on-demand re-check stays available on both surfaces.
+    /// Clamped to
+    /// `[MIN_GITHUB_PROBE_INTERVAL_SECONDS, MAX_GITHUB_PROBE_INTERVAL_SECONDS]`.
+    pub github_probe_interval_secs: u16,
     /// Whether selecting text in the web terminal auto-copies it to the
     /// clipboard (X11-style "highlight to copy"). Covers both gestures: a mouse
     /// drag, and the lift at the end of a touch press-and-hold selection.
@@ -1981,6 +2063,7 @@ impl Default for UiConfig {
             diff_tab_width: 4,
             github_integration: true,
             pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
+            github_probe_interval_secs: DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS,
             copy_on_select: true,
             terminal_font_family: String::new(),
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
@@ -2536,6 +2619,7 @@ impl Default for Config {
                 diff_tab_width: 4,
                 github_integration: true,
                 pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
+                github_probe_interval_secs: DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS,
                 copy_on_select: true,
                 terminal_font_family: String::new(),
                 terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
@@ -2763,6 +2847,10 @@ pub fn load_config(paths: &DuxPaths) -> Config {
         config.ui.upload_pasted_text_chars =
             normalized_upload_pasted_text_chars(config.ui.upload_pasted_text_chars);
     }
+    // And once more for the `gh` re-check interval, whose read path is an engine
+    // tick rather than a bootstrap projection: correcting it here is what keeps a
+    // mistyped value from warning tens of times a second for the whole run.
+    correct_github_probe_interval(&mut config.ui);
     if let Some(warning) = upload_directory_load_warning(&config.ui.upload_directory) {
         crate::logger::warn(&warning);
         config.ui.upload_directory = DEFAULT_UPLOAD_DIRECTORY.to_string();
@@ -4172,6 +4260,100 @@ mod tests {
     }
 
     #[test]
+    fn load_config_reads_the_github_probe_interval() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(
+            &paths.config_path,
+            "[ui]\ngithub_probe_interval_secs = 900\n",
+        )
+        .expect("write config");
+
+        assert_eq!(load_config(&paths).ui.github_probe_interval_secs, 900);
+    }
+
+    #[test]
+    fn load_config_defaults_the_github_probe_interval_when_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(&paths.config_path, "[ui]\ngithub_integration = true\n")
+            .expect("write config");
+
+        assert_eq!(
+            load_config(&paths).ui.github_probe_interval_secs,
+            DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS,
+        );
+    }
+
+    #[test]
+    fn load_config_corrects_an_out_of_range_github_probe_interval_in_memory() {
+        // The tick that consults this interval runs tens of times a second on
+        // the terminal UI's own thread, so the value it reads has to be already
+        // valid: the warning belongs here, at the one place a config is taken in.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(&paths.config_path, "[ui]\ngithub_probe_interval_secs = 1\n")
+            .expect("write config");
+
+        assert_eq!(
+            load_config(&paths).ui.github_probe_interval_secs,
+            MIN_GITHUB_PROBE_INTERVAL_SECONDS,
+        );
+    }
+
+    #[test]
+    fn load_config_keeps_a_github_probe_interval_of_zero() {
+        // 0 disables the periodic re-check and is not out of range.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(&paths.config_path, "[ui]\ngithub_probe_interval_secs = 0\n")
+            .expect("write config");
+
+        assert_eq!(load_config(&paths).ui.github_probe_interval_secs, 0);
+    }
+
+    #[test]
+    fn correcting_the_github_probe_interval_warns_once_and_then_never_again() {
+        // The whole point of correcting in memory: a second pass over the
+        // already-corrected value has nothing to say, so no read path can
+        // re-raise the warning however often it runs.
+        let mut ui = UiConfig {
+            github_probe_interval_secs: 1,
+            ..Default::default()
+        };
+        let first = github_probe_interval_load_warning(ui.github_probe_interval_secs)
+            .expect("an out-of-range interval warns");
+        assert!(
+            first.contains(&MIN_GITHUB_PROBE_INTERVAL_SECONDS.to_string())
+                && first.contains(&MAX_GITHUB_PROBE_INTERVAL_SECONDS.to_string()),
+            "the warning names the range it is clamping into: {first}",
+        );
+
+        correct_github_probe_interval(&mut ui);
+        assert_eq!(
+            ui.github_probe_interval_secs,
+            MIN_GITHUB_PROBE_INTERVAL_SECONDS
+        );
+        assert_eq!(
+            github_probe_interval_load_warning(ui.github_probe_interval_secs),
+            None,
+            "the corrected value must never warn again",
+        );
+    }
+
+    #[test]
+    fn an_in_range_github_probe_interval_never_warns() {
+        for seconds in [
+            0,
+            MIN_GITHUB_PROBE_INTERVAL_SECONDS,
+            DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS,
+            MAX_GITHUB_PROBE_INTERVAL_SECONDS,
+        ] {
+            assert_eq!(github_probe_interval_load_warning(seconds), None);
+        }
+    }
+
+    #[test]
     fn load_config_reads_custom_provider_command() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_test_paths(dir.path());
@@ -4592,6 +4774,33 @@ mod agent_tabs_cap_tests {
             UiConfig::default().pr_poll_interval_seconds,
             DEFAULT_PR_POLL_INTERVAL_SECONDS
         );
+    }
+
+    #[test]
+    fn github_probe_interval_default_is_300() {
+        assert_eq!(DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS, 300);
+        assert_eq!(
+            UiConfig::default().github_probe_interval_secs,
+            DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS
+        );
+    }
+
+    #[test]
+    fn normalized_github_probe_interval_preserves_zero_as_disabled() {
+        assert_eq!(normalized_github_probe_interval(0), 0);
+    }
+
+    #[test]
+    fn normalized_github_probe_interval_clamps_both_ends() {
+        assert_eq!(
+            normalized_github_probe_interval(u16::MAX),
+            MAX_GITHUB_PROBE_INTERVAL_SECONDS
+        );
+        assert_eq!(
+            normalized_github_probe_interval(1),
+            MIN_GITHUB_PROBE_INTERVAL_SECONDS
+        );
+        assert_eq!(normalized_github_probe_interval(300), 300);
     }
 
     #[test]

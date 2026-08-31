@@ -93,6 +93,12 @@ pub struct GhProbeState {
     /// The program the probe runs. `gh` in production; a test points it at a
     /// stand-in so the wiring can be exercised without a network call.
     pub program: std::ffi::OsString,
+    /// When the most recent probe was SPAWNED, which is what the periodic
+    /// re-check counts from. Stamped at spawn rather than at completion so a
+    /// probe that is still running cannot be joined by a second one every tick,
+    /// and it is wall-clock elapsed time per the animation/refresh tenet.
+    /// `None` until the first probe, which the surfaces spawn at startup.
+    pub last_probe_at: Option<Instant>,
 }
 
 impl Default for GhProbeState {
@@ -101,6 +107,7 @@ impl Default for GhProbeState {
             policy: Arc::new(Mutex::new(crate::gh::GithubHostPolicy::DenyAll)),
             generation: 0,
             program: std::ffi::OsString::from("gh"),
+            last_probe_at: None,
         }
     }
 }
@@ -1892,9 +1899,18 @@ impl Engine {
     pub fn apply_reloaded_config(&mut self, config: Config) -> anyhow::Result<()> {
         let github_was_enabled = self.github_integration_enabled;
         self.github_integration_enabled = config.ui.github_integration;
-        if !github_was_enabled && self.github_integration_enabled {
+        if self.github_integration_enabled
+            && (!github_was_enabled || !matches!(self.gh_status, crate::model::GhStatus::Available))
+        {
             // Off-to-on through a config reload is the same transition as the
             // toggle, and needs the same fresh answer from `gh`.
+            //
+            // A reload while the integration was already on re-probes too, but
+            // only when `gh` is not currently usable: reloading the config is a
+            // deliberate act and one of the reasons to perform it is having just
+            // fixed `gh`, so waiting out the timer would be needless. A reload
+            // with everything working stays a no-op, because there is nothing to
+            // recover and a probe costs a process.
             self.spawn_gh_status_check();
         }
         self.projects = crate::project_browser::load_projects(
@@ -2138,6 +2154,46 @@ impl Engine {
             && matches!(self.gh_status, crate::model::GhStatus::Available)
     }
 
+    /// The configured `gh` re-check interval, clamped.
+    ///
+    /// The tick calls this, so the clamp is deliberately silent: an out-of-range
+    /// value is warned about and corrected once, where the config was taken in
+    /// (see [`crate::config::correct_github_probe_interval`]), which leaves
+    /// nothing for this to say however often it is asked.
+    pub fn github_probe_interval(&self) -> Duration {
+        Duration::from_secs(
+            crate::config::normalized_github_probe_interval(
+                self.config.ui.github_probe_interval_secs,
+            )
+            .into(),
+        )
+    }
+
+    /// Re-ask `gh` when the periodic re-check is due. Called once per tick by
+    /// whichever surface is driving the engine (the terminal UI's run loop, or
+    /// the web's maintenance sweep), the same way the PTY activity poll is.
+    ///
+    /// The decision is [`crate::gh::gh_reprobe_is_due`]; this only supplies the
+    /// clock and spawns the worker, so nothing about `gh` is ever run on a UI
+    /// thread and a wedged `gh` is bounded by the probe's own timeout.
+    pub fn poll_gh_probe_schedule(&mut self) {
+        if !crate::gh::gh_reprobe_is_due(
+            self.gh_status,
+            self.github_integration_enabled,
+            self.gh_probe.last_probe_at.map(|at| at.elapsed()),
+            self.github_probe_interval(),
+        ) {
+            return;
+        }
+        crate::logger::info(&format!(
+            "[gh-integration] re-checking gh (status is {:?}); dux retries every {}s while \
+             GitHub features are unavailable",
+            self.gh_status,
+            self.github_probe_interval().as_secs(),
+        ));
+        self.spawn_gh_status_check();
+    }
+
     /// Ask `gh` which hosts it can serve, on a worker.
     ///
     /// This is the same call the surfaces already make at startup to decide
@@ -2157,6 +2213,7 @@ impl Engine {
         // Stamped BEFORE the spawn, and carried on every way this probe can
         // finish, including the synthesised result of a panicking worker.
         self.gh_probe.generation = self.gh_probe.generation.wrapping_add(1);
+        self.gh_probe.last_probe_at = Some(Instant::now());
         let generation = self.gh_probe.generation;
         let program = self.gh_probe.program.clone();
         let spawn = self.spawn_background_worker(
@@ -6956,18 +7013,19 @@ mod tests {
     }
 
     #[test]
-    fn a_config_reload_that_leaves_the_integration_on_is_not_a_transition() {
+    fn a_config_reload_with_gh_already_working_is_not_a_transition() {
         // Held because the reload stores this config's `logging.level` into the
         // process-wide threshold another test may be asserting on.
         let _guard = crate::logger::level_test_guard();
         // Starting up is not an off-to-on transition and is already covered by
-        // the surface's own boot probe, so a reload that changes nothing must
-        // not fire another one.
+        // the surface's own boot probe, so a reload that changes nothing while
+        // `gh` works must not fire another one.
         let (mut engine, _tmp) = test_engine();
         let dir = tempfile::tempdir().expect("tempdir");
         engine.gh_probe.program = stand_in_gh(dir.path(), "exit 0").into();
         engine.github_integration_enabled = true;
         engine.config.ui.github_integration = true;
+        engine.gh_status = GhStatus::Available;
         let before = engine.gh_probe.generation;
 
         let mut new_config = Config::default();
@@ -6977,6 +7035,61 @@ mod tests {
             .expect("apply reloaded config");
 
         assert_eq!(engine.gh_probe.generation, before, "no new probe");
+    }
+
+    #[test]
+    fn a_config_reload_re_asks_gh_while_it_is_unusable() {
+        let _guard = crate::logger::level_test_guard();
+        // Journey: dux booted while GitHub was rate-limiting, so the status sits
+        // at Unreachable. The user fixes things and reloads the config rather
+        // than waiting out the retry timer; the reload must ask again.
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.gh_probe.program = stand_in_gh_serving(dir.path(), &["github.com"]).into();
+        engine.github_integration_enabled = true;
+        engine.config.ui.github_integration = true;
+        engine.gh_status = GhStatus::Unreachable;
+
+        let mut new_config = Config::default();
+        new_config.ui.github_integration = true;
+        engine
+            .apply_reloaded_config(new_config)
+            .expect("apply reloaded config");
+        settle_gh_probe(&mut engine);
+
+        assert_eq!(engine.gh_status, GhStatus::Available);
+    }
+
+    #[test]
+    fn the_scheduled_re_check_recovers_from_a_transient_first_probe() {
+        // The measured journey: dux boots while GitHub is rate-limiting, so the
+        // first probe decides nothing. Once the interval passes, the tick that
+        // every surface runs asks again, and GitHub features come back with no
+        // restart.
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.github_integration_enabled = true;
+        engine.config.ui.github_probe_interval_secs = 30;
+        engine.gh_status = GhStatus::Unreachable;
+        engine.gh_probe.program = stand_in_gh_serving(dir.path(), &["github.com"]).into();
+
+        engine.gh_probe.last_probe_at = Some(Instant::now());
+        engine.poll_gh_probe_schedule();
+        assert_eq!(
+            engine.gh_probe.generation, 0,
+            "nothing is due until the interval has passed",
+        );
+
+        engine.gh_probe.last_probe_at = Some(Instant::now() - Duration::from_secs(31));
+        engine.poll_gh_probe_schedule();
+        assert_eq!(engine.gh_probe.generation, 1, "the re-check was spawned");
+        settle_gh_probe(&mut engine);
+        assert_eq!(engine.gh_status, GhStatus::Available);
+
+        // And it stops asking, because there is nothing left to recover.
+        engine.gh_probe.last_probe_at = Some(Instant::now() - Duration::from_secs(31));
+        engine.poll_gh_probe_schedule();
+        assert_eq!(engine.gh_probe.generation, 1, "no further probes");
     }
 
     #[test]
