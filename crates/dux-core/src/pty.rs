@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Instant;
 
-use alacritty_terminal::event::{Event, EventListener, WindowSize};
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, GridCell, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
@@ -2014,7 +2014,7 @@ impl TerminalState {
     }
 
     fn with_scrollback(rows: u16, cols: u16, scrollback: usize) -> Self {
-        let event_proxy = EventProxy::new(rows, cols);
+        let event_proxy = EventProxy::new();
         let dimensions = TerminalDimensions::new(rows, cols);
         let config = Config {
             scrolling_history: scrollback,
@@ -2539,7 +2539,6 @@ impl TerminalState {
     fn resize(&mut self, rows: u16, cols: u16) {
         self.rows = rows;
         self.cols = cols;
-        self.event_proxy.set_size(rows, cols);
         self.term.resize(TerminalDimensions::new(rows, cols));
         // A resize widens the engine's region back to the whole screen at the new
         // height. Follow it, or the tracker keeps reporting margins the child no
@@ -2552,14 +2551,12 @@ impl TerminalState {
 #[derive(Clone)]
 struct EventProxy {
     pending: Arc<Mutex<PendingEvents>>,
-    size: Arc<Mutex<(u16, u16)>>,
 }
 
 impl EventProxy {
-    fn new(rows: u16, cols: u16) -> Self {
+    fn new() -> Self {
         Self {
             pending: Arc::new(Mutex::new(PendingEvents::default())),
-            size: Arc::new(Mutex::new((rows, cols))),
         }
     }
 
@@ -2583,12 +2580,6 @@ impl EventProxy {
             .map(|mut pending| std::mem::take(&mut *pending))
             .unwrap_or_default()
     }
-
-    fn set_size(&self, rows: u16, cols: u16) {
-        if let Ok(mut size) = self.size.lock() {
-            *size = (rows, cols);
-        }
-    }
 }
 
 impl EventListener for EventProxy {
@@ -2602,16 +2593,19 @@ impl EventListener for EventProxy {
             // Taking the bell from both places would arm the flag twice for one
             // ding and split one signal set across two mechanisms.
             Event::ColorRequest(index, formatter) => self.push_color_request(index, formatter),
-            Event::TextAreaSizeRequest(formatter) => {
-                let (rows, cols) = self.size.lock().map(|size| *size).unwrap_or((24, 80));
-                let response = formatter(WindowSize {
-                    num_lines: rows,
-                    num_cols: cols,
-                    cell_width: 0,
-                    cell_height: 0,
-                });
-                self.push_bytes(response.as_bytes());
-            }
+            // `Event::TextAreaSizeRequest` (the child's `CSI 14 t`, the text area
+            // measured in PIXELS) is deliberately NOT answered. This emulator is
+            // headless: there is no window, no font and no cell box, and the two
+            // surfaces that render the PTY measure different ones anyway. The
+            // formatter multiplies a cell size by the grid, so the only reply
+            // available here is `CSI 4 ; 0 ; 0 t`, which is not a polite
+            // "unknown" but a measurement of zero: a caller sizing an image
+            // divides the reported height by the row count and gets zero, or
+            // divides by it. Staying silent is what the emulator already does for
+            // the neighbouring cell-size query (`CSI 16 t`, which has no handler
+            // at all) and what xterm.js does by default, and it leaves the caller
+            // on its own fallback. The character-cell form (`CSI 18 t`) is a fact
+            // this emulator does hold and is still answered, through `PtyWrite`.
             _ => {}
         }
     }
@@ -3432,6 +3426,69 @@ mod tests {
         assert!(
             terminal.take_content_change(),
             "printing more text must register a visible change"
+        );
+    }
+
+    /// The answer table for a child's device queries. dux-core is the ONE
+    /// emulator that answers them (the browser's xterm.js is a viewer and is
+    /// silenced by `suppressViewerReports`), so each query must produce exactly
+    /// one reply, and each reply must be something dux actually knows.
+    ///
+    /// The reply travels back through the PTY master as if typed, which is what
+    /// every real terminal does with a query it finds in a program's output: a
+    /// `cat` of a file containing `OSC 11 ; ? ST` leaves the answer sitting in
+    /// the tty input queue for the shell to read at its next prompt. That is not
+    /// a bug to be fixed here; the table below is what keeps the ANSWERS honest.
+    #[test]
+    fn device_queries_get_exactly_one_reply_each() {
+        let table: &[(&[u8], &[u8])] = &[
+            // Colors. The emulator is headless: the palette it reports is the
+            // xterm default until the CHILD repaints a slot, because a single
+            // PTY can be watched from the TUI and a browser at once and their
+            // backgrounds need not agree. So the answer is "a dark terminal",
+            // not a measurement of either surface.
+            (b"\x1b]10;?\x1b\\", b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
+            (b"\x1b]11;?\x1b\\", b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
+            (b"\x1b]11;?\x07", b"\x1b]11;rgb:0000/0000/0000\x07"),
+            (b"\x1b]4;1;?\x1b\\", b"\x1b]4;1;rgb:cdcd/0000/0000\x1b\\"),
+            // Device attributes and status.
+            (b"\x1b[c", b"\x1b[?6c"),
+            (b"\x1b[5n", b"\x1b[0n"),
+            (b"\x1b[6n", b"\x1b[1;1R"),
+            (b"\x1b[?2004$p", b"\x1b[?2004;2$y"),
+            // Geometry IN CHARACTERS is a fact the emulator holds.
+            (b"\x1b[18t", b"\x1b[8;24;80t"),
+        ];
+        for (query, reply) in table {
+            let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+            assert_eq!(
+                terminal.process(query),
+                reply.to_vec(),
+                "query {:?} must be answered exactly once, with {:?}",
+                String::from_utf8_lossy(query),
+                String::from_utf8_lossy(reply),
+            );
+        }
+    }
+
+    /// Geometry IN PIXELS is a fact a headless emulator does not hold: there is
+    /// no window, no font and no cell box here, and the two surfaces that render
+    /// this PTY measure different ones. Answering `CSI 4 ; 0 ; 0 t` is not a
+    /// polite "unknown", it is a measurement of zero, and a caller that divides
+    /// the reported height by the row count to size an image gets zero or a
+    /// division by it. Silence is the honest answer and the one dux already
+    /// gives to the neighbouring cell-size query (`CSI 16 t`), which the
+    /// emulator has never had a handler for.
+    #[test]
+    fn pixel_geometry_queries_are_left_unanswered() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        assert!(
+            terminal.process(b"\x1b[14t").is_empty(),
+            "the text-area size in pixels must not be answered with a fabricated zero"
+        );
+        assert!(
+            terminal.process(b"\x1b[16t").is_empty(),
+            "the cell size in pixels must stay unanswered too"
         );
     }
 
