@@ -235,8 +235,11 @@ what the fetch targets: dux fetches the PR's head ref into that local branch, th
 creates a worktree on it.
 
 If the branch already exists locally, from a previous fetch say, dux attaches to it
-without fetching again, and deleting the agent later leaves that branch alone. A branch
-dux fetched for you is dux's own, so that one is cleaned up with the agent.
+without fetching again, and deleting the agent later leaves that branch alone. Otherwise
+the local branch is dux's own, whether dux fetched the pull request head or checked out a
+copy your project had already fetched from the remote, and it is deleted with the agent
+unless you had the branch first. Nothing dux does to it reaches the remote: the branch on
+GitHub, and the pull request itself, are untouched either way.
 
 ### How PR status stays fresh
 

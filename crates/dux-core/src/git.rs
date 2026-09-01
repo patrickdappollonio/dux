@@ -5579,6 +5579,56 @@ mod tests {
         );
     }
 
+    /// Deleting an agent whose branch dux created removes the LOCAL branch and
+    /// nothing else. A PR agent's branch tracks a branch on origin, and the
+    /// pull request itself lives there, so the remote-tracking ref (and the
+    /// remote it stands for) must come through untouched.
+    #[test]
+    fn remove_worktree_deletes_the_local_branch_and_leaves_the_remote_alone() {
+        let origin = init_test_repo();
+        let repo = init_test_repo();
+        run_git(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin.path().to_string_lossy().as_ref(),
+            ],
+        );
+        run_git(repo.path(), &["fetch", "origin"]);
+        let head = String::from_utf8_lossy(
+            &test_support::git_command()
+                .args([
+                    "-C",
+                    origin.path().to_string_lossy().as_ref(),
+                    "rev-parse",
+                    "HEAD",
+                ])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        run_git(
+            repo.path(),
+            &["update-ref", "refs/remotes/origin/pr-head", &head],
+        );
+        let wt = add_worktree(repo.path(), "pr-head");
+
+        remove_worktree(repo.path(), &wt, "pr-head", Some("pr-head")).unwrap();
+
+        assert!(
+            !local_branch_exists(repo.path(), "pr-head"),
+            "the local branch dux made is dux's to delete"
+        );
+        assert!(
+            ref_exists(repo.path(), "refs/remotes/origin/pr-head"),
+            "nothing dux does on delete may reach the remote's branch"
+        );
+    }
+
     #[test]
     fn remove_worktree_deletes_a_branch_whose_name_looks_like_an_option() {
         let repo = init_test_repo();

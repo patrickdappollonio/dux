@@ -139,9 +139,20 @@ impl SessionStatus {
 ///
 /// Separate variants rather than a bool because the delete copy wants the
 /// distinction: "existed before this agent" and "came with the worktree this
-/// agent adopted" are different sentences. Local-vs-remote attach is
-/// deliberately NOT distinguished: the delete semantics are identical and the
-/// preflight's branch location never reaches the create job.
+/// agent adopted" are different sentences.
+///
+/// What counts as "existed before" is per create arm, because what the user
+/// pointed at differs. A plain create attaches to a branch the user TYPED and
+/// confirmed against a preflight that names its location, so a remote-only
+/// branch is still the branch they chose and it keeps its `AttachedExisting`.
+/// The PR arm's name comes from the pull request rather than from the user, so
+/// it asks the narrower question, and asks it whatever the user confirmed: did
+/// `refs/heads/<name>` exist before dux ran?
+/// Against a remote-only ref, `git worktree add` DWIMs the local branch into
+/// existence, which makes it dux's own work, and a PR agent that reported "this
+/// branch existed before the agent" about a branch dux had just created is the
+/// bug that split the two questions apart. Nothing here ever deletes a remote
+/// branch, so only local refs are in play.
 ///
 /// There is deliberately no `Default`. The only sensible default would be
 /// `CreatedByDux`, and a struct-update literal that silently filled it in
@@ -149,9 +160,11 @@ impl SessionStatus {
 /// construction site says which one it means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchProvenance {
-    /// dux created the branch for this agent (a fresh create, a fork, or a PR
-    /// arm that fetched the head into a new local branch). Deleting the agent
-    /// may delete the branch: nothing existed before dux made it.
+    /// dux created the branch for this agent: a fresh create, a fork, or a PR
+    /// arm that put `refs/heads/<name>` there itself, whether by fetching the
+    /// pull request head or by checking out a remote-tracking ref that had no
+    /// local branch yet. Deleting the agent may delete the branch: no local
+    /// branch existed before dux made it.
     CreatedByDux,
     /// The agent was attached to a branch that already existed. The branch is
     /// the user's; deleting the agent keeps it.

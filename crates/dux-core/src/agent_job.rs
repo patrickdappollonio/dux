@@ -397,6 +397,22 @@ impl CreatePlanContext<'_> {
             // (Named `agent_title` to avoid shadowing the PR `title` above.)
             let agent_title = custom_name.clone();
             let resolved_name = custom_name.unwrap_or_else(|| head_branch.clone());
+            // Two separate questions, and conflating them is what made a PR
+            // agent report the user's branch back to them.
+            //
+            // `attach_existing` decides how the worktree is made: a name git
+            // already resolves (a local branch, or a remote-tracking ref left
+            // by an ordinary `git fetch` for a same-repo PR) is checked out
+            // rather than re-fetched, which is what keeps a same-repo PR branch
+            // tracking origin.
+            //
+            // `local_branch_existed` decides whose branch it is. Against a
+            // remote-only ref, `git worktree add` DWIMs `refs/heads/<name>`
+            // into existence, so dux made that local branch just as surely as
+            // the fetch arm would have, and deleting the agent takes it. The
+            // branch on origin is a different ref and is never touched either
+            // way. Only a LOCAL branch that was there first is the user's.
+            let local_branch_existed = git::local_branch_exists(&repo_path, &resolved_name);
             let attach_existing =
                 use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
 
@@ -452,9 +468,11 @@ impl CreatePlanContext<'_> {
                     // rollback owns the branch and this cleanup must not run,
                     // or the two would both delete it.
                     //
-                    // Only when dux minted it: an attach found the user's
-                    // branch already there and it survives the failure.
-                    if !attach_existing {
+                    // Only when dux minted it: a local branch that was there
+                    // first is the user's and survives the failure. A branch
+                    // the fetch minted, or one the failed worktree add DWIMed
+                    // out of a remote-tracking ref, is dux's leftover.
+                    if !local_branch_existed {
                         git::delete_created_branch_best_effort(&repo_path, &resolved_name);
                     }
                     let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
@@ -492,11 +510,12 @@ impl CreatePlanContext<'_> {
                 title: agent_title,
                 launch_with_resume: false,
                 pending_copy: None,
-                // Fetching the PR head MINTS `refs/heads/<name>` here, so that
-                // branch is dux's to clean up (and leaving it behind is what
-                // makes recreating the agent collide). Attaching means the
-                // branch was already there and stays.
-                branch_provenance: if attach_existing {
+                // Whether the fetch minted `refs/heads/<name>` or the worktree
+                // add DWIMed it out of `origin/<name>`, dux made the local
+                // branch and it is dux's to clean up (leaving it behind is what
+                // makes recreating the agent collide). Only a local branch that
+                // was already there is the user's and stays.
+                branch_provenance: if local_branch_existed {
                     BranchProvenance::AttachedExisting
                 } else {
                     BranchProvenance::CreatedByDux
@@ -1893,6 +1912,83 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_pull_request_agent_owns_the_local_branch_dux_checked_out_from_origin() {
+        // A SAME-REPO pull request whose head branch has already been fetched:
+        // `refs/remotes/origin/pr-head` is there, `refs/heads/pr-head` is not.
+        // The arm attaches instead of fetching (git's worktree add DWIMs the
+        // local branch into existence), so the local ref is still dux's own
+        // work and deleting the agent must take it. The branch on origin is a
+        // different ref and is never touched either way.
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        git_in(repo.path(), &["fetch", "origin"]);
+        assert!(
+            !crate::git::local_branch_exists(repo.path(), "pr-head"),
+            "the local branch must not exist before the create"
+        );
+        let session = drive_create_job(repo.path(), pull_request_request(repo.path(), None, false));
+        assert!(
+            crate::git::local_branch_exists(repo.path(), "pr-head"),
+            "dux made this local branch as part of creating the agent"
+        );
+        assert_eq!(
+            session.branch_provenance().unwrap(),
+            crate::model::BranchProvenance::CreatedByDux,
+            "no local branch existed first, so this one is dux's to delete"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_agent_keeps_a_local_branch_the_user_already_had() {
+        // The user had checked the PR branch out by hand. The arm discovers it
+        // (no dialog consent involved) and the branch stays the user's.
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        git_in(repo.path(), &["fetch", "origin"]);
+        git_in(repo.path(), &["branch", "--", "pr-head", "origin/pr-head"]);
+        let session = drive_create_job(repo.path(), pull_request_request(repo.path(), None, false));
+        assert_eq!(
+            session.branch_provenance().unwrap(),
+            crate::model::BranchProvenance::AttachedExisting,
+            "the branch existed before the agent, so deleting the agent keeps it"
+        );
+    }
+
+    #[test]
+    fn a_fork_pull_request_owns_the_branch_the_fetch_minted() {
+        // A FORK pull request: the head branch lives on someone else's repo, so
+        // origin has `refs/pull/42/head` and no branch of that name at all. The
+        // arm fetches, and the branch it mints is dux's.
+        let (_origin, repo) = pr_repo_with_fake_origin_fork();
+        git_in(repo.path(), &["fetch", "origin"]);
+        assert!(
+            crate::git::branch_exists(repo.path(), "pr-head").is_none(),
+            "a fork PR's head branch is on no ref of origin's"
+        );
+        let session = drive_create_job(repo.path(), pull_request_request(repo.path(), None, false));
+        assert_eq!(
+            session.branch_provenance().unwrap(),
+            crate::model::BranchProvenance::CreatedByDux
+        );
+    }
+
+    #[test]
+    fn a_failed_pr_worktree_deletes_a_branch_the_attach_would_have_minted() {
+        // The same-repo case again, this time with the worktree add failing.
+        // Nothing local existed first, so nothing local may be left behind.
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        git_in(repo.path(), &["fetch", "origin"]);
+        let run = drive_create_job_run_with_setup(
+            repo.path(),
+            pull_request_request(repo.path(), None, false),
+            |paths| block_worktree_path(paths, "pr-head"),
+        );
+        assert!(run.failure.is_some(), "the worktree add must still fail");
+        assert!(
+            !crate::git::local_branch_exists(repo.path(), "pr-head"),
+            "a local branch that did not exist before the create must not outlive it"
+        );
+    }
+
     /// A repo whose `origin` is a local repo carrying `refs/pull/42/head`, so
     /// the PR arm's fetch resolves without a network.
     fn pr_repo_with_fake_origin() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -1922,6 +2018,16 @@ mod tests {
                 origin.path().to_string_lossy().as_ref(),
             ],
         );
+        (origin, repo)
+    }
+
+    /// The same fake origin with the head branch REMOVED from it, which is what
+    /// a fork's pull request looks like from the base repo: the commits are
+    /// reachable through `refs/pull/42/head` and through no branch of origin's.
+    fn pr_repo_with_fake_origin_fork() -> (tempfile::TempDir, tempfile::TempDir) {
+        let (origin, repo) = pr_repo_with_fake_origin();
+        git_in(origin.path(), &["checkout", "--detach"]);
+        git_in(origin.path(), &["branch", "-D", "--", "pr-head"]);
         (origin, repo)
     }
 
