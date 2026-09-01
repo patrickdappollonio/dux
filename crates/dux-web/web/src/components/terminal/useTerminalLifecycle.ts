@@ -97,6 +97,10 @@ export type TerminalLifecyclePorts = {
   /// have disturbed it (a demotion, a font change), so a viewer re-grid stays
   /// a coordinator act rather than a lifecycle side effect.
   viewerRegridRef: RefObject<(() => void) | null>
+  /// `ownerRefitRef` is INSTALLED here for the same reason and points the same
+  /// way: the pane's relayout calls it when new cell metrics need a refit, so
+  /// that fit obeys the coordinator's holds instead of going around them.
+  ownerRefitRef: RefObject<(() => void) | null>
   /// `viewerRelayoutRef` is installed by the PANE and read here: the
   /// coordinator's own ResizeObserver calls it instead of fitting while a
   /// watcher renders faithfully, because the host's size decides the shrink
@@ -195,6 +199,7 @@ export function useTerminalLifecycle(
     prevVisibleRef,
     takeoverIntent,
     viewerRegridRef,
+    ownerRefitRef,
     viewerRelayoutRef,
     live,
     mods,
@@ -298,6 +303,7 @@ export function useTerminalLifecycle(
     })
     // The pane's handle on this mount's grid adoption (see the port's doc).
     viewerRegridRef.current = () => resize.applyViewerGrid()
+    ownerRefitRef.current = () => resize.refitForFonts()
     const localGridSubscription = openTerminal({
       setup: terminalSetup,
       container,
@@ -496,6 +502,7 @@ export function useTerminalLifecycle(
         resize,
         takeoverIntent,
         viewerRegridRef,
+        ownerRefitRef,
         beat,
         beatRef,
         unregisterLifecycle,

@@ -17,6 +17,7 @@ type TerminalRelayoutOptions = {
   termRef: RefObject<Terminal | null>
   fitAddonRef: RefObject<FitAddon | null>
   viewerRegridRef: RefObject<(() => void) | null>
+  ownerRefitRef: RefObject<(() => void) | null>
   setViewerOverflow: (overflow: boolean) => void
   fontFamilySetting: string
   fontSizeSetting: number
@@ -35,6 +36,7 @@ type MountedTerminal = Pick<
   | "termRef"
   | "fitAddonRef"
   | "viewerRegridRef"
+  | "ownerRefitRef"
   | "setViewerOverflow"
 > & {
   host: HTMLDivElement
@@ -114,7 +116,13 @@ function applyFont(
   if (faithful) {
     context.viewerRegridRef.current?.()
   } else if (familyChanged || sizeChanged || wasFaithful) {
-    context.fitAddonRef.current?.fit()
+    // Through the coordinator, never a bare `fit.fit()`. New cell metrics do
+    // need a refit, but this one fires while the attach is still in flight
+    // (the configured face is applied on mount, the bundled faces land a
+    // moment later), and a fit landing between the handshake and the replay
+    // undoes the grid the coordinator adopted for that replay. The coordinator
+    // holds it and fits for this once the replay is on screen.
+    context.ownerRefitRef.current?.()
   }
 
   if (!familyChanged) return
@@ -177,6 +185,7 @@ export function useTerminalRelayout(
     termRef,
     fitAddonRef,
     viewerRegridRef,
+    ownerRefitRef,
     setViewerOverflow,
     fontFamilySetting,
     fontSizeSetting,
@@ -192,6 +201,7 @@ export function useTerminalRelayout(
       termRef,
       fitAddonRef,
       viewerRegridRef,
+      ownerRefitRef,
       viewerRelayoutRef,
       setViewerOverflow,
       fontFamilySetting,
@@ -220,6 +230,7 @@ export function useTerminalRelayout(
     fontFamilySetting,
     fontSizeSetting,
     hostRef,
+    ownerRefitRef,
     remoteCols,
     remoteRows,
     setViewerOverflow,

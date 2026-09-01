@@ -233,6 +233,238 @@ describe("the resize coordinator's record of what the PTY was told", () => {
   })
 })
 
+describe("the grid the attach replay is parsed at", () => {
+  it("adopts the pty's grid from the handshake, owner included", () => {
+    // The replay is a repaint DRAWN FOR the pty's grid, absolute cursor
+    // addressing and all. Parsing it in a taller terminal parks the cursor
+    // short of the bottom, and the live bytes that follow overwrite the last
+    // rows the replay drew instead of scrolling past them: exactly
+    // (ours - theirs) lines are destroyed. So the terminal takes the child's
+    // geometry before the bytes land, whoever is driving.
+    const { coord, term } = setup()
+    coord.start(document.createElement("div"))
+    term.regrid(46, 84)
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 41, cols: 84 })
+  })
+
+  it("does not adopt an owner's later size reports, which are its own echo", () => {
+    // Only the handshake precedes a replay. Every later `size` event is the
+    // pty answering a resize this client asked for, and re-grinding the
+    // terminal to it would undo the fit that asked.
+    const { coord, term } = setup()
+    coord.start(document.createElement("div"))
+    term.regrid(46, 84)
+    coord.noteRemoteGrid({ rows: 41, cols: 84 })
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 46, cols: 84 })
+  })
+
+  it("claims nothing by adopting: the adopted grid never reaches the wire", () => {
+    // The adoption re-grids the terminal, and xterm answers a re-grid with its
+    // own resize event, which arms the debounced send. Booking the adopted
+    // grid as what the pty was last told is what keeps that settle silent: a
+    // resize frame is a CLAIM, and claiming the child's own size back at it
+    // says nothing and costs a SIGWINCH.
+    const { coord, term, sent } = setup()
+    coord.start(document.createElement("div"))
+    settleFirstFrame(coord, sent)
+    term.regrid(46, 84)
+    vi.advanceTimersByTime(500)
+    sent.length = 0
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    vi.advanceTimersByTime(500)
+    expect(sent).toEqual([])
+  })
+})
+
+describe("holding the adopted grid until the replay has landed", () => {
+  it("refuses every local fit between the handshake and the replay", () => {
+    // Adopting is not enough on its own. The mount's own observer callback,
+    // the font refit and any container settling all fit the terminal back to
+    // this viewport, and one of them landing in the window puts the grid back
+    // exactly where the replay loses its lines. Measured: the loss came back
+    // on roughly one load in five with only the adoption in place.
+    const { coord, term, fit } = setup()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(true)
+    term.regrid(46, 84)
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    expect(term.rows).toBe(41)
+    fit.next = { rows: 46, cols: 84 }
+    observers[0].fire()
+    vi.advanceTimersByTime(20)
+    expect(term.rows).toBe(41)
+    coord.refitForFonts()
+    expect(term.rows).toBe(41)
+  })
+
+  it("fits back the moment the replay lands, and tells the child", () => {
+    const { coord, term, fit, sent } = setup()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    term.regrid(46, 84)
+    sent.length = 0
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    expect(term.rows).toBe(41)
+    fit.next = { rows: 46, cols: 84 }
+    coord.firstFrameLanded()
+    expect(term.rows).toBe(46)
+    expect(sent).toEqual([{ rows: 46, cols: 84 }])
+  })
+
+  it("measures the no-first-frame fallback from the handshake, not the mount", () => {
+    // THE RACE THAT SURVIVED THE HOLD. The fallback is armed when the pane
+    // mounts, but the socket's handshake lands a couple of hundred
+    // milliseconds later and the replay behind it later still. On a slow open
+    // the timer fired first, released the hold, fitted back to this viewport,
+    // and the replay arrived into the grid it was not drawn for: the same five
+    // lines, on roughly one load in ten. The open's clock starts when the
+    // connection speaks, not when the component mounted.
+    const { coord, term, fit } = setup()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    term.regrid(46, 84)
+    vi.advanceTimersByTime(240)
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    fit.next = { rows: 46, cols: 84 }
+    // Past the deadline the MOUNT armed: the replay is still owed, so the
+    // adopted grid stands.
+    vi.advanceTimersByTime(30)
+    expect(term.rows).toBe(41)
+    // Past the deadline the HANDSHAKE armed: nothing came, so the pane stops
+    // waiting and sizes itself.
+    vi.advanceTimersByTime(300)
+    expect(term.rows).toBe(46)
+  })
+
+  it("closes the window even when no first frame ever arrives", () => {
+    // A freshly launched agent can emit nothing at all. The fallback timer is
+    // what keeps the hold from outliving the open it belongs to.
+    const { coord, term, fit } = setup()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    term.regrid(46, 84)
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    fit.next = { rows: 46, cols: 84 }
+    vi.advanceTimersByTime(1000)
+    expect(term.rows).toBe(46)
+  })
+
+  it("holds for a handshake that lands after the fallback already fired", () => {
+    // THE SLOW LINK. The fallback answers "has this connection said anything",
+    // so on a long round trip it can come due before the handshake does. The
+    // hold is owed to the REPLAY, which has still not been parsed, so the
+    // handshake takes it whatever the fallback did in the meantime, and the
+    // open owes its first-frame resize again.
+    const { coord, term, fit, sent } = setup()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    term.regrid(46, 84)
+    vi.advanceTimersByTime(260)
+    sent.length = 0
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    expect(term.rows).toBe(41)
+    // Every local fit is still refused, exactly as on a prompt handshake.
+    fit.next = { rows: 46, cols: 84 }
+    observers[0].fire()
+    vi.advanceTimersByTime(20)
+    expect(term.rows).toBe(41)
+    // And the replay's own callback fits back and tells the child.
+    coord.firstFrameLanded()
+    expect(term.rows).toBe(46)
+    expect(sent).toEqual([{ rows: 46, cols: 84 }])
+  })
+
+  it("ends a slow reconnect at this viewport, with the child told the same", () => {
+    // The reconnect flavor of the same race: the socket bounces inside the
+    // window, so the hold the old open took is not this one's, and the new
+    // handshake's own hold is what the new replay is parsed under.
+    const { coord, term, fit, sent } = setup()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    term.regrid(46, 84)
+    vi.advanceTimersByTime(260)
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    expect(term.rows).toBe(41)
+    coord.noteOpen(false)
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    fit.next = { rows: 46, cols: 84 }
+    observers[0].fire()
+    vi.advanceTimersByTime(20)
+    expect(term.rows).toBe(41)
+    sent.length = 0
+    coord.firstFrameLanded()
+    expect(term.rows).toBe(46)
+    expect(sent).toEqual([{ rows: 46, cols: 84 }])
+  })
+
+  it("ignores a superseded open's fallback timer", () => {
+    // The hold and its timer belong to one open. A timer armed under the
+    // previous one firing during this one would release a hold it never took
+    // and drop this replay into the wrong grid.
+    const { coord, term, fit } = setup()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    term.regrid(46, 84)
+    vi.advanceTimersByTime(200)
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    vi.advanceTimersByTime(40)
+    coord.noteOpen(false)
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    fit.next = { rows: 46, cols: 84 }
+    // Past the previous open's deadline: this open's hold stands.
+    vi.advanceTimersByTime(220)
+    expect(term.rows).toBe(41)
+    // Past its own: it stops waiting and sizes itself.
+    vi.advanceTimersByTime(60)
+    expect(term.rows).toBe(46)
+  })
+
+  it("drops the hold at a new open, whose handshake is still owed", () => {
+    const { coord, term, fit } = setup()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    term.regrid(46, 84)
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    expect(term.rows).toBe(41)
+    coord.noteOpen(false)
+    fit.next = { rows: 46, cols: 84 }
+    coord.refitForFonts()
+    expect(term.rows).toBe(46)
+  })
+
+  it("takes no hold on a handshake whose replay has already been parsed", () => {
+    // A hold nobody is going to release would stop this pane fitting for the
+    // rest of its life, so it is taken only while a replay is still owed.
+    const { coord, term, fit } = setup()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    term.regrid(46, 84)
+    coord.firstFrameLanded()
+    coord.noteRemoteGrid({ rows: 41, cols: 84 }, true)
+    fit.next = { rows: 46, cols: 84 }
+    coord.refitForFonts()
+    expect(term.rows).toBe(46)
+  })
+
+  it("adopts nothing from a handshake that reports no grid", () => {
+    // The server really does report a null grid, and null is "it could not
+    // say". Adopting the grid some earlier connection reported would authorize
+    // a re-grid nobody asked for, and hold the pane for a replay drawn at a
+    // geometry this handshake never named.
+    const { coord, term, fit } = setup()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    coord.noteRemoteGrid({ rows: 41, cols: 84 })
+    term.regrid(46, 84)
+    const fits = fit.fits
+    coord.noteRemoteGrid(null, true)
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 46, cols: 84 })
+    coord.refitForFonts()
+    expect(fit.fits).toBe(fits + 1)
+  })
+})
+
 describe("the resize coordinator's gesture hold", () => {
   it("performs NO local refit while the gesture holds the pair, then exactly one at the lift", () => {
     const { fit, coord, sent } = setup()
@@ -419,8 +651,11 @@ describe("the resize coordinator's first-frame plan", () => {
   })
 
   it("fires the fallback for a session that emits no first frame at all", () => {
+    // Measured from the OPEN, never the mount: the pane exists before there is
+    // a connection to ask "have you gone quiet" about.
     const { coord, sent } = setup()
     coord.start(document.createElement("div"))
+    coord.noteOpen(false)
     expect(coord.needsFirstFrameResize()).toBe(true)
     vi.advanceTimersByTime(250)
     expect(sent).toHaveLength(1)
@@ -569,6 +804,33 @@ describe("the resize coordinator in VIEWER mode", () => {
     setOwner(false)
     coord.applyViewerGrid()
     expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 40, cols: 120 })
+  })
+
+  it("fits for new cell metrics while the wire has named no grid, and sends nothing", () => {
+    // A watcher renders faithfully only once it knows what to be faithful TO.
+    // Before the wire has named a grid there is nothing to adopt, so its own
+    // viewport is the only geometry it has and new cell metrics still need a
+    // fit. It is still not the driver, so nothing goes out.
+    const { coord, term, fit, sent } = watcher()
+    coord.start(document.createElement("div"))
+    fit.next = { rows: 30, cols: 100 }
+    coord.refitForFonts()
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 30, cols: 100 })
+    vi.advanceTimersByTime(1000)
+    expect(sent).toEqual([])
+  })
+
+  it("does not fit for new cell metrics once the wire has named a grid", () => {
+    // With a grid to be faithful to, the answer to new metrics is the pane's
+    // font shrink, never a fit: fitting is the divergence the faithful view
+    // exists to remove.
+    const { coord, fit, relayouts } = watcher()
+    coord.start(document.createElement("div"))
+    coord.noteRemoteGrid({ rows: 40, cols: 120 })
+    const fits = fit.fits
+    coord.refitForFonts()
+    expect(fit.fits).toBe(fits)
+    expect(relayouts.length).toBeGreaterThan(0)
   })
 
   it("returns to fitting and sending on PROMOTION, through the existing path", () => {

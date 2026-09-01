@@ -21,6 +21,7 @@ type TerminalLifecycleCleanupOptions = {
   resize: ResizeCoordinator
   takeoverIntent: TakeoverIntent
   viewerRegridRef: RefObject<(() => void) | null>
+  ownerRefitRef: RefObject<(() => void) | null>
   beat: Heartbeat
   beatRef: RefObject<Heartbeat | null>
   unregisterLifecycle: () => void
@@ -45,6 +46,7 @@ export function disposeTerminalLifecycle(
     resize,
     takeoverIntent,
     viewerRegridRef,
+    ownerRefitRef,
     beat,
     beatRef,
     unregisterLifecycle,
@@ -65,6 +67,7 @@ export function disposeTerminalLifecycle(
   resize.dispose()
   takeoverIntent.clear()
   if (viewerRegridRef.current !== null) viewerRegridRef.current = null
+  if (ownerRefitRef.current !== null) ownerRefitRef.current = null
   beat.stop()
   if (beatRef.current === beat) beatRef.current = null
   unregisterLifecycle()

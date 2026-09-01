@@ -81,7 +81,9 @@ export function registerTerminalSocketCallbacks(
 
   pty.onPtyGrid = (grid, fromHandshake) => {
     // Adopt before notifying: a heal replay must parse at the PTY's own grid.
-    resize.noteRemoteGrid(grid)
+    // The handshake half is passed on because the replay behind it was drawn
+    // for that grid, which the owner has to honour too.
+    resize.noteRemoteGrid(grid, fromHandshake)
     noteRemotePtyGrid(grid, fromHandshake)
   }
 

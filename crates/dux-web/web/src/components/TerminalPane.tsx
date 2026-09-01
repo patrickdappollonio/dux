@@ -302,6 +302,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   // of a font change), and the pane's own relayout, which the coordinator's
   // ResizeObserver calls in place of the fit it does not run.
   const viewerRegridRef = useRef<(() => void) | null>(null)
+  // The same idiom for the owner's side: the relayout's font refit is a
+  // coordinator act too, so it goes through this rather than the fit addon.
+  const ownerRefitRef = useRef<(() => void) | null>(null)
 
   // THE INPUT SURFACE: the compose Send, the accessory sends, the sticky
   // modifier latches and the draft splice.
@@ -340,6 +343,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     termRef,
     fitAddonRef,
     viewerRegridRef,
+    ownerRefitRef,
     setViewerOverflow,
     fontFamilySetting: terminalFontFamilySetting,
     fontSizeSetting: terminalFontSizeSetting,
@@ -481,6 +485,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     prevVisibleRef,
     takeoverIntent,
     viewerRegridRef,
+    ownerRefitRef,
     viewerRelayoutRef,
     live,
     mods: input.mods,

@@ -2715,7 +2715,10 @@ describe("TerminalPane holds the PTY resize while a touch-scroll gesture is acti
       // The resync's trigger moved to the socket reopening; the property under
       // test (a DIRECT send still defers to the gesture's lift) is unchanged.
       pty.onOpen()
-      vi.advanceTimersByTime(200)
+      // Long enough for the open's no-first-frame fallback to come due as
+      // well: it is a direct send too, so it joins the parked one rather than
+      // escaping through the gesture.
+      vi.advanceTimersByTime(300)
     })
     expect(FitStub.fits).toBe(0)
     expect(pty.sendResize).not.toHaveBeenCalled()
@@ -3105,9 +3108,8 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
   it("still jiggles on the very first open (the deliberate first-frame bypass)", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const pty = last()
-    act(() => {
-      vi.advanceTimersByTime(250)
-    })
+    act(() => pty.onOpen())
+    act(() => pty.bytesCb?.(new Uint8Array([1])))
     expect(pty.sendResize).toHaveBeenNthCalledWith(1, 24, 79)
     act(() => {
       vi.advanceTimersByTime(60)
@@ -3123,22 +3125,24 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
     // rendering.
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const pty = last()
+    act(() => pty.onOpen())
     FitStub.nextDims = { rows: 30, cols: 100 }
-    act(() => {
-      vi.advanceTimersByTime(250)
-    })
+    act(() => pty.bytesCb?.(new Uint8Array([1])))
     expect(term().rows).toBe(30)
     expect(pty.sendResize).toHaveBeenNthCalledWith(1, 30, 99)
     act(() => {
       vi.advanceTimersByTime(60)
     })
     expect(pty.sendResize).toHaveBeenNthCalledWith(2, 30, 100)
-    // The re-grid also scheduled a debounced size check. It must find the PTY
-    // already at this size and say nothing, rather than a third frame.
+    // The re-grid also scheduled a debounced size check, and the open's own
+    // forced re-assert is still to come. The re-assert sends this size again,
+    // by design; what must not appear is a frame from the debounce
+    // contradicting the tail, so the count says the debounce stayed silent.
     act(() => {
       vi.advanceTimersByTime(250)
     })
-    expect(pty.sendResize).toHaveBeenCalledTimes(2)
+    expect(pty.sendResize).toHaveBeenCalledTimes(3)
+    expect(pty.sendResize).toHaveBeenNthCalledWith(3, 30, 100)
   })
 
   it("carries a re-grid landing INSIDE the jiggle window through to the PTY", () => {
@@ -3148,9 +3152,8 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
     // check behind it must not then contradict the tail.
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const pty = last()
-    act(() => {
-      vi.advanceTimersByTime(250)
-    })
+    act(() => pty.onOpen())
+    act(() => pty.bytesCb?.(new Uint8Array([1])))
     expect(pty.sendResize).toHaveBeenNthCalledWith(1, 24, 79)
     act(() => {
       term().resize(100, 30)
@@ -3159,10 +3162,13 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
       vi.advanceTimersByTime(60)
     })
     expect(pty.sendResize).toHaveBeenNthCalledWith(2, 30, 100)
+    // The third frame is the open's own forced re-assert, not the debounce
+    // contradicting the tail.
     act(() => {
       vi.advanceTimersByTime(250)
     })
-    expect(pty.sendResize).toHaveBeenCalledTimes(2)
+    expect(pty.sendResize).toHaveBeenCalledTimes(3)
+    expect(pty.sendResize).toHaveBeenNthCalledWith(3, 30, 100)
   })
 
   it("still sends one plain resize on a RECONNECT's first frame, and does not jiggle", () => {
@@ -4374,8 +4380,12 @@ describe("TerminalPane faithful-view overflow and live preference flips", () => 
     const fitsBefore = FitStub.fits
     FitStub.nextDims = { rows: 24, cols: 80 }
     // The take-over lands: this pane is the driver, so its own container
-    // defines the grid again.
+    // defines the grid again. The replay this handshake owes has still not
+    // been parsed, though, and it was drawn for the adopted grid, so the
+    // promotion's fit waits behind it rather than putting the grid back.
     act(() => notifyPtyOwner("s1", "conn-self"))
+    expect(FitStub.fits).toBe(fitsBefore)
+    act(() => pty.bytesCb?.(new Uint8Array([1])))
     expect(FitStub.fits).toBe(fitsBefore + 1)
     expect({ rows: term().rows, cols: term().cols }).toEqual({
       rows: 24,
