@@ -435,7 +435,8 @@ Whether the compose bar appears is the `ui.compose_bar` setting, a Preferences r
 three values:
 
 - **Automatic** (the default) asks your browser whether you point at the screen with a
-  finger.
+  finger, and uses the answer as the starting point. Your own choice from the typing-surface
+  switch wins from then on.
 - **Always** and **Never** are for the device dux guesses wrong on. Never restores typing
   straight into the terminal.
 
@@ -443,17 +444,31 @@ An older config that says `compose_bar = true` or `false` keeps working: `true` 
 Automatic and `false` as Never.
 
 > [!IMPORTANT]
-> **Width decides the layout; your pointer decides the typing surface.** A tablet in
-> landscape gets the desktop panes *and* the accessory keys and compose box. A mouse on a
-> narrow window gets neither. Rotating a tablet never swaps your typing surface out from
-> under you.
+> **Width decides the layout; your pointer decides which typing surface you start with.** A
+> tablet in landscape gets the desktop panes *and* the accessory keys and compose box. A
+> mouse on a narrow window starts with neither. Rotating a tablet never swaps your typing
+> surface out from under you.
 
 What the browser cannot see is a keyboard case, so there is a **typing-surface toggle** in
 two places: at the end of the accessory bar's key row, and in the input `⋯` menu below,
 worded as a sentence. It says which state it is in, **Box** while you are typing into the
 message box and **Direct** while your keystrokes go straight to the terminal, and one tap
-swaps them. It is not a setting: it is remembered on that device and changes nothing in your
-config. It appears only under **Automatic**.
+swaps them.
+
+**Your choice wins, on any device, in both directions.** The pointer only decides where you
+start. Ask for the message box on a laptop and you get it, keys and all, and while it is up
+your keystrokes go into the box rather than straight to the terminal; switch back to Direct
+and both are gone again. Your choice sticks across reloads and survives folding a
+convertible or unplugging a mouse, until you change it. It is not a setting: it is
+remembered on that device and changes nothing in your config, and it appears only under
+**Automatic**, since **Always** and **Never** have already decided. Switching the
+preference to **Always** or **Never** does not erase it either: the choice stays remembered
+in that browser, and comes back the moment you put the preference on **Automatic** again.
+
+While the message box is up it really is the typing surface. Clicking into the terminal
+puts your cursor back in the box, right-clicking pastes the clipboard into your draft
+instead of sending it, and the terminal is skipped when you tab backwards out of the pane.
+Switch to Direct and all of that goes back to the way a plain terminal behaves.
 
 Terminal rows are precious on a phone, so the chrome is hideable. Every phone terminal
 screen's `⋯` menu (agent, project, and standalone terminals alike) has **Hide top bar**
@@ -469,8 +484,12 @@ than both.
 
 Those preferences live on the server, so they follow you to every device. The top bar does
 not exist in the wide layout, but the terminal keys travel with your pointer, so hiding them
-from your phone also hides them on the tablet you pick up next. The input menu therefore
-appears wherever the keys would, the wide touch layout included. Watching someone else's
+from your phone also hides them on the tablet you pick up next. The input menu is under
+every terminal you are driving, desktop included, because it is how you ask for the message
+box in the first place. In theater mode on a computer there is no input row to put it on, so
+its entries move into the floating pill's own `⋯` and there is still exactly one menu on
+screen. **Hide terminal keys** appears only where a key row could actually
+show up, so it is never a button that does nothing. Watching someone else's
 terminal on a phone with the top bar hidden, you still get the menu, with the top-bar entry
 in it, so you can never end up with a screen you cannot get out of.
 
