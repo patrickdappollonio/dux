@@ -142,29 +142,34 @@ async fn create_tab(
 
 /// Resolve a `.../tabs/:tab` address: `:id` names a live session and `:tab` is
 /// one of its tabs. Every `:tab`-scoped verb opens with this, so they cannot
-/// drift on what a bad address answers.
+/// drift on what a bad address answers. The refusal is boxed because an axum
+/// response is wide enough to trip clippy's large-error lint on macOS.
 ///
 /// The two ids are checked separately because an out-of-bound `:id` is an
 /// unknown SESSION (matching `resolve_worktree`'s 404 below it), and collapsing
 /// both into `unknown_tab()` blames the tab even when the session id is the bad
 /// one. Slot-ness decides only whether the ownership check applies: the slot tab
-/// has no `agent_tabs` row for `tab_session` to resolve, and the session's own
-/// pointer is what names it as this agent's. An extra tab must belong to `:id`,
-/// so no verb here ever reaches across sessions.
-async fn resolve_tab_of_session(state: &AppState, id: &str, tab: &str) -> Result<(), Response> {
+/// is named by the session's own pointer, not by the extra-tab map that
+/// `tab_session` answers from. An extra tab must belong to `:id`, so no verb here
+/// ever reaches across sessions.
+async fn resolve_tab_of_session(
+    state: &AppState,
+    id: &str,
+    tab: &str,
+) -> Result<(), Box<Response>> {
     if !id_within_bound(id) {
-        return Err(unknown_session());
+        return Err(Box::new(unknown_session()));
     }
     if !id_within_bound(tab) {
-        return Err(unknown_tab());
+        return Err(Box::new(unknown_tab()));
     }
     if let Err(resp) = resolve_worktree(state, id.to_string()).await {
-        return Err(resp.into_response());
+        return Err(Box::new(resp.into_response()));
     }
     if !state.engine.is_slot_tab(id.to_string(), tab).await {
         match state.engine.tab_session(tab.to_string()).await {
             Some(owner) if owner == id => {}
-            _ => return Err(unknown_tab()),
+            _ => return Err(Box::new(unknown_tab())),
         }
     }
     Ok(())
@@ -180,7 +185,7 @@ async fn delete_tab(
     headers: HeaderMap,
 ) -> Response {
     if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
-        return resp;
+        return *resp;
     }
     match state
         .engine
@@ -224,7 +229,7 @@ async fn start_tab(
     Path((id, tab)): Path<(String, String)>,
 ) -> Response {
     if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
-        return resp;
+        return *resp;
     }
     match state.engine.start_agent_tab(tab).await {
         Ok(()) => StatusCode::OK.into_response(),
@@ -242,7 +247,7 @@ async fn retarget_tab(
     Json(body): Json<RetargetBody>,
 ) -> Response {
     if let Err(resp) = resolve_tab_of_session(&state, &id, &tab).await {
-        return resp;
+        return *resp;
     }
     match state
         .engine
