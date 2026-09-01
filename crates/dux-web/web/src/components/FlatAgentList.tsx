@@ -77,6 +77,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useTouchSurfaces } from "@/hooks/use-typing-surface"
 import { agentRowVisual } from "@/lib/agentRow"
 import { defaultProviderForSession } from "@/lib/agentTabs"
 import {
@@ -233,6 +234,7 @@ export function AgentActionsMenu({
   // no hover at all.
   const activeElsewhere = sessionActiveElsewhere(duxState, session)
   const isMobile = useIsMobile()
+  const touchSurfaces = useTouchSurfaces()
   // Every PTY this agent can have a mounted pane for: the session-slot tab's id
   // IS the session id, and each extra tab has its own. Whichever pane is
   // mounted and owns its input answers.
@@ -257,7 +259,10 @@ export function AgentActionsMenu({
           the agentless terminal screens' menu, so the three can never drift).
           Visibility is computed HERE rather than inside the component: this
           header menu is phone-shell chrome, so both toggles ride `isMobile`,
-          which is the behavior this menu has always had.
+          which is the behavior this menu has always had. The keys toggle rides
+          the touch surfaces too, so it is present exactly where pressing it
+          puts a key row on screen: in a narrow window on a laptop the width
+          alone said yes and the press did nothing.
 
           Deliberately NOT disabled while the agent is active elsewhere: hiding
           this device's own bars is this device's view preference, not a
@@ -271,7 +276,7 @@ export function AgentActionsMenu({
         gates={{
           attach: false,
           surfaceSwitch: false,
-          keysToggle: context === "terminal" && isMobile,
+          keysToggle: context === "terminal" && isMobile && touchSurfaces,
           topBarToggle: context === "terminal" && isMobile,
           // This menu hangs off the phone header, which is one of the things
           // theater takes away, so it is never on screen while theater is on

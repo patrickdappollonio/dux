@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import {
+  COARSE_POINTER_QUERY,
+  stubCoarsePointer,
+  type MatchMediaStub,
+} from "@/test/matchMedia"
 
 // Override only `useDux` so the mobile drawer header's wiring (`bootstrap.title`
 // to `resolveInstanceTitle` to the rendered wordmark) is exercised end to end,
@@ -822,17 +827,22 @@ describe("MobileShell terminal-screen macro trigger", () => {
 })
 
 describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
-  // The toggles are gated on `context === "terminal" && isMobile`, and
+  // The top-bar toggle is gated on `context === "terminal" && isMobile`, and
   // `useIsMobile` reads `window.innerWidth`, so these tests shrink it below
-  // the 768px breakpoint (mirroring the TerminalPane compose-bar tests).
+  // the 768px breakpoint (mirroring the TerminalPane compose-bar tests). The
+  // keys toggle additionally rides the touch surfaces, hence the pointer stub:
+  // the item is present exactly where pressing it puts a key row on screen.
   const desktopWidth = window.innerWidth
+  let media: MatchMediaStub
   beforeEach(() => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
+    media = stubCoarsePointer()
   })
   afterEach(() => {
+    media.restore()
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
@@ -866,6 +876,19 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     fireEvent.click(screen.getByLabelText("Session actions"))
     expect(screen.getByText("Hide top bar")).toBeTruthy()
     expect(screen.getByText("Hide terminal keys")).toBeTruthy()
+  })
+
+  // NEVER INERT. A narrow window on a laptop is a mobile LAYOUT with a fine
+  // pointer, so no key row is on screen and none would appear: the item used to
+  // render there and do nothing when pressed. The way in is the input `⋯`,
+  // which offers the message box on every device.
+  it("drops the keys toggle where no key row could appear", () => {
+    media.set(COARSE_POINTER_QUERY, false)
+    mockState = terminalState()
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    expect(screen.getByText("Hide top bar")).toBeTruthy()
+    expect(screen.queryByText("Hide terminal keys")).toBeNull()
   })
 
   it("labels flip to Show when a bar is already hidden", () => {
@@ -983,15 +1006,19 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
   // Every mobile terminal screen carries the quick toggles; without them,
   // hiding the bars means a trip through Preferences.
   // The toggles read `useIsMobile`, so the viewport shrinks below the 768px
-  // breakpoint exactly like the agent-screen quick-toggle suite above.
+  // breakpoint exactly like the agent-screen quick-toggle suite above, and the
+  // keys toggle rides the touch surfaces, hence the pointer stub.
   const desktopWidth = window.innerWidth
+  let media: MatchMediaStub
   beforeEach(() => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
+    media = stubCoarsePointer()
   })
   afterEach(() => {
+    media.restore()
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,

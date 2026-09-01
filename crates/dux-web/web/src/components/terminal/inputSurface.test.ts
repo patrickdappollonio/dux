@@ -62,6 +62,7 @@ class TermFake {
   focusCalls = 0
   scrolls = 0
   clears = 0
+  pastes: string[] = []
   modes = { applicationCursorKeysMode: false, mouseTrackingMode: "none" }
   buffer = { active: { type: "normal" } }
   rows = 24
@@ -75,6 +76,9 @@ class TermFake {
   }
   clearSelection() {
     this.clears++
+  }
+  paste(text: string) {
+    this.pastes.push(text)
   }
   scrollPages() {}
 }
@@ -401,5 +405,75 @@ describe("nextTypingFocus", () => {
       focus: true,
       focusedFor: "agent:a1:false",
     })
+  })
+})
+
+// A RIGHT-CLICK IS A PASTE INTO THE TYPING SURFACE, wherever that is. The
+// classic-terminal gesture predates the message box, and it kept writing
+// straight to the PTY: on a fine pointer with the box up that put the clipboard
+// on the wire behind an unsent draft, which is the one thing the box exists to
+// prevent.
+describe("the right-click paste", () => {
+  const withClipboard = (text: string) => {
+    vi.stubGlobal("navigator", {
+      clipboard: { readText: async () => text },
+    })
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it("joins the draft while the message box is the typing surface", async () => {
+    withClipboard("from the clipboard")
+    const { view, term, compose } = setup({ composeActive: true })
+
+    await act(async () => {
+      view.result.current.onRightClickPaste()
+    })
+
+    expect(drafts["pane-1"]).toBe("from the clipboard")
+    expect(term.pastes).toEqual([])
+    expect(document.activeElement).toBe(compose)
+  })
+
+  it("goes straight to the terminal while typing does", async () => {
+    withClipboard("from the clipboard")
+    const { view, term } = setup({ composeActive: false })
+
+    await act(async () => {
+      view.result.current.onRightClickPaste()
+    })
+
+    expect(term.pastes).toEqual(["from the clipboard"])
+    expect(drafts["pane-1"]).toBeUndefined()
+  })
+
+  // The box only exists for the owner, but the gate is the ownership verdict
+  // rather than the surface: a demotion mid-gesture must reach neither.
+  it("writes nowhere for a watcher", async () => {
+    withClipboard("from the clipboard")
+    const { view, term } = setup({ composeActive: true, owner: false })
+
+    await act(async () => {
+      view.result.current.onRightClickPaste()
+    })
+
+    expect(drafts["pane-1"]).toBeUndefined()
+    expect(term.pastes).toEqual([])
+  })
+
+  // The box can be up in the settings while its element is not mounted yet (the
+  // commit ownership flips in). The terminal is the truthful destination then,
+  // and it is what the focus rule falls back to as well.
+  it("falls back to the terminal when the box is not mounted", async () => {
+    withClipboard("from the clipboard")
+    const { view, term, composeInputRef } = setup({ composeActive: true })
+    composeInputRef.current = null
+
+    await act(async () => {
+      view.result.current.onRightClickPaste()
+    })
+
+    expect(term.pastes).toEqual(["from the clipboard"])
   })
 })

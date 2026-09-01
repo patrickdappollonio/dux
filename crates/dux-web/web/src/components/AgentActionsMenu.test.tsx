@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
+import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
 
 // The agent ⋯ menu's pull-request entries. What is pinned here is the GATING:
 // the attach item exists only with a usable gh (matching the project menu's
@@ -276,8 +277,11 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
 
 describe("AgentActionsMenu context and tab availability", () => {
   const desktopWidth = window.innerWidth
+  let media: MatchMediaStub | null = null
 
   afterEach(() => {
+    media?.restore()
+    media = null
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
@@ -291,6 +295,9 @@ describe("AgentActionsMenu context and tab availability", () => {
       value: 500,
       configurable: true,
     })
+    // The keys toggle rides the touch surfaces as well as the layout, so it is
+    // present exactly where pressing it puts a key row on screen.
+    media = stubCoarsePointer()
 
     await openMenu(session, "terminal")
     expect(screen.getByText("Hide terminal keys")).toBeTruthy()

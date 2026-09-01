@@ -4,6 +4,14 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { AgentTabView, SessionView } from "@/lib/types"
+import {
+  registerAttachCapability,
+  resetAttachCapabilities,
+} from "@/lib/attachRegistry"
+import {
+  registerPaneInputMenu,
+  resetPaneInputMenus,
+} from "@/lib/paneInputMenu"
 
 let mockState: DuxState
 const exitTheaterMock = vi.fn()
@@ -153,6 +161,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  resetPaneInputMenus()
+  resetAttachCapabilities()
   vi.unstubAllGlobals()
   Element.prototype.getBoundingClientRect = realRect
 })
@@ -875,5 +885,118 @@ describe("moving the theater pill", () => {
   it("settles with an animation for everybody else", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     expect(pill().className).toContain("transition-[left,top]")
+  })
+})
+
+// ONE `⋯` IN THEATER, and it is this one. On a computer the mode takes the
+// whole window, so the pane renders no input row to anchor its own ellipsis and
+// publishes the items for the pill instead. Without this the typing-surface
+// switch and "Attach a file…" would be unreachable for the duration of a mode
+// whose entire point is staying in it.
+describe("the input items the pill folds in", () => {
+  const settle = () => new Promise((r) => setTimeout(r, 40))
+
+  async function openMenu() {
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }))
+    await screen.findByRole("menu")
+    await settle()
+  }
+
+  function items(): (string | null)[] {
+    return screen.getAllByRole("menuitem").map((e) => e.textContent)
+  }
+
+  it("shows the switch and the attach the pane published", async () => {
+    const attach = vi.fn()
+    registerAttachCapability("tm1", attach)
+    registerPaneInputMenu("tm1", {
+      gates: {
+        attach: true,
+        surfaceSwitch: true,
+        keysToggle: false,
+        topBarToggle: false,
+        theaterExit: true,
+      },
+      composeSurface: false,
+    })
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    await openMenu()
+
+    expect(items().some((t) => t?.includes("Use the message box"))).toBe(true)
+    const attachItem = screen
+      .getAllByRole("menuitem")
+      .find((e) => e.textContent?.includes("Attach a file"))
+    expect(attachItem).toBeTruthy()
+    fireEvent.click(attachItem!)
+    expect(attach).toHaveBeenCalledTimes(1)
+  })
+
+  // The item's wording follows the RESOLVED surface, not the pointer, exactly
+  // as it does in the pane's own menu: both write through `setTypingSurface`.
+  it("names the way back while the message box is the surface", async () => {
+    registerPaneInputMenu("tm1", {
+      gates: {
+        attach: false,
+        surfaceSwitch: true,
+        keysToggle: false,
+        topBarToggle: false,
+        theaterExit: true,
+      },
+      composeSurface: true,
+    })
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    await openMenu()
+
+    expect(
+      items().some((t) => t?.includes("Type directly in the terminal")),
+    ).toBe(true)
+  })
+
+  // An attach the pane advertises but no mounted owner can perform is not an
+  // item: it would open nothing. Both halves have to be there.
+  it("drops the attach when no mounted pane can perform it", async () => {
+    registerPaneInputMenu("tm1", {
+      gates: {
+        attach: true,
+        surfaceSwitch: false,
+        keysToggle: false,
+        topBarToggle: false,
+        theaterExit: true,
+      },
+      composeSurface: false,
+    })
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    await openMenu()
+
+    expect(items().some((t) => t?.includes("Attach a file"))).toBe(false)
+  })
+
+  // A phone in theater keeps its own input row (a pill can end up under the
+  // soft keyboard), so it publishes nothing and this menu stays what it was.
+  it("carries no input items while the pane still has its own row", async () => {
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    await openMenu()
+
+    expect(items().some((t) => t?.includes("Use the message box"))).toBe(false)
+    expect(items().some((t) => t?.includes("Attach a file"))).toBe(false)
+    expect(items().some((t) => t?.includes("Leave theater mode"))).toBe(true)
+  })
+
+  // It reads the pane it is painted over, never whichever registered last.
+  it("ignores a menu published by another pane", async () => {
+    registerPaneInputMenu("someone-else", {
+      gates: {
+        attach: false,
+        surfaceSwitch: true,
+        keysToggle: false,
+        topBarToggle: false,
+        theaterExit: true,
+      },
+      composeSurface: false,
+    })
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    await openMenu()
+
+    expect(items().some((t) => t?.includes("Use the message box"))).toBe(false)
   })
 })

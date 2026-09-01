@@ -6,7 +6,7 @@ import {
   composeSendTooLarge,
   composeSendWrites,
   composeBarMode,
-  composeBarVisible,
+  resolvedTypingSurface,
   composeBarShown,
   insertIntoComposeDraft,
   inactiveCursorStyle,
@@ -14,6 +14,7 @@ import {
   inputMenuSurfaceSwitchOffered,
   typingSurfaceToggleOffered,
 } from "./composebar"
+import type { ComposeBarMode, TypingSurfaceChoice } from "./composebar"
 
 // The full write-plan matrix for the mobile compose bar's Send action. The
 // helper is pure (no xterm import), so every rule the component relies on is
@@ -205,45 +206,114 @@ describe("composeBarMode", () => {
   })
 })
 
-describe("composeBarVisible", () => {
-  it("auto follows the pointer capability", () => {
-    expect(composeBarVisible("auto", true)).toBe(true)
-    expect(composeBarVisible("auto", false)).toBe(false)
+describe("resolvedTypingSurface", () => {
+  // THE POINTER IS A DEFAULT, NOT A GATE. Nobody has chosen, so the capability
+  // answers: a finger gets the buffered box, a mouse types straight in.
+  it("falls back to the pointer while nothing has been chosen", () => {
+    expect(resolvedTypingSurface("auto", true, null)).toBe("compose")
+    expect(resolvedTypingSurface("auto", false, null)).toBe("direct")
   })
 
-  // The whole reason the setting is three-way: a tablet with a keyboard case
-  // and one without report identical media queries, so the user must be able
-  // to override the capability answer in BOTH directions.
-  it("always and never override the capability in both directions", () => {
-    expect(composeBarVisible("always", false)).toBe(true)
-    expect(composeBarVisible("always", true)).toBe(true)
-    expect(composeBarVisible("never", true)).toBe(false)
-    expect(composeBarVisible("never", false)).toBe(false)
+  // The whole point of the fix: an explicit choice wins on EVERY device, in
+  // both directions. Turning the message box on where the browser thinks it is
+  // not needed is allowed.
+  it("lets an explicit choice win in both directions on either pointer", () => {
+    expect(resolvedTypingSurface("auto", false, "compose")).toBe("compose")
+    expect(resolvedTypingSurface("auto", true, "direct")).toBe("direct")
+    expect(resolvedTypingSurface("auto", true, "compose")).toBe("compose")
+    expect(resolvedTypingSurface("auto", false, "direct")).toBe("direct")
+  })
+
+  // The SETTING is the configuration surface and it wins. A per-device toggle
+  // must never quietly defeat something the operator wrote in config.
+  it("lets always and never win over the device-local choice", () => {
+    expect(resolvedTypingSurface("always", false, "direct")).toBe("compose")
+    expect(resolvedTypingSurface("never", true, "compose")).toBe("direct")
   })
 })
 
+// EVERY STATE OF THE RESOLVED RULE, as a table. Three modes times two pointer
+// answers times three choices is small enough to write out in full, and written
+// out in full a changed arm shows up as a row that disagrees rather than as a
+// case nobody thought to add. The prose tests above say WHY each arm is what it
+// is; this says WHAT, exhaustively.
+describe("resolvedTypingSurface over every state", () => {
+  const table: [
+    ComposeBarMode,
+    boolean,
+    TypingSurfaceChoice | null,
+    TypingSurfaceChoice,
+  ][] = [
+    // The setting has decided; neither the pointer nor the choice is consulted.
+    ["always", false, null, "compose"],
+    ["always", false, "compose", "compose"],
+    ["always", false, "direct", "compose"],
+    ["always", true, null, "compose"],
+    ["always", true, "compose", "compose"],
+    ["always", true, "direct", "compose"],
+    ["never", false, null, "direct"],
+    ["never", false, "compose", "direct"],
+    ["never", false, "direct", "direct"],
+    ["never", true, null, "direct"],
+    ["never", true, "compose", "direct"],
+    ["never", true, "direct", "direct"],
+    // `auto` means work it out: the person first, the browser second.
+    ["auto", false, null, "direct"],
+    ["auto", false, "compose", "compose"],
+    ["auto", false, "direct", "direct"],
+    ["auto", true, null, "compose"],
+    ["auto", true, "compose", "compose"],
+    ["auto", true, "direct", "direct"],
+  ]
+
+  it.each(table)(
+    "%s with coarse=%s and choice %s resolves to %s",
+    (mode, coarsePointer, choice, expected) => {
+      expect(resolvedTypingSurface(mode, coarsePointer, choice)).toBe(expected)
+      // The two readers of the rule agree with it by construction, and this is
+      // what keeps that true if either ever grows a condition of its own.
+      expect(composeBarShown(mode, coarsePointer, choice)).toBe(
+        expected === "compose",
+      )
+    },
+  )
+})
+
 // THE TWO ORTHOGONAL QUESTIONS. Width decides the LAYOUT (how much room is
-// there, so which shell you get). The POINTER decides the TYPING SURFACE (is a
-// finger doing the typing, so does the text need a buffer autocorrect and swipe
-// can work in). These helpers answer only the second one, and nothing here has
-// a width in it.
+// there, so which shell you get). The POINTER decides the DEFAULT TYPING
+// SURFACE (is a finger doing the typing, so does the text need a buffer
+// autocorrect and swipe can work in). These helpers answer only the second one,
+// and nothing here has a width in it.
 describe("touchSurfacesApply", () => {
   it("puts the touch surfaces wherever the pointer is coarse, layout regardless", () => {
-    expect(touchSurfacesApply("auto", true)).toBe(true)
-    expect(touchSurfacesApply("never", true)).toBe(true)
+    expect(touchSurfacesApply("auto", true, null)).toBe(true)
+    expect(touchSurfacesApply("never", true, null)).toBe(true)
   })
 
   it("keeps them away from a fine pointer unless the user asked for them", () => {
-    expect(touchSurfacesApply("auto", false)).toBe(false)
-    expect(touchSurfacesApply("never", false)).toBe(false)
-    expect(touchSurfacesApply("always", false)).toBe(true)
+    expect(touchSurfacesApply("auto", false, null)).toBe(false)
+    expect(touchSurfacesApply("never", false, null)).toBe(false)
+    expect(touchSurfacesApply("always", false, null)).toBe(true)
+  })
+
+  // The inert-toggle bug: choosing the message box on a laptop used to leave
+  // the keys behind, because the key row was gated on the pointer alone.
+  it("brings the keys to a fine pointer that chose the message box", () => {
+    expect(touchSurfacesApply("auto", false, "compose")).toBe(true)
   })
 
   // `never` is about the compose BOX. A phone still cannot produce Esc, Tab or
   // a Ctrl chord, so the accessory keys stay.
   it("keeps the accessory keys on a phone whose compose box is switched off", () => {
-    expect(touchSurfacesApply("never", true)).toBe(true)
+    expect(touchSurfacesApply("never", true, null)).toBe(true)
     expect(composeBarShown("never", true, null)).toBe(false)
+  })
+
+  // Direct is one of the two legal divergences: the key row stays, because it
+  // carries the way back.
+  it("keeps the keys on a phone that chose direct typing", () => {
+    expect(touchSurfacesApply("auto", true, "direct")).toBe(true)
+    expect(composeBarShown("auto", true, "direct")).toBe(false)
   })
 })
 
@@ -258,8 +328,6 @@ describe("composeBarShown", () => {
     expect(composeBarShown("auto", false, "compose")).toBe(true)
   })
 
-  // The SETTING is the configuration surface and it wins. A transient toggle
-  // must never quietly defeat something the operator wrote in config.
   it("lets always and never win over the device-local choice", () => {
     expect(composeBarShown("always", true, "direct")).toBe(true)
     expect(composeBarShown("always", false, "direct")).toBe(true)
@@ -269,38 +337,31 @@ describe("composeBarShown", () => {
 })
 
 describe("typingSurfaceToggleOffered", () => {
-  // The toggle exists only where it can do something: in `auto`, on a device
-  // that has the touch surfaces at all. Under always/never the setting decides
-  // and a control that changed nothing would be a lie.
-  it("is offered in auto on a coarse pointer and nowhere else", () => {
-    expect(typingSurfaceToggleOffered("auto", true)).toBe(true)
-    expect(typingSurfaceToggleOffered("auto", false)).toBe(false)
-    expect(typingSurfaceToggleOffered("always", true)).toBe(false)
-    expect(typingSurfaceToggleOffered("never", true)).toBe(false)
+  // The in-bar cap lives in the key row, so it is offered exactly where that
+  // row is. Under always/never the setting decides and a control that changed
+  // nothing would be a lie.
+  it("is offered in auto wherever the key row is", () => {
+    expect(typingSurfaceToggleOffered("auto", true, null)).toBe(true)
+    expect(typingSurfaceToggleOffered("auto", false, null)).toBe(false)
+    expect(typingSurfaceToggleOffered("auto", false, "compose")).toBe(true)
+    expect(typingSurfaceToggleOffered("always", true, null)).toBe(false)
+    expect(typingSurfaceToggleOffered("never", true, null)).toBe(false)
   })
 })
 
 describe("inputMenuSurfaceSwitchOffered", () => {
-  // Same rule as the in-bar toggle wherever the bar exists.
-  it("follows the touch surfaces while nothing is stored", () => {
-    expect(inputMenuSurfaceSwitchOffered("auto", true, null)).toBe(true)
-    expect(inputMenuSurfaceSwitchOffered("auto", false, null)).toBe(false)
+  // NEVER INERT AND NEVER MISSING. The menu is the guaranteed way in and out of
+  // the virtual input, so under `auto` it is offered on every device whatever
+  // the pointer says and whatever has been chosen so far.
+  it("is offered on every device under auto", () => {
+    expect(inputMenuSurfaceSwitchOffered("auto")).toBe(true)
   })
 
-  // THE TRAP THIS CLOSES: `auto` + fine pointer + a stored `compose` choice
-  // puts the message box up while the accessory bar (and with it the only
-  // toggle) never mounts. The menu is then the one surface that can switch
-  // back, so it offers the item on the stored choice alone.
-  it("is offered on a fine pointer once a choice is stored", () => {
-    expect(inputMenuSurfaceSwitchOffered("auto", false, "compose")).toBe(true)
-    expect(inputMenuSurfaceSwitchOffered("auto", false, "direct")).toBe(true)
-  })
-
-  // The SETTING still wins: a stored choice cannot conjure a switch under
-  // always/never, where it would change nothing.
+  // The SETTING still wins: the switch cannot appear under always/never, where
+  // pressing it would change nothing.
   it("is never offered outside auto", () => {
-    expect(inputMenuSurfaceSwitchOffered("always", true, "direct")).toBe(false)
-    expect(inputMenuSurfaceSwitchOffered("never", true, "compose")).toBe(false)
+    expect(inputMenuSurfaceSwitchOffered("always")).toBe(false)
+    expect(inputMenuSurfaceSwitchOffered("never")).toBe(false)
   })
 })
 

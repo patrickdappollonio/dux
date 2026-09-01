@@ -32,7 +32,7 @@ import {
   setComposeDraft,
   useDux,
 } from "@/lib/store"
-import { pasteIntoTerm } from "@/lib/termClipboard"
+import { pasteClipboardText, pasteIntoTerm } from "@/lib/termClipboard"
 import type { PtySocket } from "@/lib/ptySocket"
 import { arrowSeq, ESC, pageKeySeq } from "@/lib/termkeys"
 import {
@@ -242,11 +242,22 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
   // Right-click pastes the browser clipboard (classic terminal: selecting
   // copies via copy-on-select, right-click pastes). Gated on ownership (a
   // read-only viewer cannot drive input). Needs a secure context for
-  // `readText`; `pasteIntoTerm` toasts a "use Ctrl+v" hint when the clipboard
+  // `readText`; the shared reader toasts a "use Ctrl+v" hint when the clipboard
   // cannot be read (plain HTTP).
+  //
+  // THE DESTINATION IS THE TYPING SURFACE, not always the terminal. While the
+  // message box is up it is where typing goes, so a right-click joins the DRAFT
+  // through the same splice the box's own paste listener delivers into. Sending
+  // it to the PTY instead put the clipboard on the wire behind an unsent draft,
+  // in the one state the pane exists to keep keystrokes out of the child.
   function onRightClickPaste() {
+    if (!ownership.read()) return
+    if (live.current.composeActive && composeInputRef.current !== null) {
+      void pasteClipboardText(insertComposeText, focusTypingSurface)
+      return
+    }
     const term = termRef.current
-    if (term && ownership.read()) void pasteIntoTerm(term, focusTypingSurface)
+    if (term) void pasteIntoTerm(term, focusTypingSurface)
   }
 
   // Splice text into the mobile compose bar's DRAFT at the caret. Shared by

@@ -15,6 +15,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
+import { useAttachCapability } from "@/lib/attachRegistry"
+import { usePaneInputMenu } from "@/lib/paneInputMenu"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import {
   armTheaterToggleFocus,
@@ -100,6 +102,10 @@ export function TheaterPill({
   )
   const labels = tabLabels(model.tabs)
   const sessionId = session?.id
+  // The PTY behind the pane this pill is painted over, named the same way the
+  // shells key the pane itself, so the pill reads the input menu of the pane it
+  // is actually on rather than whichever one registered last.
+  const paneId = target.kind === "agent" ? target.tabId : target.terminalId
 
   return (
     <div
@@ -244,7 +250,7 @@ export function TheaterPill({
 
       <MacroPopover variant="pill" target={target} />
 
-      <TheaterAppMenu />
+      <TheaterAppMenu paneId={paneId} />
 
       <span aria-hidden className="mx-0.5 h-5.5 w-px shrink-0 bg-border" />
 
@@ -284,10 +290,25 @@ export function TheaterPill({
 // cannot offer different things; the wrapper adds only the theater exit, from
 // the shared item the input `⋯` uses, so the way out is inside the one `⋯` too.
 //
+// It also carries the pane's INPUT items whenever the pane has nowhere of its
+// own to put them, which on a computer is the ordinary case: theater takes the
+// whole window, and a bordered `⋯` row under the terminal would be both a
+// second ellipsis beside this one and exactly the chrome the mode removes. The
+// pane publishes them for precisely that state (see `lib/paneInputMenu.ts`), so
+// the typing-surface switch and "Attach a file…" stay one press away and there
+// is still one trigger on screen. A phone keeps its own row and publishes
+// nothing, and then this menu is the app menu plus the theater exit as before.
+//
 // NAMED "Settings", like the control it stands in for: a user looking for the
 // cog's menu should find it under the name they know, and the pill's own
 // buttons already say what each of them does.
-function TheaterAppMenu() {
+function TheaterAppMenu({ paneId }: { paneId: string }) {
+  const paneMenu = usePaneInputMenu(paneId)
+  // The attach item is the mounted OWNER pane's own capability, borrowed the
+  // way the row menus borrow it, so the file travels through that pane's
+  // already-gated socket and lands in its own sink. Both halves have to be
+  // there: the pane says the item belongs, the registry hands over the act.
+  const attachToPane = useAttachCapability([paneId])
   return (
     <DropdownMenu>
       <SimpleTooltip content="Settings">
@@ -312,12 +333,17 @@ function TheaterAppMenu() {
         <DropdownMenuSeparator />
         <InputMenuItems
           gates={{
-            attach: false,
-            surfaceSwitch: false,
-            keysToggle: false,
+            attach: (paneMenu?.gates.attach ?? false) && attachToPane !== null,
+            surfaceSwitch: paneMenu?.gates.surfaceSwitch ?? false,
+            keysToggle: paneMenu?.gates.keysToggle ?? false,
+            // Never here: the top bar is one of the things theater took away,
+            // and this menu only exists while the mode is on.
             topBarToggle: false,
+            // The guaranteed way out, whatever the pane published.
             theaterExit: true,
           }}
+          composeSurface={paneMenu?.composeSurface ?? false}
+          onAttach={() => attachToPane?.()}
         />
       </DropdownMenuContent>
     </DropdownMenu>

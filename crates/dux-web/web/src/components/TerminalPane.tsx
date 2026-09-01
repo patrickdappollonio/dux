@@ -81,6 +81,8 @@ import {
   useViewerGrid,
 } from "@/components/terminal/viewerGrid"
 import { REPLAY_WAIT_POLL_MS } from "@/components/terminal/constants"
+import { suspendTerminalTabStop } from "@/components/terminal/inputWiring"
+import { registerPaneInputMenu } from "@/lib/paneInputMenu"
 import {
   focusTypingSurfaceIn,
   nextTypingFocus,
@@ -129,8 +131,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     fitAddonRef,
     ptyRef,
     isMobile,
-    isCoarsePointer,
-    typingSurface,
     pickerInput,
     openFilePicker,
     dragActive,
@@ -155,17 +155,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     composeInputRef,
     viewerOverflow,
     setViewerOverflow,
-    live,
+    liveSettingsFor,
     isSessionSlotTab,
   } = useTerminalPaneSetup(props)
-
-  // THE ONE FOCUS-ROUTING RULE, bound to this pane's three handles. It is a
-  // standalone function in the input surface rather than a method of it,
-  // because two things need it BEFORE that hook has run: the ownership
-  // machine's take-over, and the lifecycle's focus-on-mount. Every refocus in
-  // the pane goes through this one binding.
-  const focusTypingSurface = () =>
-    focusTypingSurfaceIn({ live, composeInputRef, termRef })
 
   // True while the PTY socket has dropped and is retrying (non-blocking), or
   // while a take-over is deliberately bouncing it. Drives a "Reconnecting…"
@@ -249,6 +241,29 @@ export function TerminalPane(props: TerminalPaneProps) {
     ptyRef,
     setReconnecting,
   })
+
+  // THE LIVE-SETTINGS SNAPSHOT, published here rather than inside the setup
+  // hook because `composeActive` is OWNER-GATED and the verdict is only known
+  // now. The typing surfaces render for the input owner alone, so a watcher
+  // with a stored `compose` choice has no message box: publishing `true` there
+  // armed the focus guard over a pane with nothing to redirect into (every
+  // redirect a no-op) and painted the permanently-focused caret xterm shows
+  // while the box holds the keyboard. Still ahead of the relayout hook and of
+  // the lifecycle, which is the ordering this container's contract requires.
+  // IS THE MESSAGE BOX THE TYPING SURFACE IN THIS PANE, RIGHT NOW? The bar
+  // renders for the input owner alone, so a watcher with a stored `compose`
+  // choice has no box at all: everything downstream of this flag has to know
+  // that, or it acts on a surface that is not on screen.
+  const composeSurfaceLive = composeBarEnabled && isOwner
+  const live = useTerminalLiveSettings(liveSettingsFor(composeSurfaceLive))
+
+  // THE ONE FOCUS-ROUTING RULE, bound to this pane's three handles. It is a
+  // standalone function in the input surface rather than a method of it,
+  // because two things need it BEFORE the input-surface hook has run: the
+  // ownership machine's take-over, and the lifecycle's focus-on-mount. Every
+  // refocus in the pane goes through this one binding.
+  const focusTypingSurface = () =>
+    focusTypingSurfaceIn({ live, composeInputRef, termRef })
 
   // LOSING OWNERSHIP LEAVES THEATER, and forgets that this pane was ever in it.
   // Another device is driving now and the take-over card is about to cover the
@@ -391,8 +406,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   useEffect(() => {
     const term = termRef.current
     if (!term) return
-    term.options.cursorInactiveStyle = inactiveCursorStyle(composeBarEnabled)
-  }, [composeBarEnabled, termRef])
+    term.options.cursorInactiveStyle = inactiveCursorStyle(composeSurfaceLive)
+  }, [composeSurfaceLive, termRef])
   // Tracks the attention-grace hidden -> visible transition (see
   // `visibleSinceAfterTransition` in viewedPing.ts). Refs, not state, so both
   // the lifecycle's visibility listeners and the ownership-gain effect below
@@ -454,13 +469,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     inputMenuGates,
     menuHasItems,
     inputMenuRow,
-    inColumn,
+    inputMenuInPill,
   } = terminalInputLayout({
     isOwner,
     fileDropEnabled,
     composeMode,
-    isCoarsePointer,
-    typingSurface,
     touchSurfaces,
     accessoryBarVisible,
     composeBarEnabled,
@@ -521,11 +534,13 @@ export function TerminalPane(props: TerminalPaneProps) {
   //   IN THIS FILE
   //   [fontFamily, fontSize]              live-apply a font preference change
   //   [dragActive]                        pin the drag-depth counter to zero
-  //   [composeBarEnabled]                 the open terminal's inactive caret
+  //   [composeSurfaceLive]                the open terminal's inactive caret
   //   [isOwner, composeBarEnabled]        focus the freshly mounted compose box
   //   [composeBarEnabled, isOwner]        the compose-insert sink
   //   [live]                              the terminal focus target
   //   [composeBarEnabled, isOwner]        the compose textarea's paste listener
+  //   [composeSurfaceLive]                xterm's tab stop, while the box is up
+  //   [inputMenuInPill, ...the gates]     the input menu the theater pill shows
   //   [isSessionSlotTab, everReady, ...]  eject to the welcome screen on exit
   //   [isOwner]                           the viewed ping on gaining ownership
   //
@@ -661,6 +676,50 @@ export function TerminalPane(props: TerminalPaneProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composeBarEnabled, isOwner])
 
+  // THE KEYBOARD WAY OUT OF THE PANE while the box holds the typing surface.
+  // The focus guard sends every focus landing in the terminal container to the
+  // message box, which turned xterm's `tabindex="0"` helper textarea into a
+  // trap: Shift-Tab out of the box landed there and was bounced straight back,
+  // so backward navigation out of the pane was impossible. Taking it out of the
+  // tab order is the answer that a pointer does not consult, so a click into
+  // the terminal still hands focus to the box (see `suspendTerminalTabStop`).
+  // Same gate as the box itself, and restored the moment it goes away.
+  useEffect(() => {
+    if (!composeSurfaceLive) return
+    return suspendTerminalTabStop(termRef.current?.textarea)
+    // The terminal is created by the lifecycle effect declared above this one,
+    // so `termRef` is filled by the time this runs; it is listed for the linter
+    // rather than because its identity ever changes.
+  }, [composeSurfaceLive, termRef])
+
+  // THE INPUT `⋯` WITH NOWHERE TO RENDER. In theater on a computer the pane
+  // has no input row to anchor it and the floating pill is the only chrome
+  // left, so the items are published for the pill to fold into its own single
+  // menu (see `lib/paneInputMenu.ts`). Registered only while this pane really
+  // has no anchor of its own, so the same items can never appear twice.
+  //
+  // Every dependency is a primitive: the gates object is rebuilt on each render,
+  // and a registration keyed on its identity would publish on every commit,
+  // re-render the pill and come straight back round.
+  const { attach, surfaceSwitch, keysToggle, topBarToggle, theaterExit } =
+    inputMenuGates
+  useEffect(() => {
+    if (!inputMenuInPill) return
+    return registerPaneInputMenu(id, {
+      gates: { attach, surfaceSwitch, keysToggle, topBarToggle, theaterExit },
+      composeSurface: composeBarEnabled,
+    })
+  }, [
+    id,
+    inputMenuInPill,
+    attach,
+    surfaceSwitch,
+    keysToggle,
+    topBarToggle,
+    theaterExit,
+    composeBarEnabled,
+  ])
+
   // Mirror the TUI's exit behavior: when the agent we were attached to stops
   // running (it produced output in this pane, then its session left `active`
   // — the exit prune marks it detached), reset the center pane back to the
@@ -702,7 +761,6 @@ export function TerminalPane(props: TerminalPaneProps) {
   const pane = (
     <TerminalPaneSurface
       kind={kind}
-      inColumn={inColumn}
       dragActive={dragActive}
       setDragActive={setDragActive}
       dragDepthRef={dragDepthRef}
@@ -727,7 +785,6 @@ export function TerminalPane(props: TerminalPaneProps) {
   return (
     <TerminalPaneLayout
       pane={pane}
-      inColumn={inColumn}
       isOwner={isOwner}
       accessoryBarShown={accessoryBarShown}
       composeBarShown={composeBarShownHere}
@@ -907,10 +964,15 @@ function terminalTouchSettings(
       isCoarsePointer,
       typingSurface,
     ),
-    touchSurfaces: touchSurfacesApply(composeMode, isCoarsePointer),
+    touchSurfaces: touchSurfacesApply(
+      composeMode,
+      isCoarsePointer,
+      typingSurface,
+    ),
     surfaceToggleOffered: typingSurfaceToggleOffered(
       composeMode,
       isCoarsePointer,
+      typingSurface,
     ),
     accessoryBarVisible: mobileAccessoryBarVisible(duxState),
     topBarVisible: mobileTopBarVisible(duxState),
@@ -922,8 +984,6 @@ type TerminalInputLayoutInputs = {
   isOwner: boolean
   fileDropEnabled: boolean
   composeMode: ReturnType<typeof composeBarMode>
-  isCoarsePointer: boolean
-  typingSurface: ReturnType<typeof useTypingSurface>
   touchSurfaces: boolean
   accessoryBarVisible: boolean
   composeBarEnabled: boolean
@@ -939,12 +999,7 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
   const inputMenuGates = {
     attach: input.isOwner && input.fileDropEnabled,
     surfaceSwitch:
-      input.isOwner &&
-      inputMenuSurfaceSwitchOffered(
-        input.composeMode,
-        input.isCoarsePointer,
-        input.typingSurface,
-      ),
+      input.isOwner && inputMenuSurfaceSwitchOffered(input.composeMode),
     keysToggle: input.isOwner && input.touchSurfaces,
     // Not in theater: the top bar is one of the things theater took away, and
     // an item offering to show a bar this mode has already removed is a lie
@@ -956,23 +1011,41 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
     theaterExit: input.theater,
   }
   const menuHasItems = inputMenuHasItems(inputMenuGates)
-  const ownerNeedsMenuRow =
-    input.touchSurfaces || (input.isMobile && !input.topBarVisible)
+  // THE OWNER'S `⋯` IS UNCONDITIONAL, in its own minimal row when no bar is up
+  // to carry it. It is the one guaranteed way into the virtual input, so gating
+  // it on the very surfaces it turns on is circular: on a laptop that gate left
+  // the switch nowhere at all. A viewer has no input surfaces to reach, so its
+  // row stays the narrow phone-chrome fallback. `menuHasItems` above still
+  // decides whether the row has anything to show.
   const viewerNeedsMenuRow = input.isMobile && !input.topBarVisible
+  // NOT IN THEATER ON A COMPUTER, where the mode has taken the whole window and
+  // the floating pill is the only chrome left. A bordered row under the
+  // terminal there is a second `⋯` beside the pill's own, and it is exactly the
+  // chrome this mode exists to remove. The items move INTO the pill instead
+  // (`inputMenuInPill` below), so the switch stays one press away and there is
+  // still only one trigger on screen.
   const inputMenuRow =
     !accessoryBarShown &&
     !composeBarShown &&
     menuHasItems &&
-    (input.isOwner ? ownerNeedsMenuRow : viewerNeedsMenuRow)
-  const inColumn =
-    input.isMobile || accessoryBarShown || composeBarShown || inputMenuRow
+    ((input.isOwner && !input.theater) || viewerNeedsMenuRow)
+  // The pill carries the items exactly while theater is on and nothing else in
+  // the pane is anchoring them, so they can never be in two menus at once: a
+  // phone in theater keeps its own row (a pill there can end up under the soft
+  // keyboard) and publishes nothing.
+  const inputMenuInPill =
+    input.theater &&
+    !accessoryBarShown &&
+    !composeBarShown &&
+    !inputMenuRow &&
+    menuHasItems
   return {
     accessoryBarShown,
     composeBarShown,
     inputMenuGates,
     menuHasItems,
     inputMenuRow,
-    inColumn,
+    inputMenuInPill,
   }
 }
 
@@ -1033,14 +1106,12 @@ function useTerminalPaneSetup(props: TerminalPaneProps) {
   const target = terminalTargetView(props, spine, ids)
   const composeInputRef = useRef<HTMLTextAreaElement | null>(null)
   const [viewerOverflow, setViewerOverflow] = useState(false)
-  const live = useTerminalLiveSettings(
-    terminalLiveSettings(
-      preferences,
-      target,
-      viewerOverflow,
-      touch.composeBarEnabled,
-    ),
-  )
+  // The snapshot is BUILT here and PUBLISHED in the component body, because one
+  // of its fields is not known yet: whether the message box is actually the
+  // typing surface depends on owning the input, and the ownership machine runs
+  // after this hook. See the publish site for what that gate is worth.
+  const liveSettingsFor = (composeActive: boolean) =>
+    terminalLiveSettings(preferences, target, viewerOverflow, composeActive)
 
   return {
     hostRef,
@@ -1049,8 +1120,6 @@ function useTerminalPaneSetup(props: TerminalPaneProps) {
     fitAddonRef,
     ptyRef,
     isMobile,
-    isCoarsePointer,
-    typingSurface,
     pickerInput,
     openFilePicker,
     dragActive,
@@ -1069,14 +1138,13 @@ function useTerminalPaneSetup(props: TerminalPaneProps) {
     composeInputRef,
     viewerOverflow,
     setViewerOverflow,
-    live,
+    liveSettingsFor,
     isSessionSlotTab: target.isSessionSlotTab,
   }
 }
 
 type TerminalPaneSurfaceProps = {
   kind: TerminalPaneProps["kind"]
-  inColumn: boolean
   dragActive: boolean
   setDragActive: (active: boolean) => void
   dragDepthRef: RefObject<number>
@@ -1099,7 +1167,6 @@ type TerminalPaneSurfaceProps = {
 
 function TerminalPaneSurface({
   kind,
-  inColumn,
   dragActive,
   setDragActive,
   dragDepthRef,
@@ -1121,11 +1188,7 @@ function TerminalPaneSurface({
 }: TerminalPaneSurfaceProps) {
   return (
     <div
-      className={
-        inColumn
-          ? "group relative min-h-0 w-full flex-1 overflow-hidden bg-background"
-          : "group relative h-full w-full overflow-hidden bg-background"
-      }
+      className="group relative min-h-0 w-full flex-1 overflow-hidden bg-background"
       onDragEnter={(event) => {
         if (!upload.paneAcceptsFileDrag(event)) return
         event.preventDefault()
@@ -1359,7 +1422,6 @@ function TakeoverCard({
 
 type TerminalPaneLayoutProps = {
   pane: ReactNode
-  inColumn: boolean
   isOwner: boolean
   accessoryBarShown: boolean
   composeBarShown: boolean
@@ -1376,7 +1438,6 @@ type TerminalPaneLayoutProps = {
 
 function TerminalPaneLayout({
   pane,
-  inColumn,
   isOwner,
   accessoryBarShown,
   composeBarShown,
@@ -1390,8 +1451,6 @@ function TerminalPaneLayout({
   kind,
   onAttach,
 }: TerminalPaneLayoutProps) {
-  if (!inColumn) return pane
-
   const inputMenu = (
     <InputMenu
       gates={inputMenuGates}

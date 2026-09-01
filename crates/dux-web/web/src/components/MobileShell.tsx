@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useTouchSurfaces } from "@/hooks/use-typing-surface"
 import {
   dormantTabNeedsCard,
   shouldShowTabStrip,
@@ -158,6 +159,7 @@ function AgentlessTerminalScreen({
   // which is on screen in every bar state, or from Preferences.
   const topBarVisible = mobileTopBarVisible(duxState)
   const isMobile = useIsMobile()
+  const touchSurfaces = useTouchSurfaces()
   // On the phone shell the app header IS the chrome stack theater takes away,
   // and it goes whatever the top-bar preference says: theater is the stronger,
   // deliberate statement of the same intent. The preference is untouched
@@ -217,16 +219,18 @@ function AgentlessTerminalScreen({
                   ConfirmDeleteTerminalDialog are the danger signal), routed
                   through the same confirm target.
 
-                  Both toggles ride `isMobile`: this header is the phone
+                  The top-bar toggle rides `isMobile`: this header is the phone
                   shell's own chrome, which is the gate this menu has always
-                  had. Visibility is the caller's, so the input `⋯` can widen
-                  the keys item to a coarse-pointer tablet without widening it
-                  here. */}
+                  had. The keys toggle rides the touch surfaces as well, so it
+                  is present exactly where pressing it puts a key row on screen:
+                  in a narrow window on a laptop the width alone said yes and
+                  the press did nothing. Asking for the message box from the
+                  input `⋯` brings the surfaces, and this item, along. */}
               <InputMenuItems
                 gates={{
                   attach: false,
                   surfaceSwitch: false,
-                  keysToggle: isMobile,
+                  keysToggle: isMobile && touchSurfaces,
                   topBarToggle: isMobile,
                   // Same reason as the agent screen's header menu: this menu
                   // lives in the header theater takes away, so it is never on

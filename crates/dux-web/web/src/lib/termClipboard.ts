@@ -68,6 +68,22 @@ export async function pasteIntoTerm(
   term: Pasteable,
   refocus: () => void,
 ): Promise<void> {
+  await pasteClipboardText((text) => term.paste(text), refocus)
+}
+
+/// Read the BROWSER clipboard and hand the text to whatever the typing surface
+/// is right now.
+///
+/// The same read, the same guards and the same single refusal message as
+/// `pasteIntoTerm`, which is now one call to this; only the destination
+/// differs. It exists because the terminal is not always the destination: while
+/// the message box is up it IS the typing surface, and a right-click that
+/// dropped the clipboard into the PTY behind an unsent draft would be typing
+/// past the buffer, which is the very thing the box exists to stop.
+export async function pasteClipboardText(
+  deliver: (text: string) => void,
+  refocus: () => void,
+): Promise<void> {
   const read = navigator.clipboard?.readText?.()
   if (!read) {
     notifyError("Couldn't read clipboard, use Ctrl+v to paste")
@@ -75,7 +91,7 @@ export async function pasteIntoTerm(
     return
   }
   try {
-    term.paste(await read)
+    deliver(await read)
   } catch {
     notifyError("Couldn't read clipboard, use Ctrl+v to paste")
   } finally {

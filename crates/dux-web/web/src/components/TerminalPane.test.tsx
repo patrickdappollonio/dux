@@ -19,8 +19,13 @@ import { installXtermMouseModel } from "@/lib/xtermMouseModel"
 import { VIEWER_MIN_FONT_SIZE } from "@/lib/viewerFit"
 import { replayWaitMs } from "@/lib/connectionTiming"
 import { REPLAY_WAIT_POLL_MS } from "@/components/terminal/constants"
-import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
+import {
+  COARSE_POINTER_QUERY,
+  stubCoarsePointer,
+  type MatchMediaStub,
+} from "@/test/matchMedia"
 import { GLYPH_SPINNER_CLASS, SPINNER_FRAMES } from "@/lib/spinnerFrames"
+import { usePaneInputMenu } from "@/lib/paneInputMenu"
 
 // TerminalPane embeds xterm.js, whose canvas rendering jsdom cannot back (see the
 // note in TerminalArea.test.tsx). So we mount the REAL TerminalPane — exercising
@@ -53,6 +58,9 @@ class TermStub {
     setAttribute: (name: string, value: string) => {
       this.textareaAttributes.set(name, value)
     },
+    // Real xterm's helper textarea is a tab stop, which is what makes it a trap
+    // while the focus guard is armed.
+    tabIndex: 0,
     focused: false,
     blur() {
       this.focused = false
@@ -3382,15 +3390,24 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
   const accessoryUp = () =>
     screen.queryByRole("button", { name: "Esc" }) !== null
 
-  it("uses the terminal pane itself as the desktop root when no input rows render", () => {
+  // A fine-pointer desktop owner still gets a column, because the input `⋯`
+  // takes its own minimal row there: it is the one guaranteed way to ask for
+  // the message box, so it cannot be gated on the surfaces it turns on. What
+  // must NOT be under the terminal is either touch bar.
+  it("keeps a fine-pointer desktop owner down to the menu row alone", () => {
     pointerStub = stubCoarsePointer(false)
     const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const terminalPane = screen.getByTestId("terminal-container")
       .parentElement!.parentElement!
+    const column = view.container.firstElementChild
 
-    expect(view.container.firstElementChild).toBe(terminalPane)
-    expect(terminalPane.className).toContain("h-full")
-    expect(terminalPane.className).not.toContain("flex-1")
+    expect(terminalPane.parentElement).toBe(column)
+    expect(column?.className).toContain("flex-col")
+    expect(composeUp()).toBe(false)
+    expect(accessoryUp()).toBe(false)
+    expect(
+      screen.getByRole("button", { name: "Input options" }),
+    ).toBeTruthy()
   })
 
   it("puts the terminal pane and touch rows under one column on a coarse desktop", () => {
@@ -3631,32 +3648,100 @@ describe("TerminalPane input menu follows the touch surfaces", () => {
     expect(trigger()).toBeTruthy()
   })
 
-  // A fine-pointer desktop never had the keys, never has the box, and (with
-  // uploads switched off in this state) has nothing else to put in the menu.
-  // An ⋯ that opens an empty popup is worse than no ⋯, so it renders none, and
-  // no new row appears under a desktop terminal.
-  it("offers nothing on a fine pointer with an empty item list", () => {
+  // THE POINTER IS A DEFAULT, NOT A GATE. A fine-pointer desktop starts with
+  // neither bar, and the menu offers the way in: the switch is present on every
+  // device under `auto`, because gating it on the surfaces it turns on left a
+  // laptop user no way to ask for them at all.
+  it("offers the way in on a fine pointer that has chosen nothing", () => {
     pointerStub = stubCoarsePointer(false)
-    mockState = hideAccessoryBar()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(trigger()).toBeNull()
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
+    fireEvent.click(trigger()!)
+    expect(screen.getByText("Use the message box")).toBeTruthy()
   })
 
-  // THE TRAP THE WIDER GATE CLOSES. A stored `compose` choice puts the message
-  // box up on a FINE pointer (the choice replaces the capability answer), while
-  // the accessory bar, and with it the Box/Direct cap, never mounts. Before
-  // this the only control that could switch back was in the bar that is not
-  // there; now the compose row's own ⋯ carries it.
-  it("offers the surface switch on a fine pointer with a stored choice", async () => {
+  // THE DEFECT THIS FIXES: the press used to change nothing on a fine pointer.
+  // Both surfaces arrive together, because asking for the message box on a
+  // laptop brings its keys along.
+  it("turns the virtual input on from a fine pointer, keys and all", () => {
+    pointerStub = stubCoarsePointer(false)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.click(trigger()!)
+    fireEvent.click(screen.getByText("Use the message box"))
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
+  })
+
+  // AND BACK OUT AGAIN, from the same menu, whose label follows the resolved
+  // state rather than the pointer.
+  it("switches a fine pointer back to typing straight into the terminal", async () => {
     const mod = await import("@/lib/typingSurface")
     mod.setTypingSurface("compose")
     pointerStub = stubCoarsePointer(false)
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
-    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
     fireEvent.click(trigger()!)
     fireEvent.click(screen.getByText("Type directly in the terminal"))
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+  })
+
+  // THE CHOICE OUTLIVES THE DETECTION. A convertible folding, or a mouse being
+  // unplugged, moves the DEFAULT; it must not undo what the user asked for.
+  it("keeps a stored choice across a pointer flip", async () => {
+    const mod = await import("@/lib/typingSurface")
+    mod.setTypingSurface("direct")
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    act(() => pointerStub!.set(COARSE_POINTER_QUERY, false))
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    act(() => pointerStub!.set(COARSE_POINTER_QUERY, true))
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+  })
+
+  // THE SETTING STILL WINS. `never` is configuration, and the per-device switch
+  // is not offered where it could not take effect.
+  it("offers no switch under a hard never, on either pointer", () => {
+    pointerStub = stubCoarsePointer(false)
+    const state = makeState()
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+      "never"
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    // Nothing else belongs in the menu in this state (uploads are off here and
+    // the keys cannot apply), so the never-renders-empty rule leaves no trigger
+    // at all. The switch's absence is the point either way.
+    expect(trigger()).toBeNull()
+  })
+
+  // The other pointer, where the menu really does exist: `never` keeps the
+  // accessory keys (a soft keyboard still cannot produce a Ctrl chord), so the
+  // trigger is there and what it opens is everything BUT the switch.
+  it("offers no switch under a hard never on a coarse pointer either", () => {
+    pointerStub = stubCoarsePointer(true)
+    const state = makeState()
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+      "never"
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    fireEvent.click(trigger()!)
+    expect(screen.getByText("Hide terminal keys")).toBeTruthy()
+    expect(screen.queryByText("Use the message box")).toBeNull()
+  })
+
+  it("offers no switch under a hard always, whose box is up regardless", () => {
+    pointerStub = stubCoarsePointer(false)
+    const state = makeState()
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+      "always"
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
+    fireEvent.click(trigger()!)
+    expect(screen.queryByText("Type directly in the terminal")).toBeNull()
   })
 
   // The TOP bar is the mobile shell's own chrome. The desktop shell never
@@ -4698,6 +4783,24 @@ describe("TerminalPane and theater mode", () => {
     expect(screen.getByText("Leave theater mode")).toBeTruthy()
   })
 
+  // Theater takes the chrome away, not the typing surface. The pane's own `⋯`
+  // is still the way in and out of the virtual input while it is on.
+  it("keeps the typing-surface switch working in theater", async () => {
+    const surface = await import("@/lib/typingSurface")
+    goMobile()
+    mockState = { ...makeState(), theater: true } as DuxState
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
+    fireEvent.click(screen.getByText("Type directly in the terminal"))
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
+    fireEvent.click(screen.getByText("Use the message box"))
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
+    // The choice is device-local and persistent by design, so hand the decision
+    // back to the pointer rather than leaking it into the suites below.
+    surface.setTypingSurface(null)
+  })
+
   it("keeps the top-bar item outside theater", () => {
     goMobile()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
@@ -4839,5 +4942,127 @@ describe("TerminalPane gates its floating overlay on the cover", () => {
     expect(screen.getByText("Connection lost.")).toBeTruthy()
     expect(screen.queryByTestId("pane-overlay")).toBeNull()
     expect(mounted).not.toHaveBeenCalled()
+  })
+})
+
+// THEATER ON A COMPUTER TAKES THE WHOLE WINDOW, and the floating pill is the
+// only chrome it leaves. The pane's own `⋯` row would be a second ellipsis
+// beside the pill's, so the items move into the pill instead and the pane
+// publishes them for it. The mobile theater suite above covers the other shell,
+// where the row stays because a pill can end up under the soft keyboard.
+describe("TerminalPane input menu in desktop theater", () => {
+  let pointerStub: MatchMediaStub | null = null
+  afterEach(() => {
+    pointerStub?.restore()
+    pointerStub = null
+  })
+
+  // Reads the registry the theater pill reads, so the assertion is about what
+  // the pill will actually be handed rather than about an internal flag.
+  function MenuProbe({ id }: { id: string }) {
+    const menu = usePaneInputMenu(id)
+    return (
+      <div data-testid="published">{menu === null ? "none" : "published"}</div>
+    )
+  }
+
+  function paneWithProbe() {
+    return render(
+      <>
+        <TerminalPane kind="agent" id="s1" sessionId="s1" />
+        <MenuProbe id="s1" />
+      </>,
+    )
+  }
+
+  it("renders no row of its own and hands the items to the pill", () => {
+    pointerStub = stubCoarsePointer(false)
+    mockState = { ...makeState(), theater: true } as DuxState
+    paneWithProbe()
+
+    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
+    expect(screen.getByTestId("published").textContent).toBe("published")
+  })
+
+  it("keeps its own row, and publishes nothing, outside theater", () => {
+    pointerStub = stubCoarsePointer(false)
+    paneWithProbe()
+
+    expect(screen.getByRole("button", { name: "Input options" })).toBeTruthy()
+    expect(screen.getByTestId("published").textContent).toBe("none")
+  })
+
+  // THE PANE HAS ONE SHAPE, WHATEVER IS UNDER THE TERMINAL. The rows come and
+  // go inside a column that is always there, because the column IS the root:
+  // returning a different root when nothing is under the terminal made a live
+  // flip (asking for the message box in theater) replace the whole subtree, and
+  // the lifecycle does not re-run for that, so xterm stayed attached to the
+  // detached container and the terminal went blank. Measured in the preview
+  // container before this was pinned here.
+  it("keeps one shape when the rows come and go, so xterm is never orphaned", async () => {
+    const surface = await import("@/lib/typingSurface")
+    pointerStub = stubCoarsePointer(false)
+    mockState = { ...makeState(), theater: true } as DuxState
+    const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const root = view.container.firstElementChild
+    const container = screen.getByTestId("terminal-container")
+    const terminals = TermStub.instances.length
+
+    act(() => surface.setTypingSurface("compose"))
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
+
+    expect(view.container.firstElementChild).toBe(root)
+    expect(screen.getByTestId("terminal-container")).toBe(container)
+    expect(TermStub.instances.length).toBe(terminals)
+    surface.setTypingSurface(null)
+  })
+
+  // A bar is an anchor, so the `⋯` stays in the compose row and the pill gets
+  // nothing: two menus offering the same items is the thing being avoided.
+  it("keeps the menu in the compose row when the box is up in theater", () => {
+    pointerStub = stubCoarsePointer(true)
+    mockState = { ...makeState(), theater: true } as DuxState
+    paneWithProbe()
+
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Input options" })).toBeTruthy()
+    expect(screen.getByTestId("published").textContent).toBe("none")
+  })
+})
+
+// THE MESSAGE BOX ONLY EXISTS FOR THE INPUT OWNER, so everything that acts on
+// "the box is the typing surface" has to be owner-gated too. A watcher whose
+// device has chosen `compose` has no box at all: the focus guard would redirect
+// into nothing, and the caret would claim the terminal is being typed into.
+describe("TerminalPane compose surface belongs to the owner", () => {
+  let pointerStub: MatchMediaStub | null = null
+  afterEach(() => {
+    pointerStub?.restore()
+    pointerStub = null
+  })
+
+  it("arms the caret and frees the tab order for the owner", () => {
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onConnected("conn-self", null))
+
+    const term = TermStub.instances.at(-1)!
+    expect(term.options.cursorInactiveStyle).toBe("block")
+    // Out of the tab order, so Shift-Tab out of the message box leaves the pane
+    // instead of being bounced back by the focus guard.
+    expect(term.textarea.tabIndex).toBe(-1)
+  })
+
+  it("leaves a watcher's terminal exactly as it was", () => {
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // The pre-handshake frame is an optimistic owner's; the handshake naming
+    // another driver is what makes this pane a watcher.
+    act(() => last().onConnected("conn-self", "conn-other"))
+
+    const term = TermStub.instances.at(-1)!
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(term.options.cursorInactiveStyle).toBe("outline")
+    expect(term.textarea.tabIndex).toBe(0)
   })
 })

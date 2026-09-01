@@ -118,58 +118,6 @@ export function composeBarMode(raw: string | undefined): ComposeBarMode {
 }
 
 /**
- * Should the compose bar be up?
- *
- * Pure so the whole matrix is testable without mounting a terminal. The
- * capability argument is "is touch the primary pointer" (`pointer: coarse`,
- * see `hooks/use-coarse-pointer.ts`), NOT a viewport width: the bar is a
- * decision about the INPUT METHOD, and keying it to width meant rotating a
- * tablet changed the typing surface underneath the user mid-session.
- *
- * `always`/`never` exist because that capability check cannot finish the job.
- * MEASURED: an Android tablet with a physical keyboard attached and the same
- * tablet without one report identical interaction media queries, so the two
- * cases that want opposite answers are indistinguishable to the browser and
- * only the user can resolve them.
- */
-export function composeBarVisible(
-  mode: ComposeBarMode,
-  coarsePointer: boolean
-): boolean {
-  switch (mode) {
-    case "always":
-      return true
-    case "never":
-      return false
-    case "auto":
-      return coarsePointer
-  }
-}
-
-/**
- * Do the TOUCH TYPING SURFACES belong on this device at all?
- *
- * TWO ORTHOGONAL QUESTIONS, and treating them as one was the bug. WIDTH decides
- * the LAYOUT: how much room is there, so which shell you get. The POINTER
- * decides the TYPING SURFACE: is a finger doing the typing, so does the text
- * need a buffer where autocorrect and swipe have something to work with. A
- * tablet in landscape wants the desktop layout AND the buffered input, so the
- * bars travel with the pointer and render inside the desktop shell too.
- *
- * This gates the pair: the accessory keys (Esc/Tab/Ctrl/Alt and the rest) and
- * the compose bar. `never` still keeps the accessory keys on a coarse pointer,
- * because it is a preference about the compose BOX and a soft keyboard still
- * cannot produce a Ctrl chord; `always` brings the pair to a fine pointer,
- * because that is the user saying the capability answer is wrong here.
- */
-export function touchSurfacesApply(
-  mode: ComposeBarMode,
-  coarsePointer: boolean
-): boolean {
-  return coarsePointer || mode === "always"
-}
-
-/**
  * Which typing surface a device-local toggle has been left on, or `null` while
  * nobody has touched it and the pointer capability answers. Persisted in
  * `localStorage` by `lib/typingSurface.ts`; deliberately NOT configuration.
@@ -177,72 +125,131 @@ export function touchSurfacesApply(
 export type TypingSurfaceChoice = "compose" | "direct"
 
 /**
- * Is the compose bar up, once the device-local toggle is folded in?
+ * What the POINTER says the typing surface should be, and nothing more.
  *
- * The SETTING wins: `always` and `never` are what the operator wrote in config
- * and a transient toggle must never quietly defeat them. Only `auto` (which
- * MEANS "work it out") consults the choice, and there the choice replaces the
- * capability answer for exactly the case the browser cannot see: the same
- * tablet with and without a keyboard case attached.
+ * A coarse pointer is a finger, and a finger wants a buffer where autocorrect,
+ * swipe and IMEs have something to work with. This is a DEFAULT, not a gate:
+ * the browser is guessing, and a guess loses to the person using the machine.
+ * MEASURED, and this is exactly why it can only ever be a default: an Android
+ * tablet with a physical keyboard attached and the same tablet without one
+ * report identical interaction media queries, so the two cases that want
+ * opposite answers are indistinguishable from here.
+ */
+export function detectedTypingSurface(
+  coarsePointer: boolean
+): TypingSurfaceChoice {
+  return coarsePointer ? "compose" : "direct"
+}
+
+/**
+ * THE ONE RESOLVED ANSWER to "where does typing go in this pane".
+ *
+ * `always`/`never` are configuration, written in the Preferences dialog, and
+ * they win outright: a per-device toggle must never quietly defeat what the
+ * operator set up. `auto` MEANS "work it out", and there the order is the
+ * person first and the browser second: an explicit choice, else the pointer's
+ * default.
+ *
+ * The choice wins in BOTH directions on EVERY device, deliberately. Turning the
+ * message box on where the pointer says it is not needed is allowed: a laptop
+ * user who wants a buffered box, or who is driving a touchscreen the browser
+ * has not noticed, is not wrong about their own machine.
+ *
+ * The pointer changing (a convertible folding, a mouse being unplugged) moves
+ * the DEFAULT only. An explicit choice persists until the user changes it,
+ * because a surface that snapped back underneath someone mid-session is
+ * precisely what makes a toggle feel broken.
+ */
+export function resolvedTypingSurface(
+  mode: ComposeBarMode,
+  coarsePointer: boolean,
+  choice: TypingSurfaceChoice | null
+): TypingSurfaceChoice {
+  switch (mode) {
+    case "always":
+      return "compose"
+    case "never":
+      return "direct"
+    case "auto":
+      return choice ?? detectedTypingSurface(coarsePointer)
+  }
+}
+
+/**
+ * Is the buffered message box the typing surface right now?
+ *
+ * Pure so the whole matrix is testable without mounting a terminal. The
+ * capability argument is "is touch the primary pointer" (`pointer: coarse`,
+ * see `hooks/use-coarse-pointer.ts`), NOT a viewport width: the bar is a
+ * decision about the INPUT METHOD, and keying it to width meant rotating a
+ * tablet changed the typing surface underneath the user mid-session.
  */
 export function composeBarShown(
   mode: ComposeBarMode,
   coarsePointer: boolean,
   choice: TypingSurfaceChoice | null
 ): boolean {
-  if (mode !== "auto") return composeBarVisible(mode, coarsePointer)
-  if (choice !== null) return choice === "compose"
-  return coarsePointer
+  return resolvedTypingSurface(mode, coarsePointer, choice) === "compose"
+}
+
+/**
+ * Do the TOUCH TYPING SURFACES belong on this device at all?
+ *
+ * TWO ORTHOGONAL QUESTIONS, and treating them as one was the bug. WIDTH decides
+ * the LAYOUT: how much room is there, so which shell you get. The POINTER
+ * decides the DEFAULT TYPING SURFACE: is a finger doing the typing, so does the
+ * text need a buffer where autocorrect and swipe have something to work with. A
+ * tablet in landscape wants the desktop layout AND the buffered input, so the
+ * bars travel with the pointer and render inside the desktop shell too.
+ *
+ * This gates the pair: the accessory keys (Esc/Tab/Ctrl/Alt and the rest) and
+ * the compose bar. A coarse pointer always has them, whatever the surface
+ * resolves to: `never` and a stored `direct` both keep the accessory keys,
+ * because each is a statement about the compose BOX and a soft keyboard still
+ * cannot produce a Ctrl chord. A fine pointer gets them once the message box is
+ * up, by the setting or by the user's own choice, so asking for the box on a
+ * laptop brings its keys along instead of leaving the press inert.
+ */
+export function touchSurfacesApply(
+  mode: ComposeBarMode,
+  coarsePointer: boolean,
+  choice: TypingSurfaceChoice | null
+): boolean {
+  return coarsePointer || composeBarShown(mode, coarsePointer, choice)
 }
 
 /**
  * Should the IN-BAR toggle render?
  *
- * Only where it can do something: in `auto` (under always/never the setting has
- * already decided, and a control that changed nothing would be a lie) and on a
- * device that has the touch surfaces at all, since this toggle lives in the
- * accessory bar's key row.
- *
- * The accessory bar is not the guaranteed surface any more: the input `⋯` menu
- * is, and it renders in every bar state including bars-all-hidden. The quick
- * toggle stays in the key row because that is where a thumb already is, and
- * both it and the menu item write through the SAME `setTypingSurface` helper so
- * the two can never disagree about what a switch means.
+ * It lives in the accessory bar's key row, so it is offered exactly where that
+ * row is, and only in `auto` (under always/never the setting has already
+ * decided, and a control that changed nothing would be a lie). The quick toggle
+ * stays in the key row because that is where a thumb already is, and both it
+ * and the menu item write through the SAME `setTypingSurface` helper so the two
+ * can never disagree about what a switch means.
  */
 export function typingSurfaceToggleOffered(
   mode: ComposeBarMode,
-  coarsePointer: boolean
+  coarsePointer: boolean,
+  choice: TypingSurfaceChoice | null
 ): boolean {
-  return mode === "auto" && touchSurfacesApply(mode, coarsePointer)
+  return mode === "auto" && touchSurfacesApply(mode, coarsePointer, choice)
 }
 
 /**
  * Should the INPUT MENU's typing-surface item render?
  *
- * Wider than the in-bar toggle by exactly one state, and that state is a trap
- * this closes: `auto` on a FINE pointer with a stored `compose` choice puts the
- * message box up (the choice replaces the capability answer, see
- * `composeBarShown`) while the accessory bar, gated on `touchSurfacesApply`,
- * does not mount at all. The only control that could switch back was in the bar
- * that is not there. So the menu offers the switch whenever the mode is `auto`
- * and either the touch surfaces apply or a choice is already stored.
+ * Under `auto`, always, on every device. The menu is the guaranteed way in and
+ * out of the virtual input: the key row can be absent (a fine pointer typing
+ * directly) and the compose bar with it, so gating this on either of them is
+ * what left a laptop user with no way to ask for the message box at all, beside
+ * a keys item that did nothing when pressed.
  *
- * Still nothing under `always`/`never`: the setting has decided, and the toggle
- * deliberately cannot defeat it.
- *
- * One accepted asymmetry: on a fine pointer with a stored `compose` choice,
- * switching to Direct removes every anchor, so from the pane the switch is
- * one-way there. Accepted because the resulting state is pixel-identical to
- * the fine-pointer default, and the stored choice only arises on convertibles
- * that can re-enter coarse-pointer mode, where the toggle returns.
+ * Still nothing under `always`/`never`: the setting has decided, and the
+ * per-device choice deliberately cannot defeat it.
  */
-export function inputMenuSurfaceSwitchOffered(
-  mode: ComposeBarMode,
-  coarsePointer: boolean,
-  choice: TypingSurfaceChoice | null
-): boolean {
-  if (mode !== "auto") return false
-  return touchSurfacesApply(mode, coarsePointer) || choice !== null
+export function inputMenuSurfaceSwitchOffered(mode: ComposeBarMode): boolean {
+  return mode === "auto"
 }
 
 /**
