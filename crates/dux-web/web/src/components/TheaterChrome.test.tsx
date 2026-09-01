@@ -32,6 +32,20 @@ describe("the collapsing chrome", () => {
     expect(screen.getByTestId("theater-chrome").dataset.hidden).toBe("false")
   })
 
+  it("is already collapsed when the page opens in theater, with nothing to animate", () => {
+    // The property the boot flag exists to buy. A pane mounting beside this
+    // one has to measure the SETTLED height, so a chrome that renders hidden
+    // the first time is collapsed synchronously: no children, no measured
+    // natural height, no transition running underneath the pane's first fit.
+    render(
+      <TheaterChrome hidden>
+        <button type="button">Show changes</button>
+      </TheaterChrome>,
+    )
+    expect(screen.queryByRole("button", { name: "Show changes" })).toBeNull()
+    expect(screen.getByTestId("theater-chrome").style.height).toBe("0px")
+  })
+
   it("takes the chrome out of the DOM once the collapse finishes", () => {
     const { rerender } = render(
       <TheaterChrome hidden={false}>

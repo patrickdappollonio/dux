@@ -61,9 +61,14 @@ let loc: {
   search: string
 }
 
+// Set to hold the first spine read open forever, so a test can look at the
+// state the very first render sees rather than the one the workspace produced.
+let holdSpine = false
+
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
   if (u.includes("/api/v1/workspace")) {
+    if (holdSpine) await new Promise(() => {})
     return {
       ok: true,
       status: 200,
@@ -102,6 +107,7 @@ class FakeWebSocket {
 }
 
 beforeEach(() => {
+  holdSpine = false
   spineBody = makeSpine([])
   store = new Map<string, string>()
   replaceStateMock = vi.fn((_s: unknown, _t: string, url: string) => {
@@ -144,6 +150,14 @@ async function loadStore(
     expect(mod.getSnapshot().spine).not.toBeNull()
   })
   return mod
+}
+
+// Import the store on a boot hash WITHOUT waiting for a spine: what the first
+// render sees is exactly the question the boot-layout tests ask.
+async function loadUnresolved(hash: string) {
+  loc = { protocol: "http:", host: "localhost:0", hash, pathname: "/", search: "" }
+  vi.stubGlobal("location", loc)
+  return await import("./store")
 }
 
 describe("entering and leaving theater", () => {
@@ -315,6 +329,35 @@ describe("theater in the address", () => {
     ])
     expect(mod.getSnapshot().theater).toBe(true)
     expect(loc.hash).toBe("#/agent/s1/tab/t2?view=theater")
+  })
+
+  it("boots with the mode already on, before any workspace has landed", async () => {
+    // The pane measures itself the instant it mounts. When the flag only
+    // arrived with the first spine, the chrome was painted at boot and then
+    // collapsed as an ANIMATED transition underneath a pane that was mounting
+    // into it: the pane fitted at a geometry it was only passing through, the
+    // server's replay was parsed at that grid, and the settled fit re-gridded
+    // on top of it, dropping and reordering lines. The address already says
+    // where the page is going, so the first layout says it too.
+    holdSpine = true
+    const mod = await loadUnresolved("#/agent/s1?view=theater")
+    expect(mod.getSnapshot().spine).toBeNull()
+    expect(mod.getSnapshot().theater).toBe(true)
+  })
+
+  it("boots with the mode off on an address that does not carry it", async () => {
+    holdSpine = true
+    const mod = await loadUnresolved("#/agent/s1")
+    expect(mod.getSnapshot().theater).toBe(false)
+  })
+
+  it("never boots into theater on an address that names no pane", async () => {
+    // Home has nothing to fill the screen, and `withTheaterHash` refuses to
+    // write the modifier there, so a bare one is a hand-made address that must
+    // not blank the chrome while the route resolves to home anyway.
+    holdSpine = true
+    const mod = await loadUnresolved("#?view=theater")
+    expect(mod.getSnapshot().theater).toBe(false)
   })
 
   it("still tells the truth about a missing agent", async () => {

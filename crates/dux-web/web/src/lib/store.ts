@@ -916,6 +916,31 @@ function bootIsStandaloneEditor(): boolean {
   return parseStandaloneEditorRoute(location.hash ?? "") !== null
 }
 
+// Whether this tab BOOTED on a theater address, and therefore whether the very
+// FIRST layout is the theater one.
+//
+// The flag is otherwise committed with the selection, once the first spine has
+// resolved the route. That is too late for the LAYOUT: the chrome is painted at
+// boot, and the flag arriving later collapses it as an animated transition
+// underneath a pane that is mounting into it. The pane fits at a geometry it is
+// only passing through, the server's replay is parsed at that grid, and the
+// settled fit re-grids on top of it, which drops and reorders lines. Reading
+// the address here makes the boot layout agree with where the page is going, so
+// there is no transition to mount into.
+//
+// Deliberately LOOSER than `parseRoute`, which cannot be called at module init
+// (it reads route constants declared below, unlike the hoisted helpers
+// `bootIsStandaloneEditor` uses). This is the modifier's own suffix test plus
+// "the address names a position at all", which every address `withTheaterHash`
+// writes satisfies. A hand-made address that gets past it costs a moment of
+// hidden chrome and nothing else: the route resolution commits the honest value
+// for the position it lands on, `theaterSerializable` included.
+function bootIsTheater(): boolean {
+  if (typeof location === "undefined") return false
+  const { hash, theater } = splitTheaterHash(location.hash ?? "")
+  return theater && hash !== "" && hash !== "#"
+}
+
 let state: DuxState = {
   spine: null,
   bootstrap: null,
@@ -923,7 +948,7 @@ let state: DuxState = {
   conn: "connecting",
   offline: false,
   selectedTarget: null,
-  theater: false,
+  theater: bootIsTheater(),
   selectedSessionId: null,
   terminalEpoch: 0,
   composeDrafts: {},
