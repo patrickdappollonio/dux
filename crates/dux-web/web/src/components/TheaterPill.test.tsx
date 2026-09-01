@@ -213,6 +213,44 @@ describe("the floating theater pill", () => {
     expect(screen.getAllByLabelText("Needs attention").length).toBeGreaterThan(0)
   })
 
+  it("carries both hidden-tab cues in the expander's own row", () => {
+    // Never absolutely placed in the corners of its box: a ghost control
+    // paints no surface, so a mark parked there floats in the pill's dead
+    // space and reads as the neighbouring control's. In the row it is
+    // unambiguously the expander's.
+    render(
+      <TheaterPill
+        target={agentTarget}
+        session={session([
+          tab({ id: "s1" }),
+          tab({
+            id: "t2",
+            provider: "codex",
+            working: true,
+            needs_attention: true,
+          }),
+        ])}
+      />,
+    )
+    const expander = screen.getByRole("button", { name: /other tabs/i })
+    expect(expander.contains(screen.getByLabelText("Needs attention"))).toBe(true)
+    expect(expander.querySelectorAll(".absolute").length).toBe(0)
+    // The cue-bearing expander keeps the cluster's one height and grows only
+    // in width.
+    expect(expander.className).toContain("h-10")
+  })
+
+  it("stays a bare circle when the hidden tabs have nothing to say", () => {
+    render(
+      <TheaterPill
+        target={agentTarget}
+        session={session([tab({ id: "s1" }), tab({ id: "t2", provider: "codex" })])}
+      />,
+    )
+    const expander = screen.getByRole("button", { name: /other tabs/i })
+    expect(expander.className).toContain("w-10")
+  })
+
   it("says nothing about the tab already filling the screen", () => {
     render(
       <TheaterPill

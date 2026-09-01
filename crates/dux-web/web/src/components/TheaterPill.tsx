@@ -125,29 +125,43 @@ export function TheaterPill({
           <Button
             variant="ghost"
             size="icon"
-            className="relative size-10 shrink-0 rounded-full"
+            className={cn(
+              // One fixed height whatever it carries, so it never disagrees
+              // with the controls beside it; it grows into a small pill for
+              // its cues and is a bare 40px circle without them.
+              "h-10 shrink-0 gap-1.5 rounded-full",
+              model.working || model.attention
+                ? "w-auto min-w-10 px-2.5"
+                : "w-10",
+            )}
             aria-expanded={expanded}
             aria-label={hiddenTabsLabel(model.working, model.attention)}
             onClick={() => setExpanded((open) => !open)}
           >
+            {/* The two cues the tab strip uses, on the one control that speaks
+                for the strip while it is not on screen. The dot is the shared
+                marker; the bob is the same working animation the pills and the
+                sidebar rows run.
+
+                IN THE ROW, exactly as a tab pill carries them, never parked in
+                the corners of the button's box. This is a GHOST control: it
+                paints no surface, so a mark in the corner of its square has no
+                disc to belong to. It sits in the pill's dead space, nearer
+                whatever is beside it than the control it speaks for, and reads
+                as the neighbour's; expanded, that neighbour is a tab pill, and
+                the mark becomes a lie about which tab is working. Between the
+                chevron and the button's own edge it cannot be anybody else's,
+                and it needs no chip, no offset and no clipping to say so. */}
+            {model.working ? (
+              <Bot className="size-3.5 shrink-0 text-muted-foreground motion-safe:animate-agent-working" />
+            ) : null}
+            {model.attention ? <AttentionDot withTooltip={false} /> : null}
             <ChevronUp
               className={cn(
-                "motion-safe:transition-transform motion-safe:duration-300",
+                "shrink-0 motion-safe:transition-transform motion-safe:duration-300",
                 expanded && "rotate-180",
               )}
             />
-            {/* The two cues the tab strip uses, on the one control that speaks
-                for the strip while it is not on screen. The dot is the
-                shared marker; the bob is the same working animation the pills
-                and the sidebar rows run. */}
-            {model.attention ? (
-              <span className="absolute top-1 right-1">
-                <AttentionDot withTooltip={false} />
-              </span>
-            ) : null}
-            {model.working ? (
-              <Bot className="absolute bottom-0.5 left-1 size-3 text-muted-foreground motion-safe:animate-agent-working" />
-            ) : null}
           </Button>
         </SimpleTooltip>
       ) : null}
