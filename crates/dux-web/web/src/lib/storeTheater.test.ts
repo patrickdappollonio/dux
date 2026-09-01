@@ -53,6 +53,9 @@ let spineBody: Spine = makeSpine([])
 let replaceStateMock: ReturnType<typeof vi.fn>
 let pushStateMock: ReturnType<typeof vi.fn>
 let store: Map<string, string>
+// The store's own window listeners, kept so a test can play the browser moving
+// the address (the not-found route arrives that way and no other).
+let windowListeners: Map<string, () => void>
 let loc: {
   protocol: string
   host: string
@@ -122,7 +125,12 @@ beforeEach(() => {
     removeItem: (k: string) => void store.delete(k),
     clear: () => store.clear(),
   })
-  vi.stubGlobal("window", { addEventListener: () => {} })
+  windowListeners = new Map()
+  vi.stubGlobal("window", {
+    addEventListener: (type: string, fn: () => void) => {
+      windowListeners.set(type, fn)
+    },
+  })
   vi.stubGlobal("history", {
     pushState: pushStateMock,
     replaceState: replaceStateMock,
@@ -521,5 +529,305 @@ describe("losing input ownership", () => {
     mod.noteTheaterOwnershipLost("terminal", "tm1")
     expect(mod.getSnapshot().theater).toBe(false)
     expect(store.has("dux:theater:terminal:tm1")).toBe(false)
+  })
+})
+
+describe("the side panels theater takes away", () => {
+  // Theater is a temporary override of the desktop layout, never a write to
+  // the sidebar's own memory: the panels come back exactly as they were, and
+  // nothing the user set is different for having been in the mode.
+
+  // The sidebar's open state persists as a cookie (the shadcn primitive's own
+  // key, written from the store now that the store owns the state). This file
+  // runs under plain Node, where there is no `document` at all, so a recorder
+  // stands in for one and doubles as the spy on the writer.
+  function recordCookies(existing = ""): string[] {
+    const written: string[] = []
+    vi.stubGlobal("document", {
+      get cookie() {
+        return existing
+      },
+      set cookie(value: string) {
+        written.push(value)
+      },
+    })
+    return written
+  }
+
+  it("captures the layout on the way in and puts it back on the way out", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.setSidebarOpen(false)
+    mod.setSidebarWidth("20rem")
+    mod.setChangesPanePercent(33)
+
+    mod.enterTheater()
+    expect(mod.getSnapshot().theaterLayout).toEqual({
+      sidebarOpen: false,
+      sidebarWidth: "20rem",
+      changesPanePercent: 33,
+    })
+
+    mod.exitTheater()
+    expect(mod.getSnapshot().theaterLayout).toBeNull()
+    expect(mod.getSnapshot().sidebarOpen).toBe(false)
+    expect(mod.getSnapshot().sidebarWidth).toBe("20rem")
+    expect(mod.getSnapshot().changesPanePercent).toBe(33)
+  })
+
+  it("keeps the sidebar toggle inert while the panels are off screen", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.enterTheater()
+    const written = recordCookies()
+
+    mod.setSidebarOpen(false)
+    mod.setSidebarWidth("22rem")
+
+    expect(mod.getSnapshot().sidebarOpen).toBe(true)
+    expect(mod.getSnapshot().sidebarWidth).toBe("18rem")
+    expect(written).toEqual([])
+
+    mod.exitTheater()
+    expect(mod.getSnapshot().sidebarOpen).toBe(true)
+  })
+
+  it("refuses from the rail too, and takes the toggle again on the way out", async () => {
+    // The other branch of the primitive's shortcut: a sidebar already
+    // collapsed would be asked to OPEN, which is the direction that would put
+    // a second column back over a mode that just took it away.
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.setSidebarOpen(false)
+    mod.enterTheater()
+    const written = recordCookies()
+
+    mod.setSidebarOpen(true)
+    expect(mod.getSnapshot().sidebarOpen).toBe(false)
+    expect(written).toEqual([])
+
+    mod.exitTheater()
+    mod.setSidebarOpen(true)
+    expect(mod.getSnapshot().sidebarOpen).toBe(true)
+    expect(written.some((c) => c.startsWith("sidebar_state=true"))).toBe(true)
+  })
+
+  it("writes the sidebar preference again once the mode is over", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    const written = recordCookies()
+
+    mod.setSidebarOpen(false)
+    expect(mod.getSnapshot().sidebarOpen).toBe(false)
+    expect(written.some((c) => c.startsWith("sidebar_state=false"))).toBe(true)
+  })
+
+  it("touches no persisted preference for the whole round trip", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.setSidebarWidth("20rem", true)
+    const written = recordCookies()
+    const widthBefore = store.get("dux:sidebar-width")
+    fetchMock.mockClear()
+
+    mod.enterTheater()
+    mod.exitTheater()
+
+    expect(written).toEqual([])
+    expect(store.get("dux:sidebar-width")).toBe(widthBefore)
+    // The Changes pane's visibility is server-persisted config; theater must
+    // not PUT it, because hiding the pane for the mode is not the user asking
+    // for the pane to be hidden.
+    const configCalls = fetchMock.mock.calls.filter((c) =>
+      String(c[0]).includes("/api/v1/config"),
+    )
+    expect(configCalls).toEqual([])
+  })
+
+  it("leaves the stored preferences alone when the page opened in theater", async () => {
+    // Nothing was captured, because nothing was ever on screen to capture:
+    // leaving restores the persisted preferences as they stand.
+    const mod = await loadStore("#/agent/s1?view=theater", [
+      { id: "s1", project_id: "p1" },
+    ])
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().theater).toBe(true)
+    })
+    expect(mod.getSnapshot().theaterLayout).toBeNull()
+
+    mod.exitTheater()
+    expect(mod.getSnapshot().theaterLayout).toBeNull()
+    expect(mod.getSnapshot().sidebarOpen).toBe(true)
+    expect(mod.getSnapshot().sidebarWidth).toBe("18rem")
+  })
+
+  it("captures and restores across the phone's changes screen too", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.setSidebarOpen(false)
+    mod.enterTheater()
+
+    mod.openChangesScreen()
+    expect(mod.getSnapshot().theaterLayout).toBeNull()
+    expect(mod.getSnapshot().sidebarOpen).toBe(false)
+
+    mod.navigateUp()
+    expect(mod.getSnapshot().theaterLayout).not.toBeNull()
+  })
+
+  it("puts the layout back when ownership is lost", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.setSidebarOpen(false)
+    mod.enterTheater()
+
+    mod.noteTheaterOwnershipLost("agent", "s1")
+
+    expect(mod.getSnapshot().theaterLayout).toBeNull()
+    expect(mod.getSnapshot().sidebarOpen).toBe(false)
+  })
+})
+
+describe("the snapshot and the mode are one decision", () => {
+  // THE INVARIANT: `theaterLayout` is non-null exactly while `theater` is on
+  // and the mode captured something. A commit that decides the flag in one
+  // place and the snapshot in another can break that, so every path that can
+  // change the flag is exercised here.
+
+  function invariant(s: { theater: boolean; theaterLayout: unknown }): void {
+    if (!s.theater) expect(s.theaterLayout).toBeNull()
+  }
+
+  it("holds when the editor opens onto a pane that remembers the mode", async () => {
+    // The order this used to get wrong: the editor's suspend is decided
+    // against the pane being left, and the selection's entry against the pane
+    // being arrived at. Read separately they disagree, and the commit kept the
+    // suspend's flag with the entry's snapshot.
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    store.set("dux:theater:agent:s2", "on")
+
+    mod.openEditor({ kind: "agent", sessionId: "s2" })
+
+    expect(mod.getSnapshot().theater).toBe(false)
+    invariant(mod.getSnapshot())
+  })
+
+  it("captures once, whatever else happens inside the mode", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["t2"] },
+    ])
+    mod.selectSession("s1")
+    mod.setSidebarOpen(false)
+    mod.enterTheater()
+    const captured = mod.getSnapshot().theaterLayout
+
+    mod.selectTab("s1", "t2", { theater: true })
+
+    expect(mod.getSnapshot().theater).toBe(true)
+    expect(mod.getSnapshot().theaterLayout).toEqual(captured)
+  })
+
+  it("holds when the selection is dropped for home", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.setSidebarOpen(false)
+    mod.enterTheater()
+
+    mod.selectSession(null)
+
+    expect(mod.getSnapshot().theater).toBe(false)
+    invariant(mod.getSnapshot())
+    expect(mod.getSnapshot().sidebarOpen).toBe(false)
+  })
+
+  it("holds when the address lands on an agent that is gone", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.setSidebarOpen(false)
+    mod.enterTheater()
+
+    loc.hash = "#/agent/gone"
+    windowListeners.get("popstate")?.()
+
+    expect(mod.getSnapshot().routeNotFound).not.toBeNull()
+    expect(mod.getSnapshot().theater).toBe(false)
+    invariant(mod.getSnapshot())
+    expect(mod.getSnapshot().sidebarOpen).toBe(false)
+  })
+
+  it("holds across the desktop editor's suspend and resume", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.setSidebarOpen(false)
+    mod.enterTheater()
+
+    mod.openEditor({ kind: "agent", sessionId: "s1" })
+    expect(mod.getSnapshot().theater).toBe(false)
+    invariant(mod.getSnapshot())
+    expect(mod.getSnapshot().sidebarOpen).toBe(false)
+
+    mod.closeEditor()
+    expect(mod.getSnapshot().theater).toBe(true)
+    expect(mod.getSnapshot().theaterLayout).not.toBeNull()
+  })
+
+  it("captures when the mode arrives with the selection rather than a button", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.setSidebarOpen(false)
+    store.set("dux:theater:agent:s2", "on")
+
+    mod.selectSession("s2")
+
+    expect(mod.getSnapshot().theater).toBe(true)
+    expect(mod.getSnapshot().theaterLayout).toEqual({
+      sidebarOpen: false,
+      sidebarWidth: "18rem",
+      changesPanePercent: mod.getSnapshot().changesPanePercent,
+    })
+  })
+})
+
+describe("the sidebar's remembered shape at boot", () => {
+  // The cookie the store writes is the cookie the store reads: a sidebar left
+  // collapsed comes back collapsed, which is also what makes theater's promise
+  // to give the layout back exactly as it found it true for a page that booted
+  // into the mode and captured nothing.
+
+  it("comes up collapsed when that is what the last visit left", async () => {
+    vi.stubGlobal("document", { cookie: "sidebar_state=false" })
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    expect(mod.getSnapshot().sidebarOpen).toBe(false)
+  })
+
+  it("comes up expanded with no cookie, and with one it cannot read", async () => {
+    vi.stubGlobal("document", { cookie: "other=1; sidebar_state=perhaps" })
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    expect(mod.getSnapshot().sidebarOpen).toBe(true)
+  })
+
+  it("reads it out of a cookie jar with neighbours", async () => {
+    vi.stubGlobal("document", {
+      cookie: "theme=dark; sidebar_state=false; other=1",
+    })
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    expect(mod.getSnapshot().sidebarOpen).toBe(false)
+  })
+
+  it("survives a browser that refuses to hand the cookies over", async () => {
+    vi.stubGlobal("document", {
+      get cookie(): string {
+        throw new Error("blocked")
+      },
+    })
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    expect(mod.getSnapshot().sidebarOpen).toBe(true)
   })
 })

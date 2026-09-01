@@ -75,10 +75,14 @@ function SidebarProvider({
     (value: boolean | ((value: boolean) => boolean)) => {
       const openState = typeof value === "function" ? value(open) : value
       if (setOpenProp) {
+        // CONTROLLED: the parent owns the state, and therefore the persistence
+        // too. dux keeps it in its store, where theater mode can refuse a
+        // toggle outright; writing the cookie from in here would record a
+        // preference the parent just declined to take.
         setOpenProp(openState)
-      } else {
-        _setOpen(openState)
+        return
       }
+      _setOpen(openState)
 
       // This sets the cookie to keep the sidebar state.
       document.cookie = `${SIDEBAR_COOKIE_NAME}=${openState}; path=/; max-age=${SIDEBAR_COOKIE_MAX_AGE}`

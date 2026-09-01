@@ -332,6 +332,11 @@ export interface DuxState {
   // local storage on selection, and losing input ownership of the pane takes it
   // away (see `noteTheaterOwnershipLost`). Never true with nothing focused.
   theater: boolean
+  // The desktop layout theater is temporarily overriding, captured on the way
+  // in and put back on the way out. `null` whenever theater is off, and also
+  // while theater is on if the page BOOTED into it: nothing was ever on screen
+  // to capture, so leaving lands on the stored preferences as they stand.
+  theaterLayout: TheaterLayoutSnapshot | null
   // Derived from `selectedTarget`: the owning session id. Session-scoped UI
   // (breadcrumb, changed files, statusbar) reads this so it keeps working
   // whether an agent or one of its terminals is focused. Kept in `state` (not
@@ -693,6 +698,14 @@ export interface DuxState {
   // acting would create an agent from the reference the user replaced and
   // close the dialog they are looking at.
   createAgentPrRequestId: number | null
+  // Whether the desktop sidebar is expanded (false is the icon rail). Lifted
+  // out of `SidebarProvider`'s own `useState` and into the store because
+  // theater mode has to be able to hold it still: with the panel unmounted the
+  // primitive's keyboard toggle would still flip the state and write the
+  // preference behind the mode's back, and the layout the user came from would
+  // be different on the way out. The provider is CONTROLLED from here, so the
+  // store owns the persistence too (see `persistSidebarOpen`).
+  sidebarOpen: boolean
   sidebarWidth: string
   // Optimistic override for the Changes pane's visibility (desktop). `null`
   // follows the persisted config (`bootstrap.show_changes_pane`); the palette and
@@ -854,6 +867,50 @@ export function changesPaneMountPercent(): number {
     CHANGES_PANE_MIN_PERCENT,
     CHANGES_PANE_MAX_PERCENT,
   )
+}
+
+// The sidebar's expanded/collapsed preference, kept exactly where the shadcn
+// primitive kept it (same cookie name, same lifetime) now that the store owns
+// the state and the provider is controlled. Written on every toggle and READ
+// AT BOOT, so a sidebar left collapsed comes back collapsed. The primitive
+// wrote this cookie and never read it (it takes a server-rendered `defaultOpen`
+// instead, which a single-page app has nowhere to come from), so the preference
+// was recorded and thrown away; that is also what a page which BOOTED into
+// theater lands on when it leaves, having captured nothing.
+const SIDEBAR_OPEN_COOKIE = "sidebar_state"
+const SIDEBAR_OPEN_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
+export const SIDEBAR_DEFAULT_OPEN = true
+
+function loadSidebarOpen(): boolean {
+  // Same two hazards as the write below, plus a third: anything at all can be
+  // in a cookie jar, so only the two values this ever writes are believed.
+  try {
+    if (typeof document === "undefined") return SIDEBAR_DEFAULT_OPEN
+    const jar = document.cookie ?? ""
+    for (const part of jar.split(";")) {
+      const [name, ...rest] = part.split("=")
+      if (name.trim() !== SIDEBAR_OPEN_COOKIE) continue
+      const value = rest.join("=").trim()
+      if (value === "true") return true
+      if (value === "false") return false
+      return SIDEBAR_DEFAULT_OPEN
+    }
+  } catch {
+    // Cookies refused. The sidebar opens on its default, as it always did.
+  }
+  return SIDEBAR_DEFAULT_OPEN
+}
+
+function persistSidebarOpen(open: boolean): void {
+  // No `document` under the website's Node-side figure renderer, and a browser
+  // with cookies blocked throws on the write. Losing the memory is the whole
+  // cost either way.
+  try {
+    if (typeof document === "undefined") return
+    document.cookie = `${SIDEBAR_OPEN_COOKIE}=${open}; path=/; max-age=${SIDEBAR_OPEN_COOKIE_MAX_AGE}`
+  } catch {
+    // Refused. The live state still works for the life of the page.
+  }
 }
 
 function loadSidebarWidth(): string {
@@ -1032,7 +1089,9 @@ let state: DuxState = {
   createAgentPrResolving: false,
   createAgentPrError: null,
   createAgentPrRequestId: null,
+  sidebarOpen: loadSidebarOpen(),
   sidebarWidth: SIDEBAR_INITIAL_WIDTH,
+  theaterLayout: null,
   changesPaneOverride: null,
   changesPanePercent: changesPaneMountPercent(),
   mobileTopBarOverride: null,
@@ -2956,11 +3015,20 @@ function theaterPatch(
   // Always dropped, override or not: a route's flag belongs to the very next
   // commit and nothing else.
   pendingTheater = undefined
-  if (target === null) return { theater: false }
-  const key = theaterMemoryKey(target)
-  if (explicit === undefined) return { theater: readTheaterMemory(key) }
-  writeTheaterMemory(key, explicit)
-  return { theater: explicit }
+  const theater = (() => {
+    if (target === null) return false
+    const key = theaterMemoryKey(target)
+    if (explicit === undefined) return readTheaterMemory(key)
+    writeTheaterMemory(key, explicit)
+    return explicit
+  })()
+  // Selecting a pane whose memory says theater is an entry like any other, and
+  // selecting away from one is an exit: the side panels have to be captured and
+  // restored on those transitions too, not only on the button's. The snapshot
+  // itself is left to `withTheaterLayout`, which every commit that carries this
+  // patch goes through: a caller's `extra` can still overrule the flag, and the
+  // snapshot has to follow the value that wins.
+  return { theater }
 }
 
 // Resolve a route's target against a spine and commit it, or record not-found
@@ -3066,14 +3134,16 @@ function retryRouteNotFound(spine: Spine): void {
 // Back onto a deleted agent is a normal thing to do.
 function setRouteNotFound(sessionId: string): void {
   const prev = state.selectedSessionId
-  setState({
-    selectedTarget: null,
-    selectedSessionId: null,
-    changes: emptyChanges(),
-    mobileScreen: "home",
-    theater: false,
-    routeNotFound: { kind: "agent", sessionId },
-  })
+  setState(
+    withTheaterLayout({
+      selectedTarget: null,
+      selectedSessionId: null,
+      changes: emptyChanges(),
+      mobileScreen: "home",
+      theater: false,
+      routeNotFound: { kind: "agent", sessionId },
+    }),
+  )
   switchChangesSubscription(prev, null)
 }
 
@@ -3518,18 +3588,24 @@ function selectSessionRoute(
     return
   }
   const slotTab = session ? session.slot_tab_id : slotTabTargetId(id)
-  setState({
-    selectedTarget: { kind: "agent", sessionId: id, tabId: slotTab },
-    selectedSessionId: id,
-    ...theaterPatch({ kind: "agent", sessionId: id, tabId: slotTab }),
-    // Re-selecting the same session keeps its loaded data; a real switch enters
-    // the loading window so the pane shows a spinner, not the previous session's
-    // files.
-    changes: prev === id ? state.changes : loadingChanges(id),
-    ...editorSelectionPatch({ kind: "agent", sessionId: id, tabId: slotTab }),
-    ...screenPatch(changes),
-    ...(extra ?? {}),
-  })
+  setState(
+    withTheaterLayout({
+      selectedTarget: { kind: "agent", sessionId: id, tabId: slotTab },
+      selectedSessionId: id,
+      ...theaterPatch({ kind: "agent", sessionId: id, tabId: slotTab }),
+      // Re-selecting the same session keeps its loaded data; a real switch
+      // enters the loading window so the pane shows a spinner, not the
+      // previous session's files.
+      changes: prev === id ? state.changes : loadingChanges(id),
+      ...editorSelectionPatch({ kind: "agent", sessionId: id, tabId: slotTab }),
+      ...screenPatch(changes),
+      // LAST, and the snapshot is decided around the whole merged patch for
+      // exactly that reason: a caller's `extra` may carry a mode of its own
+      // (the editor's suspend does), and it is the winning flag the snapshot
+      // has to agree with.
+      ...(extra ?? {}),
+    }),
+  )
   // Move the per-session changed-files subscription, THEN fetch — subscribing
   // before the GET means an invalidation that races the fetch is never missed.
   switchChangesSubscription(prev, id)
@@ -3543,16 +3619,18 @@ function selectSessionRoute(
 // an open one closes in the same commit (`editorSelectionPatch`).
 function clearSelection(urlMode?: "replace", extra?: Partial<DuxState>): void {
   const prev = state.selectedSessionId
-  setState({
-    selectedTarget: null,
-    selectedSessionId: null,
-    // Nothing focused is nothing to fill the screen with, so home is never in
-    // theater; the pane's own memory is untouched and brings it back.
-    theater: false,
-    changes: emptyChanges(),
-    ...editorSelectionPatch(null),
-    ...(extra ?? {}),
-  })
+  setState(
+    withTheaterLayout({
+      selectedTarget: null,
+      selectedSessionId: null,
+      // Nothing focused is nothing to fill the screen with, so home is never in
+      // theater; the pane's own memory is untouched and brings it back.
+      theater: false,
+      changes: emptyChanges(),
+      ...editorSelectionPatch(null),
+      ...(extra ?? {}),
+    }),
+  )
   // Drop the previous session's changed-files subscription; there is no global
   // watch to clear, so the cross-client clobber is gone by construction.
   switchChangesSubscription(prev, null)
@@ -3606,15 +3684,17 @@ export function selectTab(
   },
 ): void {
   const prev = state.selectedSessionId
-  setState({
-    selectedTarget: { kind: "agent", sessionId, tabId },
-    selectedSessionId: sessionId,
-    ...theaterPatch({ kind: "agent", sessionId, tabId }, opts?.theater),
-    changes: prev === sessionId ? state.changes : loadingChanges(sessionId),
-    ...editorSelectionPatch({ kind: "agent", sessionId, tabId }),
-    ...screenPatch(opts?.changes),
-    ...(opts?.extra ?? {}),
-  })
+  setState(
+    withTheaterLayout({
+      selectedTarget: { kind: "agent", sessionId, tabId },
+      selectedSessionId: sessionId,
+      ...theaterPatch({ kind: "agent", sessionId, tabId }, opts?.theater),
+      changes: prev === sessionId ? state.changes : loadingChanges(sessionId),
+      ...editorSelectionPatch({ kind: "agent", sessionId, tabId }),
+      ...screenPatch(opts?.changes),
+      ...(opts?.extra ?? {}),
+    }),
+  )
   switchChangesSubscription(prev, sessionId)
   syncUrl(opts?.urlMode)
   if (prev !== sessionId) loadChanges(sessionId)
@@ -3677,26 +3757,28 @@ export function selectTerminal(
   // "is this owner a session" is the entire question. Any other owner leaves it
   // null, which is exactly the state a project terminal already puts it in.
   const sessionId = ownerSessionId(owner)
-  setState({
-    selectedTarget: { kind: "terminal", terminalId, owner },
-    selectedSessionId: sessionId,
-    ...theaterPatch({ kind: "terminal", terminalId, owner }),
-    // Switching from the agent to one of its own terminals keeps the same
-    // session's loaded changes; only a different session (or a project
-    // terminal, which has none) enters loading/empty.
-    changes:
-      sessionId === null
-        ? emptyChanges()
-        : prev === sessionId
-          ? state.changes
-          : loadingChanges(sessionId),
-    // A terminal of the editor's own session keeps the editor, and so does the
-    // terminal whose OWN editor is open; anything else closes it, the same rule
-    // as an agent selection.
-    ...editorSelectionPatch({ kind: "terminal", terminalId, owner }),
-    ...screenPatch(opts?.changes),
-    ...(opts?.extra ?? {}),
-  })
+  setState(
+    withTheaterLayout({
+      selectedTarget: { kind: "terminal", terminalId, owner },
+      selectedSessionId: sessionId,
+      ...theaterPatch({ kind: "terminal", terminalId, owner }),
+      // Switching from the agent to one of its own terminals keeps the same
+      // session's loaded changes; only a different session (or a project
+      // terminal, which has none) enters loading/empty.
+      changes:
+        sessionId === null
+          ? emptyChanges()
+          : prev === sessionId
+            ? state.changes
+            : loadingChanges(sessionId),
+      // A terminal of the editor's own session keeps the editor, and so does
+      // the terminal whose OWN editor is open; anything else closes it, the
+      // same rule as an agent selection.
+      ...editorSelectionPatch({ kind: "terminal", terminalId, owner }),
+      ...screenPatch(opts?.changes),
+      ...(opts?.extra ?? {}),
+    }),
+  )
   // The changed files belong to the SESSION, so subscribe/fetch the parent
   // session even when a companion terminal is the streamed target; a project
   // terminal drops the subscription entirely.
@@ -4052,7 +4134,7 @@ export function openEditor(
   // is the open choke point; `editorOpenFile` coerces too, and the render
   // keeps the image arm above the diff arm as defense in depth.
   const effectiveMode: EditorViewMode = editorMode(root, mode, initialPath)
-  const editorPatch: Partial<DuxState> = {
+  const editorPatch: Partial<DuxState> & { theater: boolean } = {
     editorTarget: { root, initialPath, initialMode: effectiveMode },
     editorRoute: { root, mode: effectiveMode, path: initialPath },
     ...theaterSuspendPatch(),
@@ -4085,7 +4167,7 @@ export function openEditor(
       })
       return
     }
-    setState(editorPatch)
+    setState(withTheaterLayout(editorPatch))
     syncUrl(opts?.urlMode)
     return
   }
@@ -4093,7 +4175,7 @@ export function openEditor(
     selectSessionRoute(root.sessionId, opts?.urlMode, undefined, editorPatch)
     return
   }
-  setState(editorPatch)
+  setState(withTheaterLayout(editorPatch))
   syncUrl(opts?.urlMode)
 }
 
@@ -4104,14 +4186,16 @@ export function closeEditor(opts?: { urlMode?: "replace" }): void {
   // shell kept up over a closed editor is the boot spinner forever. Unreachable
   // from the standalone UI today (its body hides the Close button), so this is
   // defense in depth.
-  setState({
-    editorTarget: null,
-    editorRoute: null,
-    standaloneEditor: false,
-    // Landing back on the pane restores whatever mode it remembers, which is
-    // the other half of the suspend `openEditor` wrote.
-    ...theaterResumePatch(),
-  })
+  setState(
+    withTheaterLayout({
+      editorTarget: null,
+      editorRoute: null,
+      standaloneEditor: false,
+      // Landing back on the pane restores whatever mode it remembers, which is
+      // the other half of the suspend `openEditor` wrote.
+      ...theaterResumePatch(),
+    }),
+  )
   // Closing is a move too (Esc, the Close button): the push-key drops its
   // editor bit, so this pushes the closed position like any other navigation
   // between two real places. The popstate path never comes through here (see
@@ -4499,15 +4583,17 @@ export function reconnectSession(sessionId: string, force: boolean): void {
     // Reconnect is a session-slot-tab operation, so focus the session-slot tab.
     tabId: slotTabIdFor(sessionId),
   }
-  setState({
-    selectedTarget: reconnectTarget,
-    selectedSessionId: sessionId,
-    // This IS a selection commit, so it restores the pane's remembered mode
-    // like every other one. Skipping it left the flag saying whatever the
-    // previously focused pane said, and the URL was written from that.
-    ...theaterPatch(reconnectTarget),
-    terminalEpoch: state.terminalEpoch + 1,
-  })
+  setState(
+    withTheaterLayout({
+      selectedTarget: reconnectTarget,
+      selectedSessionId: sessionId,
+      // This IS a selection commit, so it restores the pane's remembered mode
+      // like every other one. Skipping it left the flag saying whatever the
+      // previously focused pane said, and the URL was written from that.
+      ...theaterPatch(reconnectTarget),
+      terminalEpoch: state.terminalEpoch + 1,
+    }),
+  )
   // This focuses an agent like any other selection, so the URL has to say so
   // too: a position the address bar does not name is a position Back cannot
   // return to.
@@ -5859,11 +5945,73 @@ function theaterSuspendPatch(): { theater: boolean } {
 }
 
 function theaterResumePatch(): { theater: boolean } {
+  const theater =
+    state.selectedTarget === null
+      ? false
+      : readTheaterMemory(theaterMemoryKey(state.selectedTarget))
+  return { theater }
+}
+
+// BOTH SIDE PANELS LEAVE TOO, on the desktop: theater is one pane and the whole
+// window, so the sidebar (rail included) and the Changes pane are unmounted for
+// the duration. Neither of those is a preference the user changed, so neither
+// may be written: the shell derives its layout from the live `theater` flag and
+// touches nothing persisted, and this snapshot is the guarantee that whatever
+// the layout was on the way in is what comes back on the way out.
+//
+// The Changes pane's VISIBILITY is deliberately not in here. It is
+// server-persisted config shared by every connected client, so the mode is not
+// allowed to PUT it, and putting a captured value back into the optimistic
+// override would overwrite a preference changed from the TUI or another browser
+// while the mode was on. The pane returns because the suppression lifts, which
+// is the same thing arrived at without writing anything, and a captured value
+// nothing may act on is a field that only invites somebody to act on it.
+export interface TheaterLayoutSnapshot {
+  sidebarOpen: boolean
+  sidebarWidth: string
+  changesPanePercent: number
+}
+
+// THE ONE OWNER OF THE SNAPSHOT. Hand it the patch a commit is about to apply
+// and it appends the capture or the restore for whatever `theater` value that
+// patch actually SETTLES ON.
+//
+// Reconciling here rather than beside each decision is the whole point. Two
+// different halves of one commit can each have an opinion about the mode (the
+// editor suspends the pane being left while the selection enters the pane being
+// arrived at), they are read against the state before either lands, and the
+// later spread wins the flag. Deciding the snapshot next to either half means
+// pairing one half's flag with the other half's snapshot, which is a
+// `theaterLayout` captured with the mode off: a layout that gets restored on
+// some later exit that never happened.
+function withTheaterLayout(
+  patch: Partial<DuxState> & { theater?: boolean },
+): Partial<DuxState> {
+  const next = patch.theater ?? state.theater
+  return { ...patch, ...theaterLayoutPatch(next) }
+}
+
+function theaterLayoutPatch(next: boolean): Partial<DuxState> {
+  // Nothing changed, so nothing is captured and nothing is put back: a second
+  // capture inside the mode would overwrite the layout the user came from with
+  // the one the mode imposed.
+  if (next === state.theater) return {}
+  if (next) {
+    return {
+      theaterLayout: {
+        sidebarOpen: state.sidebarOpen,
+        sidebarWidth: state.sidebarWidth,
+        changesPanePercent: state.changesPanePercent,
+      },
+    }
+  }
+  const captured = state.theaterLayout
+  if (!captured) return { theaterLayout: null }
   return {
-    theater:
-      state.selectedTarget === null
-        ? false
-        : readTheaterMemory(theaterMemoryKey(state.selectedTarget)),
+    theaterLayout: null,
+    sidebarOpen: captured.sidebarOpen,
+    sidebarWidth: captured.sidebarWidth,
+    changesPanePercent: captured.changesPanePercent,
   }
 }
 
@@ -5871,7 +6019,7 @@ function theaterResumePatch(): { theater: boolean } {
 export function enterTheater(): void {
   if (!state.selectedTarget || state.theater) return
   writeTheaterMemory(theaterMemoryKey(state.selectedTarget), true)
-  setState({ theater: true })
+  setState(withTheaterLayout({ theater: true }))
   syncUrl("push")
 }
 
@@ -5879,7 +6027,7 @@ export function enterTheater(): void {
 export function exitTheater(): void {
   if (!state.theater) return
   writeTheaterMemory(theaterMemoryKey(state.selectedTarget), false)
-  setState({ theater: false })
+  setState(withTheaterLayout({ theater: false }))
   syncUrl("push")
 }
 
@@ -5910,7 +6058,7 @@ export function noteTheaterOwnershipLost(
   clearTheaterMemory(key)
   if (!state.theater) return
   if (theaterMemoryKey(state.selectedTarget) !== key) return
-  setState({ theater: false })
+  setState(withTheaterLayout({ theater: false }))
   syncUrl("replace")
 }
 
@@ -5921,7 +6069,7 @@ export function noteTheaterOwnershipLost(
 // target IS home, both through the ordinary selection functions.
 export function openChangesScreen(): void {
   if (!state.selectedTarget || state.mobileScreen === "changes") return
-  setState({ mobileScreen: "changes", ...theaterSuspendPatch() })
+  setState(withTheaterLayout({ mobileScreen: "changes", ...theaterSuspendPatch() }))
   syncUrl()
 }
 
@@ -5945,7 +6093,9 @@ export function navigateUp(): void {
     refreshAttentionChrome()
   }
   if (state.mobileScreen === "changes" && state.selectedTarget) {
-    setState({ mobileScreen: "terminal", ...theaterResumePatch() })
+    setState(
+      withTheaterLayout({ mobileScreen: "terminal", ...theaterResumePatch() }),
+    )
     syncUrl(urlMode)
     return
   }
@@ -6015,9 +6165,27 @@ export function reconnect(): void {
   setState({ terminalEpoch: state.terminalEpoch + 1 })
 }
 
+// Expand or collapse the desktop sidebar, and remember the choice.
+//
+// INERT IN THEATER, and so is the width below. Both side panels are unmounted
+// there, so a toggle has nothing to act on: the sidebar's own trigger and rail
+// are gone with it, and what is left is the primitive's keyboard shortcut,
+// which would otherwise silently flip a panel nobody can see and write the
+// preference for it. Inert rather than "exit theater first" because one gesture
+// should mean one thing: the mode has four exits of its own (the pane header's
+// button, the pill, the input menu and Escape), and a key that means "collapse
+// the sidebar" must not become a way out of an unrelated mode.
+export function setSidebarOpen(open: boolean): void {
+  if (state.theater) return
+  if (state.sidebarOpen === open) return
+  setState({ sidebarOpen: open })
+  persistSidebarOpen(open)
+}
+
 // Update the expanded sidebar width during a drag. Pass `persist` on release to
 // write the final value to localStorage.
 export function setSidebarWidth(width: string, persist = false): void {
+  if (state.theater) return
   setState({ sidebarWidth: width })
   if (persist) {
     writeStoredText(SIDEBAR_WIDTH_KEY, width)
