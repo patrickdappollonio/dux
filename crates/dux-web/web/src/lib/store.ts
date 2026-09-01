@@ -6227,8 +6227,13 @@ export function persistChangesPanePercent(percent: number): void {
 // lands on the terminal pane's right edge. Zero when the Changes pane is hidden,
 // because the terminal pane then runs to the window edge and the button slides
 // out with it.
+//
+// Zero in theater too, by the same rule the shell lays out with
+// (`changesPaneVisible(dux) && !theater`): the mode suppresses the pane without
+// touching the preference, so the preference alone still says "visible" and the
+// header would hold back a strip of nothing while the two collapse together.
 export function changesSpacerPercent(s: DuxState): number {
-  return changesPaneVisible(s) ? s.changesPanePercent : 0
+  return changesPaneVisible(s) && !s.theater ? s.changesPanePercent : 0
 }
 
 // A collapsed collapsible panel snaps to its collapsedSize, which defaults to
@@ -6363,8 +6368,17 @@ export function changesPaneEffectivelyHidden(s: DuxState): boolean {
 // threshold sets the same collapsed state its collapse button does.
 //
 // Guarded on the current visibility because a panel can report zero more than
-// once (its unmount is measured too) and each write is a config PUT.
+// once and each write is a config PUT.
+//
+// AND ON THEATER, explicitly. The mode unmounts the pane while the preference
+// still says visible, and an unmount is measured: react-resizable-panels 4.11.2
+// happens to unregister the panel in a `useLayoutEffect` before any layout
+// report can reach these rules, but that is a library detail, and if it ever
+// changes then entering theater would read as the user dragging the pane shut
+// and would write that preference for every connected client. The mode may
+// never write a preference it is only borrowing.
 export function collapseChangesPaneFromDrag(): void {
+  if (state.theater) return
   if (!changesPaneVisible(state)) return
   setChangesPaneVisibility(false)
 }

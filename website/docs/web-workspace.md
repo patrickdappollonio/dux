@@ -161,14 +161,20 @@ terminal grows into the space they were using; on a phone the app header goes wi
 The compose box and the terminal keys stay exactly as you had them, and the input `⋯`
 menu keeps offering to show or hide either one, so theater is as bare or as equipped as
 you want it. The top bar is not on that list while theater is on: it is one of the things
-this mode took away, and it comes back with the rest when you leave.
+this mode took away, and it comes back with the rest when you leave. On a computer both
+side panels leave too, the agent list and the changes list, and they come back as you had
+them: open, collapsed to the rail, hidden, and at the widths you dragged them to. Open a
+link that goes straight into theater and there was no layout on screen to remember, so
+leaving lands on your saved preferences instead.
 
 A small floating pill in the bottom-right corner is the only thing left over the
-terminal. It holds the way out, the macro picker, and, when the agent has more than one
-tab, a marker for the tabs you can no longer see: it bobs while one of them is working
-and shows the attention dot when one needs you. Tap it and the tab pills fold out inline,
-so you can switch tab without leaving the mode. On an agent with a single tab, and on a
-plain terminal, the pill is just the macros button and the way out.
+terminal. It holds the way out, the macro picker, a `⋯` carrying the same **Settings**
+menu the header's cog carries (so Preferences, new agents and everything else stay one
+tap away, with **Leave theater mode** at the bottom of it), and, when the agent has more
+than one tab, a marker for the tabs you can no longer see: it bobs while one of them is
+working and shows the attention dot when one needs you. Tap it and the tab pills fold out
+inline, so you can switch tab without leaving the mode. On an agent with a single tab, and on a
+plain terminal, the pill is the macros button, the `⋯` and the way out.
 
 The pill does not have to stay in that corner. Its leading edge is a grip: hold the grip
 and drag, with a finger or with the mouse, and the pill goes anywhere over the terminal,
@@ -181,8 +187,9 @@ the window, and back to where you put it once there is room for it again.
 The button you came in by is not a way back, because the header it lives in is one of the
 things that left. On a computer there are three ways out: the pill, `Escape` whenever you
 are not typing into the message box or the terminal itself, and your browser's Back
-button. On a phone there is a fourth, **Leave theater mode** in the input `⋯` menu, which
-is there for the times the pill ends up under the keyboard. If the pill's tab list is
+button. There is a fourth in the pill's own `⋯` menu, and on a phone a fifth,
+**Leave theater mode** in the input `⋯` menu, which is there for the times the pill ends
+up under the keyboard. If the pill's tab list is
 folded out, the first `Escape` puts that away and the next one leaves the mode.
 
 Back works because theater is part of the address: a link copied in theater opens in

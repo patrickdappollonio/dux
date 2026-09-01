@@ -75,6 +75,7 @@ function installBootStubs() {
 installBootStubs()
 const { TheaterPill } = await import("./TheaterPill")
 const { peekTheaterTabs } = await import("@/lib/theater")
+const { appMenuModel } = await import("@/lib/appMenu")
 const { THEATER_PILL_HINT_KEY, THEATER_PILL_POSITION_KEY } = await import(
   "@/lib/theaterPill"
 )
@@ -162,6 +163,58 @@ const terminalTarget = {
   terminalId: "tm1",
   owner: { kind: "standalone" as const },
 }
+
+describe("the app menu the pill carries", () => {
+  // THEATER TAKES EVERY OTHER ANCHOR AWAY. On a computer the mode unmounts the
+  // sidebar (the launcher corner's `⋯` with it) and the header (the cog with
+  // it), and on a phone the top bar; without this trigger Preferences, New
+  // agent and every other global action are unreachable for the duration,
+  // against the "exactly one surface-scoped `⋯` on screen" rule.
+  const settle = () => new Promise((r) => setTimeout(r, 40))
+
+  async function openMenu() {
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }))
+    await screen.findByRole("menu")
+    await settle()
+  }
+
+  it("carries the trigger even in its collapsed form", () => {
+    // A terminal pane has no tab strip, so the pill is grip, macros, `⋯` and
+    // the way out. The app menu is not one of the parts that folds away.
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy()
+  })
+
+  it("opens the same menu the header's cog opens", async () => {
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    await openMenu()
+
+    // Driven from the model, never a hand-written list: the pill renders the
+    // shared body, so a new app-menu entry arrives here with no change of ours.
+    const topLevel = appMenuModel({
+      ghAvailable: false,
+      githubIntegrationEnabled: false,
+    }).filter((e) => e.kind !== "separator")
+    const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
+    for (const entry of topLevel) {
+      if (entry.kind === "separator") continue
+      expect(rendered.some((t) => t?.includes(entry.title))).toBe(true)
+    }
+  })
+
+  it("keeps the way out inside the one menu as well", async () => {
+    // The tenet's own reason: whatever else the mode hides, the way back is
+    // inside the `⋯` a user can always find.
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    await openMenu()
+    const item = screen
+      .getAllByRole("menuitem")
+      .find((e) => e.textContent?.includes("Leave theater mode"))
+    expect(item).toBeTruthy()
+    fireEvent.click(item!)
+    expect(exitTheaterMock).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe("the floating theater pill", () => {
   it("always carries the way out", () => {

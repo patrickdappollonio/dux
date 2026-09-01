@@ -1,11 +1,19 @@
-import { Bot, ChevronUp, GripVertical, Minimize2 } from "lucide-react"
+import { Bot, ChevronUp, Ellipsis, GripVertical, Minimize2 } from "lucide-react"
 import type * as React from "react"
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 
+import { AppMenuBody } from "@/components/AppMenu"
 import { AttentionDot } from "@/components/AttentionDot"
+import { InputMenuItems } from "@/components/InputMenuItems"
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import {
@@ -34,9 +42,9 @@ import { cn } from "@/lib/utils"
 
 // THE FLOATING PILL: the only chrome theater mode leaves on screen.
 //
-// It carries exactly three things, and nothing else earns a permanent floating
-// control: what the tabs theater HID are doing, the macros trigger, and the way
-// out. The status half expands into a mini strip of the same tab pills, so
+// It carries exactly four things, and nothing else earns a permanent floating
+// control: what the tabs theater HID are doing, the macros trigger, the app
+// menu, and the way out. The status half expands into a mini strip of the same tab pills, so
 // switching tab does not cost leaving the mode; it is absent entirely for a
 // terminal pane and for a single-tab agent, because an expander that opens onto
 // nothing is the never-renders-empty rule.
@@ -236,6 +244,8 @@ export function TheaterPill({
 
       <MacroPopover variant="pill" target={target} />
 
+      <TheaterAppMenu />
+
       <span aria-hidden className="mx-0.5 h-5.5 w-px shrink-0 bg-border" />
 
       <SimpleTooltip content="Leave theater mode">
@@ -256,6 +266,61 @@ export function TheaterPill({
         </Button>
       </SimpleTooltip>
     </div>
+  )
+}
+
+// THE APP MENU, WHILE THE MODE HAS TAKEN EVERY OTHER ANCHOR AWAY.
+//
+// On a computer theater unmounts the sidebar (and with it the launcher corner's
+// `⋯`) and the whole header stack (and with it the cog); on a phone it takes
+// the top bar. Without this the mode is the one state in which Preferences, New
+// agent and every other global action are unreachable, which is exactly what
+// the "exactly one surface-scoped `⋯` is on screen whatever the surrounding
+// state" rule forbids. So the pill grows the app menu for the duration, and it
+// stays in the collapsed form too: a single-tab agent or a terminal pane folds
+// the tab strip away, never the way to the app's own actions.
+//
+// It renders `AppMenuBody`, the same body the header's cog renders, so the two
+// cannot offer different things; the wrapper adds only the theater exit, from
+// the shared item the input `⋯` uses, so the way out is inside the one `⋯` too.
+//
+// NAMED "Settings", like the control it stands in for: a user looking for the
+// cog's menu should find it under the name they know, and the pill's own
+// buttons already say what each of them does.
+function TheaterAppMenu() {
+  return (
+    <DropdownMenu>
+      <SimpleTooltip content="Settings">
+        <DropdownMenuTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Settings"
+              className="size-10 shrink-0 rounded-full"
+            />
+          }
+        >
+          <Ellipsis />
+        </DropdownMenuTrigger>
+      </SimpleTooltip>
+      {/* Anchored ABOVE the trigger, as the input `⋯` is: the pill lives in the
+          bottom corner of the pane, where a downward popup has nowhere to go.
+          On a phone the primitive renders it as a sheet and ignores this. */}
+      <DropdownMenuContent side="top" align="end">
+        <AppMenuBody />
+        <DropdownMenuSeparator />
+        <InputMenuItems
+          gates={{
+            attach: false,
+            surfaceSwitch: false,
+            keysToggle: false,
+            topBarToggle: false,
+            theaterExit: true,
+          }}
+        />
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 

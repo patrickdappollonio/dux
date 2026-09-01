@@ -831,3 +831,39 @@ describe("the sidebar's remembered shape at boot", () => {
     expect(mod.getSnapshot().sidebarOpen).toBe(true)
   })
 })
+
+describe("what the mode must not write while the Changes pane is off screen", () => {
+  it("refuses a drag-collapse of a pane nobody is dragging", async () => {
+    // The pane is UNMOUNTED in theater, and an unmount is measured: the panel
+    // library reports zero on the way out. Only its own `useLayoutEffect`
+    // unregistration keeps that report from reaching the collapse rules today,
+    // which is a library detail to be immune to rather than to rely on. A
+    // collapse believed here writes the preference for every client.
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.enterTheater()
+    fetchMock.mockClear()
+
+    mod.collapseChangesPaneFromDrag()
+
+    expect(mod.getSnapshot().changesPaneOverride).toBeNull()
+    expect(
+      fetchMock.mock.calls.filter((c) => String(c[0]).includes("changes-pane")),
+    ).toEqual([])
+  })
+
+  it("reserves no header spacer for a pane the mode took away", async () => {
+    // The spacer is what holds the header's right-hand controls off the
+    // Changes pane's edge. In theater there is no pane and no header stack, so
+    // a non-zero spacer only shoves the controls left while the two collapse.
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    expect(mod.changesSpacerPercent(mod.getSnapshot())).toBeGreaterThan(0)
+
+    mod.enterTheater()
+    expect(mod.changesSpacerPercent(mod.getSnapshot())).toBe(0)
+
+    mod.exitTheater()
+    expect(mod.changesSpacerPercent(mod.getSnapshot())).toBeGreaterThan(0)
+  })
+})

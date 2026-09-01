@@ -58,6 +58,7 @@ import { useChangesPaneController } from "@/hooks/use-changes-pane-controller"
 import {
   CHANGES_PANE_MIN_PERCENT,
   changesPaneVisible,
+  setSidebarOpen,
   TERMINAL_PANE_MIN_PERCENT,
   useDux,
 } from "@/lib/store"
@@ -125,30 +126,56 @@ export { CHANGES_PANE_HEAL_FRAMES } from "@/hooks/use-changes-pane-controller"
 // below is still the only production caller.
 export function DesktopShell() {
   const dux = useDux()
-  const { sidebarWidth } = dux
+  const { sidebarWidth, sidebarOpen, theater } = dux
   // The Changes pane honours config.ui.show_changes_pane (via the bootstrap
   // document). The runtime hide/show controls (the pane's ⋯ menu, the header's
   // show button, the Preferences row) all persist that same preference. When
   // hidden, the terminal panel takes the full width and the handle + panel are
   // unmounted (no leftover sliver).
-  const showChanges = changesPaneVisible(dux)
+  //
+  // THEATER SUPPRESSES IT WITHOUT WRITING IT. The mode is one pane and the whole
+  // window, so both side panels leave; the preference is not what changed, and a
+  // write here would hide the pane for good and for every client. Derived rather
+  // than stored, so a preference changed elsewhere while the mode is on is still
+  // the truth the pane comes back to.
+  const showChanges = changesPaneVisible(dux) && !theater
 
   const { mountPercent, panelRef, onLayoutChange, onResize } =
     useChangesPaneController(showChanges)
 
   return (
     <SidebarProvider
+      // CONTROLLED, so the store owns both the state and its persistence. The
+      // primitive's internal state would keep flipping (and writing) under the
+      // mode's keyboard shortcut with the panel unmounted, and the layout the
+      // user came from would be different on the way out.
+      open={sidebarOpen}
+      onOpenChange={setSidebarOpen}
       style={{ "--sidebar-width": sidebarWidth } as React.CSSProperties}
     >
-      <AppSidebar />
+      {/* THEATER TAKES BOTH SIDE PANELS, not just the chrome stacked on the
+          pane: one pane, the whole window. The sidebar is unmounted outright
+          rather than collapsed, because collapsed is the icon rail, which is
+          chrome too.
+
+          AN INSTANT SWAP, deliberately, while the header stack below animates.
+          The sidebar's own width transition belongs to the primitive (a CSS
+          variable on this provider, read by the gap element and every
+          `group-data-[collapsible=icon]` rule), and the Changes pane's width
+          belongs to react-resizable-panels; animating either would hand the
+          terminal a stream of intermediate widths to be measured at. Both
+          disappear inside the SAME layout gesture the chrome collapse runs in
+          (see `useTheaterGesture`), so the whole change still costs exactly one
+          refit at the geometry it settles on. */}
+      {theater ? null : <AppSidebar />}
       <SidebarInset className="flex h-svh min-h-0 flex-col overflow-hidden">
         {/* The pane header is the first of the two chrome stacks theater takes
             away. The other is the pull-request band plus the tab strip, inside
             TerminalArea; both collapse on the same flag and the ONE gesture
-            above pays for the single refit between them. The sidebar and the
-            Changes pane stay: theater is about the chrome stacked ON the pane,
-            and both of those are already yours to put away. */}
-        <TheaterChrome hidden={dux.theater}>
+            above pays for the single refit between them. The header is also
+            where the hidden Changes pane's reopen control lives, so that goes
+            with it: the floating pill is the only chrome theater leaves. */}
+        <TheaterChrome hidden={theater}>
           <InsetHeader />
         </TheaterChrome>
         <div className="min-h-0 flex-1">

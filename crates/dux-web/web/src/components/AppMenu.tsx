@@ -18,12 +18,19 @@ import { useDux } from "@/lib/store"
 // hand-authors no items, so it cannot drift from the mobile bottom sheet
 // (`AppMenuSheet.tsx`), which renders the same model.
 //
+// The BODY is exported separately from the cog, because the header is not the
+// only place this menu has to appear: theater mode takes the header and the
+// sidebar away, and the floating pill's `⋯` carries the same menu so that
+// Preferences and every creation action stay reachable while the mode is on.
+// It renders the model and reads the same context, so the two anchors cannot
+// offer different things.
+//
 // Deliberately NO keyboard shortcut (the web has no Ctrl+K anymore). The cog is
 // a plain <button>: Tab reaches it, Enter/Space activate it natively, ArrowDown
 // opens it, arrows move within it, Escape closes it and restores focus. All of
 // that comes from base-ui's Menu plus the native button.
 
-function AppMenuEntries({ entries }: { entries: AppMenuEntry[] }) {
+export function AppMenuEntries({ entries }: { entries: AppMenuEntry[] }) {
   return (
     <>
       {entries.map((entry) => {
@@ -61,12 +68,21 @@ function AppMenuEntries({ entries }: { entries: AppMenuEntry[] }) {
   )
 }
 
-export function AppMenu() {
+// Every item of the app menu, ready to drop into any `DropdownMenuContent`.
+export function AppMenuBody() {
   // The model's one context input: gh availability gates the from-PR agent
   // variant, exactly as the launcher corner's ⋯ menu gates its copy.
   const { bootstrap } = useDux()
   const ghAvailable = bootstrap?.gh_available ?? false
   const githubIntegrationEnabled = bootstrap?.github_integration ?? false
+  return (
+    <AppMenuEntries
+      entries={appMenuModel({ ghAvailable, githubIntegrationEnabled })}
+    />
+  )
+}
+
+export function AppMenu() {
   return (
     <DropdownMenu>
       {/* LABELLED on desktop, where there is room: "Settings" says what the cog
@@ -85,7 +101,7 @@ export function AppMenu() {
         }
       />
       <DropdownMenuContent align="end" side="bottom">
-        <AppMenuEntries entries={appMenuModel({ ghAvailable, githubIntegrationEnabled })} />
+        <AppMenuBody />
       </DropdownMenuContent>
     </DropdownMenu>
   )
