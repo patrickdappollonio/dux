@@ -154,7 +154,7 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
   // MUTATE the agent disable; read-only entries (info, project submenu,
   // editor, terminals) stay usable.
   const disabledLabels = [
-    /^New agent tab for /,
+    "New agent tab…",
     "Force recreate agent…",
     "Enable agent auto-reopen",
     "Rename agent…",
@@ -323,7 +323,7 @@ describe("AgentActionsMenu context and tab availability", () => {
 
     await openMenu(session)
     const trigger = screen
-      .getByText(/New agent tab for/)
+      .getByText("New agent tab…")
       .closest('[role="menuitem"]')
     expect(trigger?.getAttribute("aria-disabled")).toBe("true")
     expect(

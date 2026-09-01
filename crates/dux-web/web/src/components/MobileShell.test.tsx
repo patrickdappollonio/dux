@@ -173,7 +173,7 @@ describe("MobileShell home row agent ⋯ menu: Add tab", () => {
     })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    const item = screen.getByText(/^New agent tab for /)
+    const item = screen.getByText("New agent tab…")
     expect(
       item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
     ).not.toBe("true")
@@ -191,7 +191,7 @@ describe("MobileShell home row agent ⋯ menu: Add tab", () => {
     })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    const item = screen.getByText(/^New agent tab for /)
+    const item = screen.getByText("New agent tab…")
     expect(item.closest('[role="menuitem"]')?.getAttribute("aria-disabled")).toBe(
       "true",
     )
@@ -208,7 +208,7 @@ describe("MobileShell home row agent ⋯ menu: Add tab", () => {
     })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    fireEvent.click(screen.getByText(/^New agent tab for /))
+    fireEvent.click(screen.getByText("New agent tab…"))
     // makeSessionSpine's project default_provider is "claude".
     expect(screen.getByText("default")).toBeTruthy()
     expect(screen.getByText("codex")).toBeTruthy()
@@ -939,7 +939,7 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     mockState = terminalState()
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    expect(screen.getByText(/^New agent tab for /)).toBeTruthy()
+    expect(screen.getByText("New agent tab…")).toBeTruthy()
     expect(screen.queryByText("Hide top bar")).toBeNull()
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
   })
@@ -971,7 +971,7 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     fireEvent.click(screen.getByLabelText("Session actions"))
     const item = screen.getByText("Hide top bar").closest('[role="menuitem"]')!
     const subTriggers = [
-      screen.getByText(/^New agent tab for /).closest('[role="menuitem"]')!,
+      screen.getByText("New agent tab…").closest('[role="menuitem"]')!,
       screen.getByText(/^Project /).closest('[role="menuitem"]')!,
     ]
     for (const cls of ["min-h-11", "md:min-h-0"]) {
@@ -996,7 +996,7 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    expect(screen.getByText(/^New agent tab for /)).toBeTruthy()
+    expect(screen.getByText("New agent tab…")).toBeTruthy()
     expect(screen.queryByText("Hide top bar")).toBeNull()
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
   })
@@ -1160,7 +1160,7 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
     mockState = projectTerminalState()
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Terminal actions"))
-    expect(screen.queryByText(/^New agent tab for /)).toBeNull()
+    expect(screen.queryByText("New agent tab…")).toBeNull()
     expect(screen.queryByText("Rename agent…")).toBeNull()
   })
 })

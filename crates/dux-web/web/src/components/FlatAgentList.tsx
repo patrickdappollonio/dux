@@ -196,12 +196,10 @@ export function AgentActionsMenu({
   const addingTab = createTabInFlight.includes(session.id)
   const providers = bootstrap?.available_providers ?? []
   const defaultProvider = defaultProviderForSession(spine, session)
-  // The two submenu labels name their subject so the menu reads unambiguously
-  // even when opened far from the row (the mobile terminal header). The agent
-  // name is the row's own display idiom (title ?? branch); the Project
-  // submenu names the PROJECT, because its actions affect the whole project,
-  // not just this agent.
-  const agentName = sessionLabel(session)
+  // The Project submenu names the PROJECT, because its actions affect the whole
+  // project, not just this agent. The tab submenu names nothing: the agent's own
+  // name sits beside the menu in every placement (the row, the mobile terminal
+  // header), so repeating it in the label is noise.
   // `null` for a standalone agent, which belongs to no project. Read once so
   // the submenu's presence and its contents cannot disagree.
   const projectId = workspaceProjectId(session.workspace)
@@ -304,7 +302,6 @@ export function AgentActionsMenu({
       ) : null}
       <AgentTabSubmenu
         sessionId={session.id}
-        agentName={agentName}
         providers={providers}
         defaultProvider={defaultProvider}
         atTabCap={atTabCap}
@@ -402,7 +399,6 @@ export function AgentActionsMenu({
 
 function AgentTabSubmenu({
   sessionId,
-  agentName,
   providers,
   defaultProvider,
   atTabCap,
@@ -410,7 +406,6 @@ function AgentTabSubmenu({
   activeElsewhere,
 }: {
   sessionId: string
-  agentName: string
   providers: string[]
   defaultProvider: string
   atTabCap: boolean
@@ -423,9 +418,7 @@ function AgentTabSubmenu({
         disabled={atTabCap || addingTab || activeElsewhere}
       >
         <Plus />
-        <span className="min-w-0 truncate">
-          New agent tab for &quot;{agentName}&quot;…
-        </span>
+        <span className="min-w-0 truncate">New agent tab…</span>
       </DropdownMenuSubTrigger>
       <DropdownMenuSubContent>
         {providers.map((provider) => {
