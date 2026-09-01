@@ -32,6 +32,16 @@ vi.mock("@/lib/store", async (importOriginal) => {
 })
 const historyBack = vi.fn()
 
+// The real pane pulls in xterm's canvas rendering, which jsdom cannot back, and
+// it arrives behind `React.lazy`, so nothing it is handed would ever mount in a
+// test. The stub renders the OVERLAY it is given, which is where the floating
+// theater pill lives on this shell exactly as it does on the desktop one.
+vi.mock("@/components/LazyTerminalPane", () => ({
+  LazyTerminalPane: (props: { overlay?: React.ReactNode }) => (
+    <div data-testid="terminal-pane-stub">{props.overlay}</div>
+  ),
+}))
+
 // jsdom lacks localStorage/fetch/matchMedia as globals; the real store boots on
 // import. Stub them before the component (and the store behind it) loads so the
 // render tests are hermetic and off the network.
@@ -434,6 +444,34 @@ describe("MobileShell phone header for a standalone agent", () => {
     } as unknown as Partial<DuxState>)
     render(<MobileShell />)
     expect(screen.getByText("~/notes")).toBeTruthy()
+  })
+})
+
+// The phone gets the same pill, from the same component, inside the same pane
+// box: theater is one mode with one floating control, and the drag it carries
+// is the gesture the phone needs most.
+describe("MobileShell in theater", () => {
+  it("floats the draggable pill inside the pane's own box", () => {
+    mockState = makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      selectedSessionId: "s1",
+      mobileScreen: "terminal",
+      changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      pendingSlotTab: {},
+      terminalEpoch: 0,
+      theater: true,
+    } as unknown as Partial<DuxState>)
+    render(<MobileShell />)
+    const pill = screen.getByTestId("theater-pill")
+    expect(screen.getByTestId("terminal-pane-stub").contains(pill)).toBe(true)
+    expect(screen.getByTestId("theater-pill-grip")).toBeTruthy()
   })
 })
 

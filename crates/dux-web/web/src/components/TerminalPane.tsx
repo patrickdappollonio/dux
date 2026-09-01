@@ -64,6 +64,7 @@ import { matchOwner, ownerProjectId, ownerSessionId } from "@/lib/terminalOwner"
 import { terminalsForOwner } from "@/lib/terminals"
 import { DEFAULT_ATTENTION_GRACE_SECONDS } from "@/lib/viewedPing"
 import { attachCover, type AttachCover } from "@/lib/attachCover"
+import { assertNever } from "@/lib/assertNever"
 import { replayWaitMs } from "@/lib/connectionTiming"
 import { createVisibleClock, type VisibleClock } from "@/lib/visibleClock"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
@@ -1188,9 +1189,33 @@ function TerminalPaneSurface({
         ownerPresent={ownerPresent}
         takeOver={takeOver}
       />
-      {overlay}
+      {coverOwnsThePane(cover) ? null : overlay}
     </div>
   )
+}
+
+/// Does the cover speak for the whole pane, or is it a cue over one the user
+/// still has?
+///
+/// The floating overlay (theater's pill) is chrome for a surface somebody is
+/// using. A CARD says another device is driving this pty and a BOX says the
+/// picture is gone: both are full-pane, opaque, and carry the one control that
+/// answers them, so a pill on top of either offers a drag over a surface there
+/// is nothing to uncover on, and its one-time hint teaches the gesture to
+/// somebody who cannot see what it is for. The SPINNER is deliberately the other
+/// way: a small, transparent, pointer-transparent cue over a pane that is still
+/// this user's, and a blip must not take the way out of theater with it.
+function coverOwnsThePane(cover: AttachCover): boolean {
+  switch (cover.kind) {
+    case "card":
+    case "box":
+      return true
+    case "spinner":
+    case "none":
+      return false
+    default:
+      return assertNever(cover)
+  }
 }
 
 function FileDropOverlay({ kind }: { kind: TerminalPaneProps["kind"] }) {

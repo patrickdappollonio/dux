@@ -4759,3 +4759,85 @@ describe("TerminalPane and theater mode", () => {
     }
   })
 })
+
+// THE FLOATING OVERLAY BELONGS TO A PANE THE USER CAN STILL USE.
+//
+// Theater's pill is handed to the pane as `overlay`, and the pane paints its
+// covers over the terminal. A full-pane cover is a statement that this surface
+// is not the user's to drive right now (somebody else has it, or the picture is
+// gone), so the pill floating on top of it is chrome for a pane that is not
+// there: it offers a drag over a card, and it teaches the drag to a viewer who
+// cannot see what the drag is for.
+describe("TerminalPane gates its floating overlay on the cover", () => {
+  const mounted = vi.fn()
+  // Mounting is exactly what the pill's one-time drag hint rides on, so a probe
+  // that counts its own mounts answers both halves at once: no pill on screen,
+  // and nobody taught about it.
+  function OverlayProbe() {
+    mounted()
+    return <div data-testid="pane-overlay" />
+  }
+  const overlay = <OverlayProbe />
+
+  beforeEach(() => {
+    mounted.mockClear()
+  })
+
+  /// A pane with a screen: the spine says this pty has printed something, so
+  /// the readiness spinner is skipped and only the attach replay is left.
+  function readySpine(): DuxState {
+    const base = makeState()
+    const session = base.spine!.sessions[0] as unknown as {
+      has_output: boolean
+      tabs: { has_output: boolean }[]
+    }
+    session.has_output = true
+    session.tabs[0].has_output = true
+    return base
+  }
+
+  it("renders it for an owner whose pane is uncovered", () => {
+    mockState = readySpine()
+    render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" overlay={overlay} />,
+    )
+    const pty = last()
+    act(() => pty.onOpen())
+    act(() => pty.onConnected("conn-self", null))
+    act(() => pty.bytesCb?.(new Uint8Array([0x61])))
+    expect(screen.queryByText(/Starting|Attaching|Reconnecting/)).toBeNull()
+    expect(screen.getByTestId("pane-overlay")).toBeTruthy()
+  })
+
+  it("keeps it through the transient spinner, so the way out survives a blip", () => {
+    render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" overlay={overlay} />,
+    )
+    expect(screen.getByText("Starting claude…")).toBeTruthy()
+    expect(screen.getByTestId("pane-overlay")).toBeTruthy()
+  })
+
+  it("hides it under the take-over card a watcher arrives to", () => {
+    render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" overlay={overlay} />,
+    )
+    // The optimistic pre-handshake frame is an owner's, so the pill is up; the
+    // handshake naming another driver is what turns this pane into a watcher.
+    mounted.mockClear()
+    act(() => last().onConnected("conn-self", "conn-other"))
+    expect(screen.getByText("Active on another device")).toBeTruthy()
+    expect(screen.queryByTestId("pane-overlay")).toBeNull()
+    expect(mounted).not.toHaveBeenCalled()
+  })
+
+  it("hides it under a box cover, which owns the whole pane", () => {
+    render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" overlay={overlay} />,
+    )
+    mounted.mockClear()
+    last().emit("failed")
+    expect(screen.getByText("Connection lost.")).toBeTruthy()
+    expect(screen.queryByTestId("pane-overlay")).toBeNull()
+    expect(mounted).not.toHaveBeenCalled()
+  })
+})

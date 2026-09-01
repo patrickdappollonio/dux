@@ -23,7 +23,11 @@ const paneProps: unknown[] = []
 vi.mock("@/components/LazyTerminalPane", () => ({
   LazyTerminalPane: (props: unknown) => {
     paneProps.push(props)
-    return <div data-testid="terminal-pane-stub" />
+    // The overlay is rendered rather than dropped: it is where the floating
+    // theater pill lives, and the pane's positioned box is the surface the pill
+    // is clamped to on both shells.
+    const { overlay } = props as { overlay?: React.ReactNode }
+    return <div data-testid="terminal-pane-stub">{overlay}</div>
   },
 }))
 
@@ -176,6 +180,24 @@ describe("TerminalArea not-found route", () => {
     render(<TerminalArea />)
     expect(screen.getByText("Agent not found")).toBeTruthy()
     expect(screen.getByText("s9")).toBeTruthy()
+  })
+})
+
+describe("TerminalArea in theater", () => {
+  it("floats the draggable pill inside the pane's own box", async () => {
+    // Inside the pane, not beside it: the pill is clamped to the surface it is
+    // rendered in, and that surface is the terminal's box on both shells.
+    mockState = makeState({
+      spine: dormantSpine(),
+      selectedSessionId: "s1",
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      theater: true,
+    } as unknown as Partial<DuxState>)
+    render(<TerminalArea />)
+    await vi.waitFor(() => expect(paneProps.length).toBeGreaterThan(0))
+    const pill = screen.getByTestId("theater-pill")
+    expect(screen.getByTestId("terminal-pane-stub").contains(pill)).toBe(true)
+    expect(screen.getByTestId("theater-pill-grip")).toBeTruthy()
   })
 })
 
