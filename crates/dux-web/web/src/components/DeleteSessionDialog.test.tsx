@@ -199,6 +199,19 @@ describe("DeleteSessionDialog", () => {
     expect(
       screen.getByText(/existed before this agent, so dux keeps it/),
     ).toBeTruthy()
+    // A kept verdict is the one the user may disagree with, so the dialog says
+    // where the override lives instead of leaving them with no way through.
+    expect(
+      screen.getByText(/remove it from the project.s Worktrees dialog/),
+    ).toBeTruthy()
+  })
+
+  it("points at the override only where a branch is actually kept", () => {
+    // The branch is going anyway here, so directions for deleting it by hand
+    // would be noise on the one screen that must be read carefully.
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    expect(screen.queryByText(/Worktrees dialog/)).toBeNull()
   })
 
   it("says an adopted branch came with its worktree", () => {

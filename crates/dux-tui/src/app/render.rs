@@ -9359,6 +9359,17 @@ impl App {
                     format!(" Branch \"{kept}\" {reason} and is kept."),
                     Style::default().fg(self.theme.hint_desc_fg),
                 )));
+                // The manual override, named where the user is standing. dux
+                // has no command that deletes a branch it did not create, so
+                // when this verdict is wrong for a branch (an agent created
+                // from a pull request by a dux older than this one recorded the
+                // branch as pre-existing) the way through is the worktree
+                // manager, which honors the checkbox rather than the
+                // provenance.
+                body_lines.push(Line::from(Span::styled(
+                    " To delete it anyway, leave the worktree in place here, then remove it with the manage-worktrees command, leaving its branch box ticked.",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )));
             }
         } else {
             body_lines.push(Line::from(Span::styled(
@@ -21796,6 +21807,39 @@ mod tests {
                 "{provenance:?}: the rendered label must be the helper's:\n{screen}"
             );
         }
+    }
+
+    /// A kept branch is the verdict a user may disagree with (a PR agent
+    /// created by an older dux carries the wrong one), so the dialog names the
+    /// override. Where the branch is going anyway there is nothing to override
+    /// and the directions would be noise.
+    #[test]
+    fn the_delete_dialog_names_the_override_only_where_the_branch_is_kept() {
+        let mut app = test_app(default_bindings());
+        let prompt_for = |provenance| PromptState::ConfirmDeleteAgent {
+            session_id: "s1".to_string(),
+            agent_label: "b".to_string(),
+            target: crate::app::DeleteAgentTarget::Managed {
+                branch_name: "b".to_string(),
+                initial_branch: "b".to_string(),
+                branch_provenance: provenance,
+                worktree_shared: false,
+            },
+            focus: super::DeleteAgentFocus::Checkbox,
+            delete_worktree: true,
+        };
+        app.prompt = prompt_for(dux_core::model::BranchProvenance::AttachedExisting);
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains("manage-worktrees"),
+            "a kept branch must come with the way to remove it by hand:\n{screen}"
+        );
+        app.prompt = prompt_for(dux_core::model::BranchProvenance::CreatedByDux);
+        let screen = rendered_screen(&mut app);
+        assert!(
+            !screen.contains("manage-worktrees"),
+            "this branch is already going; the override is noise:\n{screen}"
+        );
     }
 
     #[test]

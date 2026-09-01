@@ -126,6 +126,19 @@ export function DeleteSessionDialog() {
             , so dux keeps it.
           </p>
         )}
+        {managed && branchIsKept && (
+          // The manual override, named where the user is standing. dux has no
+          // command that deletes a branch it did not create, so when this
+          // verdict is wrong for a branch (an agent created from a pull request
+          // by a dux older than this one recorded the branch as pre-existing)
+          // the way through is the project's Worktrees dialog, which honors the
+          // checkbox rather than the provenance.
+          <p className="text-sm text-muted-foreground">
+            To delete it anyway, leave the worktree in place here, then remove
+            it from the project&rsquo;s Worktrees dialog, leaving its branch box
+            ticked.
+          </p>
+        )}
         <div className="h-2" />
         <DialogFooter>
           <Button variant="outline" onClick={handleCancel}>
