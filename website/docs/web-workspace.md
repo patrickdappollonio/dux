@@ -170,6 +170,14 @@ and shows the attention dot when one needs you. Tap it and the tab pills fold ou
 so you can switch tab without leaving the mode. On an agent with a single tab, and on a
 plain terminal, the pill is just the macros button and the way out.
 
+The pill does not have to stay in that corner. Its leading edge is a grip: hold the grip
+and drag, with a finger or with the mouse, and the pill goes anywhere over the terminal,
+never further than its edges. A quick tap does nothing, so the buttons beside the grip
+keep working as buttons. If you would rather not drag, focus the grip and the arrow keys
+move it a step at a time. Where you leave it is remembered on that device, for every
+agent and every terminal, and it is nudged back inside if you rotate the phone or shrink
+the window, and back to where you put it once there is room for it again.
+
 The button you came in by is not a way back, because the header it lives in is one of the
 things that left. On a computer there are three ways out: the pill, `Escape` whenever you
 are not typing into the message box or the terminal itself, and your browser's Back
