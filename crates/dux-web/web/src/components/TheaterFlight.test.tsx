@@ -330,7 +330,9 @@ describe("the cluster the pill carries on a phone", () => {
     expect(box.contains(toggle)).toBe(true)
     expect(box.contains(screen.getByLabelText("Run a macro"))).toBe(true)
     expect(box.contains(screen.getByLabelText(/changed files$/))).toBe(true)
-    expect(box.contains(screen.getByLabelText("Settings"))).toBe(true)
+    // The SAME `⋯` the flap carries, by the same name: the cluster flew here
+    // as one object, so its menu cannot become a different menu on arrival.
+    expect(box.contains(screen.getByLabelText("Session actions"))).toBe(true)
     expect(toggle.getAttribute("aria-pressed")).toBe("true")
   })
 

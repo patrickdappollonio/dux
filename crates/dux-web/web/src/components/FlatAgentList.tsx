@@ -20,7 +20,6 @@ import {
   ChevronRight,
   ClipboardCopy,
   Cpu,
-  Diff,
   Ellipsis,
   ExternalLink,
   FileCode2,
@@ -49,7 +48,6 @@ import type { CSSProperties, ReactNode } from "react"
 import { useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
-import { InputMenuItems } from "@/components/InputMenuItems"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import {
   quietTailManualChoice,
@@ -77,8 +75,6 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty"
-import { useIsMobile } from "@/hooks/use-mobile"
-import { useTouchSurfaces } from "@/hooks/use-typing-surface"
 import { agentRowVisual } from "@/lib/agentRow"
 import { defaultProviderForSession } from "@/lib/agentTabs"
 import {
@@ -137,7 +133,6 @@ import {
   openAddProject,
   openAttachPullRequest,
   openChangeProvider,
-  openChangesScreen,
   openDelete,
   openDeleteTerminal,
   openEditor,
@@ -157,7 +152,6 @@ import {
   useDux,
 } from "@/lib/store"
 import { useAttachCapability } from "@/lib/attachRegistry"
-import { changesSummary } from "@/lib/changesSummary"
 import { terminalForeground, terminalTitle } from "@/lib/terminals"
 import type { DuxState, SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import { matchOwner } from "@/lib/terminalOwner"
@@ -234,8 +228,6 @@ export function AgentActionsMenu({
   // pointer-events-none, so a hover tooltip could never fire, and touch has
   // no hover at all.
   const activeElsewhere = sessionActiveElsewhere(duxState, session)
-  const isMobile = useIsMobile()
-  const touchSurfaces = useTouchSurfaces()
   // Every PTY this agent can have a mounted pane for: the session-slot tab's id
   // IS the session id, and each extra tab has its own. Whichever pane is
   // mounted and owns its input answers.
@@ -255,49 +247,12 @@ export function AgentActionsMenu({
           <DropdownMenuSeparator />
         </>
       ) : null}
-      {/* The shared input-menu items (labels, icons and store writes live in
-          InputMenuItems, shared with the input `⋯` below the terminal and with
-          the agentless terminal screens' menu, so the three can never drift).
-          Visibility is computed HERE rather than inside the component: this
-          header menu is phone-shell chrome, so both toggles ride `isMobile`,
-          which is the behavior this menu has always had. The keys toggle rides
-          the touch surfaces too, so it is present exactly where pressing it
-          puts a key row on screen: in a narrow window on a laptop the width
-          alone said yes and the press did nothing.
-
-          Deliberately NOT disabled while the agent is active elsewhere: hiding
-          this device's own bars is this device's view preference, not a
-          mutation of the agent. Attach is gated off in the shared items only
-          because this menu renders its own Attach entry just below: this menu
-          is the phone terminal screen's header menu and a keyboard-reachable
-          path, so it carries Attach itself. On a phone agent screen Attach
-          therefore appears both here and in the input `⋯` menu; both call the
-          one registered capability, so they cannot drift. */}
-      {/* THE CHANGED FILES, as a menu row as well as the cluster's own count
-          button. Terminal context only: this is the phone agent screen's menu,
-          and the hub's row menus open onto a screen where the count control is
-          not on offer at all. It is the keyboard- and screen-reader-reachable
-          twin of the count beside it, and it opens the same screen. */}
-      {context === "terminal" ? (
-        <DropdownMenuItem onClick={() => openChangesScreen()}>
-          <Diff />
-          {`Changes ${changesSummary(duxState.changes, session.id).label}`}
-        </DropdownMenuItem>
-      ) : null}
-      <InputMenuItems
-        gates={{
-          attach: false,
-          surfaceSwitch: false,
-          keysToggle: context === "terminal" && isMobile && touchSurfaces,
-          topBarToggle: context === "terminal" && isMobile,
-          // This menu hangs off the phone header, which is one of the things
-          // theater takes away, so it is never on screen while theater is on
-          // and has nothing to offer a way out of.
-          theaterExit: false,
-        }}
-        trailingSeparator
-      />
-      {attachToPane ? (
+      {/* The changed-file row and the shared input-menu items used to be here,
+          for the phone terminal screen's menu alone. They live in
+          `MobilePaneMenu` now, which is the ONE menu both of that screen's
+          surfaces open (the docked flap and the floating pill), and which
+          renders this body as its agent group. */}
+      {context === "hub" && attachToPane ? (
         <>
           {/* THE DESKTOP AND KEYBOARD PATH INTO THE UPLOAD JOURNEY. A drag
               needs a desktop pointer and a paste needs the file already on the
@@ -306,7 +261,11 @@ export function AgentActionsMenu({
               still travels through that pane's own gated connection and sink
               (never a side channel), and a file attached from a viewer would
               strand as saved-but-not-sent. Hidden rather than disabled when no
-              such pane exists, per the row-menu convention. */}
+              such pane exists, per the row-menu convention.
+
+              Hub rows only: the phone terminal screen's menu carries its own,
+              down in the input group where the mock puts it, rather than one
+              entry in each of two groups. */}
           <DropdownMenuItem onClick={attachToPane}>
             <Paperclip />
             Attach a file…

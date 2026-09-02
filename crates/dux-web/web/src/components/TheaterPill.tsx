@@ -5,6 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { AppMenuBody } from "@/components/AppMenu"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { MobileActionCluster } from "@/components/MobileActionCluster"
+import { MobilePaneMenu } from "@/components/MobilePaneMenu"
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -210,7 +211,19 @@ export function TheaterPill({
           target={target}
           sessionId={sessionId}
           theaterRef={exitRef}
-          ellipsis={<TheaterAppMenu paneId={paneId} />}
+          // THE SAME `⋯` THE FLAP CARRIES, by the same name: the cluster flew
+          // here as one object, and a button that changed what it opens on
+          // arrival would make the animation a lie. It is also the only way to
+          // the agent's own actions while the mode is on. A pane with no agent
+          // behind it has no such menu, and falls back to the app menu the way
+          // the desktop pill does.
+          ellipsis={
+            session ? (
+              <MobilePaneMenu session={session} side="top" />
+            ) : (
+              <TheaterAppMenu paneId={paneId} />
+            )
+          }
         />
       ) : (
         <>

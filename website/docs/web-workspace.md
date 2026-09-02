@@ -175,7 +175,11 @@ terminal. On a computer it holds the way out, the macro picker and a `⋯` carry
 same **Settings** menu the header's cog carries, so Preferences, new agents and
 everything else stay one tap away, with **Leave theater mode** at the bottom of it. On a
 phone it is the flap that flew there: the theater button (now showing the way out), the
-macro picker, the changed-file count and the same `⋯`.
+macro picker, the changed-file count and the same `⋯`, opening the same menu it opened on
+the band. That menu is the agent's own actions, the changed files, this screen's view
+toggles, the way out of theater while the mode is on, and **Settings**, which drills into
+the app menu the cog carries, so nothing about an agent goes out of reach because you
+went full screen.
 
 The pill carries no tab status. What the other tabs are doing is in the agents list, and
 an agent that needs you says so with a notification, wherever you happen to be looking.
@@ -409,8 +413,10 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
   agent's name over its assistant, branch and project, and an optional PR chip) and the
   tab strip when the agent has more than one tab. The actions hang off the strip on the
   right, in a small tab-shaped flap over the terminal: theater mode, the macro picker,
-  the changed-file count, and the session's `⋯` menu. The flap stays put when you hide
-  the top bar, since it takes no room from the terminal.
+  the changed-file count, and the session's `⋯` menu, which carries the agent's actions,
+  the changed files, this screen's view toggles and a **Settings** drill into the app
+  menu. The flap stays put when you hide the top bar, since it takes no room from the
+  terminal.
 - The **changes** screen is the full Changes pane.
 
 An **accessory bar** sits above the soft keyboard with the keys a phone keyboard lacks:

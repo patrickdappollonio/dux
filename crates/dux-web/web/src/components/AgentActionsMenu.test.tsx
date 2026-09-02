@@ -288,20 +288,23 @@ describe("AgentActionsMenu context and tab availability", () => {
     })
   })
 
-  it("offers terminal-screen bar toggles only from a phone terminal menu", async () => {
+  it("carries no view toggles or changed-file row in either context", async () => {
+    // Both moved to `MobilePaneMenu`, which renders this body as its agent
+    // group and then adds them once, below it. This menu is the AGENT's
+    // actions wherever it is opened from, and a phone row menu carrying the
+    // phone terminal screen's chrome toggles was how it stopped being that.
     const session = makeSession({ id: "s1" })
     seed(session, true)
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
-    // The keys toggle rides the touch surfaces as well as the layout, so it is
-    // present exactly where pressing it puts a key row on screen.
     media = stubCoarsePointer()
 
     await openMenu(session, "terminal")
-    expect(screen.getByText("Hide terminal keys")).toBeTruthy()
-    expect(screen.getByText("Hide top bar")).toBeTruthy()
+    expect(screen.queryByText("Hide terminal keys")).toBeNull()
+    expect(screen.queryByText("Hide top bar")).toBeNull()
+    expect(screen.queryByText(/^Changes/)).toBeNull()
 
     cleanup()
     await openMenu(session, "hub")

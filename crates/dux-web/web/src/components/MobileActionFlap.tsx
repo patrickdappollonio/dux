@@ -1,15 +1,8 @@
-import { Ellipsis } from "lucide-react"
 import type * as React from "react"
 import { useLayoutEffect, useRef, useState } from "react"
 
-import { AgentActionsMenu } from "@/components/FlatAgentList"
 import { MobileActionCluster } from "@/components/MobileActionCluster"
-import { Button } from "@/components/ui/button"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+import { MobilePaneMenu } from "@/components/MobilePaneMenu"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import { buildFlapShape } from "@/lib/flapShape"
 import { registerFlapElement } from "@/lib/theaterFlight"
@@ -115,25 +108,10 @@ export function MobileActionFlap({
         target={target}
         sessionId={session.id}
         theaterRef={theaterRef}
-        ellipsis={
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-10 shrink-0 rounded-full"
-                  aria-label="Session actions"
-                />
-              }
-            >
-              <Ellipsis />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <AgentActionsMenu session={session} context="terminal" />
-            </DropdownMenuContent>
-          </DropdownMenu>
-        }
+        // The one pane menu, which the floating pill opens too: the cluster
+        // flies across the screen as one object, so its `⋯` cannot mean
+        // something else once it lands.
+        ellipsis={<MobilePaneMenu session={session} side="bottom" />}
       />
     </div>
   )
