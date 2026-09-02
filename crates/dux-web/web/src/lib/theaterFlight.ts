@@ -92,6 +92,30 @@ export function flightForMode(theater: boolean, chromeMs: number): FlightPhase {
 }
 
 /**
+ * The same question, asked by a machine that is already in the middle of one.
+ *
+ * A MODE FLIPPED BACK DURING ITS OWN CHROME STAGE UNDOES THAT STAGE rather than
+ * starting the opposite gesture. The chrome stages are the two where nothing has
+ * moved yet: a collapse that is abandoned before the cluster ever left the band
+ * has a flap still on the band to go back to, and running the leaving gesture
+ * from there hides the flap and floats a pill over a screen the cluster never
+ * flew off. So an abandoned stage rests at the state it started from, with no
+ * flight at all, and the chrome animates back on its own flag.
+ *
+ * Every other interruption is a real gesture in the opposite direction, because
+ * by then the cluster really is somewhere else.
+ */
+export function flightForModeFrom(
+  previous: FlightPhase,
+  theater: boolean,
+  chromeMs: number,
+): FlightPhase {
+  const abandoned = theater ? "expanding" : "collapsing"
+  if (previous === abandoned) return theater ? "floating" : "docked"
+  return flightForMode(theater, chromeMs)
+}
+
+/**
  * How long a stage lasts, or `null` for a resting state.
  *
  * The two chrome stages are the CHROME's clock rather than one of their own:

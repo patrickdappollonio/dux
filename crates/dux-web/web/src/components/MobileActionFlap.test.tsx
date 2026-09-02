@@ -2,6 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
+import { readFileSync } from "node:fs"
+
 import type { DuxState, SelectedTarget } from "@/lib/store"
 import type { AgentTabView, SessionView } from "@/lib/types"
 
@@ -94,6 +96,13 @@ function makeState(over: Partial<DuxState> = {}): DuxState {
     },
     ...over,
   } as unknown as DuxState
+}
+
+/// The `z-N` utility the class list carries, as a number to compare.
+function zLevel(className: string): number {
+  const found = /(?:^| )z-(\d+)(?: |$)/.exec(className)
+  if (!found) throw new Error(`no z utility in ${className}`)
+  return Number(found[1])
 }
 
 /// jsdom lays nothing out, so the flap's own box reads zero and no silhouette
@@ -217,6 +226,22 @@ describe("the docked action flap", () => {
     render(<MobileActionFlap target={target} session={session()} band="strip" />)
     const box = screen.getByTestId("mobile-action-flap")
     expect(box.className).toContain("-top-px")
-    expect(box.className).toContain("z-20")
+    expect(box.className).toContain("z-30")
+  })
+
+  it("paints over the pane's full-pane covers, which is what it is for", () => {
+    // The flap is the ONLY surface carrying these controls while a cover owns
+    // the terminal (the pane's overlay slot is withheld there), and a watcher
+    // reaching the session's actions is exactly that state. Neither the pane's
+    // root nor the shell's column starts a stacking context, so the two levels
+    // are compared directly and the later element in the document wins a tie.
+    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    const flapZ = zLevel(screen.getByTestId("mobile-action-flap").className)
+    const pane = readFileSync("src/components/TerminalPane.tsx", "utf8")
+    const covers = [...pane.matchAll(/absolute inset-0 z-(\d+)/g)].map((m) =>
+      Number(m[1]),
+    )
+    expect(covers.length).toBeGreaterThan(0)
+    for (const cover of covers) expect(flapZ).toBeGreaterThan(cover)
   })
 })

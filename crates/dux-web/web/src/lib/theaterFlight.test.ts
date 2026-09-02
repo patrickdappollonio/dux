@@ -8,6 +8,7 @@ import {
   flapMounted,
   flapVisible,
   flightForMode,
+  flightForModeFrom,
   flightHoldMs,
   flightNext,
   flightOffset,
@@ -49,6 +50,29 @@ describe("the phone's theater flight, stage by stage", () => {
       "attaching",
       "docked",
     ])
+  })
+
+  it("undoes a chrome stage the mode flipped back out of, with no flight", () => {
+    // Nothing has moved yet at either chrome stage, so the gesture that was
+    // abandoned rests where it started. Running the opposite flight from there
+    // would hide a flap that never left the band and float a pill over a screen
+    // the cluster never flew off.
+    expect(flightForModeFrom("collapsing", false, CHROME_MS)).toBe("docked")
+    expect(flightForModeFrom("expanding", true, CHROME_MS)).toBe("floating")
+  })
+
+  it("treats every later interruption as a real gesture the other way", () => {
+    // By then the cluster is somewhere else, and it has to travel back.
+    expect(flightForModeFrom("detaching", false, CHROME_MS)).toBe("expanding")
+    expect(flightForModeFrom("floating", false, CHROME_MS)).toBe("expanding")
+    expect(flightForModeFrom("returning", true, CHROME_MS)).toBe("collapsing")
+    expect(flightForModeFrom("attaching", true, CHROME_MS)).toBe("collapsing")
+    expect(flightForModeFrom("docked", true, CHROME_MS)).toBe("collapsing")
+  })
+
+  it("still cuts straight to the resting state for reduced motion", () => {
+    expect(flightForModeFrom("collapsing", true, 0)).toBe("floating")
+    expect(flightForModeFrom("docked", true, 0)).toBe("floating")
   })
 
   it("collapses every stage to an instant swap for reduced motion", () => {

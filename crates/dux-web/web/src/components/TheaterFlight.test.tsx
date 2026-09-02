@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, render, screen } from "@testing-library/react"
 
-import type * as React from "react"
+import * as React from "react"
 
 import type { DuxState } from "@/lib/store"
 import type { AgentTabView, SessionView } from "@/lib/types"
@@ -264,6 +264,57 @@ describe("a page that opens straight into theater", () => {
   it("runs no flight at all, because there was never a dock on screen", () => {
     mockState = makeState(true)
     render(<MobileShell />)
+    expect(shot()).toEqual({ flap: "gone", pill: "floating" })
+  })
+
+  it("runs none in development either, where every effect fires twice", () => {
+    // Strict mode double-invokes effects on purpose. A first-run latch is spent
+    // by the first invocation, so the second read it as a mode change and flew
+    // a whole leaving gesture over a page that opened settled. The condition is
+    // the mode MOVING, which a second invocation cannot fake.
+    mockState = makeState(true)
+    render(
+      <React.StrictMode>
+        <MobileShell />
+      </React.StrictMode>,
+    )
+    expect(shot()).toEqual({ flap: "gone", pill: "floating" })
+  })
+})
+
+describe("a mode flipped back mid-gesture", () => {
+  it("re-docks instantly when the collapse never let the flap go", () => {
+    mockState = makeState(false)
+    const view = render(<MobileShell />)
+    mockState = makeState(true)
+    act(() => view.rerender(<MobileShell />))
+    expect(shot()).toEqual({ flap: "shown", pill: "gone" })
+
+    // Back out before the chrome finished. The flap never left the band, so
+    // there is nothing to fly home and nothing to hide in the meantime.
+    mockState = makeState(false)
+    act(() => view.rerender(<MobileShell />))
+    expect(shot()).toEqual({ flap: "shown", pill: "gone" })
+
+    tick(CHROME_HOLD_MS + FLIGHT_TRAVEL_HOLD_MS + FLIGHT_ATTACH_HOLD_MS)
+    expect(shot()).toEqual({ flap: "shown", pill: "gone" })
+  })
+
+  it("stays floating when the return never let the pill go", () => {
+    mockState = makeState(false)
+    const view = render(<MobileShell />)
+    mockState = makeState(true)
+    act(() => view.rerender(<MobileShell />))
+    tick(CHROME_HOLD_MS)
+    tick(FLIGHT_TRAVEL_HOLD_MS)
+    mockState = makeState(false)
+    act(() => view.rerender(<MobileShell />))
+    expect(shot()).toEqual({ flap: "hidden", pill: "floating" })
+
+    mockState = makeState(true)
+    act(() => view.rerender(<MobileShell />))
+    expect(shot()).toEqual({ flap: "gone", pill: "floating" })
+    tick(CHROME_HOLD_MS + FLIGHT_TRAVEL_HOLD_MS)
     expect(shot()).toEqual({ flap: "gone", pill: "floating" })
   })
 })

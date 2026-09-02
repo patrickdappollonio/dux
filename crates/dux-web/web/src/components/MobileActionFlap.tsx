@@ -70,11 +70,15 @@ export function MobileActionFlap({
       // body starts ON the band's bottom hairline, so the fill covers that line
       // for the flap's own width and the two are visibly one shape.
       //
-      // `z-20` clears the chrome stack's own `z-10`. The flap has to paint over
-      // the band's border to interrupt it, and the chrome's layer would
-      // otherwise win however the two are ordered in the document.
+      // `z-30` clears the chrome stack's own `z-10` and the pane's full-pane
+      // covers, which sit at `z-20` in this same stacking context. The flap has
+      // to paint over the band's border to interrupt it, and it is the only
+      // surface carrying these controls while a cover owns the terminal, which
+      // is exactly the state a watcher reaches them from; at the covers' own
+      // level the later element in the document won and buried it. Same level as
+      // the floating pill it becomes: the two are never painted at once.
       className={cn(
-        "absolute -top-px right-3 z-20 flex items-center gap-0.5 p-[5px]",
+        "absolute -top-px right-3 z-30 flex items-center gap-0.5 p-[5px]",
         hidden && "invisible",
         // No drop shadow, deliberately: on the near-black terminal a big soft
         // shadow quantizes into one-step bands whose contours read as a squared

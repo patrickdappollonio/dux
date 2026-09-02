@@ -174,16 +174,26 @@ export function useTheaterToggleFocusWhen(
 /**
  * The pill's exit button taking focus when the chrome leaves.
  *
- * ONLY when nothing else holds it. Entering from the header button destroys
- * that button, so focus falls to the body and the pill is the nearest thing to
- * what the user was doing; entering from the input menu, or from a shared link
- * that opens straight into theater, leaves focus somewhere real, and the pill
- * must not pull it out of a terminal the user is about to type into.
+ * IT CONSUMES THE TOKEN, because an armed entry is precisely the case this hook
+ * exists for: the press that turned the mode on destroyed the control it was
+ * made on, and this is the control that replaced it. Consuming is also what
+ * retires the token, which otherwise stayed armed for the whole theater session
+ * with its only consumer (the docked flap) unmounted, and pulled focus onto a
+ * later, unrelated flap the next time one appeared.
+ *
+ * Unarmed, it takes focus only when nothing else holds it: entering from the
+ * input menu, or from a shared link that opens straight into theater, leaves
+ * focus somewhere real, and the pill must not pull it out of a terminal the
+ * user is about to type into.
  */
 export function useTheaterPillFocus(
   ref: React.RefObject<HTMLElement | null>,
 ): void {
   React.useEffect(() => {
+    if (consumeToggleFocus()) {
+      ref.current?.focus()
+      return
+    }
     const active = document.activeElement
     if (active !== null && active !== document.body) return
     ref.current?.focus()

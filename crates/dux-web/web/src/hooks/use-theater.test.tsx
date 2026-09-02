@@ -2,6 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
+import * as React from "react"
+
 import type { DuxState } from "@/lib/store"
 
 // The two page-wide pieces of theater mode: the ONE refit the gesture costs,
@@ -51,7 +53,13 @@ function installBootStubs() {
   )
 }
 installBootStubs()
-const { useTheaterEscape, useTheaterGesture } = await import("./use-theater")
+const {
+  armTheaterToggleFocus,
+  useTheaterEscape,
+  useTheaterGesture,
+  useTheaterPillFocus,
+  useTheaterToggleFocusWhen,
+} = await import("./use-theater")
 const { layoutGestureDepth, registerLayoutGestureHolder } = await import(
   "@/lib/layoutGesture"
 )
@@ -256,5 +264,51 @@ describe("Escape in theater", () => {
     // The menu is gone, so the next press is theater's.
     pressEscape()
     expect(exitTheaterMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+// THE FOCUS TOKEN, which is one flag two controls hand between them.
+describe("where focus lands when the chrome moves", () => {
+  function Pill() {
+    const ref = React.useRef<HTMLButtonElement | null>(null)
+    useTheaterPillFocus(ref)
+    return <button ref={ref}>Leave theater mode</button>
+  }
+
+  function Flap({ ready }: { ready: boolean }) {
+    const ref = React.useRef<HTMLButtonElement | null>(null)
+    useTheaterToggleFocusWhen(ref, ready)
+    return <button ref={ref}>Theater mode</button>
+  }
+
+  it("hands an armed entry to the pill, and spends the token doing it", () => {
+    armTheaterToggleFocus()
+    const view = render(<Pill />)
+    expect(document.activeElement).toBe(screen.getByText("Leave theater mode"))
+    // The token is SPENT. Left armed it survived the whole theater session with
+    // its only other consumer unmounted, and pulled focus onto the next flap to
+    // appear, which by then could belong to another agent entirely.
+    view.unmount()
+    render(<Flap ready />)
+    expect(document.activeElement).not.toBe(screen.getByText("Theater mode"))
+  })
+
+  it("leaves focus alone on an unarmed entry that something else holds", () => {
+    const holder = document.createElement("input")
+    document.body.appendChild(holder)
+    holder.focus()
+    render(<Pill />)
+    expect(document.activeElement).toBe(holder)
+    holder.remove()
+  })
+
+  it("gives an armed exit to the flap, once it is really on screen", () => {
+    armTheaterToggleFocus()
+    const view = render(<Flap ready={false} />)
+    // Mounted but unpainted for the whole return flight: focusing it there
+    // points the keyboard at something invisible.
+    expect(document.activeElement).not.toBe(screen.getByText("Theater mode"))
+    act(() => view.rerender(<Flap ready />))
+    expect(document.activeElement).toBe(screen.getByText("Theater mode"))
   })
 })
