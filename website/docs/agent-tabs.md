@@ -16,8 +16,9 @@ it from the first tab on.
 
 > [!NOTE]
 > The browser's [theater mode](/docs/web-workspace#theater-mode-one-pane-no-chrome) takes
-> the strip away along with the rest of the chrome. The tabs are not gone: the floating
-> pill in the corner marks the ones you cannot see and folds them out for switching.
+> the strip away along with the rest of the chrome. The tabs are still running; what
+> they are doing is in the agents list, and one that needs you says so with a
+> notification. Leaving theater brings the strip back where you left it.
 
 ## Every tab is equal
 

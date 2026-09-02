@@ -155,9 +155,12 @@ so and offers to try again. And if the connection is really gone, the blocking
 
 ### Theater mode: one pane, no chrome
 
-The expand button in the terminal's header, next to **Macros…**, hands the whole screen
-to the terminal. The header, the pull-request band and the tab strip slide away and the
-terminal grows into the space they were using; on a phone the app header goes with them.
+The expand button hands the whole screen to the terminal. On a computer it is in the
+terminal's header, next to **Macros…**; on a phone it is the first button in the flap
+that hangs off the tab strip. The header, the pull-request band and the tab strip slide
+away and the terminal grows into the space they were using; on a phone the app header
+goes with them, and the flap lifts off the strip and flies to the floating pill, which is
+the same four buttons in the same order.
 The compose box and the terminal keys stay exactly as you had them, and the input `⋯`
 menu keeps offering to show or hide either one, so theater is as bare or as equipped as
 you want it. The top bar is not on that list while theater is on: it is one of the things
@@ -168,13 +171,14 @@ link that goes straight into theater and there was no layout on screen to rememb
 leaving lands on your saved preferences instead.
 
 A small floating pill in the bottom-right corner is the only thing left over the
-terminal. It holds the way out, the macro picker, a `⋯` carrying the same **Settings**
-menu the header's cog carries (so Preferences, new agents and everything else stay one
-tap away, with **Leave theater mode** at the bottom of it), and, when the agent has more
-than one tab, a marker for the tabs you can no longer see: it bobs while one of them is
-working and shows the attention dot when one needs you. Tap it and the tab pills fold out
-inline, so you can switch tab without leaving the mode. On an agent with a single tab, and on a
-plain terminal, the pill is the macros button, the `⋯` and the way out.
+terminal. On a computer it holds the way out, the macro picker and a `⋯` carrying the
+same **Settings** menu the header's cog carries, so Preferences, new agents and
+everything else stay one tap away, with **Leave theater mode** at the bottom of it. On a
+phone it is the flap that flew there: the theater button (now showing the way out), the
+macro picker, the changed-file count and the same `⋯`.
+
+The pill carries no tab status. What the other tabs are doing is in the agents list, and
+an agent that needs you says so with a notification, wherever you happen to be looking.
 
 The pill does not have to stay in that corner. Its leading edge is a grip: hold the grip
 and drag, with a finger or with the mouse, and the pill goes anywhere over the terminal,
@@ -189,8 +193,7 @@ things that left. On a computer there are three ways out: the pill, `Escape` whe
 are not typing into the message box or the terminal itself, and your browser's Back
 button. There is a fourth in the pill's own `⋯` menu, and on a phone a fifth,
 **Leave theater mode** in the input `⋯` menu, which is there for the times the pill ends
-up under the keyboard. If the pill's tab list is
-folded out, the first `Escape` puts that away and the next one leaves the mode.
+up under the keyboard.
 
 Back works because theater is part of the address: a link copied in theater opens in
 theater on whatever device you send it to. Opening the file editor or the changes screen
@@ -402,9 +405,12 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
   desktop, the same launcher pair along the bottom, and a **cog** button that opens the
   app menu as a bottom sheet (submenus drill down in place, with a back arrow). The
   launcher's `⋯` opens as a bottom sheet too. Tap a session to jump into its terminal.
-- The **terminal** screen is a full-screen terminal with a slim bar on top (Back, branch
-  name, an optional PR chip, and a chip showing the changed-file count) and the tab strip
-  when the agent has more than one tab.
+- The **terminal** screen is a full-screen terminal with a slim bar on top (Back, the
+  agent's name over its assistant, branch and project, and an optional PR chip) and the
+  tab strip when the agent has more than one tab. The actions hang off the strip on the
+  right, in a small tab-shaped flap over the terminal: theater mode, the macro picker,
+  the changed-file count, and the session's `⋯` menu. The flap stays put when you hide
+  the top bar, since it takes no room from the terminal.
 - The **changes** screen is the full Changes pane.
 
 An **accessory bar** sits above the soft keyboard with the keys a phone keyboard lacks:
@@ -471,9 +477,13 @@ instead of sending it, and the terminal is skipped when you tab backwards out of
 Switch to Direct and all of that goes back to the way a plain terminal behaves.
 
 Terminal rows are precious on a phone, so the chrome is hideable. Every phone terminal
-screen's `⋯` menu (agent, project, and standalone terminals alike) has **Hide top bar**
-(which on the agent screen also takes the tab strip) and **Hide terminal keys**, each backed
-by its own preference and each also a row in Preferences.
+screen's `⋯` menu (in the flap on the agent screen, in the header on project and
+standalone terminals) has **Hide top bar** (which on the agent screen also takes the tab
+strip) and **Hide terminal keys**, each backed by its own preference and each also a row
+in Preferences. The agent screen's flap is not part of the top bar and stays where it is:
+it floats over the terminal rather than taking a row from it, so hiding the bar has
+nothing to reclaim from it, and theater, the changed-file count and the session's actions
+stay one tap away.
 
 The way back is a `⋯` **input menu** at the left edge of whatever input row you have: beside
 the message box, in the key row when the box is off, or on its own slim row when you have

@@ -2,10 +2,9 @@
 //
 // The pure decisions live here, away from the components and the store, because
 // every one of them is a rule rather than a rendering: which key a pane's
-// memory is filed under, whether an Escape belongs to dux or to the child,
-// whether the floating pill has anything to expand, and how the mode rides the
-// address. The store owns the live flag and the URL write; the components own
-// the boxes that move.
+// memory is filed under, whether an Escape belongs to dux or to the child, and
+// how the mode rides the address. The store owns the live flag and the URL
+// write; the components own the boxes that move.
 //
 // Theater is deliberately NOT the browser's Fullscreen API. The tenet is
 // explicit about why (Android hard-clips a fullscreen page against the
@@ -13,7 +12,6 @@
 // chrome, which is not something a system mode could give back anyway.
 
 import type { SelectedTarget } from "./store"
-import type { AgentTabView } from "./types"
 
 /** The `localStorage` key prefix every pane's theater memory is filed under. */
 export const THEATER_STORAGE_PREFIX = "dux:theater:"
@@ -155,14 +153,12 @@ export interface TheaterEscEvent {
   inTypingSurface: boolean
   /// Whether an overlay has already answered this Escape.
   defaultPrevented: boolean
-  /// Whether the pill's inline tab strip is folded out.
-  tabsExpanded: boolean
   /// Whether the pane is in theater at all.
   theater: boolean
 }
 
 /** What one Escape does in theater. */
-export type TheaterEscapeAction = "none" | "collapse-tabs" | "exit"
+export type TheaterEscapeAction = "none" | "exit"
 
 /**
  * Does this Escape belong to theater, and what does it do?
@@ -176,12 +172,11 @@ export type TheaterEscapeAction = "none" | "collapse-tabs" | "exit"
  * expensive of the two mistakes. So Escape is the exit only where nothing else
  * wants it, and the pill and the header button are the exits that always work.
  *
- * TWO THINGS ALREADY WANT IT. An open menu, popover or dialog answers Escape by
- * closing, and Base UI's dismiss hook marks that answer by calling
+ * SOMETHING ELSE ALREADY WANTS IT. An open menu, popover or dialog answers
+ * Escape by closing, and Base UI's dismiss hook marks that answer by calling
  * `preventDefault` on the very keydown this rule reads; abstaining on a
  * prevented event is what keeps one press from closing a menu AND leaving the
- * mode. The pill's own folded-out tab strip is the other: it is the innermost
- * thing on screen, so it collapses first and the next press leaves theater.
+ * mode.
  *
  * The modifier and IME guards mirror the ones in `termkeys.ts` for the same
  * reasons: a modified Escape is somebody else's chord, and mid-composition
@@ -195,37 +190,7 @@ export function theaterEscapeAction(ev: TheaterEscEvent): TheaterEscapeAction {
   if (ev.ctrlKey || ev.shiftKey || ev.altKey || ev.metaKey) return "none"
   if (ev.isComposing || ev.keyCode === 229) return "none"
   if (ev.inTypingSurface) return "none"
-  return ev.tabsExpanded ? "collapse-tabs" : "exit"
-}
-
-/**
- * The pill's folded-out tab strip, as the page-wide Escape rule sees it.
- *
- * A module-level registration, the same idiom as `terminalFocus.ts` and
- * `layoutGesture.ts`: the strip's expanded state is the pill's own `useState`
- * and the Escape listener is mounted above both shells, so a prop chain would
- * have to cross every layout to join them.
- */
-export interface TheaterTabsHandle {
-  expanded: () => boolean
-  collapse: () => void
-}
-
-let theaterTabs: TheaterTabsHandle | null = null
-
-/** Register the mounted pill's strip. Returns the unregister. */
-export function registerTheaterTabs(handle: TheaterTabsHandle): () => void {
-  theaterTabs = handle
-  return () => {
-    // Only retire our OWN registration: a successor pill may already have
-    // replaced it, and React does not order an old cleanup before a new effect.
-    if (theaterTabs === handle) theaterTabs = null
-  }
-}
-
-/** The registered strip, or `null` when no pill is mounted. */
-export function peekTheaterTabs(): TheaterTabsHandle | null {
-  return theaterTabs
+  return "exit"
 }
 
 /**
@@ -273,40 +238,15 @@ export function isTypingSurfaceElement(
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT"
 }
 
-/** What the floating theater pill has to show. */
-export interface TheaterPillModel {
-  /// The tabs the inline mini strip offers, empty when there is nothing to switch to.
-  tabs: AgentTabView[]
-  /// Whether the status half exists at all. An expander that opens onto nothing
-  /// is the "never renders empty" rule, so a terminal pane and a single-tab
-  /// agent collapse the pill to macros plus exit.
-  expandable: boolean
-  /// A tab OTHER than the one on screen is working.
-  working: boolean
-  /// A tab OTHER than the one on screen needs attention.
-  attention: boolean
-}
-
-/**
- * The pill's content, from the focused pane's tabs.
- *
- * The status half speaks for the tabs theater HID, never for the one filling
- * the screen: its bob and its dot exist to say "something you cannot see moved",
- * and the visible tab says that for itself.
- */
-export function theaterPillModel(
-  tabs: AgentTabView[] | undefined,
-  activeTabId: string | null,
-): TheaterPillModel {
-  const all = tabs ?? []
-  const hidden = all.filter((t) => t.id !== activeTabId)
-  return {
-    tabs: all.length >= 2 ? all : [],
-    expandable: all.length >= 2,
-    working: hidden.some((t) => t.working),
-    attention: hidden.some((t) => t.needs_attention),
-  }
-}
+// THE PILL CARRIES NO TAB STATUS, deliberately.
+//
+// It used to grow a status half that bobbed while a hidden tab worked, wore an
+// attention dot, and folded out a mini strip of the same tab pills to switch
+// between them. All three came out: the agents list is where tab status lives
+// and a second, smaller copy of it floating over the terminal was a place for
+// the two to disagree, and attention arrives as a toast, which reaches the user
+// whatever surface they are on. What is left is four controls that ACT, which
+// is what a floating cluster is for.
 
 /**
  * How long the chrome takes to leave, in milliseconds.

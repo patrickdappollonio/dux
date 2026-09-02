@@ -8,18 +8,14 @@ import {
   theaterMemoryKeyForPty,
   theaterOwnershipStep,
   theaterOwnershipWatchStart,
-  peekTheaterTabs,
-  registerTheaterTabs,
   isTypingSurfaceElement,
   readTheaterMemory,
   splitTheaterHash,
   theaterMemoryKey,
-  theaterPillModel,
   theaterSerializable,
   withTheaterHash,
   writeTheaterMemory,
 } from "./theater"
-import type { AgentTabView } from "./types"
 
 function installStorage(): Map<string, string> {
   const mem = new Map<string, string>()
@@ -39,19 +35,6 @@ const terminal = {
   terminalId: "tm3",
   owner: { kind: "session", sessionId: "s1" },
 } as const
-
-function tab(over: Partial<AgentTabView> & { id: string }): AgentTabView {
-  return {
-    provider: "claude",
-    order: 0,
-    working: false,
-    typing: false,
-    needs_attention: false,
-    has_output: false,
-    has_live_process: true,
-    ...over,
-  } as AgentTabView
-}
 
 describe("theaterMemoryKey", () => {
   it("keys an agent pane by its stable tab id, not its session", () => {
@@ -207,7 +190,6 @@ describe("theaterEscapeAction", () => {
     keyCode: 27,
     inTypingSurface: false,
     defaultPrevented: false,
-    tabsExpanded: false,
     theater: true,
   }
 
@@ -251,12 +233,6 @@ describe("theaterEscapeAction", () => {
     expect(theaterEscapeAction({ ...base, defaultPrevented: true })).toBe("none")
   })
 
-  it("collapses the pill's tab strip first, and leaves theater on the next press", () => {
-    expect(theaterEscapeAction({ ...base, tabsExpanded: true })).toBe(
-      "collapse-tabs",
-    )
-    expect(theaterEscapeAction(base)).toBe("exit")
-  })
 })
 
 describe("theaterOwnershipStep", () => {
@@ -320,33 +296,6 @@ describe("theaterOwnershipStep", () => {
   })
 })
 
-describe("the pill's tab-strip registry", () => {
-  it("hands the page-wide Escape rule the strip it cannot see", () => {
-    // The strip's expanded state is the pill's own, and the Escape listener
-    // lives above both shells, so the two meet through a registration rather
-    // than a prop chain crossing every layout.
-    expect(peekTheaterTabs()).toBeNull()
-    const handle = { expanded: () => true, collapse: vi.fn() }
-    const off = registerTheaterTabs(handle)
-    expect(peekTheaterTabs()?.expanded()).toBe(true)
-    peekTheaterTabs()?.collapse()
-    expect(handle.collapse).toHaveBeenCalledTimes(1)
-    off()
-    expect(peekTheaterTabs()).toBeNull()
-  })
-
-  it("retires only its own registration, the way every other one does", () => {
-    const first = { expanded: () => false, collapse: vi.fn() }
-    const second = { expanded: () => true, collapse: vi.fn() }
-    const offFirst = registerTheaterTabs(first)
-    const offSecond = registerTheaterTabs(second)
-    offFirst()
-    expect(peekTheaterTabs()).toBe(second)
-    offSecond()
-    expect(peekTheaterTabs()).toBeNull()
-  })
-})
-
 describe("isTypingSurfaceElement", () => {
   it("recognizes the surfaces a keystroke can be typed into", () => {
     for (const tag of ["input", "textarea", "select"]) {
@@ -363,48 +312,5 @@ describe("isTypingSurfaceElement", () => {
   it("says no for an ordinary element and for nothing at all", () => {
     expect(isTypingSurfaceElement({ tagName: "DIV" })).toBe(false)
     expect(isTypingSurfaceElement(null)).toBe(false)
-  })
-})
-
-describe("theaterPillModel", () => {
-  it("collapses to macros and exit for a terminal, which has no tabs", () => {
-    const model = theaterPillModel(undefined, null)
-    expect(model.expandable).toBe(false)
-    expect(model.tabs).toEqual([])
-    expect(model.working).toBe(false)
-    expect(model.attention).toBe(false)
-  })
-
-  it("collapses for a single-tab agent, so the expander is never empty", () => {
-    const model = theaterPillModel([tab({ id: "t1" })], "t1")
-    expect(model.expandable).toBe(false)
-  })
-
-  it("expands for a multi-tab agent and carries every tab for switching", () => {
-    const tabs = [tab({ id: "t1" }), tab({ id: "t2" }), tab({ id: "t3" })]
-    const model = theaterPillModel(tabs, "t1")
-    expect(model.expandable).toBe(true)
-    expect(model.tabs.map((t) => t.id)).toEqual(["t1", "t2", "t3"])
-  })
-
-  it("reports the HIDDEN tabs' state, never the one already on screen", () => {
-    const tabs = [
-      tab({ id: "t1", working: true, needs_attention: true }),
-      tab({ id: "t2" }),
-    ]
-    const model = theaterPillModel(tabs, "t1")
-    expect(model.working).toBe(false)
-    expect(model.attention).toBe(false)
-  })
-
-  it("rolls a background tab's working and attention up onto the pill", () => {
-    const tabs = [
-      tab({ id: "t1" }),
-      tab({ id: "t2", working: true }),
-      tab({ id: "t3", needs_attention: true }),
-    ]
-    const model = theaterPillModel(tabs, "t1")
-    expect(model.working).toBe(true)
-    expect(model.attention).toBe(true)
   })
 })

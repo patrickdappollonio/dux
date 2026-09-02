@@ -8,7 +8,6 @@ import {
 import { exitTheater, useDux } from "@/lib/store"
 import {
   isTypingSurfaceElement,
-  peekTheaterTabs,
   theaterEscapeAction,
   theaterTransitionMs,
 } from "@/lib/theater"
@@ -88,9 +87,6 @@ export function useTheaterGesture(): void {
  * one press both closed the overlay and left the mode. Reading that flag needs
  * the bubble phase, and waiting takes nothing from the child, which never sees a
  * keystroke this rule claims.
- *
- * The pill's folded-out tab strip is the other thing that wants Escape, and it
- * is the innermost: it collapses first, and the next press leaves theater.
  */
 export function useTheaterEscape(): void {
   const { theater } = useDux()
@@ -99,7 +95,6 @@ export function useTheaterEscape(): void {
     if (!theater) return
     const onKeyDown = (ev: KeyboardEvent) => {
       const target = ev.target as { tagName?: string; isContentEditable?: boolean } | null
-      const tabs = peekTheaterTabs()
       const action = theaterEscapeAction({
         type: ev.type,
         key: ev.key,
@@ -111,15 +106,10 @@ export function useTheaterEscape(): void {
         keyCode: ev.keyCode,
         inTypingSurface: isTypingSurfaceElement(target),
         defaultPrevented: ev.defaultPrevented,
-        tabsExpanded: tabs?.expanded() === true,
         theater: true,
       })
       if (action === "none") return
       ev.preventDefault()
-      if (action === "collapse-tabs") {
-        tabs?.collapse()
-        return
-      }
       armTheaterToggleFocus()
       exitTheater()
     }

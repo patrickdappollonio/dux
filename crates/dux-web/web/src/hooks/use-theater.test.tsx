@@ -55,9 +55,7 @@ const { useTheaterEscape, useTheaterGesture } = await import("./use-theater")
 const { layoutGestureDepth, registerLayoutGestureHolder } = await import(
   "@/lib/layoutGesture"
 )
-const { THEATER_TRANSITION_MS, registerTheaterTabs } = await import(
-  "@/lib/theater"
-)
+const { THEATER_TRANSITION_MS } = await import("@/lib/theater")
 const { InputMenu } = await import("@/components/InputMenu")
 
 function state(theater: boolean): DuxState {
@@ -258,22 +256,5 @@ describe("Escape in theater", () => {
     // The menu is gone, so the next press is theater's.
     pressEscape()
     expect(exitTheaterMock).toHaveBeenCalledTimes(1)
-  })
-
-  it("collapses the pill's folded-out tab strip before it leaves the mode", () => {
-    mockState = state(true)
-    let expanded = true
-    const collapse = vi.fn(() => {
-      expanded = false
-    })
-    const off = registerTheaterTabs({ expanded: () => expanded, collapse })
-    render(<Escape />)
-    pressEscape()
-    expect(collapse).toHaveBeenCalledTimes(1)
-    expect(exitTheaterMock).not.toHaveBeenCalled()
-    // The strip is away, so the next press is the exit.
-    pressEscape()
-    expect(exitTheaterMock).toHaveBeenCalledTimes(1)
-    off()
   })
 })

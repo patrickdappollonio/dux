@@ -82,7 +82,6 @@ function installBootStubs() {
 }
 installBootStubs()
 const { TheaterPill } = await import("./TheaterPill")
-const { peekTheaterTabs } = await import("@/lib/theater")
 const { appMenuModel } = await import("@/lib/appMenu")
 const { THEATER_PILL_HINT_KEY, THEATER_PILL_POSITION_KEY } = await import(
   "@/lib/theaterPill"
@@ -238,76 +237,23 @@ describe("the floating theater pill", () => {
     expect(screen.getByRole("button", { name: "Run a macro" })).toBeTruthy()
   })
 
-  it("collapses to macros and exit for a terminal, which has no tabs", () => {
-    render(<TheaterPill target={terminalTarget} session={undefined} />)
+  it("carries no tab status at all, on any shape of agent", () => {
+    // The expander came out: the agents list is where tab status lives, and a
+    // second, smaller copy of it floating over the terminal was a place for
+    // the two to disagree. Attention arrives as a toast, which reaches the
+    // user whatever surface they are looking at.
+    render(
+      <TheaterPill
+        target={agentTarget}
+        session={session([
+          tab({ id: "s1" }),
+          tab({ id: "t2", provider: "codex", working: true, needs_attention: true }),
+        ])}
+      />,
+    )
     expect(screen.queryByRole("button", { name: /other tab/i })).toBeNull()
-  })
-
-  it("collapses for a single-tab agent, so the expander is never empty", () => {
-    render(
-      <TheaterPill target={agentTarget} session={session([tab({ id: "s1" })])} />,
-    )
-    expect(screen.queryByRole("button", { name: /other tab/i })).toBeNull()
-  })
-
-  it("offers the hidden tabs when there are some, and switches to one", () => {
-    render(
-      <TheaterPill
-        target={agentTarget}
-        session={session([tab({ id: "s1" }), tab({ id: "t2", provider: "codex" })])}
-      />,
-    )
-    const status = screen.getByRole("button", { name: /other tabs/i })
-    expect(status.getAttribute("aria-expanded")).toBe("false")
-    fireEvent.click(status)
-    expect(status.getAttribute("aria-expanded")).toBe("true")
-
-    // The switch CARRIES the mode rather than reading the destination's memory,
-    // so reaching for a sibling that has never been in theater stays in it.
-    fireEvent.click(screen.getByRole("tab", { name: /codex/i }))
-    expect(selectTabMock).toHaveBeenCalledWith("s1", "t2", { theater: true })
-  })
-
-  it("puts the folded-out strip away on a tap anywhere else", () => {
-    render(
-      <TheaterPill
-        target={agentTarget}
-        session={session([tab({ id: "s1" }), tab({ id: "t2", provider: "codex" })])}
-      />,
-    )
-    const status = screen.getByRole("button", { name: /other tabs/i })
-    fireEvent.click(status)
-    expect(status.getAttribute("aria-expanded")).toBe("true")
-    fireEvent.pointerDown(document.body)
-    expect(status.getAttribute("aria-expanded")).toBe("false")
-  })
-
-  it("keeps the strip open for a press inside the pill itself", () => {
-    render(
-      <TheaterPill
-        target={agentTarget}
-        session={session([tab({ id: "s1" }), tab({ id: "t2", provider: "codex" })])}
-      />,
-    )
-    const status = screen.getByRole("button", { name: /other tabs/i })
-    fireEvent.click(status)
-    fireEvent.pointerDown(screen.getByTestId("theater-pill"))
-    expect(status.getAttribute("aria-expanded")).toBe("true")
-  })
-
-  it("publishes the strip so the page-wide Escape rule can collapse it", () => {
-    render(
-      <TheaterPill
-        target={agentTarget}
-        session={session([tab({ id: "s1" }), tab({ id: "t2", provider: "codex" })])}
-      />,
-    )
-    const status = screen.getByRole("button", { name: /other tabs/i })
-    expect(peekTheaterTabs()?.expanded()).toBe(false)
-    fireEvent.click(status)
-    expect(peekTheaterTabs()?.expanded()).toBe(true)
-    act(() => peekTheaterTabs()?.collapse())
-    expect(status.getAttribute("aria-expanded")).toBe("false")
+    expect(screen.queryAllByRole("tab").length).toBe(0)
+    expect(screen.queryByLabelText("Needs attention")).toBeNull()
   })
 
   it("takes focus onto the way out when the chrome left nothing focused", () => {
@@ -326,84 +272,6 @@ describe("the floating theater pill", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     expect(document.activeElement).toBe(field)
     field.remove()
-  })
-
-  it("marks the tab on screen as the selected one", () => {
-    render(
-      <TheaterPill
-        target={agentTarget}
-        session={session([tab({ id: "s1" }), tab({ id: "t2", provider: "codex" })])}
-      />,
-    )
-    fireEvent.click(screen.getByRole("button", { name: /other tabs/i }))
-    expect(
-      screen.getByRole("tab", { name: /claude/i }).getAttribute("aria-selected"),
-    ).toBe("true")
-  })
-
-  it("shows the attention dot for a background tab that needs you", () => {
-    render(
-      <TheaterPill
-        target={agentTarget}
-        session={session([
-          tab({ id: "s1" }),
-          tab({ id: "t2", provider: "codex", needs_attention: true }),
-        ])}
-      />,
-    )
-    expect(screen.getAllByLabelText("Needs attention").length).toBeGreaterThan(0)
-  })
-
-  it("carries both hidden-tab cues in the expander's own row", () => {
-    // Never absolutely placed in the corners of its box: a ghost control
-    // paints no surface, so a mark parked there floats in the pill's dead
-    // space and reads as the neighbouring control's. In the row it is
-    // unambiguously the expander's.
-    render(
-      <TheaterPill
-        target={agentTarget}
-        session={session([
-          tab({ id: "s1" }),
-          tab({
-            id: "t2",
-            provider: "codex",
-            working: true,
-            needs_attention: true,
-          }),
-        ])}
-      />,
-    )
-    const expander = screen.getByRole("button", { name: /other tabs/i })
-    expect(expander.contains(screen.getByLabelText("Needs attention"))).toBe(true)
-    expect(expander.querySelectorAll(".absolute").length).toBe(0)
-    // The cue-bearing expander keeps the cluster's one height and grows only
-    // in width.
-    expect(expander.className).toContain("h-10")
-  })
-
-  it("stays a bare circle when the hidden tabs have nothing to say", () => {
-    render(
-      <TheaterPill
-        target={agentTarget}
-        session={session([tab({ id: "s1" }), tab({ id: "t2", provider: "codex" })])}
-      />,
-    )
-    const expander = screen.getByRole("button", { name: /other tabs/i })
-    expect(expander.className).toContain("w-10")
-  })
-
-  it("says nothing about the tab already filling the screen", () => {
-    render(
-      <TheaterPill
-        target={agentTarget}
-        session={session([
-          tab({ id: "s1", needs_attention: true }),
-          tab({ id: "t2", provider: "codex" }),
-        ])}
-      />,
-    )
-    const status = screen.getByRole("button", { name: /other tabs/i })
-    expect(status.getAttribute("aria-label")).not.toMatch(/attention/i)
   })
 })
 
@@ -563,9 +431,11 @@ describe("moving the theater pill", () => {
   })
 
   it("keeps a live drag through the pill's own box changing size", () => {
-    // The strip folds away ON THE LIFT, so the pill's box resizes at the very
-    // start of every drag: treating that as an interruption would end them all.
-    render(<TheaterPill target={agentTarget} session={twoTabs()} />)
+    // The pill's own box really does change width while it is on screen (the
+    // grip slot opens and closes across the phone's detach and return), so
+    // treating that as an interruption would end a drag for a reason that has
+    // nothing to do with the pointer.
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
     down(grip(), { pointerType: "mouse", clientX: 600, clientY: 550 })
     move(500, 400)
     pillBox = { width: 180, height: 48 }
@@ -697,21 +567,6 @@ describe("moving the theater pill", () => {
     },
   )
 
-  it("puts the folded-out strip away the moment the pill lifts", () => {
-    render(
-      <TheaterPill
-        target={agentTarget}
-        session={session([tab({ id: "s1" }), tab({ id: "t2", provider: "codex" })])}
-      />,
-    )
-    const status = screen.getByRole("button", { name: /other tabs/i })
-    fireEvent.click(status)
-    expect(status.getAttribute("aria-expanded")).toBe("true")
-    down(grip(), { pointerType: "mouse", clientX: 600, clientY: 550 })
-    move(560, 500)
-    expect(status.getAttribute("aria-expanded")).toBe("false")
-  })
-
   it("still leaves theater on a tap of the way out", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     fireEvent.click(screen.getByRole("button", { name: "Leave theater mode" }))
@@ -754,43 +609,33 @@ describe("moving the theater pill", () => {
   // the intent is what is stored and re-clamped, and the clamp is re-derived.
   const expandedPill = { width: 420, height: 48 }
 
-  function twoTabs() {
-    return session([tab({ id: "s1" }), tab({ id: "t2", provider: "codex" })])
-  }
-
-  function expander() {
-    return screen.getByRole("button", { name: /other tabs/i })
-  }
-
-  it("gives the corner back when the expander that shoved it folds away", () => {
-    render(<TheaterPill target={agentTarget} session={twoTabs()} />)
+  it("gives the corner back when a wider pill that shoved it narrows again", () => {
+    // The pill's own box really does change width while it is on screen: the
+    // grip slot opens across the detach flight and closes across the return.
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
     expect(pill().style.left).toBe(CORNER.left)
 
-    fireEvent.click(expander())
     pillBox = expandedPill
     act(() => playPillResize())
     // Still the corner, for a wider pill: an unplaced pill keeps its margin.
     expect(pill().style.left).toBe("366px")
 
-    fireEvent.click(expander())
     pillBox = PILL_BOX
     act(() => playPillResize())
     expect(pill().style.left).toBe(CORNER.left)
   })
 
   it("gives a dragged position back after the same shove", () => {
-    render(<TheaterPill target={agentTarget} session={twoTabs()} />)
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
     down(grip(), { pointerType: "mouse", clientX: 600, clientY: 550 })
     move(900, 550)
     up(900, 550)
     expect(pill().style.left).toBe("600px")
 
-    fireEvent.click(expander())
     pillBox = expandedPill
     act(() => playPillResize())
     expect(pill().style.left).toBe("380px")
 
-    fireEvent.click(expander())
     pillBox = PILL_BOX
     act(() => playPillResize())
     expect(pill().style.left).toBe("600px")

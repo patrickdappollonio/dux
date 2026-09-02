@@ -1,9 +1,8 @@
-import { Bot, ChevronUp, Ellipsis, GripVertical, Minimize2 } from "lucide-react"
+import { Ellipsis, GripVertical, Minimize2 } from "lucide-react"
 import type * as React from "react"
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 
 import { AppMenuBody } from "@/components/AppMenu"
-import { AttentionDot } from "@/components/AttentionDot"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { MobileActionCluster } from "@/components/MobileActionCluster"
 import { MacroPopover } from "@/components/MacroPopover"
@@ -23,7 +22,6 @@ import {
   armTheaterToggleFocus,
   useTheaterPillFocus,
 } from "@/hooks/use-theater"
-import { tabLabels } from "@/lib/agentTabs"
 import { FLAP_FILLET_BOX, filletShape } from "@/lib/flapShape"
 import {
   FLIGHT_ATTACH_MS,
@@ -39,8 +37,7 @@ import {
   type FlightPhase,
 } from "@/lib/theaterFlight"
 import { notifyInfo } from "@/lib/notify"
-import { exitTheater, selectTab, type SelectedTarget } from "@/lib/store"
-import { registerTheaterTabs, theaterPillModel } from "@/lib/theater"
+import { exitTheater, type SelectedTarget } from "@/lib/store"
 import {
   classifyPillGesture,
   clampPillPosition,
@@ -59,12 +56,17 @@ import { cn } from "@/lib/utils"
 
 // THE FLOATING PILL: the only chrome theater mode leaves on screen.
 //
-// It carries exactly four things, and nothing else earns a permanent floating
-// control: what the tabs theater HID are doing, the macros trigger, the app
-// menu, and the way out. The status half expands into a mini strip of the same tab pills, so
-// switching tab does not cost leaving the mode; it is absent entirely for a
-// terminal pane and for a single-tab agent, because an expander that opens onto
-// nothing is the never-renders-empty rule.
+// It carries controls that ACT, and nothing that merely reports. On a computer
+// that is the macros trigger, the app menu and the way out; on a phone it is
+// the docked flap's own four, in the flap's order, because the pill IS the flap
+// in the air.
+//
+// IT CARRIES NO TAB STATUS. It used to grow a status half that bobbed while a
+// hidden tab worked, wore an attention dot, and folded out a mini strip of tab
+// pills to switch between them. The agents list is where tab status lives, and
+// a second, smaller copy of it floating over the terminal was a place for the
+// two to disagree; attention arrives as a toast, which reaches the user
+// whatever surface they are looking at.
 //
 // Bottom right, because that is the corner a thumb reaches on a held tablet and
 // the corner an agent CLI is least likely to be drawing something that must be
@@ -92,40 +94,13 @@ export function TheaterPill({
   /// The phone's flight stage, or `null` on a surface that does not fly.
   flight?: FlightPhase | null
 }) {
-  const [expanded, setExpanded] = useState(false)
   const boxRef = useRef<HTMLDivElement | null>(null)
   const exitRef = useRef<HTMLButtonElement | null>(null)
   useTheaterPillFocus(exitRef)
-  const collapse = useCallback(() => setExpanded(false), [])
   const coarse = useIsCoarsePointer()
   const reducedMotion = usePrefersReducedMotion()
-  const drag = usePillDrag(boxRef, collapse)
+  const drag = usePillDrag(boxRef)
   usePillHint()
-  // The page-wide Escape rule cannot see this component's state, so the strip
-  // publishes itself: Escape collapses the strip before it leaves the mode.
-  useEffect(
-    () => registerTheaterTabs({ expanded: () => expanded, collapse }),
-    [expanded, collapse],
-  )
-  // A tap anywhere else puts the strip away, the way every other transient
-  // surface behaves. Pointerdown rather than click, so a press that starts on
-  // the terminal dismisses before the gesture reaches xterm.
-  useEffect(() => {
-    if (!expanded) return
-    const onDown = (ev: PointerEvent) => {
-      const box = boxRef.current
-      if (box && ev.target instanceof Node && box.contains(ev.target)) return
-      setExpanded(false)
-    }
-    document.addEventListener("pointerdown", onDown, true)
-    return () => document.removeEventListener("pointerdown", onDown, true)
-  }, [expanded])
-  const activeTabId = target.kind === "agent" ? target.tabId : null
-  const model = theaterPillModel(
-    target.kind === "agent" ? session?.tabs : undefined,
-    activeTabId,
-  )
-  const labels = tabLabels(model.tabs)
   const sessionId = session?.id
   // The PTY behind the pane this pill is painted over, named the same way the
   // shells key the pane itself, so the pill reads the input menu of the pane it
@@ -214,91 +189,6 @@ export function TheaterPill({
           <GripVertical />
         </Button>
       </SimpleTooltip>
-
-      {model.expandable && expanded && sessionId ? (
-        <div role="tablist" className="flex items-center gap-1 pr-1">
-          {model.tabs.map((tab, i) => (
-            <button
-              key={tab.id}
-              type="button"
-              role="tab"
-              aria-selected={tab.id === activeTabId}
-              // The switch CARRIES the mode. Reading the destination tab's own
-              // memory here would drop out of theater the moment the user
-              // reached for a sibling that had never been in it, which is the
-              // opposite of what pressing a tab inside the mode asks for.
-              onClick={() => selectTab(sessionId, tab.id, { theater: true })}
-              className={cn(
-                // 34px tall inside a 48px-tall pill: the vertical axis is
-                // relaxed because the only neighbours above and below are the
-                // pill's own padding and the pane behind it, and the button
-                // keeps a comfortable width. Its horizontal neighbours are
-                // other tab pills, so the gap between them is what an
-                // imprecise tap has to clear.
-                "flex h-[34px] shrink-0 items-center gap-1.5 rounded-full border px-3 text-sm transition-colors",
-                tab.id === activeTabId
-                  ? "border-border bg-background text-foreground"
-                  : "border-transparent bg-muted text-muted-foreground hover:text-foreground",
-              )}
-            >
-              <Bot
-                className={cn(
-                  "size-3.5 shrink-0 motion-safe:transition-transform motion-safe:duration-300",
-                  tab.working && "motion-safe:animate-agent-working",
-                )}
-              />
-              {tab.needs_attention ? <AttentionDot withTooltip={false} /> : null}
-              <span className="max-w-32 truncate">{labels[i]}</span>
-            </button>
-          ))}
-        </div>
-      ) : null}
-
-      {model.expandable ? (
-        <SimpleTooltip content={expanded ? "Hide the other tabs" : "Show the other tabs"}>
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn(
-              // One fixed height whatever it carries, so it never disagrees
-              // with the controls beside it; it grows into a small pill for
-              // its cues and is a bare 40px circle without them.
-              "h-10 shrink-0 gap-1.5 rounded-full",
-              model.working || model.attention
-                ? "w-auto min-w-10 px-2.5"
-                : "w-10",
-            )}
-            aria-expanded={expanded}
-            aria-label={hiddenTabsLabel(model.working, model.attention)}
-            onClick={() => setExpanded((open) => !open)}
-          >
-            {/* The two cues the tab strip uses, on the one control that speaks
-                for the strip while it is not on screen. The dot is the shared
-                marker; the bob is the same working animation the pills and the
-                sidebar rows run.
-
-                IN THE ROW, exactly as a tab pill carries them, never parked in
-                the corners of the button's box. This is a GHOST control: it
-                paints no surface, so a mark in the corner of its square has no
-                disc to belong to. It sits in the pill's dead space, nearer
-                whatever is beside it than the control it speaks for, and reads
-                as the neighbour's; expanded, that neighbour is a tab pill, and
-                the mark becomes a lie about which tab is working. Between the
-                chevron and the button's own edge it cannot be anybody else's,
-                and it needs no chip, no offset and no clipping to say so. */}
-            {model.working ? (
-              <Bot className="size-3.5 shrink-0 text-muted-foreground motion-safe:animate-agent-working" />
-            ) : null}
-            {model.attention ? <AttentionDot withTooltip={false} /> : null}
-            <ChevronUp
-              className={cn(
-                "shrink-0 motion-safe:transition-transform motion-safe:duration-300",
-                expanded && "rotate-180",
-              )}
-            />
-          </Button>
-        </SimpleTooltip>
-      ) : null}
 
       {mobile ? (
         // THE FLAP'S OWN CLUSTER, in the air. Same component, same order, same
@@ -748,10 +638,7 @@ interface DragGesture {
  * underneath from ever seeing the move; the handlers stop propagation as well,
  * so nothing in the pane's own tree can start a selection from this gesture.
  */
-function usePillDrag(
-  boxRef: React.RefObject<HTMLDivElement | null>,
-  collapseTabs: () => void,
-): PillDrag {
+function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
   const [position, setPosition] = useState<PillPosition | null>(null)
   const [dragging, setDragging] = useState(false)
   const [justDropped, setJustDropped] = useState(false)
@@ -885,11 +772,8 @@ function usePillDrag(
       clearTimeout(g.timer)
       g.timer = null
     }
-    // The strip is a transient surface anchored to a pill that is about to
-    // move; carrying it along would drag a tablist across the terminal.
-    collapseTabs()
     setDragging(true)
-  }, [collapseTabs])
+  }, [])
 
   const paint = useCallback(() => {
     const g = gestureRef.current
@@ -1065,16 +949,4 @@ function usePillDrag(
     onLostPointerCapture,
     onKeyDown,
   }
-}
-
-// What the status button announces. It speaks for the HIDDEN tabs only, so a
-// screen reader hears about the ones off screen and never about the one filling
-// it; the visible tab says that for itself.
-function hiddenTabsLabel(working: boolean, attention: boolean): string {
-  const parts: string[] = []
-  if (working) parts.push("one is working")
-  if (attention) parts.push("one needs attention")
-  return parts.length === 0
-    ? "Other tabs"
-    : `Other tabs: ${parts.join(", ")}`
 }
