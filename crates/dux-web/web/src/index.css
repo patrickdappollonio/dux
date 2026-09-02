@@ -496,10 +496,13 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 .dux-ic-min {
   opacity: 0;
 }
-[aria-pressed="true"] .dux-ic-min {
+/* Scoped to the swap itself. Unscoped, any pressed control anywhere in the app
+   claimed these class names, which is a rule waiting for the next component to
+   pick the same word. */
+[aria-pressed="true"] .dux-icswap .dux-ic-min {
   opacity: 1;
 }
-[aria-pressed="true"] .dux-ic-max {
+[aria-pressed="true"] .dux-icswap .dux-ic-max {
   opacity: 0;
 }
 .dux-flight-out .dux-ic-max,

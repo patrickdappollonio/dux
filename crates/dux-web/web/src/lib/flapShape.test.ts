@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs"
+
 import { describe, expect, it } from "vitest"
 
 import {
@@ -73,9 +75,71 @@ describe("the docked flap's silhouette", () => {
   })
 })
 
+/// Every command's endpoint, and every arc's sweep flag, read back OUT of a
+/// built path. Deliberately not rebuilt from the same constants the builder
+/// used: a path that is wrong in the same way twice still passes a test that
+/// re-derives it, and what matters about this shape is where it ends up.
+function readPath(d: string) {
+  const points: Array<{ x: number; y: number }> = []
+  const sweeps: number[] = []
+  for (const command of d.trim().split(/(?=[MLAZ])/)) {
+    const verb = command[0]
+    const nums = (command.slice(1).match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number)
+    if (verb === "A") sweeps.push(nums[4])
+    if (nums.length >= 2) {
+      points.push({ x: nums[nums.length - 2], y: nums[nums.length - 1] })
+    }
+  }
+  return { points, sweeps }
+}
+
+describe("the silhouette, read back as geometry", () => {
+  it("stays inside the box it declares, corner to corner", () => {
+    const shape = buildFlapShape({ width: 180, height: 50 })
+    const { points } = readPath(shape?.stroke ?? "")
+    const xs = points.map((p) => p.x)
+    const ys = points.map((p) => p.y)
+    // Nothing hangs outside the SVG, which would be clipped away on screen.
+    for (const p of points) {
+      expect(p.x).toBeGreaterThanOrEqual(0)
+      expect(p.x).toBeLessThanOrEqual(shape?.width ?? 0)
+      expect(p.y).toBeGreaterThanOrEqual(0)
+      expect(p.y).toBeLessThanOrEqual(shape?.height ?? 0)
+    }
+    // And it spans the whole width: both ends run out onto the band's hairline.
+    expect(Math.min(...xs)).toBe(0)
+    expect(Math.max(...xs)).toBe(shape?.width)
+    // The outline reaches the hanging bottom edge, a hairline up from the box.
+    expect(Math.max(...ys)).toBeGreaterThan((shape?.height ?? 0) / 2)
+    expect(Math.max(...ys)).toBeLessThan(shape?.height ?? 0)
+  })
+
+  it("curves the top corners the opposite way from the bottom ones", () => {
+    // THE FILLETS ARE CONCAVE and the hanging corners convex, which is the
+    // whole difference between a tab growing out of the band and a box stuck
+    // under it. In SVG that is the sweep flag, and it is the one thing about
+    // this path that a wrong radius cannot show up as.
+    const shape = buildFlapShape({ width: 180, height: 50 })
+    expect(readPath(shape?.stroke ?? "").sweeps).toEqual([1, 0, 0, 1])
+  })
+})
+
 describe("the fillets the travelling pill wears", () => {
   it("draws a square one pixel bigger than the arc, for the stroke's offsets", () => {
     expect(FLAP_FILLET_BOX).toBe(FLAP_FILLET_R + 1)
+  })
+
+  it("hangs off the pill at exactly the radius it draws", () => {
+    // The offsets are a stylesheet's, the arc is this module's, and nothing
+    // else makes the two agree: a fillet parked at the wrong offset leaves a
+    // gap between the arc and the capsule it is supposed to grow out of.
+    const css = readFileSync("src/index.css", "utf8")
+    const left = /\.dux-pill-fillet-l \{\s*left: (-?\d+)px/.exec(css)
+    const right = /\.dux-pill-fillet-r \{\s*right: (-?\d+)px/.exec(css)
+    expect(left).not.toBeNull()
+    expect(right).not.toBeNull()
+    expect(Number(left?.[1])).toBe(-FLAP_FILLET_R)
+    expect(Number(right?.[1])).toBe(-FLAP_FILLET_R)
   })
 
   it("mirrors left and right, and closes each fill back into the corner", () => {

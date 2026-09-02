@@ -27,10 +27,11 @@ import {
 import { setTypingSurface } from "@/lib/typingSurface"
 
 // THE INPUT MENU'S ITEMS, shared by every menu that carries any of them: the
-// always-present input `⋯` below the terminal (see `InputMenu`), the mobile
-// agent screen's header menu (AgentActionsMenu, context="terminal") and the
-// agentless project/standalone screens' header menu (MobileShell). One
-// component so the labels, icons and store writes can never drift between them.
+// always-present input `⋯` below the terminal (see `InputMenu`), the phone
+// agent screen's one pane menu (`MobilePaneMenu`, opened from the docked flap
+// and from the floating pill) and the agentless project/standalone screens'
+// header menu (MobileShell). One component so the labels, icons and store
+// writes can never drift between them.
 //
 // VISIBILITY IS THE CALLER'S, deliberately: this component self-gates nothing.
 // The same item belongs on different predicates depending on where the menu is

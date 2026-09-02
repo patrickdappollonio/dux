@@ -86,7 +86,9 @@ const { appMenuModel } = await import("@/lib/appMenu")
 const { THEATER_PILL_HINT_KEY, THEATER_PILL_POSITION_KEY } = await import(
   "@/lib/theaterPill"
 )
-const { registerFlapElement } = await import("@/lib/theaterFlight")
+const { FLAP_FILL_VAR, registerFlapElement } = await import(
+  "@/lib/theaterFlight"
+)
 
 function tab(over: Partial<AgentTabView> & { id: string }): AgentTabView {
   return {
@@ -869,9 +871,12 @@ describe("the phone flight, with real boxes to measure", () => {
   /// The docked flap, as the flight sees it: an element that answers with a
   /// rect. It is registered rather than rendered, because the real one is a
   /// sibling of the pane and reaches the pill the same way.
-  function mountDock() {
+  function mountDock(fill = "var(--dux-flap-bg)") {
     const el = document.createElement("div")
     el.dataset.testid = "flap-dock"
+    // The flap publishes its own body colour, which is the band's: the strip's
+    // composited tone, or the plain background with no strip on screen.
+    el.style.setProperty(FLAP_FILL_VAR, fill)
     document.body.appendChild(el)
     const retire = registerFlapElement(el)
     return () => {
@@ -1023,6 +1028,33 @@ describe("the phone flight, with real boxes to measure", () => {
     )
     expect(pill().style.left).toBe("566px")
     expect(pill().style.transform).toBe("translate(-366px, -534px)")
+  })
+
+  it("flies in the colour of the band it is leaving, not the strip's", () => {
+    // A single-tab agent, or anyone who hid the top bar, has a flap hanging off
+    // the plain background. A flight pinned to the tab strip's tone popped the
+    // wrong colour for a frame at both ends of the journey.
+    retireDock()
+    retireDock = mountDock("var(--background)")
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const view = render(flying("detaching"))
+    expect(pill().style.getPropertyValue(FLAP_FILL_VAR)).toBe(
+      "var(--background)",
+    )
+    // And the same colour on the way back in, read off the dock it is landing
+    // on rather than remembered from the way out.
+    act(() => view.rerender(flying("attaching")))
+    expect(pill().style.getPropertyValue(FLAP_FILL_VAR)).toBe(
+      "var(--background)",
+    )
+    expect(pill().style.backgroundColor).toBe(`var(${FLAP_FILL_VAR})`)
+  })
+
+  it("gives the colour back with everything else the flight wrote", () => {
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const view = render(flying("detaching"))
+    act(() => view.rerender(flying("floating")))
+    expect(pill().style.getPropertyValue(FLAP_FILL_VAR)).toBe("")
   })
 
   it("lets go of a flight whose pill is unmounted under it", () => {

@@ -5,15 +5,18 @@ import { MobileActionCluster } from "@/components/MobileActionCluster"
 import { MobilePaneMenu } from "@/components/MobilePaneMenu"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import { buildFlapShape } from "@/lib/flapShape"
-import { registerFlapElement } from "@/lib/theaterFlight"
+import { FLAP_FILL_VAR, registerFlapElement } from "@/lib/theaterFlight"
 import type { SelectedTarget } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 // THE DOCKED FLAP: where the phone's pane actions live when theater is off.
 //
-// It hangs from the band above the terminal (the tab strip, or the header when
-// there is no strip) at the top right, a browser tab turned upside down. The
+// It hangs from the band above the terminal at the top right, a browser tab
+// turned upside down. THE BAND IS USUALLY THE HEADER, not the tab strip: the
+// strip is only on screen for an agent with two or more tabs, so a single-tab
+// agent (and anyone who hid the top bar) is the common case, and the flap takes
+// the colour of whichever one it is actually hanging from. The
 // header it came out of is now Back, the agent's identity across the whole
 // remaining width, and the pull-request chip: on a phone the identity is the
 // thing worth reading and four buttons were eating it.
@@ -63,6 +66,12 @@ export function MobileActionFlap({
       // body starts ON the band's bottom hairline, so the fill covers that line
       // for the flap's own width and the two are visibly one shape.
       //
+      // TOP RIGHT, over the few cells where xterm paints its own scrollbar. That
+      // is accepted rather than worked around: this is dux's chrome painted over
+      // the terminal, exactly as the desktop's floating pill is, and the pill is
+      // draggable precisely because covering output is the cost of floating
+      // chrome. The flap is not draggable because it belongs to the band.
+      //
       // `z-30` clears the chrome stack's own `z-10` and the pane's full-pane
       // covers, which sit at `z-20` in this same stacking context. The flap has
       // to paint over the band's border to interrupt it, and it is the only
@@ -78,9 +87,12 @@ export function MobileActionFlap({
         // ghost box around the flap. The hairline outline is its whole edge
         // treatment.
       )}
+      // PUBLISHED, not merely used: the detach and the arrival snap paint the
+      // travelling capsule in this colour, and they read it back off this
+      // element rather than assuming the strip's tone (see `peekFlapFill`).
       style={
         {
-          "--dux-flap-fill":
+          [FLAP_FILL_VAR]:
             band === "strip" ? "var(--dux-flap-bg)" : "var(--background)",
         } as React.CSSProperties
       }
@@ -94,7 +106,7 @@ export function MobileActionFlap({
           viewBox={shape.viewBox}
           style={{ left: shape.left, top: shape.top }}
         >
-          <path d={shape.fill} fill="var(--dux-flap-fill)" />
+          <path d={shape.fill} fill={`var(${FLAP_FILL_VAR})`} />
           <path
             d={shape.stroke}
             fill="none"

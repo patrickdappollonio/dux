@@ -30,9 +30,11 @@ import {
   FLIGHT_SHAPE_MS,
   FLIGHT_TAB_RADIUS_PX,
   FLIGHT_TRAVEL_MS,
+  FLAP_FILL_VAR,
   flightOffset,
   flightOwnsPosition,
   flightTranslation,
+  peekFlapFill,
   peekFlapRect,
   transparentShadow,
   type FlightPhase,
@@ -66,10 +68,12 @@ import { cn } from "@/lib/utils"
 //
 // IT CARRIES NO TAB STATUS. It used to grow a status half that bobbed while a
 // hidden tab worked, wore an attention dot, and folded out a mini strip of tab
-// pills to switch between them. The agents list is where tab status lives, and
-// a second, smaller copy of it floating over the terminal was a place for the
-// two to disagree; attention arrives as a toast, which reaches the user
-// whatever surface they are looking at.
+// pills to switch between them. The agents list and the tab strip are where tab
+// status lives, and a second, smaller copy of it floating over the terminal was
+// a place for the two to disagree. The accepted cost is that in theater on a
+// phone, where both of those are off screen, a hidden tab needing attention has
+// no on-screen signal until the mode is left; see `lib/theater.ts` for why that
+// is not answered by a notification either.
 //
 // Bottom right, because that is the corner a thumb reaches on a held tablet and
 // the corner an agent CLI is least likely to be drawing something that must be
@@ -282,7 +286,12 @@ function FlapFillets() {
           height={box}
           viewBox={`0 0 ${box} ${box}`}
         >
-          <path d={shape.fill} fill="var(--dux-flap-bg)" />
+          {/* The band's OWN colour, which the flight puts on the pill's root
+              for the two stages these are painted in. A single-tab agent's flap
+              hangs off the plain background rather than the strip's tone, and
+              fillets pinned to the strip's flashed the wrong colour at both
+              ends of the journey. */}
+          <path d={shape.fill} fill={`var(${FLAP_FILL_VAR}, var(--dux-flap-bg))`} />
           <path
             d={shape.stroke}
             fill="none"
@@ -405,6 +414,7 @@ function clearFlightStyles(
   style.willChange = ""
   style.right = ""
   style.bottom = ""
+  style.removeProperty(FLAP_FILL_VAR)
   if (position) return
   style.left = ""
   style.top = ""
@@ -463,7 +473,8 @@ function runDetach(
   // The shape it is leaving: the flap's square top and hanging corners, its
   // body colour, no shadow, and no top edge at all.
   box.style.borderRadius = `0 0 ${FLIGHT_TAB_RADIUS_PX}px ${FLIGHT_TAB_RADIUS_PX}px`
-  box.style.backgroundColor = "var(--dux-flap-bg)"
+  box.style.setProperty(FLAP_FILL_VAR, peekFlapFill())
+  box.style.backgroundColor = `var(${FLAP_FILL_VAR})`
   box.style.borderTopColor = "transparent"
   if (shadow) box.style.boxShadow = shadow
   // Force the browser to take all of that before the end values land, or the
@@ -527,6 +538,10 @@ function runReturn(
 function runAttach(box: HTMLElement, dock: DOMRect): void {
   const here = surfaceOffset(box, dock)
   box.style.transition = "none"
+  // The colour it is arriving INTO, taken from the dock itself rather than
+  // assumed: the flap's body is the strip's tone or the plain background
+  // depending on what it is hanging from.
+  box.style.setProperty(FLAP_FILL_VAR, peekFlapFill())
   pinTopLeft(box, here)
   box.style.transform = ""
   // A live fractional transform composites the pill's glyphs off the device
@@ -543,7 +558,7 @@ function runAttach(box: HTMLElement, dock: DOMRect): void {
     `border-top-color ${FLIGHT_ATTACH_MS}ms ease`,
   ].join(", ")
   box.style.borderRadius = `0 0 ${FLIGHT_TAB_RADIUS_PX}px ${FLIGHT_TAB_RADIUS_PX}px`
-  box.style.backgroundColor = "var(--dux-flap-bg)"
+  box.style.backgroundColor = `var(${FLAP_FILL_VAR})`
   // The flap is flush with the band, so it has no top edge to draw.
   box.style.borderTopColor = "transparent"
 }

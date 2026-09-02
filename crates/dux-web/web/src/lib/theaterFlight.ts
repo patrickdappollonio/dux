@@ -278,3 +278,21 @@ export function registerFlapElement(el: HTMLElement | null): () => void {
 export function peekFlapRect(): DOMRect | null {
   return flapElement?.getBoundingClientRect() ?? null
 }
+
+/// The custom property the flap's body colour is published on, and the pill
+/// wears for the length of a flight.
+export const FLAP_FILL_VAR = "--dux-flap-fill"
+
+/// The colour the pill has to be at the dock end of a flight.
+///
+/// THE FLAP IS NOT ONE COLOUR. It takes the tone of whatever band it hangs
+/// from: the tab strip's composited one, or the plain app background for a
+/// single-tab agent or a hidden top bar, which is the common case rather than
+/// the exotic one. A flight that assumed the strip's colour popped in the wrong
+/// tone for a frame at both ends of the journey. The flap publishes its own
+/// answer on the element the flight already measures, so the two cannot
+/// disagree; the strip's tone is the fallback for a flight with no flap to ask.
+export function peekFlapFill(): string {
+  const published = flapElement?.style.getPropertyValue(FLAP_FILL_VAR).trim()
+  return published ? published : "var(--dux-flap-bg)"
+}

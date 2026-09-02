@@ -170,15 +170,14 @@ export interface FlatSelectHandlers {
 // by both surfaces (this is the SessionActions menu the redesign must preserve).
 //
 // `context` says which screen the menu opened FROM: `"hub"` (the default; the
-// hub/sidebar row menus on both surfaces) or `"terminal"` (the mobile terminal
-// screen's header menu, passed by MobileShell). The mobile-bar quick toggles
-// render only in the terminal context, because they toggle chrome that only
-// the terminal screen shows: an unscoped gate would leak them into the hub's
-// row menus (and the desktop sidebar), where that chrome is not even visible.
+// hub/sidebar row menus on both surfaces) or `"terminal"` (the phone terminal
+// screen's one pane menu, which renders this as its agent group and adds the
+// changed files, the view toggles and the app menu below it).
 //
-// "Attach a file…" is not context-scoped: it is offered from any of this
-// agent's menus, and answers for itself by asking whether a pane of this agent
-// is mounted and owns its input (see `useAttachCapability`).
+// The only thing the context decides is "Attach a file…", which the pane menu
+// carries itself, down in the input group beside the rest of them. It answers
+// for itself either way by asking whether a pane of this agent is mounted and
+// owns its input (see `useAttachCapability`).
 export function AgentActionsMenu({
   session,
   context = "hub",

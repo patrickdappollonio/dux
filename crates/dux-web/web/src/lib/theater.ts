@@ -242,11 +242,17 @@ export function isTypingSurfaceElement(
 //
 // It used to grow a status half that bobbed while a hidden tab worked, wore an
 // attention dot, and folded out a mini strip of the same tab pills to switch
-// between them. All three came out: the agents list is where tab status lives
-// and a second, smaller copy of it floating over the terminal was a place for
-// the two to disagree, and attention arrives as a toast, which reaches the user
-// whatever surface they are on. What is left is four controls that ACT, which
-// is what a floating cluster is for.
+// between them. All three came out: the agents list and the tab strip are where
+// tab status lives, and a second, smaller copy of it floating over the terminal
+// was a place for the two to disagree. What is left is four controls that ACT,
+// which is what a floating cluster is for.
+//
+// THE COST, WRITTEN DOWN RATHER THAN WISHED AWAY: in theater on a phone both of
+// those surfaces are off screen, so a hidden tab that needs attention has no
+// on-screen signal until the mode is left. Nothing raises a notification for it
+// either (the browser ones are the agent's own escape sequences, delivered by a
+// mounted terminal to a page that is not being looked at). That is accepted for
+// a mode whose whole purpose is one terminal and nothing else.
 
 /**
  * How long the chrome takes to leave, in milliseconds.

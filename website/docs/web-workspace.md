@@ -157,10 +157,12 @@ so and offers to try again. And if the connection is really gone, the blocking
 
 The expand button hands the whole screen to the terminal. On a computer it is in the
 terminal's header, next to **Macros…**; on a phone it is the first button in the flap
-that hangs off the tab strip. The header, the pull-request band and the tab strip slide
-away and the terminal grows into the space they were using; on a phone the app header
-goes with them, and the flap lifts off the strip and flies to the floating pill, which is
-the same four buttons in the same order.
+that hangs off the band above the terminal. That band is the tab strip when the agent has
+more than one tab and the header itself when it does not, and the flap takes the colour of
+whichever one it is hanging from, so it always reads as part of it. The header, the
+pull-request band and the tab strip slide away and the terminal grows into the space they
+were using; on a phone the app header goes with them, and the flap lifts off the band and
+flies to the floating pill, which is the same four buttons in the same order.
 The compose box and the terminal keys stay exactly as you had them, and the input `⋯`
 menu keeps offering to show or hide either one, so theater is as bare or as equipped as
 you want it. The top bar is not on that list while theater is on: it is one of the things
@@ -181,8 +183,10 @@ toggles, the way out of theater while the mode is on, and **Settings**, which dr
 the app menu the cog carries, so nothing about an agent goes out of reach because you
 went full screen.
 
-The pill carries no tab status. What the other tabs are doing is in the agents list, and
-an agent that needs you says so with a notification, wherever you happen to be looking.
+The pill carries no tab status. What the other tabs are doing is in the agents list and
+the tab strip, and one copy of that is enough. Theater on a phone hides both, so a tab
+you cannot see that needs you will be waiting when you come back out: that is the trade
+this mode makes for a screen with nothing on it but the terminal.
 
 The pill does not have to stay in that corner. Its leading edge is a grip: hold the grip
 and drag, with a finger or with the mouse, and the pill goes anywhere over the terminal,
