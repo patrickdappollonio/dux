@@ -59,6 +59,14 @@ export const FLIGHT_ATTACH_MS = 200
 /// The snap plus its own frame of slack.
 export const FLIGHT_ATTACH_HOLD_MS = 220
 
+/// A frame of slack past the CHROME's own clock, for the same reason the travel
+/// holds one past the travel. The timer is armed in the commit that flips the
+/// mode, and the chrome's transition does not start until the next paint, so a
+/// stage handed over exactly on the chrome's duration measures a dock that is
+/// still short of where it settles. That measurement IS the flight's start
+/// point, so the difference lands in the translation.
+export const FLIGHT_CHROME_SLACK_MS = 20
+
 /// The corner and colour morph at pull-off, which finishes inside the flight's
 /// first stretch so the rest of the travel is already a finished capsule.
 export const FLIGHT_SHAPE_MS = 200
@@ -88,7 +96,9 @@ export function flightForMode(theater: boolean, chromeMs: number): FlightPhase {
  *
  * The two chrome stages are the CHROME's clock rather than one of their own:
  * the flap may not leave the band until the band has finished leaving, and the
- * pill may not fly home until the dock it is aiming at is back on screen.
+ * pill may not fly home until the dock it is aiming at is back on screen. Plus
+ * the frame of slack the transition starts a paint late by, so the stage that
+ * measures the dock reads it settled rather than nearly there.
  */
 export function flightHoldMs(
   phase: FlightPhase,
@@ -97,7 +107,7 @@ export function flightHoldMs(
   switch (phase) {
     case "collapsing":
     case "expanding":
-      return chromeMs
+      return chromeMs + FLIGHT_CHROME_SLACK_MS
     case "detaching":
     case "returning":
       return FLIGHT_TRAVEL_HOLD_MS

@@ -86,6 +86,7 @@ const { appMenuModel } = await import("@/lib/appMenu")
 const { THEATER_PILL_HINT_KEY, THEATER_PILL_POSITION_KEY } = await import(
   "@/lib/theaterPill"
 )
+const { registerFlapElement } = await import("@/lib/theaterFlight")
 
 function tab(over: Partial<AgentTabView> & { id: string }): AgentTabView {
   return {
@@ -121,29 +122,36 @@ function session(tabs: AgentTabView[]): SessionView {
 // The pill measures itself and the surface it floats over, and jsdom lays
 // nothing out. One rect stub answers for both: the pill's own box by its test
 // id, everything else (its parent, which IS the surface) the pane.
-const PILL_BOX = { width: 200, height: 48 }
+const PILL_BOX = { left: 0, top: 0, width: 200, height: 48 }
 // The pill's own box is a variable because folding the tab strip out really does
 // widen it, and jsdom lays nothing out: a test plays that growth here.
 let pillBox = PILL_BOX
-let surfaceBox = { width: 800, height: 600 }
+let surfaceBox = { left: 0, top: 0, width: 800, height: 600 }
+// The docked flap the flight measures. It is not in the pill's tree (the flap is
+// a sibling of the pane), so it carries its own test id and answers here.
+let flapBox = { left: 0, top: 0, width: 200, height: 48 }
 const realRect = Element.prototype.getBoundingClientRect
+
+function rect(box: { left: number; top: number; width: number; height: number }) {
+  return {
+    x: box.left,
+    y: box.top,
+    top: box.top,
+    left: box.left,
+    right: box.left + box.width,
+    bottom: box.top + box.height,
+    width: box.width,
+    height: box.height,
+    toJSON: () => ({}),
+  } as DOMRect
+}
 
 function stubRects() {
   Element.prototype.getBoundingClientRect = function (this: Element) {
-    const pill =
-      this instanceof HTMLElement && this.dataset.testid === "theater-pill"
-    const box = pill ? pillBox : surfaceBox
-    return {
-      x: 0,
-      y: 0,
-      top: 0,
-      left: 0,
-      right: box.width,
-      bottom: box.height,
-      width: box.width,
-      height: box.height,
-      toJSON: () => ({}),
-    } as DOMRect
+    const id = this instanceof HTMLElement ? this.dataset.testid : undefined
+    if (id === "theater-pill") return rect(pillBox)
+    if (id === "flap-dock") return rect(flapBox)
+    return rect(surfaceBox)
   }
 }
 
@@ -152,8 +160,9 @@ beforeEach(() => {
   exitTheaterMock.mockReset()
   selectTabMock.mockReset()
   notifyInfoMock.mockReset()
-  surfaceBox = { width: 800, height: 600 }
+  surfaceBox = { left: 0, top: 0, width: 800, height: 600 }
   pillBox = PILL_BOX
+  flapBox = { left: 0, top: 0, width: 200, height: 48 }
   stubRects()
   mockState = { bootstrap: null } as unknown as DuxState
 })
@@ -326,7 +335,7 @@ describe("moving the theater pill", () => {
 
   it("clamps a remembered position into a surface that has since shrunk", () => {
     localStorage.setItem(THEATER_PILL_POSITION_KEY, '{"x":700,"y":500}')
-    surfaceBox = { width: 390, height: 400 }
+    surfaceBox = { left: 0, top: 0, width: 390, height: 400 }
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     expect(pill().style.left).toBe("190px")
     expect(pill().style.top).toBe("352px")
@@ -419,7 +428,7 @@ describe("moving the theater pill", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     down(grip(), { pointerType: "mouse", clientX: 600, clientY: 550 })
     move(500, 400)
-    surfaceBox = { width: 390, height: 400 }
+    surfaceBox = { left: 0, top: 0, width: 390, height: 400 }
     act(() => playResize())
     expect(pill().style.transform).toBe("")
     expect(stored()).toEqual({ x: 486, y: 388 })
@@ -438,7 +447,7 @@ describe("moving the theater pill", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     down(grip(), { pointerType: "mouse", clientX: 600, clientY: 550 })
     move(500, 400)
-    pillBox = { width: 180, height: 48 }
+    pillBox = { left: 0, top: 0, width: 180, height: 48 }
     act(() => playPillResize())
     move(400, 300)
     up(400, 300)
@@ -591,7 +600,7 @@ describe("moving the theater pill", () => {
 
   it("re-derives its corner when the surface rotates under it", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
-    surfaceBox = { width: 390, height: 400 }
+    surfaceBox = { left: 0, top: 0, width: 390, height: 400 }
     act(() => playResize())
     // Nobody has placed this pill, so the rotation gets the corner it would
     // have started in on a surface this size, margin and all, rather than the
@@ -648,19 +657,19 @@ describe("moving the theater pill", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     expect(pill().style.left).toBe("500px")
 
-    surfaceBox = { width: 390, height: 400 }
+    surfaceBox = { left: 0, top: 0, width: 390, height: 400 }
     act(() => playResize())
     expect(pill().style.left).toBe("190px")
     expect(stored()).toEqual({ x: 500, y: 400 })
 
-    surfaceBox = { width: 800, height: 600 }
+    surfaceBox = { left: 0, top: 0, width: 800, height: 600 }
     act(() => playResize())
     expect(pill().style.left).toBe("500px")
   })
 
   it("writes nothing at all when nobody has ever moved it", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
-    surfaceBox = { width: 390, height: 400 }
+    surfaceBox = { left: 0, top: 0, width: 390, height: 400 }
     act(() => playResize())
     expect(stored()).toBeNull()
   })
@@ -843,5 +852,192 @@ describe("the input items the pill folds in", () => {
     await openMenu()
 
     expect(items().some((t) => t?.includes("Use the message box"))).toBe(false)
+  })
+})
+
+// THE FLIGHT'S ARITHMETIC, ACTUALLY RUN.
+//
+// Everything above pins what the pill IS at each stage. This block runs the
+// imperative half: with a measured dock and a measured pill, the choreography
+// really writes the transform, the radius, the pinned coordinates and the
+// parking, so the numbers are checked rather than assumed. jsdom lays nothing
+// out, which is exactly why every box here is stubbed: what is under test is
+// the arithmetic, not the browser.
+describe("the phone flight, with real boxes to measure", () => {
+  const mobileTarget = { kind: "agent" as const, sessionId: "s1", tabId: "s1" }
+
+  /// The docked flap, as the flight sees it: an element that answers with a
+  /// rect. It is registered rather than rendered, because the real one is a
+  /// sibling of the pane and reaches the pill the same way.
+  function mountDock() {
+    const el = document.createElement("div")
+    el.dataset.testid = "flap-dock"
+    document.body.appendChild(el)
+    const retire = registerFlapElement(el)
+    return () => {
+      retire()
+      el.remove()
+    }
+  }
+
+  function flying(flight: "detaching" | "returning" | "attaching" | "floating") {
+    return (
+      <TheaterPill
+        target={mobileTarget}
+        session={session([tab({ id: "s1" })])}
+        variant="mobile"
+        flight={flight}
+      />
+    )
+  }
+
+  let retireDock = () => {}
+  beforeEach(() => {
+    mockState = {
+      bootstrap: null,
+      theater: true,
+      changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
+    } as unknown as DuxState
+    // The capsule's radius is HALF THE PAINTED HEIGHT, so the morph needs a
+    // height to halve; jsdom reports zero for every box it never laid out.
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      get: () => 48,
+    })
+    retireDock = mountDock()
+  })
+
+  afterEach(() => {
+    retireDock()
+    // @ts-expect-error restoring jsdom's own zero-size getter
+    delete HTMLElement.prototype.offsetHeight
+  })
+
+  it("leaves room for the grip slot the detach is about to open", () => {
+    // The pill starts every detach gripless, and a resting corner derived from
+    // that narrower box hangs its right edge outside the surface the moment the
+    // slot opens. 800 - (200 + 20) - 14.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    render(flying("detaching"))
+    expect(pill().style.left).toBe("566px")
+  })
+
+  it("pulls off wearing the flap's shape and lands as a capsule", () => {
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    render(flying("detaching"))
+    const box = pill()
+    // The end values of the morph: a capsule at half the painted height, on the
+    // travel's own clock, with its own layer while it moves.
+    expect(box.style.borderRadius).toBe("24px")
+    expect(box.style.transform).toBe("")
+    expect(box.style.transition).toContain("transform 320ms")
+    expect(box.style.transition).toContain("border-radius 200ms")
+    expect(box.style.willChange).toBe("transform")
+  })
+
+  it("flies home from where it sits to where the dock is", () => {
+    pillBox = { left: 566, top: 538, width: 220, height: 48 }
+    flapBox = { left: 200, top: 4, width: 220, height: 48 }
+    render(flying("returning"))
+    const box = pill()
+    // Pinned on the coordinates it is LEAVING, then translated onto the dock's.
+    expect(box.style.left).toBe("566px")
+    expect(box.style.top).toBe("538px")
+    expect(box.style.transform).toBe("translate(-366px, -534px)")
+    // Both axes are said, so the fallback corner class cannot fight it.
+    expect(box.style.right).toBe("auto")
+    expect(box.style.bottom).toBe("auto")
+  })
+
+  it("parks on the dock's real coordinates before it squares up", () => {
+    pillBox = { left: 566, top: 538, width: 220, height: 48 }
+    flapBox = { left: 200, top: 4, width: 220, height: 48 }
+    render(flying("attaching"))
+    const box = pill()
+    expect(box.style.left).toBe("200px")
+    expect(box.style.top).toBe("4px")
+    // The transform is cleared and the compositor layer dropped, so the raster
+    // re-snaps to the device pixel grid the in-flow flap will paint on.
+    expect(box.style.transform).toBe("")
+    expect(box.style.willChange).toBe("auto")
+    expect(box.style.borderRadius).toBe("0 0 10px 10px")
+    expect(box.style.borderTopColor).toBe("transparent")
+  })
+
+  it("keeps its own coordinates once the flight lets go of the box", () => {
+    // The settled pill is placed by React, from its own position state, and the
+    // stage that ends clears what the FLIGHT wrote. It must not take those with
+    // it: React's next diff sees values that never changed and rewrites
+    // nothing, so a blanket clear strands the pill at the overlay's corner with
+    // no inset at all.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const view = render(flying("detaching"))
+    act(() => view.rerender(flying("floating")))
+    const box = pill()
+    expect(box.style.left).toBe("566px")
+    expect(box.style.top).toBe(CORNER.top)
+    expect(box.style.transform).toBe("")
+    expect(box.style.borderRadius).toBe("")
+  })
+
+  it("hands the box back mid-air when the mode flips under the flight", () => {
+    pillBox = { left: 566, top: 538, width: 220, height: 48 }
+    flapBox = { left: 200, top: 4, width: 220, height: 48 }
+    const view = render(flying("returning"))
+    expect(pill().style.transform).not.toBe("")
+    act(() => view.rerender(flying("floating")))
+    const box = pill()
+    expect(box.style.transform).toBe("")
+    expect(box.style.right).toBe("")
+    expect(box.style.bottom).toBe("")
+    // Its own resting corner for THIS box: 800 - 220 - 14.
+    expect(box.style.left).toBe("566px")
+  })
+
+  it("falls back to the corner while a fresh pill has nothing to place it", () => {
+    // A pane that remounts mid-return mounts a pill with no coordinates of its
+    // own, and the flight has not written any yet. Without the fallback that is
+    // an absolutely positioned box with no insets at all: the overlay's top-left
+    // corner, in front of the terminal.
+    surfaceBox = { left: 0, top: 0, width: 0, height: 0 }
+    render(flying("returning"))
+    expect(pill().className).toContain("right-3.5")
+    expect(pill().className).toContain("bottom-3.5")
+  })
+
+  it("re-runs the flight for a pill that mounts in the middle of one", () => {
+    pillBox = { left: 566, top: 538, width: 220, height: 48 }
+    flapBox = { left: 200, top: 4, width: 220, height: 48 }
+    const view = render(flying("returning"))
+    // An agent switch mid-flight remounts the pane, and the overlay with it.
+    act(() =>
+      view.rerender(
+        <TheaterPill
+          key="remounted"
+          target={mobileTarget}
+          session={session([tab({ id: "s1" })])}
+          variant="mobile"
+          flight="returning"
+        />,
+      ),
+    )
+    expect(pill().style.left).toBe("566px")
+    expect(pill().style.transform).toBe("translate(-366px, -534px)")
+  })
+
+  it("lets go of a flight whose pill is unmounted under it", () => {
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const view = render(flying("detaching"))
+    expect(() => view.unmount()).not.toThrow()
+  })
+
+  it("flies nothing at all when there is no dock to measure", () => {
+    // The reduced-motion answer, and the answer for a page that opened in
+    // theater: with no flap on screen the cluster simply appears.
+    retireDock()
+    retireDock = () => {}
+    render(flying("detaching"))
+    expect(pill().style.transform).toBe("")
+    expect(pill().style.transition).toBe("")
   })
 })

@@ -61,9 +61,13 @@ vi.mock("@/components/LazyTerminalPane", () => ({
 installBootStubs()
 const { MobileShell } = await import("./MobileShell")
 const { THEATER_TRANSITION_MS } = await import("@/lib/theater")
-const { FLIGHT_ATTACH_HOLD_MS, FLIGHT_TRAVEL_HOLD_MS } = await import(
-  "@/lib/theaterFlight"
-)
+const { FLIGHT_ATTACH_HOLD_MS, FLIGHT_CHROME_SLACK_MS, FLIGHT_TRAVEL_HOLD_MS } =
+  await import("@/lib/theaterFlight")
+
+/// The chrome stage's whole hold: its transition plus the frame of slack the
+/// transition starts late by. What the next stage measures is the dock this
+/// wait exists to let settle.
+const CHROME_HOLD_MS = THEATER_TRANSITION_MS + FLIGHT_CHROME_SLACK_MS
 
 function tab(id: string): AgentTabView {
   return {
@@ -179,7 +183,7 @@ describe("entering theater on a phone", () => {
     mockState = makeState(true)
     act(() => view.rerender(<MobileShell />))
 
-    tick(THEATER_TRANSITION_MS)
+    tick(CHROME_HOLD_MS)
     // Mid-flight: the capsule is in the air and the flap is only there to have
     // been measured.
     expect(shot()).toEqual({ flap: "hidden", pill: "leaving" })
@@ -205,7 +209,7 @@ describe("leaving theater on a phone", () => {
     const view = render(<MobileShell />)
     mockState = makeState(true)
     act(() => view.rerender(<MobileShell />))
-    tick(THEATER_TRANSITION_MS)
+    tick(CHROME_HOLD_MS)
     tick(FLIGHT_TRAVEL_HOLD_MS)
     return view
   }
@@ -225,7 +229,7 @@ describe("leaving theater on a phone", () => {
     mockState = makeState(false)
     act(() => view.rerender(<MobileShell />))
 
-    tick(THEATER_TRANSITION_MS)
+    tick(CHROME_HOLD_MS)
     expect(shot()).toEqual({ flap: "hidden", pill: "returning" })
 
     // Arrival is its own stage: the shape morph runs only once the travel is

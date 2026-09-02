@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   FLIGHT_ATTACH_HOLD_MS,
+  FLIGHT_CHROME_SLACK_MS,
   FLIGHT_TRAVEL_HOLD_MS,
   FLIGHT_TRAVEL_MS,
   flapMounted,
@@ -59,9 +60,16 @@ describe("the phone's theater flight, stage by stage", () => {
 
   it("gives the two chrome stages the CHROME's clock, not one of their own", () => {
     // The flap may not leave until the band has, and the capsule may not fly
-    // home until the dock is back on screen.
-    expect(flightHoldMs("collapsing", CHROME_MS)).toBe(CHROME_MS)
-    expect(flightHoldMs("expanding", CHROME_MS)).toBe(CHROME_MS)
+    // home until the dock is back on screen. Plus the slack the transition
+    // starts a paint late by: the stage that follows MEASURES that dock, and a
+    // handover exactly on the duration reads it a few pixels short.
+    expect(flightHoldMs("collapsing", CHROME_MS)).toBe(
+      CHROME_MS + FLIGHT_CHROME_SLACK_MS,
+    )
+    expect(flightHoldMs("expanding", CHROME_MS)).toBe(
+      CHROME_MS + FLIGHT_CHROME_SLACK_MS,
+    )
+    expect(FLIGHT_CHROME_SLACK_MS).toBeGreaterThan(0)
   })
 
   it("holds each travel a frame past its own transition", () => {

@@ -27,6 +27,27 @@ export const THEATER_PILL_HINT_KEY = "dux:theater-pill-hint"
 /// the inset the pill was pinned at before it could move.
 export const THEATER_PILL_MARGIN = 14
 
+/// The phone grip's own width, a per-axis relaxation of the 40px floor argued
+/// at the button itself. It is written here as well as in the button's class
+/// because the resting corner is arithmetic about it; a test pins the two
+/// together.
+export const THEATER_PILL_GRIP_W_PX = 18
+
+/// The gap between the pill's controls, Tailwind's `gap-0.5`.
+export const THEATER_PILL_ROW_GAP_PX = 2
+
+/// THE WIDTH THE CLUSTER GAINS ON ITS WAY OUT of the flap and gives back on the
+/// way home: the grip plus the gap that appears with it. The docked flap has no
+/// grip and reserves no blank space for one, so the pill starts every detach
+/// this much narrower than it will settle at, and anything measuring the pill
+/// for a resting place has to add it back.
+export const THEATER_PILL_GRIP_SLOT_PX =
+  THEATER_PILL_GRIP_W_PX + THEATER_PILL_ROW_GAP_PX
+
+/// The class the collapsed slot is expressed by, shared by the component that
+/// applies it and the measurement that has to know it is applied.
+export const PILL_GRIPLESS_CLASS = "dux-pill-gripless"
+
 /// How far one arrow-key press moves the pill.
 ///
 /// Keyboard nudging exists because dragging is a pointer gesture and a keyboard

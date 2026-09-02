@@ -43,9 +43,11 @@ import {
   clampPillPosition,
   markPillHintShown,
   nudgePillPosition,
+  PILL_GRIPLESS_CLASS,
   readPillHintPending,
   readPillPosition,
   resolvePillPosition,
+  THEATER_PILL_GRIP_SLOT_PX,
   THEATER_PILL_HOLD_MS,
   writePillPosition,
   type PillPosition,
@@ -107,7 +109,7 @@ export function TheaterPill({
   // is actually on rather than whichever one registered last.
   const paneId = target.kind === "agent" ? target.tabId : target.terminalId
   const mobile = variant === "mobile"
-  const gripless = useFlightChoreography(boxRef, flight, drag.position !== null)
+  const gripless = useFlightChoreography(boxRef, flight, drag.position)
   // WHILE IT IS FLYING HOME the flight owns the box's coordinates outright: it
   // pins the pill at the ones it is leaving and parks it on the flap's, neither
   // of which is a place the drag state has any business holding.
@@ -123,7 +125,14 @@ export function TheaterPill({
         // The corner it starts in, until a measurement gives it real
         // coordinates. Keeping the CSS default for that frame is what stops the
         // pill flashing at the origin on a pane that has not been laid out yet.
-        drag.position === null && !flightPlaces && "right-3.5 bottom-3.5",
+        //
+        // It applies DURING A FLIGHT TOO, for the pane that remounts mid-return:
+        // a fresh pill has no coordinates of its own and the flight has not yet
+        // written any, and the two together used to leave it painted at the
+        // overlay's top-left corner. The two can never fight over the same edges,
+        // because the run that parks the box pins `right` and `bottom` to `auto`
+        // as it writes `left` and `top`.
+        drag.position === null && "right-3.5 bottom-3.5",
         // The settle after a nudge or a re-clamp. It is deliberately absent
         // while a drag is live (the pointer already moves the pill, and easing
         // toward the finger would lag it) and for a viewer who asked for less
@@ -133,7 +142,7 @@ export function TheaterPill({
           !drag.justDropped &&
           !flightPlaces &&
           "transition-[left,top] duration-150 ease-out",
-        gripless && "dux-pill-gripless",
+        gripless && PILL_GRIPLESS_CLASS,
         flight === "detaching" && "dux-flight-out",
         flight === "returning" && "dux-flight-in",
         flight === "attaching" && "dux-flight-attach",
@@ -294,7 +303,10 @@ function FlapFillets() {
 function useFlightChoreography(
   boxRef: React.RefObject<HTMLDivElement | null>,
   flight: FlightPhase | null,
-  placed: boolean,
+  /// Where the pill's own state says it sits, or `null` before anything has
+  /// been measured. The flights need a measured dock to fly from; the resting
+  /// stages need it to know whether React has coordinates of its own to write.
+  position: PillPosition | null,
 ): boolean {
   // The stage's own answer, until the stage's effect overrides it mid-flight.
   // KEYED ON THE STAGE it was written for, so a new stage's default takes over
@@ -321,7 +333,7 @@ function useFlightChoreography(
       // Both flights need a real dock: one to leave, one to land on. Without a
       // measured pill there is nothing to fly, so the cluster simply appears,
       // which is also the reduced-motion answer.
-      if (!placed) return
+      if (!position) return
       const from = peekFlapRect()
       if (!from) return
       ranRef.current = flight
@@ -344,8 +356,8 @@ function useFlightChoreography(
     // A resting stage. Anything the flight wrote is over, and leaving it behind
     // would pin the pill's shape at whatever the last frame happened to be.
     ranRef.current = flight
-    clearFlightStyles(box)
-  }, [boxRef, flight, placed, setStageGripless])
+    clearFlightStyles(box, position)
+  }, [boxRef, flight, position, setStageGripless])
 
   // The flap has no grip and reserves no space for one, so the two stages that
   // are the flap's shape start collapsed; the two travels then open or close
@@ -358,7 +370,17 @@ function useFlightChoreography(
 
 /// Everything the flight writes inline, in one place, so a stage that ends can
 /// hand the element back exactly as it found it.
-function clearFlightStyles(box: HTMLElement): void {
+///
+/// LEFT AND TOP ARE REACT'S while the pill rests, and this is the one place that
+/// has to remember it. React writes them from the pill's own position state, and
+/// its next diff sees values that never changed, so a blanket clear here strands
+/// the settled pill at the overlay's top-left corner with nothing left to put it
+/// back. They are cleared only when the pill has no position of its own, which
+/// is also the state the fallback corner class paints.
+function clearFlightStyles(
+  box: HTMLElement,
+  position: PillPosition | null,
+): void {
   const style = box.style
   style.transition = ""
   style.transform = ""
@@ -368,6 +390,9 @@ function clearFlightStyles(box: HTMLElement): void {
   style.boxShadow = ""
   style.borderTopColor = ""
   style.willChange = ""
+  style.right = ""
+  style.bottom = ""
+  if (position) return
   style.left = ""
   style.top = ""
 }
@@ -379,6 +404,24 @@ function clearFlightStyles(box: HTMLElement): void {
 /// so the corners sit finished for most of it and then appear to snap.
 function capsuleRadiusPx(box: HTMLElement): string {
   return `${box.offsetHeight / 2}px`
+}
+
+/// Park the box on real coordinates, and say so on BOTH axes.
+///
+/// The fallback corner is a class rather than an inline style, so a pill that
+/// has not been measured yet is holding `right` and `bottom` while a flight
+/// writes `left` and `top`; an absolutely positioned box given all four stops
+/// being content-sized and stretches. Overriding the pair the flight does not
+/// own is what makes the two safe to coexist for the commit it takes React to
+/// drop the class.
+function pinTopLeft(
+  box: HTMLElement,
+  here: { left: number; top: number },
+): void {
+  box.style.left = `${here.left}px`
+  box.style.top = `${here.top}px`
+  box.style.right = "auto"
+  box.style.bottom = "auto"
 }
 
 function surfaceOffset(box: HTMLElement, rect: DOMRect): {
@@ -451,8 +494,7 @@ function runReturn(
   // a right-anchored one would slide its left edge out from under the
   // translation; left-anchored, the buttons walk continuously toward that edge
   // as the slot narrows and the translation lands it on the flap's.
-  box.style.left = `${here.left}px`
-  box.style.top = `${here.top}px`
+  pinTopLeft(box, here)
   box.style.transformOrigin = "top left"
   box.style.borderRadius = capsuleRadiusPx(box)
   void box.offsetWidth
@@ -472,8 +514,7 @@ function runReturn(
 function runAttach(box: HTMLElement, dock: DOMRect): void {
   const here = surfaceOffset(box, dock)
   box.style.transition = "none"
-  box.style.left = `${here.left}px`
-  box.style.top = `${here.top}px`
+  pinTopLeft(box, here)
   box.style.transform = ""
   // A live fractional transform composites the pill's glyphs off the device
   // pixel grid, half a pixel adrift of where the in-flow flap will paint them,
@@ -592,6 +633,16 @@ function usePillHint(): void {
   }, [])
 }
 
+/// How much width the collapsed grip slot is about to give back, or zero for a
+/// pill whose slot is already open. Read from the element rather than threaded
+/// down from the choreography, because the class and the measurement have to be
+/// the same commit's answer and the class is what the browser is laying out.
+function griplessSlotWidth(box: HTMLElement): number {
+  return box.classList.contains(PILL_GRIPLESS_CLASS)
+    ? THEATER_PILL_GRIP_SLOT_PX
+    : 0
+}
+
 interface PillDrag {
   /// Where the pill sits, or `null` before anything has been measured.
   position: PillPosition | null
@@ -679,7 +730,17 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     const p = box.getBoundingClientRect()
     const sizes = {
       surface: { width: s.width, height: s.height },
-      pill: { width: p.width, height: p.height },
+      // MEASURED AT THE WIDTH IT WILL SETTLE AT, not the one it is passing
+      // through. The detach starts with the grip slot collapsed (that is what
+      // makes the handoff a pure translation), and a resting corner derived
+      // from that narrower box puts the pill's right edge outside the surface
+      // the moment the slot opens, which the re-clamp then yanks back with no
+      // transition on `left` to carry it. The class the slot is collapsed by is
+      // on the element in the same commit this reads, so the DOM answers.
+      pill: {
+        width: p.width + griplessSlotWidth(box),
+        height: p.height,
+      },
     }
     sizesRef.current = sizes
     if (!restoredRef.current) {
