@@ -83,9 +83,13 @@ function installBootStubs() {
 installBootStubs()
 const { TheaterPill } = await import("./TheaterPill")
 const { appMenuModel } = await import("@/lib/appMenu")
-const { THEATER_PILL_HINT_KEY, THEATER_PILL_POSITION_KEY } = await import(
-  "@/lib/theaterPill"
-)
+const {
+  THEATER_PILL_GRIP_SLOT_PX,
+  THEATER_PILL_GRIP_W_PX,
+  THEATER_PILL_HINT_KEY,
+  THEATER_PILL_POSITION_KEY,
+  THEATER_PILL_ROW_GAP_PX,
+} = await import("@/lib/theaterPill")
 const { FLAP_FILL_VAR, registerFlapElement } = await import(
   "@/lib/theaterFlight"
 )
@@ -916,6 +920,19 @@ describe("the phone flight, with real boxes to measure", () => {
     retireDock()
     // @ts-expect-error restoring jsdom's own zero-size getter
     delete HTMLElement.prototype.offsetHeight
+  })
+
+  it("measures the slot at the width the class actually draws", () => {
+    // The slot is arithmetic in one place and a utility class in another, and
+    // nothing else makes the two agree: a grip drawn wider than the resting
+    // corner allows for hangs the pill's edge outside the surface again.
+    render(flying("floating"))
+    const cls = screen.getByTestId("theater-pill-grip").className
+    expect(cls).toContain(`w-[${THEATER_PILL_GRIP_W_PX}px]`)
+    expect(pill().className).toContain(`gap-${THEATER_PILL_ROW_GAP_PX / 4}`)
+    expect(THEATER_PILL_GRIP_SLOT_PX).toBe(
+      THEATER_PILL_GRIP_W_PX + THEATER_PILL_ROW_GAP_PX,
+    )
   })
 
   it("leaves room for the grip slot the detach is about to open", () => {
