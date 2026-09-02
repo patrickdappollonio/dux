@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import { buildFlapShape } from "@/lib/flapShape"
+import { registerFlapElement } from "@/lib/theaterFlight"
 import type { SelectedTarget } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -34,6 +35,7 @@ export function MobileActionFlap({
   target,
   session,
   band,
+  hidden = false,
 }: {
   target: SelectedTarget
   /// The agent behind the pane, when there is one. Only the count needs it.
@@ -42,13 +44,23 @@ export function MobileActionFlap({
   /// strip's own composited tone, or the plain app background when the strip is
   /// not on screen (a single-tab agent, or a hidden top bar).
   band: "strip" | "plain"
+  /// MOUNTED BUT NOT PAINTED, which is what the flap is for the whole return
+  /// flight: it IS the dock the capsule is flying onto, so the choreography
+  /// measures the real element rather than reconstructing where it would have
+  /// been, and the final swap therefore moves nothing.
+  hidden?: boolean
 }) {
   const ref = useRef<HTMLDivElement | null>(null)
   const theaterRef = useRef<HTMLButtonElement | null>(null)
   const shape = useFlapShape(ref)
   // The way back into focus after the pill's own theater button was pressed:
   // that press destroyed the pill, and this is the control that replaced it.
-  useTheaterToggleFocusWhen(theaterRef, true)
+  // Only once the flap is really on screen; focus on an invisible control is a
+  // keyboard pointed at nothing.
+  useTheaterToggleFocusWhen(theaterRef, !hidden)
+  // Published so the flight can measure the dock. What travels is one
+  // measurement, never control over what the flap does.
+  useLayoutEffect(() => registerFlapElement(ref.current), [])
 
   return (
     <div
@@ -63,6 +75,7 @@ export function MobileActionFlap({
       // otherwise win however the two are ordered in the document.
       className={cn(
         "absolute -top-px right-3 z-20 flex items-center gap-0.5 p-[5px]",
+        hidden && "invisible",
         // No drop shadow, deliberately: on the near-black terminal a big soft
         // shadow quantizes into one-step bands whose contours read as a squared
         // ghost box around the flap. The hairline outline is its whole edge

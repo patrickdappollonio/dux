@@ -5,6 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { AppMenuBody } from "@/components/AppMenu"
 import { AttentionDot } from "@/components/AttentionDot"
 import { InputMenuItems } from "@/components/InputMenuItems"
+import { MobileActionCluster } from "@/components/MobileActionCluster"
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -23,6 +24,20 @@ import {
   useTheaterPillFocus,
 } from "@/hooks/use-theater"
 import { tabLabels } from "@/lib/agentTabs"
+import { FLAP_FILLET_BOX, filletShape } from "@/lib/flapShape"
+import {
+  FLIGHT_ATTACH_MS,
+  FLIGHT_EASE,
+  FLIGHT_SHAPE_MS,
+  FLIGHT_TAB_RADIUS_PX,
+  FLIGHT_TRAVEL_MS,
+  flightOffset,
+  flightOwnsPosition,
+  flightTranslation,
+  peekFlapRect,
+  transparentShadow,
+  type FlightPhase,
+} from "@/lib/theaterFlight"
 import { notifyInfo } from "@/lib/notify"
 import { exitTheater, selectTab, type SelectedTarget } from "@/lib/store"
 import { registerTheaterTabs, theaterPillModel } from "@/lib/theater"
@@ -61,11 +76,21 @@ import { cn } from "@/lib/utils"
 export function TheaterPill({
   target,
   session,
+  variant = "desktop",
+  flight = null,
 }: {
   target: SelectedTarget
   /// The focused pane's owning session, when it has one. A terminal pane passes
   /// `undefined` and gets the collapsed pill.
   session: SessionView | undefined
+  /// WHICH CLUSTER THIS IS. On a computer the pill is a way BACK: theater is
+  /// entered from the header, so the pill carries what the mode took away plus
+  /// the exit. On a phone the pill IS the docked flap, in the air: the same
+  /// four controls in the same order, so the flight between them reads as one
+  /// object moving rather than two clusters swapping.
+  variant?: "desktop" | "mobile"
+  /// The phone's flight stage, or `null` on a surface that does not fly.
+  flight?: FlightPhase | null
 }) {
   const [expanded, setExpanded] = useState(false)
   const boxRef = useRef<HTMLDivElement | null>(null)
@@ -106,6 +131,12 @@ export function TheaterPill({
   // shells key the pane itself, so the pill reads the input menu of the pane it
   // is actually on rather than whichever one registered last.
   const paneId = target.kind === "agent" ? target.tabId : target.terminalId
+  const mobile = variant === "mobile"
+  const gripless = useFlightChoreography(boxRef, flight, drag.position !== null)
+  // WHILE IT IS FLYING HOME the flight owns the box's coordinates outright: it
+  // pins the pill at the ones it is leaving and parks it on the flap's, neither
+  // of which is a place the drag state has any business holding.
+  const flightPlaces = flight !== null && flightOwnsPosition(flight)
 
   return (
     <div
@@ -117,7 +148,7 @@ export function TheaterPill({
         // The corner it starts in, until a measurement gives it real
         // coordinates. Keeping the CSS default for that frame is what stops the
         // pill flashing at the origin on a pane that has not been laid out yet.
-        drag.position === null && "right-3.5 bottom-3.5",
+        drag.position === null && !flightPlaces && "right-3.5 bottom-3.5",
         // The settle after a nudge or a re-clamp. It is deliberately absent
         // while a drag is live (the pointer already moves the pill, and easing
         // toward the finger would lag it) and for a viewer who asked for less
@@ -125,14 +156,20 @@ export function TheaterPill({
         !reducedMotion &&
           !drag.dragging &&
           !drag.justDropped &&
+          !flightPlaces &&
           "transition-[left,top] duration-150 ease-out",
+        gripless && "dux-pill-gripless",
+        flight === "detaching" && "dux-flight-out",
+        flight === "returning" && "dux-flight-in",
+        flight === "attaching" && "dux-flight-attach",
       )}
       style={
-        drag.position === null
+        flightPlaces || drag.position === null
           ? undefined
           : { left: drag.position.x, top: drag.position.y }
       }
     >
+      {mobile ? <FlapFillets /> : null}
       <SimpleTooltip content={coarse ? "" : "Hold to drag"}>
         <Button
           variant="ghost"
@@ -148,7 +185,22 @@ export function TheaterPill({
           // scrolling or long-pressing the page out from under the drag, and it
           // is what keeps the terminal's own long-press selection from starting
           // under the finger. The handlers stop the events reaching the pane too.
-          className="size-10 shrink-0 cursor-grab touch-none rounded-full text-muted-foreground select-none active:cursor-grabbing"
+          //
+          // `dux-pill-grip` is the slot the flight widens: the docked flap has
+          // no grip and reserves no blank space for one, so this width is what
+          // the cluster GAINS on the way out and gives back on the way home.
+          //
+          // On the phone the slot is 18px wide, a deliberate per-axis
+          // relaxation of the 40px floor. It keeps the full 40px HEIGHT; its
+          // horizontal neighbours are the pill's own padding edge on one side
+          // and the theater toggle on the other, and the pill has to be the
+          // flap's width plus exactly this slot for the handoff to be a pure
+          // translation. A stray tap costs a mode toggle with a visible way
+          // back, the cheapest of the four to hit by mistake.
+          className={cn(
+            "dux-pill-grip h-10 shrink-0 cursor-grab touch-none rounded-full text-muted-foreground select-none active:cursor-grabbing",
+            mobile ? "w-[18px] px-0" : "w-10",
+          )}
           onPointerDown={drag.onPointerDown}
           onPointerMove={drag.onPointerMove}
           onPointerUp={drag.onPointerUp}
@@ -248,31 +300,308 @@ export function TheaterPill({
         </SimpleTooltip>
       ) : null}
 
-      <MacroPopover variant="pill" target={target} />
+      {mobile ? (
+        // THE FLAP'S OWN CLUSTER, in the air. Same component, same order, same
+        // offsets: the detach overlays the two exactly and then translates, so
+        // anything that differed here would tear at the handoff. The way out is
+        // the theater toggle at its head rather than a separate exit, which is
+        // also what makes the toggle one control changing state rather than two
+        // buttons trading places.
+        <MobileActionCluster
+          target={target}
+          sessionId={sessionId}
+          theaterRef={exitRef}
+          ellipsis={<TheaterAppMenu paneId={paneId} />}
+        />
+      ) : (
+        <>
+          <MacroPopover variant="pill" target={target} />
 
-      <TheaterAppMenu paneId={paneId} />
+          <TheaterAppMenu paneId={paneId} />
 
-      <span aria-hidden className="mx-0.5 h-5.5 w-px shrink-0 bg-border" />
+          <span aria-hidden className="mx-0.5 h-5.5 w-px shrink-0 bg-border" />
 
-      <SimpleTooltip content="Leave theater mode">
-        <Button
-          ref={exitRef}
-          variant="ghost"
-          size="icon"
-          className="size-10 shrink-0 rounded-full text-foreground"
-          aria-label="Leave theater mode"
-          onClick={() => {
-            // This button is about to be unmounted, so hand focus on to the
-            // header control that replaces it rather than to the body.
-            armTheaterToggleFocus()
-            exitTheater()
-          }}
-        >
-          <Minimize2 />
-        </Button>
-      </SimpleTooltip>
+          <SimpleTooltip content="Leave theater mode">
+            <Button
+              ref={exitRef}
+              variant="ghost"
+              size="icon"
+              className="size-10 shrink-0 rounded-full text-foreground"
+              aria-label="Leave theater mode"
+              onClick={() => {
+                // This button is about to be unmounted, so hand focus on to the
+                // header control that replaces it rather than to the body.
+                armTheaterToggleFocus()
+                exitTheater()
+              }}
+            >
+              <Minimize2 />
+            </Button>
+          </SimpleTooltip>
+        </>
+      )}
     </div>
   )
+}
+
+// THE FLAP'S CONCAVE FILLETS, worn by the pill.
+//
+// They are the same arcs the docked flap draws, not an approximation of them:
+// the flight leaves a tab shape and re-forms one, and a gradient standing in
+// for an arc makes the two visibly different objects at the moment they are
+// supposed to be the same one. They are `display: none` except during the two
+// stages that need them (see the `dux-flight-*` rules in index.css), so the
+// floating pill is a plain capsule with nothing hanging off it.
+function FlapFillets() {
+  const left = filletShape("left")
+  const right = filletShape("right")
+  const box = FLAP_FILLET_BOX
+  return (
+    <>
+      {[
+        { side: "l", shape: left },
+        { side: "r", shape: right },
+      ].map(({ side, shape }) => (
+        <svg
+          key={side}
+          aria-hidden
+          className={`dux-pill-fillet dux-pill-fillet-${side}`}
+          width={box}
+          height={box}
+          viewBox={`0 0 ${box} ${box}`}
+        >
+          <path d={shape.fill} fill="var(--dux-flap-bg)" />
+          <path
+            d={shape.stroke}
+            fill="none"
+            stroke="var(--border)"
+            strokeWidth={1}
+          />
+        </svg>
+      ))}
+    </>
+  )
+}
+
+/**
+ * THE FLIGHT ITSELF: the imperative half of the choreography.
+ *
+ * It lives in the pill rather than in the shell that owns the phase because it
+ * has to run in a commit where the pill's own coordinates are already ON the
+ * element. The pill places itself in a layout effect and that placement is a
+ * state write; a parent's layout effect in the same commit would read the box
+ * before React had flushed it and fly the cluster to the corner the pill was
+ * about to leave.
+ *
+ * Every stage runs exactly ONCE per entry into it: the effect re-fires when the
+ * placement lands, and a detach that ran twice would measure its own transform.
+ *
+ * Returns whether the grip slot is collapsed right now, which is the one piece
+ * of the animation React has to own: the slot's width is what the cluster gains
+ * and gives back, and the transition needs the class to change AFTER the box
+ * has been measured at the collapsed width.
+ */
+function useFlightChoreography(
+  boxRef: React.RefObject<HTMLDivElement | null>,
+  flight: FlightPhase | null,
+  placed: boolean,
+): boolean {
+  // The stage's own answer, until the stage's effect overrides it mid-flight.
+  // KEYED ON THE STAGE it was written for, so a new stage's default takes over
+  // by itself rather than needing a reset pass that would cost a render.
+  const [override, setOverride] = useState<{
+    phase: FlightPhase
+    gripless: boolean
+  } | null>(null)
+  // Which stage has already had its routine run. Never reset: it only ever
+  // holds the stage that ran, so any other stage fails the guard on its own.
+  const ranRef = useRef<FlightPhase | null>(null)
+  const setStageGripless = useCallback(
+    (phase: FlightPhase, gripless: boolean) =>
+      setOverride({ phase, gripless }),
+    [],
+  )
+
+  useLayoutEffect(() => {
+    const box = boxRef.current
+    if (!box || flight === null) return
+    if (ranRef.current === flight) return
+
+    if (flight === "detaching" || flight === "returning") {
+      // Both flights need a real dock: one to leave, one to land on. Without a
+      // measured pill there is nothing to fly, so the cluster simply appears,
+      // which is also the reduced-motion answer.
+      if (!placed) return
+      const from = peekFlapRect()
+      if (!from) return
+      ranRef.current = flight
+      if (flight === "detaching") {
+        runDetach(box, from, (on) => setStageGripless("detaching", on))
+      } else {
+        runReturn(box, from, (on) => setStageGripless("returning", on))
+      }
+      return
+    }
+
+    if (flight === "attaching") {
+      const dock = peekFlapRect()
+      if (!dock) return
+      ranRef.current = flight
+      runAttach(box, dock)
+      return
+    }
+
+    // A resting stage. Anything the flight wrote is over, and leaving it behind
+    // would pin the pill's shape at whatever the last frame happened to be.
+    ranRef.current = flight
+    clearFlightStyles(box)
+  }, [boxRef, flight, placed, setStageGripless])
+
+  // The flap has no grip and reserves no space for one, so the two stages that
+  // are the flap's shape start collapsed; the two travels then open or close
+  // the slot from their own effects.
+  if (override && flight !== null && override.phase === flight) {
+    return override.gripless
+  }
+  return flight === "detaching" || flight === "attaching"
+}
+
+/// Everything the flight writes inline, in one place, so a stage that ends can
+/// hand the element back exactly as it found it.
+function clearFlightStyles(box: HTMLElement): void {
+  const style = box.style
+  style.transition = ""
+  style.transform = ""
+  style.transformOrigin = ""
+  style.borderRadius = ""
+  style.backgroundColor = ""
+  style.boxShadow = ""
+  style.borderTopColor = ""
+  style.willChange = ""
+  style.left = ""
+  style.top = ""
+}
+
+/// The pill's box radius as a PIXEL value.
+///
+/// The morph's endpoint is the painted capsule's radius, never `999px`:
+/// transitioning to a clamped value spends the whole animation above the clamp,
+/// so the corners sit finished for most of it and then appear to snap.
+function capsuleRadiusPx(box: HTMLElement): string {
+  return `${box.offsetHeight / 2}px`
+}
+
+function surfaceOffset(box: HTMLElement, rect: DOMRect): {
+  left: number
+  top: number
+} {
+  const parent = box.parentElement?.getBoundingClientRect()
+  return flightOffset(rect, parent ?? { left: 0, top: 0 })
+}
+
+/// PULL-OFF. The pill starts as the flap, in the flap's place, and becomes a
+/// floating capsule at its dock over one travel.
+function runDetach(
+  box: HTMLElement,
+  from: DOMRect,
+  setGripless: (on: boolean) => void,
+): void {
+  const shadow = transparentShadow(getComputedStyle(box).boxShadow)
+  const to = box.getBoundingClientRect()
+  const move = flightTranslation(from, to)
+
+  box.style.transition = "none"
+  box.style.willChange = "transform"
+  box.style.transformOrigin = "top left"
+  box.style.transform = `translate(${move.x}px, ${move.y}px)`
+  // The shape it is leaving: the flap's square top and hanging corners, its
+  // body colour, no shadow, and no top edge at all.
+  box.style.borderRadius = `0 0 ${FLIGHT_TAB_RADIUS_PX}px ${FLIGHT_TAB_RADIUS_PX}px`
+  box.style.backgroundColor = "var(--dux-flap-bg)"
+  box.style.borderTopColor = "transparent"
+  if (shadow) box.style.boxShadow = shadow
+  // Force the browser to take all of that before the end values land, or the
+  // two writes coalesce into one and there is nothing to animate.
+  void box.offsetWidth
+
+  box.style.transition = [
+    `transform ${FLIGHT_TRAVEL_MS}ms ${FLIGHT_EASE}`,
+    `border-radius ${FLIGHT_SHAPE_MS}ms ${FLIGHT_EASE}`,
+    `background-color ${FLIGHT_SHAPE_MS}ms ease`,
+    `border-top-color ${FLIGHT_SHAPE_MS}ms ease`,
+    // The shadow rides the WHOLE travel: it belongs to the floating pill, so it
+    // arrives with it rather than appearing at pull-off.
+    `box-shadow ${FLIGHT_TRAVEL_MS}ms ease`,
+  ].join(", ")
+  box.style.transform = ""
+  box.style.backgroundColor = ""
+  box.style.borderTopColor = ""
+  box.style.boxShadow = ""
+  box.style.borderRadius = capsuleRadiusPx(box)
+  // The slot opens on the travel's own clock, stretching the capsule leftward
+  // as it goes. React owns this one, and flushes it before the next paint.
+  setGripless(false)
+}
+
+/// THE WAY HOME. Travel first, as a finished capsule; the shape morph is the
+/// separate arrival snap, so nothing flies through the air wearing a tab shape.
+function runReturn(
+  box: HTMLElement,
+  dock: DOMRect,
+  setGripless: (on: boolean) => void,
+): void {
+  const shadow = transparentShadow(getComputedStyle(box).boxShadow)
+  const from = box.getBoundingClientRect()
+  const here = surfaceOffset(box, from)
+  const move = flightTranslation(dock, from)
+
+  box.style.transition = "none"
+  box.style.willChange = "transform"
+  // Pinned LEFT and TOP for the flight. The grip collapse shrinks the box, and
+  // a right-anchored one would slide its left edge out from under the
+  // translation; left-anchored, the buttons walk continuously toward that edge
+  // as the slot narrows and the translation lands it on the flap's.
+  box.style.left = `${here.left}px`
+  box.style.top = `${here.top}px`
+  box.style.transformOrigin = "top left"
+  box.style.borderRadius = capsuleRadiusPx(box)
+  void box.offsetWidth
+
+  box.style.transition = [
+    `transform ${FLIGHT_TRAVEL_MS}ms ${FLIGHT_EASE}`,
+    `box-shadow ${FLIGHT_TRAVEL_MS}ms ease`,
+  ].join(", ")
+  // The capsule must land SHADOWLESS: the flap has no shadow, so a swap while
+  // one was still painted would wipe a dark smear in a single frame.
+  if (shadow) box.style.boxShadow = shadow
+  box.style.transform = `translate(${move.x}px, ${move.y}px)`
+  setGripless(true)
+}
+
+/// ARRIVAL. Park on the pixel grid first, then square into the tab shape.
+function runAttach(box: HTMLElement, dock: DOMRect): void {
+  const here = surfaceOffset(box, dock)
+  box.style.transition = "none"
+  box.style.left = `${here.left}px`
+  box.style.top = `${here.top}px`
+  box.style.transform = ""
+  // A live fractional transform composites the pill's glyphs off the device
+  // pixel grid, half a pixel adrift of where the in-flow flap will paint them,
+  // and the final swap would nudge every icon. Parked on real coordinates with
+  // the transform cleared and the compositor layer dropped, the raster
+  // re-snaps and the swap moves nothing.
+  box.style.willChange = "auto"
+  void box.offsetWidth
+
+  box.style.transition = [
+    `border-radius ${FLIGHT_ATTACH_MS}ms ${FLIGHT_EASE}`,
+    `background-color ${FLIGHT_ATTACH_MS}ms ease`,
+    `border-top-color ${FLIGHT_ATTACH_MS}ms ease`,
+  ].join(", ")
+  box.style.borderRadius = `0 0 ${FLIGHT_TAB_RADIUS_PX}px ${FLIGHT_TAB_RADIUS_PX}px`
+  box.style.backgroundColor = "var(--dux-flap-bg)"
+  // The flap is flush with the band, so it has no top edge to draw.
+  box.style.borderTopColor = "transparent"
 }
 
 // THE APP MENU, WHILE THE MODE HAS TAKEN EVERY OTHER ANCHOR AWAY.

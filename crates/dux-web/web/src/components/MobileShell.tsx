@@ -35,6 +35,8 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useTheaterFlight } from "@/hooks/use-theater-flight"
+import { flapMounted, flapVisible, pillMounted } from "@/lib/theaterFlight"
 import { useTouchSurfaces } from "@/hooks/use-typing-surface"
 import {
   dormantTabNeedsCard,
@@ -527,6 +529,10 @@ function TerminalScreen() {
     startedDormantTabs,
     pendingSlotTab,
   } = duxState
+  // The one phase both clusters are rendered from. Above the early returns,
+  // because a hook cannot be conditional, and harmless there: with no agent on
+  // screen it simply rests.
+  const flight = useTheaterFlight()
   const ownerScreen = terminalOwnerScreen(selectedTarget)
   if (ownerScreen) return ownerScreen
 
@@ -582,13 +588,14 @@ function TerminalScreen() {
         {/* The flap is a SIBLING of the pane, not part of its overlay: the
             overlay is withheld while a full-pane cover owns the terminal, and
             these are the only controls the phone has left. */}
-        {duxState.theater ? null : (
+        {flapMounted(flight) ? (
           <MobileActionFlap
             target={selectedTarget}
             session={session}
             band={stripShown ? "strip" : "plain"}
+            hidden={!flapVisible(flight)}
           />
-        )}
+        ) : null}
         <TerminalViewport
           target={selectedTarget}
           focusedTab={focusedTab}
@@ -603,8 +610,13 @@ function TerminalScreen() {
           targetId={targetId}
           slotTabId={slotTabId}
           overlay={
-            duxState.theater ? (
-              <TheaterPill target={selectedTarget} session={session} />
+            pillMounted(flight) ? (
+              <TheaterPill
+                target={selectedTarget}
+                session={session}
+                variant="mobile"
+                flight={flight}
+              />
             ) : null
           }
         />
