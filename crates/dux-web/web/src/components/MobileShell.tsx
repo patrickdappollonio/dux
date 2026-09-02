@@ -17,8 +17,9 @@ import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { ConnDot } from "@/components/ConnDot"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { DormantTabCard } from "@/components/DormantTabCard"
-import { AgentActionsMenu, FlatAgentList } from "@/components/FlatAgentList"
+import { FlatAgentList } from "@/components/FlatAgentList"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
+import { MobileActionFlap } from "@/components/MobileActionFlap"
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { TheaterChrome } from "@/components/TheaterChrome"
@@ -40,13 +41,11 @@ import {
   shouldShowTabStrip,
   slotTabIdOf,
 } from "@/lib/agentTabs"
-import { changesSummary, type ChangesSummary } from "@/lib/changesSummary"
 import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
   mobileTopBarVisible,
   navigateUp,
-  openChangesScreen,
   openDeleteTerminal,
   selectSession,
   selectTerminal,
@@ -397,19 +396,22 @@ function terminalOwnerScreen(target: SelectedTarget | null): ReactElement | null
 
 interface TerminalHeaderProps {
   session: SessionView
-  target: SelectedTarget
   focusedTab: AgentTabView | undefined
   projectName: string | undefined
-  changes: ChangesSummary
 }
 
-function TerminalHeader({
-  session,
-  target,
-  focusedTab,
-  projectName,
-  changes,
-}: TerminalHeaderProps) {
+// THE AGENT SCREEN'S HEADER: Back, the identity, and the pull request.
+//
+// It carries no actions at all. Those live in the flap hanging off the band
+// below it, which is what buys the identity the whole remaining width: an agent
+// name, its assistant, its branch and its project are what tell you which of
+// half a dozen near-identical terminals you are looking at, and four icon
+// buttons were ellipsizing all four of them down to nothing.
+//
+// The pull request stays, as the compact chip: it is the phone's whole PR
+// surface (the desktop's wide band has no room here), it is one tap to the
+// review, and it opens the same URL every other PR control in the app opens.
+function TerminalHeader({ session, focusedTab, projectName }: TerminalHeaderProps) {
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
       <Button
@@ -447,34 +449,6 @@ function TerminalHeader({
           </a>
         </SimpleTooltip>
       ) : null}
-      <TheaterToggle size="mobile" />
-      <MacroPopover variant="icon" target={target} />
-      <Button
-        variant="outline"
-        size="lg"
-        className="min-w-11 shrink-0"
-        aria-label={changes.countLabel}
-        onClick={() => openChangesScreen()}
-      >
-        {changes.label}
-      </Button>
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <Button
-              variant="outline"
-              size="lg"
-              className="min-w-11 shrink-0"
-              aria-label="Session actions"
-            />
-          }
-        >
-          <Ellipsis />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <AgentActionsMenu session={session} context="terminal" />
-        </DropdownMenuContent>
-      </DropdownMenu>
     </header>
   )
 }
@@ -550,7 +524,6 @@ function TerminalScreen() {
     selectedSessionId,
     selectedTarget,
     terminalEpoch,
-    changes,
     startedDormantTabs,
     pendingSlotTab,
   } = duxState
@@ -572,33 +545,30 @@ function TerminalScreen() {
       ? tabs.find((tab) => tab.id === selectedTarget.tabId)
       : undefined
   const slotTabId = slotTabIdOf(session.id, session, pendingSlotTab)
-  // The ±N summary, from the helper the desktop header's reopen control reads
-  // too. Non-null here because this screen has a session.
-  const changesControl = changesSummary(changes, session.id)
   const projectName = spine?.projects.find(
     (project) => project.id === workspaceProjectId(session.workspace),
   )?.name
+  const topBarVisible = mobileTopBarVisible(duxState)
+  const stripShown =
+    topBarVisible &&
+    selectedTarget.kind === "agent" &&
+    shouldShowTabStrip(tabs, bootstrap?.always_show_tab_strip ?? false)
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* The phone shell's chrome stack: its header AND the tab strip, which is
           what "the app header goes with them" means here. Both leave on the one
-          flag, and the strip's pills come back inside the floating pill. */}
+          flag; the actions they used to sit beside are in the flap below, which
+          detaches into the floating pill rather than leaving with them. */}
       <TheaterChrome hidden={duxState.theater}>
-        {mobileTopBarVisible(duxState) ? (
+        {topBarVisible ? (
           <>
             <TerminalHeader
               session={session}
-              target={selectedTarget}
               focusedTab={focusedTab}
               projectName={projectName}
-              changes={changesControl}
             />
-            {selectedTarget.kind === "agent" &&
-            shouldShowTabStrip(
-              tabs,
-              bootstrap?.always_show_tab_strip ?? false,
-            ) ? (
+            {stripShown ? (
               <AgentTabsStrip
                 session={session}
                 activeTabId={selectedTarget.tabId}
@@ -609,6 +579,16 @@ function TerminalScreen() {
         ) : null}
       </TheaterChrome>
       <div className="relative min-h-0 flex-1">
+        {/* The flap is a SIBLING of the pane, not part of its overlay: the
+            overlay is withheld while a full-pane cover owns the terminal, and
+            these are the only controls the phone has left. */}
+        {duxState.theater ? null : (
+          <MobileActionFlap
+            target={selectedTarget}
+            session={session}
+            band={stripShown ? "strip" : "plain"}
+          />
+        )}
         <TerminalViewport
           target={selectedTarget}
           focusedTab={focusedTab}

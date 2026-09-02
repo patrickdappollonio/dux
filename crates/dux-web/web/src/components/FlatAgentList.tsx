@@ -20,6 +20,7 @@ import {
   ChevronRight,
   ClipboardCopy,
   Cpu,
+  Diff,
   Ellipsis,
   ExternalLink,
   FileCode2,
@@ -136,6 +137,7 @@ import {
   openAddProject,
   openAttachPullRequest,
   openChangeProvider,
+  openChangesScreen,
   openDelete,
   openDeleteTerminal,
   openEditor,
@@ -155,6 +157,7 @@ import {
   useDux,
 } from "@/lib/store"
 import { useAttachCapability } from "@/lib/attachRegistry"
+import { changesSummary } from "@/lib/changesSummary"
 import { terminalForeground, terminalTitle } from "@/lib/terminals"
 import type { DuxState, SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import { matchOwner } from "@/lib/terminalOwner"
@@ -270,6 +273,17 @@ export function AgentActionsMenu({
           path, so it carries Attach itself. On a phone agent screen Attach
           therefore appears both here and in the input `⋯` menu; both call the
           one registered capability, so they cannot drift. */}
+      {/* THE CHANGED FILES, as a menu row as well as the cluster's own count
+          button. Terminal context only: this is the phone agent screen's menu,
+          and the hub's row menus open onto a screen where the count control is
+          not on offer at all. It is the keyboard- and screen-reader-reachable
+          twin of the count beside it, and it opens the same screen. */}
+      {context === "terminal" ? (
+        <DropdownMenuItem onClick={() => openChangesScreen()}>
+          <Diff />
+          {`Changes ${changesSummary(duxState.changes, session.id).label}`}
+        </DropdownMenuItem>
+      ) : null}
       <InputMenuItems
         gates={{
           attach: false,

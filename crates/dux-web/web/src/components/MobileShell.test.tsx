@@ -684,8 +684,12 @@ describe("MobileShell hideable top bar (ui.mobile_top_bar)", () => {
     })
     render(<MobileShell />)
     expect(screen.queryByLabelText("Back")).toBeNull()
-    expect(screen.queryByLabelText("Session actions")).toBeNull()
     expect(screen.queryAllByRole("tab").length).toBe(0)
+    // The FLAP is not the top bar and costs no layout space: it floats over
+    // the terminal, so hiding the bars (which is a request for more room) has
+    // nothing to reclaim from it. It stays, and with it the only way into
+    // theater, the changed-file count and the session's own actions.
+    expect(screen.getByLabelText("Session actions")).toBeTruthy()
   })
 
   it("an optimistic override hides the bar before the bootstrap confirms", () => {
@@ -788,12 +792,14 @@ describe("MobileShell terminal-screen macro trigger", () => {
     expect(screen.getByLabelText("Run a macro")).toBeTruthy()
   })
 
-  it("hides the macro trigger together with the hidden top bar", () => {
-    // Hiding the top bar states an intent (more space), so the macro trigger
-    // goes with the header; restore is the input ⋯ menu or Preferences.
+  it("keeps the flap's macro trigger through a hidden top bar", () => {
+    // Hiding the top bar states an intent (more space) and the flap takes
+    // none: it hangs over the terminal rather than in the column. So the
+    // cluster survives the bars going away, which is also what keeps theater
+    // and the session actions reachable in that state.
     mockState = terminalState({ mobileTopBarOverride: false })
     render(<MobileShell />)
-    expect(screen.queryByLabelText("Run a macro")).toBeNull()
+    expect(screen.getByLabelText("Run a macro")).toBeTruthy()
   })
 
   it("puts the macro trigger in the agentless terminal screen's header too", () => {
@@ -955,9 +961,11 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     fireEvent.click(screen.getByText("Hide top bar"))
     mockState = terminalState({ mobileTopBarOverride: false })
     view.rerender(<MobileShell />)
-    expect(screen.queryByLabelText("Session actions")).toBeNull()
     expect(screen.queryByText("Hide top bar")).toBeNull()
     expect(screen.queryByLabelText("Back")).toBeNull()
+    // The trigger itself lives in the flap, which the preference does not
+    // touch; what must not survive is the OPEN menu it had spawned.
+    expect(screen.getByLabelText("Session actions")).toBeTruthy()
   })
 
   it("gives the submenu trigger rows the same phone touch-target height as sibling items", () => {
@@ -1228,11 +1236,14 @@ describe("MobileShell agent header identity", () => {
 // corner radius.
 //
 // jsdom has no layout engine, so `getBoundingClientRect` is all zeros here and
-// these assert the height TOKEN rather than the rendered pixel. The rendered
-// pixels were measured separately in the preview container (all four controls
-// at exactly 36px tall, 44px+ wide); this test is what keeps them from
-// drifting apart again without anyone re-running that.
-describe("MobileShell terminal header control family", () => {
+// these assert the height TOKEN rather than the rendered pixel.
+//
+// The header no longer holds an action cluster at all: the four controls moved
+// into the docked flap so the identity could have the whole remaining width.
+// What the header owes now is Back plus the identity plus the pull-request
+// chip, and what the FLAP owes is one shared height across a cluster that has
+// to be pixel-identical to the floating pill it detaches into.
+describe("MobileShell agent header and its flap cluster", () => {
   function headerState(): DuxState {
     return makeState({
       spine: makeSessionSpine(1),
@@ -1253,76 +1264,75 @@ describe("MobileShell terminal header control family", () => {
     })
   }
 
-  const controls = () => ({
+  const cluster = () => ({
+    theater: screen.getByLabelText("Theater mode"),
     macro: screen.getByLabelText("Run a macro"),
     changes: screen.getByLabelText(/changed files$/),
     actions: screen.getByLabelText("Session actions"),
-    back: screen.getByLabelText("Back"),
   })
 
-  it("renders every header control at the SAME explicit height", () => {
+  it("leaves the header with navigation and identity only", () => {
     mockState = headerState()
     render(<MobileShell />)
-    const found = controls()
-
-    // One height token across all four, so an icon-only control and the one
-    // carrying text cannot disagree. This is the rule: a control's height is
-    // set explicitly, never inherited from its padding or its content.
-    for (const [name, el] of Object.entries(found)) {
-      expect(el.className, `${name} must carry the h-9 (36px) height`).toContain(
-        "h-9"
-      )
-    }
-
-    // And nothing re-introduces a content- or square-derived height: no
-    // `min-h-*` prop-up (what `size="sm"` needed) and no `size-N` square
-    // (what `size="icon"` is), either of which ties height to width.
-    // Both patterns anchor on a class BOUNDARY. A loose `\bsize-\d` also
-    // matches the base button's `[&_svg:not([class*='size-'])]:size-4`, which
-    // sizes the ICON inside the control and has nothing to do with the
-    // control's own box.
-    for (const [name, el] of Object.entries(found)) {
-      expect(el.className, `${name} must not force a min height`).not.toMatch(
-        /(?:^|\s)min-h-\d/
-      )
-      expect(el.className, `${name} must not be a fixed square`).not.toMatch(
-        /(?:^|\s)size-\d/
-      )
+    const header = screen.getByLabelText("Back").closest("header")
+    expect(header).not.toBeNull()
+    // Every action moved out; nothing but Back is left inside the bar.
+    for (const el of Object.values(cluster())) {
+      expect(header?.contains(el)).toBe(false)
     }
   })
 
-  it("gives every header control the 44px per-axis width floor", () => {
+  it("hangs the cluster off the band as one flap", () => {
     mockState = headerState()
     render(<MobileShell />)
-    for (const [name, el] of Object.entries(controls())) {
-      expect(el.className, `${name} must carry min-w-11`).toContain("min-w-11")
+    const flap = screen.getByTestId("mobile-action-flap")
+    for (const [name, el] of Object.entries(cluster())) {
+      expect(flap.contains(el), `${name} belongs to the flap`).toBe(true)
     }
   })
 
-  // The action cluster is outline (the treatment the desktop AppMenu cog and
-  // the Show-Changes button beside it already use for an action cluster). The
-  // back chevron deliberately stays ghost because it is NAVIGATION, not an
-  // action on this screen; it matches on geometry and differs on weight.
-  it("makes the three actions outline and leaves Back ghost", () => {
+  it("renders every cluster control at the SAME explicit height", () => {
     mockState = headerState()
     render(<MobileShell />)
-    const { macro, changes, actions, back } = controls()
+    // One height token across all four: the cluster is a single row on a
+    // single surface, and the flight that carries it into the pill would tear
+    // visibly if one control sat at a different offset from the rest.
+    for (const [name, el] of Object.entries(cluster())) {
+      expect(el.className, `${name} must carry the 40px height`).toMatch(
+        /(?:^|\s)(?:size-10|h-10)(?:\s|$)/
+      )
+    }
+  })
 
-    for (const [name, el] of Object.entries({ macro, changes, actions })) {
-      expect(el.className, `${name} must be the outline variant`).toContain(
+  it("keeps the bare count on the changes control, and nothing else wide", () => {
+    mockState = headerState()
+    render(<MobileShell />)
+    const { theater, macro, changes, actions } = cluster()
+    // The count is DATA, so it survives on a surface that otherwise prefers
+    // icon-only, and it is the one control wider than it is tall. The diff
+    // glyph already draws the ±, so the text is the number alone.
+    expect(changes.textContent).toMatch(/^\d+$/)
+    expect(changes.className).toContain("w-auto")
+    for (const [name, el] of Object.entries({ theater, macro, actions })) {
+      expect(el.textContent, `${name} is icon-only`).toBe("")
+    }
+  })
+
+  it("gives the cluster one variant: bare circles on the flap's own surface", () => {
+    mockState = headerState()
+    render(<MobileShell />)
+    // Not outline, deliberately: the flap is ONE surface, and a bordered
+    // button inside it reads as two. Back stays ghost in the header for the
+    // reason it always has, that it navigates rather than acts.
+    for (const [name, el] of Object.entries(cluster())) {
+      expect(el.className, `${name} must not be outlined`).not.toContain(
         "border-border"
       )
+      expect(el.className, `${name} must be a pill on the flap`).toContain(
+        "rounded-full"
+      )
     }
-    expect(back.className).not.toContain("border-border")
-  })
-
-  // ±N is the deliberate exception to phones-prefer-icon-only: the number is
-  // DATA, not a label, and no icon can say "3 changes". It keeps its text and
-  // therefore its auto width, while the height stays pinned above.
-  it("keeps the changed-count text on the ±N control", () => {
-    mockState = headerState()
-    render(<MobileShell />)
-    expect(controls().changes.textContent).toMatch(/^±\d+$/)
+    expect(screen.getByLabelText("Back").className).not.toContain("border-border")
   })
 })
 

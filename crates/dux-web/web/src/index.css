@@ -374,6 +374,12 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        bundled dark theme's soft slate blue (`#7d96a0`). Identity, not state.
        Constant across light/dark since the web app is dark-only. */
     --dux-standalone: oklch(0.657 0.032 224);
+    /* The phone action flap's OPAQUE body color: the tab strip's translucent
+       `bg-muted/30` composited over the app background, written out as one
+       opaque value. The flap grows out of the strip, so the two have to be the
+       same pixel color; an alpha composite of the same mix lands one 8-bit step
+       away from the opaque value and reopens the seam between them. */
+    --dux-flap-bg: color-mix(in srgb, var(--muted) 30%, var(--background));
 }
 
 .dark {
@@ -416,6 +422,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-typing: #c586e0;
     /* Standalone-location identity color (see :root above). */
     --dux-standalone: oklch(0.657 0.032 224);
+    /* The phone action flap's opaque body color (see :root above). */
+    --dux-flap-bg: color-mix(in srgb, var(--muted) 30%, var(--background));
 }
 
 /* Slim the xterm scrollbar so it doesn't dominate the terminal column. xterm 6
@@ -462,6 +470,159 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
   html {
     @apply font-sans;
     }
+}
+
+/* ===========================================================================
+   THE PHONE ACTION CLUSTER'S DETACH FLIGHT.
+
+   Entering theater on a phone does not swap one control for another: the
+   docked flap tears off the tab strip and FLIES to the floating pill's dock as
+   one object, and leaving theater flies it home and re-attaches it. The
+   translation itself is applied inline by the choreography (it is measured, so
+   it cannot be a stylesheet value); everything here is the part that is the
+   same on every flight, which is exactly the part that belongs in CSS.
+
+   Kept out of Tailwind on purpose: these are keyframes and descendant rules
+   driven by a phase class on the pill's root, which utility classes cannot
+   express, and the phase class is what keeps the choreography readable in one
+   place rather than scattered across a dozen conditional `cn()` arms.
+   =========================================================================== */
+
+/* The theater toggle stacks both icons in one cell; `aria-pressed` picks the
+   settled one, and the flight rotates one out while the other rotates in. */
+.dux-icswap > * {
+  grid-area: 1 / 1;
+}
+.dux-ic-min {
+  opacity: 0;
+}
+[aria-pressed="true"] .dux-ic-min {
+  opacity: 1;
+}
+[aria-pressed="true"] .dux-ic-max {
+  opacity: 0;
+}
+.dux-flight-out .dux-ic-max,
+.dux-flight-in .dux-ic-min {
+  animation: dux-ic-out 180ms ease 70ms both;
+}
+.dux-flight-out .dux-ic-min,
+.dux-flight-in .dux-ic-max {
+  animation: dux-ic-in 180ms ease 70ms both;
+}
+@keyframes dux-ic-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: rotate(90deg) scale(0.6);
+  }
+}
+@keyframes dux-ic-in {
+  from {
+    opacity: 0;
+    transform: rotate(-90deg) scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* THE GRIP SLOT IS THE WIDTH THE CLUSTER GAINS IN FLIGHT. The docked flap has
+   no grip and reserves no blank space for one, so the pill starts the detach
+   gripless (its box then equals the flap's exactly, which is what makes the
+   FLIP a pure translation) and the slot widens on the travel's own clock. The
+   negative margin swallows the row's 2px gap at zero width, so a collapsed grip
+   advances the row by exactly nothing. */
+.dux-pill-grip {
+  transition:
+    width 320ms cubic-bezier(0.2, 0, 0, 1),
+    margin-right 320ms cubic-bezier(0.2, 0, 0, 1);
+}
+.dux-pill-gripless .dux-pill-grip {
+  width: 0;
+  margin-right: -2px;
+  padding: 0;
+  overflow: hidden;
+}
+.dux-flight-out .dux-pill-grip {
+  animation: dux-grip-in 380ms 100ms both;
+}
+.dux-flight-in .dux-pill-grip {
+  animation: dux-grip-out 200ms ease both;
+}
+@keyframes dux-grip-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes dux-grip-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/* The flap's concave fillets, reproduced on the travelling pill as the same
+   arcs the docked flap draws, so the shape the flight leaves and the shape it
+   re-forms are one object. They shrink away right at pull-off; on the way back
+   they appear only AFTER the capsule has arrived, so the return reads
+   travel-then-snap and never a tab shape flying through the air. */
+.dux-pill-fillet {
+  position: absolute;
+  top: 0;
+  display: none;
+  pointer-events: none;
+}
+.dux-pill-fillet-l {
+  left: -12px;
+  transform-origin: 100% 0;
+}
+.dux-pill-fillet-r {
+  right: -12px;
+  transform-origin: 0 0;
+}
+.dux-flight-out .dux-pill-fillet,
+.dux-flight-attach .dux-pill-fillet {
+  display: block;
+}
+.dux-flight-out .dux-pill-fillet {
+  animation: dux-fillet-out 180ms ease both;
+}
+.dux-flight-attach .dux-pill-fillet {
+  animation: dux-fillet-in 180ms ease both;
+}
+@keyframes dux-fillet-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.25);
+  }
+}
+@keyframes dux-fillet-in {
+  from {
+    opacity: 0;
+    transform: scale(0.25);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* A viewer who asked for less motion never reaches a flight at all: the phase
+   machine collapses every stage to an instant swap, so no phase class is ever
+   applied. The grip's own transition is the one rule that is live outside a
+   flight, so it is the one that has to be cut here. */
+@media (prefers-reduced-motion: reduce) {
+  .dux-pill-grip {
+    transition: none;
+  }
 }
 
 /* Projects sidebar: render the nested rows as an actual tree instead of just an

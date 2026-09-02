@@ -158,11 +158,27 @@ export function useTheaterToggleFocus(
   ref: React.RefObject<HTMLElement | null>,
   theater: boolean,
 ): void {
+  useTheaterToggleFocusWhen(ref, !theater)
+}
+
+/**
+ * The same hand-off, for a control whose "I am on screen and settled" is not
+ * simply "theater is off".
+ *
+ * The phone's docked flap is mounted (hidden) through the whole return flight
+ * so the choreography can measure the dock it is flying to; focusing it in that
+ * state would put the keyboard on something invisible. Its readiness is the
+ * flight's, not the mode's, so it says so itself.
+ */
+export function useTheaterToggleFocusWhen(
+  ref: React.RefObject<HTMLElement | null>,
+  ready: boolean,
+): void {
   React.useEffect(() => {
-    if (theater) return
+    if (!ready) return
     if (!consumeToggleFocus()) return
     ref.current?.focus()
-  }, [ref, theater])
+  }, [ref, ready])
 }
 
 /**
