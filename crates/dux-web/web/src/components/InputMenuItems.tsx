@@ -15,7 +15,7 @@ import {
   useDux,
 } from "@/lib/store"
 import type { InputMenuGates } from "@/lib/inputMenu"
-import { switchTypingSurface } from "@/lib/typingSurface"
+import { hideTerminalKeysHint, switchTypingSurface } from "@/lib/typingSurface"
 
 // THE INPUT ITEMS, shared by every menu that carries any of them: the input
 // `⋯` inside the virtual input (see `InputMenu`) and the INPUT group at the top
@@ -43,6 +43,7 @@ export function InputMenuItems({
   onAttach,
   composeSurface = false,
   directLeavesNothingBelow = true,
+  keysHideLeavesNothingBelow = false,
 }: {
   /// The two rows either menu can carry. Defaulted off for the callers whose
   /// menu carries neither, which is every caller of the theater exit.
@@ -72,6 +73,13 @@ export function InputMenuItems({
   /// answer for the top menu, which offers the opposite direction only and can
   /// therefore never reach the hint at all.
   directLeavesNothingBelow?: boolean
+  /// Would HIDING THE TERMINAL KEYS leave nothing under the terminal? The other
+  /// door out of the virtual input, and the same one-time hint: from direct
+  /// typing with only the key row down, hiding it takes the bottom `⋯` with it.
+  /// Defaults to the quiet answer for the top menu, whose keys item can only
+  /// ever read "Show terminal keys" (it is offered exactly while no bottom row
+  /// is up, which is exactly when the keys are already hidden).
+  keysHideLeavesNothingBelow?: boolean
 }) {
   const duxState = useDux()
   const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
@@ -104,9 +112,17 @@ export function InputMenuItems({
       ) : null}
       {gates.keysToggle ? (
         <DropdownMenuItem
-          onClick={() =>
+          onClick={() => {
             void setAccessoryBarVisibility(!accessoryBarVisible)
-          }
+            // HIDING THE KEYS IS THE OTHER WAY OUT of the virtual input, so it
+            // owes the same one-time signpost the surface switch does: from
+            // direct typing this row is the whole bottom bar, and the `⋯` that
+            // carries the way back hangs off it. Only ever raised on the way
+            // down, and only where nothing is left below.
+            if (accessoryBarVisible) {
+              hideTerminalKeysHint(keysHideLeavesNothingBelow)
+            }
+          }}
         >
           {accessoryBarVisible ? <KeyboardOff /> : <Keyboard />}
           {accessoryBarVisible ? "Hide terminal keys" : "Show terminal keys"}

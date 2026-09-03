@@ -70,8 +70,8 @@ export function PaneInputGroup({
             keysToggle: gates?.keysToggle ?? false,
           }}
           // The top menu only ever offers the way BACK to the virtual input:
-          // the other direction is the bottom `⋯`, which exists exactly while
-          // the virtual input does.
+          // the other direction is the bottom `⋯`, which exists while ANY row
+          // under the terminal does and leaves with the last of them.
           composeSurface={false}
           onAttach={() => attachToPane?.()}
         />

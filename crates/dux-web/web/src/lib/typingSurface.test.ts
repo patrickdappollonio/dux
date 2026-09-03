@@ -242,6 +242,46 @@ describe("the direct-typing hint", () => {
     expect(notified).toHaveLength(1)
   })
 
+  // THE OTHER DOOR. From direct typing with the key row still down, that row is
+  // the whole bottom bar and the `⋯` on it is the visible way back; hiding the
+  // keys takes both, which is the same dead end the surface switch hints for.
+  it("fires when hiding the keys takes the last row away", async () => {
+    installStorage()
+    vi.resetModules()
+    const m = await load()
+    m.hideTerminalKeysHint(true)
+    expect(notified).toHaveLength(1)
+    // It names the item that brings back what was just hidden, not the other.
+    expect(notified[0]).toContain("Show terminal keys")
+    expect(notified[0]).not.toContain("Use virtual input")
+  })
+
+  it("stays quiet when the message box is still under the terminal", async () => {
+    const mem = installStorage()
+    vi.resetModules()
+    const m = await load()
+    m.hideTerminalKeysHint(false)
+    expect(notified).toHaveLength(0)
+    expect(mem.get(m.DIRECT_INPUT_HINT_KEY)).toBeUndefined()
+  })
+
+  // ONE LATCH, EITHER DOOR: the lesson is the same one, so being taught it by
+  // hiding the keys spends the device's single hint.
+  it("shares its one-per-device latch with the surface switch", async () => {
+    installStorage()
+    vi.resetModules()
+    const m = await load()
+    m.hideTerminalKeysHint(true)
+    m.switchTypingSurface("direct", true)
+    expect(notified).toHaveLength(1)
+  })
+
+  it("names the same per-shell control the switch does", async () => {
+    const m = await load()
+    expect(m.directHintMessage("phone", "keys")).toContain("over the terminal")
+    expect(m.directHintMessage("computer", "keys")).toContain("sidebar")
+  })
+
   // The write still happens whatever the hint does: `setTypingSurface` is the
   // writer, and the toast is a side effect of the first switch only.
   it("still writes the choice", async () => {

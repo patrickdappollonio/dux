@@ -393,8 +393,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (!dragActive) dragDepthRef.current = 0
   }, [dragActive, dragDepthRef])
   // Keep an OPEN terminal's unfocused-caret style in step with the typing
-  // surface. The Box/Direct toggle and a preference flip both change the
-  // answer mid-session, and xterm options are mutable in place (verified
+  // surface. The menus' typing-surface switch and a preference flip both
+  // change the answer mid-session, and xterm options are mutable in place (verified
   // against the installed 6.0.0: only `cols` and `rows` are read-only), so
   // this never touches the terminal's identity. Before the lifecycle effect has
   // run `termRef` is null and this is a no-op; the mount reads the same helper
@@ -1427,6 +1427,11 @@ function TerminalPaneLayout({
       gates={inputMenuGates}
       composeSurface={composeBarEnabled}
       directLeavesNothingBelow={directLeavesNothingBelow}
+      // The message box is the only other row there is, so hiding the keys
+      // leaves nothing below exactly when it is not up. Answered here rather
+      // than by a helper because there is nothing to it: two rows, and this
+      // menu only exists while at least one of them is.
+      keysHideLeavesNothingBelow={!composeBarShown}
     />
   )
 

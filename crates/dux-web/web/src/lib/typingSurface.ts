@@ -126,19 +126,66 @@ export function markDirectHintShown(): void {
 /// sentence: it sends the reader looking for a control that is not there.
 export type TypingSurfaceShell = "phone" | "computer"
 
+/// WHICH FLIP TOOK THE LAST ROW AWAY. Both leave the same pane with nothing
+/// under its terminal and the way back in the same top menu, so they share one
+/// latch; only the row that went, and the item that brings it back, differ.
+export type VirtualInputExit = "direct" | "keys"
+
 /**
  * The hint's sentence, naming a control that exists on the shell it fires on.
  *
  * On a phone the pane's own `⋯` is the cluster over the terminal (docked in the
  * band, or floating in theater); on a computer it is the agent's or terminal's
  * row menu in the sidebar. Pure, so a test can pin both without a DOM.
+ *
+ * The ITEM it names is the one the reader will be looking for, which is the
+ * half that depends on which flip they made: a message box comes back through
+ * "Use virtual input", a key row through "Show terminal keys". Naming the wrong
+ * one sends them hunting exactly as naming the wrong shell would.
  */
-export function directHintMessage(shell: TypingSurfaceShell): string {
+export function directHintMessage(
+  shell: TypingSurfaceShell,
+  exit: VirtualInputExit = "direct",
+): string {
   const where =
     shell === "phone"
       ? "The ⋯ button over the terminal"
       : "This pane's own ⋯ menu, on its row in the sidebar,"
-  return `Typing goes straight to the terminal now. ${where} has “Use virtual input” when you want the message box back.`
+  return exit === "direct"
+    ? `Typing goes straight to the terminal now. ${where} has “Use virtual input” when you want the message box back.`
+    : `The terminal keys are hidden now. ${where} has “Show terminal keys” when you want them back.`
+}
+
+/**
+ * Raise the one-time "here is the way back" hint, if this is its moment.
+ *
+ * ONE LATCH, ONE DEVICE, EITHER DOOR. Both flips teach the same lesson (the way
+ * back is in the top menu now), so somebody who has already been told does not
+ * need telling again because they left by the other one.
+ */
+function raiseVirtualInputHint(
+  exit: VirtualInputExit,
+  nothingLeftBelow: boolean,
+): void {
+  if (!nothingLeftBelow) return
+  if (!directHintPending()) return
+  // Marked BEFORE the raise, so a double-invoked caller cannot produce two.
+  markDirectHintShown()
+  notifyInfo(directHintMessage(isMobileViewport() ? "phone" : "computer", exit))
+}
+
+/**
+ * THE OTHER WAY OUT OF THE VIRTUAL INPUT: hiding the terminal keys.
+ *
+ * From direct typing with the key row still down, that row IS the bottom bar
+ * and the `⋯` hanging off it is the visible way back. Hiding the keys takes
+ * both, which is the very state the surface switch raises the hint for, so it
+ * raises the same hint rather than leaving the user with no signpost at all.
+ * The caller answers whether anything is left below, for the same reason it
+ * does for the switch: this module cannot see the rows.
+ */
+export function hideTerminalKeysHint(nothingLeftBelow: boolean): void {
+  raiseVirtualInputHint("keys", nothingLeftBelow)
 }
 
 /**
@@ -172,11 +219,7 @@ export function switchTypingSurface(
 ): void {
   setTypingSurface(next)
   if (next !== "direct") return
-  if (!nothingLeftBelow) return
-  if (!directHintPending()) return
-  // Marked BEFORE the raise, so a double-invoked caller cannot produce two.
-  markDirectHintShown()
-  notifyInfo(directHintMessage(isMobileViewport() ? "phone" : "computer"))
+  raiseVirtualInputHint("direct", nothingLeftBelow)
 }
 
 /** Subscribe to changes; returns the unsubscribe. */

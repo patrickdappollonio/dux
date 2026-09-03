@@ -22,11 +22,13 @@ vi.mock("@/lib/store", async (importOriginal) => {
 })
 const exitTheater = vi.fn()
 const switchTypingSurface = vi.fn()
+const hideTerminalKeysHint = vi.fn()
 vi.mock("@/lib/typingSurface", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/typingSurface")>()
   return {
     ...actual,
     switchTypingSurface: (...a: unknown[]) => switchTypingSurface(...a),
+    hideTerminalKeysHint: (...a: unknown[]) => hideTerminalKeysHint(...a),
   }
 })
 
@@ -74,7 +76,11 @@ function state(keys = true): DuxState {
 
 function open(
   gates: Partial<InputMenuGates>,
-  props: { composeSurface?: boolean; directLeavesNothingBelow?: boolean } = {},
+  props: {
+    composeSurface?: boolean
+    directLeavesNothingBelow?: boolean
+    keysHideLeavesNothingBelow?: boolean
+  } = {},
 ) {
   render(<InputMenu gates={{ ...ALL_OFF, ...gates }} {...props} />)
   const trigger = screen.queryByRole("button", { name: "Input options" })
@@ -86,6 +92,7 @@ beforeEach(() => {
   mockState = state()
   setAccessoryBarVisibility.mockClear()
   switchTypingSurface.mockClear()
+  hideTerminalKeysHint.mockClear()
 })
 afterEach(() => cleanup())
 
@@ -157,6 +164,30 @@ describe("InputMenu", () => {
     expect(setAccessoryBarVisibility).toHaveBeenCalledExactlyOnceWith(false)
     pick("Show terminal keys", false)
     expect(setAccessoryBarVisibility).toHaveBeenCalledExactlyOnceWith(true)
+  })
+
+  // THE BACK DOOR OUT OF THE VIRTUAL INPUT. From direct typing the key row is
+  // the whole bottom bar, so hiding it takes this very `⋯` away; the pane says
+  // whether anything is left below and the same one-time hint decides.
+  it("asks for the way-back hint when hiding the keys leaves nothing", () => {
+    open({ keysToggle: true }, { keysHideLeavesNothingBelow: true })
+    fireEvent.click(screen.getByText("Hide terminal keys"))
+    expect(setAccessoryBarVisibility).toHaveBeenCalledExactlyOnceWith(false)
+    expect(hideTerminalKeysHint).toHaveBeenCalledExactlyOnceWith(true)
+  })
+
+  it("carries the pane's answer about what the keys leave behind", () => {
+    open({ keysToggle: true }, { keysHideLeavesNothingBelow: false })
+    fireEvent.click(screen.getByText("Hide terminal keys"))
+    expect(hideTerminalKeysHint).toHaveBeenCalledExactlyOnceWith(false)
+  })
+
+  // Only ever on the way DOWN: bringing the row back can strand nobody.
+  it("asks for nothing when the keys are being shown", () => {
+    mockState = state(false)
+    open({ keysToggle: true }, { keysHideLeavesNothingBelow: true })
+    fireEvent.click(screen.getByText("Show terminal keys"))
+    expect(hideTerminalKeysHint).not.toHaveBeenCalled()
   })
 
   // The top bar has no toggle here any more: theater mode is the one way to

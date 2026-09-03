@@ -1557,19 +1557,24 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     (`terminalKeysApply`), `terminalInputLayout` in `TerminalPane.tsx`. Pinned:
     `src/lib/composebar.test.ts` "keeps the keys on a phone that chose direct typing" and
     "spans the four states the two surfaces can be in";
-    `components/TerminalPane.test.tsx` "reaches every combination of the two rows".
+    `components/TerminalPane.test.tsx` "reaches every combination of the two rows, each
+    with one way back", which also pins which menu holds the way back in each of them.
 
 4. **ONE HOME AT A TIME for the surface switch, and the pane decides which.** The bottom
     ⋯ hangs off whatever row is under the terminal, so it exists while EITHER row is up
     and carries both directions; the pane publishes the way BACK to the top menu's INPUT
     group only once nothing is left below. The same fact gates the one-time hint, which
-    would otherwise point at another menu while the way back was visible on screen. Fix:
+    would otherwise point at another menu while the way back was visible on screen. THE
+    KEYS TOGGLE IS THE OTHER DOOR: hiding the last row raises the same hint, off the same
+    once-per-device latch, and the pane answers that question too. Fix:
     `src/lib/composebar.ts` (`bottomBarSurvivesDirect`), `terminalInputLayout` in
-    `TerminalPane.tsx`, `src/lib/paneInputGroup.ts`, `switchTypingSurface` in
-    `src/lib/typingSurface.ts`. Pinned: `components/TerminalPane.test.tsx` "keeps the
-    terminal keys when the message box goes" and the "TerminalPane input group for the
-    top menu" suite; `src/lib/typingSurface.test.ts` "stays quiet while a row is left
-    under the terminal"; `components/inputWayBack.test.tsx`.
+    `TerminalPane.tsx`, `src/lib/paneInputGroup.ts`, `switchTypingSurface` and
+    `hideTerminalKeysHint` in `src/lib/typingSurface.ts`. Pinned:
+    `components/TerminalPane.test.tsx` "keeps the terminal keys when the message box
+    goes", "says what hiding the keys would leave behind", and the "TerminalPane input
+    group for the top menu" suite; `src/lib/typingSurface.test.ts` "stays quiet while a
+    row is left under the terminal" and "fires when hiding the keys takes the last row
+    away"; `components/inputWayBack.test.tsx`.
 
 5. **The compose DRAFT lives in the pane's state, not in ComposeBar.** Trap: a
     preference flip or rotation past the breakpoint unmounts the bar; the draft must

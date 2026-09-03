@@ -332,6 +332,36 @@ describe("terminalKeysApply", () => {
     expect(state(true, "direct", true)).toEqual({ box: false, keys: true })
     expect(state(true, "direct", false)).toEqual({ box: false, keys: false })
   })
+
+  // THE FINE-POINTER HALF, which is a different shape and has to be pinned as
+  // one: the keys are on the keyboard already, so the row is offered only once
+  // the box is up and it has no state of its own there. Whatever the setting
+  // and whatever the choice, the two answers are the same answer.
+  it("collapses onto the message box wherever the pointer is fine", () => {
+    const modes: ComposeBarMode[] = ["auto", "always", "never"]
+    const choices: TypingSurfaceChoice[] = [null, "compose", "direct"]
+    for (const mode of modes) {
+      for (const choice of choices) {
+        expect(terminalKeysApply(mode, false, choice)).toBe(
+          composeBarShown(mode, false, choice),
+        )
+      }
+    }
+  })
+
+  // So a fine pointer reaches TWO of the four states, and keys-alone is not one
+  // of them: that is the state a finger holds a virtual Ctrl in, and a laptop
+  // has a real one.
+  it("spans two states on a fine pointer, keys-alone not among them", () => {
+    const state = (choice: TypingSurfaceChoice, keysVisible: boolean) => ({
+      box: composeBarShown("auto", false, choice),
+      keys: keysVisible && terminalKeysApply("auto", false, choice),
+    })
+    expect(state("compose", true)).toEqual({ box: true, keys: true })
+    expect(state("compose", false)).toEqual({ box: true, keys: false })
+    expect(state("direct", true)).toEqual({ box: false, keys: false })
+    expect(state(null, true)).toEqual({ box: false, keys: false })
+  })
 })
 
 describe("bottomBarSurvivesDirect", () => {

@@ -438,6 +438,18 @@ vi.mock("@/lib/ptySocket", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/ptySocket")>()
   return { ...actual, PtySocket: FakePtySocket }
 })
+// The one-time way-back hint, spied at its raiser: what the pane is answerable
+// for is the QUESTION it hands down (would this flip leave anything under the
+// terminal), and the answer is a toast nothing else here has any business
+// raising. Everything else in the module stays real, the setter included.
+const hideTerminalKeysHint = vi.fn()
+vi.mock("@/lib/typingSurface", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/typingSurface")>()
+  return {
+    ...actual,
+    hideTerminalKeysHint: (...a: unknown[]) => hideTerminalKeysHint(...a),
+  }
+})
 
 let mockState: DuxState
 // The pane's theater seam, spied so the ownership-transition rule can be
@@ -2533,7 +2545,7 @@ describe("TerminalPane input menu anchors", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     openMenu()
     // The message box is up, so the switch is the way OUT of it. It writes
-    // through the same helper as the key row's Box/Direct cap.
+    // through the one `switchTypingSurface` every entry point shares.
     fireEvent.click(screen.getByText("Type directly in the terminal"))
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
   })
@@ -3475,8 +3487,8 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
 // THE CARET STAYS SOLID WHILE THE COMPOSE BAR HOLDS FOCUS. xterm is never
 // focused in that mode by design, so its unfocused caret is the only one the
 // user ever sees, and the conventional hollow outline says "asleep" about a
-// live prompt. The option follows the state, because the Box/Direct toggle
-// flips it mid-session.
+// live prompt. The option follows the state, because the menus'
+// typing-surface switch flips it mid-session.
 describe("TerminalPane inactive cursor style", () => {
   let pointerStub: MatchMediaStub | null = null
 
@@ -3887,9 +3899,19 @@ describe("TerminalPane typing-surface toggle", () => {
 
   // AND ALL FOUR STATES ARE REACHABLE, through the two independent switches:
   // the typing-surface choice and the terminal-keys preference.
-  it("reaches every combination of the two rows", async () => {
+  //
+  // EVERY ONE OF THEM HAS A WAY BACK, and exactly ONE home for it. The rows are
+  // what can go away; the switch that brings them back cannot, so it lives in
+  // the bottom `⋯` while any row is up and in the surface's top menu once the
+  // last one goes. A state with neither home is a dead end and a state with
+  // both is two menus that can disagree, so the pair is pinned state by state
+  // rather than only at the extremes.
+  it("reaches every combination of the two rows, each with one way back", async () => {
     const surface = await import("@/lib/typingSurface")
+    const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
     const keysUp = () => screen.queryByRole("button", { name: "Esc" }) !== null
+    const bottomMenu = () =>
+      screen.queryByRole("button", { name: "Input options" }) !== null
     const show = (composeChoice: "compose" | "direct", keys: boolean) => {
       cleanup()
       surface.setTypingSurface(composeChoice)
@@ -3899,14 +3921,67 @@ describe("TerminalPane typing-surface toggle", () => {
       ).mobile_accessory_bar = keys
       mockState = state
       render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-      return [composeUp(), keysUp()]
+      return {
+        box: composeUp(),
+        keys: keysUp(),
+        bottom: bottomMenu(),
+        top: paneInputGroupFor(["s1"])?.surfaceSwitch ?? false,
+      }
     }
-    expect(show("compose", true)).toEqual([true, true])
-    expect(show("compose", false)).toEqual([true, false])
+    expect(show("compose", true)).toEqual({
+      box: true,
+      keys: true,
+      bottom: true,
+      top: false,
+    })
+    expect(show("compose", false)).toEqual({
+      box: true,
+      keys: false,
+      bottom: true,
+      top: false,
+    })
     // KEYS WITHOUT THE BOX: a finger holds the virtual Ctrl while a physical
     // keyboard types the letter, which is exactly what direct typing is for.
-    expect(show("direct", true)).toEqual([false, true])
-    expect(show("direct", false)).toEqual([false, false])
+    // The key row is the whole bottom bar here, and it carries the `⋯`.
+    expect(show("direct", true)).toEqual({
+      box: false,
+      keys: true,
+      bottom: true,
+      top: false,
+    })
+    // Nothing under the terminal at all, so the way back is the top menu's.
+    expect(show("direct", false)).toEqual({
+      box: false,
+      keys: false,
+      bottom: false,
+      top: true,
+    })
+  })
+
+  // THE OTHER DOOR OUT OF THE VIRTUAL INPUT, and the pane's answer about it.
+  // From direct typing the key row IS the bottom bar, so hiding it takes the
+  // last row and the `⋯` on it: the same dead end the surface switch hints
+  // about, reached by a different tap. With the message box still up, hiding
+  // the keys leaves the compose row and its `⋯`, so there is nothing to say.
+  it("says what hiding the keys would leave behind", async () => {
+    const surface = await import("@/lib/typingSurface")
+    const hideKeys = () => {
+      fireEvent.click(screen.getByRole("button", { name: "Input options" }))
+      fireEvent.click(screen.getByText("Hide terminal keys"))
+    }
+    surface.setTypingSurface("direct")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeUp()).toBe(false)
+    hideKeys()
+    expect(hideTerminalKeysHint).toHaveBeenCalledExactlyOnceWith(true)
+
+    cleanup()
+    hideTerminalKeysHint.mockClear()
+    surface.setTypingSurface("compose")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeUp()).toBe(true)
+    hideKeys()
+    expect(hideTerminalKeysHint).toHaveBeenCalledExactlyOnceWith(false)
   })
 
   it("writes the choice to localStorage, so a reload does not snap back", async () => {

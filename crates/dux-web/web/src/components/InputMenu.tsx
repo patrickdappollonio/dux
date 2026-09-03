@@ -37,6 +37,7 @@ export function InputMenu({
   gates,
   composeSurface,
   directLeavesNothingBelow,
+  keysHideLeavesNothingBelow,
   className,
 }: {
   gates: InputMenuGates
@@ -45,6 +46,9 @@ export function InputMenu({
   /// which is the only case the one-time way-back hint fires in. The pane knows
   /// (its key row may well survive the switch) and passes the answer down.
   directLeavesNothingBelow?: boolean
+  /// The same question for the other flip in this menu: whether hiding the
+  /// terminal keys would leave nothing under the terminal.
+  keysHideLeavesNothingBelow?: boolean
   className?: string
 }) {
   if (!inputMenuHasItems(gates)) return null
@@ -74,6 +78,7 @@ export function InputMenu({
           gates={gates}
           composeSurface={composeSurface}
           directLeavesNothingBelow={directLeavesNothingBelow}
+          keysHideLeavesNothingBelow={keysHideLeavesNothingBelow}
         />
       </DropdownMenuContent>
     </DropdownMenu>

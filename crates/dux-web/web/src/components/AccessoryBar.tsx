@@ -109,7 +109,6 @@ function KeyButton({
   pressed,
   onActivate,
   children,
-  className,
 }: {
   label?: string
   ariaLabel?: string
@@ -119,9 +118,6 @@ function KeyButton({
   // keyboard/AT activation (see `keyClick`).
   onActivate: () => void
   children?: React.ReactNode
-  // Extra classes merged last so a caller can loosen the min-w-0 floor (the
-  // surface toggle needs a wider one; see its call site).
-  className?: string
 }) {
   return (
     <Button
@@ -132,7 +128,6 @@ function KeyButton({
       onClick={keyClick(onActivate)}
       className={cn(
         "h-10 min-w-0 flex-1 font-mono",
-        className,
         // Latched modifiers get an accent fill so the active state is
         // unmistakable on a glance — accent tokens, never raw colors.
         pressed && "bg-primary text-primary-foreground hover:bg-primary/80",
@@ -180,17 +175,20 @@ export function AccessoryBar({
           <ShiftEnterIcon />
         </KeyButton>
         {/* THE INPUT ⋯, when this row is the bottom-most input row. It sits
-            behind its own divider for the same misclick reason the surface
-            toggle does: opening a menu out from under a thumb aiming for ⇧↵
-            is a different kind of surprise from a mistyped key.
+            behind its own divider on the misclick-safe-spacing rule: opening a
+            menu out from under a thumb aiming for ⇧↵ is a different kind of
+            surprise from a mistyped key, and the divider's own margins are the
+            clear space that makes the two cells hard to confuse.
 
             TOUCH FLOOR, per axis: the trigger keeps `size-10` on BOTH axes
-            (40px square), so nothing here is an exemption. WIDTH BUDGET: row
-            one is budgeted for 390px; MEASURED in the preview container at
-            that width with the "Direct" label up (the tightest state the row
-            has): the label clipped under an even flex split, so the surface
-            toggle carries a min-width floor (see it above) and every cell
-            stays at or above the 40px touch floor. */}
+            (40px square), so nothing here is an exemption. Nothing in the row
+            carries a min-width floor any more: the only cell that ever needed
+            one was the "Box"/"Direct" typing-surface cap, whose label did not
+            fit an even flex split, and that control is gone from the row (the
+            same switch lives in this very menu, which says what it does). The
+            five keys that remain are short mono labels and icons sharing what
+            the trigger leaves, floored at the 40px touch target by `h-10` on
+            the cross axis. */}
         {inputMenu ? (
           <>
             <div
