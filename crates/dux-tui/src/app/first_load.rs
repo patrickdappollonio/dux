@@ -218,17 +218,29 @@ impl FirstLoadPrompt {
         }
     }
 
-    /// The destination shown right-aligned and dimmed next to the buttons.
-    ///
-    /// On the what's-new screen it is where the primary button goes, so the user
-    /// can see the link before pressing it. On the welcome screen it is plain
-    /// text: nothing there opens it (the palette's own commands and the app menu
-    /// are the routes to the site), and it stays because a new user should be
-    /// able to read where dux lives.
+    /// Where the what's-new screen's primary button goes. Never rendered as
+    /// text: the button IS the link (see [`Self::footer_link`]).
     pub(crate) fn link(&self) -> String {
         match &self.screen {
             FirstLoadScreen::Welcome(_) => dux_core::urls::WEBSITE.to_string(),
             FirstLoadScreen::WhatsNew(notes) => dux_core::release_notes::notes_url(Some(notes)),
+        }
+    }
+
+    /// The address shown right-aligned and dimmed next to the buttons, or
+    /// nothing.
+    ///
+    /// Only the WELCOME screen carries one: it is plain text there, because
+    /// nothing on that screen opens the site (the palette's own commands and
+    /// the app menu are the routes to it) and a new user should be able to read
+    /// where dux lives. The what's-new screen shows none: its "Open full notes"
+    /// button is the link, so repeating the destination as text was redundant,
+    /// and measurement showed the ~51-62 character release URL never fit beside
+    /// the buttons at common terminal sizes anyway.
+    pub(crate) fn footer_link(&self) -> Option<String> {
+        match &self.screen {
+            FirstLoadScreen::Welcome(_) => Some(dux_core::urls::WEBSITE.to_string()),
+            FirstLoadScreen::WhatsNew(_) => None,
         }
     }
 }
@@ -478,12 +490,14 @@ pub(crate) fn button_rects(row: Rect, labels: [&str; 2]) -> [Rect; 2] {
 }
 
 /// The button row: two pills (the focused one takes the accent fill, mirroring
-/// the app's confirm-button treatment) plus, when the column is wide enough, the
-/// screen's destination, right-aligned and dimmed.
+/// the app's confirm-button treatment) plus, when the screen carries a footer
+/// address AND the column is wide enough for it, that address, right-aligned
+/// and dimmed. A screen with no footer address (the what's-new screen, whose
+/// primary button is the link) renders the pills alone at every width.
 pub(crate) fn button_row(
     labels: [&str; 2],
     focus: FirstLoadButton,
-    link: &str,
+    link: Option<&str>,
     width: u16,
     colors: &FirstLoadColors,
 ) -> Line<'static> {
@@ -499,15 +513,17 @@ pub(crate) fn button_row(
         };
         spans.push(Span::styled(format!(" {label} "), style));
     }
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let link_len = link.chars().count();
-    if used + 2 + link_len <= width as usize {
-        let pad = width as usize - used - link_len;
-        spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(
-            link.to_string(),
-            Style::default().fg(colors.dim),
-        ));
+    if let Some(link) = link {
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let link_len = link.chars().count();
+        if used + 2 + link_len <= width as usize {
+            let pad = width as usize - used - link_len;
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(
+                link.to_string(),
+                Style::default().fg(colors.dim),
+            ));
+        }
     }
     Line::from(spans)
 }
@@ -653,11 +669,11 @@ pub(crate) fn render_modal(
     .render(sep, frame.buffer_mut());
 
     let labels = prompt.buttons();
-    let link = prompt.link();
+    let link = prompt.footer_link();
     Paragraph::new(button_row(
         labels,
         prompt.focus,
-        &link,
+        link.as_deref(),
         buttons.width,
         &colors,
     ))
@@ -1322,12 +1338,13 @@ mod tests {
     }
 
     #[test]
-    fn the_button_row_shows_the_link_only_when_it_fits() {
+    fn the_welcome_button_row_shows_its_address_only_when_it_fits() {
         let colors = colors();
+        let labels = FirstLoadPrompt::welcome(sample_welcome(), false).buttons();
         let wide = button_row(
-            ["Open full notes", "Close"],
+            labels,
             FirstLoadButton::Primary,
-            "https://x.dev/v1",
+            Some("https://x.dev/v1"),
             80,
             &colors,
         );
@@ -1335,9 +1352,9 @@ mod tests {
         assert!(wide_text.contains("https://x.dev/v1"), "{wide_text}");
 
         let narrow = button_row(
-            ["Open full notes", "Close"],
+            labels,
             FirstLoadButton::Primary,
-            "https://x.dev/v1",
+            Some("https://x.dev/v1"),
             30,
             &colors,
         );
@@ -1346,7 +1363,44 @@ mod tests {
             !narrow_text.contains("https://x.dev/v1"),
             "the link must be dropped rather than wrap: {narrow_text}"
         );
-        assert!(narrow_text.contains("Open full notes"));
+        assert!(narrow_text.contains("Add a project"));
+    }
+
+    /// The what's-new screen's button row carries no URL text at ANY width: its
+    /// "Open full notes" button is the link, so the dimmed address was
+    /// redundant, and measurement showed the ~51-62 character release URL never
+    /// fit beside the buttons at common terminal sizes anyway. The welcome row
+    /// keeps its address under the fit rule (the test above).
+    #[test]
+    fn the_whats_new_button_row_renders_no_url_at_any_width() {
+        let colors = colors();
+        let prompt = FirstLoadPrompt::whats_new(sample_notes(), false);
+        assert_eq!(
+            prompt.footer_link(),
+            None,
+            "the what's-new screen must publish no footer address"
+        );
+        assert_eq!(
+            FirstLoadPrompt::welcome(sample_welcome(), false)
+                .footer_link()
+                .as_deref(),
+            Some(dux_core::urls::WEBSITE),
+            "the welcome screen's address must stay"
+        );
+        for width in [10u16, 30, 80, 200, 500] {
+            let row = button_row(
+                prompt.buttons(),
+                FirstLoadButton::Primary,
+                prompt.footer_link().as_deref(),
+                width,
+                &colors,
+            );
+            let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                !text.contains("http"),
+                "a URL leaked into the what's-new button row at width {width}: {text}"
+            );
+        }
     }
 
     // ── content assembly ─────────────────────────────────────────────────
@@ -1628,6 +1682,10 @@ mod tests {
             "primary button missing"
         );
         assert!(rendered.contains("Close"), "secondary button missing");
+        assert!(
+            !rendered.contains("https://"),
+            "the button is the link; the release URL must not render as text"
+        );
     }
 
     #[test]
