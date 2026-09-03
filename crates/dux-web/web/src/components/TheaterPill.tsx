@@ -624,8 +624,6 @@ function TheaterAppMenu({ paneId }: { paneId: string }) {
             attach: (paneMenu?.gates.attach ?? false) && attachToPane !== null,
             surfaceSwitch: paneMenu?.gates.surfaceSwitch ?? false,
             keysToggle: paneMenu?.gates.keysToggle ?? false,
-            // Never here: the top bar is one of the things theater took away,
-            // and this menu only exists while the mode is on.
             // The guaranteed way out, whatever the pane published.
             theaterExit: true,
           }}

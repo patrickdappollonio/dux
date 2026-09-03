@@ -388,9 +388,9 @@ struct SettingsBody {
     defaults: DefaultsSettingsPatch,
     /// Top-level because it is not a settings field: it asks the engine to
     /// emit no info status for this request, and the engine honors it only
-    /// for a patch confined to the two mobile-bar fields (see
+    /// for a patch confined to the accessory-bar field (see
     /// `SettingsPatch::quiet`), so it cannot silence any other settings
-    /// write. Sent by the web's mobile bar toggles, whose feedback is the
+    /// write. Sent by the web's accessory-bar toggle, whose feedback is the
     /// bar itself moving.
     quiet: bool,
 }
@@ -1100,7 +1100,7 @@ mod tests {
     }
 
     /// The top-level `quiet` flag rides beside the groups (it is not a
-    /// settings field) and still persists the mobile-bar write; the engine
+    /// settings field) and still persists the accessory-bar write; the engine
     /// drops the info status for such a request (pinned in
     /// `dux_core::wire`'s `set_settings_quiet_*` tests).
     #[tokio::test]

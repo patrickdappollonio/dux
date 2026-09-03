@@ -5077,7 +5077,9 @@ mod agent_tabs_cap_tests {
     // and is gone: theater mode hides the same chrome and offers a way back,
     // and two flows for hiding one thing could disagree about what was on
     // screen. Same treatment as `watcher_view` above: a config file still
-    // carrying the line loads unchanged and `dux config regenerate` tidies it.
+    // carrying the line loads unchanged, and only `dux config regenerate
+    // --yes` removes the leftover key (it rewrites the whole file;
+    // restore-docs preserves the line verbatim).
     #[test]
     fn a_leftover_mobile_top_bar_line_is_ignored_rather_than_failing_the_load() {
         let parsed: Config = toml::from_str("[ui]\nmobile_top_bar = false\n")

@@ -1686,7 +1686,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     choice, uploads off); the state "keys up, box off" used to render two menus; a
     chrome-free PWA screen has no browser Back button, so the menu's own row is the
     way back. A fine-pointer desktop grows no new row. Fix: TP:455-485,
-    TP:952-953, TP:1037-1048, `src/lib/inputMenu.ts`.
+    TP:952-953, TP:986-1028, `src/lib/inputMenu.ts`.
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane input menu anchors" suite
     ("renders exactly one menu with the keys up and the box off",
     "renders its own row when neither bar is up"), "input menu follows the touch
@@ -1731,6 +1731,49 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     headers outside the pane.** Fix: TP:813-820. Pinned:
     `components/TerminalPane.test.tsx` "renders no macro trigger over the terminal on
     desktop" / "on mobile".
+
+27. **RETIRED at the theater arc: `ui.mobile_top_bar` is GONE, and theater mode is
+    the one way to hide the phone's top bar.** For one unreleased arc it was a real
+    preference hiding the mobile terminal screens' header and tab strip, riding the
+    generic settings machinery end to end. It is removed because theater mode
+    collapses the same chrome and carries its own way back (the floating pill, and
+    the input menu's Leave theater mode), while the preference had no way back of
+    its own, and two flows for hiding one thing could disagree about what was on
+    screen.
+    NEVER SHIPPED, so nothing migrates: the key was added on `server-mode` and is
+    not in `main` (the check-shipped rule). `UiConfig` has no `deny_unknown_fields`,
+    so a config file still carrying a `mobile_top_bar` line loads exactly as it did
+    and the key is ignored; `toml_edit` saves leave the stale line in place, and
+    `dux config regenerate --yes` (which rewrites the whole file) is the way to
+    tidy it away; restore-docs preserves it.
+    Removed from: `crates/dux-core/src/config.rs` (`UiConfig::mobile_top_bar` and
+    its default), `crates/dux-core/src/config_write.rs`,
+    `crates/dux-tui/src/config.rs` (the canonical commented template),
+    `crates/dux-core/src/wire.rs` (`SettingsPatch::mobile_top_bar`, its apply arm
+    and its settings row, count 23 down to 22; the quiet gate now reads the one
+    accessory-bar field), `crates/dux-web/src/config_routes.rs` (the HTTP patch's
+    `ui` field), `crates/dux-core/src/viewmodel.rs` (the bootstrap field and its
+    projection), `src/lib/bootstrapApi.ts`, `src/lib/store.ts`
+    (`mobileTopBarOverride`, `mobileTopBarVisible`, and the two-armed
+    `setMobileBarVisibility`, collapsed into `setAccessoryBarVisibility`), the five
+    UI entry points (`src/lib/settingsDescriptors.ts`'s Preferences row with
+    `CustomizeWebappDialog`'s override-awareness, `InputMenuItems`' toggle item with
+    its `topBarToggle` gate, `MobilePaneMenu`'s gate, `MobileShell`'s header-menu
+    gate, and `TheaterPill`'s hardwired-off gate), the viewer's menu-only row
+    (`viewerNeedsMenuRow`, see H20), and the flap band's `topBarVisible` conjunct
+    in `MobileShell` (the band is now "strip" exactly when the tab strip shows).
+    Pinned: `crates/dux-core/src/config.rs`
+    `a_leftover_mobile_top_bar_line_is_ignored_rather_than_failing_the_load` (the
+    leftover-key compat test); `crates/dux-core/src/wire.rs`
+    `set_settings_applies_every_field_when_sent_alone` (the row count);
+    `src/lib/settingsDescriptors.test.ts` "offers no preference for hiding the
+    phone top bar"; `src/lib/storeMobileBars.test.ts` "the store publishes no
+    top-bar preference at all"; `components/InputMenu.test.tsx` "carries no
+    top-bar toggle whatever the caller asks for";
+    `components/MobileShell.test.tsx` "ignores a stored mobile_top_bar preference
+    entirely" / "there too"; `components/MobilePaneMenu.test.tsx` (no top-bar item
+    in the merged menu); `components/TerminalPane.test.tsx` "TerminalPane input
+    menu for a non-owner" suite (no viewer row).
 
 ## I. Viewer suppression and notifications
 

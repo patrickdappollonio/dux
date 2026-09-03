@@ -145,9 +145,9 @@ export const configApi = {
     defaults?: Record<string, SettingValue>
     // Not a settings field: asks the server to emit no info status for THIS
     // request. The server honors it only when the patch is confined to the
-    // two mobile-bar fields (`SettingsPatch::quiet` in dux-core), so it can
+    // accessory-bar field (`SettingsPatch::quiet` in dux-core), so it can
     // never silence any other settings write; errors still fail the request
-    // loudly. Sent by the mobile bar toggles, whose feedback is the bar
+    // loudly. Sent by the accessory-bar toggle, whose feedback is the bar
     // itself moving.
     quiet?: boolean
   }): Promise<void> => send("PATCH", "/api/v1/config/settings", patch),

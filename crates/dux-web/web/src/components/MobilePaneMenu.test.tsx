@@ -164,8 +164,9 @@ describe("the phone's one pane menu", () => {
     )
     await openFrom(screen.getByLabelText(MOBILE_PANE_MENU_LABEL))
     expect(labels().some((t) => t?.includes("Leave theater mode"))).toBe(true)
-    // And never the top-bar toggle, which offers to show a bar the mode has
-    // already taken away.
+    // And nothing for the top bar: theater mode is the one way to hide the
+    // phone's chrome, and a second flow for the same intent is exactly what
+    // this menu must not grow back.
     expect(labels().some((t) => t?.includes("top bar"))).toBe(false)
 
     cleanup()
@@ -175,7 +176,7 @@ describe("the phone's one pane menu", () => {
     expect(labels().some((t) => t?.includes("Leave theater mode"))).toBe(false)
   })
 
-  it("keeps the phone's chrome toggles where pressing them does something", async () => {
+  it("keeps the phone's chrome toggle where pressing it does something", async () => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,

@@ -846,11 +846,11 @@ pub struct SettingsPatch {
     /// default rather than clamping to the nearer bound.
     pub terminal_font_size: Option<u16>,
     /// Presentation-only, NOT a settings field: when true, and the patch is
-    /// confined to the two mobile-bar fields, the engine emits no info status
-    /// for this request. Those two fields gate chrome the user is looking
+    /// confined to the accessory-bar field, the engine emits no info status
+    /// for this request. That field gates chrome the user is looking
     /// straight at, so the bar visibly moving is the whole feedback and a
     /// "Settings updated." toast on top is noise. The flag is honored per
-    /// request and only for that field pair (`is_mobile_bar_only`), so it can
+    /// request and only for that field (`is_accessory_bar_only`), so it can
     /// never silence any other settings write; validation and save errors
     /// still fail the command loudly regardless of the flag.
     #[serde(default)]
@@ -880,7 +880,7 @@ impl SettingsPatch {
     /// settings field. This is the gate that scopes `quiet`: the whole-struct
     /// compare (every field its own default except that one and the flag)
     /// cannot go stale when a field is added, mirroring `any_present`.
-    pub fn is_mobile_bar_only(&self) -> bool {
+    pub fn is_accessory_bar_only(&self) -> bool {
         self.mobile_accessory_bar.is_some()
             && *self
                 == Self {
@@ -1531,7 +1531,7 @@ impl Engine {
             }
             WireCommand::SetSettings(patch) => {
                 // `set_settings` decides its own status presence: a quiet
-                // mobile-bar-only patch succeeds with `None` (no toast).
+                // accessory-bar-only patch succeeds with `None` (no toast).
                 let status = self.set_settings(patch)?;
                 return Ok(WireCommandOutcome::with_optional_status(status));
             }
@@ -1759,10 +1759,10 @@ impl Engine {
     fn set_settings(&mut self, patch: SettingsPatch) -> anyhow::Result<Option<WireStatus>> {
         // Resolve the quiet flag before the destructure moves the patch
         // apart. Quiet drops the INFO statuses only, and only for a patch
-        // confined to the two mobile-bar fields (see the field's doc); errors
+        // confined to the accessory-bar field (see the field's doc); errors
         // below still bail loudly. `None` here means "succeeded, say
         // nothing" — the bar visibly moving is the feedback.
-        let quiet = patch.quiet && patch.is_mobile_bar_only();
+        let quiet = patch.quiet && patch.is_accessory_bar_only();
         let info = |status: WireStatus| if quiet { None } else { Some(status) };
         // Ask before the destructure moves the patch apart. This message is
         // deliberately distinct from "Settings unchanged." below: "you sent me
@@ -11029,12 +11029,12 @@ mod tests {
         );
     }
 
-    /// The quiet flag: a mobile-bar-only patch that asks for quiet gets NO
+    /// The quiet flag: an accessory-bar-only patch that asks for quiet gets NO
     /// status at all — the bar visibly moving is the feedback, and the write
     /// still lands. Suppression is per request: only a request carrying the
     /// flag is silent, so no other settings write can lose its toast.
     #[test]
-    fn set_settings_quiet_mobile_bar_patch_emits_no_status() {
+    fn set_settings_quiet_accessory_bar_patch_emits_no_status() {
         let (mut engine, _tmp) = test_engine();
         let outcome = engine
             .apply_wire(WireCommand::SetSettings(SettingsPatch {
@@ -11045,7 +11045,7 @@ mod tests {
             .expect("dispatch ok");
         assert!(
             outcome.status.is_none(),
-            "a quiet mobile-bar write must emit no status"
+            "a quiet accessory-bar write must emit no status"
         );
         assert!(
             !engine.config.ui.mobile_accessory_bar,
@@ -11053,8 +11053,8 @@ mod tests {
         );
     }
 
-    /// Quiet is honored ONLY for a patch confined to the two mobile-bar
-    /// fields. Any other field present keeps the normal status, so the flag
+    /// Quiet is honored ONLY for a patch confined to the accessory-bar
+    /// field. Any other field present keeps the normal status, so the flag
     /// cannot be used to silence an ordinary settings write.
     #[test]
     fn set_settings_quiet_is_ignored_when_the_patch_touches_other_fields() {
@@ -11074,7 +11074,7 @@ mod tests {
         );
     }
 
-    /// A quiet mobile-bar patch whose values already match is silent too: the
+    /// A quiet accessory-bar patch whose values already match is silent too: the
     /// "Settings unchanged." info is exactly the redundant confirmation the
     /// flag exists to drop.
     #[test]
