@@ -21,7 +21,7 @@ use dux_core::statusline::{
     Generation, KeyedStatusController, KeyedWireStatus, StatusScope, StatusTone,
 };
 use dux_core::wire::{WireCommand, WireCommandOutcome, WireStatus};
-use dux_core::worker::AgentLaunchKind;
+use dux_core::worker::{AgentLaunchKind, AgentLaunchRequest};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::pty_owners::PtySizeOwners;
@@ -3898,30 +3898,7 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
             (24, 80),
             AgentLaunchKind::Reconnect { status_message },
         );
-        let reaction = engine
-            .apply(Command::DispatchAgentLaunch {
-                request: Box::new(request),
-            })
-            .map_err(|e| e.to_string())?;
-        // The chokepoint (`Command::DispatchAgentLaunch`) refuses a launch for a
-        // closing session (or an in-flight collision) by returning
-        // `Ok(view { launched: false, .. })`, not an `Err`. Ignoring `view.launched`
-        // swallows that refusal silently: never logged, never surfaced, leaving
-        // `PendingSubscribe` to fail-fast later with a generic "check dux.log"
-        // message and nothing in the log to check. Surface the
-        // refusal as an `Err` here so it is logged and reported like the extra-tab
-        // branch below.
-        if let EventReaction::DispatchAgentLaunchView(view) = &reaction
-            && !view.launched
-        {
-            let message = view
-                .status
-                .as_ref()
-                .map(|s| s.message.clone())
-                .unwrap_or_else(|| "Agent launch was refused.".to_string());
-            return Err(message);
-        }
-        return Ok(());
+        return dispatch_launch(engine, request);
     }
     // Extra tab: resolve the owning session + the tab's own provider and launch.
     // Resume is per-provider — reopening a dormant tab resumes that provider's
@@ -3951,13 +3928,24 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
     let request = engine
         .dormant_tab_launch_request(subscribed_id, (24, 80))
         .ok_or_else(|| format!("unknown session {subscribed_id}"))?;
+    dispatch_launch(engine, request)
+}
+
+/// Run a built launch request through the dispatch chokepoint and turn a refusal
+/// into an `Err`.
+///
+/// The chokepoint (`Command::DispatchAgentLaunch`) refuses a launch for a closing
+/// session (or an in-flight collision) by returning `Ok(view { launched: false,
+/// .. })`, not an `Err`. Ignoring `view.launched` swallows that refusal silently:
+/// never logged, never surfaced, leaving `PendingSubscribe` to fail-fast later
+/// with a generic "check dux.log" message and nothing in the log to check. Both
+/// launch arms answer through here so neither can drift back into swallowing it.
+fn dispatch_launch(engine: &mut Engine, request: AgentLaunchRequest) -> Result<(), String> {
     let reaction = engine
         .apply(Command::DispatchAgentLaunch {
             request: Box::new(request),
         })
         .map_err(|e| e.to_string())?;
-    // Same refusal-surfacing fix as the session-slot branch above: a refused
-    // launch comes back as `Ok(view { launched: false, .. })`, not an `Err`.
     if let EventReaction::DispatchAgentLaunchView(view) = &reaction
         && !view.launched
     {

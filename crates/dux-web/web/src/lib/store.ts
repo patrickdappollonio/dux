@@ -2606,7 +2606,7 @@ function positionHash(route: Route): string {
   if (route.standalone && route.editor && route.target !== null) {
     // The root half is the selection grammar with `#/editor` in front of it,
     // the exact inverse of the parser's peel.
-    const base = `#/editor${selectionHash(standaloneTarget(route.target)).slice(1)}`
+    const base = `#/editor${selectionHash(slotTargetFor(route.target)).slice(1)}`
     if (route.editor.path === null) return base
     return `${base}/${route.editor.mode}/${encodeURIComponent(route.editor.path)}`
   }
@@ -2620,11 +2620,17 @@ function positionHash(route: Route): string {
   return base + CHANGES_SUFFIX
 }
 
-// The target a standalone editor address serializes: an agent target is
-// flattened to its session-slot tab, because the standalone surface is the
-// editor and not a tab strip, and the parser can only ever produce that form.
-// A terminal target is already its own whole spelling.
-function standaloneTarget(target: SelectedTarget): SelectedTarget {
+// The one rule a standalone editor address is spelled by: an agent is named by
+// its SESSION-SLOT tab, because the standalone surface is the editor and not a
+// tab strip, and the parser can only ever produce that form. A terminal is
+// already its own whole spelling.
+//
+// It takes either spelling of the same thing, because both reach the same rule.
+// From a selection the step is lossy on purpose: an extra tab's own id is
+// dropped in favour of the slot's, which is exactly the normalization the
+// parser mirrors. From an editor root there is no tab id to drop, so the same
+// step is the plain inverse of `editorRootForTarget` for the roots it produces.
+function slotTargetFor(target: SelectedTarget | EditorRoot): SelectedTarget {
   if (target.kind === "terminal") return target
   return {
     kind: "agent",
@@ -2666,7 +2672,7 @@ export function standaloneEditorHash(
   editor: { mode: EditorViewMode; path: string | null } | null = null,
 ): string {
   return routeHash({
-    target: targetForRoot(root),
+    target: slotTargetFor(root),
     changes: false,
     editor: editor ?? { mode: "file", path: null },
     standalone: true,
@@ -2674,18 +2680,6 @@ export function standaloneEditorHash(
     // the modifier. Stated rather than left to `theaterSerializable` to drop.
     theater: false,
   })
-}
-
-// The selection target that spells a root in the URL. The inverse of
-// `editorRootForTarget` for the roots it can produce: an agent root is its
-// session-slot tab, and a terminal root is itself.
-function targetForRoot(root: EditorRoot): SelectedTarget {
-  if (root.kind === "terminal") return root
-  return {
-    kind: "agent",
-    sessionId: root.sessionId,
-    tabId: slotTabTargetId(root.sessionId),
-  }
 }
 
 // The route the app currently holds in state.

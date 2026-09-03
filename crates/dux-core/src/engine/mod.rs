@@ -1642,6 +1642,20 @@ impl Engine {
         self.failed_tab_runs.remove(tab_id);
     }
 
+    /// Whether `pred` holds for ANY tab of the session, the session-slot tab
+    /// included. The one any-tab rollup shape every per-agent liveness question
+    /// is asked through: the slot tab is resolved through the session's pointer
+    /// (never inferred from an id that looks like a session id) and the extras
+    /// are the stored rows that name this session.
+    fn any_tab(&self, session_id: &str, pred: impl Fn(&str) -> bool) -> bool {
+        if pred(self.slot_tab_id_of(SessionIdRef::new(session_id)).as_str()) {
+            return true;
+        }
+        self.agent_tabs
+            .values()
+            .any(|t| t.session_id == session_id && pred(&t.id))
+    }
+
     /// Whether ANY tab of the session (session-slot or extra) currently needs
     /// attention. The any-tab rollup the sidebar row uses, mirroring how
     /// `working` rolls up. Cheap: `needs_attention` is usually empty, so this
@@ -1650,15 +1664,7 @@ impl Engine {
         if self.needs_attention.is_empty() {
             return false;
         }
-        if self
-            .needs_attention
-            .contains(self.slot_tab_id_of(SessionIdRef::new(session_id)))
-        {
-            return true;
-        }
-        self.agent_tabs
-            .values()
-            .any(|t| t.session_id == session_id && self.tab_needs_attention(&t.id))
+        self.any_tab(session_id, |tab_id| self.tab_needs_attention(tab_id))
     }
 
     /// Whether ANY tab of the session (session-slot or extra) is currently
@@ -1666,12 +1672,7 @@ impl Engine {
     /// uses, mirroring `session_needs_attention` and the viewmodel's `working`
     /// field — so an agent whose non-slot tab is streaming still reads as working.
     pub fn session_is_streaming(&self, session_id: &str) -> bool {
-        if self.is_agent_streaming(self.slot_tab_id_of(SessionIdRef::new(session_id)).as_str()) {
-            return true;
-        }
-        self.agent_tabs
-            .values()
-            .any(|t| t.session_id == session_id && self.is_agent_streaming(&t.id))
+        self.any_tab(session_id, |tab_id| self.is_agent_streaming(tab_id))
     }
 
     /// Whether ANY tab of the session (session-slot or extra) is currently being
@@ -1679,12 +1680,7 @@ impl Engine {
     /// sidebar row can show a Typing cue whenever the user is typing into any of
     /// the agent's tabs.
     pub fn session_is_typing(&self, session_id: &str) -> bool {
-        if self.is_typing(self.slot_tab_id_of(SessionIdRef::new(session_id)).as_str()) {
-            return true;
-        }
-        self.agent_tabs
-            .values()
-            .any(|t| t.session_id == session_id && self.is_typing(&t.id))
+        self.any_tab(session_id, |tab_id| self.is_typing(tab_id))
     }
 
     /// True if the given key is currently marked in-flight.
