@@ -4367,9 +4367,15 @@ export function closeDelete(): void {
 
 // Ask the server to delete an agent session. `deleteWorktree` opts into the
 // destructive removal of the git worktree on disk (default off in the UI).
-export function deleteSession(sessionId: string, deleteWorktree: boolean): void {
+// `deleteBranch` is the dialog's branch answer, or `null` when it had no
+// checkbox to answer with.
+export function deleteSession(
+  sessionId: string,
+  deleteWorktree: boolean,
+  deleteBranch: boolean | null = null,
+): void {
   sessionsApi
-    .remove(sessionId, deleteWorktree)
+    .remove(sessionId, deleteWorktree, deleteBranch)
     .catch((e) => {
       // A 409 is a refusal (a tab is still launching, or a delete is already in
       // flight). The server already surfaces that message over the `/ws/events`

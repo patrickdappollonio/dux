@@ -17,6 +17,16 @@ vi.mock("@/lib/store", async (importOriginal) => {
   }
 })
 
+// The branch-risk read is a real HTTP call; stub the one method the dialog
+// uses and leave the rest of the client alone.
+vi.mock("@/lib/sessionsApi", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/sessionsApi")>()
+  return {
+    ...actual,
+    sessionsApi: { ...actual.sessionsApi, branchUnpushed: vi.fn() },
+  }
+})
+
 function installBootStubs() {
   const mem = new Map<string, string>()
   vi.stubGlobal("localStorage", {
@@ -33,8 +43,10 @@ function installBootStubs() {
 installBootStubs()
 const { DeleteSessionDialog } = await import("./DeleteSessionDialog")
 const store = await import("@/lib/store")
+const api = await import("@/lib/sessionsApi")
 const deleteSession = vi.mocked(store.deleteSession)
 const closeDelete = vi.mocked(store.closeDelete)
+const branchUnpushed = vi.mocked(api.sessionsApi.branchUnpushed)
 
 function managed(branch: string) {
   return {
@@ -58,6 +70,19 @@ const session2 = {
   title: "wobbly-duckling",
   workspace: managed("dux/s2"),
 }
+const attachedSession = {
+  id: "s3",
+  title: "attached",
+  workspace: {
+    kind: "managed" as const,
+    project_id: "p1",
+    branch_name: "develop",
+    initial_branch: "develop",
+    branch_provenance: "attached" as const,
+    source_branch: "main",
+    worktree_path: "/tmp/develop",
+  },
+}
 
 function seed(target: string | null, sessions: unknown[]) {
   mockState = {
@@ -70,6 +95,8 @@ beforeEach(() => {
   installBootStubs()
   deleteSession.mockClear()
   closeDelete.mockClear()
+  branchUnpushed.mockReset()
+  branchUnpushed.mockResolvedValue({ branch: "develop", unpushed_commits: 0 })
 })
 
 afterEach(() => {
@@ -85,18 +112,60 @@ describe("DeleteSessionDialog", () => {
     expect(screen.getByText(/quacky-mallard/)).toBeTruthy()
   })
 
-  it("says the branch goes too, because this path deletes it", () => {
-    // The checkbox must promise the branch too: the same code path runs
-    // `git branch -D`, on the current branch AND the one the agent was born
-    // on. The TUI's checkbox says "worktree and branch"; the web must say it
-    // as well or the user is agreeing to less than happens.
+  // The branch is its own decision now, so it is its own box. It appears only
+  // once the worktree is going, because git will not delete a branch that is
+  // still checked out in a worktree.
+  it("offers the branch box only once the worktree box is ticked", () => {
     seed("s1", [session1])
     render(<DeleteSessionDialog />)
-    expect(
+    expect(screen.queryByRole("checkbox", { name: /Also delete the branch/ }))
+      .toBeNull()
+
+    fireEvent.click(
       screen.getByRole("checkbox", {
-        name: "Also delete the git worktree and its branch (irreversible)",
+        name: "Also delete the git worktree (irreversible)",
       }),
-    ).toBeTruthy()
+    )
+    const branchBox = screen.getByRole("checkbox", {
+      name: /Also delete the branch/,
+    })
+    expect(branchBox.textContent).toBeDefined()
+    expect(screen.getByText("dux/s1")).toBeTruthy()
+  })
+
+  it("starts the branch box ticked for a branch dux created", () => {
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
+    const branchBox = screen.getByRole("checkbox", {
+      name: /Also delete the branch/,
+    })
+    expect(branchBox.getAttribute("aria-checked")).toBe("true")
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith("s1", true, true)
+  })
+
+  // The mirror, and the reason the box is a control rather than a label: it
+  // spares a branch dux would otherwise have deleted unasked.
+  it("sends a declined branch deletion for a branch dux created", () => {
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /Also delete the branch/ }),
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith("s1", true, false)
+  })
+
+  // With the worktree kept there is no branch offer on screen at all, so the
+  // request must carry no branch answer either: an answer nobody was asked for
+  // is the server deciding on a click that never happened.
+  it("sends no branch answer when the worktree is kept", () => {
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith("s1", false, null)
   })
 
   // THE PIN. There is no worktree to remove and no branch to delete, so the
@@ -143,7 +212,7 @@ describe("DeleteSessionDialog", () => {
     ])
     render(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("sa1", false)
+    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null)
   })
 
   // The checkbox state outlives one open: the dialog stays mounted. A box ticked
@@ -169,49 +238,43 @@ describe("DeleteSessionDialog", () => {
     seed("sa1", [session1, standalone])
     rerender(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
-    expect(deleteSession).toHaveBeenCalledWith("sa1", false)
+    expect(deleteSession).toHaveBeenCalledWith("sa1", false, null)
   })
 
-  it("says the branch is kept when the agent attached to one it did not create", () => {
-    // Promising to delete a branch dux will deliberately keep is the same class
-    // of bug from the other direction: the dialog has to describe what happens.
-    seed("s3", [
-      {
-        id: "s3",
-        title: "attached",
-        workspace: {
-          kind: "managed",
-          project_id: "",
-          branch_name: "develop",
-          initial_branch: "develop",
-          branch_provenance: "attached",
-          source_branch: "",
-          worktree_path: "",
-        },
-      },
-    ])
+  // A branch that predates the agent is still offered, because the user may
+  // genuinely want it gone and nothing else can reach it once the worktree is
+  // removed. It starts UNTICKED and it comes with the sentence that says why.
+  it("offers a pre-existing branch unticked, with the warning that says why", () => {
+    seed("s3", [attachedSession])
     render(<DeleteSessionDialog />)
-    expect(
-      screen.getByRole("checkbox", {
-        name: "Also delete the git worktree, keeping its branch (irreversible)",
-      }),
-    ).toBeTruthy()
-    expect(
-      screen.getByText(/existed before this agent, so dux keeps it/),
-    ).toBeTruthy()
-    // A kept verdict is the one the user may disagree with, so the dialog says
-    // where the override lives instead of leaving them with no way through.
-    expect(
-      screen.getByText(/remove it from the project.s Worktrees dialog/),
-    ).toBeTruthy()
+    fireEvent.click(screen.getByRole("checkbox"))
+    const branchBox = screen.getByRole("checkbox", {
+      name: /Also delete the branch/,
+    })
+    expect(branchBox.getAttribute("aria-checked")).toBe("false")
+    expect(screen.getByText(/This branch existed before the agent\./)).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith("s3", true, false)
   })
 
-  it("points at the override only where a branch is actually kept", () => {
-    // The branch is going anyway here, so directions for deleting it by hand
-    // would be noise on the one screen that must be read carefully.
+  it("sends the override when the user ticks a pre-existing branch", () => {
+    seed("s3", [attachedSession])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /Also delete the branch/ }),
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith("s3", true, true)
+  })
+
+  it("warns about nothing for a branch dux created", () => {
+    // The branch is dux's own; there is no prior owner to warn about, and a
+    // sentence here would be noise on the one screen that must be read.
     seed("s1", [session1])
     render(<DeleteSessionDialog />)
-    expect(screen.queryByText(/Worktrees dialog/)).toBeNull()
+    fireEvent.click(screen.getByRole("checkbox"))
+    expect(screen.queryByText(/existed before the agent/)).toBeNull()
   })
 
   it("says an adopted branch came with its worktree", () => {
@@ -231,11 +294,55 @@ describe("DeleteSessionDialog", () => {
       },
     ])
     render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
     expect(
       screen.getByText(
-        /came with the worktree this agent adopted, so dux keeps it/,
+        /This branch came with the worktree this agent adopted\./,
       ),
     ).toBeTruthy()
+  })
+
+  // The count is a git answer that arrives after the dialog is already up, so
+  // the warning grows a sentence rather than waiting for it.
+  it("names how many commits are pushed nowhere once the count arrives", async () => {
+    branchUnpushed.mockResolvedValue({ branch: "develop", unpushed_commits: 3 })
+    seed("s3", [attachedSession])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
+    expect(
+      await screen.findByText(/It has 3 commits not pushed anywhere\./),
+    ).toBeTruthy()
+  })
+
+  it("says nothing about commits when there are none unpushed", async () => {
+    branchUnpushed.mockResolvedValue({ branch: "develop", unpushed_commits: 0 })
+    seed("s3", [attachedSession])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
+    expect(
+      await screen.findByText(/This branch existed before the agent\./),
+    ).toBeTruthy()
+    expect(screen.queryByText(/not pushed anywhere/)).toBeNull()
+  })
+
+  // git may simply not answer (the branch is already gone, the repository is
+  // locked). The warning that matters does not depend on it.
+  it("keeps the provenance warning when git cannot count", async () => {
+    branchUnpushed.mockRejectedValue(new Error("no repo"))
+    seed("s3", [attachedSession])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
+    expect(
+      await screen.findByText(/This branch existed before the agent\./),
+    ).toBeTruthy()
+    expect(screen.queryByText(/not pushed anywhere/)).toBeNull()
+  })
+
+  it("never asks git about a branch dux created", () => {
+    // One git call per open, bought only where the answer is rendered.
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    expect(branchUnpushed).not.toHaveBeenCalled()
   })
 
   // A provenance a NEWER server writes and this page has never heard of. The
@@ -258,27 +365,30 @@ describe("DeleteSessionDialog", () => {
       },
     ])
     render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
     expect(
-      screen.getByRole("checkbox", {
-        name: "Also delete the git worktree, keeping its branch (irreversible)",
-      }),
-    ).toBeTruthy()
+      screen
+        .getByRole("checkbox", { name: /Also delete the branch/ })
+        .getAttribute("aria-checked"),
+    ).toBe("false")
     expect(
-      screen.getByText(/is not a branch dux created, so dux keeps it/),
+      screen.getByText(/This branch is not one dux created\./),
     ).toBeTruthy()
-    expect(screen.queryByText(/existed before this agent/)).toBeNull()
+    expect(screen.queryByText(/existed before the agent/)).toBeNull()
   })
 
-  it("keeps the branch-deleting copy for a server too old to say", () => {
-    // An older server omits the field and deletes the branch either way, so the
-    // absent case must not quietly promise the safer behavior.
+  it("keeps the branch-deleting default for a server too old to say", () => {
+    // An older server omits the field, and it deletes the branch alongside the
+    // worktree, so the absent case must default to ticked rather than quietly
+    // promising the safer behavior.
     seed("s1", [session1])
     render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
     expect(
-      screen.getByRole("checkbox", {
-        name: "Also delete the git worktree and its branch (irreversible)",
-      }),
-    ).toBeTruthy()
+      screen
+        .getByRole("checkbox", { name: /Also delete the branch/ })
+        .getAttribute("aria-checked"),
+    ).toBe("true")
   })
 
   it("calls closeDelete when the session vanishes mid-open", () => {

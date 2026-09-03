@@ -130,6 +130,12 @@ export interface ResolvedPullRequestReference {
   uninspected_summary: string | null
 }
 
+// The answer to `GET /api/v1/sessions/:id/branch-unpushed`.
+export type BranchUnpushed = {
+  branch: string
+  unpushed_commits: number | null
+}
+
 export const sessionsApi = {
   create: (body: CreateSessionBody) =>
     request<SessionView>("POST", "/api/v1/sessions", body),
@@ -142,10 +148,23 @@ export const sessionsApi = {
       "/api/v1/pull-requests/resolve",
       { reference },
     ),
-  remove: (id: string, deleteWorktree: boolean) =>
+  // `deleteBranch` is the delete dialog's "also delete the branch" answer.
+  // `null` means nobody was asked (a standalone agent, whose dialog has no
+  // checkbox), and the server then keeps its provenance default.
+  remove: (id: string, deleteWorktree: boolean, deleteBranch: boolean | null) =>
     request<void>(
       "DELETE",
-      `/api/v1/sessions/${encodeURIComponent(id)}?delete_worktree=${deleteWorktree}`,
+      `/api/v1/sessions/${encodeURIComponent(id)}?delete_worktree=${deleteWorktree}` +
+        (deleteBranch === null ? "" : `&delete_branch=${deleteBranch}`),
+    ),
+  // How much work ticking that box would destroy: the branch the delete would
+  // remove, and how many of its commits no remote-tracking ref reaches. The
+  // count is `null` when git could not answer, and the dialog then says nothing
+  // about it rather than guessing.
+  branchUnpushed: (id: string) =>
+    request<BranchUnpushed>(
+      "GET",
+      `/api/v1/sessions/${encodeURIComponent(id)}/branch-unpushed`,
     ),
   patch: (id: string, body: PatchSessionBody) =>
     request<{ provider_change?: string }>(
