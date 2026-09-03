@@ -195,6 +195,17 @@ const fallback = [
     pointer-events: none;
   }
 
+  /* The body paints its own faint glows over the ink, and the hero's layers
+     are opaque, so a hard edge shows wherever they simply stop. Dissolving the
+     background layers (never the copy) over the last stretch lets the body's
+     paint take over with no seam. */
+  .hero-fold canvas,
+  .hero-base,
+  .hero-scrim {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 9rem), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 9rem), transparent);
+  }
+
   .hero-scrim {
     position: absolute;
     inset: 0;
