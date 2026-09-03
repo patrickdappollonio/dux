@@ -144,7 +144,7 @@ const MAX_ATTENTION_GRACE_SECONDS = 300
 // the input at the floor would make the off switch unreachable from here.
 const MAX_UPLOAD_PASTED_TEXT_CHARS = 100_000
 const MIN_UPLOAD_PASTED_TEXT_CHARS = 200
-const DEFAULT_UPLOAD_PASTED_TEXT_CHARS = 1_000
+const DEFAULT_UPLOAD_PASTED_TEXT_CHARS = 4_000
 // MIN_TERMINAL_FONT_SIZE/MAX_TERMINAL_FONT_SIZE are imported above from
 // terminalFont.ts rather than redeclared here (that file mirrors the
 // server-side bounds in `crates/dux-core/src/config.rs`). UX bounds only; the
@@ -287,8 +287,8 @@ export const SETTING_GROUPS: SettingGroup[] = [
         writeTarget: "settings",
         // ABSENT MEANS OFF, not "means the default". An older server publishes
         // nothing here, `TerminalPane` reads that as 0 and files nothing away,
-        // and `bootstrapApi.ts` documents the rule. Reading it as 1000 in this
-        // one place showed a threshold that was not in force, and a user who
+        // and `bootstrapApi.ts` documents the rule. Reading it as the shipped
+        // default here showed a threshold that was not in force, and a user who
         // saved the dialog would have switched the feature on without asking
         // for it. `default` below is the shipped value, which is a different
         // question and is answered separately.

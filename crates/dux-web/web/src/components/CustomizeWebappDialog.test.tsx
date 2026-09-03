@@ -120,8 +120,9 @@ const fullBootstrap: Bootstrap = {
   // falls back to their own default. This one's absence MEANS OFF (an older
   // server never published it), so leaving it out would make the fixture a
   // server with the feature switched off, and "reset the section to defaults"
-  // would then legitimately emit it as a change.
-  upload_pasted_text_chars: 1000,
+  // would then legitimately emit it as a change. It must therefore carry the
+  // shipped default, and moves whenever that does.
+  upload_pasted_text_chars: 4000,
 }
 
 function seed(overrides: Partial<Bootstrap> = {}) {

@@ -634,13 +634,14 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # instructions and it arrives as text, as it always did.\n\
                  # Counted in CHARACTERS, so a paste in Japanese or one full of emoji is\n\
                  # measured the same way an English one is.\n\
-                 # The default of 1000 is deliberately conservative. It sits at the low\n\
-                 # end of the region where the CLIs we could measure start reclassifying\n\
-                 # a paste themselves (Codex files anything over 1000 characters away as\n\
-                 # generic large content; Claude Code treats a single key event over 800\n\
-                 # as a paste), because any command can be a provider here and one we\n\
-                 # have not measured may cut off sooner. Raise it if you would rather\n\
-                 # more of your text arrived as text.\n\
+                 # The default of 4000 is about a long page of prose, and it comes from\n\
+                 # measuring what the CLIs actually do with a long paste. Claude Code\n\
+                 # folds one up in its composer at around 800 characters, but that is\n\
+                 # only how it looks: the whole text still reaches the agent. Codex takes\n\
+                 # a paste up to the size of a request, far past anything you would type.\n\
+                 # So ordinary instructions, however wordy, keep arriving as text, while\n\
+                 # a log or a diff runs past 4000 and becomes a file. Lower it if the\n\
+                 # command you run handles long pastes worse than those two do.\n\
                  # Set to 0 to switch this off and always paste text as text. Press\n\
                  # Ctrl+Shift+v (Cmd+Shift+v on a Mac) to bypass it for one paste; that\n\
                  # is the same chord that forces text when the clipboard also holds an\n\

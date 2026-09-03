@@ -64,10 +64,12 @@ upload folder and pastes **that file's path** instead. The agent can then open i
 or grep it.
 
 The threshold is [`ui.upload_pasted_text_chars`](/docs/configuration), and the default is
-**1000 characters**, deliberately low: Codex files anything past 1000 characters away as
-generic large content, and Claude Code treats a single key event over 800 as a paste. Since
-any command can be a provider in dux, one nobody has measured may cut off sooner. Raise it
-if you would rather more of your text arrived as text.
+**4000 characters**, about a long page of prose. That figure comes from what the CLIs
+actually do with a long paste: Claude Code folds one up in its composer at around 800
+characters, but only visually, and the whole text still reaches the agent, while Codex
+takes a paste up to the size of a request. So your instructions keep arriving as text
+however wordy they get, and a log or a diff becomes a file. Lower it if the command you
+run handles long pastes worse than those two do.
 
 The details:
 
@@ -194,7 +196,7 @@ These are settings, on `[ui]` in `config.toml`:
 |---|---|---|
 | `upload_directory` | `".dux/uploads"` | Where an agent's dropped and pasted files go, relative to that agent's worktree. Must be a relative path with no `..` in it that a filesystem could actually hold; anything else falls back to the default and says so once in `dux.log`. |
 | `upload_write_gitignore` | `true` | Whether to keep the self-ignoring `.gitignore` in that folder, attempted on every upload. Set it to `false` if you intend to commit what you drop or paste, and your uploads show up as ordinary untracked files again. This one is also a row in the web UI's **Preferences** dialog, as *Hide dropped and pasted files from git*. |
-| `upload_pasted_text_chars` | `1000` | How long a piece of text you paste into an **agent** may be before dux saves it as a `.txt` file in the folder above and pastes that file's path instead. Counted in characters. `0` switches it off. Values between 1 and 199, or above 100000, are clamped with one warning in `dux.log`. Also a row in the web UI's **Preferences** dialog, as *Save long pastes as a file*. Never applies to a terminal. |
+| `upload_pasted_text_chars` | `4000` | How long a piece of text you paste into an **agent** may be before dux saves it as a `.txt` file in the folder above and pastes that file's path instead. Counted in characters. `0` switches it off. Values between 1 and 199, or above 100000, are clamped with one warning in `dux.log`. Also a row in the web UI's **Preferences** dialog, as *Save long pastes as a file*. Never applies to a terminal. |
 
 `upload_directory` deliberately has **no** Preferences row: picking a path properly needs a
 directory picker the dialog does not have. Edit it in `config.toml`.

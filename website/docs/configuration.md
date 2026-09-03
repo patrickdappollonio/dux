@@ -233,7 +233,7 @@ an **agent** pane:
 [ui]
 upload_directory         = ".dux/uploads"  # relative to the agent's worktree
 upload_write_gitignore   = true            # hide the uploads from git
-upload_pasted_text_chars = 1000            # longer pastes become a .txt file
+upload_pasted_text_chars = 4000            # longer pastes become a .txt file
 ```
 
 `upload_directory` is where the file is saved, relative to that agent's worktree, created
@@ -256,8 +256,9 @@ ignores in every other worktree at once.
 `upload_pasted_text_chars` is the point at which text you PASTE into an agent stops being
 typed at the prompt and becomes a document: dux saves it as a `.txt` file in the folder
 above and pastes that file's path, which costs the agent's context window far less than a
-wall of text. The default of 1000 is deliberately conservative, and it counts CHARACTERS,
-so a paste in Japanese is measured the way an English one is.
+wall of text. The default of 4000 is about a long page of prose, chosen so ordinary
+instructions still arrive as text while a log or a diff becomes a file, and it counts
+CHARACTERS, so a paste in Japanese is measured the way an English one is.
 
 Set it to `0` to always paste text as text, or press `Ctrl+Shift+v` (`Cmd+Shift+v` on a
 Mac) to bypass it for one paste. Values between 1 and 199, or above 100000, are clamped

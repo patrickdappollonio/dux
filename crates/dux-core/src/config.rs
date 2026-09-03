@@ -1741,30 +1741,24 @@ pub fn normalized_upload_directory(configured: &str) -> String {
         .join("/")
 }
 
-/// Default `ui.upload_pasted_text_chars`, and it is CONSERVATIVE on purpose.
+/// Default `ui.upload_pasted_text_chars`, chosen from what the measured CLIs
+/// actually do with a long paste rather than from caution about it.
 ///
-/// Two measurements say what the SCALE of a "this is a document, not a message"
-/// paste is, for the CLIs whose source could be read. Codex's
-/// `LARGE_PASTE_CHAR_THRESHOLD` is 1000 characters, the figure already recorded
-/// in the web's `COMMAND_ATTACHMENT_CHAR_LIMITS` table: past it, its composer
-/// stops treating a paste as text you typed and files it away as generic large
-/// content. Claude Code's bundle force-classifies any single key event over 800
-/// characters as a paste. So a low four-figure number is the region where CLIs
-/// themselves start reclassifying, which is what these figures are evidence of.
+/// Claude Code collapses a long paste in its composer at around 800 characters,
+/// but the collapse is VISUAL and LOSSLESS: the whole text still reaches the
+/// agent, so it is not a reason to file anything away. Codex accepts a paste up
+/// to its request-size cap, which is orders of magnitude above any prompt
+/// someone types. Neither measured CLI truncates text at a low four-figure
+/// count, so the earlier default of 1000 was turning ordinary prompts into
+/// files for a danger that was not there.
 ///
-/// They are NOT the reason for this number, and must not be read as one: those
-/// two thresholds answer a different question (what that CLI does with a paste
-/// it received) and neither of them chose dux's default. dux aims to be
-/// one-size-fits-most, and any CLI can be a provider here, including ones
-/// nobody has measured and which may cut a paste off SOONER than the two above.
-/// So the default sits at the low end of the measured region rather than above
-/// it: a user who wants more text going through as text raises it, which is
-/// exactly what the setting is for, while nobody's unmeasured CLI silently
-/// swallows a paste dux decided to type out.
-///
-/// An error log, a stack trace or a diff runs well past this and is exactly
-/// what the feature is for.
-pub const DEFAULT_UPLOAD_PASTED_TEXT_CHARS: usize = 1_000;
+/// 4000 characters is roughly a long page of prose: ordinary instructions,
+/// however wordy, still arrive inline as text, while an error log, a stack
+/// trace or a diff runs well past it and becomes a file the agent can read on
+/// demand. That is the split the feature exists for. It stays a preference: a
+/// user running an unmeasured CLI that handles long pastes worse lowers it, and
+/// one who wants everything typed out sets `0`.
+pub const DEFAULT_UPLOAD_PASTED_TEXT_CHARS: usize = 4_000;
 
 /// Floor on a *nonzero* `ui.upload_pasted_text_chars`.
 ///
@@ -1776,9 +1770,9 @@ pub const MIN_UPLOAD_PASTED_TEXT_CHARS: usize = 200;
 
 /// Ceiling on `ui.upload_pasted_text_chars`.
 ///
-/// Two orders of magnitude above the largest MEASURED composer threshold in the
-/// tree (Codex's 1000). A value up here is not a preference anyone could have
-/// arrived at from how the CLIs behave; it is a byte figure or an extra zero,
+/// Well over an order of magnitude above the default. A value up here is not a
+/// preference anyone could have arrived at from how the CLIs behave; it is a
+/// byte figure or an extra zero,
 /// and clamping it with a warning is what the warn-once-and-degrade convention
 /// is for. Switching the behaviour off has its own value, and it is `0`.
 pub const MAX_UPLOAD_PASTED_TEXT_CHARS: usize = 100_000;
