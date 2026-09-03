@@ -4163,6 +4163,7 @@ mod tests {
             exit_success: Some(false),
             is_minimal: false,
             output_excerpt: String::new(),
+            read_error: None,
         }
     }
 

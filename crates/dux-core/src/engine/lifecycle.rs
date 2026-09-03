@@ -233,6 +233,13 @@ pub struct PrunedPty {
     /// exit-status message and error log; the web ignores it. Captured off the
     /// live client at reap time for the same once-only reason as `exit_success`.
     pub output_excerpt: String,
+    /// The read error that ended the PTY's read side, when one did, rather than
+    /// a clean end of input. It is the difference between "the child closed its
+    /// end" and "dux stopped being able to read it and then killed it", and
+    /// nothing else carries it: after a read error `exit_success` is almost
+    /// always `None`, which reads identically to a child that simply was not
+    /// reaped in time. Always `None` for a companion terminal.
+    pub read_error: Option<String>,
 }
 
 /// The facts `prune_exited_ptys` reads off a dying agent PTY in its first pass,
@@ -246,6 +253,7 @@ struct ExitedAgentPty {
     is_minimal: bool,
     output_excerpt: String,
     run_duration: Option<Duration>,
+    read_error: Option<String>,
 }
 
 /// Whether an exited agent tab's row should be closed along with the prune:
@@ -435,6 +443,7 @@ impl Engine {
                         is_minimal,
                         output_excerpt,
                         run_duration: client.run_duration(),
+                        read_error: client.read_error().map(str::to_string),
                     })
                 } else {
                     None
@@ -447,6 +456,7 @@ impl Engine {
             is_minimal,
             output_excerpt,
             run_duration,
+            read_error,
         } in exited_agents
         {
             // Resolve the exited PTY's owning session and whether it held the
@@ -553,6 +563,16 @@ impl Engine {
             if ended_badly && owning.is_some() {
                 self.mark_tab_run_failed(&tab_id);
             }
+            // Say out loud that this tab did not end the ordinary way. Nothing
+            // downstream can work it out: the read error left no exit status, so
+            // the tab reads as "exited, status unknown" exactly like a child that
+            // was merely slow to be reaped, and the process dux then killed may
+            // have been perfectly healthy.
+            if let Some(error) = &read_error {
+                crate::logger::warn(&format!(
+                    "tab \"{tab_id}\" ({label}) was killed after a read error, exit status unknown: {error}"
+                ));
+            }
             let tab_closed = clean_exit_closes_tab_row(is_session_slot, exit_success)
                 && self.remove_agent_tab_row(tab_id.as_str());
             pruned.push(PrunedPty {
@@ -565,6 +585,7 @@ impl Engine {
                 exit_success,
                 is_minimal,
                 output_excerpt,
+                read_error,
             });
         }
 
@@ -605,6 +626,7 @@ impl Engine {
                 exit_success: None,
                 is_minimal: false,
                 output_excerpt: String::new(),
+                read_error: None,
             });
         }
 
@@ -1386,9 +1408,14 @@ mod tests {
         wait_for_exit(&mut engine, &slot);
         let pruned = engine.prune_exited_ptys();
 
-        assert!(
-            pruned.iter().any(|p| p.id == slot.as_str()),
-            "the tab must actually be pruned for this test to say anything"
+        let entry = pruned
+            .iter()
+            .find(|p| p.id == slot.as_str())
+            .expect("the tab must actually be pruned for this test to say anything");
+        assert_eq!(
+            entry.read_error, None,
+            "a child that closed its own end reached a clean end of input, and \
+             must not be reported as a read failure"
         );
         assert!(
             engine.tab_last_run_failed(slot.as_str()),

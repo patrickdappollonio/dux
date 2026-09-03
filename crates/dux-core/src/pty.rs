@@ -792,6 +792,17 @@ pub struct PtyClient {
     /// because a child that closes its descriptors and keeps running reaches EOF
     /// and is never reaped at all.
     exited_at: Arc<OnceLock<Instant>>,
+    /// The read error that ended this PTY's reader loop, if one did.
+    ///
+    /// A read error and a clean end of input both stop the loop and both set
+    /// `exited`, but they are not the same fact: EOF means the child closed the
+    /// other end, while an error means dux stopped listening to a child that may
+    /// well still be alive, and which the teardown that follows then kills. The
+    /// difference does not show up in the exit status (there frequently is none)
+    /// and used to not show up in the log either, so an agent that vanished
+    /// under a read error looked exactly like one that quit. Written once,
+    /// before `exited`, so anyone who observes the exit also sees this.
+    read_error: Arc<OnceLock<String>>,
     has_output: Arc<AtomicBool>,
     /// Set by the reader thread or scroll/resize methods when the terminal
     /// state changes. Cleared by `snapshot_into` after rebuilding the buffer.
@@ -860,6 +871,11 @@ struct ReaderLoopState {
     writer_tx: std::sync::mpsc::SyncSender<PtyWriteMsg>,
     exited: Arc<AtomicBool>,
     exited_at: Arc<OnceLock<Instant>>,
+    read_error: Arc<OnceLock<String>>,
+    /// What this PTY is running, for the reader thread's own log lines. The
+    /// thread knows no tab id (a PTY is spawned before anything files it under
+    /// one), so it names the process; the engine's prune names the tab.
+    label: String,
     has_output: Arc<AtomicBool>,
     dirty: Arc<AtomicBool>,
     received_data: Arc<AtomicBool>,
@@ -877,6 +893,20 @@ impl ReaderLoopState {
         // sees `exited` also sees `exited_at`.
         let _ = self.exited_at.set(Instant::now());
         self.exited.store(true, Ordering::Release);
+    }
+
+    /// End the read side because reading FAILED, rather than because the child
+    /// closed it. The child may still be running; nothing here kills it, and the
+    /// teardown that follows this will. Recorded and logged at warning level
+    /// because it is a real fault with a real cost, and it used to leave nothing
+    /// behind but a debug line.
+    fn mark_dead_after_read_error(&self, err: &std::io::Error) {
+        let _ = self.read_error.set(err.to_string());
+        logger::warn(&format!(
+            "PTY read failed for {}: {err}. Treating the process as gone; its exit status will not be known.",
+            self.label,
+        ));
+        self.mark_eof();
     }
 
     fn scan_signals(
@@ -1118,6 +1148,7 @@ impl PtyClient {
         let writer_tx = writer.sender();
         let exited = Arc::new(AtomicBool::new(false));
         let exited_at: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
+        let read_error: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
         let has_output = Arc::new(AtomicBool::new(false));
         let dirty = Arc::new(AtomicBool::new(true));
         let received_data = Arc::new(AtomicBool::new(false));
@@ -1132,6 +1163,8 @@ impl PtyClient {
             writer_tx,
             exited: Arc::clone(&exited),
             exited_at: Arc::clone(&exited_at),
+            read_error: Arc::clone(&read_error),
+            label: format!("\"{command}\" in {}", cwd.display()),
             has_output: Arc::clone(&has_output),
             dirty: Arc::clone(&dirty),
             received_data: Arc::clone(&received_data),
@@ -1154,6 +1187,7 @@ impl PtyClient {
             reaped: None,
             spawned_at: Instant::now(),
             exited,
+            read_error,
             exited_at,
             has_output,
             dirty,
@@ -1189,8 +1223,7 @@ impl PtyClient {
                     state.ingest(data);
                 }
                 Err(err) => {
-                    logger::debug(&format!("PTY reader error: {err}"));
-                    state.mark_eof();
+                    state.mark_dead_after_read_error(&err);
                     break;
                 }
             }
@@ -1587,6 +1620,14 @@ impl PtyClient {
     /// and keeps running reaches EOF and is never reapable at all.
     pub fn exited_at(&self) -> Option<Instant> {
         self.exited_at.get().copied()
+    }
+
+    /// The error that ended this PTY's read side, or `None` when it ended at a
+    /// clean end of input (or has not ended at all). What tells "the child
+    /// closed its end" apart from "dux could not read it any more", which the
+    /// exit status cannot: after a read error there usually is none.
+    pub fn read_error(&self) -> Option<&str> {
+        self.read_error.get().map(String::as_str)
     }
 
     /// How long this child ran, from the spawn to the FIRST end-of-run fact
@@ -4944,6 +4985,88 @@ mod tests {
         assert_eq!(
             resolve_term_from_parent(Some(OsStr::new("vt100"))),
             "xterm-256color"
+        );
+    }
+
+    /// A reader that fails on its first read, so the error path can be driven
+    /// without waiting for a real PTY to break.
+    struct FailingReader;
+
+    impl std::io::Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("input/output error"))
+        }
+    }
+
+    /// A reader already at end of input: the ordinary way a PTY's read side ends.
+    struct EofReader;
+
+    impl std::io::Read for EofReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    /// Build a reader-loop state around fresh flags, and hand back the flags the
+    /// loop is expected to publish.
+    #[allow(clippy::type_complexity)]
+    fn reader_loop_probe() -> (
+        ReaderLoopState,
+        Arc<AtomicBool>,
+        Arc<OnceLock<String>>,
+        std::sync::mpsc::Receiver<PtyWriteMsg>,
+    ) {
+        let exited = Arc::new(AtomicBool::new(false));
+        let read_error: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel(1);
+        let state = ReaderLoopState {
+            terminal: Arc::new(Mutex::new(TerminalState::new(24, 80, 100))),
+            writer_tx,
+            exited: Arc::clone(&exited),
+            exited_at: Arc::new(OnceLock::new()),
+            read_error: Arc::clone(&read_error),
+            label: "\"probe\" in /tmp".to_string(),
+            has_output: Arc::new(AtomicBool::new(false)),
+            dirty: Arc::new(AtomicBool::new(false)),
+            received_data: Arc::new(AtomicBool::new(false)),
+            subscribers: Arc::new(Mutex::new(Vec::new())),
+            attention_bell: Arc::new(AtomicBool::new(false)),
+            attention_notify: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(Mutex::new(None)),
+            passthrough: Arc::new(Mutex::new(VecDeque::new())),
+            track_agent_signals: true,
+        };
+        // The receiver is handed back so the writer channel is not hung up under
+        // the loop.
+        (state, exited, read_error, writer_rx)
+    }
+
+    /// A read error and a clean end of input both stop the reader and both mark
+    /// the PTY exited, but only one of them means the child closed its end. The
+    /// error is recorded so the exit can be reported honestly: after one there is
+    /// no exit status to report, and the process dux kills next may have been
+    /// perfectly healthy.
+    #[test]
+    fn a_read_error_is_recorded_apart_from_a_clean_end_of_input() {
+        let (state, exited, read_error, _writer_rx) = reader_loop_probe();
+        PtyClient::reader_loop(Box::new(FailingReader), state);
+        assert!(
+            exited.load(Ordering::Acquire),
+            "a failed read still ends the PTY's read side"
+        );
+        assert_eq!(
+            read_error.get().map(String::as_str),
+            Some("input/output error"),
+            "the error that ended the read side must be kept, not discarded"
+        );
+
+        let (state, exited, read_error, _writer_rx) = reader_loop_probe();
+        PtyClient::reader_loop(Box::new(EofReader), state);
+        assert!(exited.load(Ordering::Acquire));
+        assert_eq!(
+            read_error.get(),
+            None,
+            "an ordinary end of input is not an error and must not read as one"
         );
     }
 
