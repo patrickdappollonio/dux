@@ -2,12 +2,11 @@ import type * as React from "react"
 import { useLayoutEffect, useRef, useState } from "react"
 
 import { MobileActionCluster } from "@/components/MobileActionCluster"
-import { PaneMenu } from "@/components/PaneMenu"
+import { PaneMenu, type PaneMenuSubject } from "@/components/PaneMenu"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import { buildFlapShape } from "@/lib/flapShape"
 import { FLAP_FILL_VAR, registerFlapElement } from "@/lib/theaterFlight"
 import type { SelectedTarget } from "@/lib/store"
-import type { SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 // THE DOCKED FLAP: where the phone's pane actions live when theater is off.
@@ -17,9 +16,15 @@ import { cn } from "@/lib/utils"
 // strip is only on screen for an agent with two or more tabs, so a single-tab
 // agent (and anyone who hid the top bar) is the common case, and the flap takes
 // the colour of whichever one it is actually hanging from. The
-// header it came out of is now Back, the agent's identity across the whole
+// header it came out of is now Back, the pane's identity across the whole
 // remaining width, and the pull-request chip: on a phone the identity is the
 // thing worth reading and four buttons were eating it.
+//
+// EVERY PANE SCREEN HAS ONE, agent or terminal. A project or standalone
+// terminal has no changed-file count and no pull request, so its cluster is one
+// control shorter and its `⋯` opens the terminal's menu; everything else about
+// it (the band it hangs from, the silhouette measured off the cluster, the
+// flight into the pill) is the same component doing the same thing.
 //
 // It is dux's own chrome painted OVER the terminal, not part of the terminal,
 // so a press on it is never forwarded to the PTY. It sits outside the pane's
@@ -29,13 +34,17 @@ import { cn } from "@/lib/utils"
 // still gets to reach them.
 export function MobileActionFlap({
   target,
-  session,
+  subject,
   band,
   hidden = false,
 }: {
   target: SelectedTarget
-  /// The agent behind the pane, when there is one. Only the count needs it.
-  session: SessionView
+  /// WHAT THE PANE IS ABOUT, which decides the menu the `⋯` opens and whether
+  /// there is a changed-file count at all. An agent has one; a project or
+  /// standalone terminal has neither a count nor a pull request, so its flap is
+  /// three controls wide instead of four and the silhouette is measured from
+  /// whatever the cluster turns out to be.
+  subject: PaneMenuSubject
   /// What the flap is hanging from, which decides its body color: the tab
   /// strip's own composited tone, or the plain app background when the strip is
   /// not on screen (a single-tab agent, or a hidden top bar).
@@ -118,12 +127,12 @@ export function MobileActionFlap({
 
       <MobileActionCluster
         target={target}
-        sessionId={session.id}
+        sessionId={subject.kind === "agent" ? subject.session.id : undefined}
         theaterRef={theaterRef}
         // The one pane menu, which the floating pill opens too: the cluster
         // flies across the screen as one object, so its `⋯` cannot mean
         // something else once it lands.
-        ellipsis={<PaneMenu session={session} side="bottom" />}
+        ellipsis={<PaneMenu subject={subject} side="bottom" />}
       />
     </div>
   )

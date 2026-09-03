@@ -132,7 +132,7 @@ function labels() {
 
 describe("the phone's one pane menu", () => {
   it("carries the agent's own actions from the docked flap", async () => {
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     const items = labels()
     expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
@@ -187,7 +187,7 @@ describe("the phone's one pane menu", () => {
 
     cleanup()
     mockState = makeState(false)
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     expect(labels().some((t) => t?.includes("Leave theater mode"))).toBe(false)
   })
@@ -204,7 +204,7 @@ describe("the phone's one pane menu", () => {
     media = stubCoarsePointer()
     registerPaneInputGroup("s1", { surfaceSwitch: true, keysToggle: false })
     registerAttachCapability("s1", vi.fn())
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     const items = labels()
     expect(items[0]).toContain("Attach a file…")
@@ -228,7 +228,7 @@ describe("the phone's one pane menu", () => {
   // owns the other direction, and offering both here is how the two would
   // eventually disagree about which surface is live.
   it("has no INPUT group at all when the pane publishes nothing", async () => {
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     expect(screen.queryByText(PANE_INPUT_GROUP_LABEL)).toBeNull()
     expect(labels().some((t) => t?.includes("Attach a file…"))).toBe(false)
@@ -243,7 +243,7 @@ describe("the phone's one pane menu", () => {
 describe("the pane menu at the desktop header's anchor", () => {
   it("opens the whole agent menu, not a header-sized subset", async () => {
     registerPaneInputGroup("s1", { surfaceSwitch: true, keysToggle: false })
-    render(<PaneMenu session={session()} appearance="header" />)
+    render(<PaneMenu subject={{ kind: "agent", session: session() }} appearance="header" />)
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     const items = labels()
     expect(items.some((t) => t?.includes("Use virtual input"))).toBe(true)
@@ -256,20 +256,20 @@ describe("the pane menu at the desktop header's anchor", () => {
   it("names itself what every other anchor names itself", () => {
     // One name across the surfaces, so a screen reader and a voice command do
     // not have to learn which anchor is on screen.
-    render(<PaneMenu session={session()} appearance="header" />)
+    render(<PaneMenu subject={{ kind: "agent", session: session() }} appearance="header" />)
     expect(screen.getByLabelText(PANE_MENU_AGENT_LABEL)).toBeTruthy()
   })
 
   it("wears the header cluster's treatment, not the flap's circle", () => {
     // The cluster is one family (outline) at one height token; the flap and the
     // pill are each ONE rounded surface, where a bordered button reads as two.
-    render(<PaneMenu session={session()} appearance="header" />)
+    render(<PaneMenu subject={{ kind: "agent", session: session() }} appearance="header" />)
     const trigger = screen.getByLabelText(PANE_MENU_AGENT_LABEL)
     expect(trigger.className).toContain("size-8")
     expect(trigger.className).not.toContain("rounded-full")
 
     cleanup()
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     const clusterTrigger = screen.getByLabelText(PANE_MENU_AGENT_LABEL)
     expect(clusterTrigger.className).toContain("size-10")
     expect(clusterTrigger.className).toContain("rounded-full")

@@ -2,7 +2,7 @@ import { PanelRightOpen } from "lucide-react"
 
 import { AppMenu } from "@/components/AppMenu"
 import { MacroPopover } from "@/components/MacroPopover"
-import { PaneMenu } from "@/components/PaneMenu"
+import { PaneMenu, type PaneMenuSubject } from "@/components/PaneMenu"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { TheaterToggle } from "@/components/TheaterToggle"
@@ -23,7 +23,7 @@ import {
   showChangesPane,
   useDux,
 } from "@/lib/store"
-import { matchOwner } from "@/lib/terminalOwner"
+import { matchOwner, ownerSessionId } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import type { SessionView, TerminalView } from "@/lib/types"
 import {
@@ -215,6 +215,30 @@ export function InsetHeader() {
     )
   }
 
+  // WHAT THE PANE MENU IS ABOUT, decided the same way the chips above are: the
+  // agent when one is behind the pane, and the terminal itself when nothing is.
+  // A session-owned terminal takes the agent's menu because this whole header is
+  // that agent's; its own Close and editor entries stay one click away in its
+  // sidebar row.
+  // Read off the TARGET rather than off `selectedSessionId`, which can still
+  // name the agent a project terminal was reached from.
+  const terminalOwnerAgent = focusedTerminal
+    ? spine?.sessions.find(
+        (s) => s.id === ownerSessionId(focusedTerminal.owner),
+      )
+    : undefined
+  const paneSubject: PaneMenuSubject | null = focusedTerminal
+    ? terminalOwnerAgent
+      ? { kind: "agent", session: terminalOwnerAgent }
+      : {
+          kind: "terminal",
+          terminalId: focusedTerminal.terminalId,
+          owner: focusedTerminal.owner,
+        }
+    : session
+      ? { kind: "agent", session }
+      : null
+
   // The width the header must hold back on its right so that whatever sits just
   // before it lands on the terminal pane's RIGHT EDGE rather than the window's.
   // A percentage, mirrored from the panel group below (see the store), because
@@ -286,17 +310,20 @@ export function InsetHeader() {
       <TheaterToggle />
       {selectedTarget ? <MacroPopover target={selectedTarget} /> : null}
       {/* THE PANE'S TOP MENU on a computer, the twin of the phone flap's `⋯`.
-          It opens the WHOLE agent menu, the same body the sidebar row's `⋯`
-          opens, rather than a header-sized subset: a pane in front of you and
-          a row in a list are two anchors on one agent, and two menus about the
-          same agent are two things that can disagree. It sits with the pane's
-          own controls, on the pane's right edge, and not in the cog beside it,
-          because the cog's menu is the app's and this one is about one pane.
+          It opens the WHOLE menu, the same body the sidebar row's `⋯` opens,
+          rather than a header-sized subset: a pane in front of you and a row in
+          a list are two anchors on one thing, and two menus about it are two
+          things that can disagree. It sits with the pane's own controls, on the
+          pane's right edge, and not in the cog beside it, because the cog's
+          menu is the app's and this one is about one pane.
 
-          Only for an agent: a focused terminal's own menu arrives with the
-          terminal treatment. */}
-      {session && selectedTarget?.kind === "agent" ? (
-        <PaneMenu session={session} appearance="header" />
+          WHICH menu is the same question the header's own chips answer: an
+          agent's when there is an agent behind the pane (a session-owned
+          terminal included, whose whole header is that agent's), and the
+          terminal's own for a project or standalone terminal, which has no
+          agent to be about. */}
+      {paneSubject ? (
+        <PaneMenu subject={paneSubject} appearance="header" />
       ) : null}
 
       {/* The spacer IS the control cluster, rather than an empty box in front of

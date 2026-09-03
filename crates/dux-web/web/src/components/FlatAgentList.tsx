@@ -19,22 +19,18 @@ import {
   ChevronDown,
   ChevronRight,
   Ellipsis,
-  ExternalLink,
-  FileCode2,
   Folder,
   GitPullRequest,
   Plus,
   Search,
   SquarePlus,
   SquareTerminal,
-  X,
 } from "lucide-react"
 import type { CSSProperties, ReactNode } from "react"
 import { useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
-import { AgentPaneMenuBody } from "@/components/PaneMenu"
-import { PaneInputGroup } from "@/components/PaneInputGroup"
+import { PaneMenuBody } from "@/components/PaneMenu"
 import {
   quietTailManualChoice,
   setQuietTailManualChoice,
@@ -45,7 +41,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -91,7 +86,6 @@ import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import { launcherVerb } from "@/lib/launcherVerb"
 import { partitionProjects } from "@/lib/projects"
 import { moveItem, ordersMatch, reorderById } from "@/lib/reorder"
-import { editorRootForTarget } from "@/lib/editorRoot"
 import {
   sessionLabel,
   workspaceLocation,
@@ -100,9 +94,6 @@ import {
   agentSortValue,
   createStandaloneTerminal,
   openAddProject,
-  openDeleteTerminal,
-  openEditor,
-  standaloneEditorHash,
   openNewAgentPicker,
   reorderAgents,
   reorderTerminals,
@@ -469,7 +460,7 @@ function AgentFlatRow({
               the group holds is the pane's own published answer, not something
               this anchor decides. */}
           <DropdownMenuContent side="right" align="start">
-            <AgentPaneMenuBody session={session} />
+            <PaneMenuBody subject={{ kind: "agent", session }} />
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -533,15 +524,6 @@ function TerminalFlatRow({
   // distance keeps a plain click as a select; touch arms on a hold, see
   // lib/dragActivation.ts), and the wrapper carries the Y-locked transform so
   // a row never flies out of the column.
-
-  // Where this row's two editor entries point. A session-owned terminal
-  // resolves to its AGENT's root, which is what keeps one worktree from
-  // sprouting a second, git-blind editor beside the agent's.
-  const editorRoot = editorRootForTarget({
-    kind: "terminal",
-    terminalId: terminal.id,
-    owner,
-  })
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: terminal.id })
@@ -627,51 +609,15 @@ function TerminalFlatRow({
             <Ellipsis />
           </DropdownMenuTrigger>
         </div>
-        {/* Streaming the terminal is the row's own click, so it is deliberately
-            not repeated here (a menu duplicate, "Stream", was removed as
-            misleading). What the menu carries is everything else: the two
-            editor entries, matching the agent row's pair exactly, "Attach a
-            file…", which is an action on the terminal's live PANE rather than
-            on the terminal (hence only while that pane is mounted and owns its
-            input), and Close, which stays in the menu rather than becoming an
-            inline X so the destructive action keeps its confirm flow and its
-            misclick-safe reveal-on-hover treatment. */}
+        {/* THE PANE'S ONE MENU, at the row's anchor: the same body the desktop
+            pane header's `⋯` and the phone flap's open for this terminal, so a
+            terminal's menu is one menu learned once. Its INPUT group is still
+            one home at a time, because what the group holds is the pane's own
+            published answer rather than something this anchor decides. */}
         <DropdownMenuContent side="right" align="start">
-          {/* The pane's INPUT group, first, exactly as the agent row's menu
-              carries it: a terminal is one PTY, so one id answers, and this row
-              menu is the desktop's permanent home for the way back to the
-              virtual input once typing directly has taken the bottom bar. It
-              carries "Attach a file…" too, which used to be a hand-rolled item
-              further down this same menu. */}
-          <PaneInputGroup ptyIds={[terminal.id]} />
-          {/* The editor's root is the directory this terminal was SPAWNED in,
-              and a terminal owned by an agent is sent to that agent's editor
-              instead: same worktree, and the agent's editor is the one with the
-              git surface. `editorRootForTarget` is what decides that. */}
-          <DropdownMenuItem
-            className="max-md:hidden"
-            onClick={() => openEditor(editorRoot)}
-          >
-            <FileCode2 />
-            Open editor here
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            render={
-              <a
-                href={standaloneEditorHash(editorRoot)}
-                target="_blank"
-                rel="noopener"
-              />
-            }
-          >
-            <ExternalLink />
-            Open editor in new tab
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => openDeleteTerminal(terminal.id)}>
-            <X />
-            Close…
-          </DropdownMenuItem>
+          <PaneMenuBody
+            subject={{ kind: "terminal", terminalId: terminal.id, owner }}
+          />
         </DropdownMenuContent>
       </DropdownMenu>
     </div>

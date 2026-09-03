@@ -5,7 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { AppMenuBody } from "@/components/AppMenu"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { MobileActionCluster } from "@/components/MobileActionCluster"
-import { PaneMenu } from "@/components/PaneMenu"
+import { PaneMenu, type PaneMenuSubject } from "@/components/PaneMenu"
 import { PaneInputGroup } from "@/components/PaneInputGroup"
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
@@ -112,6 +112,15 @@ export function TheaterPill({
   // shells key the pane itself, so the pill reads the input menu of the pane it
   // is actually on rather than whichever one registered last.
   const paneId = target.kind === "agent" ? target.tabId : target.terminalId
+  // WHAT THE PHONE'S `⋯` IS ABOUT, resolved the same way the docked flap
+  // resolves it: the agent when there is one, otherwise the terminal on screen.
+  // A session-owned terminal is the agent's own screen, so it keeps the agent's
+  // menu, which is also what its identity, its count and its PR chip are about.
+  const paneSubject: PaneMenuSubject | null = session
+    ? { kind: "agent", session }
+    : target.kind === "terminal"
+      ? { kind: "terminal", terminalId: target.terminalId, owner: target.owner }
+      : null
   const mobile = variant === "mobile"
   const gripless = useFlightChoreography(boxRef, flight, drag.position)
   // WHILE IT IS FLYING HOME the flight owns the box's coordinates outright: it
@@ -226,12 +235,13 @@ export function TheaterPill({
           // THE SAME `⋯` THE FLAP CARRIES, by the same name: the cluster flew
           // here as one object, and a button that changed what it opens on
           // arrival would make the animation a lie. It is also the only way to
-          // the agent's own actions while the mode is on. A pane with no agent
-          // behind it has no such menu, and falls back to the app menu the way
-          // the desktop pill does.
+          // the pane's own actions while the mode is on, for a terminal exactly
+          // as for an agent. The app-menu fallback is for a pane that is
+          // neither, which the types say cannot happen and the surface should
+          // survive anyway.
           ellipsis={
-            session ? (
-              <PaneMenu session={session} side="top" />
+            paneSubject ? (
+              <PaneMenu subject={paneSubject} side="top" />
             ) : (
               <TheaterAppMenu paneId={paneId} />
             )

@@ -538,6 +538,88 @@ describe("InsetHeader standalone terminal chips", () => {
   })
 })
 
+// WHICH MENU THE PANE'S `⋯` OPENS is the same question the chips answer: what
+// is this header about? An agent behind the pane makes it the agent's, and a
+// terminal with no agent makes it the terminal's. The alternative, reading
+// `selectedSessionId`, still names the agent a project terminal was reached
+// from, and would have put an agent's Delete under a project terminal.
+describe("InsetHeader pane menu", () => {
+  it("opens the agent's menu for an agent pane", () => {
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    expect(screen.getByRole("button", { name: /session actions/i })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: /terminal actions/i })).toBeNull()
+  })
+
+  it("opens the agent's menu for that agent's own terminal", () => {
+    // The whole header is the agent's here (its project, its name, its
+    // assistant), so the menu is too; the terminal's own Close and editor
+    // entries stay one click away in its sidebar row.
+    const base = stateFor("main", "main")
+    mockState = {
+      ...base,
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "t1",
+        owner: { kind: "session", sessionId: "s1" },
+      },
+      spine: {
+        ...base.spine,
+        terminals: [
+          {
+            id: "t1",
+            owner: { kind: "session", session_id: "s1" },
+            label: "Terminal 1",
+            has_output: true,
+            foreground_cmd: null,
+          },
+        ],
+      },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    expect(screen.getByRole("button", { name: /session actions/i })).toBeTruthy()
+  })
+
+  it("opens the terminal's own menu for a project terminal, even with an agent still selected", () => {
+    const base = stateFor("main", "main")
+    mockState = {
+      ...base,
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "pt-1",
+        owner: { kind: "project", projectId: "p1" },
+      },
+      spine: {
+        ...base.spine,
+        terminals: [
+          {
+            id: "pt-1",
+            owner: { kind: "project", project_id: "p1" },
+            label: "Terminal 2",
+            has_output: true,
+            foreground_cmd: null,
+          },
+        ],
+      },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    expect(screen.getByRole("button", { name: /terminal actions/i })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: /session actions/i })).toBeNull()
+  })
+
+  it("renders no pane menu with nothing focused", () => {
+    mockState = {
+      selectedSessionId: null,
+      selectedTarget: null,
+      changesPanePercent: 26,
+      spine: { projects: [], sessions: [] },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    expect(screen.queryByRole("button", { name: /session actions/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /terminal actions/i })).toBeNull()
+  })
+})
+
 describe("InsetHeader show-Changes button", () => {
   // A reopen control inside the pane's own header menu unmounts with the
   // pane; this button is the always-there

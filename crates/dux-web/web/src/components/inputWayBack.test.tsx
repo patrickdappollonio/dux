@@ -51,7 +51,7 @@ function installStubs() {
 }
 installStubs()
 
-const { AgentPaneMenuBody } = await import("./PaneMenu")
+const { PaneMenuBody } = await import("./PaneMenu")
 const {
   DropdownMenu,
   DropdownMenuContent,
@@ -110,7 +110,16 @@ function makeState(): DuxState {
 // each SUBJECT, because a terminal's menu is a different body with the same
 // promise to keep.
 const SHELLS = {
-  agent: () => <AgentPaneMenuBody session={session()} />,
+  agent: () => <PaneMenuBody subject={{ kind: "agent", session: session() }} />,
+  terminal: () => (
+    <PaneMenuBody
+      subject={{
+        kind: "terminal",
+        terminalId: "s1",
+        owner: { kind: "standalone" },
+      }}
+    />
+  ),
 } as const
 
 async function openBody(body: React.ReactNode) {

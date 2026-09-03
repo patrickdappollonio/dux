@@ -1,11 +1,4 @@
-import {
-  ChevronLeft,
-  Ellipsis,
-  ExternalLink,
-  GitPullRequest,
-  Settings,
-  X,
-} from "lucide-react"
+import { ChevronLeft, GitPullRequest, Settings } from "lucide-react"
 import { Suspense, useState, type ReactElement, type ReactNode } from "react"
 
 import { AgentNotFound } from "@/components/AgentNotFound"
@@ -20,20 +13,11 @@ import { DormantTabCard } from "@/components/DormantTabCard"
 import { FlatAgentList } from "@/components/FlatAgentList"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
 import { MobileActionFlap } from "@/components/MobileActionFlap"
-import { MacroPopover } from "@/components/MacroPopover"
+import type { PaneMenuSubject } from "@/components/PaneMenu"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { TheaterChrome } from "@/components/TheaterChrome"
 import { TheaterPill } from "@/components/TheaterPill"
-import { TheaterToggle } from "@/components/TheaterToggle"
 import { Button } from "@/components/ui/button"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { PaneInputGroup } from "@/components/PaneInputGroup"
 import { useTheaterFlight } from "@/hooks/use-theater-flight"
 import { flapMounted, flapVisible, pillMounted } from "@/lib/theaterFlight"
 import {
@@ -45,16 +29,13 @@ import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
   navigateUp,
-  openDeleteTerminal,
   selectSession,
   selectTerminal,
-  standaloneEditorHash,
   useDux,
 } from "@/lib/store"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import type { AgentTabView, SessionView } from "@/lib/types"
-import { editorRootForTarget } from "@/lib/editorRoot"
 import { matchOwner } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import { cn } from "@/lib/utils"
@@ -127,9 +108,15 @@ function HomeScreen() {
 
 // The spoke for a terminal that is NOT session-owned: one identity crumb over
 // the shared terminal. Such a terminal has no agent, so it borrows none of the
-// agent screen's AGENT chrome (no changes chip, no agent actions menu) — but it
-// carries a ⋯ menu of its own, with the pane's shared INPUT group and
-// the terminal's one real action, Close….
+// agent screen's AGENT chrome: its flap carries no changed-file count and its
+// header no pull-request chip, because a terminal has neither.
+//
+// EVERYTHING ELSE IS THE AGENT SCREEN'S. The actions used to sit in this header
+// as three icon buttons, which is the idiom the agent screen left behind: they
+// hang off the band as the flap now, they fly into the floating pill on the way
+// into theater and back out of it on the way home, and the `⋯` opens the
+// terminal's own merged menu. The header keeps Back and the identity, which is
+// what the header tenet says a phone header is for.
 //
 // Shared by the project-owned and standalone screens, which differ only in what
 // the identity crumb says and in what has to exist for the screen to be valid;
@@ -155,6 +142,12 @@ function AgentlessTerminalScreen({
   // hid it too was a second flow for the same intent with no way back of its
   // own, and the two could disagree about what was on screen.
   const theater = duxState.theater
+  // The one phase both clusters are rendered from, exactly as the agent screen
+  // does it: the flap and the pill are rendered FROM it rather than each
+  // deciding for itself, so the handoff cannot land in the gap between them.
+  const flight = useTheaterFlight()
+  const target: SelectedTarget = { kind: "terminal", terminalId, owner }
+  const subject: PaneMenuSubject = { kind: "terminal", terminalId, owner }
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <TheaterChrome hidden={theater}>
@@ -177,77 +170,22 @@ function AgentlessTerminalScreen({
               {terminal ? terminalTitle(terminal, ownedTerminals) : "Terminal"}
             </span>
           </div>
-          {/* The macro quick-picker's mobile entry point, a header icon like
-              the agent screen's (a floating trigger over the PTY covered the
-              text under it). Theater takes it away with the header, the same
-              more-space trade the tab strip makes; leaving theater brings it
-              back. */}
-          <TheaterToggle size="mobile" />
-          <MacroPopover
-            variant="icon"
-            target={{ kind: "terminal", terminalId, owner }}
-          />
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-10 shrink-0"
-                  aria-label="Terminal actions"
-                />
-              }
-            >
-              <Ellipsis />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {/* The pane's INPUT group first, identical to the agent screen's
-                  menu: this header is the terminal screen's one permanent menu,
-                  so it is where the way back to the virtual input lives once
-                  typing directly has taken the bottom bar away. Then the
-                  terminal's one real action from its sidebar row menu: Close…,
-                  neutral color per the destructive convention (the … plus
-                  ConfirmDeleteTerminalDialog are the danger signal), routed
-                  through the same confirm target.
-
-                  No theater exit, for the same reason as the agent screen's
-                  header menu: this menu lives in the header theater takes away,
-                  so it is never on screen in the mode. The way out of the mode
-                  is the floating pill below, which is the only chrome this
-                  screen keeps once the header has gone. */}
-              <PaneInputGroup ptyIds={[terminalId]} />
-              {/* The new-tab editor entry only, matching the agent screen's
-                  menu: the in-app overlay is desktop-only, so its item would be
-                  a dead no-op here. A real anchor, so a long-press keeps its
-                  native open-in-new-tab. */}
-              <DropdownMenuItem
-                render={
-                  <a
-                    href={standaloneEditorHash(
-                      editorRootForTarget({
-                        kind: "terminal",
-                        terminalId,
-                        owner,
-                      }),
-                    )}
-                    target="_blank"
-                    rel="noopener"
-                  />
-                }
-              >
-                <ExternalLink />
-                Open editor in new tab
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => openDeleteTerminal(terminalId)}>
-                <X />
-                Close…
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
         </header>
       </TheaterChrome>
       <div className="relative min-h-0 flex-1">
+        {/* The flap is a SIBLING of the pane, not part of its overlay: the
+            overlay is withheld while a full-pane cover owns the terminal, and
+            these are the only controls the phone has left. The band is always
+            "plain" here: only an agent can have a tab strip, so there is never
+            a strip for this flap to hang from. */}
+        {flapMounted(flight) ? (
+          <MobileActionFlap
+            target={target}
+            subject={subject}
+            band="plain"
+            hidden={!flapVisible(flight)}
+          />
+        ) : null}
         <ChunkBoundary>
           <Suspense fallback={null}>
             <LazyTerminalPane
@@ -256,21 +194,18 @@ function AgentlessTerminalScreen({
               id={terminalId}
               owner={owner}
               // THE ONLY CHROME LEFT IN THEATER, and the reason this screen has
-              // one at all. Everything else here lives in the header, which the
-              // mode takes away: without the pill, entering theater on a
-              // project or standalone terminal leaves nothing on screen that
-              // can leave it again. It carries the way out, the pane's INPUT
-              // group and the app menu, exactly as the desktop pane's does.
-              //
-              // No flight, for the same reason the desktop's has none: the
-              // cluster flies between a docked flap and the pill, and this
-              // screen has no flap for it to come from.
+              // one at all: everything else lives in the header and the flap's
+              // dock, which the mode takes away. It is the flap's own cluster
+              // in the air, carrying the terminal's menu rather than the
+              // agent's, and it FLIES now that there is a dock to leave from
+              // and land back on.
               overlay={
-                theater ? (
+                pillMounted(flight) ? (
                   <TheaterPill
-                    target={{ kind: "terminal", terminalId, owner }}
+                    target={target}
                     session={undefined}
                     variant="mobile"
+                    flight={flight}
                   />
                 ) : null
               }
@@ -582,7 +517,7 @@ function TerminalScreen() {
         {flapMounted(flight) ? (
           <MobileActionFlap
             target={selectedTarget}
-            session={session}
+            subject={{ kind: "agent", session }}
             band={stripShown ? "strip" : "plain"}
             hidden={!flapVisible(flight)}
           />

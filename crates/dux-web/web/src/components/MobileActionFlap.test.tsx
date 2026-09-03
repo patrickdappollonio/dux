@@ -136,7 +136,7 @@ afterEach(() => {
 
 describe("the docked action flap", () => {
   it("carries the four controls the header gave up, and nothing else", () => {
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     expect(screen.getByLabelText("Theater mode")).toBeTruthy()
     expect(screen.getByLabelText("Run a macro")).toBeTruthy()
     expect(screen.getByLabelText("3 changed files")).toBeTruthy()
@@ -144,14 +144,14 @@ describe("the docked action flap", () => {
   })
 
   it("prints the BARE count beside the diff glyph, which already draws the ±", () => {
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     const count = screen.getByTestId("mobile-changes-count")
     expect(count.textContent).toBe("3")
     expect(count.textContent).not.toContain("±")
   })
 
   it("keeps every control on the 40px touch floor", () => {
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     for (const label of ["Theater mode", "Run a macro", "Session actions"]) {
       expect(screen.getByLabelText(label).className).toContain("size-10")
     }
@@ -161,20 +161,20 @@ describe("the docked action flap", () => {
   })
 
   it("opens the changes screen from the count", () => {
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     fireEvent.click(screen.getByTestId("mobile-changes-count"))
     expect(openChangesScreenMock).toHaveBeenCalled()
   })
 
   it("asks the store for theater rather than toggling anything itself", () => {
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     fireEvent.click(screen.getByLabelText("Theater mode"))
     expect(toggleTheaterMock).toHaveBeenCalled()
   })
 
   it("stacks both theater icons so the flight has something to morph between", () => {
     const { container } = render(
-      <MobileActionFlap target={target} session={session()} band="strip" />,
+      <MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />,
     )
     expect(container.querySelector(".dux-ic-max")).not.toBeNull()
     expect(container.querySelector(".dux-ic-min")).not.toBeNull()
@@ -182,7 +182,7 @@ describe("the docked action flap", () => {
 
   it("draws no silhouette until it has been measured", () => {
     const { container } = render(
-      <MobileActionFlap target={target} session={session()} band="strip" />,
+      <MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />,
     )
     expect(container.querySelector("svg path[stroke]")).toBeNull()
   })
@@ -190,7 +190,7 @@ describe("the docked action flap", () => {
   it("generates the silhouette from its own measured box", () => {
     stubBox(196, 50)
     const { container } = render(
-      <MobileActionFlap target={target} session={session()} band="strip" />,
+      <MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />,
     )
     const svg = container.querySelector("svg[viewBox]") as SVGSVGElement | null
     expect(svg).not.toBeNull()
@@ -204,7 +204,7 @@ describe("the docked action flap", () => {
 
   it("takes the band's own color, and the plain background with no band", () => {
     const strip = render(
-      <MobileActionFlap target={target} session={session()} band="strip" />,
+      <MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />,
     )
     expect(
       (strip.getByTestId("mobile-action-flap") as HTMLElement).style.getPropertyValue(
@@ -213,7 +213,7 @@ describe("the docked action flap", () => {
     ).toBe("var(--dux-flap-bg)")
     cleanup()
     const plain = render(
-      <MobileActionFlap target={target} session={session()} band="plain" />,
+      <MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="plain" />,
     )
     expect(
       (plain.getByTestId("mobile-action-flap") as HTMLElement).style.getPropertyValue(
@@ -223,7 +223,7 @@ describe("the docked action flap", () => {
   })
 
   it("paints over the chrome stack, so it can interrupt the band's hairline", () => {
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     const box = screen.getByTestId("mobile-action-flap")
     expect(box.className).toContain("-top-px")
     expect(box.className).toContain("z-30")
@@ -235,7 +235,7 @@ describe("the docked action flap", () => {
     // reaching the session's actions is exactly that state. Neither the pane's
     // root nor the shell's column starts a stacking context, so the two levels
     // are compared directly and the later element in the document wins a tie.
-    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     const flapZ = zLevel(screen.getByTestId("mobile-action-flap").className)
     const pane = readFileSync("src/components/TerminalPane.tsx", "utf8")
     const covers = [...pane.matchAll(/absolute inset-0 z-(\d+)/g)].map((m) =>
@@ -243,5 +243,65 @@ describe("the docked action flap", () => {
     )
     expect(covers.length).toBeGreaterThan(0)
     for (const cover of covers) expect(flapZ).toBeGreaterThan(cover)
+  })
+})
+
+// THE SAME FLAP OVER A TERMINAL. One component, parameterized by what the pane
+// is about: a project or standalone terminal has no changed-file summary, so
+// the cluster is three controls instead of four and the silhouette is measured
+// off whatever that turns out to be rather than off a fixed path.
+describe("the docked action flap over a terminal", () => {
+  const terminalTarget = {
+    kind: "terminal" as const,
+    terminalId: "t1",
+    owner: { kind: "standalone" as const },
+  }
+  const terminalSubject = {
+    kind: "terminal" as const,
+    terminalId: "t1",
+    owner: { kind: "standalone" as const },
+  }
+
+  it("carries the pane's controls with no count at all", () => {
+    render(
+      <MobileActionFlap
+        target={terminalTarget}
+        subject={terminalSubject}
+        band="plain"
+      />,
+    )
+    expect(screen.getByLabelText("Theater mode")).toBeTruthy()
+    expect(screen.getByLabelText("Run a macro")).toBeTruthy()
+    expect(screen.getByLabelText("Terminal actions")).toBeTruthy()
+    expect(screen.queryByTestId("mobile-changes-count")).toBeNull()
+  })
+
+  it("keeps every control on the 40px touch floor", () => {
+    render(
+      <MobileActionFlap
+        target={terminalTarget}
+        subject={terminalSubject}
+        band="plain"
+      />,
+    )
+    for (const label of ["Theater mode", "Run a macro", "Terminal actions"]) {
+      expect(screen.getByLabelText(label).className).toContain("size-10")
+    }
+  })
+
+  it("measures its silhouette off its own narrower box", () => {
+    stubBox(150, 50)
+    const { container } = render(
+      <MobileActionFlap
+        target={terminalTarget}
+        subject={terminalSubject}
+        band="plain"
+      />,
+    )
+    const svg = container.querySelector("svg[viewBox]") as SVGSVGElement | null
+    // 150 body plus the same fillet and overhang on each side the agent's flap
+    // gets: the shape follows the cluster, which is the whole reason it is
+    // generated rather than drawn once.
+    expect(svg?.getAttribute("viewBox")).toBe("0 0 180 53")
   })
 })

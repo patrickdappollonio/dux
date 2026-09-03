@@ -356,15 +356,50 @@ describe("MobileShell standalone terminals", () => {
     // toggle reads as the exit while the mode is on.
     const exit = screen.getByLabelText("Leave theater mode")
     expect(pill.contains(exit)).toBe(true)
-    // And the header really is gone, which is what makes the pill the only
-    // control left.
-    expect(screen.queryByLabelText("Terminal actions")).toBeNull()
+    // And the header really is gone, along with the flap's dock, which is what
+    // makes the pill the only chrome left. The terminal's own menu travelled
+    // with the cluster rather than leaving with the header.
+    expect(screen.queryByLabelText("Back")).toBeNull()
+    expect(screen.queryByTestId("mobile-action-flap")).toBeNull()
+    expect(pill.contains(screen.getByLabelText("Terminal actions"))).toBe(true)
   })
 
   it("floats no pill over an agentless terminal outside theater", () => {
     mockState = standaloneState()
     render(<MobileShell />)
     expect(screen.queryByTestId("theater-pill")).toBeNull()
+  })
+
+  // THE FLAP, NOT THE OLD HEADER BUTTONS. The agent screen moved its actions
+  // out of the header years of commits ago; a terminal screen keeping three
+  // icon buttons up there was the last place the two idioms disagreed.
+  it("hangs the flap off the band and leaves the header to Back and identity", () => {
+    mockState = standaloneState()
+    render(<MobileShell />)
+    const flap = screen.getByTestId("mobile-action-flap")
+    // The pane's controls, all of them, inside the flap.
+    for (const name of ["Theater mode", "Run a macro", "Terminal actions"]) {
+      expect(flap.contains(screen.getByLabelText(name))).toBe(true)
+    }
+    // NO COUNT AND NO PR CHIP: a terminal has neither a changed-file summary
+    // nor a pull request, so the cluster is one control shorter here.
+    expect(screen.queryByTestId("mobile-changes-count")).toBeNull()
+    // The header keeps what a phone header is for.
+    expect(screen.getByLabelText("Back")).toBeTruthy()
+  })
+
+  it("opens the terminal's own menu from the flap, not an agent's", async () => {
+    mockState = standaloneState()
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Terminal actions"))
+    await screen.findByRole("menu")
+    const items = screen.getAllByRole("menuitem").map((el) => el.textContent)
+    expect(items.some((t) => t?.includes("Close…"))).toBe(true)
+    expect(items.some((t) => t?.includes("Open editor in new tab"))).toBe(true)
+    // The same merged body every other anchor opens, Settings drill and all.
+    expect(items.some((t) => t?.includes("Settings"))).toBe(true)
+    // And nothing about an agent, because there is none behind this pane.
+    expect(items.some((t) => t?.includes("Rename agent…"))).toBe(false)
   })
 })
 
