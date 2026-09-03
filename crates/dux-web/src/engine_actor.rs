@@ -162,6 +162,14 @@ pub enum EngineRequest {
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
+    /// What the delete dialog needs in order to ask git about the branch it is
+    /// offering to remove (instant lookup; the `rev-list` runs off-thread in
+    /// the handler). `None` for a standalone agent, which has no branch, and
+    /// for an orphaned session, whose project record is gone.
+    SessionBranchDeleteInputs(
+        String,
+        oneshot::Sender<Option<dux_core::engine::BranchDeleteInputs>>,
+    ),
     /// What git dux may do for one agent, in ONE round trip: the directory, and
     /// whether the changes panel works and the branch features exist there.
     /// Asking those separately would let a caller act on half an answer.
@@ -1266,6 +1274,23 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// See [`EngineRequest::SessionBranchDeleteInputs`].
+    pub async fn session_branch_delete_inputs(
+        &self,
+        session_id: String,
+    ) -> Option<dux_core::engine::BranchDeleteInputs> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::SessionBranchDeleteInputs(session_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn session_worktree(&self, session_id: String) -> Option<String> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -1831,6 +1856,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::TabSession(..)
         | EngineRequest::SlotTabId(..)
         | EngineRequest::SessionWorktree(..)
+        | EngineRequest::SessionBranchDeleteInputs(..)
         | EngineRequest::SessionGitAccess(..)
         | EngineRequest::PtyKeyForPaneId(..)
         | EngineRequest::FileDropDestination(..)
@@ -3556,6 +3582,9 @@ fn handle_request(
                 .find(|s| s.id == session_id)
                 .map(|s| s.directory().to_string());
             let _ = reply.send(worktree);
+        }
+        EngineRequest::SessionBranchDeleteInputs(session_id, reply) => {
+            let _ = reply.send(engine.branch_delete_inputs(&session_id));
         }
         EngineRequest::SessionGitAccess(session_id, reply) => {
             // Refresh first: the probe is off-thread, so this call answers with
@@ -6423,6 +6452,11 @@ mod tests {
                 false,
             ),
             (
+                "SessionBranchDeleteInputs",
+                EngineRequest::SessionBranchDeleteInputs("s1".into(), dead_reply()),
+                false,
+            ),
+            (
                 "PtyKeyForPaneId",
                 EngineRequest::PtyKeyForPaneId("s1".into(), dead_reply()),
                 false,
@@ -6623,7 +6657,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            42,
+            43,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

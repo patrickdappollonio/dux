@@ -1918,10 +1918,12 @@ impl App {
         &mut self,
         session_id: &str,
         delete_worktree: bool,
+        delete_branch: Option<bool>,
     ) -> Result<()> {
         let reaction = self.engine.apply(Command::DoDeleteSession {
             session_id: session_id.to_string(),
             delete_worktree,
+            delete_branch,
         })?;
         self.apply_reaction(reaction);
         Ok(())
@@ -2048,10 +2050,16 @@ impl App {
         )
     }
 
-    pub(crate) fn begin_delete_session(&mut self, session_id: &str, delete_worktree: bool) {
+    pub(crate) fn begin_delete_session(
+        &mut self,
+        session_id: &str,
+        delete_worktree: bool,
+        delete_branch: Option<bool>,
+    ) {
         match self.engine.apply(Command::BeginDeleteSession {
             session_id: session_id.to_string(),
             delete_worktree,
+            delete_branch,
         }) {
             Ok(reaction) => self.apply_reaction(reaction),
             Err(e) => self.set_error(format!("{e:#}")),
@@ -6234,7 +6242,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.do_delete_session("s1", false)
+        app.do_delete_session("s1", false, None)
             .expect("delete should succeed without touching git");
 
         assert!(
@@ -6271,7 +6279,7 @@ mod tests {
         app.selected_left = 1;
         assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s2"));
 
-        app.do_delete_session("s2", false).expect("delete s2");
+        app.do_delete_session("s2", false, None).expect("delete s2");
 
         // The cursor stays at display index 1, which now holds s3 (the row that
         // slid up), NOT s1 (which a decrement would have selected).
@@ -6304,7 +6312,7 @@ mod tests {
         app.selected_left = 0;
         assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s1"));
 
-        app.do_delete_session("s2", false).expect("delete s2");
+        app.do_delete_session("s2", false, None).expect("delete s2");
 
         assert_eq!(
             app.selected_session().map(|s| s.id.as_str()),
@@ -6335,7 +6343,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
 
-        app.do_delete_session("s1", true)
+        app.do_delete_session("s1", true, None)
             .expect("delete should succeed without touching git for shared worktree");
 
         assert!(
@@ -6373,7 +6381,7 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
         let err = app
-            .do_delete_session("s1", true)
+            .do_delete_session("s1", true, None)
             .expect_err("git should fail against a non-git project dir");
         let msg = format!("{err:#}");
         assert!(
@@ -6409,7 +6417,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.begin_delete_session("s1", true);
+        app.begin_delete_session("s1", true, None);
 
         assert!(
             app.engine.sessions.iter().all(|s| s.id != "s1"),
@@ -6434,7 +6442,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.begin_delete_session("s1", false);
+        app.begin_delete_session("s1", false, None);
 
         assert!(
             app.engine.sessions.iter().all(|s| s.id != "s1"),
@@ -6516,7 +6524,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.begin_delete_session("s1", true);
+        app.begin_delete_session("s1", true, None);
 
         assert!(
             app.engine.pending_deletions.contains("s1"),
@@ -6540,7 +6548,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.begin_delete_session("s1", false);
+        app.begin_delete_session("s1", false, None);
 
         assert!(
             app.engine.pending_deletions.is_empty(),
@@ -6565,14 +6573,14 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.begin_delete_session("s1", true);
+        app.begin_delete_session("s1", true, None);
         assert_eq!(
             app.engine.pending_deletions.len(),
             1,
             "first call records pending"
         );
 
-        app.begin_delete_session("s1", true);
+        app.begin_delete_session("s1", true, None);
         assert_eq!(
             app.engine.pending_deletions.len(),
             1,
@@ -7085,7 +7093,9 @@ mod tests {
             outcome,
             WorktreeRemoval::Performed {
                 branches: dux_core::engine::RemovedBranches::Kept(
-                    dux_core::model::BranchProvenance::AttachedExisting,
+                    dux_core::model::BranchKeptReason::NotDuxs(
+                        dux_core::model::BranchProvenance::AttachedExisting,
+                    ),
                 ),
             },
             true,
@@ -7118,7 +7128,9 @@ mod tests {
         let reaction = op
             .resolve(&TuiDeleteOutcome::SucceededPresent {
                 branches: dux_core::engine::RemovedBranches::Kept(
-                    dux_core::model::BranchProvenance::Adopted,
+                    dux_core::model::BranchKeptReason::NotDuxs(
+                        dux_core::model::BranchProvenance::Adopted,
+                    ),
                 ),
             })
             .into_reaction();

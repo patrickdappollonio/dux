@@ -114,6 +114,11 @@ pub struct DeferredWorktreeRemoval {
     /// standalone agent can construct a removal for the user's folder. That is
     /// the structural spelling of "dux never touches the folder".
     pub managed: crate::model::ManagedWorkspace,
+    /// The delete dialog's "also delete the branch" answer, captured when the
+    /// delete was requested. `None` for a caller with no dialog behind it,
+    /// which keeps the provenance default. See
+    /// [`crate::model::BranchProvenance::resolve_branch_deletion`].
+    pub delete_branch: Option<bool>,
     /// The Busy status message to show while the removal runs (set when the
     /// worker is finally spawned, after the PTY is reaped).
     pub busy_message: String,
@@ -3368,7 +3373,7 @@ mod tests {
             .providers
             .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
 
-        let outcome = engine.begin_delete_session("s1", true);
+        let outcome = engine.begin_delete_session("s1", true, None);
         assert!(
             matches!(outcome, BeginDeleteSessionOutcome::AsyncStarted { .. }),
             "a worktree-removing delete returns the deferred (AsyncStarted) outcome"
@@ -3418,7 +3423,7 @@ mod tests {
         engine.sessions.push(session);
         // No provider inserted: the agent already exited.
 
-        let outcome = engine.begin_delete_session("s1", true);
+        let outcome = engine.begin_delete_session("s1", true, None);
         assert!(matches!(
             outcome,
             BeginDeleteSessionOutcome::AsyncStarted { .. }
@@ -3643,7 +3648,7 @@ mod tests {
             .providers
             .insert(TabId::new("tab-2"), spawn_cat(worktree.path()));
 
-        let outcome = engine.begin_delete_session("s1", true);
+        let outcome = engine.begin_delete_session("s1", true, None);
         assert!(matches!(
             outcome,
             BeginDeleteSessionOutcome::AsyncStarted { .. }
@@ -3705,7 +3710,7 @@ mod tests {
             worktree_removal: None,
         });
 
-        let outcome = engine.begin_delete_session("s1", true);
+        let outcome = engine.begin_delete_session("s1", true, None);
         assert!(matches!(
             outcome,
             BeginDeleteSessionOutcome::AsyncStarted { .. }
@@ -3752,6 +3757,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             removal: DeferredWorktreeRemoval {
+                delete_branch: None,
                 session_id: "s1".to_string(),
                 project_path: "/tmp/p".to_string(),
                 managed: crate::model::ManagedWorkspace {

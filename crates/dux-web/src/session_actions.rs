@@ -16,7 +16,10 @@
 //! Routes:
 //! - `POST   /api/v1/sessions`                     — create (body discriminator:
 //!   `new` | `fork` | `from_worktree` | `from_pr`); `Idempotency-Key` honored.
-//! - `DELETE /api/v1/sessions/:id`                 — delete (`?delete_worktree=`).
+//! - `DELETE /api/v1/sessions/:id`                 — delete (`?delete_worktree=`,
+//!   `?delete_branch=`; an absent `delete_branch` keeps the provenance default).
+//! - `GET    /api/v1/sessions/:id/branch-unpushed` — the branch the delete dialog
+//!   would remove, and how many of its commits no remote-tracking ref reaches.
 //! - `PATCH  /api/v1/sessions/:id`                 — rename / change provider /
 //!   toggle auto-reopen (optional body fields).
 //! - `POST   /api/v1/sessions/:id/reconnect`       — relaunch (`{force}`).
@@ -88,6 +91,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/sessions/{id}",
             patch(patch_session).delete(delete_session),
+        )
+        .route(
+            "/api/v1/sessions/{id}/branch-unpushed",
+            axum::routing::get(session_branch_unpushed),
         )
         .route("/api/v1/sessions/{id}/reconnect", post(reconnect_session))
         .route(
@@ -399,6 +406,53 @@ struct CreatedRef {
     id: String,
 }
 
+// ── Branch risk (read) ───────────────────────────────────────────────────────
+
+/// What the delete dialog says about the branch it is offering to remove.
+#[derive(Serialize)]
+struct BranchUnpushedResponse {
+    /// The branch the answer is about, so the dialog and the count can never
+    /// name different branches.
+    branch: String,
+    /// Commits on that branch reachable from no remote-tracking ref, or `null`
+    /// when git could not answer (a branch that is already gone, a locked or
+    /// unreadable repository). The dialog then simply omits the sentence: it
+    /// warns about what it knows and never guesses a number.
+    unpushed_commits: Option<u32>,
+}
+
+/// How much work would be lost by ticking "also delete the branch".
+///
+/// A read, run off the reactor because it shells out to git. Answered only for
+/// a managed agent with a project behind it; a standalone agent has no branch
+/// and its dialog renders no checkbox, so there is nothing to ask.
+async fn session_branch_unpushed(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let Some(inputs) = state.engine.session_branch_delete_inputs(id).await else {
+        return unknown_session();
+    };
+    let branch = inputs.warned_branch().to_string();
+    let repo = std::path::PathBuf::from(&inputs.project_path);
+    let counted = {
+        let branch = branch.clone();
+        tokio::task::spawn_blocking(move || {
+            dux_core::git::unpushed_commit_count(&repo, &branch).ok()
+        })
+        .await
+        .unwrap_or(None)
+    };
+    axum::Json(BranchUnpushedResponse {
+        branch,
+        unpushed_commits: counted,
+    })
+    .into_response()
+}
+
 // ── Delete ───────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -408,6 +462,12 @@ struct DeleteQuery {
     /// query parameter never deletes user data.
     #[serde(default)]
     delete_worktree: bool,
+    /// The delete dialog's "also delete the branch" answer. Absent means nobody
+    /// was asked, which keeps the provenance default: dux deletes only the
+    /// branches it created. A caller that never learned about this parameter
+    /// therefore behaves exactly as it did before it existed.
+    #[serde(default)]
+    delete_branch: Option<bool>,
 }
 
 async fn delete_session(
@@ -429,6 +489,7 @@ async fn delete_session(
                 WireCommand::DeleteSession {
                     session_id: id,
                     delete_worktree: q.delete_worktree,
+                    delete_branch: q.delete_branch,
                 },
                 scope_from_headers(&headers, &state.connections),
             )

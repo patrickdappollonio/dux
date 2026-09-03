@@ -212,9 +212,34 @@ impl BranchProvenance {
         }
     }
 
-    /// Whether deleting this agent may delete its branches.
+    /// Whether deleting this agent may delete its branches **unasked**: the
+    /// answer for a caller with no dialog in front of it, and the state the
+    /// delete dialogs' "also delete the branch" checkbox starts in.
+    ///
+    /// It is no longer the last word. A user who ticks the box on a dialog
+    /// that named the branch and warned about it has answered the question
+    /// themselves, and [`BranchProvenance::resolve_branch_deletion`] is where
+    /// the two are folded together.
     pub fn dux_may_delete_branch(&self) -> bool {
         matches!(self, Self::CreatedByDux)
+    }
+
+    /// What a delete request actually does to this agent's branches, once the
+    /// user's own answer is folded into the provenance default.
+    ///
+    /// `requested` is the delete dialog's "also delete the branch" checkbox.
+    /// `None` means nobody was asked: the project-removal cascade, the create
+    /// rollback and factory reset all run with no dialog in front of them, and
+    /// they keep the provenance default exactly as they always have.
+    ///
+    /// `Some(true)` against a pre-existing branch is the ONE thing that deletes
+    /// a branch dux did not create from an agent delete. That is deliberate:
+    /// it is the same explicit act the worktree manager's checkbox already is,
+    /// made where the user is standing rather than only in a dialog they have
+    /// to go and find. `Some(false)` against a branch dux did create is the
+    /// mirror, and it is why the box is a real control rather than a label.
+    pub fn resolve_branch_deletion(self, requested: Option<bool>) -> bool {
+        requested.unwrap_or_else(|| self.dux_may_delete_branch())
     }
 
     /// Why this agent's pre-existing branch is not dux's to delete, as a
@@ -269,6 +294,51 @@ impl BranchProvenance {
                  Delete it yourself with git branch -D \"{branch_name}\" if you no longer need it.",
                 self.kept_reason()
             )
+        }
+    }
+}
+
+/// Why a worktree-removing delete left the agent's branches on disk.
+///
+/// Two genuinely different sentences, which is why this is not a bool: "that
+/// branch was never dux's to delete" and "you asked dux not to" are different
+/// facts, and only the first of them tells the user something they did not
+/// already know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchKeptReason {
+    /// The branch predates the agent and nobody overrode that, so the
+    /// provenance default stood. Carries the provenance so the sentence can
+    /// say which kind of "predates" it was.
+    NotDuxs(BranchProvenance),
+    /// The delete dialog offered to remove the branch and the user left the
+    /// box unticked. Reachable for a branch dux created too, which is exactly
+    /// the case the provenance sentence cannot describe.
+    UserDeclined,
+}
+
+impl BranchKeptReason {
+    /// The sentence(s) naming every branch the removal kept, with its reason.
+    /// See [`BranchProvenance::kept_branches_note`] for the drift rule.
+    pub fn kept_branches_note(&self, branch_name: &str, initial_branch: &str) -> String {
+        match self {
+            Self::NotDuxs(provenance) => provenance.kept_branches_note(branch_name, initial_branch),
+            Self::UserDeclined => {
+                let drifted = !initial_branch.is_empty() && initial_branch != branch_name;
+                if drifted {
+                    format!(
+                        "Its branches \"{branch_name}\" and \"{initial_branch}\" were kept \
+                         because you left the branch box unticked. Delete either yourself with \
+                         git branch -D \"{branch_name}\" or git branch -D \"{initial_branch}\" \
+                         if you no longer need them."
+                    )
+                } else {
+                    format!(
+                        "Its branch \"{branch_name}\" was kept because you left the branch box \
+                         unticked. Delete it yourself with git branch -D \"{branch_name}\" if \
+                         you no longer need it."
+                    )
+                }
+            }
         }
     }
 }
@@ -1016,6 +1086,82 @@ mod tests {
             !note.contains("existed before this agent"),
             "and nothing this binary cannot know, got {note:?}"
         );
+    }
+
+    /// The delete dialogs' checkbox starts in the provenance default, and the
+    /// callers with no dialog behind them keep it.
+    #[test]
+    fn unanswered_branch_deletion_follows_the_provenance() {
+        for provenance in [
+            BranchProvenance::CreatedByDux,
+            BranchProvenance::AttachedExisting,
+            BranchProvenance::Adopted,
+            BranchProvenance::Unknown,
+        ] {
+            assert_eq!(
+                provenance.resolve_branch_deletion(None),
+                provenance.dux_may_delete_branch(),
+                "an unasked delete must behave exactly as it did before the checkbox existed, \
+                 for {provenance:?}"
+            );
+        }
+    }
+
+    /// The checkbox is a real control in both directions: it can spare a branch
+    /// dux created, and it is the only thing that removes one dux did not.
+    #[test]
+    fn an_answered_branch_deletion_wins_over_the_provenance() {
+        assert!(!BranchProvenance::CreatedByDux.resolve_branch_deletion(Some(false)));
+        assert!(BranchProvenance::CreatedByDux.resolve_branch_deletion(Some(true)));
+        for provenance in [
+            BranchProvenance::AttachedExisting,
+            BranchProvenance::Adopted,
+            BranchProvenance::Unknown,
+        ] {
+            assert!(
+                !provenance.resolve_branch_deletion(Some(false)),
+                "{provenance:?} unticked keeps the branch"
+            );
+            assert!(
+                provenance.resolve_branch_deletion(Some(true)),
+                "{provenance:?} ticked is the explicit override the dialog exists to offer"
+            );
+        }
+    }
+
+    /// "Not dux's branch" and "you said no" are different sentences, and the
+    /// second one must be available for a branch dux DID create.
+    #[test]
+    fn a_declined_branch_deletion_says_so_rather_than_blaming_the_provenance() {
+        let declined = BranchKeptReason::UserDeclined.kept_branches_note("feature", "feature");
+        assert!(
+            declined.contains("you left the branch box unticked"),
+            "got {declined:?}"
+        );
+        assert!(
+            !declined.contains("existed before this agent"),
+            "a branch dux created gets no provenance excuse, got {declined:?}"
+        );
+        assert!(
+            declined.contains("git branch -D \"feature\""),
+            "the branch outlives every dux surface, so the note names the way out, got {declined:?}"
+        );
+
+        let not_duxs = BranchKeptReason::NotDuxs(BranchProvenance::AttachedExisting)
+            .kept_branches_note("feature", "feature");
+        assert_eq!(
+            not_duxs,
+            BranchProvenance::AttachedExisting.kept_branches_note("feature", "feature"),
+            "the provenance sentence has one author"
+        );
+    }
+
+    /// A drifted agent keeps two branches, and the declined note must name both.
+    #[test]
+    fn a_declined_branch_deletion_names_both_branches_after_drift() {
+        let note = BranchKeptReason::UserDeclined.kept_branches_note("moved-to", "born-on");
+        assert!(note.contains("moved-to"), "got {note:?}");
+        assert!(note.contains("born-on"), "got {note:?}");
     }
 
     fn folder_session(title: Option<&str>, folder_path: &str) -> AgentSession {

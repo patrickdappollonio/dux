@@ -567,10 +567,68 @@ pub enum ProjectPersistenceView {
 pub enum RemovedBranches {
     /// dux deleted the branches it owned; git's per-branch report.
     Deleted(crate::git::RemoveResult),
-    /// Nothing was deleted. The branches predate dux's ownership, so the
-    /// worktree went and both branches stayed. Carries the provenance so the
-    /// message can say WHY they were kept.
-    Kept(crate::model::BranchProvenance),
+    /// Nothing was deleted: the worktree went and both branches stayed.
+    /// Carries WHY, because the two reasons say different things to the user
+    /// (see [`crate::model::BranchKeptReason`]).
+    Kept(crate::model::BranchKeptReason),
+}
+
+/// What a delete dialog needs in order to ask git about the branch it is
+/// offering to remove.
+///
+/// Only a MANAGED agent can produce one, which is the same structural spelling
+/// as [`crate::engine::DeferredWorktreeRemoval`]: a standalone agent has no
+/// branch, so there is nothing here to compute a count for and no checkbox to
+/// render.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchDeleteInputs {
+    /// The repository to run git in. The agent's project may be gone (an
+    /// orphaned session), in which case there is no repository to ask.
+    pub project_path: String,
+    /// The branch the agent is on now.
+    pub branch_name: String,
+    /// The branch the agent was born on, empty when it was never recorded.
+    pub initial_branch: String,
+    pub branch_provenance: crate::model::BranchProvenance,
+}
+
+impl BranchDeleteInputs {
+    /// The branch the dialog names and counts commits on: the one the agent was
+    /// BORN on, which is the one whose provenance the warning is about. A
+    /// drifted agent's current branch was created inside the worktree, so it is
+    /// not the branch a user is at risk of losing work on.
+    pub fn warned_branch(&self) -> &str {
+        if self.initial_branch.is_empty() {
+            &self.branch_name
+        } else {
+            &self.initial_branch
+        }
+    }
+}
+
+/// Why a removal that kept the branches kept them, given the provenance and
+/// the delete dialog's answer.
+///
+/// One function so the synchronous and deferred removal paths cannot word the
+/// same outcome differently. It is only ever called on the keeping arm, so
+/// "the user said yes" cannot reach it.
+///
+/// The provenance sentence WINS whenever it is true, and "you left the box
+/// unticked" is reserved for the one case it cannot describe: a branch dux
+/// created, which would have gone unasked, spared because the user unticked
+/// the box. Unticking the box on a pre-existing branch leaves it at its default,
+/// and telling that user their own click is why `develop` survived would be
+/// both less informative and slightly untrue.
+pub(crate) fn branch_kept_reason(
+    provenance: crate::model::BranchProvenance,
+    delete_branch: Option<bool>,
+) -> crate::model::BranchKeptReason {
+    match delete_branch {
+        Some(false) if provenance.dux_may_delete_branch() => {
+            crate::model::BranchKeptReason::UserDeclined
+        }
+        _ => crate::model::BranchKeptReason::NotDuxs(provenance),
+    }
 }
 
 /// The refusal for a delete that asked dux to remove a standalone agent's
@@ -1406,6 +1464,29 @@ impl Engine {
         })
     }
 
+    /// What the delete dialog needs to ask git about this agent's branch, or
+    /// `None` when there is nothing to ask: a standalone agent (no branch), or
+    /// an orphaned session whose project record is gone (no repository to run
+    /// git in).
+    ///
+    /// Lives in the engine rather than in either surface because both dialogs
+    /// ask the same question, and the answer has to be assembled from the
+    /// session and its project together.
+    pub fn branch_delete_inputs(&self, session_id: &str) -> Option<BranchDeleteInputs> {
+        let session = self.sessions.iter().find(|s| s.id == session_id)?;
+        let managed = session.workspace.as_managed()?;
+        let project = self
+            .projects
+            .iter()
+            .find(|project| project.id == managed.project_id)?;
+        Some(BranchDeleteInputs {
+            project_path: project.path.clone(),
+            branch_name: managed.branch_name.clone(),
+            initial_branch: managed.initial_branch.clone(),
+            branch_provenance: managed.branch_provenance,
+        })
+    }
+
     /// Synchronous engine half of "delete this session" — looks up the session
     /// and project, optionally calls `git::remove_worktree`, then runs the full
     /// `finish_delete_session` cascade.
@@ -1427,6 +1508,7 @@ impl Engine {
         &mut self,
         session_id: &str,
         delete_worktree: bool,
+        delete_branch: Option<bool>,
     ) -> anyhow::Result<Option<DoDeleteSessionOutcome>> {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
             return Ok(None);
@@ -1534,13 +1616,19 @@ impl Engine {
             // survives an `Err` (the `?` aborts the delete), and unlike the async
             // `WorktreeRemoveCompleted` handler nothing else would clear the flag,
             // leaving the agent permanently barred from creating/relaunching tabs.
-            // THE GATE. dux deletes the branches it created and only those.
-            // An agent attached to `develop`, or adopted with an existing
-            // worktree, gives up its worktree and keeps its branches: they were
-            // the user's before the agent existed. Deciding it HERE means the
-            // project-delete cascade (which calls this per agent) inherits it,
-            // so removing a project can no longer take `develop` with it.
-            let result = if managed.branch_provenance.dux_may_delete_branch() {
+            // THE GATE. Unasked, dux deletes the branches it created and only
+            // those: an agent attached to `develop`, or adopted with an
+            // existing worktree, gives up its worktree and keeps its branches,
+            // because they were the user's before the agent existed. The delete
+            // dialog's checkbox is the one thing that overrides that, in either
+            // direction, and it arrives here as `delete_branch`. Deciding it
+            // HERE means the project-delete cascade (which calls this per agent
+            // with no answer) inherits the provenance default, so removing a
+            // project still cannot take `develop` with it.
+            let result = if managed
+                .branch_provenance
+                .resolve_branch_deletion(delete_branch)
+            {
                 match crate::git::remove_worktree(
                     std::path::Path::new(&project.path),
                     std::path::Path::new(&managed.worktree_path),
@@ -1561,7 +1649,10 @@ impl Engine {
                     std::path::Path::new(&project.path),
                     std::path::Path::new(&managed.worktree_path),
                 ) {
-                    Ok(()) => RemovedBranches::Kept(managed.branch_provenance),
+                    Ok(()) => RemovedBranches::Kept(branch_kept_reason(
+                        managed.branch_provenance,
+                        delete_branch,
+                    )),
                     Err(err) => {
                         self.closing_sessions.remove(session_id);
                         return Err(err);
@@ -1655,6 +1746,7 @@ impl Engine {
         &mut self,
         session_id: &str,
         delete_worktree: bool,
+        delete_branch: Option<bool>,
     ) -> BeginDeleteSessionOutcome {
         if self.pending_deletions.contains(session_id) {
             return BeginDeleteSessionOutcome::AlreadyInFlight;
@@ -1723,6 +1815,12 @@ impl Engine {
                 session_id: session.id.clone(),
                 project_path: project.path.clone(),
                 managed: managed.clone(),
+                // Resolved at REQUEST time, not at dispatch time. The removal
+                // runs seconds later, once the agent's PTYs reap, and the
+                // dialog that asked the question is long gone by then; carrying
+                // the raw answer with the payload is what makes the deferred
+                // path and the synchronous one decide the same thing.
+                delete_branch,
                 busy_message: format!(
                     "Removing worktree for agent \"{}\"\u{2026}",
                     session.display_label()
@@ -1783,6 +1881,7 @@ impl Engine {
             session_id,
             project_path,
             managed,
+            delete_branch,
             busy_message,
         } = req;
         let crate::model::ManagedWorkspace {
@@ -1827,9 +1926,10 @@ impl Engine {
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                // The same gate as the synchronous path: only branches dux
-                // created are dux's to delete.
-                if branch_provenance.dux_may_delete_branch() {
+                // The same gate as the synchronous path: unasked, only branches
+                // dux created are dux's to delete, and the delete dialog's
+                // answer overrides that in either direction.
+                if branch_provenance.resolve_branch_deletion(delete_branch) {
                     crate::git::remove_worktree(
                         std::path::Path::new(&project_path),
                         std::path::Path::new(&worktree_path),
@@ -1844,7 +1944,9 @@ impl Engine {
                         std::path::Path::new(&project_path),
                         std::path::Path::new(&worktree_path),
                     )
-                    .map(|()| RemovedBranches::Kept(branch_provenance))
+                    .map(|()| {
+                        RemovedBranches::Kept(branch_kept_reason(branch_provenance, delete_branch))
+                    })
                     .map_err(|e| format!("{e:#}"))
                 }
             }))
@@ -3334,7 +3436,7 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let result = engine.do_delete_session("s1", true);
+        let result = engine.do_delete_session("s1", true, None);
 
         assert!(
             result.is_err(),
@@ -3411,7 +3513,7 @@ mod tests {
         engine.sessions.push(session);
 
         let outcome = engine
-            .do_delete_session("s1", true)
+            .do_delete_session("s1", true, None)
             .unwrap()
             .expect("the delete should have run");
 
@@ -3523,14 +3625,16 @@ mod tests {
         engine.sessions.push(session);
 
         let outcome = engine
-            .do_delete_session("s1", true)
+            .do_delete_session("s1", true, None)
             .unwrap()
             .expect("the delete should have run");
 
         assert_eq!(
             outcome.removal,
             WorktreeRemoval::Performed {
-                branches: RemovedBranches::Kept(crate::model::BranchProvenance::AttachedExisting),
+                branches: RemovedBranches::Kept(crate::model::BranchKeptReason::NotDuxs(
+                    crate::model::BranchProvenance::AttachedExisting,
+                )),
             },
             "nothing was deleted, so the outcome must not carry a deletion report"
         );
@@ -3540,6 +3644,125 @@ mod tests {
             branches.contains("develop"),
             "a branch that existed before the agent must survive it: {branches}"
         );
+    }
+
+    /// The new capability: a ticked "also delete the branch" box removes a
+    /// branch that predates the agent. Nothing else in the app can do this once
+    /// the worktree is gone, which is why the box exists.
+    #[test]
+    fn a_ticked_branch_box_deletes_a_branch_that_predates_the_agent() {
+        let (mut engine, tmp) = test_engine();
+        let repo = repo_with_branches(tmp.path(), &["develop"]);
+        let worktree = attach_worktree(&repo, "develop");
+
+        engine
+            .projects
+            .push(sample_project("p1", repo.to_str().unwrap()));
+        let mut session = sample_session("s1", "p1", "develop");
+        {
+            let managed = session
+                .workspace
+                .as_managed_mut()
+                .expect("managed test session");
+            managed.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+            managed.worktree_path = worktree.to_str().unwrap().to_string();
+        }
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .do_delete_session("s1", true, Some(true))
+            .unwrap()
+            .expect("the delete should have run");
+
+        assert!(
+            matches!(
+                outcome.removal,
+                WorktreeRemoval::Performed {
+                    branches: RemovedBranches::Deleted(_),
+                }
+            ),
+            "an explicit yes must produce a deletion report, got {:?}",
+            outcome.removal
+        );
+        let branches = branch_list(&repo);
+        assert!(
+            !branches.contains("develop"),
+            "the user ticked the box that named this branch: {branches}"
+        );
+    }
+
+    /// The mirror, and the reason the box is a control rather than a label: it
+    /// spares a branch dux created and would otherwise have deleted unasked.
+    #[test]
+    fn an_unticked_branch_box_spares_a_branch_dux_created() {
+        let (mut engine, tmp) = test_engine();
+        let repo = repo_with_branches(tmp.path(), &["dux-made"]);
+        let worktree = attach_worktree(&repo, "dux-made");
+
+        engine
+            .projects
+            .push(sample_project("p1", repo.to_str().unwrap()));
+        let mut session = sample_session("s1", "p1", "dux-made");
+        {
+            let managed = session
+                .workspace
+                .as_managed_mut()
+                .expect("managed test session");
+            managed.branch_provenance = crate::model::BranchProvenance::CreatedByDux;
+            managed.worktree_path = worktree.to_str().unwrap().to_string();
+        }
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .do_delete_session("s1", true, Some(false))
+            .unwrap()
+            .expect("the delete should have run");
+
+        assert_eq!(
+            outcome.removal,
+            WorktreeRemoval::Performed {
+                branches: RemovedBranches::Kept(crate::model::BranchKeptReason::UserDeclined),
+            },
+            "the status line must say the user declined, not invent a provenance excuse"
+        );
+        assert!(!worktree.exists(), "the worktree must still be gone");
+        let branches = branch_list(&repo);
+        assert!(
+            branches.contains("dux-made"),
+            "the user unticked the box, so the branch stays: {branches}"
+        );
+    }
+
+    /// A standalone agent has no branch and no worktree, and the refusal for a
+    /// directory-removing delete stays loud whatever the branch box says. The
+    /// branch answer cannot smuggle a removal past it.
+    #[test]
+    fn a_branch_answer_does_not_soften_the_standalone_refusal() {
+        let (mut engine, tmp) = test_engine();
+        let folder = tmp.path().join("mine");
+        std::fs::create_dir_all(&folder).unwrap();
+        engine
+            .sessions
+            .push(crate::engine::test_support::sample_standalone_session(
+                "sa1",
+                folder.to_str().unwrap(),
+            ));
+
+        for answer in [None, Some(true), Some(false)] {
+            let Err(err) = engine.do_delete_session("sa1", true, answer) else {
+                panic!("a worktree-removing delete of a standalone agent must be refused");
+            };
+            assert!(
+                format!("{err:#}").contains("standalone agent"),
+                "the refusal must name what it is refusing, got {err:#}"
+            );
+            assert!(
+                folder.exists(),
+                "dux never removes a standalone agent's folder"
+            );
+        }
     }
 
     #[test]
@@ -3579,7 +3802,10 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine.do_delete_session("s1", true).unwrap().expect("ran");
+        let outcome = engine
+            .do_delete_session("s1", true, None)
+            .unwrap()
+            .expect("ran");
 
         let branches = branch_list(&repo);
         assert!(
@@ -3679,7 +3905,10 @@ mod tests {
         engine.sessions.push(first);
 
         // Delete WITHOUT the checkbox: worktree and branch stay, row goes.
-        engine.do_delete_session("s1", false).unwrap().expect("ran");
+        engine
+            .do_delete_session("s1", false, None)
+            .unwrap()
+            .expect("ran");
         assert!(worktree.exists());
 
         // Re-adopt the orphan.
@@ -3697,12 +3926,17 @@ mod tests {
         engine.session_store.upsert_session(&second).unwrap();
         engine.sessions.push(second);
 
-        let outcome = engine.do_delete_session("s2", true).unwrap().expect("ran");
+        let outcome = engine
+            .do_delete_session("s2", true, None)
+            .unwrap()
+            .expect("ran");
 
         assert_eq!(
             outcome.removal,
             WorktreeRemoval::Performed {
-                branches: RemovedBranches::Kept(crate::model::BranchProvenance::Adopted),
+                branches: RemovedBranches::Kept(crate::model::BranchKeptReason::NotDuxs(
+                    crate::model::BranchProvenance::Adopted,
+                )),
             }
         );
         let branches = branch_list(&repo);
@@ -4357,6 +4591,7 @@ mod tests {
 
         let message =
             engine.dispatch_deferred_worktree_removal(crate::engine::DeferredWorktreeRemoval {
+                delete_branch: None,
                 session_id: "s1".to_string(),
                 project_path: repo.to_string_lossy().to_string(),
                 managed: crate::model::ManagedWorkspace {
@@ -6094,7 +6329,7 @@ mod tests {
     fn begin_delete_session_already_in_flight_returns_already_in_flight() {
         let (mut engine, _tmp) = test_engine();
         engine.pending_deletions.insert("s1".to_string());
-        let outcome = engine.begin_delete_session("s1", true);
+        let outcome = engine.begin_delete_session("s1", true, None);
         assert!(matches!(
             outcome,
             BeginDeleteSessionOutcome::AlreadyInFlight
@@ -6104,7 +6339,7 @@ mod tests {
     #[test]
     fn begin_delete_session_unknown_id_returns_not_found() {
         let (mut engine, _tmp) = test_engine();
-        let outcome = engine.begin_delete_session("missing", true);
+        let outcome = engine.begin_delete_session("missing", true, None);
         assert!(matches!(outcome, BeginDeleteSessionOutcome::NotFound));
     }
 
@@ -6122,7 +6357,7 @@ mod tests {
         // in `providers`, so it is invisible to the live-tab check. Deleting must
         // refuse rather than race the worktree removal against the spawn.
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-1")));
-        let outcome = engine.begin_delete_session("s1", true);
+        let outcome = engine.begin_delete_session("s1", true, None);
         assert!(matches!(outcome, BeginDeleteSessionOutcome::TabLaunching));
     }
 
@@ -6136,7 +6371,7 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine.begin_delete_session("standalone", true);
+        let outcome = engine.begin_delete_session("standalone", true, None);
 
         assert!(matches!(
             outcome,
@@ -6164,7 +6399,7 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine.begin_delete_session("standalone", false);
+        let outcome = engine.begin_delete_session("standalone", false, None);
 
         assert!(matches!(
             outcome,
@@ -6184,7 +6419,7 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
         // delete_worktree=false → no git work needed → inline path
-        let outcome = engine.begin_delete_session("s1", false);
+        let outcome = engine.begin_delete_session("s1", false, None);
         assert!(matches!(
             outcome,
             BeginDeleteSessionOutcome::Inline {
@@ -6204,7 +6439,7 @@ mod tests {
         // Even requesting worktree removal, a missing project takes the inline
         // path (we cannot run git worktree remove without the repo) — NOT NotFound,
         // which would silently no-op the user's delete.
-        let outcome = engine.begin_delete_session("s1", true);
+        let outcome = engine.begin_delete_session("s1", true, None);
         assert!(matches!(outcome, BeginDeleteSessionOutcome::Inline { .. }));
     }
 
@@ -6346,7 +6581,7 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine.begin_delete_session("s1", false);
+        let outcome = engine.begin_delete_session("s1", false, None);
         match outcome {
             BeginDeleteSessionOutcome::Inline { removal } => {
                 assert_eq!(removal, WorktreeRemoval::PreservedOrphan);
@@ -6374,7 +6609,7 @@ mod tests {
         engine.sessions.push(a);
         engine.sessions.push(b);
 
-        let outcome = engine.begin_delete_session("s1", false);
+        let outcome = engine.begin_delete_session("s1", false, None);
         match outcome {
             BeginDeleteSessionOutcome::Inline { removal } => {
                 assert_eq!(removal, WorktreeRemoval::PreservedShared);
@@ -6404,7 +6639,7 @@ mod tests {
 
         // delete_worktree=true but a sibling shares the worktree → skipped,
         // so this stays on the inline path (no git removal needed).
-        let outcome = engine.begin_delete_session("s1", true);
+        let outcome = engine.begin_delete_session("s1", true, None);
         match outcome {
             BeginDeleteSessionOutcome::Inline { removal } => {
                 assert_eq!(removal, WorktreeRemoval::SkippedForSiblings);
@@ -6418,7 +6653,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         assert!(
             engine
-                .do_delete_session("missing", false)
+                .do_delete_session("missing", false, None)
                 .unwrap()
                 .is_none()
         );
@@ -6439,7 +6674,7 @@ mod tests {
         engine.pending_deletions.insert("s1".to_string());
 
         let outcome = engine
-            .do_delete_session("s1", true)
+            .do_delete_session("s1", true, None)
             .expect("soft-return does not error");
         assert!(
             outcome.is_none(),
@@ -6468,7 +6703,7 @@ mod tests {
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
 
         let outcome = engine
-            .do_delete_session("s1", true)
+            .do_delete_session("s1", true, None)
             .expect("soft-return does not error");
         assert!(
             outcome.is_none(),
@@ -6488,6 +6723,7 @@ mod tests {
         engine.pending_deletions.insert("s1".to_string());
         let reaction = engine
             .apply(crate::engine::Command::BeginDeleteSession {
+                delete_branch: None,
                 session_id: "s1".to_string(),
                 delete_worktree: true,
             })
@@ -6504,6 +6740,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let reaction = engine
             .apply(crate::engine::Command::BeginDeleteSession {
+                delete_branch: None,
                 session_id: "missing".to_string(),
                 delete_worktree: false,
             })
@@ -6520,6 +6757,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let reaction = engine
             .apply(crate::engine::Command::DoDeleteSession {
+                delete_branch: None,
                 session_id: "missing".to_string(),
                 delete_worktree: false,
             })
@@ -7543,6 +7781,7 @@ mod tests {
         let worktree = attach_worktree(&repo, "develop");
 
         engine.dispatch_deferred_worktree_removal(crate::engine::DeferredWorktreeRemoval {
+            delete_branch: None,
             session_id: "s1".to_string(),
             project_path: repo.to_string_lossy().to_string(),
             managed: crate::model::ManagedWorkspace {
@@ -7565,7 +7804,9 @@ mod tests {
             crate::worker::WorkerEvent::WorktreeRemoveCompleted { result, .. } => {
                 assert_eq!(
                     result.unwrap(),
-                    RemovedBranches::Kept(crate::model::BranchProvenance::AttachedExisting)
+                    RemovedBranches::Kept(crate::model::BranchKeptReason::NotDuxs(
+                        crate::model::BranchProvenance::AttachedExisting,
+                    ))
                 );
             }
             _ => panic!("expected a WorktreeRemoveCompleted event"),

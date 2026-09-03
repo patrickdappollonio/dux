@@ -21,9 +21,9 @@ pub use command::Command;
 pub use config_saver::{ConfigSurface, NoopConfigSurface, ReloadCompletionGuard};
 pub use events::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
-    BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DetachedSession,
-    DispatchAgentLaunchView, DoDeleteSessionOutcome, DoDeleteSessionView, EventReaction,
-    FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
+    BeginDeleteSessionOutcome, BeginDeleteSessionView, BranchDeleteInputs, DeleteTerminalView,
+    DetachedSession, DispatchAgentLaunchView, DoDeleteSessionOutcome, DoDeleteSessionView,
+    EventReaction, FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
     ProjectPersistenceView, RemovedBranches, StatusUpdate, WorktreeRemoval,
 };
 pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};

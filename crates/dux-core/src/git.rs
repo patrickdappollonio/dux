@@ -917,6 +917,51 @@ pub fn local_branch_exists(repo_path: &Path, name: &str) -> bool {
     ref_exists(repo_path, &format!("refs/heads/{name}"))
 }
 
+/// How many commits on `branch` are reachable from no remote-tracking ref, i.e.
+/// how much work on it exists only on this machine.
+///
+/// Asked by the delete-agent dialogs before they offer to remove a branch that
+/// predates the agent: "this branch is yours" is a weaker warning than "this
+/// branch is yours and holds 12 commits that are nowhere else". Callers run it
+/// in a background worker; it shells out to git.
+///
+/// `--not --remotes` excludes everything under `refs/remotes/`, which is every
+/// remote-tracking ref of every remote. A repository with NO remotes therefore
+/// counts the branch's whole history, and that is the honest answer: nothing in
+/// it has been pushed anywhere, because there is nowhere to have pushed it.
+///
+/// Git-config immune by construction: `rev-list --count` is plumbing and prints
+/// one integer. The branch is passed fully qualified as `refs/heads/<name>`,
+/// which cannot begin with a dash, so it can never be read as an option (the
+/// same technique `pull` uses); the trailing `--` pins the pathspec boundary so
+/// nothing after the revision list is read as a path either.
+pub fn unpushed_commit_count(repo_path: &Path, branch: &str) -> Result<u32> {
+    let repo = repo_path.to_string_lossy();
+    let qualified = format!("refs/heads/{branch}");
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo.as_ref(),
+            "rev-list",
+            "--count",
+            qualified.as_str(),
+            "--not",
+            "--remotes",
+            "--",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git rev-list failed for branch \"{branch}\": {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim()
+        .parse::<u32>()
+        .map_err(|_| anyhow!("git rev-list printed an unexpected count: {}", text.trim()))
+}
+
 fn ref_exists(repo_path: &Path, ref_name: &str) -> bool {
     let repo = repo_path.to_string_lossy();
     Command::new("git")
@@ -5650,6 +5695,98 @@ mod tests {
             !String::from_utf8_lossy(&listed.stdout).contains("--delete"),
             "the ref should be gone"
         );
+    }
+
+    // ── unpushed_commit_count ────────────────────────────────
+
+    /// Commit an empty change on `branch` (creating it from HEAD the first
+    /// time), so a test can put a known number of commits on it.
+    fn commit_on_branch(repo: &Path, branch: &str, message: &str) {
+        run_git(repo, &["commit", "--allow-empty", "-m", message]);
+        // The commit landed on HEAD's branch; point `branch` at it. Done with
+        // plumbing so an option-looking branch name can be created at all,
+        // which `git branch` refuses.
+        run_git(
+            repo,
+            &["update-ref", &format!("refs/heads/{branch}"), "HEAD"],
+        );
+    }
+
+    #[test]
+    fn unpushed_commit_count_counts_everything_when_there_is_no_remote() {
+        let repo = init_test_repo();
+        commit_on_branch(repo.path(), "feature", "one");
+        // One `init` commit plus the one above, and no remote-tracking ref
+        // anywhere, so none of it has been pushed.
+        assert_eq!(unpushed_commit_count(repo.path(), "feature").unwrap(), 2);
+    }
+
+    #[test]
+    fn unpushed_commit_count_is_zero_for_a_fully_pushed_branch() {
+        let repo = init_test_repo();
+        commit_on_branch(repo.path(), "feature", "one");
+        run_git(
+            repo.path(),
+            &[
+                "update-ref",
+                "refs/remotes/origin/feature",
+                "refs/heads/feature",
+            ],
+        );
+        assert_eq!(unpushed_commit_count(repo.path(), "feature").unwrap(), 0);
+    }
+
+    #[test]
+    fn unpushed_commit_count_counts_only_what_no_remote_ref_reaches() {
+        let repo = init_test_repo();
+        commit_on_branch(repo.path(), "feature", "one");
+        run_git(
+            repo.path(),
+            &[
+                "update-ref",
+                "refs/remotes/origin/feature",
+                "refs/heads/feature",
+            ],
+        );
+        commit_on_branch(repo.path(), "feature", "two");
+        commit_on_branch(repo.path(), "feature", "three");
+        assert_eq!(unpushed_commit_count(repo.path(), "feature").unwrap(), 2);
+    }
+
+    /// A remote-tracking ref of ANY remote counts as pushed, not just the one
+    /// the branch happens to track: `--not --remotes` spans `refs/remotes/`.
+    #[test]
+    fn unpushed_commit_count_accepts_a_ref_from_any_remote() {
+        let repo = init_test_repo();
+        commit_on_branch(repo.path(), "feature", "one");
+        run_git(
+            repo.path(),
+            &[
+                "update-ref",
+                "refs/remotes/fork/whatever",
+                "refs/heads/feature",
+            ],
+        );
+        assert_eq!(unpushed_commit_count(repo.path(), "feature").unwrap(), 0);
+    }
+
+    /// Without the fully-qualified `refs/heads/` form, `git rev-list --count
+    /// --all` would be read as a flag and print the count for every ref in the
+    /// repository instead of failing. The count here must be the branch's own.
+    #[test]
+    fn unpushed_commit_count_reads_an_option_looking_branch_as_a_ref() {
+        let repo = init_test_repo();
+        // `git branch` refuses a dash-leading name but plumbing does not, and
+        // such a ref is exactly what dux would then be asked about.
+        commit_on_branch(repo.path(), "--all", "one");
+        assert_eq!(unpushed_commit_count(repo.path(), "--all").unwrap(), 2);
+    }
+
+    #[test]
+    fn unpushed_commit_count_fails_for_a_branch_that_does_not_exist() {
+        let repo = init_test_repo();
+        let result = unpushed_commit_count(repo.path(), "nope");
+        assert!(result.is_err(), "expected an error: {result:?}");
     }
 
     /// Every local branch of the repo, one per line, for the drift tests below.

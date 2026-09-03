@@ -36,12 +36,19 @@ pub enum Command {
     DoDeleteSession {
         session_id: String,
         delete_worktree: bool,
+        /// The delete dialog's "also delete the branch" answer, or `None` for a
+        /// caller with no dialog behind it, which keeps the provenance default.
+        /// See [`crate::model::BranchProvenance::resolve_branch_deletion`].
+        delete_branch: Option<bool>,
     },
     /// Modal entrypoint: branches between async git-removal worker and
     /// inline finish.
     BeginDeleteSession {
         session_id: String,
         delete_worktree: bool,
+        /// The delete dialog's "also delete the branch" answer. See
+        /// [`crate::model::BranchProvenance::resolve_branch_deletion`].
+        delete_branch: Option<bool>,
     },
     /// Persist a project mutation. The `Add` action is handled INLINE
     /// (synchronously): the handler writes SQLite and config.toml in `apply` and
@@ -330,8 +337,11 @@ impl Engine {
             Command::DoDeleteSession {
                 session_id,
                 delete_worktree,
+                delete_branch,
             } => {
-                let Some(outcome) = self.do_delete_session(&session_id, delete_worktree)? else {
+                let Some(outcome) =
+                    self.do_delete_session(&session_id, delete_worktree, delete_branch)?
+                else {
                     return Ok(EventReaction::Nothing);
                 };
                 Ok(EventReaction::DoDeleteSessionView(Box::new(
@@ -344,8 +354,10 @@ impl Engine {
             Command::BeginDeleteSession {
                 session_id,
                 delete_worktree,
+                delete_branch,
             } => {
-                let outcome = self.begin_delete_session(&session_id, delete_worktree);
+                let outcome =
+                    self.begin_delete_session(&session_id, delete_worktree, delete_branch);
                 Ok(EventReaction::BeginDeleteSessionView(Box::new(
                     BeginDeleteSessionView {
                         session_id,
@@ -968,7 +980,12 @@ impl Engine {
             .collect();
         let mut removed = 0usize;
         for session_id in &session_ids {
-            if self.do_delete_session(session_id, true)?.is_some() {
+            // `None` for the branch: the project-removal dialog asks about the
+            // project, not about each agent's branch one at a time, so nobody
+            // answered that question and the provenance default stands. That
+            // is what keeps a project removal from taking a user's `develop`
+            // with it, and it is unchanged by the per-agent checkbox.
+            if self.do_delete_session(session_id, true, None)?.is_some() {
                 removed += 1;
             }
         }

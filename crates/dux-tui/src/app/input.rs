@@ -7531,7 +7531,7 @@ impl App {
             // Dispatches git work to a worker when needed, so the UI stays
             // responsive. Errors arrive asynchronously via
             // `WorkerEvent::WorktreeRemoveCompleted`.
-            self.begin_delete_session(&session_id, delete_worktree);
+            self.begin_delete_session(&session_id, delete_worktree, None);
         }
         false
     }

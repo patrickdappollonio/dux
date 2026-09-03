@@ -116,6 +116,12 @@ pub enum WireCommand {
     DeleteSession {
         session_id: String,
         delete_worktree: bool,
+        /// The delete dialog's "also delete the branch" answer. ABSENT means
+        /// nobody was asked, which keeps the provenance default and is what a
+        /// caller that only knows about `delete_worktree` gets. See
+        /// [`crate::model::BranchProvenance::resolve_branch_deletion`].
+        #[serde(default)]
+        delete_branch: Option<bool>,
     },
     PersistGlobalEnv {
         env: BTreeMap<String, String>,
@@ -1241,11 +1247,11 @@ pub fn delete_session_status_message(
         // no branch and takes the `NothingToRemove` arm above, which is the
         // only arm it can take.
         WorktreeRemoval::Performed {
-            branches: crate::engine::RemovedBranches::Kept(provenance),
+            branches: crate::engine::RemovedBranches::Kept(reason),
         } => {
             format!(
                 "Deleted agent \"{name}\" and removed its worktree. {}",
-                provenance.kept_branches_note(
+                reason.kept_branches_note(
                     outcome.session.branch_name().unwrap_or_default(),
                     outcome.session.initial_branch().unwrap_or_default(),
                 )
@@ -4328,9 +4334,11 @@ impl Engine {
             WireCommand::DeleteSession {
                 session_id,
                 delete_worktree,
+                delete_branch,
             } => Command::BeginDeleteSession {
                 session_id,
                 delete_worktree,
+                delete_branch,
             },
             WireCommand::PersistGlobalEnv { env } => Command::PersistGlobalEnv { env },
             WireCommand::ReloadConfig {} => Command::ReloadConfig,
@@ -4825,7 +4833,7 @@ mod tests {
             .sessions
             .push(sample_standalone_session("sa1", &link.to_string_lossy()));
 
-        let outcome = match engine.do_delete_session("s1", true) {
+        let outcome = match engine.do_delete_session("s1", true, None) {
             Ok(Some(outcome)) => outcome,
             other => panic!("the delete must proceed, got {:?}", other.is_ok()),
         };
@@ -4852,7 +4860,7 @@ mod tests {
             .sessions
             .push(sample_standalone_session("sa1", &folder_path));
 
-        let outcome = match engine.do_delete_session("sa1", false) {
+        let outcome = match engine.do_delete_session("sa1", false, None) {
             Ok(Some(outcome)) => outcome,
             Ok(None) => panic!("the session existed"),
             Err(err) => panic!("delete must succeed: {err}"),
@@ -4890,7 +4898,7 @@ mod tests {
             .sessions
             .push(sample_standalone_session("sa1", &folder_path));
 
-        let message = match engine.do_delete_session("sa1", true) {
+        let message = match engine.do_delete_session("sa1", true, None) {
             Err(err) => err.to_string(),
             Ok(_) => panic!("a destructive request dux will not honour must be refused"),
         };
@@ -4994,7 +5002,9 @@ mod tests {
             delete_session_status_message(
                 &outcome,
                 &WorktreeRemoval::Performed {
-                    branches: crate::engine::RemovedBranches::Kept(provenance),
+                    branches: crate::engine::RemovedBranches::Kept(
+                        crate::model::BranchKeptReason::NotDuxs(provenance),
+                    ),
                 },
             )
         }
@@ -5530,8 +5540,29 @@ mod tests {
             WireCommand::DeleteSession {
                 session_id: "s1".to_string(),
                 delete_worktree: true,
-            }
+                delete_branch: None,
+            },
+            "an absent branch answer must mean nobody was asked, not \"keep it\": that is what \
+             keeps a caller written before the checkbox existed behaving as it always did"
         );
+    }
+
+    #[test]
+    fn wire_delete_session_carries_an_explicit_branch_answer() {
+        for (json_value, expected) in [("true", Some(true)), ("false", Some(false))] {
+            let json = format!(
+                r#"{{"command":"delete_session","args":{{"session_id":"s1","delete_worktree":true,"delete_branch":{json_value}}}}}"#
+            );
+            let cmd: WireCommand = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                cmd,
+                WireCommand::DeleteSession {
+                    session_id: "s1".to_string(),
+                    delete_worktree: true,
+                    delete_branch: expected,
+                }
+            );
+        }
     }
 
     #[test]
@@ -8195,6 +8226,7 @@ mod tests {
             .apply_wire(WireCommand::DeleteSession {
                 session_id: "s1".to_string(),
                 delete_worktree: false,
+                delete_branch: None,
             })
             .expect("apply_wire");
         let status = outcome.status.expect("status");
