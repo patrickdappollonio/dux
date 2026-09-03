@@ -65,8 +65,12 @@ const WAY_BACK = "Use virtual input"
 
 function session(): SessionView {
   return {
+    // The ids are deliberately all different from one another here: a session
+    // id, a tab id and a terminal id come from different counters, and a
+    // fixture that reuses one for another makes a menu reading the wrong id
+    // space pass anyway.
     id: "s1",
-    slot_tab_id: "s1",
+    slot_tab_id: "tab1",
     provider: "claude",
     title: "s1",
     status: "active",
@@ -80,7 +84,7 @@ function session(): SessionView {
       source_branch: "main",
       worktree_path: "/w",
     },
-    tabs: [{ id: "s1", provider: "claude", order: 0 }],
+    tabs: [{ id: "tab1", provider: "claude", order: 0 }],
   } as unknown as SessionView
 }
 
@@ -109,17 +113,61 @@ function makeState(): DuxState {
 // would test the same component twice. What has to be listed separately is
 // each SUBJECT, because a terminal's menu is a different body with the same
 // promise to keep.
+//
+// EACH SHELL SAYS WHICH PTY ID ITS PANE PUBLISHES UNDER, because that is the
+// whole question the group is read by.
 const SHELLS = {
-  agent: () => <PaneMenuBody subject={{ kind: "agent", session: session() }} />,
-  terminal: () => (
-    <PaneMenuBody
-      subject={{
-        kind: "terminal",
-        terminalId: "s1",
-        owner: { kind: "standalone" },
-      }}
-    />
-  ),
+  agent: {
+    ptyId: "tab1",
+    body: () => (
+      <PaneMenuBody
+        subject={{ kind: "agent", session: session() }}
+        pane={{ kind: "agent", sessionId: "s1", tabId: "tab1" }}
+      />
+    ),
+  },
+  terminal: {
+    ptyId: "t9",
+    body: () => (
+      <PaneMenuBody
+        subject={{
+          kind: "terminal",
+          terminalId: "t9",
+          owner: { kind: "standalone" },
+        }}
+        pane={{
+          kind: "terminal",
+          terminalId: "t9",
+          owner: { kind: "standalone" },
+        }}
+      />
+    ),
+  },
+  // THE CASE THAT WAS BROKEN: a companion terminal's pane wears its AGENT's
+  // menu, and that pane publishes under the TERMINAL's id. Reading the group
+  // off the subject looked among the agent's ids and found nothing, so this
+  // pane had no "Attach a file…" and, once the user had asked to type straight
+  // into the terminal, no way back at all.
+  "agent-owned terminal": {
+    ptyId: "t7",
+    body: () => (
+      <PaneMenuBody
+        subject={{ kind: "agent", session: session() }}
+        pane={{
+          kind: "terminal",
+          terminalId: "t7",
+          owner: { kind: "session", sessionId: "s1" },
+        }}
+      />
+    ),
+  },
+  // A SIDEBAR ROW is not painted over a pane, so it scans the subject's own
+  // ptys: the session-slot id and every tab id, any one of which can be the
+  // mounted pane.
+  "sidebar row": {
+    ptyId: "tab1",
+    body: () => <PaneMenuBody subject={{ kind: "agent", session: session() }} />,
+  },
 } as const
 
 async function openBody(body: React.ReactNode) {
@@ -146,11 +194,11 @@ afterEach(() => {
 })
 
 describe("the way back from typing directly in the terminal", () => {
-  for (const [shell, body] of Object.entries(SHELLS)) {
+  for (const [shell, { ptyId, body }] of Object.entries(SHELLS)) {
     it(`is in a top menu for an ${shell} pane`, async () => {
       // What a pane publishes once the bottom bar is gone: the way back is
       // the top menu's to offer, because nothing else is on screen to offer it.
-      registerPaneInputGroup("s1", { surfaceSwitch: true, keysToggle: false })
+      registerPaneInputGroup(ptyId, { surfaceSwitch: true, keysToggle: false })
       await openBody(body())
       expect(screen.getByText(WAY_BACK)).toBeTruthy()
     })
@@ -160,9 +208,18 @@ describe("the way back from typing directly in the terminal", () => {
       // row it can hang off exists, and one row must never be in two menus at
       // once. That covers the key row standing alone with the message box
       // gone, which is what the pane publishes here.
-      registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: false })
+      registerPaneInputGroup(ptyId, { surfaceSwitch: false, keysToggle: false })
       await openBody(body())
       expect(screen.queryByText(WAY_BACK)).toBeNull()
     })
   }
+
+  // The other half of the pane-driven rule: a menu must not pick up a SIBLING
+  // pane's group. An agent's other tab publishing a way back says nothing
+  // about the companion terminal the user is actually looking at.
+  it("ignores a sibling pane's group for an agent-owned terminal", async () => {
+    registerPaneInputGroup("tab1", { surfaceSwitch: true, keysToggle: false })
+    await openBody(SHELLS["agent-owned terminal"].body())
+    expect(screen.queryByText(WAY_BACK)).toBeNull()
+  })
 })

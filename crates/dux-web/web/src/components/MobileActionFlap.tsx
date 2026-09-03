@@ -38,6 +38,9 @@ export function MobileActionFlap({
   band,
   hidden = false,
 }: {
+  /// THE PANE ON SCREEN, which is what Macros writes to and what the `⋯` reads
+  /// its INPUT group under. It is a different question from `subject` below: a
+  /// companion terminal's pane wears its agent's menu.
   target: SelectedTarget
   /// WHAT THE PANE IS ABOUT, which decides the menu the `⋯` opens and whether
   /// there is a changed-file count at all. An agent has one; a project or
@@ -132,7 +135,7 @@ export function MobileActionFlap({
         // The one pane menu, which the floating pill opens too: the cluster
         // flies across the screen as one object, so its `⋯` cannot mean
         // something else once it lands.
-        ellipsis={<PaneMenu subject={subject} side="bottom" />}
+        ellipsis={<PaneMenu subject={subject} pane={target} side="bottom" />}
       />
     </div>
   )

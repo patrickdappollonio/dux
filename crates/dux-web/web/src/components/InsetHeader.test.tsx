@@ -32,6 +32,9 @@ function installBootStubs() {
 }
 installBootStubs()
 const { InsetHeader } = await import("./InsetHeader")
+const { registerPaneInputGroup, resetPaneInputGroups } = await import(
+  "@/lib/paneInputGroup"
+)
 
 // The chip a kind renders as, or null when that field is absent. Queried by the
 // `data-chip` marker the header stamps on each chip, because a glyph has no
@@ -88,10 +91,12 @@ function stateFor(branchName: string, initialBranch: string): DuxState {
 
 beforeEach(() => {
   installBootStubs()
+  resetPaneInputGroups()
 })
 
 afterEach(() => {
   cleanup()
+  resetPaneInputGroups()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -551,10 +556,13 @@ describe("InsetHeader pane menu", () => {
     expect(screen.queryByRole("button", { name: /terminal actions/i })).toBeNull()
   })
 
-  it("opens the agent's menu for that agent's own terminal", () => {
+  it("opens the agent's menu for that agent's own terminal, with the terminal's own verbs in it", async () => {
     // The whole header is the agent's here (its project, its name, its
-    // assistant), so the menu is too; the terminal's own Close and editor
-    // entries stay one click away in its sidebar row.
+    // assistant), so the menu is too. The terminal's own Close and editor
+    // entries ride along as a labelled group, and the INPUT group is read
+    // under the TERMINAL's pty id, which is what that pane publishes under:
+    // reading it off the agent instead left this pane with no attach item and
+    // no way back from typing straight into the terminal.
     const base = stateFor("main", "main")
     mockState = {
       ...base,
@@ -575,9 +583,17 @@ describe("InsetHeader pane menu", () => {
           },
         ],
       },
+      createTabInFlight: [],
     } as unknown as DuxState
+    registerPaneInputGroup("t1", { surfaceSwitch: true, keysToggle: false })
     render(<InsetHeader />)
-    expect(screen.getByRole("button", { name: /session actions/i })).toBeTruthy()
+    const trigger = screen.getByRole("button", { name: /session actions/i })
+    fireEvent.click(trigger)
+    await screen.findByRole("menu")
+    const items = screen.getAllByRole("menuitem").map((el) => el.textContent)
+    expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
+    expect(items.some((t) => t?.includes("Close…"))).toBe(true)
+    expect(items.some((t) => t?.includes("Use virtual input"))).toBe(true)
   })
 
   it("opens the terminal's own menu for a project terminal, even with an agent still selected", () => {

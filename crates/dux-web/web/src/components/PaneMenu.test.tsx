@@ -48,7 +48,8 @@ function installStubs() {
 installStubs()
 const { MobileActionFlap } = await import("./MobileActionFlap")
 const { TheaterPill } = await import("./TheaterPill")
-const { PaneMenu, PANE_MENU_AGENT_LABEL } = await import("./PaneMenu")
+const { PaneMenu, PANE_MENU_AGENT_LABEL, PANE_MENU_TERMINAL_GROUP_LABEL } =
+  await import("./PaneMenu")
 const { PANE_INPUT_GROUP_LABEL } = await import("./PaneInputGroup")
 const { registerPaneInputGroup, resetPaneInputGroups } = await import(
   "@/lib/paneInputGroup"
@@ -233,6 +234,81 @@ describe("the phone's one pane menu", () => {
     expect(screen.queryByText(PANE_INPUT_GROUP_LABEL)).toBeNull()
     expect(labels().some((t) => t?.includes("Attach a file…"))).toBe(false)
     expect(labels().some((t) => t?.includes("Use virtual input"))).toBe(false)
+  })
+})
+
+// A COMPANION TERMINAL'S PANE wears its agent's menu, because the header, the
+// count and the PR chip around it are that agent's. What it must not lose in
+// the bargain is its own verbs: the sidebar row that used to be their only
+// other home is exactly what a narrow window and theater take away.
+describe("an agent's menu over one of its companion terminals", () => {
+  const terminalPane = {
+    kind: "terminal" as const,
+    terminalId: "t7",
+    owner: { kind: "session" as const, sessionId: "s1" },
+  }
+
+  it("carries the terminal's own verbs under a heading, below the agent's", async () => {
+    render(
+      <PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        pane={terminalPane}
+        appearance="header"
+      />,
+    )
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    const items = labels()
+    // The agent's, because this header is the agent's.
+    expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
+    expect(items.some((t) => t?.includes("Delete agent…"))).toBe(true)
+    // And the terminal's, which had nowhere else to be reached from.
+    expect(items.some((t) => t?.includes("Close…"))).toBe(true)
+    expect(items.some((t) => t?.includes("Open editor in new tab"))).toBe(true)
+    // Labelled, so Close… cannot read as one more agent action.
+    const heading = screen.getByText(PANE_MENU_TERMINAL_GROUP_LABEL)
+    const remove = screen
+      .getAllByRole("menuitem")
+      .find((el) => el.textContent?.includes("Delete agent…"))!
+    // After the agent's actions: the agent body keeps the row order it has at
+    // every other anchor, and the terminal's group is what is added.
+    expect(
+      remove.compareDocumentPosition(heading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it("adds nothing when the pane IS the agent's own tab", async () => {
+    render(
+      <PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        pane={target}
+        appearance="header"
+      />,
+    )
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    expect(screen.queryByText(PANE_MENU_TERMINAL_GROUP_LABEL)).toBeNull()
+    expect(labels().some((t) => t?.includes("Close…"))).toBe(false)
+  })
+
+  it("keeps a terminal's own menu unlabelled, where every row is already the terminal's", async () => {
+    render(
+      <PaneMenu
+        subject={{
+          kind: "terminal",
+          terminalId: "t9",
+          owner: { kind: "standalone" },
+        }}
+        pane={{
+          kind: "terminal",
+          terminalId: "t9",
+          owner: { kind: "standalone" },
+        }}
+        appearance="header"
+      />,
+    )
+    await openFrom(screen.getByLabelText("Terminal actions"))
+    expect(labels().some((t) => t?.includes("Close…"))).toBe(true)
+    expect(screen.queryByText(PANE_MENU_TERMINAL_GROUP_LABEL)).toBeNull()
   })
 })
 
