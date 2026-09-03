@@ -1927,7 +1927,7 @@ impl DeleteAgentTarget {
 pub(crate) struct UnpushedCountAnswer {
     pub(crate) session_id: String,
     /// `None` when git could not answer, which the dialog renders as silence.
-    pub(crate) count: Option<u32>,
+    pub(crate) count: Option<dux_core::git::UnpushedCommits>,
 }
 
 /// Which selectable element has focus in the Delete Agent confirmation modal.
@@ -2161,12 +2161,13 @@ pub(crate) enum PromptState {
         /// `delete_worktree` is set: git will not delete a branch that is still
         /// checked out in a worktree, so the box is not offered otherwise.
         delete_branch: bool,
-        /// Commits on that branch reachable from no remote-tracking ref, once
-        /// the background worker has answered. `None` is "not known": either
+        /// Commits on those branches reachable from no remote-tracking ref,
+        /// once the background worker has answered, and whether the repository
+        /// has any such ref to be reachable from. `None` is "not known": either
         /// the answer has not landed yet or git could not give one, and the
         /// dialog says nothing about commits in both cases rather than
         /// guessing a number.
-        unpushed_commits: Option<u32>,
+        unpushed_commits: Option<dux_core::git::UnpushedCommits>,
     },
     ConfirmDeleteTerminal {
         terminal_id: String,

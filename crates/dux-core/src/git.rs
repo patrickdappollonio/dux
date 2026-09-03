@@ -917,6 +917,43 @@ pub fn local_branch_exists(repo_path: &Path, name: &str) -> bool {
     ref_exists(repo_path, &format!("refs/heads/{name}"))
 }
 
+/// How much of a branch exists only on this machine, and whether there was
+/// anywhere for it to have been pushed to in the first place.
+///
+/// The two travel together because the number means different things without
+/// the flag: in a repository with no remote-tracking refs at all, `--not
+/// --remotes` excludes nothing and the count is the branch's whole history.
+/// "It has 47 commits not pushed anywhere" is true there and reads as an
+/// accusation about work that was never going anywhere; the surfaces use the
+/// flag to say the honest thing instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnpushedCommits {
+    pub count: u32,
+    /// Whether `refs/remotes/` holds anything. It is about remote-tracking
+    /// refs rather than configured remotes on purpose: a remote that has never
+    /// been fetched excludes nothing either, so it is the same situation.
+    pub has_remote_refs: bool,
+}
+
+/// Whether the repository has any remote-tracking refs at all.
+///
+/// `for-each-ref` is plumbing and prints nothing at all for an empty namespace,
+/// so "no output" is the whole answer and no parsing is involved.
+fn has_remote_tracking_refs(repo_path: &Path) -> bool {
+    let repo = repo_path.to_string_lossy();
+    Command::new("git")
+        .args([
+            "-C",
+            repo.as_ref(),
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            "refs/remotes/",
+        ])
+        .output()
+        .is_ok_and(|out| out.status.success() && !out.stdout.is_empty())
+}
+
 /// How many commits on `branches` are reachable from no remote-tracking ref,
 /// i.e. how much work on them exists only on this machine.
 ///
@@ -941,12 +978,15 @@ pub fn local_branch_exists(repo_path: &Path, name: &str) -> bool {
 /// which cannot begin with a dash, so it can never be read as an option (the
 /// same technique `pull` uses); the trailing `--` pins the pathspec boundary so
 /// nothing after the revision list is read as a path either.
-pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<u32> {
+pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<UnpushedCommits> {
     // No branches means nothing would be deleted, so nothing is at risk. Git
     // would refuse an empty revision list, and an error here would read to the
     // caller as "git could not answer" about a question nobody asked.
     if branches.is_empty() {
-        return Ok(0);
+        return Ok(UnpushedCommits {
+            count: 0,
+            has_remote_refs: has_remote_tracking_refs(repo_path),
+        });
     }
     let repo = repo_path.to_string_lossy();
     let mut args: Vec<String> = vec![
@@ -972,9 +1012,14 @@ pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<u32>
         ));
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    text.trim()
+    let count = text
+        .trim()
         .parse::<u32>()
-        .map_err(|_| anyhow!("git rev-list printed an unexpected count: {}", text.trim()))
+        .map_err(|_| anyhow!("git rev-list printed an unexpected count: {}", text.trim()))?;
+    Ok(UnpushedCommits {
+        count,
+        has_remote_refs: has_remote_tracking_refs(repo_path),
+    })
 }
 
 fn ref_exists(repo_path: &Path, ref_name: &str) -> bool {
@@ -5733,7 +5778,12 @@ mod tests {
         commit_on_branch(repo.path(), "feature", "one");
         // One `init` commit plus the one above, and no remote-tracking ref
         // anywhere, so none of it has been pushed.
-        assert_eq!(unpushed_commit_count(repo.path(), &["feature"]).unwrap(), 2);
+        assert_eq!(
+            unpushed_commit_count(repo.path(), &["feature"])
+                .unwrap()
+                .count,
+            2
+        );
     }
 
     #[test]
@@ -5748,7 +5798,12 @@ mod tests {
                 "refs/heads/feature",
             ],
         );
-        assert_eq!(unpushed_commit_count(repo.path(), &["feature"]).unwrap(), 0);
+        assert_eq!(
+            unpushed_commit_count(repo.path(), &["feature"])
+                .unwrap()
+                .count,
+            0
+        );
     }
 
     #[test]
@@ -5765,7 +5820,12 @@ mod tests {
         );
         commit_on_branch(repo.path(), "feature", "two");
         commit_on_branch(repo.path(), "feature", "three");
-        assert_eq!(unpushed_commit_count(repo.path(), &["feature"]).unwrap(), 2);
+        assert_eq!(
+            unpushed_commit_count(repo.path(), &["feature"])
+                .unwrap()
+                .count,
+            2
+        );
     }
 
     /// A remote-tracking ref of ANY remote counts as pushed, not just the one
@@ -5782,7 +5842,12 @@ mod tests {
                 "refs/heads/feature",
             ],
         );
-        assert_eq!(unpushed_commit_count(repo.path(), &["feature"]).unwrap(), 0);
+        assert_eq!(
+            unpushed_commit_count(repo.path(), &["feature"])
+                .unwrap()
+                .count,
+            0
+        );
     }
 
     /// Without the fully-qualified `refs/heads/` form, `git rev-list --count
@@ -5794,7 +5859,12 @@ mod tests {
         // `git branch` refuses a dash-leading name but plumbing does not, and
         // such a ref is exactly what dux would then be asked about.
         commit_on_branch(repo.path(), "--all", "one");
-        assert_eq!(unpushed_commit_count(repo.path(), &["--all"]).unwrap(), 2);
+        assert_eq!(
+            unpushed_commit_count(repo.path(), &["--all"])
+                .unwrap()
+                .count,
+            2
+        );
     }
 
     /// A drifted agent's delete removes two branches, so the dialog's number
@@ -5816,18 +5886,54 @@ mod tests {
         commit_on_branch(repo.path(), "born-here", "two");
         commit_on_branch(repo.path(), "drifted", "three");
         assert_eq!(
-            unpushed_commit_count(repo.path(), &["born-here"]).unwrap(),
+            unpushed_commit_count(repo.path(), &["born-here"])
+                .unwrap()
+                .count,
             1
         );
         assert_eq!(
-            unpushed_commit_count(repo.path(), &["drifted"]).unwrap(),
+            unpushed_commit_count(repo.path(), &["drifted"])
+                .unwrap()
+                .count,
             2,
             "`drifted` sits on top of `born-here`, so it reaches both commits"
         );
         assert_eq!(
-            unpushed_commit_count(repo.path(), &["born-here", "drifted"]).unwrap(),
+            unpushed_commit_count(repo.path(), &["born-here", "drifted"])
+                .unwrap()
+                .count,
             2,
             "the union counts the commit both branches reach once"
+        );
+    }
+
+    /// The count alone cannot tell "12 commits you forgot to push" from "your
+    /// whole history, because there is nowhere to push it", so the answer says
+    /// which repository it came from and the surfaces word themselves on it.
+    #[test]
+    fn unpushed_commit_count_says_whether_there_are_remote_refs_at_all() {
+        let repo = init_test_repo();
+        commit_on_branch(repo.path(), "feature", "one");
+        assert!(
+            !unpushed_commit_count(repo.path(), &["feature"])
+                .unwrap()
+                .has_remote_refs,
+            "a repository with no remote-tracking refs excludes nothing"
+        );
+        run_git(
+            repo.path(),
+            &[
+                "update-ref",
+                "refs/remotes/origin/main",
+                "refs/heads/feature",
+            ],
+        );
+        assert!(
+            unpushed_commit_count(repo.path(), &["feature"])
+                .unwrap()
+                .has_remote_refs,
+            "one remote-tracking ref anywhere is enough for the count to mean \
+             what it says"
         );
     }
 
@@ -5836,7 +5942,7 @@ mod tests {
     #[test]
     fn unpushed_commit_count_of_no_branches_is_zero() {
         let repo = init_test_repo();
-        assert_eq!(unpushed_commit_count(repo.path(), &[]).unwrap(), 0);
+        assert_eq!(unpushed_commit_count(repo.path(), &[]).unwrap().count, 0);
     }
 
     #[test]

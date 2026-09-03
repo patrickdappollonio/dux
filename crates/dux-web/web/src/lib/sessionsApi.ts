@@ -135,7 +135,11 @@ export interface ResolvedPullRequestReference {
 // their union, so the dialog can name exactly what would go.
 export type BranchUnpushed = {
   branches: string[]
-  unpushed_commits: number | null
+  // `null` when git could not answer. The count and whether the repository has
+  // any remote-tracking ref at all travel as one object, because the number
+  // means a different thing without the flag: with nowhere to have pushed to,
+  // the count is simply the whole history.
+  unpushed: { count: number; has_remote_refs: boolean } | null
 }
 
 export const sessionsApi = {

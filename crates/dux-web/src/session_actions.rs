@@ -18,8 +18,9 @@
 //!   `new` | `fork` | `from_worktree` | `from_pr`); `Idempotency-Key` honored.
 //! - `DELETE /api/v1/sessions/:id`                 — delete (`?delete_worktree=`,
 //!   `?delete_branch=`; an absent `delete_branch` keeps the provenance default).
-//! - `GET    /api/v1/sessions/:id/branch-unpushed` — the branch the delete dialog
-//!   would remove, and how many of its commits no remote-tracking ref reaches.
+//! - `GET    /api/v1/sessions/:id/branch-unpushed` — the branches the delete
+//!   dialog would remove, and how many of their commits no remote-tracking ref
+//!   reaches.
 //! - `PATCH  /api/v1/sessions/:id`                 — rename / change provider /
 //!   toggle auto-reopen (optional body fields).
 //! - `POST   /api/v1/sessions/:id/reconnect`       — relaunch (`{force}`).
@@ -420,7 +421,18 @@ struct BranchUnpushedResponse {
     /// as a union, or `null` when git could not answer (a branch that is already
     /// gone, a locked or unreadable repository). The dialog then simply omits
     /// the sentence: it warns about what it knows and never guesses a number.
-    unpushed_commits: Option<u32>,
+    ///
+    /// The count and "does this repository have remote-tracking refs at all"
+    /// travel as one object because the number means a different thing without
+    /// the flag, and two nullable fields would eventually disagree.
+    unpushed: Option<UnpushedPayload>,
+}
+
+/// The wire shape of [`dux_core::git::UnpushedCommits`].
+#[derive(Serialize)]
+struct UnpushedPayload {
+    count: u32,
+    has_remote_refs: bool,
 }
 
 /// How much work would be lost by ticking "also delete the branch".
@@ -455,7 +467,10 @@ async fn session_branch_unpushed(
     };
     axum::Json(BranchUnpushedResponse {
         branches,
-        unpushed_commits: counted,
+        unpushed: counted.map(|answer| UnpushedPayload {
+            count: answer.count,
+            has_remote_refs: answer.has_remote_refs,
+        }),
     })
     .into_response()
 }

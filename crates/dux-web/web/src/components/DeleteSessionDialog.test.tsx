@@ -112,7 +112,10 @@ beforeEach(() => {
   deleteSession.mockClear()
   closeDelete.mockClear()
   branchUnpushed.mockReset()
-  branchUnpushed.mockResolvedValue({ branches: ["develop"], unpushed_commits: 0 })
+  branchUnpushed.mockResolvedValue({
+    branches: ["develop"],
+    unpushed: { count: 0, has_remote_refs: true },
+  })
 })
 
 afterEach(() => {
@@ -321,7 +324,10 @@ describe("DeleteSessionDialog", () => {
   // The count is a git answer that arrives after the dialog is already up, so
   // the warning grows a sentence rather than waiting for it.
   it("names how many commits are pushed nowhere once the count arrives", async () => {
-    branchUnpushed.mockResolvedValue({ branches: ["develop"], unpushed_commits: 3 })
+    branchUnpushed.mockResolvedValue({
+      branches: ["develop"],
+      unpushed: { count: 3, has_remote_refs: true },
+    })
     seed("s3", [attachedSession])
     render(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("checkbox"))
@@ -330,8 +336,31 @@ describe("DeleteSessionDialog", () => {
     ).toBeTruthy()
   })
 
+  // In a repository with no remote-tracking refs the count is the whole
+  // history, because there is nowhere to have pushed to. "N commits not pushed
+  // anywhere" is true there and reads as an accusation; the sentence says what
+  // is actually the case instead.
+  it("words the count honestly when the repository has no remote", async () => {
+    branchUnpushed.mockResolvedValue({
+      branches: ["develop"],
+      unpushed: { count: 12, has_remote_refs: false },
+    })
+    seed("s3", [attachedSession])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
+    expect(
+      await screen.findByText(
+        /Nothing on it has been pushed anywhere: all 12 of its commits exist only on this machine\./,
+      ),
+    ).toBeTruthy()
+    expect(screen.queryByText(/not pushed anywhere\./)).toBeNull()
+  })
+
   it("says nothing about commits when there are none unpushed", async () => {
-    branchUnpushed.mockResolvedValue({ branches: ["develop"], unpushed_commits: 0 })
+    branchUnpushed.mockResolvedValue({
+    branches: ["develop"],
+    unpushed: { count: 0, has_remote_refs: true },
+  })
     seed("s3", [attachedSession])
     render(<DeleteSessionDialog />)
     fireEvent.click(screen.getByRole("checkbox"))
@@ -370,7 +399,7 @@ describe("DeleteSessionDialog", () => {
   it("names both branches of a drifted agent, and counts them together", async () => {
     branchUnpushed.mockResolvedValue({
       branches: ["develop-next", "develop"],
-      unpushed_commits: 4,
+      unpushed: { count: 4, has_remote_refs: true },
     })
     seed("s6", [driftedSession])
     render(<DeleteSessionDialog />)
@@ -424,7 +453,7 @@ describe("DeleteSessionDialog", () => {
   it("renders the branches the server answered with", async () => {
     branchUnpushed.mockResolvedValue({
       branches: ["develop", "older-branch"],
-      unpushed_commits: 0,
+      unpushed: { count: 0, has_remote_refs: true },
     })
     seed("s3", [attachedSession])
     render(<DeleteSessionDialog />)

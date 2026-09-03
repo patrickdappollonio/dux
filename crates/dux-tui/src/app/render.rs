@@ -799,7 +799,7 @@ pub(super) fn delete_agent_branch_checkbox_label(branches: &[&str]) -> String {
 pub(super) fn delete_agent_branch_warning(
     provenance: dux_core::model::BranchProvenance,
     branches: &[&str],
-    unpushed: Option<u32>,
+    unpushed: Option<dux_core::git::UnpushedCommits>,
 ) -> Option<String> {
     let drifted = branches.len() > 1;
     let predates = !provenance.dux_may_delete_branch();
@@ -831,14 +831,28 @@ pub(super) fn delete_agent_branch_warning(
         }
         text.push_str(&clause);
     }
-    if let Some(count) = unpushed
-        && count > 0
+    if let Some(answer) = unpushed
+        && answer.count > 0
     {
+        let count = answer.count;
         let plural = if count == 1 { "commit" } else { "commits" };
-        text.push_str(&if drifted {
-            format!(" They have {count} {plural} not pushed anywhere between them.")
-        } else {
-            format!(" It has {count} {plural} not pushed anywhere.")
+        // A repository with no remote-tracking refs has not held anything back;
+        // it has nowhere to have pushed to, and the count is its whole history.
+        // Saying "not pushed anywhere" there reads as an accusation about work
+        // that was never going anywhere, so the sentence says what is true.
+        text.push_str(&match (answer.has_remote_refs, drifted) {
+            (true, false) => format!(" It has {count} {plural} not pushed anywhere."),
+            (true, true) => {
+                format!(" They have {count} {plural} not pushed anywhere between them.")
+            }
+            (false, false) => format!(
+                " Nothing on it has been pushed anywhere: all {count} of its commits exist \
+                 only on this machine."
+            ),
+            (false, true) => format!(
+                " Nothing on them has been pushed anywhere: all {count} of their commits \
+                 exist only on this machine."
+            ),
         });
     }
     Some(text)
@@ -21856,7 +21870,7 @@ mod tests {
         provenance: dux_core::model::BranchProvenance,
         delete_worktree: bool,
         delete_branch: bool,
-        unpushed_commits: Option<u32>,
+        unpushed_commits: Option<dux_core::git::UnpushedCommits>,
     ) -> PromptState {
         delete_agent_prompt_on(
             provenance,
@@ -21876,7 +21890,7 @@ mod tests {
         initial_branch: &str,
         delete_worktree: bool,
         delete_branch: bool,
-        unpushed_commits: Option<u32>,
+        unpushed_commits: Option<dux_core::git::UnpushedCommits>,
     ) -> PromptState {
         PromptState::ConfirmDeleteAgent {
             session_id: "s1".to_string(),
@@ -21979,6 +21993,15 @@ mod tests {
         );
     }
 
+    /// A counted answer from a repository that HAS remote-tracking refs, which
+    /// is what "not pushed anywhere" is allowed to be said about.
+    fn pushed_nowhere(count: u32) -> Option<dux_core::git::UnpushedCommits> {
+        Some(dux_core::git::UnpushedCommits {
+            count,
+            has_remote_refs: true,
+        })
+    }
+
     /// The count is a git answer that lands after the dialog is already up, so
     /// the warning grows a sentence rather than waiting for it, and says
     /// nothing at all when there is nothing to say.
@@ -21988,7 +22011,7 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::AttachedExisting,
                 &["feature"],
-                Some(3)
+                pushed_nowhere(3)
             )
             .as_deref(),
             Some("This branch existed before the agent. It has 3 commits not pushed anywhere.")
@@ -21997,12 +22020,12 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::AttachedExisting,
                 &["feature"],
-                Some(1)
+                pushed_nowhere(1)
             )
             .as_deref(),
             Some("This branch existed before the agent. It has 1 commit not pushed anywhere.")
         );
-        for unknown in [None, Some(0)] {
+        for unknown in [None, pushed_nowhere(0)] {
             assert_eq!(
                 super::delete_agent_branch_warning(
                     dux_core::model::BranchProvenance::AttachedExisting,
@@ -22026,6 +22049,43 @@ mod tests {
         );
     }
 
+    /// In a repository with no remote-tracking refs the count is the whole
+    /// history, because there was nowhere to push it to. "N commits not pushed
+    /// anywhere" is true there and reads as an accusation about work that was
+    /// never going anywhere, so the sentence says what is actually the case.
+    #[test]
+    fn the_delete_dialog_words_the_count_honestly_without_a_remote() {
+        let nowhere_to_push = Some(dux_core::git::UnpushedCommits {
+            count: 12,
+            has_remote_refs: false,
+        });
+        assert_eq!(
+            super::delete_agent_branch_warning(
+                dux_core::model::BranchProvenance::AttachedExisting,
+                &["feature"],
+                nowhere_to_push
+            )
+            .as_deref(),
+            Some(
+                "This branch existed before the agent. Nothing on it has been pushed \
+                 anywhere: all 12 of its commits exist only on this machine."
+            )
+        );
+        assert_eq!(
+            super::delete_agent_branch_warning(
+                dux_core::model::BranchProvenance::AttachedExisting,
+                &["develop-next", "develop"],
+                nowhere_to_push
+            )
+            .as_deref()
+            .map(|text| text.contains(
+                "Nothing on them has been pushed anywhere: all 12 of their commits exist \
+                 only on this machine."
+            )),
+            Some(true)
+        );
+    }
+
     /// THE CONSENT PIN, terminal half. A drifted agent's delete removes the
     /// branch the worktree moved onto AND the one it was born on, so the box
     /// names both and the count covers both: a label promising one deletion
@@ -22039,7 +22099,7 @@ mod tests {
             "develop",
             true,
             true,
-            Some(4),
+            pushed_nowhere(4),
         );
         let screen = rendered_screen(&mut app);
         assert!(
@@ -22053,7 +22113,7 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::AttachedExisting,
                 &["develop-next", "develop"],
-                Some(4)
+                pushed_nowhere(4)
             )
             .as_deref(),
             Some(
@@ -22084,7 +22144,7 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::CreatedByDux,
                 &["dux/s1"],
-                Some(9)
+                pushed_nowhere(9)
             ),
             None,
             "a branch dux created for an agent that stayed on it warns about nothing"

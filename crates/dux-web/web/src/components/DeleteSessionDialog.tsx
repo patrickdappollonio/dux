@@ -48,7 +48,7 @@ function branchCheckboxLabel(branches: string[]): string {
 function branchWarning(
   provenance: string,
   branches: string[],
-  unpushed: number | null,
+  unpushed: { count: number; has_remote_refs: boolean } | null,
 ): string | null {
   const drifted = branches.length > 1
   const predates = provenance !== "created"
@@ -64,13 +64,26 @@ function branchWarning(
       existedBeforeSentence(provenance, drifted ? branches[1] : "This branch"),
     )
   }
-  if (unpushed !== null && unpushed > 0) {
-    const plural = unpushed === 1 ? "commit" : "commits"
-    parts.push(
-      drifted
-        ? `They have ${unpushed} ${plural} not pushed anywhere between them.`
-        : `It has ${unpushed} ${plural} not pushed anywhere.`,
-    )
+  if (unpushed !== null && unpushed.count > 0) {
+    const count = unpushed.count
+    const plural = count === 1 ? "commit" : "commits"
+    // A repository with no remote-tracking refs has held nothing back; it has
+    // nowhere to have pushed to, and the count is its whole history. "Not
+    // pushed anywhere" reads there as an accusation about work that was never
+    // going anywhere, so the sentence says what is actually true.
+    if (unpushed.has_remote_refs) {
+      parts.push(
+        drifted
+          ? `They have ${count} ${plural} not pushed anywhere between them.`
+          : `It has ${count} ${plural} not pushed anywhere.`,
+      )
+    } else {
+      parts.push(
+        drifted
+          ? `Nothing on them has been pushed anywhere: all ${count} of their commits exist only on this machine.`
+          : `Nothing on it has been pushed anywhere: all ${count} of its commits exist only on this machine.`,
+      )
+    }
   }
   return parts.join(" ")
 }
@@ -87,7 +100,9 @@ export function DeleteSessionDialog() {
   // and the warning line grows a sentence when the answer lands. `null` all the
   // way through means git could not answer, and the dialog then says nothing
   // about it rather than guessing a number.
-  const [unpushed, setUnpushed] = useState<number | null>(null)
+  const [unpushed, setUnpushed] = useState<
+    { count: number; has_remote_refs: boolean } | null
+  >(null)
   // The branches the server says the delete would remove, straight from the
   // answer that counted them. Rendered in preference to working the pair out
   // here a second time, so what this dialog asks about is what the server would
@@ -156,7 +171,7 @@ export function DeleteSessionDialog() {
       .branchUnpushed(deleteTarget)
       .then((answer) => {
         if (!live) return
-        setUnpushed(answer.unpushed_commits)
+        setUnpushed(answer.unpushed)
         setAnsweredBranches(answer.branches)
       })
       // A failure is simply "no number to show". The dialog is already telling
@@ -248,7 +263,7 @@ export function DeleteSessionDialog() {
           // The danger sits in the warning text, never in a red checkbox: the
           // box is an ordinary control and the sentence under it is what says
           // what is at stake.
-          <p className="text-sm text-muted-foreground">{branchWarningText}</p>
+          <p className="text-sm text-destructive">{branchWarningText}</p>
         )}
         <div className="h-2" />
         <DialogFooter>

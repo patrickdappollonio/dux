@@ -214,8 +214,10 @@ staying there is nothing to offer. Where it starts depends on where the branch c
   keep the branch.
 - **Unticked**, for a branch that already existed, or that was adopted along with an existing
   worktree. Underneath it dux says which of the two it is, and adds "It has N commits not
-  pushed anywhere" when there are any. Tick it and the branch goes anyway; this is the only
-  way to remove such a branch from dux once its worktree is gone.
+  pushed anywhere" when there are any. In a repository with no remotes it says so differently,
+  because there the count is the branch's whole history and nothing was ever going anywhere.
+  Tick it and the branch goes anyway; this is the only way to remove such a branch from dux
+  once its worktree is gone.
 
 If the worktree has moved onto another branch since the agent was created, the tick removes
 **both**: the branch it is on now and the one it was born on, which is what keeps creating
