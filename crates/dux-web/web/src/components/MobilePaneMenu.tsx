@@ -1,25 +1,21 @@
-import { Diff, Ellipsis, Settings } from "lucide-react"
+import { Ellipsis, Settings } from "lucide-react"
 
 import { AppMenuBody } from "@/components/AppMenu"
 import { AgentActionsMenu } from "@/components/FlatAgentList"
 import { InputMenuItems } from "@/components/InputMenuItems"
+import { PaneInputGroup } from "@/components/PaneInputGroup"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { useIsMobile } from "@/hooks/use-mobile"
-import { useTouchSurfaces } from "@/hooks/use-typing-surface"
-import { useAttachCapability } from "@/lib/attachRegistry"
-import { changesSummary } from "@/lib/changesSummary"
-import { openChangesScreen, useDux } from "@/lib/store"
+import { useDux } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 
 /// The one name the control answers to, on both of the surfaces it is painted
@@ -38,12 +34,23 @@ export const MOBILE_PANE_MENU_LABEL = "Session actions"
 // object, and one of its four buttons changing what it does on arrival is the
 // thing the animation says cannot happen.
 //
-// So there is one body, in this order: the agent's own actions, then the pane's
-// input items (the changed-file count's keyboard-reachable twin at their head),
-// then the way out of theater while the mode is on, then the app menu as a
-// drill named for the cog it stands in for. A phone renders every one of these
-// menus as a bottom sheet with its own stacked sub-sheets, so a submenu is the
-// sheet's own idiom rather than a flyout squeezed against an edge.
+// So there is one body, in this order: the pane's INPUT group, then the agent's
+// own actions, then the way out of theater while the mode is on, then the app
+// menu as a drill named for the cog it stands in for. A phone renders every one
+// of these menus as a bottom sheet with its own stacked sub-sheets, so a
+// submenu is the sheet's own idiom rather than a flyout squeezed against an
+// edge.
+//
+// THE INPUT GROUP IS FIRST, above the agent's own actions, because this sheet
+// is the only permanent home the virtual input's controls have: typing directly
+// in the terminal takes the whole bottom bar away, and the way back has to be
+// somewhere that never leaves. It is a thumb's reach from the `⋯` that opened
+// the sheet, which is where the hand already is.
+//
+// There is no "Changes ±N" row: the flap and the pill both carry a real count
+// BUTTON beside this trigger, keyboard-reachable and labelled for a screen
+// reader, and a second copy of it in the menu was two places for the same
+// number to be printed.
 export function MobilePaneMenu({
   session,
   side = "bottom",
@@ -80,44 +87,29 @@ export function MobilePaneMenu({
 /// Everything the phone's pane menu carries, ready to drop into any content.
 export function MobilePaneMenuBody({ session }: { session: SessionView }) {
   const duxState = useDux()
-  const isMobile = useIsMobile()
-  const touchSurfaces = useTouchSurfaces()
   const theater = duxState.theater
-  // Whichever of this agent's panes is mounted and owns its input answers for
-  // the upload, exactly as the row menus borrow it: the file travels through
-  // that pane's own gated connection and lands in its own sink.
-  const attachToPane = useAttachCapability([
-    session.id,
-    ...session.tabs.map((t) => t.id),
-  ])
   return (
     <>
+      {/* Whichever of this agent's panes is mounted and owns its input answers
+          for the whole group, exactly as the row menus borrow the attach: an
+          upload travels through that pane's own gated connection and lands in
+          its own sink, and the surface items are that pane's own state. */}
+      <PaneInputGroup ptyIds={[session.id, ...session.tabs.map((t) => t.id)]} />
       <AgentActionsMenu session={session} context="terminal" />
-      <DropdownMenuSeparator />
-      {/* THE CHANGED FILES, as a row as well as the cluster's own count button:
-          the keyboard- and screen-reader-reachable twin of the count beside it,
-          opening the same screen. */}
-      <DropdownMenuItem onClick={() => openChangesScreen()}>
-        <Diff />
-        {`Changes ${changesSummary(duxState.changes, session.id).label}`}
-      </DropdownMenuItem>
-      <InputMenuItems
-        gates={{
-          attach: attachToPane !== null,
-          // The typing-surface switch is not here: a phone always keeps its own
-          // input row under the terminal, theater included, and that row's `⋯`
-          // is where the pane publishes it. Offering it twice is how the two
-          // would eventually disagree about which surface is live.
-          surfaceSwitch: false,
-          // Present exactly where pressing it puts a key row on screen: in a
-          // narrow window on a laptop the width alone said yes and the press
-          // did nothing.
-          keysToggle: isMobile && touchSurfaces,
-          // The way back, from the surface the mode leaves on screen.
-          theaterExit: theater,
-        }}
-        onAttach={() => attachToPane?.()}
-      />
+      {theater ? (
+        <>
+          <DropdownMenuSeparator />
+          {/* The way back, from the surface the mode leaves on screen. */}
+          <InputMenuItems
+            gates={{
+              attach: false,
+              surfaceSwitch: false,
+              keysToggle: false,
+              theaterExit: true,
+            }}
+          />
+        </>
+      ) : null}
       <DropdownMenuSeparator />
       {/* NAMED FOR THE CONTROL IT STANDS IN FOR. Theater takes the phone's top
           bar, and with it the cog; the flap's own header is gone in both modes.

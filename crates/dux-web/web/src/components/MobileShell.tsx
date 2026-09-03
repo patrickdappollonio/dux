@@ -33,11 +33,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { InputMenuItems } from "@/components/InputMenuItems"
-import { useIsMobile } from "@/hooks/use-mobile"
+import { PaneInputGroup } from "@/components/PaneInputGroup"
 import { useTheaterFlight } from "@/hooks/use-theater-flight"
 import { flapMounted, flapVisible, pillMounted } from "@/lib/theaterFlight"
-import { useTouchSurfaces } from "@/hooks/use-typing-surface"
 import {
   dormantTabNeedsCard,
   shouldShowTabStrip,
@@ -152,8 +150,6 @@ function AgentlessTerminalScreen({
   // the crumb still disambiguates against its true siblings.
   const ownedTerminals = terminalsForOwner(spine?.terminals ?? [], owner)
   const terminal = ownedTerminals.find((t) => t.id === terminalId)
-  const isMobile = useIsMobile()
-  const touchSurfaces = useTouchSurfaces()
   // On the phone shell the app header IS the chrome stack theater takes away.
   // It is the only way to hide this header, deliberately: a preference that
   // hid it too was a second flow for the same intent with no way back of its
@@ -205,30 +201,19 @@ function AgentlessTerminalScreen({
               <Ellipsis />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {/* The shared input-menu items, identical to the agent screen's
-                  menu (and to the input `⋯` below the terminal), then the
+              {/* The pane's INPUT group first, identical to the agent screen's
+                  menu: this header is the terminal screen's one permanent menu,
+                  so it is where the way back to the virtual input lives once
+                  typing directly has taken the bottom bar away. Then the
                   terminal's one real action from its sidebar row menu: Close…,
                   neutral color per the destructive convention (the … plus
                   ConfirmDeleteTerminalDialog are the danger signal), routed
                   through the same confirm target.
 
-                  The keys toggle rides the touch surfaces as well, so it is
-                  present exactly where pressing it puts a key row on screen:
-                  in a narrow window on a laptop the width alone said yes and
-                  the press did nothing. Asking for the message box from the
-                  input `⋯` brings the surfaces, and this item, along. */}
-              <InputMenuItems
-                gates={{
-                  attach: false,
-                  surfaceSwitch: false,
-                  keysToggle: isMobile && touchSurfaces,
-                  // Same reason as the agent screen's header menu: this menu
-                  // lives in the header theater takes away, so it is never on
-                  // screen in theater and carries no exit.
-                  theaterExit: false,
-                }}
-                trailingSeparator
-              />
+                  No theater exit, for the same reason as the agent screen's
+                  header menu: this menu lives in the header theater takes away,
+                  so it is never on screen in the mode. */}
+              <PaneInputGroup ptyIds={[terminalId]} />
               {/* The new-tab editor entry only, matching the agent screen's
                   menu: the in-app overlay is desktop-only, so its item would be
                   a dead no-op here. A real anchor, so a long-press keeps its

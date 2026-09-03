@@ -228,6 +228,16 @@ export function InsetHeader() {
   // control at all.
   const summary = changesSummary(dux.changes, session?.id)
 
+  // The pty behind the pane this header sits over, named the way the shells key
+  // the pane itself (a terminal by its own id, an agent by the FOCUSED TAB's).
+  const inputPtyIds = selectedTarget
+    ? [
+        selectedTarget.kind === "terminal"
+          ? selectedTarget.terminalId
+          : selectedTarget.tabId,
+      ]
+    : []
+
   return (
     <header className="relative flex h-12 shrink-0 items-center gap-2 border-b px-3">
       {/* The upward continuation of the changes-panel divider. Absolutely
@@ -354,7 +364,11 @@ export function InsetHeader() {
             </Button>
           </SimpleTooltip>
         )}
-        <AppMenu />
+        {/* The pane in view, so the menu can carry its INPUT group: on this
+            surface the header's `⋯` is the one menu that is always on screen,
+            and typing directly in the terminal takes the bottom bar (and the
+            input `⋯` with it) away. */}
+        <AppMenu inputPtyIds={inputPtyIds} />
       </div>
     </header>
   )

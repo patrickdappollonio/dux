@@ -21,6 +21,8 @@
 // read is what makes a second tab's write visible on the next render instead of
 // needing a cache to invalidate.
 
+import { notifyInfo } from "./notify"
+
 /** The `localStorage` key. */
 export const TYPING_SURFACE_KEY = "dux:typing-surface"
 
@@ -76,6 +78,62 @@ export function setTypingSurface(next: TypingSurface | null): void {
   } finally {
     for (const listener of listeners) listener()
   }
+}
+
+/** The latch behind the once-per-device "here is the way back" hint. */
+export const DIRECT_INPUT_HINT_KEY = "dux:direct-input-hint"
+
+/**
+ * Should the "where the way back lives" hint fire on this device?
+ *
+ * Storage that cannot be read cannot be written either, so a browser that
+ * refuses it never hints rather than hinting on every switch. Same shape, and
+ * same reason, as the theater pill's grip hint.
+ */
+export function directHintPending(): boolean {
+  try {
+    const store = storage()
+    if (!store) return false
+    return store.getItem(DIRECT_INPUT_HINT_KEY) === null
+  } catch {
+    return false
+  }
+}
+
+/** Never hint on this device again. Best-effort. */
+export function markDirectHintShown(): void {
+  try {
+    storage()?.setItem(DIRECT_INPUT_HINT_KEY, "shown")
+  } catch {
+    // See `directHintPending`: a storage that refuses writes also refuses
+    // reads, so the hint is already suppressed.
+  }
+}
+
+/**
+ * THE ONE GESTURE that changes the typing surface, and the reason the switch
+ * cannot become a dead end.
+ *
+ * Choosing to type directly in the terminal takes the WHOLE bottom bar away:
+ * the message box, the terminal keys, and the `⋯` that hung off them. That is
+ * the point of the mode, and it is also the moment a user has no way of knowing
+ * where the way back went. So the first time it happens on a device, dux says
+ * so, once, through the one raiser. INFO and not sticky: nothing is lost if it
+ * goes unread, and the menu it names is on screen either way.
+ *
+ * `setTypingSurface` stays the writer. Every surface that flips the choice (the
+ * key row's cap, the input `⋯`, the top menu's INPUT group) calls this instead,
+ * so none of them can raise a different hint or none at all.
+ */
+export function switchTypingSurface(next: TypingSurface): void {
+  setTypingSurface(next)
+  if (next !== "direct") return
+  if (!directHintPending()) return
+  // Marked BEFORE the raise, so a double-invoked caller cannot produce two.
+  markDirectHintShown()
+  notifyInfo(
+    "Typing goes straight to the terminal now. The pane's ⋯ menu has “Use virtual input” when you want the message box back.",
+  )
 }
 
 /** Subscribe to changes; returns the unsubscribe. */

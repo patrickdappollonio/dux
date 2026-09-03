@@ -6,6 +6,7 @@ import { AppMenuBody } from "@/components/AppMenu"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { MobileActionCluster } from "@/components/MobileActionCluster"
 import { MobilePaneMenu } from "@/components/MobilePaneMenu"
+import { PaneInputGroup } from "@/components/PaneInputGroup"
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -16,8 +17,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
-import { useAttachCapability } from "@/lib/attachRegistry"
-import { usePaneInputMenu } from "@/lib/paneInputMenu"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import {
   armTheaterToggleFocus,
@@ -578,25 +577,16 @@ function runAttach(box: HTMLElement, dock: DOMRect): void {
 // cannot offer different things; the wrapper adds only the theater exit, from
 // the shared item the input `⋯` uses, so the way out is inside the one `⋯` too.
 //
-// It also carries the pane's INPUT items whenever the pane has nowhere of its
-// own to put them, which on a computer is the ordinary case: theater takes the
-// whole window, and a bordered `⋯` row under the terminal would be both a
-// second ellipsis beside this one and exactly the chrome the mode removes. The
-// pane publishes them for precisely that state (see `lib/paneInputMenu.ts`), so
-// the typing-surface switch and "Attach a file…" stay one press away and there
-// is still one trigger on screen. A phone keeps its own row and publishes
-// nothing, and then this menu is the app menu plus the theater exit as before.
+// It also carries the pane's INPUT group at the top, the same group the phone's
+// pane menu and the desktop pane header carry: in theater this is the ONE menu
+// on screen, so "Attach a file…" and the way back to the virtual input have to
+// be in it. The pane publishes what belongs there (see `lib/paneInputGroup.ts`)
+// and the group renders nothing when there is nothing to say.
 //
 // NAMED "Settings", like the control it stands in for: a user looking for the
 // cog's menu should find it under the name they know, and the pill's own
 // buttons already say what each of them does.
 function TheaterAppMenu({ paneId }: { paneId: string }) {
-  const paneMenu = usePaneInputMenu(paneId)
-  // The attach item is the mounted OWNER pane's own capability, borrowed the
-  // way the row menus borrow it, so the file travels through that pane's
-  // already-gated socket and lands in its own sink. Both halves have to be
-  // there: the pane says the item belongs, the registry hands over the act.
-  const attachToPane = useAttachCapability([paneId])
   return (
     <DropdownMenu>
       <SimpleTooltip content="Settings">
@@ -617,18 +607,17 @@ function TheaterAppMenu({ paneId }: { paneId: string }) {
           bottom corner of the pane, where a downward popup has nowhere to go.
           On a phone the primitive renders it as a sheet and ignores this. */}
       <DropdownMenuContent side="top" align="end">
+        <PaneInputGroup ptyIds={[paneId]} />
         <AppMenuBody />
         <DropdownMenuSeparator />
         <InputMenuItems
           gates={{
-            attach: (paneMenu?.gates.attach ?? false) && attachToPane !== null,
-            surfaceSwitch: paneMenu?.gates.surfaceSwitch ?? false,
-            keysToggle: paneMenu?.gates.keysToggle ?? false,
+            attach: false,
+            surfaceSwitch: false,
+            keysToggle: false,
             // The guaranteed way out, whatever the pane published.
             theaterExit: true,
           }}
-          composeSurface={paneMenu?.composeSurface ?? false}
-          onAttach={() => attachToPane?.()}
         />
       </DropdownMenuContent>
     </DropdownMenu>

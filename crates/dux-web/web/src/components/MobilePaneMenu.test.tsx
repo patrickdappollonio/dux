@@ -48,6 +48,13 @@ installStubs()
 const { MobileActionFlap } = await import("./MobileActionFlap")
 const { TheaterPill } = await import("./TheaterPill")
 const { MOBILE_PANE_MENU_LABEL } = await import("./MobilePaneMenu")
+const { PANE_INPUT_GROUP_LABEL } = await import("./PaneInputGroup")
+const { registerPaneInputGroup, resetPaneInputGroups } = await import(
+  "@/lib/paneInputGroup"
+)
+const { registerAttachCapability, resetAttachCapabilities } = await import(
+  "@/lib/attachRegistry"
+)
 
 function session(): SessionView {
   return {
@@ -98,6 +105,8 @@ const desktopWidth = window.innerWidth
 beforeEach(() => {
   installStubs()
   mockState = makeState(false)
+  resetPaneInputGroups()
+  resetAttachCapabilities()
 })
 
 afterEach(() => {
@@ -127,7 +136,13 @@ describe("the phone's one pane menu", () => {
     const items = labels()
     expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
     expect(items.some((t) => t?.includes("Delete agent…"))).toBe(true)
-    expect(items.some((t) => t?.startsWith("Changes"))).toBe(true)
+    // NO "Changes ±N" ROW. The cluster this menu hangs off carries a real count
+    // button, keyboard-reachable and labelled for a screen reader, and a second
+    // copy of the number in the menu was two places for it to be printed.
+    expect(items.some((t) => t?.startsWith("Changes"))).toBe(false)
+    expect(
+      screen.getByTestId("mobile-changes-count").getAttribute("aria-label"),
+    ).toBe("1 changed files")
     // The way to the app's own actions, named for the control it stands in for.
     expect(items.some((t) => t?.includes("Settings"))).toBe(true)
   })
@@ -148,7 +163,7 @@ describe("the phone's one pane menu", () => {
     // per-agent action was unreachable on a phone.
     expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
     expect(items.some((t) => t?.includes("Delete agent…"))).toBe(true)
-    expect(items.some((t) => t?.startsWith("Changes"))).toBe(true)
+    expect(items.some((t) => t?.startsWith("Changes"))).toBe(false)
     expect(items.some((t) => t?.includes("Settings"))).toBe(true)
   })
 
@@ -176,19 +191,46 @@ describe("the phone's one pane menu", () => {
     expect(labels().some((t) => t?.includes("Leave theater mode"))).toBe(false)
   })
 
-  it("keeps the phone's chrome toggle where pressing it does something", async () => {
+  // THE INPUT GROUP IS THE PANE'S ANSWER, not this menu's. Typing directly in
+  // the terminal takes the whole bottom bar away, so this menu is the only
+  // permanent home the virtual input's controls have; what is in it comes from
+  // the mounted owner pane, which is the only thing that knows.
+  it("carries the pane's INPUT group, at the top, from what the pane publishes", async () => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
     media = stubCoarsePointer()
+    registerPaneInputGroup("s1", { surfaceSwitch: true, keysToggle: false })
+    registerAttachCapability("s1", vi.fn())
     render(<MobileActionFlap target={target} session={session()} band="strip" />)
     await openFrom(screen.getByLabelText(MOBILE_PANE_MENU_LABEL))
     const items = labels()
-    expect(items.some((t) => t?.includes("terminal keys"))).toBe(true)
+    expect(items[0]).toContain("Attach a file…")
+    expect(items[1]).toContain("Use virtual input")
+    // The label stays even with one item, and it is above the agent's actions.
+    const group = screen.getByText(PANE_INPUT_GROUP_LABEL)
+    const rename = screen
+      .getAllByRole("menuitem")
+      .find((el) => el.textContent?.includes("Rename agent…"))!
+    expect(
+      group.compareDocumentPosition(rename) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
     // And nothing for the top bar: theater mode is the one way to hide the
     // phone's chrome, and a second flow for the same intent is exactly what
     // this menu must not grow back.
     expect(items.some((t) => t?.includes("top bar"))).toBe(false)
+  })
+
+  // The way BACK only. While the virtual input is up, the bottom `⋯` inside it
+  // owns the other direction, and offering both here is how the two would
+  // eventually disagree about which surface is live.
+  it("has no INPUT group at all when the pane publishes nothing", async () => {
+    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    await openFrom(screen.getByLabelText(MOBILE_PANE_MENU_LABEL))
+    expect(screen.queryByText(PANE_INPUT_GROUP_LABEL)).toBeNull()
+    expect(labels().some((t) => t?.includes("Attach a file…"))).toBe(false)
+    expect(labels().some((t) => t?.includes("Use virtual input"))).toBe(false)
   })
 })

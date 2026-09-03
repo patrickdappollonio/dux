@@ -21,10 +21,13 @@ vi.mock("@/lib/store", async (importOriginal) => {
   }
 })
 const exitTheater = vi.fn()
-const setTypingSurface = vi.fn()
+const switchTypingSurface = vi.fn()
 vi.mock("@/lib/typingSurface", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/typingSurface")>()
-  return { ...actual, setTypingSurface: (...a: unknown[]) => setTypingSurface(...a) }
+  return {
+    ...actual,
+    switchTypingSurface: (...a: unknown[]) => switchTypingSurface(...a),
+  }
 })
 
 // The store reads storage and the network at import time, and the menu
@@ -84,7 +87,7 @@ function open(
 beforeEach(() => {
   mockState = state()
   setAccessoryBarVisibility.mockClear()
-  setTypingSurface.mockClear()
+  switchTypingSurface.mockClear()
 })
 afterEach(() => cleanup())
 
@@ -114,8 +117,8 @@ describe("InputMenu", () => {
   })
 
   it("carries the way out of theater, and only while theater is on", () => {
-    // The input ⋯ renders in EVERY bar state, which is what makes it the exit
-    // that still works on a phone whose floating pill is under the keyboard.
+    // Not from the input `⋯` any more, which exists only inside the virtual
+    // input: the top menus carry the exit, and this gate is what they pass.
     open({ keysToggle: true })
     expect(screen.queryByText("Leave theater mode")).toBeNull()
     cleanup()
@@ -129,15 +132,18 @@ describe("InputMenu", () => {
     expect(screen.queryByText("Attach a file…")).toBeNull()
   })
 
+  // The two directions live in different menus (the way out inside the virtual
+  // input, the way back in the top menu that outlives it), so the caller says
+  // which one it is and the wording follows.
   it("names the typing-surface switch after what it does, both ways", () => {
     open({ surfaceSwitch: true }, { composeSurface: true })
     fireEvent.click(screen.getByText("Type directly in the terminal"))
-    expect(setTypingSurface).toHaveBeenCalledExactlyOnceWith("direct")
+    expect(switchTypingSurface).toHaveBeenCalledExactlyOnceWith("direct")
     cleanup()
-    setTypingSurface.mockClear()
+    switchTypingSurface.mockClear()
     open({ surfaceSwitch: true }, { composeSurface: false })
-    fireEvent.click(screen.getByText("Use the message box"))
-    expect(setTypingSurface).toHaveBeenCalledExactlyOnceWith("compose")
+    fireEvent.click(screen.getByText("Use virtual input"))
+    expect(switchTypingSurface).toHaveBeenCalledExactlyOnceWith("compose")
   })
 
   // Selecting an item closes the menu, so each write gets its own open.
@@ -170,7 +176,7 @@ describe("InputMenu", () => {
   it("renders exactly the items the caller asked for", () => {
     open({ attach: true, surfaceSwitch: true }, { composeSurface: false })
     expect(screen.getByText("Attach a file…")).toBeTruthy()
-    expect(screen.getByText("Use the message box")).toBeTruthy()
+    expect(screen.getByText("Use virtual input")).toBeTruthy()
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
   })
 })

@@ -9,9 +9,9 @@ import {
   resetAttachCapabilities,
 } from "@/lib/attachRegistry"
 import {
-  registerPaneInputMenu,
-  resetPaneInputMenus,
-} from "@/lib/paneInputMenu"
+  registerPaneInputGroup,
+  resetPaneInputGroups,
+} from "@/lib/paneInputGroup"
 
 let mockState: DuxState
 const exitTheaterMock = vi.fn()
@@ -175,7 +175,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
-  resetPaneInputMenus()
+  resetPaneInputGroups()
   resetAttachCapabilities()
   vi.unstubAllGlobals()
   Element.prototype.getBoundingClientRect = realRect
@@ -769,19 +769,11 @@ describe("the input items the pill folds in", () => {
   it("shows the switch and the attach the pane published", async () => {
     const attach = vi.fn()
     registerAttachCapability("tm1", attach)
-    registerPaneInputMenu("tm1", {
-      gates: {
-        attach: true,
-        surfaceSwitch: true,
-        keysToggle: false,
-        theaterExit: true,
-      },
-      composeSurface: false,
-    })
+    registerPaneInputGroup("tm1", { surfaceSwitch: true, keysToggle: false })
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     await openMenu()
 
-    expect(items().some((t) => t?.includes("Use the message box"))).toBe(true)
+    expect(items().some((t) => t?.includes("Use virtual input"))).toBe(true)
     const attachItem = screen
       .getAllByRole("menuitem")
       .find((e) => e.textContent?.includes("Attach a file"))
@@ -790,70 +782,54 @@ describe("the input items the pill folds in", () => {
     expect(attach).toHaveBeenCalledTimes(1)
   })
 
-  // The item's wording follows the RESOLVED surface, not the pointer, exactly
-  // as it does in the pane's own menu: both write through `setTypingSurface`.
-  it("names the way back while the message box is the surface", async () => {
-    registerPaneInputMenu("tm1", {
-      gates: {
-        attach: false,
-        surfaceSwitch: true,
-        keysToggle: false,
-        theaterExit: true,
-      },
-      composeSurface: true,
-    })
+  // THE WAY BACK ONLY. The other direction lives in the bottom `⋯`, which
+  // exists exactly while the virtual input does, so the pane publishes the
+  // switch only once its own rows are gone and this menu never has to guess
+  // which surface is live.
+  it("offers the way back rather than both directions", async () => {
+    registerPaneInputGroup("tm1", { surfaceSwitch: true, keysToggle: false })
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     await openMenu()
 
+    expect(items().some((t) => t?.includes("Use virtual input"))).toBe(true)
     expect(
       items().some((t) => t?.includes("Type directly in the terminal")),
-    ).toBe(true)
+    ).toBe(false)
   })
 
-  // An attach the pane advertises but no mounted owner can perform is not an
-  // item: it would open nothing. Both halves have to be there.
+  // An attach no mounted owner pane can perform is not an item: it would open
+  // nothing. The act and the item are the same registration, so this is the
+  // whole gate.
   it("drops the attach when no mounted pane can perform it", async () => {
-    registerPaneInputMenu("tm1", {
-      gates: {
-        attach: true,
-        surfaceSwitch: false,
-        keysToggle: false,
-        theaterExit: true,
-      },
-      composeSurface: false,
-    })
+    registerPaneInputGroup("tm1", { surfaceSwitch: false, keysToggle: false })
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     await openMenu()
 
     expect(items().some((t) => t?.includes("Attach a file"))).toBe(false)
   })
 
-  // A phone in theater keeps its own input row (a pill can end up under the
-  // soft keyboard), so it publishes nothing and this menu stays what it was.
-  it("carries no input items while the pane still has its own row", async () => {
+  // Nothing published and no attach capability: no group at all, label
+  // included, rather than an empty heading over the app menu.
+  it("carries no input group while the pane publishes nothing", async () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     await openMenu()
 
-    expect(items().some((t) => t?.includes("Use the message box"))).toBe(false)
+    expect(items().some((t) => t?.includes("Use virtual input"))).toBe(false)
     expect(items().some((t) => t?.includes("Attach a file"))).toBe(false)
+    expect(screen.queryByText("Input")).toBeNull()
     expect(items().some((t) => t?.includes("Leave theater mode"))).toBe(true)
   })
 
   // It reads the pane it is painted over, never whichever registered last.
-  it("ignores a menu published by another pane", async () => {
-    registerPaneInputMenu("someone-else", {
-      gates: {
-        attach: false,
-        surfaceSwitch: true,
-        keysToggle: false,
-        theaterExit: true,
-      },
-      composeSurface: false,
+  it("ignores a group published by another pane", async () => {
+    registerPaneInputGroup("someone-else", {
+      surfaceSwitch: true,
+      keysToggle: false,
     })
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     await openMenu()
 
-    expect(items().some((t) => t?.includes("Use the message box"))).toBe(false)
+    expect(items().some((t) => t?.includes("Use virtual input"))).toBe(false)
   })
 })
 

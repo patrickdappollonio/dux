@@ -45,7 +45,7 @@ import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useTypingSurface } from "@/hooks/use-typing-surface"
 import { useFilePicker } from "@/hooks/use-file-picker"
 import { inputMenuHasItems, type InputMenuGates } from "@/lib/inputMenu"
-import { setTypingSurface } from "@/lib/typingSurface"
+import { switchTypingSurface } from "@/lib/typingSurface"
 import { ESC, TAB } from "@/lib/termkeys"
 import {
   ejectSelectionForReconnect,
@@ -81,7 +81,7 @@ import {
 } from "@/components/terminal/viewerGrid"
 import { REPLAY_WAIT_POLL_MS } from "@/components/terminal/constants"
 import { suspendTerminalTabStop } from "@/components/terminal/inputWiring"
-import { registerPaneInputMenu } from "@/lib/paneInputMenu"
+import { registerPaneInputGroup } from "@/lib/paneInputGroup"
 import {
   focusTypingSurfaceIn,
   nextTypingFocus,
@@ -467,7 +467,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     inputMenuGates,
     menuHasItems,
     inputMenuRow,
-    inputMenuInPill,
+    topInputGates,
   } = terminalInputLayout({
     isOwner,
     fileDropEnabled,
@@ -536,7 +536,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   //   [live]                              the terminal focus target
   //   [composeBarEnabled, isOwner]        the compose textarea's paste listener
   //   [composeSurfaceLive]                xterm's tab stop, while the box is up
-  //   [inputMenuInPill, ...the gates]     the input menu the theater pill shows
+  //   [isOwner, ...the top gates]         the INPUT group the top menus show
   //   [isSessionSlotTab, everReady, ...]  eject to the welcome screen on exit
   //   [isOwner]                           the viewed ping on gaining ownership
   //
@@ -688,31 +688,29 @@ export function TerminalPane(props: TerminalPaneProps) {
     // rather than because its identity ever changes.
   }, [composeSurfaceLive, termRef])
 
-  // THE INPUT `⋯` WITH NOWHERE TO RENDER. In theater on a computer the pane
-  // has no input row to anchor it and the floating pill is the only chrome
-  // left, so the items are published for the pill to fold into its own single
-  // menu (see `lib/paneInputMenu.ts`). Registered only while this pane really
-  // has no anchor of its own, so the same items can never appear twice.
+  // THE PANE'S INPUT GROUP, for whichever TOP menu is on screen over it: the
+  // phone's merged pane menu, the phone's agentless terminal header, the
+  // desktop pane header's menu, the floating pill's one menu (see
+  // `lib/paneInputGroup.ts`). None of them is inside the pane, and only the
+  // pane knows the answers.
+  //
+  // Published only while this pane OWNS the input, so a mounted viewer pane
+  // cannot shadow a mounted owner pane's answers for the same agent.
   //
   // Every dependency is a primitive: the gates object is rebuilt on each render,
   // and a registration keyed on its identity would publish on every commit,
-  // re-render the pill and come straight back round.
-  const { attach, surfaceSwitch, keysToggle, theaterExit } = inputMenuGates
+  // re-render every open menu and come straight back round.
+  const {
+    surfaceSwitch: topSurfaceSwitch,
+    keysToggle: topKeysToggle,
+  } = topInputGates
   useEffect(() => {
-    if (!inputMenuInPill) return
-    return registerPaneInputMenu(id, {
-      gates: { attach, surfaceSwitch, keysToggle, theaterExit },
-      composeSurface: composeBarEnabled,
+    if (!isOwner) return
+    return registerPaneInputGroup(id, {
+      surfaceSwitch: topSurfaceSwitch,
+      keysToggle: topKeysToggle,
     })
-  }, [
-    id,
-    inputMenuInPill,
-    attach,
-    surfaceSwitch,
-    keysToggle,
-    theaterExit,
-    composeBarEnabled,
-  ])
+  }, [id, isOwner, topSurfaceSwitch, topKeysToggle])
 
   // Mirror the TUI's exit behavior: when the agent we were attached to stops
   // running (it produced output in this pane, then its session left `active`
@@ -987,14 +985,18 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
   const accessoryBarShown =
     input.isOwner && input.touchSurfaces && input.accessoryBarVisible
   const composeBarShown = input.isOwner && input.composeBarEnabled
+  // THE BOTTOM `⋯`, which lives INSIDE the virtual input and nowhere else. It
+  // carries only what is local to the rows around it: the way out of the
+  // virtual input, and the keys toggle. "Attach a file…" moved up to the top
+  // menu's INPUT group, which is on screen whether or not these rows are, and
+  // the theater exit went with it: this menu is not a permanent surface any
+  // more, so it cannot be anybody's guaranteed way back.
   const inputMenuGates = {
-    attach: input.isOwner && input.fileDropEnabled,
+    attach: false,
     surfaceSwitch:
       input.isOwner && inputMenuSurfaceSwitchOffered(input.composeMode),
     keysToggle: input.isOwner && input.touchSurfaces,
-    // Offered to EVERY viewer, owner or not: a watcher can put a pane in
-    // theater too, and the way back must not depend on owning the input.
-    theaterExit: input.theater,
+    theaterExit: false,
   }
   const menuHasItems = inputMenuHasItems(inputMenuGates)
   // THE OWNER'S `⋯` IS UNCONDITIONAL, in its own minimal row when no bar is up
@@ -1007,32 +1009,37 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
   // NOT IN THEATER ON A COMPUTER, where the mode has taken the whole window and
   // the floating pill is the only chrome left. A bordered row under the
   // terminal there is a second `⋯` beside the pill's own, and it is exactly the
-  // chrome this mode exists to remove. The items move INTO the pill instead
-  // (`inputMenuInPill` below), so the switch stays one press away and there is
-  // still only one trigger on screen.
+  // chrome this mode exists to remove. The items move into the top menu's INPUT
+  // group instead, so the switch stays one press away and there is still only
+  // one trigger on screen.
   const inputMenuRow =
     !accessoryBarShown &&
     !composeBarShown &&
     menuHasItems &&
     input.isOwner &&
     !input.theater
-  // The pill carries the items exactly while theater is on and nothing else in
-  // the pane is anchoring them, so they can never be in two menus at once: a
-  // phone in theater keeps its own row (a pill there can end up under the soft
-  // keyboard) and publishes nothing.
-  const inputMenuInPill =
-    input.theater &&
-    !accessoryBarShown &&
-    !composeBarShown &&
-    !inputMenuRow &&
-    menuHasItems
+  // THE TOP MENU'S INPUT GROUP, published for whichever menu is over this pane
+  // (see `lib/paneInputGroup.ts`). It carries a control exactly while the
+  // bottom `⋯` does NOT, so the same row is never in two menus at once: the
+  // bottom one is the way OUT of the virtual input while it is up, and this one
+  // is the way BACK once it is gone. "Attach a file…" is not here because it is
+  // not a gate: the menu borrows the pane's own attach capability, published
+  // under this same pty id on exactly the same condition.
+  const bottomBarShown = accessoryBarShown || composeBarShown || inputMenuRow
+  const topInputGates = {
+    surfaceSwitch:
+      input.isOwner &&
+      inputMenuSurfaceSwitchOffered(input.composeMode) &&
+      !bottomBarShown,
+    keysToggle: input.isOwner && input.touchSurfaces && !bottomBarShown,
+  }
   return {
     accessoryBarShown,
     composeBarShown,
     inputMenuGates,
     menuHasItems,
     inputMenuRow,
-    inputMenuInPill,
+    topInputGates,
   }
 }
 
@@ -1511,7 +1518,7 @@ function TerminalInputRows({
           onToggleSurface={
             surfaceToggleOffered
               ? () =>
-                  setTypingSurface(composeBarEnabled ? "direct" : "compose")
+                  switchTypingSurface(composeBarEnabled ? "direct" : "compose")
               : undefined
           }
           inputMenu={!composeBarShown && menuHasItems ? inputMenu : undefined}

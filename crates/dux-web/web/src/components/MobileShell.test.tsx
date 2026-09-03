@@ -78,6 +78,9 @@ function installBootStubs() {
 }
 installBootStubs()
 const { MobileShell } = await import("./MobileShell")
+const { registerPaneInputGroup, resetPaneInputGroups } = await import(
+  "@/lib/paneInputGroup"
+)
 const { NewAgentPickerDialog } = await import("./NewAgentPickerDialog")
 
 function makeState(overrides: Partial<DuxState> = {}): DuxState {
@@ -815,11 +818,11 @@ describe("MobileShell terminal-screen macro trigger", () => {
 })
 
 describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
-  // The top-bar toggle is gated on `context === "terminal" && isMobile`, and
-  // `useIsMobile` reads `window.innerWidth`, so these tests shrink it below
-  // the 768px breakpoint (mirroring the TerminalPane compose-bar tests). The
-  // keys toggle additionally rides the touch surfaces, hence the pointer stub:
-  // the item is present exactly where pressing it puts a key row on screen.
+  // THE ITEMS ARE THE PANE'S, published under the pty id (see
+  // `lib/paneInputGroup.ts`): only the pane knows whether it owns the input and
+  // whether a bottom bar of its own is already carrying these rows. The pane is
+  // mocked away in this suite, so each case registers what a real one would
+  // publish.
   const desktopWidth = window.innerWidth
   let media: MatchMediaStub
   beforeEach(() => {
@@ -828,8 +831,10 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
       configurable: true,
     })
     media = stubCoarsePointer()
+    resetPaneInputGroups()
   })
   afterEach(() => {
+    resetPaneInputGroups()
     media.restore()
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
@@ -859,6 +864,7 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
 
   it("offers Hide terminal keys on the terminal screen, and nothing for the top bar", () => {
     mockState = terminalState()
+    registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
     expect(screen.getByText("Hide terminal keys")).toBeTruthy()
@@ -867,13 +873,14 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     expect(screen.queryByText("Hide top bar")).toBeNull()
   })
 
-  // NEVER INERT. A narrow window on a laptop is a mobile LAYOUT with a fine
-  // pointer, so no key row is on screen and none would appear: the item used to
-  // render there and do nothing when pressed. The way in is the input `⋯`,
-  // which offers the message box on every device.
-  it("drops the keys toggle where no key row could appear", () => {
+  // NEVER INERT, and never DOUBLED: the pane publishes the keys row only while
+  // it has no bottom bar of its own carrying it, so a menu whose pane says
+  // nothing offers nothing. The item used to render on a fine-pointer laptop
+  // and do nothing at all when pressed.
+  it("drops the keys toggle when the pane does not offer it", () => {
     media.set(COARSE_POINTER_QUERY, false)
     mockState = terminalState()
+    registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: false })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
@@ -891,6 +898,7 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
         mobile_accessory_bar: false,
       },
     })
+    registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
     expect(screen.getByText("Show terminal keys")).toBeTruthy()
@@ -898,6 +906,7 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
 
   it("tapping Hide terminal keys persists through the generic settings PATCH", () => {
     mockState = terminalState()
+    registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
     fireEvent.click(screen.getByText("Hide terminal keys"))
@@ -916,12 +925,10 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     )
   })
 
-  it("renders no toggles at desktop width even in the terminal context", () => {
-    // The gate is context AND isMobile, and it is now computed by THIS caller
-    // rather than inside the shared items component (the input ⋯ below the
-    // terminal passes a wider one, for the coarse-pointer tablet). The chrome
-    // these toggles hide is still phone-shell-only, so a desktop viewport must
-    // never see them even when a terminal-context menu renders.
+  it("renders no toggles, and no group label, when no pane has published", () => {
+    // The gate moved to the PANE, which is the only thing that knows whether a
+    // bottom bar is already carrying these rows. A menu whose pane published
+    // nothing renders the group not at all, label included.
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
@@ -940,6 +947,7 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     // than every sibling item in the same open menu. Measured against a bar
     // toggle, which is a plain shared item and therefore the reference height.
     mockState = terminalState()
+    registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
     const item = screen
@@ -1084,6 +1092,7 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
 
   it("offers the keys quick toggle, exactly as the agent screen words it", () => {
     mockState = projectTerminalState()
+    registerPaneInputGroup("pt-1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Terminal actions"))
     expect(screen.getByText("Hide terminal keys")).toBeTruthy()
@@ -1092,6 +1101,7 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
 
   it("labels flip to Show when the keys bar is already hidden", () => {
     mockState = projectTerminalState({ mobile_accessory_bar: false })
+    registerPaneInputGroup("pt-1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Terminal actions"))
     expect(screen.getByText("Show terminal keys")).toBeTruthy()
@@ -1099,6 +1109,7 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
 
   it("tapping Hide terminal keys persists through the generic settings PATCH", () => {
     mockState = projectTerminalState()
+    registerPaneInputGroup("pt-1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Terminal actions"))
     fireEvent.click(screen.getByText("Hide terminal keys"))

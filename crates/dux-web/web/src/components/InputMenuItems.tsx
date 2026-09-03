@@ -21,14 +21,14 @@ import {
   inputMenuHasItems,
   type InputMenuGates,
 } from "@/lib/inputMenu"
-import { setTypingSurface } from "@/lib/typingSurface"
+import { switchTypingSurface } from "@/lib/typingSurface"
 
-// THE INPUT MENU'S ITEMS, shared by every menu that carries any of them: the
-// always-present input `⋯` below the terminal (see `InputMenu`), the phone
-// agent screen's one pane menu (`MobilePaneMenu`, opened from the docked flap
-// and from the floating pill) and the agentless project/standalone screens'
-// header menu (MobileShell). One component so the labels, icons and store
-// writes can never drift between them.
+// THE INPUT ITEMS, shared by every menu that carries any of them: the input
+// `⋯` inside the virtual input (see `InputMenu`) and the INPUT group at the top
+// of whichever menu the surface always has (see `PaneInputGroup`, which the
+// phone's merged pane menu, the phone's agentless terminal header, the desktop
+// pane header's menu and the floating pill all render). One component so the
+// labels, icons and store writes can never drift between them.
 //
 // VISIBILITY IS THE CALLER'S, deliberately: this component self-gates nothing.
 // The same item belongs on different predicates depending on where the menu is
@@ -62,10 +62,6 @@ export function InputMenuItems({
 }) {
   const duxState = useDux()
   const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
-  // The separator between "Attach a file…" (an action on a file) and the view
-  // toggles below it (preferences about this screen's chrome) only earns its
-  // place when both sides exist.
-  const viewItems = gates.surfaceSwitch || gates.keysToggle
   return (
     <>
       {gates.attach ? (
@@ -74,18 +70,21 @@ export function InputMenuItems({
           Attach a file…
         </DropdownMenuItem>
       ) : null}
-      {gates.attach && viewItems ? <DropdownMenuSeparator /> : null}
       {/* NAMED FOR WHAT IT DOES, not for the state it is in, unlike the key
           row's "Box"/"Direct" cap (which has one cell of width and reads as a
           status light beside its neighbours). A menu row is a sentence, and
-          "Use the message box" says what tapping it gets you. Both write
-          through the same `setTypingSurface`, so the two cannot drift. */}
+          "Use virtual input" says what tapping it gets you. The two directions
+          live in DIFFERENT menus (the way out inside the virtual input, the way
+          back in the top menu that outlives it), and both write through the one
+          `switchTypingSurface`, so they cannot drift. */}
       {gates.surfaceSwitch ? (
         <DropdownMenuItem
-          onClick={() => setTypingSurface(composeSurface ? "direct" : "compose")}
+          onClick={() =>
+            switchTypingSurface(composeSurface ? "direct" : "compose")
+          }
         >
           {composeSurface ? <SquareTerminal /> : <MessageSquare />}
-          {composeSurface ? "Type directly in the terminal" : "Use the message box"}
+          {composeSurface ? "Type directly in the terminal" : "Use virtual input"}
         </DropdownMenuItem>
       ) : null}
       {gates.keysToggle ? (

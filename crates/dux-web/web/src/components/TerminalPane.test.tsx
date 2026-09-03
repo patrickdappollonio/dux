@@ -25,7 +25,7 @@ import {
   type MatchMediaStub,
 } from "@/test/matchMedia"
 import { GLYPH_SPINNER_CLASS, SPINNER_FRAMES } from "@/lib/spinnerFrames"
-import { usePaneInputMenu } from "@/lib/paneInputMenu"
+import { usePaneInputGroup } from "@/lib/paneInputGroup"
 
 // TerminalPane embeds xterm.js, whose canvas rendering jsdom cannot back (see the
 // note in TerminalArea.test.tsx). So we mount the REAL TerminalPane — exercising
@@ -395,6 +395,10 @@ const toastCalls: unknown[] = []
 vi.mock("sonner", () => ({
   toast: Object.assign((...args: unknown[]) => void toastCalls.push(args[0]), {
     success: vi.fn(),
+    // The first switch to direct typing raises the one-time "here is the way
+    // back" hint, so this suite's fake has to answer the info tone too.
+    info: (...args: unknown[]) => void toastCalls.push(args[0]),
+    warning: vi.fn(),
     error: (...args: unknown[]) => toastError(...args),
   }),
 }))
@@ -3652,7 +3656,7 @@ describe("TerminalPane input menu follows the touch surfaces", () => {
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
     fireEvent.click(trigger()!)
-    expect(screen.getByText("Use the message box")).toBeTruthy()
+    expect(screen.getByText("Use virtual input")).toBeTruthy()
   })
 
   // THE DEFECT THIS FIXES: the press used to change nothing on a fine pointer.
@@ -3662,7 +3666,7 @@ describe("TerminalPane input menu follows the touch surfaces", () => {
     pointerStub = stubCoarsePointer(false)
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     fireEvent.click(trigger()!)
-    fireEvent.click(screen.getByText("Use the message box"))
+    fireEvent.click(screen.getByText("Use virtual input"))
     expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
   })
@@ -4760,19 +4764,25 @@ describe("TerminalPane and theater mode", () => {
     expect(theaterOwnershipLost).toHaveBeenCalledWith("agent", "s1")
   })
 
-  it("carries the way out of the mode and nothing about the top bar", () => {
+  // THE BOTTOM `⋯` IS INPUT-LOCAL, and that is the whole of it. It lives inside
+  // the virtual input and disappears with it, so it cannot be anybody's
+  // guaranteed way out of a mode: the exit is on the pill and in the top menu,
+  // which are on screen whatever the input is doing.
+  it("carries nothing about theater and nothing about the top bar", () => {
     goMobile()
     mockState = { ...makeState(), theater: true } as DuxState
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    // Theater is the one thing that hides the phone's chrome, so the way OUT
-    // of the mode is the only entry this menu has on the subject.
     expect(screen.queryByText(/top bar/i)).toBeNull()
-    expect(screen.getByText("Leave theater mode")).toBeTruthy()
+    expect(screen.queryByText("Leave theater mode")).toBeNull()
+    expect(screen.queryByText("Attach a file…")).toBeNull()
+    expect(screen.getByText("Type directly in the terminal")).toBeTruthy()
+    expect(screen.getByText("Hide terminal keys")).toBeTruthy()
   })
 
-  // Theater takes the chrome away, not the typing surface. The pane's own `⋯`
-  // is still the way in and out of the virtual input while it is on.
+  // Theater takes the chrome away, not the typing surface: the way OUT of the
+  // virtual input still works inside the mode. The way back is the top menu's,
+  // which the pill carries here (see the input-group suite below).
   it("keeps the typing-surface switch working in theater", async () => {
     const surface = await import("@/lib/typingSurface")
     goMobile()
@@ -4781,19 +4791,9 @@ describe("TerminalPane and theater mode", () => {
     fireEvent.click(screen.getByRole("button", { name: "Input options" }))
     fireEvent.click(screen.getByText("Type directly in the terminal"))
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
-    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    fireEvent.click(screen.getByText("Use the message box"))
-    expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
     // The choice is device-local and persistent by design, so hand the decision
     // back to the pointer rather than leaking it into the suites below.
     surface.setTypingSurface(null)
-  })
-
-  it("offers no way out while the mode is off", () => {
-    goMobile()
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    expect(screen.queryByText("Leave theater mode")).toBeNull()
   })
 
   it("registers a hold that really does coalesce a gesture's frames into one fit", () => {
@@ -4932,24 +4932,26 @@ describe("TerminalPane gates its floating overlay on the cover", () => {
   })
 })
 
-// THEATER ON A COMPUTER TAKES THE WHOLE WINDOW, and the floating pill is the
-// only chrome it leaves. The pane's own `⋯` row would be a second ellipsis
-// beside the pill's, so the items move into the pill instead and the pane
-// publishes them for it. The mobile theater suite above covers the other shell,
-// where the row stays because a pill can end up under the soft keyboard.
-describe("TerminalPane input menu in desktop theater", () => {
+// WHAT THE PANE TELLS THE TOP MENU. Every surface has one menu that is always
+// on screen (the flap on a phone, the pane header on a computer, the floating
+// pill in theater), and the pane publishes the INPUT group for it. The rule
+// pinned here is that a control is in exactly ONE of the two menus: the bottom
+// `⋯` while the virtual input is up, the top menu once it is gone.
+describe("TerminalPane input group for the top menu", () => {
   let pointerStub: MatchMediaStub | null = null
   afterEach(() => {
     pointerStub?.restore()
     pointerStub = null
   })
 
-  // Reads the registry the theater pill reads, so the assertion is about what
-  // the pill will actually be handed rather than about an internal flag.
+  // Reads the registry the top menus read, so the assertion is about what they
+  // will actually be handed rather than about an internal flag.
   function MenuProbe({ id }: { id: string }) {
-    const menu = usePaneInputMenu(id)
+    const gates = usePaneInputGroup([id])
     return (
-      <div data-testid="published">{menu === null ? "none" : "published"}</div>
+      <div data-testid="published">
+        {gates === null ? "none" : gates.surfaceSwitch ? "switch" : "quiet"}
+      </div>
     )
   }
 
@@ -4962,21 +4964,21 @@ describe("TerminalPane input menu in desktop theater", () => {
     )
   }
 
-  it("renders no row of its own and hands the items to the pill", () => {
+  it("renders no row of its own and hands the way back to the top menu", () => {
     pointerStub = stubCoarsePointer(false)
     mockState = { ...makeState(), theater: true } as DuxState
     paneWithProbe()
 
     expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
-    expect(screen.getByTestId("published").textContent).toBe("published")
+    expect(screen.getByTestId("published").textContent).toBe("switch")
   })
 
-  it("keeps its own row, and publishes nothing, outside theater", () => {
-    pointerStub = stubCoarsePointer(false)
+  it("keeps the switch out of the top menu while a bar is carrying it", () => {
+    pointerStub = stubCoarsePointer(true)
     paneWithProbe()
 
     expect(screen.getByRole("button", { name: "Input options" })).toBeTruthy()
-    expect(screen.getByTestId("published").textContent).toBe("none")
+    expect(screen.getByTestId("published").textContent).toBe("quiet")
   })
 
   // THE PANE HAS ONE SHAPE, WHATEVER IS UNDER THE TERMINAL. The rows come and
@@ -5004,8 +5006,9 @@ describe("TerminalPane input menu in desktop theater", () => {
     surface.setTypingSurface(null)
   })
 
-  // A bar is an anchor, so the `⋯` stays in the compose row and the pill gets
-  // nothing: two menus offering the same items is the thing being avoided.
+  // A bar is an anchor, so the `⋯` stays in the compose row and the top menu
+  // offers no switch: two menus offering the same row is the thing being
+  // avoided.
   it("keeps the menu in the compose row when the box is up in theater", () => {
     pointerStub = stubCoarsePointer(true)
     mockState = { ...makeState(), theater: true } as DuxState
@@ -5013,7 +5016,7 @@ describe("TerminalPane input menu in desktop theater", () => {
 
     expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Input options" })).toBeTruthy()
-    expect(screen.getByTestId("published").textContent).toBe("none")
+    expect(screen.getByTestId("published").textContent).toBe("quiet")
   })
 })
 
