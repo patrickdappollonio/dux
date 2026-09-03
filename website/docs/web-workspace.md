@@ -437,6 +437,11 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
   **Open editor in new tab** and **Close…**, then the same **Settings** drill.
 - The **changes** screen is the full Changes pane.
 
+The flap is the small tab shape hanging off the right of the band, and it is the whole
+reason the header can stay as quiet as it is:
+
+![The phone agent screen: the slim top bar naming the agent, its project and its assistant, and the action flap hanging off the band with theater mode, the macro picker, the changed-file count and the pane's menu.](/screens/phone-terminal-flap.png)
+
 An **accessory bar** sits above the soft keyboard with the keys a phone keyboard lacks:
 Esc, Tab, a sticky Ctrl and Alt latch, arrow keys, PgUp/PgDn, and a dedicated **⇧↵** key
 for the soft newline. Touch targets are sized generously. The soft keyboard is handled by

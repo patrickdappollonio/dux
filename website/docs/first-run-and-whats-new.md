@@ -32,7 +32,7 @@ and the frame itself tells you which key closes the screen.
 
 Here is the whole thing on a fresh install, rubber duck included:
 
-![The dux welcome screen in the terminal UI: a rubber duck drawn in braille dots on the left, the orientation text on the right explaining projects, agents and providers, and an Add a project button next to a link to getdux.app along the bottom.](/screens/tui-welcome-screen.png)
+![The dux welcome screen in the terminal UI: a rubber duck drawn in braille dots on the left, the orientation text on the right explaining projects, agents and providers, an Add a project button beside a Close button and a link to getdux.app along the bottom, and the close key named on the frame itself.](/screens/tui-welcome-screen.png)
 
 ## What's new after an update
 
