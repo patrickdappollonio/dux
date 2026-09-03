@@ -27,7 +27,6 @@ import {
   GitFork,
   GitPullRequest,
   Info,
-  Paperclip,
   Pencil,
   Play,
   Plus,
@@ -48,6 +47,7 @@ import type { CSSProperties, ReactNode } from "react"
 import { useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
+import { PaneInputGroup } from "@/components/PaneInputGroup"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import {
   quietTailManualChoice,
@@ -151,7 +151,6 @@ import {
   toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
-import { useAttachCapability } from "@/lib/attachRegistry"
 import { terminalForeground, terminalTitle } from "@/lib/terminals"
 import type { DuxState, SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import { matchOwner } from "@/lib/terminalOwner"
@@ -174,10 +173,15 @@ export interface FlatSelectHandlers {
 // screen's one pane menu, which renders this as its agent group and adds the
 // changed files, the view toggles and the app menu below it).
 //
-// The only thing the context decides is "Attach a file…", which the pane menu
-// carries itself, down in the input group beside the rest of them. It answers
-// for itself either way by asking whether a pane of this agent is mounted and
-// owns its input (see `useAttachCapability`).
+// The only thing the context decides is the pane's INPUT group, which the phone
+// pane menu renders itself, above this body: one group per menu, wherever the
+// menu is opened from.
+//
+// THE ROW MENU IS THE DESKTOP'S HOME FOR THAT GROUP. Typing directly in the
+// terminal takes the whole bottom bar away, the input `⋯` with it, and the way
+// back has to live in a menu that is always reachable. On this surface that is
+// the agent's own `⋯`: the per-agent surface that already exists, rather than
+// the global cog, whose menu is about the app and not about one pane.
 export function AgentActionsMenu({
   session,
   context = "hub",
@@ -227,13 +231,6 @@ export function AgentActionsMenu({
   // pointer-events-none, so a hover tooltip could never fire, and touch has
   // no hover at all.
   const activeElsewhere = sessionActiveElsewhere(duxState, session)
-  // Every PTY this agent can have a mounted pane for: the session-slot tab's id
-  // IS the session id, and each extra tab has its own. Whichever pane is
-  // mounted and owns its input answers.
-  const attachToPane = useAttachCapability([
-    session.id,
-    ...session.tabs.map((t) => t.id),
-  ])
 
   return (
     <DropdownMenuGroup>
@@ -250,27 +247,22 @@ export function AgentActionsMenu({
           for the phone terminal screen's menu alone. They live in
           `MobilePaneMenu` now, which is the ONE menu both of that screen's
           surfaces open (the docked flap and the floating pill), and which
-          renders this body as its agent group. */}
-      {context === "hub" && attachToPane ? (
-        <>
-          {/* THE DESKTOP AND KEYBOARD PATH INTO THE UPLOAD JOURNEY. A drag
-              needs a desktop pointer and a paste needs the file already on the
-              clipboard; this needs neither. It is offered only while a pane
-              for this agent is MOUNTED AND OWNS its input, because the upload
-              still travels through that pane's own gated connection and sink
-              (never a side channel), and a file attached from a viewer would
-              strand as saved-but-not-sent. Hidden rather than disabled when no
-              such pane exists, per the row-menu convention.
+          renders this body as its agent group.
 
-              Hub rows only: the phone terminal screen's menu carries its own,
-              down in the input group where the mock puts it, rather than one
-              entry in each of two groups. */}
-          <DropdownMenuItem onClick={attachToPane}>
-            <Paperclip />
-            Attach a file…
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-        </>
+          THE PANE'S INPUT GROUP, from the same shared registry every other
+          surface reads, so the desktop half cannot drift from the phone's:
+          "Attach a file…", the way back to the virtual input, and the terminal
+          keys. Every one of them is the answer of whichever pane of this agent
+          is mounted and owns its input, which is what keeps an upload on that
+          pane's own gated connection and out of a side channel; the group
+          renders nothing at all when no such pane is there.
+
+          Hub rows only: the phone terminal screen's menu renders its own group
+          above this body rather than one in each of two places. */}
+      {context === "hub" ? (
+        <PaneInputGroup
+          ptyIds={[session.id, ...session.tabs.map((t) => t.id)]}
+        />
       ) : null}
       <AgentTabSubmenu
         sessionId={session.id}
@@ -932,9 +924,6 @@ function TerminalFlatRow({
   // distance keeps a plain click as a select; touch arms on a hold, see
   // lib/dragActivation.ts), and the wrapper carries the Y-locked transform so
   // a row never flies out of the column.
-  // A terminal is one PTY, so one id answers whether a mounted owning pane is
-  // there to attach through.
-  const attachToPane = useAttachCapability([terminal.id])
 
   // Where this row's two editor entries point. A session-owned terminal
   // resolves to its AGENT's root, which is what keeps one worktree from
@@ -1039,6 +1028,13 @@ function TerminalFlatRow({
             inline X so the destructive action keeps its confirm flow and its
             misclick-safe reveal-on-hover treatment. */}
         <DropdownMenuContent side="right" align="start">
+          {/* The pane's INPUT group, first, exactly as the agent row's menu
+              carries it: a terminal is one PTY, so one id answers, and this row
+              menu is the desktop's permanent home for the way back to the
+              virtual input once typing directly has taken the bottom bar. It
+              carries "Attach a file…" too, which used to be a hand-rolled item
+              further down this same menu. */}
+          <PaneInputGroup ptyIds={[terminal.id]} />
           {/* The editor's root is the directory this terminal was SPAWNED in,
               and a terminal owned by an agent is sent to that agent's editor
               instead: same worktree, and the agent's editor is the one with the
@@ -1063,12 +1059,6 @@ function TerminalFlatRow({
             Open editor in new tab
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          {attachToPane ? (
-            <DropdownMenuItem onClick={attachToPane}>
-              <Paperclip />
-              Attach a file…
-            </DropdownMenuItem>
-          ) : null}
           <DropdownMenuItem onClick={() => openDeleteTerminal(terminal.id)}>
             <X />
             Close…

@@ -158,6 +158,44 @@ describe("the direct-typing hint", () => {
     expect(notified).toHaveLength(0)
   })
 
+  // THE SENTENCE HAS TO NAME A CONTROL THAT IS THERE. The way back lives in
+  // different places on the two shells, and a hint naming the other one sends
+  // the reader hunting for something that is not on the screen in front of them.
+  it("names the cluster over the terminal on a phone", async () => {
+    const m = await load()
+    const text = m.directHintMessage("phone")
+    expect(text).toContain("over the terminal")
+    expect(text).not.toContain("sidebar")
+    expect(text).toContain("Use virtual input")
+  })
+
+  it("names the pane's own row menu on a computer", async () => {
+    const m = await load()
+    const text = m.directHintMessage("computer")
+    expect(text).toContain("sidebar")
+    expect(text).toContain("Use virtual input")
+  })
+
+  it("picks the sentence by the shell the switch happened on", async () => {
+    installStorage()
+    vi.resetModules()
+    const m = await load()
+    const wide = window.innerWidth
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 390,
+    })
+    try {
+      m.switchTypingSurface("direct")
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: wide,
+      })
+    }
+    expect(notified).toEqual([m.directHintMessage("phone")])
+  })
+
   // The write still happens whatever the hint does: `setTypingSurface` is the
   // writer, and the toast is a side effect of the first switch only.
   it("still writes the choice", async () => {

@@ -4956,9 +4956,10 @@ describe("TerminalPane gates its floating overlay on the cover", () => {
   })
 })
 
-// WHAT THE PANE TELLS THE TOP MENU. Every surface has one menu that is always
-// on screen (the flap on a phone, the pane header on a computer, the floating
-// pill in theater), and the pane publishes the INPUT group for it. The rule
+// WHAT THE PANE TELLS THE TOP MENU. Every surface has a menu for the pane that
+// is always reachable (the flap on a phone, the pane's own sidebar row `⋯` on a
+// computer, the floating pill in theater), and the pane publishes the INPUT
+// group for it. The rule
 // pinned here is that a control is in exactly ONE of the two menus: the bottom
 // `⋯` while the virtual input is up, the top menu once it is gone.
 describe("TerminalPane input group for the top menu", () => {

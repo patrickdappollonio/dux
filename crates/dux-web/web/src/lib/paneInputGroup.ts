@@ -7,8 +7,8 @@ import { useSyncExternalStore } from "react"
 // whether uploads are switched on, whether the virtual input is up and whether
 // its key row is. The menus that have to OFFER those answers are all somewhere
 // else (the phone's merged pane menu, the phone's agentless terminal header,
-// the desktop pane header's menu, the floating pill's one menu), and none of
-// them is inside the pane. So the pane publishes and the menus read.
+// the sidebar row's menu on a computer, the floating pill's one menu), and none
+// of them is inside the pane. So the pane publishes and the menus read.
 //
 // This used to be a narrower thing: the items the input `⋯` would have shown if
 // it had had a row to sit in, published only in the one state that took its row

@@ -21,6 +21,8 @@
 // read is what makes a second tab's write visible on the next render instead of
 // needing a cache to invalidate.
 
+import { isMobileViewport } from "@/hooks/use-mobile"
+
 import { notifyInfo } from "./notify"
 
 /** The `localStorage` key. */
@@ -110,6 +112,26 @@ export function markDirectHintShown(): void {
   }
 }
 
+/// Which shell the hint is being read on. The two keep the way back in
+/// different places, and a sentence that names the wrong one is worse than no
+/// sentence: it sends the reader looking for a control that is not there.
+export type TypingSurfaceShell = "phone" | "computer"
+
+/**
+ * The hint's sentence, naming a control that exists on the shell it fires on.
+ *
+ * On a phone the pane's own `⋯` is the cluster over the terminal (docked in the
+ * band, or floating in theater); on a computer it is the agent's or terminal's
+ * row menu in the sidebar. Pure, so a test can pin both without a DOM.
+ */
+export function directHintMessage(shell: TypingSurfaceShell): string {
+  const where =
+    shell === "phone"
+      ? "The ⋯ button over the terminal"
+      : "This pane's own ⋯ menu, on its row in the sidebar,"
+  return `Typing goes straight to the terminal now. ${where} has “Use virtual input” when you want the message box back.`
+}
+
 /**
  * THE ONE GESTURE that changes the typing surface, and the reason the switch
  * cannot become a dead end.
@@ -124,6 +146,11 @@ export function markDirectHintShown(): void {
  * `setTypingSurface` stays the writer. Every surface that flips the choice (the
  * key row's cap, the input `⋯`, the top menu's INPUT group) calls this instead,
  * so none of them can raise a different hint or none at all.
+ *
+ * The sentence names a control that is actually on the shell reading it, which
+ * is why the width is consulted here rather than a shell being threaded down
+ * from each of the three call sites: none of them knows, and all three are on
+ * screen on both shells.
  */
 export function switchTypingSurface(next: TypingSurface): void {
   setTypingSurface(next)
@@ -131,9 +158,7 @@ export function switchTypingSurface(next: TypingSurface): void {
   if (!directHintPending()) return
   // Marked BEFORE the raise, so a double-invoked caller cannot produce two.
   markDirectHintShown()
-  notifyInfo(
-    "Typing goes straight to the terminal now. The pane's ⋯ menu has “Use virtual input” when you want the message box back.",
-  )
+  notifyInfo(directHintMessage(isMobileViewport() ? "phone" : "computer"))
 }
 
 /** Subscribe to changes; returns the unsubscribe. */

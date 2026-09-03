@@ -477,8 +477,8 @@ What the browser cannot see is a keyboard case, so there is a **typing-surface t
 Turning it off is at hand while the typing bar is up: **Direct** at the end of the
 accessory bar's key row, and **Type directly in the terminal** in the input `⋯` beside the
 message box. Turning it back on is **Use virtual input**, in the **Input** group at the top
-of the pane's own `⋯` menu, because by then the typing bar is gone and so is everything
-that was on it.
+of the pane's own `⋯` menu (the flap's on a phone, the row menu in the sidebar on a
+computer), because by then the typing bar is gone and so is everything that was on it.
 
 **Your choice wins, on any device, in both directions.** The pointer only decides where you
 start. Ask for the message box on a laptop and you get it, keys and all, and while it is up
@@ -513,8 +513,9 @@ does, so what is inside it is only what that bar is about: **Type directly in th
 and **Hide terminal keys**.
 
 Everything you must be able to reach when the bar is not there is one level up, in the
-**Input** group at the top of the pane's own `⋯` menu: the flap's on a phone, the terminal
-header's on a computer, the floating pill's in theater. That group carries **Attach a
+**Input** group at the top of the pane's own `⋯` menu: the flap's on a phone, the agent's
+or terminal's row menu in the sidebar on a computer, the floating pill's in theater. That
+group carries **Attach a
 file…** (see [Dropping and pasting files](/docs/dropping-files)) and **Use virtual input**,
 which only appears while the typing bar is down, since while it is up the menu beside the
 message box already offers the other direction. **Show terminal keys** joins the group the

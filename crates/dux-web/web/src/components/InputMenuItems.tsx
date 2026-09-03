@@ -26,9 +26,9 @@ import { switchTypingSurface } from "@/lib/typingSurface"
 // THE INPUT ITEMS, shared by every menu that carries any of them: the input
 // `⋯` inside the virtual input (see `InputMenu`) and the INPUT group at the top
 // of whichever menu the surface always has (see `PaneInputGroup`, which the
-// phone's merged pane menu, the phone's agentless terminal header, the desktop
-// pane header's menu and the floating pill all render). One component so the
-// labels, icons and store writes can never drift between them.
+// phone's merged pane menu, the phone's agentless terminal header, the sidebar
+// row menus and the floating pill all render). One component so the labels,
+// icons and store writes can never drift between them.
 //
 // VISIBILITY IS THE CALLER'S, deliberately: this component self-gates nothing.
 // The same item belongs on different predicates depending on where the menu is

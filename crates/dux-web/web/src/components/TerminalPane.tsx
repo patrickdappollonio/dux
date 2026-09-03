@@ -686,7 +686,7 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   // THE PANE'S INPUT GROUP, for whichever TOP menu is on screen over it: the
   // phone's merged pane menu, the phone's agentless terminal header, the
-  // desktop pane header's menu, the floating pill's one menu (see
+  // sidebar row's menu on a computer, the floating pill's one menu (see
   // `lib/paneInputGroup.ts`). None of them is inside the pane, and only the
   // pane knows the answers.
   //

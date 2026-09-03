@@ -916,6 +916,123 @@ describe("FlatAgentList attach-a-file entries", () => {
   })
 })
 
+// THE ROW MENU IS THE COMPUTER'S HOME FOR THE PANE'S INPUT GROUP. Typing
+// directly in the terminal takes the whole bottom bar away, the input `⋯` with
+// it, so the way back has to live in a menu that is always reachable. On this
+// surface that is the pane's own row menu, and these pin that the desktop half
+// is really there: the group's home was previously asserted only on the phone.
+describe("FlatAgentList input group in the row menus", () => {
+  const label = () => screen.queryByText("Input")
+  const wayBack = () => screen.queryByText("Use virtual input")
+
+  async function openAgentMenu() {
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getAllByLabelText("Session actions")[0])
+    await screen.findByRole("menu")
+  }
+
+  async function openTerminalMenu() {
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getAllByLabelText("Terminal actions")[0])
+    await screen.findByRole("menu")
+  }
+
+  afterEach(async () => {
+    const attach = await import("@/lib/attachRegistry")
+    attach.resetAttachCapabilities()
+    const group = await import("@/lib/paneInputGroup")
+    group.resetPaneInputGroups()
+  })
+
+  it("carries the group, labelled, once the agent's pane publishes one", async () => {
+    const mod = await import("@/lib/paneInputGroup")
+    // The first displayed agent is Alpha (name sort), and its session-slot
+    // tab's id IS the session id, which is what a mounted pane registers under.
+    mod.registerPaneInputGroup("alpha", {
+      surfaceSwitch: true,
+      keysToggle: false,
+    })
+    await openAgentMenu()
+    expect(label()).toBeTruthy()
+    expect(wayBack()).toBeTruthy()
+  })
+
+  // ABSENT, NEVER DISABLED: the bottom `⋯` owns the other direction while the
+  // virtual input is up, and a row offered in both menus at once is the drift
+  // the single publisher exists to prevent.
+  it("leaves the way back out while the pane says the bottom bar has it", async () => {
+    const mod = await import("@/lib/paneInputGroup")
+    mod.registerPaneInputGroup("alpha", {
+      surfaceSwitch: false,
+      keysToggle: false,
+    })
+    await openAgentMenu()
+    expect(wayBack()).toBeNull()
+    // Nothing of its own to say and no attach to borrow, so no label and no
+    // separator either.
+    expect(label()).toBeNull()
+  })
+
+  it("renders no group at all for an agent with no mounted pane", async () => {
+    await openAgentMenu()
+    expect(label()).toBeNull()
+    expect(wayBack()).toBeNull()
+  })
+
+  it("does not borrow another agent's pane", async () => {
+    const mod = await import("@/lib/paneInputGroup")
+    mod.registerPaneInputGroup("zeta", {
+      surfaceSwitch: true,
+      keysToggle: false,
+    })
+    await openAgentMenu()
+    expect(wayBack()).toBeNull()
+  })
+
+  // THE ID CONTRACT, from the menu's side: an agent's panes are its session-slot
+  // id AND every tab id, and whichever one is mounted answers. A shell that
+  // handed its pane a tab id while the menu scanned only the session id would
+  // leave the way back unreachable for every extra tab.
+  it("reads an EXTRA tab's pane, not only the slot tab's", async () => {
+    mockState = {
+      ...makeState("name"),
+      spine: {
+        ...makeState("name").spine,
+        sessions: (makeState("name").spine!.sessions as SessionView[]).map((s) =>
+          s.id === "alpha"
+            ? ({
+                ...s,
+                tabs: [{ id: "alpha" }, { id: "alpha-2" }],
+              } as SessionView)
+            : s,
+        ),
+      },
+    } as DuxState
+    const mod = await import("@/lib/paneInputGroup")
+    mod.registerPaneInputGroup("alpha-2", {
+      surfaceSwitch: true,
+      keysToggle: false,
+    })
+    await openAgentMenu()
+    expect(wayBack()).toBeTruthy()
+  })
+
+  it("carries the group in a terminal's row menu too, under its one id", async () => {
+    await openTerminalMenu()
+    expect(label()).toBeNull()
+    cleanup()
+    const mod = await import("@/lib/paneInputGroup")
+    // The first displayed terminal row in this fixture is "bash" (t-a).
+    mod.registerPaneInputGroup("t-a", {
+      surfaceSwitch: true,
+      keysToggle: false,
+    })
+    await openTerminalMenu()
+    expect(label()).toBeTruthy()
+    expect(wayBack()).toBeTruthy()
+  })
+})
+
 // The section's own controls: a + that acts and a sort trigger that only
 // reveals a menu, sharing one height token at the header's right edge.
 describe("FlatAgentList Agents header", () => {

@@ -1,6 +1,5 @@
 import { Settings } from "lucide-react"
 
-import { PaneInputGroup } from "@/components/PaneInputGroup"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -83,17 +82,7 @@ export function AppMenuBody() {
   )
 }
 
-export function AppMenu({
-  /// The pane the header is sitting over, as its pty ids, so the menu can carry
-  /// that pane's INPUT group. THE PANE HEADER'S `⋯` IS THE DESKTOP'S TOP MENU:
-  /// typing directly in the terminal removes the whole bottom bar, and this is
-  /// the menu that is on screen whatever the pane is doing, so "Attach a file…"
-  /// and the way back to the virtual input live here. Empty (or a pane that
-  /// publishes nothing) renders no group and no label.
-  inputPtyIds = [],
-}: {
-  inputPtyIds?: string[]
-} = {}) {
+export function AppMenu() {
   return (
     <DropdownMenu>
       {/* LABELLED on desktop, where there is room: "Settings" says what the cog
@@ -112,7 +101,6 @@ export function AppMenu({
         }
       />
       <DropdownMenuContent align="end" side="bottom">
-        <PaneInputGroup ptyIds={inputPtyIds} />
         <AppMenuBody />
       </DropdownMenuContent>
     </DropdownMenu>

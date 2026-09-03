@@ -199,6 +199,40 @@ describe("TerminalArea in theater", () => {
     expect(screen.getByTestId("terminal-pane-stub").contains(pill)).toBe(true)
     expect(screen.getByTestId("theater-pill-grip")).toBeTruthy()
   })
+
+  // THE ID CONTRACT BETWEEN THE SHELL AND THE PANE. The pane publishes its
+  // input group under the id it was handed; the pill reads the id the shell
+  // derives from the same target. Nothing would fail to compile if a refactor
+  // let those two diverge, and the way back would simply be missing, so the
+  // registration here uses the id the SHELL actually gave the pane rather than
+  // one the test knows by heart.
+  it("reads the input group under the very id it handed the pane", async () => {
+    mockState = makeState({
+      spine: dormantSpine(),
+      selectedSessionId: "s1",
+      // An EXTRA tab, so the tab id and the session id are different strings
+      // and a menu scanning the wrong one cannot pass by accident.
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "b2" },
+      startedDormantTabs: ["b2"],
+      theater: true,
+    } as unknown as Partial<DuxState>)
+    render(<TerminalArea />)
+    await vi.waitFor(() => expect(paneProps.length).toBeGreaterThan(0))
+    const handed = (paneProps[0] as { id: string }).id
+    expect(handed).toBe("b2")
+    const groups = await import("@/lib/paneInputGroup")
+    groups.registerPaneInputGroup(handed, {
+      surfaceSwitch: true,
+      keysToggle: false,
+    })
+    try {
+      fireEvent.click(screen.getByLabelText("Settings"))
+      await screen.findByRole("menu")
+      expect(screen.getByText("Use virtual input")).toBeTruthy()
+    } finally {
+      groups.resetPaneInputGroups()
+    }
+  })
 })
 
 describe("TerminalArea dormant-tab gating (G-T4)", () => {

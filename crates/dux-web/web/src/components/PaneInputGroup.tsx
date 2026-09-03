@@ -20,10 +20,15 @@ export const PANE_INPUT_GROUP_LABEL = "Input"
 // "Type directly in the terminal" removes the whole bottom bar, compose row,
 // key row and the input `⋯` with them, so the way back cannot live down there:
 // a control that only exists while you do not need it is not a way back at all.
-// It lives here instead, in the one menu that is always on screen whatever the
-// pane is doing (the flap's `⋯` on a phone, the pane header's on a computer,
-// the floating pill's in theater), and "Attach a file…" joins it because an
-// upload is an input act and had no other permanent home either.
+// It lives here instead, in the menu the surface always has for the pane in
+// front of it (the flap's `⋯` on a phone, the pane's own row `⋯` in the sidebar
+// on a computer, the floating pill's in theater), and "Attach a file…" joins it
+// because an upload is an input act and had no other permanent home either.
+//
+// A COMPUTER PUTS IT IN THE SIDEBAR ROW rather than in the header's cog, which
+// is deliberate: the cog's menu is the app's, and none of these rows is about
+// the app. The row menu is the per-agent (and per-terminal) surface that
+// already exists, and it already carried the attach item.
 //
 // The GROUP LABEL stays even with one item in it. It is the only labelled group
 // in these menus, and that is the point: these rows are about the pane's typing

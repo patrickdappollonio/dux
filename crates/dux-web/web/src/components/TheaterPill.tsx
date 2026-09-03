@@ -578,7 +578,7 @@ function runAttach(box: HTMLElement, dock: DOMRect): void {
 // the shared item the input `⋯` uses, so the way out is inside the one `⋯` too.
 //
 // It also carries the pane's INPUT group at the top, the same group the phone's
-// pane menu and the desktop pane header carry: in theater this is the ONE menu
+// pane menu and the sidebar row menus carry: in theater this is the ONE menu
 // on screen, so "Attach a file…" and the way back to the virtual input have to
 // be in it. The pane publishes what belongs there (see `lib/paneInputGroup.ts`)
 // and the group renders nothing when there is nothing to say.
