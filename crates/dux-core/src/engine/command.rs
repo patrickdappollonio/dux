@@ -533,6 +533,41 @@ impl Engine {
                         },
                     )));
                 }
+                // A LIVE process already holds this tab. Launching over it would
+                // replace the entry in `providers`, and dropping the displaced
+                // client SIGKILLs the child it names: a working agent killed
+                // mid-thought, with nothing said anywhere. Every legitimate
+                // relaunch path (force reconnect, resume fallback, an explicit
+                // stop) tears the runtime down before it dispatches, so reaching
+                // here with a live provider means the launch is redundant, and
+                // the live child is the one worth keeping.
+                //
+                // "Live" excludes a child that has already reached end of input
+                // and is only waiting to be pruned: that one is nobody's working
+                // agent, and refusing for it would refuse the relaunch of a tab
+                // that just died.
+                if let Some(client) = self.providers.get(&tab_id)
+                    && !client.is_exited()
+                {
+                    let pid = client
+                        .child_process_id()
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    crate::logger::warn(&format!(
+                        "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": \
+                         process {pid} is already running in it"
+                    ));
+                    return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
+                        DispatchAgentLaunchView {
+                            session_id,
+                            tab_id: tab_id_view,
+                            launched: false,
+                            status: Some(StatusUpdate::info(format!(
+                                "This tab of agent \"{branch_name}\" is already running. Stop it before starting it again.",
+                            ))),
+                        },
+                    )));
+                }
                 // Clone for the panic event closure before `request` is
                 // consumed by the job closure. `AgentLaunchRequest` is
                 // `Clone`, which keeps the panic recovery path symmetric
@@ -1837,6 +1872,62 @@ mod tests {
         }
         // No in-flight launch key was set (the guard returned before dispatch).
         assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
+    }
+
+    /// A launch over a tab that already has a LIVE process is refused before
+    /// anything is spawned. Letting it through would replace the entry in
+    /// `providers`, and the displaced client's drop SIGKILLs the child it names,
+    /// so a working agent would be killed by a redundant launch with nothing
+    /// said anywhere.
+    #[test]
+    fn dispatch_agent_launch_refuses_a_tab_that_is_already_running() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.sessions.push(session.clone());
+        // `cat` sits waiting on its input, so this provider is genuinely live.
+        let live =
+            crate::pty::PtyClient::spawn_with_env("cat", &[], worktree.path(), 24, 80, 100, &[])
+                .expect("spawn cat");
+        let live_pid = live.child_process_id();
+        engine
+            .providers
+            .insert(session.slot_tab_id().to_owned(), live);
+
+        let request = engine.build_agent_launch_request(
+            session.clone(),
+            false,
+            (24, 80),
+            crate::worker::AgentLaunchKind::Reconnect {
+                status_message: String::new(),
+            },
+        );
+        let reaction = engine
+            .apply(Command::DispatchAgentLaunch {
+                request: Box::new(request),
+            })
+            .expect("apply");
+
+        match reaction {
+            EventReaction::DispatchAgentLaunchView(view) => {
+                assert!(!view.launched, "a tab with a live process must not launch");
+                let status = view.status.expect("a refusal status");
+                assert!(
+                    status.message.contains("already running"),
+                    "msg: {}",
+                    status.message
+                );
+            }
+            _ => panic!("expected DispatchAgentLaunchView"),
+        }
+        assert_eq!(
+            engine
+                .providers
+                .get(session.slot_tab_id())
+                .and_then(crate::pty::PtyClient::child_process_id),
+            live_pid,
+            "the running child must still be the one in the tab"
+        );
     }
 
     /// A dispatched launch clears the tab's recorded failure, and a REFUSED one

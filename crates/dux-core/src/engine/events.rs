@@ -919,6 +919,40 @@ impl Engine {
             .map(|op| op.resolve(&outcome))
     }
 
+    /// Put a freshly launched provider under its tab id, unless a LIVE one is
+    /// already there.
+    ///
+    /// A bare insert would replace the entry, and dropping the displaced client
+    /// SIGKILLs the child it names, so a working agent could be killed by a
+    /// launch that landed late, with nothing said anywhere. Here the intruder is
+    /// the NEW client: it is dropped (and its own just-spawned child with it),
+    /// the running one is kept, and the refusal is logged with both processes.
+    ///
+    /// This is a backstop, not the gate: `Command::DispatchAgentLaunch` refuses
+    /// a launch over a live provider before any process is spawned, and the
+    /// per-tab in-flight lock stops two launches racing for one tab. So the
+    /// launch's own view is left to say whatever it would ordinarily say; there
+    /// is a live process in the tab either way, which is what the user asked
+    /// for.
+    fn insert_launched_provider(&mut self, tab_id: &TabId, client: crate::pty::PtyClient) {
+        if let Some(running) = self.providers.get(tab_id)
+            && !running.is_exited()
+        {
+            let describe = |pid: Option<u32>| {
+                pid.map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            };
+            logger::warn(&format!(
+                "dropping the PTY just launched for tab {tab_id} (process {}): \
+                 process {} is already running in it",
+                describe(client.child_process_id()),
+                describe(running.child_process_id()),
+            ));
+            return;
+        }
+        self.providers.insert(tab_id.clone(), client);
+    }
+
     pub fn process_agent_launch_ready(
         &mut self,
         data: AgentLaunchReadyData,
@@ -966,7 +1000,7 @@ impl Engine {
             }
             let detached =
                 self.detach_conflicting_worktree_session(session.directory(), &session.id);
-            self.providers.insert(tab_id.clone(), client);
+            self.insert_launched_provider(&tab_id, client);
             self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
             self.sessions.insert(0, session.clone());
             // Correlate this create op with the session it just produced so a REST
@@ -1076,7 +1110,7 @@ impl Engine {
         }
 
         let detached = self.detach_conflicting_worktree_session(session.directory(), &session.id);
-        self.providers.insert(tab_id.clone(), client);
+        self.insert_launched_provider(&tab_id, client);
         self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
         if request.resume {
             self.resume_fallback_candidates
@@ -5976,6 +6010,41 @@ mod tests {
             },
             message: message.to_string(),
         }
+    }
+
+    /// A launch that lands on a tab a live process already holds keeps the
+    /// RUNNING child and drops the new one. The dispatch chokepoint refuses this
+    /// launch before it is ever spawned; this is the backstop that makes sure no
+    /// path can still displace a working agent silently.
+    #[test]
+    fn a_launched_provider_never_displaces_a_live_one() {
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("dir");
+        let spawn_cat = || {
+            crate::pty::PtyClient::spawn_with_env("cat", &[], dir.path(), 24, 80, 100, &[])
+                .expect("spawn cat")
+        };
+        let tab = TabId::new("s1-slot");
+        let running = spawn_cat();
+        let running_pid = running.child_process_id();
+        engine.providers.insert(tab.clone(), running);
+
+        let latecomer = spawn_cat();
+        let latecomer_pid = latecomer.child_process_id();
+        assert_ne!(
+            running_pid, latecomer_pid,
+            "the two children must be distinguishable for this test to say anything"
+        );
+        engine.insert_launched_provider(&tab, latecomer);
+
+        assert_eq!(
+            engine
+                .providers
+                .get(tab.as_ref_id())
+                .and_then(crate::pty::PtyClient::child_process_id),
+            running_pid,
+            "the live child must survive a launch that landed on top of it"
+        );
     }
 
     #[test]
