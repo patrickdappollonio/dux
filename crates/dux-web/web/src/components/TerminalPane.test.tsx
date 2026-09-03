@@ -3733,7 +3733,7 @@ describe("TerminalPane input menu follows the touch surfaces", () => {
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     fireEvent.click(trigger()!)
     expect(screen.getByText("Hide terminal keys")).toBeTruthy()
-    expect(screen.queryByText("Use the message box")).toBeNull()
+    expect(screen.queryByText("Use virtual input")).toBeNull()
   })
 
   it("offers no switch under a hard always, whose box is up regardless", () => {

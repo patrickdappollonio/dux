@@ -252,7 +252,7 @@ export const SETTING_GROUPS: SettingGroup[] = [
         // looking for a bar that was never the phone's alone.
         label: "Touch terminal keys",
         description:
-          "On a touch device, shows the terminal-keys bar (Esc, Tab, Ctrl, Alt and the arrows) above the compose box, in the wide layout as well as on a phone. Hide it to give those rows to the terminal; bring it back from the input ⋯ menu below the terminal or from this Preferences dialog.",
+          "On a touch device, shows the terminal-keys bar (Esc, Tab, Ctrl, Alt and the arrows) above the compose box, in the wide layout as well as on a phone. Hide it to give those rows to the terminal; bring it back from the input ⋯ menu beside the message box, from the terminal's own ⋯ menu when there is no typing bar left to hold one, or from this Preferences dialog.",
         surface: "web",
         control: { kind: "bool" },
         default: true,

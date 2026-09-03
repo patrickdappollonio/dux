@@ -827,11 +827,11 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Pinned: `components/TerminalPane.test.tsx` "shows the Reconnect affordance, not the
     take-over card, on a dead socket".
 
-13. **Typing surfaces render only for the owner; the input ⋯ menu is deliberately NOT
-    owner-gated (view toggles are not input).** Trap: a viewer who hid the phone's top
-    bar had hidden the menu with it and had no way back at all. Fix: TP:455-471,
-    TP:968-975. Pinned: `components/TerminalPane.test.tsx` "hides the compose bar AND
-    the accessory bar for a non-owner viewer" and "TerminalPane input menu for a
+13. **Typing surfaces, and the input ⋯ that hangs off them, render only for the owner.**
+    A viewer owns no input, so it has no surface to reach and nothing to anchor a menu
+    to; what a viewer might still want (the way out of theater) lives in the top menu
+    every surface has. Pinned: `components/TerminalPane.test.tsx` "hides the compose bar
+    AND the accessory bar for a non-owner viewer" and "TerminalPane input menu for a
     non-owner" suite.
 
 14. **REWRITTEN at the take-over arc: EVERY send now goes through the coordinator, claims
@@ -1549,19 +1549,23 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     setting has already decided").
 
 3. **`never` keeps the accessory KEYS on a coarse pointer; `always` brings the pair to a
-    fine one.** The preference is about the compose BOX; a soft keyboard still cannot
-    produce a Ctrl chord. Fix: `src/lib/composebar.ts:150-170` (`touchSurfacesApply`).
-    Pinned: `src/lib/composebar.test.ts` "keeps the accessory keys on a phone whose
-    compose box is switched off".
+    fine one; a CHOSEN `direct` keeps neither.** The preference is about the compose BOX
+    and offers no switch to bring a key row back with, and a soft keyboard still cannot
+    produce a Ctrl chord, so a finger keeps its keys there. Choosing to type directly is
+    a different statement and takes the whole virtual input, keys included; the way back
+    is the top menu's INPUT group. Fix: `src/lib/composebar.ts` (`virtualInputUp`).
+    Pinned: `src/lib/composebar.test.ts` "keeps the keys on a phone whose compose box is
+    switched off" and "goes down entirely on a phone that chose direct typing".
 
-4. **The input-menu surface switch is offered one state wider than the in-bar toggle.**
-    Trap: `auto` on a FINE pointer with a stored `compose` choice mounts the message box
-    but not the accessory bar; the only way back lived in the bar that was not there.
-    Accepted asymmetry: from a fine pointer, switching to Direct removes every anchor
-    (state is pixel-identical to the default). Fix: `src/lib/composebar.ts:219-246`.
-    Pinned: `src/lib/composebar.test.ts` "is offered on a fine pointer once a choice is
-    stored"; `components/TerminalPane.test.tsx` "offers the surface switch on a fine
-    pointer with a stored choice".
+4. **The two directions of the surface switch live in two different menus, and never in
+    both.** Switching to Direct removes every anchor a menu could sit on, so the way back
+    cannot be down there: the bottom ⋯ carries the way OUT while the virtual input is up,
+    and the pane publishes the way BACK to the top menu's INPUT group once it is down.
+    The pane decides which, so the same row can never appear twice. Fix:
+    `src/lib/composebar.ts`, `terminalInputLayout` in `TerminalPane.tsx`,
+    `src/lib/paneInputGroup.ts`. Pinned: `components/TerminalPane.test.tsx` "TerminalPane
+    input group for the top menu" suite and "publishes the way in on a fine pointer that
+    has chosen nothing".
 
 5. **The compose DRAFT lives in the pane's state, not in ComposeBar.** Trap: a
     preference flip or rotation past the breakpoint unmounts the bar; the draft must
@@ -1680,17 +1684,17 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     key row honors the same contract (arrows and page scroll included)";
     `components/TerminalPane.test.tsx` keyboard-state suite.
 
-19. **The input ⋯ menu: items computed before the trigger exists, exactly one instance
-    on screen in every bar state, and its own third-anchor row when neither bar is up.**
-    Trap: an ⋯ opening an empty popup is reachable (fine pointer, stored compose
-    choice, uploads off); the state "keys up, box off" used to render two menus; a
-    chrome-free PWA screen has no browser Back button, so the menu's own row is the
-    way back. A fine-pointer desktop grows no new row. Fix: TP:455-485,
-    TP:952-953, TP:986-1028, `src/lib/inputMenu.ts`.
+19. **The input ⋯ menu: items computed before the trigger exists, exactly one instance on
+    screen, and NO row of its own.** Trap: an ⋯ opening an empty popup is reachable (fine
+    pointer, uploads off); the state "keys up, box off" used to render two menus. The
+    third anchor, a minimal row kept alive purely to hold the trigger, is GONE: it
+    existed so the menu could be reached in every bar state, and that guarantee moved to
+    the top menu, which outlives the bar. Fix: `terminalInputLayout` in
+    `TerminalPane.tsx`, `src/lib/inputMenu.ts`, `src/components/PaneInputGroup.tsx`.
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane input menu anchors" suite
     ("renders exactly one menu with the keys up and the box off",
-    "renders its own row when neither bar is up"), "input menu follows the touch
-    surfaces" suite, "offers nothing on a fine pointer with an empty item list".
+    "renders nothing at all when neither bar is up") and "carries nothing about theater
+    and nothing about the top bar".
 
 20. **A non-owner gets no input row at all.** Attach and the surface switch are input;
     the keys toggle would be a write with no visible effect on the viewer's screen that

@@ -163,8 +163,8 @@ whichever one it is hanging from, so it always reads as part of it. The header, 
 pull-request band and the tab strip slide away and the terminal grows into the space they
 were using; on a phone the app header goes with them, and the flap lifts off the band and
 flies to the floating pill, which is the same four buttons in the same order.
-The compose box and the terminal keys stay exactly as you had them, and the input `⋯`
-menu keeps offering to show or hide the keys, so theater is as bare or as equipped as
+The compose box and the terminal keys stay exactly as you had them, and the pill's `⋯`
+keeps offering the way back to them, so theater is as bare or as equipped as
 you want it. Theater is the only thing that takes the top bar away, and it all comes
 back when you leave. On a computer both
 side panels leave too, the agent list and the changes list, and they come back as you had
@@ -178,15 +178,17 @@ same **Settings** menu the header's cog carries, so Preferences, new agents and
 everything else stay one tap away, with **Leave theater mode** at the bottom of it. On a
 phone it is the flap that flew there: the theater button (now showing the way out), the
 macro picker, the changed-file count and the same `⋯`, opening the same menu it opened on
-the band. That menu is the agent's own actions, the changed files, this screen's view
-toggles, the way out of theater while the mode is on, and **Settings**, which drills into
+the band. That menu opens with the **Input** group (**Attach a file…**, and the way
+back to the typing bar when you have turned it off), then the agent's own actions, the way
+out of theater while the mode is on, and **Settings**, which drills into
 the app menu the cog carries, so nothing about an agent goes out of reach because you
-went full screen.
+went full screen. The changed-file count is the button beside it rather than a row in it.
 
 ![Theater mode on a phone: the top bar is gone, the floating pill hovers over the terminal, and the keys and message box are still there.](/screens/phone-theater-pill.png)
 
 Notice what did **not** leave: the terminal keys and the message box. Theater takes the
-chrome above the terminal, not the way you answer it.
+chrome above the terminal, not the way you answer it. If you have asked to type straight
+into the terminal, there is nothing below it either, and the pill's `⋯` is the way back.
 
 The pill carries no tab status. What the other tabs are doing is in the agents list and
 the tab strip, and one copy of that is enough. Theater on a phone hides both, so a tab
@@ -204,9 +206,8 @@ the window, and back to where you put it once there is room for it again.
 The button you came in by is not a way back, because the header it lives in is one of the
 things that left. On a computer there are three ways out: the pill, `Escape` whenever you
 are not typing into the message box or the terminal itself, and your browser's Back
-button. There is a fourth in the pill's own `⋯` menu, and on a phone a fifth,
-**Leave theater mode** in the input `⋯` menu, which is there for the times the pill ends
-up under the keyboard.
+button. There is a fourth in the pill's own `⋯` menu, as **Leave theater mode**, and that
+one is on every surface: the pill is the menu the phone has too.
 
 Back works because theater is part of the address: a link copied in theater opens in
 theater on whatever device you send it to. Opening the file editor or the changes screen
@@ -422,8 +423,8 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
   agent's name over its assistant, branch and project, and an optional PR chip) and the
   tab strip when the agent has more than one tab. The actions hang off the strip on the
   right, in a small tab-shaped flap over the terminal: theater mode, the macro picker,
-  the changed-file count, and the session's `⋯` menu, which carries the agent's actions,
-  the changed files, this screen's view toggles and a **Settings** drill into the app
+  the changed-file count, and the session's `⋯` menu, which carries the **Input** group,
+  the agent's actions and a **Settings** drill into the app
   menu. The flap takes no room from the terminal, so theater does not take it away: it
   lifts off the band and flies to the floating pill instead.
 - The **changes** screen is the full Changes pane.
@@ -459,7 +460,9 @@ three values:
   finger, and uses the answer as the starting point. Your own choice from the typing-surface
   switch wins from then on.
 - **Always** and **Never** are for the device dux guesses wrong on. Never restores typing
-  straight into the terminal.
+  straight into the terminal. On a touch device it keeps the terminal keys, since a finger
+  still cannot produce Esc or a Ctrl chord and there is no switch under **Never** to bring
+  them back with; it is only the message box that goes.
 
 An older config that says `compose_bar = true` or `false` keeps working: `true` is read as
 Automatic and `false` as Never.
@@ -470,16 +473,19 @@ Automatic and `false` as Never.
 > mouse on a narrow window starts with neither. Rotating a tablet never swaps your typing
 > surface out from under you.
 
-What the browser cannot see is a keyboard case, so there is a **typing-surface toggle** in
-two places: at the end of the accessory bar's key row, and in the input `⋯` menu below,
-worded as a sentence. It says which state it is in, **Box** while you are typing into the
-message box and **Direct** while your keystrokes go straight to the terminal, and one tap
-swaps them.
+What the browser cannot see is a keyboard case, so there is a **typing-surface toggle**.
+Turning it off is at hand while the typing bar is up: **Direct** at the end of the
+accessory bar's key row, and **Type directly in the terminal** in the input `⋯` beside the
+message box. Turning it back on is **Use virtual input**, in the **Input** group at the top
+of the pane's own `⋯` menu, because by then the typing bar is gone and so is everything
+that was on it.
 
 **Your choice wins, on any device, in both directions.** The pointer only decides where you
 start. Ask for the message box on a laptop and you get it, keys and all, and while it is up
 your keystrokes go into the box rather than straight to the terminal; switch back to Direct
-and both are gone again. Your choice sticks across reloads and survives folding a
+and the whole bar goes, message box, keys and menu together, giving the terminal every row
+on the screen. The first time you do that dux tells you once, on that device, where the way
+back is. Your choice sticks across reloads and survives folding a
 convertible or unplugging a mouse, until you change it. It is not a setting: it is
 remembered on that device and changes nothing in your config, and it appears only under
 **Automatic**, since **Always** and **Never** have already decided. Switching the
@@ -498,24 +504,26 @@ row in Preferences.
 
 For the top bar the answer is [theater mode](#theater-mode-one-pane-no-chrome), not a preference. It takes
 the header and the tab strip together, and it hands you the way back at the same time: the
-floating pill, and **Leave theater mode** in the input `⋯`. A preference that hid the same
+floating pill, and **Leave theater mode** in the menu it opens. A preference that hid the same
 chrome would be a second way to reach the same place, with no way back of its own.
 
-That input `⋯` menu sits at the left edge of whatever input row you have: beside the
-message box, in the key row when the box is off, or on its own slim row when you have
-hidden both. It is there whether or not anything is hidden. Inside it are **Attach a
-file…** (see [Dropping and pasting files](/docs/dropping-files)), the typing-surface
-switch, **Show terminal keys** when you have hidden them, and the way out of theater while
-theater is on.
+The input `⋯` sits at the left edge of whatever input row you have: beside the message box,
+or in the key row when the box is off. It belongs to the typing bar and it goes when the bar
+does, so what is inside it is only what that bar is about: **Type directly in the terminal**
+and **Hide terminal keys**.
+
+Everything you must be able to reach when the bar is not there is one level up, in the
+**Input** group at the top of the pane's own `⋯` menu: the flap's on a phone, the terminal
+header's on a computer, the floating pill's in theater. That group carries **Attach a
+file…** (see [Dropping and pasting files](/docs/dropping-files)) and **Use virtual input**,
+which only appears while the typing bar is down, since while it is up the menu beside the
+message box already offers the other direction. **Show terminal keys** joins the group the
+same way, in the one case where the message box is switched off in Preferences and you have
+hidden the keys as well.
 
 The terminal-keys preference lives on the server, so it follows you to every device, and
 the keys travel with your pointer, so hiding them from your phone also hides them on the
-tablet you pick up next. The input menu is under every terminal you are driving, desktop
-included, because it is how you ask for the message box in the first place. In theater mode
-on a computer there is no input row to put it on, so its entries move into the floating
-pill's own `⋯` and there is still exactly one menu on screen. **Hide terminal keys**
-appears only where a key row could actually show up, so it is never a button that does
-nothing.
+tablet you pick up next.
 
 ## Install it like an app
 

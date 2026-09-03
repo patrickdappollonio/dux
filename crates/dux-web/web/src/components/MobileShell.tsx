@@ -128,7 +128,7 @@ function HomeScreen() {
 // The spoke for a terminal that is NOT session-owned: one identity crumb over
 // the shared terminal. Such a terminal has no agent, so it borrows none of the
 // agent screen's AGENT chrome (no changes chip, no agent actions menu) — but it
-// carries a ⋯ menu of its own, with the shared terminal-keys quick toggle and
+// carries a ⋯ menu of its own, with the pane's shared INPUT group and
 // the terminal's one real action, Close….
 //
 // Shared by the project-owned and standalone screens, which differ only in what

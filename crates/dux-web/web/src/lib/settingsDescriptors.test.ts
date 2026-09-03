@@ -390,18 +390,18 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.auto_reopen_agents"]).toBe(false)
   })
 
-  // Escape-hatch truth: the terminal-keys description must name BOTH restore
-  // routes (the input ⋯ menu below the terminal, which sits in the compose row
-  // when the message box is on, in the key row when it is not, and in its own
-  // minimal row when neither is, plus this Preferences dialog) rather than
-  // leaving the user to rediscover them. Deliberately NOT "the compose bar's
-  // button": that wording was false with the compose bar disabled.
+  // Escape-hatch truth: the terminal-keys description must name EVERY restore
+  // route (the input ⋯ inside the typing bar, the pane's own ⋯ for the state
+  // with no typing bar at all, and this Preferences dialog) rather than leaving
+  // the user to rediscover them. Deliberately NOT "the compose bar's button":
+  // that wording was false with the compose bar disabled.
   it("the terminal-keys description names the restore routes", () => {
     const key = "ui.mobile_accessory_bar"
     const d = allSettingDescriptors().find((x) => x.key === key)
     expect(d?.writeTarget, key).toBe("settings")
     expect(d?.default, key).toBe(true)
-    expect(d?.description, key).toContain("below the terminal")
+    expect(d?.description, key).toContain("⋯ menu")
+    expect(d?.description, key).toContain("terminal's own")
     expect(d?.description, key).toContain("Preferences")
   })
 
