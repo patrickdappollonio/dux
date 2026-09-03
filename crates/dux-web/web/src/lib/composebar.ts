@@ -244,26 +244,6 @@ export function bottomBarSurvivesDirect(
 }
 
 /**
- * Should the IN-BAR toggle render?
- *
- * It lives in the accessory bar's key row, so it is offered exactly where that
- * row is, and only in `auto` (under always/never the setting has already
- * decided, and a control that changed nothing would be a lie). The quick toggle
- * stays in the key row because that is where a thumb already is, and it, the
- * bottom `⋯` and the top menu's way back all write through the SAME
- * `switchTypingSurface` helper so none of them can disagree about what a switch
- * means.
- *
- */
-export function typingSurfaceToggleOffered(
-  mode: ComposeBarMode,
-  coarsePointer: boolean,
-  choice: TypingSurfaceChoice | null
-): boolean {
-  return mode === "auto" && terminalKeysApply(mode, coarsePointer, choice)
-}
-
-/**
  * Should the INPUT MENU's typing-surface item render?
  *
  * Under `auto`, always, on every device. The menu is the guaranteed way in and

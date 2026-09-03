@@ -3512,12 +3512,9 @@ describe("TerminalPane inactive cursor style", () => {
     const term = TermStub.instances.at(-1)!
     expect(term.options.cursorInactiveStyle).toBe("block")
 
-    // Direct typing: xterm gets focus again, so the convention comes back. The
-    // cap goes with the row it sits in, so the way back is the surface helper
-    // the top menu's item calls, not a second press here.
-    fireEvent.pointerDown(
-      screen.getByRole("button", { name: /^Typing surface:/ }),
-    )
+    // Direct typing: xterm gets focus again, so the convention comes back.
+    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
+    fireEvent.click(screen.getByText("Type directly in the terminal"))
     expect(TermStub.instances.at(-1)).toBe(term)
     expect(term.options.cursorInactiveStyle).toBe("outline")
 
@@ -3850,18 +3847,26 @@ describe("TerminalPane typing-surface toggle", () => {
     pointerStub = null
   })
 
-  const toggle = () => screen.getByRole("button", { name: /^Typing surface:/ })
   const composeUp = () =>
     screen.queryByRole("textbox", { name: "Message" }) !== null
+  // THE SWITCH LIVES IN THE INPUT `⋯`, and nowhere else on these rows: the key
+  // row carries terminal keys only. A menu row is a sentence, so the item names
+  // the direction rather than the state it is in.
+  const flipSurface = () => {
+    const label = composeUp()
+      ? "Type directly in the terminal"
+      : "Use virtual input"
+    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
+    fireEvent.click(screen.getByText(label))
+  }
 
-  it("flips the surface and says which state it is in", () => {
+  it("flips the surface from the input menu, both ways", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(composeUp()).toBe(true)
-    // It names its state rather than being an unlabelled icon.
-    expect(toggle().textContent).toBeTruthy()
-
-    fireEvent.pointerDown(toggle())
+    flipSurface()
     expect(composeUp()).toBe(false)
+    flipSurface()
+    expect(composeUp()).toBe(true)
   })
 
   // THE BOX GOES, THE KEYS STAY. They are independent surfaces answering
@@ -3872,7 +3877,7 @@ describe("TerminalPane typing-surface toggle", () => {
   it("keeps the terminal keys when the message box goes", async () => {
     const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    fireEvent.pointerDown(toggle())
+    flipSurface()
     expect(composeUp()).toBe(false)
     expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "Input options" }))
@@ -3907,7 +3912,7 @@ describe("TerminalPane typing-surface toggle", () => {
   it("writes the choice to localStorage, so a reload does not snap back", async () => {
     const mod = await import("@/lib/typingSurface")
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    fireEvent.pointerDown(toggle())
+    flipSurface()
     expect(composeUp()).toBe(false)
     // THE STORAGE, not the module's own memory: a live module variable would
     // satisfy a remount in this file and still lose the choice on a real
@@ -3924,13 +3929,13 @@ describe("TerminalPane typing-surface toggle", () => {
     const calls = () =>
       (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
     const before = calls().length
-    fireEvent.pointerDown(toggle())
+    flipSurface()
     for (const call of calls().slice(before)) {
       expect(String(call[0])).not.toContain("/settings")
     }
   })
 
-  // Under always/never the SETTING decides, so a control that changed nothing
+  // Under always/never the SETTING decides, so an item that changed nothing
   // must not be there at all.
   it("is absent when the setting has already decided", () => {
     const state = makeState()
@@ -3938,7 +3943,16 @@ describe("TerminalPane typing-surface toggle", () => {
       "always"
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
+    expect(screen.queryByText("Type directly in the terminal")).toBeNull()
+  })
+
+  // AND THE KEY ROW CARRIES NONE OF THIS. It is terminal keys and the `⋯`,
+  // never a control that changes what the typing surface is.
+  it("puts no surface control in the key row", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByRole("button", { name: /^Typing surface:/ })).toBeNull()
+    expect(screen.queryByText("Direct")).toBeNull()
   })
 })
 

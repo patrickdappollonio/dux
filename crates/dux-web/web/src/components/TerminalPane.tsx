@@ -20,9 +20,8 @@ import {
   composeBarMode,
   composeBarShown,
   inactiveCursorStyle,
-  terminalKeysApply,
   inputMenuSurfaceSwitchOffered,
-  typingSurfaceToggleOffered,
+  terminalKeysApply,
 } from "@/lib/composebar"
 import {
   getComposeInsertSink,
@@ -46,7 +45,6 @@ import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useTypingSurface } from "@/hooks/use-typing-surface"
 import { useFilePicker } from "@/hooks/use-file-picker"
 import { inputMenuHasItems, type InputMenuGates } from "@/lib/inputMenu"
-import { switchTypingSurface } from "@/lib/typingSurface"
 import { ESC, TAB } from "@/lib/termkeys"
 import {
   ejectSelectionForReconnect,
@@ -145,7 +143,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     composeBarEnabled,
     keysApply,
     directLeavesNothingBelow,
-    surfaceToggleOffered,
     accessoryBarVisible,
     session,
     hasOutput,
@@ -782,7 +779,6 @@ export function TerminalPane(props: TerminalPaneProps) {
       menuHasItems={menuHasItems}
       composeBarEnabled={composeBarEnabled}
       directLeavesNothingBelow={directLeavesNothingBelow}
-      surfaceToggleOffered={surfaceToggleOffered}
       input={input}
       composeInputRef={composeInputRef}
       kind={kind}
@@ -962,11 +958,6 @@ function terminalTouchSettings(
       composeMode,
       isCoarsePointer,
       mobileAccessoryBarVisible(duxState),
-    ),
-    surfaceToggleOffered: typingSurfaceToggleOffered(
-      composeMode,
-      isCoarsePointer,
-      typingSurface,
     ),
     accessoryBarVisible: mobileAccessoryBarVisible(duxState),
   }
@@ -1413,7 +1404,6 @@ type TerminalPaneLayoutProps = {
   menuHasItems: boolean
   composeBarEnabled: boolean
   directLeavesNothingBelow: boolean
-  surfaceToggleOffered: boolean
   input: InputSurface
   composeInputRef: RefObject<HTMLTextAreaElement | null>
   kind: TerminalPaneProps["kind"]
@@ -1428,7 +1418,6 @@ function TerminalPaneLayout({
   menuHasItems,
   composeBarEnabled,
   directLeavesNothingBelow,
-  surfaceToggleOffered,
   input,
   composeInputRef,
   kind,
@@ -1449,9 +1438,6 @@ function TerminalPaneLayout({
           accessoryBarShown={accessoryBarShown}
           composeBarShown={composeBarShown}
           menuHasItems={menuHasItems}
-          composeBarEnabled={composeBarEnabled}
-          directLeavesNothingBelow={directLeavesNothingBelow}
-          surfaceToggleOffered={surfaceToggleOffered}
           input={input}
           composeInputRef={composeInputRef}
           kind={kind}
@@ -1466,9 +1452,6 @@ type TerminalInputRowsProps = {
   accessoryBarShown: boolean
   composeBarShown: boolean
   menuHasItems: boolean
-  composeBarEnabled: boolean
-  directLeavesNothingBelow: boolean
-  surfaceToggleOffered: boolean
   input: InputSurface
   composeInputRef: RefObject<HTMLTextAreaElement | null>
   kind: TerminalPaneProps["kind"]
@@ -1479,9 +1462,6 @@ function TerminalInputRows({
   accessoryBarShown,
   composeBarShown,
   menuHasItems,
-  composeBarEnabled,
-  directLeavesNothingBelow,
-  surfaceToggleOffered,
   input,
   composeInputRef,
   kind,
@@ -1500,16 +1480,6 @@ function TerminalInputRows({
           alt={input.alt}
           onToggleCtrl={input.toggleCtrl}
           onToggleAlt={input.toggleAlt}
-          composeSurface={surfaceToggleOffered ? composeBarEnabled : undefined}
-          onToggleSurface={
-            surfaceToggleOffered
-              ? () =>
-                  switchTypingSurface(
-                    composeBarEnabled ? "direct" : "compose",
-                    directLeavesNothingBelow,
-                  )
-              : undefined
-          }
           inputMenu={!composeBarShown && menuHasItems ? inputMenu : undefined}
         />
       ) : null}

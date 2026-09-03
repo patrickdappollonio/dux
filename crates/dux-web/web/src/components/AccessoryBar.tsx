@@ -39,19 +39,6 @@ interface AccessoryBarProps {
   alt: boolean
   onToggleCtrl: () => void
   onToggleAlt: () => void
-  // THE TYPING-SURFACE QUICK TOGGLE. A person with a keyboard case attached
-  // wants to type straight into the terminal; the same tablet without it wants
-  // the buffered message box, and the browser cannot tell the two apart
-  // (measured), so the user swaps it. It sits in THIS row because this row is
-  // where the thumb already is in both states, and it is one tap rather than
-  // two. It is not the guaranteed way back any more: pressing it takes this
-  // whole row away, and the way back is the INPUT group in the surface's top
-  // menu, which is on screen whatever the pane is doing. Both write through the
-  // same `switchTypingSurface` helper, so they cannot drift. Absent
-  // (undefined) where the toggle would change nothing, which is every case
-  // except the `auto` setting on a touch device.
-  composeSurface?: boolean
-  onToggleSurface?: () => void
   // The input ⋯ menu, when THIS bar is the bottom-most input row (the message
   // box is off, so the compose row that normally carries it is not there).
   // Presentational like everything else here: the parent owns the anchor
@@ -166,8 +153,6 @@ export function AccessoryBar({
   alt,
   onToggleCtrl,
   onToggleAlt,
-  composeSurface,
-  onToggleSurface,
   inputMenu,
 }: AccessoryBarProps) {
   // Two flex rows stacked: modifier/special keys on top, navigation (arrows +
@@ -194,45 +179,6 @@ export function AccessoryBar({
         <KeyButton ariaLabel="Insert newline" onActivate={onNewline}>
           <ShiftEnterIcon />
         </KeyButton>
-        {/* The typing-surface toggle (see the prop). It NAMES the state it is
-            in, "Box" while the buffered message box is the typing surface and
-            "Direct" while keystrokes go straight to the terminal, with the
-            full sentence on the aria-label for anyone who cannot see the word.
-            In practice it only ever reads "Box" now: pressing it takes this
-            whole row away with the rest of the virtual input, and the way back
-            is the top menu's INPUT group. The two-state wording stays because
-            the row also exists with the message box switched off in config.
-            TEXT ONLY, and on the SHORTER row, both for room rather than taste:
-            MEASURED at 390px, an eighth cell on the navigation row pushed the
-            key off the screen edge, and an icon beside the word costs another
-            22px the cell does not have. It sits behind its own divider,
-            because changing the typing surface out from under you is a far
-            bigger consequence than a mistap on a cursor key, and that is the
-            misclick-safe spacing the navigation row already uses. */}
-        {onToggleSurface ? (
-          <>
-            <div
-              aria-hidden="true"
-              className="mx-1.5 w-px shrink-0 self-stretch bg-border"
-            />
-            <KeyButton
-              label={composeSurface ? "Box" : "Direct"}
-              ariaLabel={
-                composeSurface
-                  ? "Typing surface: message box. Switch to typing directly."
-                  : "Typing surface: direct. Switch to the message box."
-              }
-              onActivate={onToggleSurface}
-              // min-w-16: with the input ⋯ cell in the row, an even flex split
-              // at 390px gives every cell 47px, and the "Direct" label needs 54
-              // (measured in the preview container; it visibly clipped). The
-              // floor holds this cell at 64 and the five keys settle at 44,
-              // still above the 40px touch floor on both axes.
-              className="min-w-16"
-            />
-
-          </>
-        ) : null}
         {/* THE INPUT ⋯, when this row is the bottom-most input row. It sits
             behind its own divider for the same misclick reason the surface
             toggle does: opening a menu out from under a thumb aiming for ⇧↵

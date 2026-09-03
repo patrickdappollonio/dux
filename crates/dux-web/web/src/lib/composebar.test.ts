@@ -13,7 +13,6 @@ import {
   bottomBarSurvivesDirect,
   terminalKeysApply,
   inputMenuSurfaceSwitchOffered,
-  typingSurfaceToggleOffered,
 } from "./composebar"
 import type { ComposeBarMode, TypingSurfaceChoice } from "./composebar"
 
@@ -368,19 +367,6 @@ describe("composeBarShown", () => {
     expect(composeBarShown("always", false, "direct")).toBe(true)
     expect(composeBarShown("never", true, "compose")).toBe(false)
     expect(composeBarShown("never", false, "compose")).toBe(false)
-  })
-})
-
-describe("typingSurfaceToggleOffered", () => {
-  // The in-bar cap lives in the key row, so it is offered exactly where that
-  // row is. Under always/never the setting decides and a control that changed
-  // nothing would be a lie.
-  it("is offered in auto wherever the key row is", () => {
-    expect(typingSurfaceToggleOffered("auto", true, null)).toBe(true)
-    expect(typingSurfaceToggleOffered("auto", false, null)).toBe(false)
-    expect(typingSurfaceToggleOffered("auto", false, "compose")).toBe(true)
-    expect(typingSurfaceToggleOffered("always", true, null)).toBe(false)
-    expect(typingSurfaceToggleOffered("never", true, null)).toBe(false)
   })
 })
 

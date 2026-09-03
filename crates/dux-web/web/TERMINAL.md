@@ -1548,24 +1548,28 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     not snap back", "does not write the ui.compose_bar setting", "is absent when the
     setting has already decided").
 
-3. **`never` keeps the accessory KEYS on a coarse pointer; `always` brings the pair to a
-    fine one; a CHOSEN `direct` keeps neither.** The preference is about the compose BOX
-    and offers no switch to bring a key row back with, and a soft keyboard still cannot
-    produce a Ctrl chord, so a finger keeps its keys there. Choosing to type directly is
-    a different statement and takes the whole virtual input, keys included; the way back
-    is the top menu's INPUT group. Fix: `src/lib/composebar.ts` (`virtualInputUp`).
-    Pinned: `src/lib/composebar.test.ts` "keeps the keys on a phone whose compose box is
-    switched off" and "goes down entirely on a phone that chose direct typing".
+3. **The message box and the key row are INDEPENDENT, and all four combinations are
+    legal.** A coarse pointer is offered the keys whatever the typing surface resolves
+    to, because Esc, Tab and a Ctrl chord are keys a soft keyboard cannot produce at all
+    and holding the virtual Ctrl while a hardware keyboard types the letter is a real way
+    to work; a fine pointer's keys arrive and leave with the box. Choosing `direct` takes
+    the BOX only, and the keys keep their own preference. Fix: `src/lib/composebar.ts`
+    (`terminalKeysApply`), `terminalInputLayout` in `TerminalPane.tsx`. Pinned:
+    `src/lib/composebar.test.ts` "keeps the keys on a phone that chose direct typing" and
+    "spans the four states the two surfaces can be in";
+    `components/TerminalPane.test.tsx` "reaches every combination of the two rows".
 
-4. **The two directions of the surface switch live in two different menus, and never in
-    both.** Switching to Direct removes every anchor a menu could sit on, so the way back
-    cannot be down there: the bottom ⋯ carries the way OUT while the virtual input is up,
-    and the pane publishes the way BACK to the top menu's INPUT group once it is down.
-    The pane decides which, so the same row can never appear twice. Fix:
-    `src/lib/composebar.ts`, `terminalInputLayout` in `TerminalPane.tsx`,
-    `src/lib/paneInputGroup.ts`. Pinned: `components/TerminalPane.test.tsx` "TerminalPane
-    input group for the top menu" suite and "publishes the way in on a fine pointer that
-    has chosen nothing".
+4. **ONE HOME AT A TIME for the surface switch, and the pane decides which.** The bottom
+    ⋯ hangs off whatever row is under the terminal, so it exists while EITHER row is up
+    and carries both directions; the pane publishes the way BACK to the top menu's INPUT
+    group only once nothing is left below. The same fact gates the one-time hint, which
+    would otherwise point at another menu while the way back was visible on screen. Fix:
+    `src/lib/composebar.ts` (`bottomBarSurvivesDirect`), `terminalInputLayout` in
+    `TerminalPane.tsx`, `src/lib/paneInputGroup.ts`, `switchTypingSurface` in
+    `src/lib/typingSurface.ts`. Pinned: `components/TerminalPane.test.tsx` "keeps the
+    terminal keys when the message box goes" and the "TerminalPane input group for the
+    top menu" suite; `src/lib/typingSurface.test.ts` "stays quiet while a row is left
+    under the terminal"; `components/inputWayBack.test.tsx`.
 
 5. **The compose DRAFT lives in the pane's state, not in ComposeBar.** Trap: a
     preference flip or rotation past the breakpoint unmounts the bar; the draft must
@@ -2187,12 +2191,15 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Pinned: `components/TerminalPane.test.tsx` "shows the Reconnect affordance on
     'failed' without doubling the spinner" and C12's test.
 
-9. **The bottom bar IS the virtual input, and there is no third anchor row.** The pane
-    column is the terminal plus whichever of the two input rows the OWNER has up, so
-    asking to type directly in the terminal leaves nothing under the terminal at all.
-    The old `inColumn` flag and the minimal row it kept alive for the input ⋯ are gone:
-    the trigger has no permanent home to be given, and what had to outlive the bar moved
-    to the top menu's INPUT group. Bars still take height OUT of the terminal in the
+9. **There is no third anchor row, and the key row carries terminal keys ONLY.** The
+    pane column is the terminal plus whichever of the two input rows the OWNER has up, so
+    only hiding both leaves nothing under the terminal. The old `inColumn` flag and the
+    minimal row it kept alive for the input ⋯ are gone: the trigger has no permanent home
+    to be given, and what had to outlive both rows moved to the top menu's INPUT group.
+    The key row's "Box"/"Direct" cap is gone with them: a control that changes what the
+    typing surface IS, one cell wide among keys that merely type, is not something a
+    thumb reaching for the newline should be able to hit, and the action lives in the ⋯
+    beside it. Bars still take height OUT of the terminal in the
     desktop shell (panel geometry untouched) and the pane's own RO reports the reflow.
     Fix: `terminalInputLayout` and `TerminalPaneLayout` in `TerminalPane.tsx`. Pinned:
     `components/TerminalPane.test.tsx` "TerminalPane input menu anchors" and "TerminalPane
