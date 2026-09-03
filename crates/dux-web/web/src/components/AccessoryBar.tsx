@@ -197,6 +197,10 @@ export function AccessoryBar({
             in, "Box" while the buffered message box is the typing surface and
             "Direct" while keystrokes go straight to the terminal, with the
             full sentence on the aria-label for anyone who cannot see the word.
+            In practice it only ever reads "Box" now: pressing it takes this
+            whole row away with the rest of the virtual input, and the way back
+            is the top menu's INPUT group. The two-state wording stays because
+            the row also exists with the message box switched off in config.
             TEXT ONLY, and on the SHORTER row, both for room rather than taste:
             MEASURED at 390px, an eighth cell on the navigation row pushed the
             key off the screen edge, and an icon beside the word costs another

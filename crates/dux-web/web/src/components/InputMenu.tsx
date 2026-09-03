@@ -11,17 +11,23 @@ import {
 import { inputMenuHasItems, type InputMenuGates } from "@/lib/inputMenu"
 import { cn } from "@/lib/utils"
 
-// THE INPUT `⋯`: the one menu attached to the virtual input area, and the
-// reason the hidden-bars dead end cannot come back. It replaces the old
-// conditional "show hidden bars" button, which only existed while something was
-// hidden and could therefore only ever be a way back, never a way there.
+// THE INPUT `⋯`: the menu that belongs to the virtual input, and lives and dies
+// with it. It is input-LOCAL, and that is the whole of it: the way out of the
+// virtual input, and the terminal-keys toggle.
 //
-// It renders in EVERY bar state, at the leading edge of the bottom-most input
-// row that exists (see the anchor matrix in TerminalPane): the compose row's
-// leading slot when the message box is up, the accessory bar's row-one trailing
-// slot when only the keys are up, and its own minimal row when neither is.
-// Exactly one instance ever renders; the anchors are mutually exclusive by
-// construction and a test pins the state that could produce two.
+// IT IS NOT A PERMANENT SURFACE, deliberately. It used to render in every bar
+// state, minimal row of its own included, so that it could be the one menu
+// always within reach; asking to type directly in the terminal now takes the
+// whole bottom bar, and a row kept alive purely to hold an `⋯` is exactly the
+// chrome that choice is asking to be rid of. What must always be reachable
+// (attaching a file, the way back to the virtual input) moved up into the top
+// menu every surface already has, through `PaneInputGroup`.
+//
+// It renders at the leading edge of the bottom-most input row that exists: the
+// compose row's leading slot when the message box is up, the accessory bar's
+// row-one trailing slot when only the keys are up. Exactly one instance ever
+// renders; the anchors are mutually exclusive by construction and a test pins
+// the state that could produce two.
 //
 // It NEVER renders empty: an `⋯` that opens nothing is worse than no `⋯`, and
 // the empty state is reachable, so every anchor asks `inputMenuHasItems` first

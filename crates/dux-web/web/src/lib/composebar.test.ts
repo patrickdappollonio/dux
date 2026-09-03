@@ -10,7 +10,7 @@ import {
   composeBarShown,
   insertIntoComposeDraft,
   inactiveCursorStyle,
-  touchSurfacesApply,
+  virtualInputUp,
   inputMenuSurfaceSwitchOffered,
   typingSurfaceToggleOffered,
 } from "./composebar"
@@ -284,36 +284,39 @@ describe("resolvedTypingSurface over every state", () => {
 // SURFACE (is a finger doing the typing, so does the text need a buffer
 // autocorrect and swipe can work in). These helpers answer only the second one,
 // and nothing here has a width in it.
-describe("touchSurfacesApply", () => {
-  it("puts the touch surfaces wherever the pointer is coarse, layout regardless", () => {
-    expect(touchSurfacesApply("auto", true, null)).toBe(true)
-    expect(touchSurfacesApply("never", true, null)).toBe(true)
+describe("virtualInputUp", () => {
+  it("is up wherever the pointer is coarse and nothing has been chosen", () => {
+    expect(virtualInputUp("auto", true, null)).toBe(true)
   })
 
-  it("keeps them away from a fine pointer unless the user asked for them", () => {
-    expect(touchSurfacesApply("auto", false, null)).toBe(false)
-    expect(touchSurfacesApply("never", false, null)).toBe(false)
-    expect(touchSurfacesApply("always", false, null)).toBe(true)
+  it("is down for a fine pointer unless the user or the setting asked", () => {
+    expect(virtualInputUp("auto", false, null)).toBe(false)
+    expect(virtualInputUp("never", false, null)).toBe(false)
+    expect(virtualInputUp("always", false, null)).toBe(true)
   })
 
   // The inert-toggle bug: choosing the message box on a laptop used to leave
   // the keys behind, because the key row was gated on the pointer alone.
   it("brings the keys to a fine pointer that chose the message box", () => {
-    expect(touchSurfacesApply("auto", false, "compose")).toBe(true)
+    expect(virtualInputUp("auto", false, "compose")).toBe(true)
   })
 
-  // `never` is about the compose BOX. A phone still cannot produce Esc, Tab or
-  // a Ctrl chord, so the accessory keys stay.
-  it("keeps the accessory keys on a phone whose compose box is switched off", () => {
-    expect(touchSurfacesApply("never", true, null)).toBe(true)
-    expect(composeBarShown("never", true, null)).toBe(false)
-  })
-
-  // Direct is one of the two legal divergences: the key row stays, because it
-  // carries the way back.
-  it("keeps the keys on a phone that chose direct typing", () => {
-    expect(touchSurfacesApply("auto", true, "direct")).toBe(true)
+  // CHOOSING TO TYPE DIRECTLY TAKES THE WHOLE BAR, keys included: that is what
+  // the choice says, and the way back is the top menu's INPUT group rather than
+  // a key row left behind to carry it.
+  it("goes down entirely on a phone that chose direct typing", () => {
+    expect(virtualInputUp("auto", true, "direct")).toBe(false)
     expect(composeBarShown("auto", true, "direct")).toBe(false)
+  })
+
+  // `never` IS NOT THAT CHOICE. It is configuration saying "no message box",
+  // and it offers no surface switch anywhere to bring a key row back with, so a
+  // finger keeps its keys and the bar is that row alone.
+  it("keeps the keys on a phone whose compose box is switched off", () => {
+    expect(virtualInputUp("never", true, null)).toBe(true)
+    expect(composeBarShown("never", true, null)).toBe(false)
+    // Even against a stored choice, which `never` overrides in both places.
+    expect(virtualInputUp("never", true, "direct")).toBe(true)
   })
 })
 

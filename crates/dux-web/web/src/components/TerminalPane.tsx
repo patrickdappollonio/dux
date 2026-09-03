@@ -20,7 +20,7 @@ import {
   composeBarShown,
   inactiveCursorStyle,
   inputMenuSurfaceSwitchOffered,
-  touchSurfacesApply,
+  virtualInputUp,
   typingSurfaceToggleOffered,
 } from "@/lib/composebar"
 import {
@@ -142,10 +142,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     fileDropEnabled,
     composeMode,
     composeBarEnabled,
-    touchSurfaces,
+    virtualInput,
     surfaceToggleOffered,
     accessoryBarVisible,
-    theater,
     session,
     hasOutput,
     providerName,
@@ -466,16 +465,13 @@ export function TerminalPane(props: TerminalPaneProps) {
     composeBarShown: composeBarShownHere,
     inputMenuGates,
     menuHasItems,
-    inputMenuRow,
     topInputGates,
   } = terminalInputLayout({
     isOwner,
-    fileDropEnabled,
     composeMode,
-    touchSurfaces,
+    virtualInput,
     accessoryBarVisible,
     composeBarEnabled,
-    theater,
   })
 
   const everReady = useEverReady(hasOutput)
@@ -780,7 +776,6 @@ export function TerminalPane(props: TerminalPaneProps) {
       isOwner={isOwner}
       accessoryBarShown={accessoryBarShown}
       composeBarShown={composeBarShownHere}
-      inputMenuRow={inputMenuRow}
       inputMenuGates={inputMenuGates}
       menuHasItems={menuHasItems}
       composeBarEnabled={composeBarEnabled}
@@ -956,7 +951,7 @@ function terminalTouchSettings(
       isCoarsePointer,
       typingSurface,
     ),
-    touchSurfaces: touchSurfacesApply(
+    virtualInput: virtualInputUp(
       composeMode,
       isCoarsePointer,
       typingSurface,
@@ -967,23 +962,21 @@ function terminalTouchSettings(
       typingSurface,
     ),
     accessoryBarVisible: mobileAccessoryBarVisible(duxState),
-    theater: duxState.theater,
   }
 }
 
 type TerminalInputLayoutInputs = {
   isOwner: boolean
-  fileDropEnabled: boolean
   composeMode: ReturnType<typeof composeBarMode>
-  touchSurfaces: boolean
+  /// Is the virtual input up at all on this device (see `virtualInputUp`)?
+  virtualInput: boolean
   accessoryBarVisible: boolean
   composeBarEnabled: boolean
-  theater: boolean
 }
 
 function terminalInputLayout(input: TerminalInputLayoutInputs) {
   const accessoryBarShown =
-    input.isOwner && input.touchSurfaces && input.accessoryBarVisible
+    input.isOwner && input.virtualInput && input.accessoryBarVisible
   const composeBarShown = input.isOwner && input.composeBarEnabled
   // THE BOTTOM `⋯`, which lives INSIDE the virtual input and nowhere else. It
   // carries only what is local to the rows around it: the way out of the
@@ -991,33 +984,23 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
   // menu's INPUT group, which is on screen whether or not these rows are, and
   // the theater exit went with it: this menu is not a permanent surface any
   // more, so it cannot be anybody's guaranteed way back.
+  // THE BOTTOM BAR IS THE VIRTUAL INPUT, and there is nothing under the
+  // terminal when it is down. There is deliberately no minimal `⋯` row any
+  // more: it existed so the menu could be reachable in every bar state, and
+  // that guarantee now belongs to the top menu, which is on screen whatever the
+  // pane is doing. Asking to type directly in the terminal therefore gives the
+  // whole height to the terminal, which is what the choice says.
+  const bottomBarShown = accessoryBarShown || composeBarShown
   const inputMenuGates = {
     attach: false,
     surfaceSwitch:
-      input.isOwner && inputMenuSurfaceSwitchOffered(input.composeMode),
-    keysToggle: input.isOwner && input.touchSurfaces,
+      input.isOwner &&
+      inputMenuSurfaceSwitchOffered(input.composeMode) &&
+      bottomBarShown,
+    keysToggle: input.isOwner && input.virtualInput && bottomBarShown,
     theaterExit: false,
   }
   const menuHasItems = inputMenuHasItems(inputMenuGates)
-  // THE OWNER'S `⋯` IS UNCONDITIONAL, in its own minimal row when no bar is up
-  // to carry it. It is the one guaranteed way into the virtual input, so gating
-  // it on the very surfaces it turns on is circular: on a laptop that gate left
-  // the switch nowhere at all. A viewer owns no input, so it gets no row of its
-  // own: on a phone the top bar and the flap are always on screen outside
-  // theater, and in theater the pill carries the items. `menuHasItems` above
-  // still decides whether the row has anything to show.
-  // NOT IN THEATER ON A COMPUTER, where the mode has taken the whole window and
-  // the floating pill is the only chrome left. A bordered row under the
-  // terminal there is a second `⋯` beside the pill's own, and it is exactly the
-  // chrome this mode exists to remove. The items move into the top menu's INPUT
-  // group instead, so the switch stays one press away and there is still only
-  // one trigger on screen.
-  const inputMenuRow =
-    !accessoryBarShown &&
-    !composeBarShown &&
-    menuHasItems &&
-    input.isOwner &&
-    !input.theater
   // THE TOP MENU'S INPUT GROUP, published for whichever menu is over this pane
   // (see `lib/paneInputGroup.ts`). It carries a control exactly while the
   // bottom `⋯` does NOT, so the same row is never in two menus at once: the
@@ -1025,20 +1008,18 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
   // is the way BACK once it is gone. "Attach a file…" is not here because it is
   // not a gate: the menu borrows the pane's own attach capability, published
   // under this same pty id on exactly the same condition.
-  const bottomBarShown = accessoryBarShown || composeBarShown || inputMenuRow
   const topInputGates = {
     surfaceSwitch:
       input.isOwner &&
       inputMenuSurfaceSwitchOffered(input.composeMode) &&
       !bottomBarShown,
-    keysToggle: input.isOwner && input.touchSurfaces && !bottomBarShown,
+    keysToggle: input.isOwner && input.virtualInput && !bottomBarShown,
   }
   return {
     accessoryBarShown,
     composeBarShown,
     inputMenuGates,
     menuHasItems,
-    inputMenuRow,
     topInputGates,
   }
 }
@@ -1419,7 +1400,6 @@ type TerminalPaneLayoutProps = {
   isOwner: boolean
   accessoryBarShown: boolean
   composeBarShown: boolean
-  inputMenuRow: boolean
   inputMenuGates: InputMenuGates
   menuHasItems: boolean
   composeBarEnabled: boolean
@@ -1435,7 +1415,6 @@ function TerminalPaneLayout({
   isOwner,
   accessoryBarShown,
   composeBarShown,
-  inputMenuRow,
   inputMenuGates,
   menuHasItems,
   composeBarEnabled,
@@ -1468,11 +1447,6 @@ function TerminalPaneLayout({
           kind={kind}
           inputMenu={inputMenu}
         />
-      ) : null}
-      {inputMenuRow ? (
-        <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
-          {inputMenu}
-        </div>
       ) : null}
     </div>
   )

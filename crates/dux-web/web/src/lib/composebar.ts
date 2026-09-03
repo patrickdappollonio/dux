@@ -193,29 +193,39 @@ export function composeBarShown(
 }
 
 /**
- * Do the TOUCH TYPING SURFACES belong on this device at all?
+ * IS THE VIRTUAL INPUT UP AT ALL: the compose box, the terminal keys, and the
+ * `⋯` that hangs off them, as ONE surface under the terminal.
  *
  * TWO ORTHOGONAL QUESTIONS, and treating them as one was the bug. WIDTH decides
  * the LAYOUT: how much room is there, so which shell you get. The POINTER
  * decides the DEFAULT TYPING SURFACE: is a finger doing the typing, so does the
  * text need a buffer where autocorrect and swipe have something to work with. A
  * tablet in landscape wants the desktop layout AND the buffered input, so the
- * bars travel with the pointer and render inside the desktop shell too.
+ * bar travels with the pointer and renders inside the desktop shell too.
  *
- * This gates the pair: the accessory keys (Esc/Tab/Ctrl/Alt and the rest) and
- * the compose bar. A coarse pointer always has them, whatever the surface
- * resolves to: `never` and a stored `direct` both keep the accessory keys,
- * because each is a statement about the compose BOX and a soft keyboard still
- * cannot produce a Ctrl chord. A fine pointer gets them once the message box is
- * up, by the setting or by the user's own choice, so asking for the box on a
- * laptop brings its keys along instead of leaving the press inert.
+ * ASKING TO TYPE DIRECTLY IN THE TERMINAL TAKES THE WHOLE BAR, keys included.
+ * That is the point of the choice: the mode is "this terminal, full height, my
+ * keyboard", and leaving a key row behind made it a half measure. A coarse
+ * pointer used to keep the keys whatever the surface resolved to; it no longer
+ * does, and the way back is the top menu's INPUT group rather than anything
+ * down here.
+ *
+ * `never` IS THE ONE EXCEPTION, and it is not the same statement. It is
+ * configuration saying "no message box", written by whoever set dux up, not a
+ * person choosing to type into the terminal on this device; a finger still
+ * cannot produce a Ctrl chord, and under `never` there is no surface switch
+ * anywhere to bring the keys back with. So a coarse pointer keeps its key row
+ * there, and the bar is that row alone.
  */
-export function touchSurfacesApply(
+export function virtualInputUp(
   mode: ComposeBarMode,
   coarsePointer: boolean,
   choice: TypingSurfaceChoice | null
 ): boolean {
-  return coarsePointer || composeBarShown(mode, coarsePointer, choice)
+  return (
+    composeBarShown(mode, coarsePointer, choice) ||
+    (mode === "never" && coarsePointer)
+  )
 }
 
 /**
@@ -224,16 +234,22 @@ export function touchSurfacesApply(
  * It lives in the accessory bar's key row, so it is offered exactly where that
  * row is, and only in `auto` (under always/never the setting has already
  * decided, and a control that changed nothing would be a lie). The quick toggle
- * stays in the key row because that is where a thumb already is, and both it
- * and the menu item write through the SAME `setTypingSurface` helper so the two
- * can never disagree about what a switch means.
+ * stays in the key row because that is where a thumb already is, and it, the
+ * bottom `⋯` and the top menu's way back all write through the SAME
+ * `switchTypingSurface` helper so none of them can disagree about what a switch
+ * means.
+ *
+ * ONE DIRECTION, now that the choice takes the whole bar: this cap can only
+ * ever read "Box", because the row it sits in is gone the moment it is pressed.
+ * It is still a toggle rather than a button, because the row also exists under
+ * `never`, where no cap is offered at all.
  */
 export function typingSurfaceToggleOffered(
   mode: ComposeBarMode,
   coarsePointer: boolean,
   choice: TypingSurfaceChoice | null
 ): boolean {
-  return mode === "auto" && touchSurfacesApply(mode, coarsePointer, choice)
+  return mode === "auto" && virtualInputUp(mode, coarsePointer, choice)
 }
 
 /**
