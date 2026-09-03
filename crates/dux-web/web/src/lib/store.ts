@@ -7,6 +7,7 @@ import { existingBranchConflict, sessionsApi, SessionsApiError } from "./session
 import { ordersMatch, reorderById } from "./reorder"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
 import { nextActiveSessionId, type FlatSortKey } from "./flatList"
+import { isMobileViewport } from "@/hooks/use-mobile"
 import { EventsSocket } from "./eventsSocket"
 import { getActivePtySocket } from "./ptySocket"
 import { getComposeInsertSink } from "./composeInsert"
@@ -2035,8 +2036,9 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
   }
 }
 
-// The destination when the focused agent vanishes under the user: the next
-// ACTIVE agent in the order the list is already showing (see
+// The destination when the focused agent vanishes under the user. On a phone
+// that is always the hub, for the reason written inside; on a computer it is the
+// next ACTIVE agent in the order the list is already showing (see
 // `nextActiveSessionId`), or home when every remaining agent is dormant. The
 // URL is REWRITTEN rather than pushed, so the entry pushed on the way in is
 // gone: one Back can then land on the screen the user is already on and look
@@ -2047,6 +2049,22 @@ function navigateAfterVanish(
   previous: SessionView[],
   goneSessionId: string,
 ): void {
+  // ON A PHONE THE ANSWER IS THE HUB, and the difference is what the two shells
+  // have on screen. On a computer the agents list is a pane the user is still
+  // looking at, so landing on the next row keeps the list, the position and the
+  // deletion all visible at once. On a phone that list is a SCREEN of its own:
+  // the agent that vanished filled the display, and the next one fills it
+  // identically, so the surface says nothing about what just happened and reads
+  // as a delete that hit the wrong agent. Going up one level is the truthful
+  // move, and it is the same place the header's own way out goes.
+  //
+  // Still a rewrite, like every other vanish path and for the reason above: the
+  // entry the user pushed on the way in names an agent that no longer exists,
+  // so pushing over it would leave Back pointing at a not-found screen.
+  if (isMobileViewport()) {
+    selectSessionRoute(null, "replace")
+    return
+  }
   // The overlay first, exactly as `FlatAgentList` does before it partitions and
   // sorts: while a drag is applied but not yet confirmed by the server, the
   // order on screen is the overlay's, so a destination computed from the raw

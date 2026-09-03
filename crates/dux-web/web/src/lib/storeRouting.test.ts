@@ -77,6 +77,12 @@ const fakeHistory = {
   },
 }
 
+// WHICH SHELL IS ON SCREEN, as a width a test can set. The store asks the real
+// `isMobileViewport`, so the stubbed window below answers with this; every test
+// is on a computer until it says otherwise, and the shared `beforeEach` puts it
+// back.
+let viewportWidth = 1280
+
 // Every warning the store raised, so a fallback that is supposed to be OUT
 // LOUD can be told from one that merely happened.
 const warnings: string[] = []
@@ -236,7 +242,11 @@ beforeEach(() => {
     setItem: () => {},
     removeItem: () => {},
   })
+  viewportWidth = 1280
   vi.stubGlobal("window", {
+    get innerWidth() {
+      return viewportWidth
+    },
     addEventListener: (type: string, handler: () => void) => {
       if (type === "popstate") popstateListeners.push(handler)
       if (type === "hashchange") hashchangeListeners.push(handler)
@@ -365,6 +375,56 @@ describe("a deleted agent never throws the user out of dux", () => {
     expect(mod.getSnapshot().selectedSessionId).toBe("s2")
     expect(mod.getSnapshot().mobileScreen).toBe("terminal")
     expect(loc.hash).toBe("#/agent/s2")
+  })
+
+  // ON A PHONE THE DESTINATION IS THE HUB, NOT THE NEXT AGENT.
+  //
+  // The two shells differ in what is on screen beside the terminal. A computer
+  // keeps the agents list in a pane, so landing on the next row shows the user
+  // both the deletion and where they ended up. A phone shows one screen at a
+  // time: the deleted agent filled it and the next agent fills it identically,
+  // so nothing on screen says the delete happened and it reads as having hit
+  // the wrong agent. Going up to the list is the honest answer, and it is a
+  // rewrite like every other vanish, because the entry it replaces names an
+  // agent that no longer exists.
+  describe("on a phone", () => {
+    beforeEach(() => {
+      viewportWidth = 390
+    })
+
+    it("lands on the hub when the focused agent is deleted, with a live one left", async () => {
+      const mod = await loadStore("#/agent/s1", [
+        { id: "s1", project_id: "p1" },
+        { id: "s2", project_id: "p1" },
+      ])
+      const entryCount = entries.length
+      await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
+      expect(mod.getSnapshot().selectedSessionId).toBeNull()
+      expect(mod.getSnapshot().selectedTarget).toBeNull()
+      expect(mod.getSnapshot().mobileScreen).toBe("home")
+      // Home names nothing, so its entry carries no hash at all.
+      expect(loc.hash).toBe("")
+      // Rewritten, not pushed: no new entry, and the user is still in dux.
+      expect(entries.length).toBe(entryCount)
+      expect(index).toBe(DUX_ENTRY_INDEX)
+      expect(leftApp).toBe(false)
+    })
+
+    it("leaves theater with the agent it was showing, stranding nothing", async () => {
+      const mod = await loadStore("#/agent/s1", [
+        { id: "s1", project_id: "p1" },
+        { id: "s2", project_id: "p1" },
+      ])
+      mod.enterTheater()
+      expect(mod.getSnapshot().theater).toBe(true)
+      await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
+      // The hub is chrome, so a mode whose whole point is hiding chrome cannot
+      // survive the trip to it.
+      expect(mod.getSnapshot().theater).toBe(false)
+      expect(mod.getSnapshot().selectedTarget).toBeNull()
+      expect(mod.getSnapshot().mobileScreen).toBe("home")
+      expect(leftApp).toBe(false)
+    })
   })
 
   it("skips an agent that detached in the same push that deleted the focused one", async () => {
