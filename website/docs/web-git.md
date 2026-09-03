@@ -67,7 +67,7 @@ file, hover a row for its `⋯` menu:
 
 ## Commit, push, pull
 
-The pane header's `⋯` **Actions** menu carries the rest:
+The changes pane's header `⋯` menu carries the rest:
 
 - **Commit…** opens a dialog for a multi-line message and commits **only the staged
   files**. It is disabled until something is staged, and `Cmd/Ctrl+Enter` submits.
