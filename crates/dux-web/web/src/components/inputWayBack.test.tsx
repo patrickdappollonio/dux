@@ -51,8 +51,7 @@ function installStubs() {
 }
 installStubs()
 
-const { MobilePaneMenuBody } = await import("./MobilePaneMenu")
-const { AgentActionsMenu } = await import("./FlatAgentList")
+const { AgentPaneMenuBody } = await import("./PaneMenu")
 const {
   DropdownMenu,
   DropdownMenuContent,
@@ -100,14 +99,18 @@ function makeState(): DuxState {
   } as unknown as DuxState
 }
 
-// The two shells' top-menu bodies, each in the plainest anchor that can open
-// one. The bodies are what the shells render; opening them here rather than
-// driving each shell keeps this about the contract and not about layout.
+// Every top-menu body a pane can be reached through, in the plainest anchor
+// that can open one. The bodies are what the shells render; opening them here
+// rather than driving each shell keeps this about the contract and not about
+// layout.
+//
+// An agent's four anchors (the phone's flap and pill, the desktop pane
+// header's `⋯` and the sidebar row's) are ONE body, so listing them separately
+// would test the same component twice. What has to be listed separately is
+// each SUBJECT, because a terminal's menu is a different body with the same
+// promise to keep.
 const SHELLS = {
-  // A phone: the one pane menu, opened from the flap or from the pill.
-  phone: () => <MobilePaneMenuBody session={session()} />,
-  // A computer: the pane's own row menu in the sidebar.
-  computer: () => <AgentActionsMenu session={session()} />,
+  agent: () => <AgentPaneMenuBody session={session()} />,
 } as const
 
 async function openBody(body: React.ReactNode) {
@@ -135,7 +138,7 @@ afterEach(() => {
 
 describe("the way back from typing directly in the terminal", () => {
   for (const [shell, body] of Object.entries(SHELLS)) {
-    it(`is in a top menu on the ${shell}`, async () => {
+    it(`is in a top menu for an ${shell} pane`, async () => {
       // What a pane publishes once the bottom bar is gone: the way back is
       // the top menu's to offer, because nothing else is on screen to offer it.
       registerPaneInputGroup("s1", { surfaceSwitch: true, keysToggle: false })
@@ -143,7 +146,7 @@ describe("the way back from typing directly in the terminal", () => {
       expect(screen.getByText(WAY_BACK)).toBeTruthy()
     })
 
-    it(`leaves it out on the ${shell} while a bottom row is up`, async () => {
+    it(`leaves it out for an ${shell} pane while a bottom row is up`, async () => {
       // Absent, never disabled: the bottom `⋯` owns both directions while any
       // row it can hang off exists, and one row must never be in two menus at
       // once. That covers the key row standing alone with the message box

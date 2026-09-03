@@ -6,11 +6,12 @@ import type { DuxState } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
 
-// THE PHONE'S ONE PANE MENU. What is pinned here is that it is ONE menu: the
-// docked flap and the floating pill open the same body under the same name, so
-// theater cannot be the state in which the agent's own actions disappear, and
-// the cluster's `⋯` cannot mean something else once it has flown across the
-// screen.
+// THE PANE'S ONE MENU. What is pinned here is that it is ONE menu: the docked
+// flap, the floating pill and the desktop pane header open the same body under
+// the same name, so theater cannot be the state in which the agent's own
+// actions disappear, the cluster's `⋯` cannot mean something else once it has
+// flown across the screen, and a computer's pane header cannot drift into a
+// smaller menu than the row beside it.
 
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
@@ -47,7 +48,7 @@ function installStubs() {
 installStubs()
 const { MobileActionFlap } = await import("./MobileActionFlap")
 const { TheaterPill } = await import("./TheaterPill")
-const { MOBILE_PANE_MENU_LABEL } = await import("./MobilePaneMenu")
+const { PaneMenu, PANE_MENU_AGENT_LABEL } = await import("./PaneMenu")
 const { PANE_INPUT_GROUP_LABEL } = await import("./PaneInputGroup")
 const { registerPaneInputGroup, resetPaneInputGroups } = await import(
   "@/lib/paneInputGroup"
@@ -132,7 +133,7 @@ function labels() {
 describe("the phone's one pane menu", () => {
   it("carries the agent's own actions from the docked flap", async () => {
     render(<MobileActionFlap target={target} session={session()} band="strip" />)
-    await openFrom(screen.getByLabelText(MOBILE_PANE_MENU_LABEL))
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     const items = labels()
     expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
     expect(items.some((t) => t?.includes("Delete agent…"))).toBe(true)
@@ -157,7 +158,7 @@ describe("the phone's one pane menu", () => {
         flight="floating"
       />,
     )
-    await openFrom(screen.getByLabelText(MOBILE_PANE_MENU_LABEL))
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     const items = labels()
     // The whole point of the merge: theater was the one state in which every
     // per-agent action was unreachable on a phone.
@@ -177,7 +178,7 @@ describe("the phone's one pane menu", () => {
         flight="floating"
       />,
     )
-    await openFrom(screen.getByLabelText(MOBILE_PANE_MENU_LABEL))
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     expect(labels().some((t) => t?.includes("Leave theater mode"))).toBe(true)
     // And nothing for the top bar: theater mode is the one way to hide the
     // phone's chrome, and a second flow for the same intent is exactly what
@@ -187,7 +188,7 @@ describe("the phone's one pane menu", () => {
     cleanup()
     mockState = makeState(false)
     render(<MobileActionFlap target={target} session={session()} band="strip" />)
-    await openFrom(screen.getByLabelText(MOBILE_PANE_MENU_LABEL))
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     expect(labels().some((t) => t?.includes("Leave theater mode"))).toBe(false)
   })
 
@@ -204,7 +205,7 @@ describe("the phone's one pane menu", () => {
     registerPaneInputGroup("s1", { surfaceSwitch: true, keysToggle: false })
     registerAttachCapability("s1", vi.fn())
     render(<MobileActionFlap target={target} session={session()} band="strip" />)
-    await openFrom(screen.getByLabelText(MOBILE_PANE_MENU_LABEL))
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     const items = labels()
     expect(items[0]).toContain("Attach a file…")
     expect(items[1]).toContain("Use virtual input")
@@ -228,9 +229,49 @@ describe("the phone's one pane menu", () => {
   // eventually disagree about which surface is live.
   it("has no INPUT group at all when the pane publishes nothing", async () => {
     render(<MobileActionFlap target={target} session={session()} band="strip" />)
-    await openFrom(screen.getByLabelText(MOBILE_PANE_MENU_LABEL))
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     expect(screen.queryByText(PANE_INPUT_GROUP_LABEL)).toBeNull()
     expect(labels().some((t) => t?.includes("Attach a file…"))).toBe(false)
     expect(labels().some((t) => t?.includes("Use virtual input"))).toBe(false)
+  })
+})
+
+// THE COMPUTER'S ANCHOR. The desktop pane header's `⋯` is the same menu the
+// phone's flap opens, in a trigger that matches the header's cluster instead of
+// the flap's bare circle. Two anchors, one body: the header and the sidebar row
+// must never be two different menus about one agent.
+describe("the pane menu at the desktop header's anchor", () => {
+  it("opens the whole agent menu, not a header-sized subset", async () => {
+    registerPaneInputGroup("s1", { surfaceSwitch: true, keysToggle: false })
+    render(<PaneMenu session={session()} appearance="header" />)
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    const items = labels()
+    expect(items.some((t) => t?.includes("Use virtual input"))).toBe(true)
+    expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
+    expect(items.some((t) => t?.includes("Delete agent…"))).toBe(true)
+    expect(items.some((t) => t?.includes("Settings"))).toBe(true)
+    expect(screen.getByText(PANE_INPUT_GROUP_LABEL)).toBeTruthy()
+  })
+
+  it("names itself what every other anchor names itself", () => {
+    // One name across the surfaces, so a screen reader and a voice command do
+    // not have to learn which anchor is on screen.
+    render(<PaneMenu session={session()} appearance="header" />)
+    expect(screen.getByLabelText(PANE_MENU_AGENT_LABEL)).toBeTruthy()
+  })
+
+  it("wears the header cluster's treatment, not the flap's circle", () => {
+    // The cluster is one family (outline) at one height token; the flap and the
+    // pill are each ONE rounded surface, where a bordered button reads as two.
+    render(<PaneMenu session={session()} appearance="header" />)
+    const trigger = screen.getByLabelText(PANE_MENU_AGENT_LABEL)
+    expect(trigger.className).toContain("size-8")
+    expect(trigger.className).not.toContain("rounded-full")
+
+    cleanup()
+    render(<MobileActionFlap target={target} session={session()} band="strip" />)
+    const clusterTrigger = screen.getByLabelText(PANE_MENU_AGENT_LABEL)
+    expect(clusterTrigger.className).toContain("size-10")
+    expect(clusterTrigger.className).toContain("rounded-full")
   })
 })

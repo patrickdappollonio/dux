@@ -18,37 +18,23 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  ClipboardCopy,
-  Cpu,
   Ellipsis,
   ExternalLink,
   FileCode2,
   Folder,
-  GitFork,
   GitPullRequest,
-  Info,
-  Pencil,
-  Play,
   Plus,
-  Radar,
-  RotateCcw,
-  RefreshCw,
-  ScrollText,
   Search,
-  SquareChevronRight,
   SquarePlus,
   SquareTerminal,
-  Trash2,
-  Unlink,
-  Variable,
   X,
 } from "lucide-react"
 import type { CSSProperties, ReactNode } from "react"
 import { useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
+import { AgentPaneMenuBody } from "@/components/PaneMenu"
 import { PaneInputGroup } from "@/components/PaneInputGroup"
-import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import {
   quietTailManualChoice,
   setQuietTailManualChoice,
@@ -58,13 +44,8 @@ import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -76,7 +57,6 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { agentRowVisual } from "@/lib/agentRow"
-import { defaultProviderForSession } from "@/lib/agentTabs"
 import {
   agentSearchLocation,
   matchCharRange,
@@ -85,8 +65,6 @@ import {
   normalizeQuery,
 } from "@/lib/agentSearch"
 import { changesCountFor } from "@/lib/agentVitals"
-import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
-import { clipboardWorktree } from "@/lib/flatClipboard"
 import {
   MOUSE_DRAG_ACTIVATION,
   TOUCH_DRAG_ACTIVATION,
@@ -113,42 +91,23 @@ import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import { launcherVerb } from "@/lib/launcherVerb"
 import { partitionProjects } from "@/lib/projects"
 import { moveItem, ordersMatch, reorderById } from "@/lib/reorder"
-import { agentRoot, editorRootForTarget } from "@/lib/editorRoot"
+import { editorRootForTarget } from "@/lib/editorRoot"
 import {
   sessionLabel,
-  supportsBranchGit,
-  workspaceDirectory,
   workspaceLocation,
   workspaceProjectId, folderDisplayName } from "@/lib/agentWorkspace"
 import {
-  addTab,
   agentSortValue,
   createStandaloneTerminal,
-  createTerminal,
-  detachPullRequest,
-  resumePullRequestAutodetection,
-  openAgentEnv,
-  openAgentInfo,
-  openAgentStartupCommand,
   openAddProject,
-  openAttachPullRequest,
-  openChangeProvider,
-  openDelete,
   openDeleteTerminal,
   openEditor,
   standaloneEditorHash,
-  openForceReconnect,
-  openForkAgent,
   openNewAgentPicker,
-  openRename,
-  openStartupLogs,
   reorderAgents,
   reorderTerminals,
-  rerunStartupCommand,
-  sessionActiveElsewhere,
   setAgentSearch,
   setAgentSort,
-  toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
 import { terminalForeground, terminalTitle } from "@/lib/terminals"
@@ -162,362 +121,6 @@ import { cn } from "@/lib/utils"
 export interface FlatSelectHandlers {
   onSelectSession: (sessionId: string) => void
   onSelectTerminal: (terminalId: string, owner: TerminalOwnerRef) => void
-}
-
-// The shared agent ⋯ actions menu body, every per-agent action from the parity
-// inventory, in one place so desktop and mobile can never drift. Reused verbatim
-// by both surfaces (this is the SessionActions menu the redesign must preserve).
-//
-// `context` says which screen the menu opened FROM: `"hub"` (the default; the
-// hub/sidebar row menus on both surfaces) or `"terminal"` (the phone terminal
-// screen's one pane menu, which renders this as its agent group and adds the
-// changed files, the view toggles and the app menu below it).
-//
-// The only thing the context decides is the pane's INPUT group, which the phone
-// pane menu renders itself, above this body: one group per menu, wherever the
-// menu is opened from.
-//
-// THE ROW MENU IS THE DESKTOP'S HOME FOR THAT GROUP. Typing directly in the
-// terminal takes the whole bottom bar away, the input `⋯` with it, and the way
-// back has to live in a menu that is always reachable. On this surface that is
-// the agent's own `⋯`: the per-agent surface that already exists, rather than
-// the global cog, whose menu is about the app and not about one pane.
-export function AgentActionsMenu({
-  session,
-  context = "hub",
-}: {
-  session: SessionView
-  context?: "hub" | "terminal"
-}) {
-  const duxState = useDux()
-  const { bootstrap, spine, createTabInFlight } = duxState
-  const tabCap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
-  const atTabCap = session.tabs.length >= tabCap
-  const addingTab = createTabInFlight.includes(session.id)
-  const providers = bootstrap?.available_providers ?? []
-  const defaultProvider = defaultProviderForSession(spine, session)
-  // The Project submenu names the PROJECT, because its actions affect the whole
-  // project, not just this agent. The tab submenu names nothing: the agent's own
-  // name sits beside the menu in every placement (the row, the mobile terminal
-  // header), so repeating it in the label is noise.
-  // `null` for a standalone agent, which belongs to no project. Read once so
-  // the submenu's presence and its contents cannot disagree.
-  const projectId = workspaceProjectId(session.workspace)
-  const projectName = spine?.projects.find((p) => p.id === projectId)?.name
-  const ghAvailable = bootstrap?.gh_available ?? false
-  // Whether the branch-identity features exist for this agent at all: fork,
-  // pull requests, startup commands. They are about a branch dux manages, and
-  // a standalone agent has none whatever its folder contains.
-  const branchGit = supportsBranchGit(session.workspace)
-  const prOverridden = session.pr?.overridden ?? false
-  // Detach answers "this agent has no PR", so it is offered on ANY association,
-  // pinned or autodetected: an autodetected badge the user does not want is the
-  // case it exists for, and gating on the pin hid it from exactly those people.
-  const prAssociated = session.pr != null
-  // The way back, offered only where it means something. Both are gh-free: the
-  // suppression is dux's own state, so it must be removable even if gh went
-  // away after the detach.
-  const prSuppressed = session.pr_autodetect_suppressed ?? false
-  // While another connection input-owns one of this agent's PTYs, the entries
-  // that MUTATE the agent disable: deleting, renaming or relaunching an agent
-  // someone else is actively driving is a surprise for them. Two sources feed
-  // the answer (see `sessionActiveElsewhere`): a mounted TerminalPane's live
-  // verdict, and the server-published `input_owner` field on the spine's
-  // tabs — the latter is what lets a hub or sidebar row gate an agent NO pane
-  // on this device is attached to. Read-only entries (info, the
-  // project submenu, editor/terminal/copy entries) and this device's own view
-  // preferences (the bar toggles) stay usable. The reason renders as an
-  // inline label rather than a tooltip: disabled menu items are
-  // pointer-events-none, so a hover tooltip could never fire, and touch has
-  // no hover at all.
-  const activeElsewhere = sessionActiveElsewhere(duxState, session)
-
-  return (
-    <DropdownMenuGroup>
-      {activeElsewhere ? (
-        <>
-          <DropdownMenuLabel className="max-w-60 whitespace-normal">
-            This agent is active on another device, so actions that modify it
-            are disabled. Take over in its terminal to use them here.
-          </DropdownMenuLabel>
-          <DropdownMenuSeparator />
-        </>
-      ) : null}
-      {/* The changed-file row and the shared input-menu items used to be here,
-          for the phone terminal screen's menu alone. They live in
-          `MobilePaneMenu` now, which is the ONE menu both of that screen's
-          surfaces open (the docked flap and the floating pill), and which
-          renders this body as its agent group.
-
-          THE PANE'S INPUT GROUP, from the same shared registry every other
-          surface reads, so the desktop half cannot drift from the phone's:
-          "Attach a file…", the way back to the virtual input, and the terminal
-          keys. Every one of them is the answer of whichever pane of this agent
-          is mounted and owns its input, which is what keeps an upload on that
-          pane's own gated connection and out of a side channel; the group
-          renders nothing at all when no such pane is there.
-
-          Hub rows only: the phone terminal screen's menu renders its own group
-          above this body rather than one in each of two places. */}
-      {context === "hub" ? (
-        <PaneInputGroup
-          ptyIds={[session.id, ...session.tabs.map((t) => t.id)]}
-        />
-      ) : null}
-      <AgentTabSubmenu
-        sessionId={session.id}
-        providers={providers}
-        defaultProvider={defaultProvider}
-        atTabCap={atTabCap}
-        addingTab={addingTab}
-        activeElsewhere={activeElsewhere}
-      />
-      <AgentProjectSubmenu projectId={projectId} projectName={projectName} />
-      <DropdownMenuSeparator />
-      <DropdownMenuItem
-        disabled={activeElsewhere}
-        onClick={() => openForceReconnect(session.id)}
-      >
-        <RotateCcw />
-        Force recreate agent…
-      </DropdownMenuItem>
-      <DropdownMenuItem
-        disabled={activeElsewhere}
-        onClick={() => toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)}
-      >
-        <RefreshCw />
-        {session.auto_reopen_enabled
-          ? "Disable agent auto-reopen"
-          : "Enable agent auto-reopen"}
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem
-        disabled={activeElsewhere}
-        onClick={() => openRename(session.id)}
-      >
-        <Pencil />
-        Rename agent…
-      </DropdownMenuItem>
-      <AgentIdentityAndSetupItems
-        sessionId={session.id}
-        branchGit={branchGit}
-        ghAvailable={ghAvailable}
-        prOverridden={prOverridden}
-        prAssociated={prAssociated}
-        prSuppressed={prSuppressed}
-        activeElsewhere={activeElsewhere}
-      />
-      <DropdownMenuSeparator />
-      {/* Two editor entries, named to distinguish their surfaces. The in-app
-          overlay cannot open on a phone (EditorOverlay is desktop-only), so
-          its item is CSS-hidden there rather than left as a dead no-op; the
-          new-tab item, which opens the standalone surface, is the only
-          editor entry on phones. Final copy was left to PR review. */}
-      <DropdownMenuItem
-        className="max-md:hidden"
-        onClick={() => openEditor(agentRoot(session.id))}
-      >
-        <FileCode2 />
-        Open editor here
-      </DropdownMenuItem>
-      {/* A real anchor, matching the editor header's affordance: middle-click
-          and ctrl/cmd-click keep their native new-tab semantics, which a
-          window.open handler would flatten. */}
-      <DropdownMenuItem
-        render={
-          <a
-            href={standaloneEditorHash(agentRoot(session.id))}
-            target="_blank"
-            rel="noopener"
-          />
-        }
-      >
-        <ExternalLink />
-        Open editor in new tab
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => createTerminal(session.id)}>
-        <SquareTerminal />
-        New terminal
-      </DropdownMenuItem>
-      <DropdownMenuItem
-        onClick={() => clipboardWorktree(workspaceDirectory(session.workspace))}
-      >
-        <ClipboardCopy />
-        Copy local path
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      {/* The one deliberate red-tinted destructive menu item (dim at rest, bright
-          on hover), per the CLAUDE.md web-UI menu tenet; the confirm dialog gates it. */}
-      <DropdownMenuItem
-        variant="destructive"
-        className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
-        disabled={activeElsewhere}
-        onClick={() => openDelete(session.id)}
-      >
-        <Trash2 />
-        Delete agent…
-      </DropdownMenuItem>
-    </DropdownMenuGroup>
-  )
-}
-
-function AgentTabSubmenu({
-  sessionId,
-  providers,
-  defaultProvider,
-  atTabCap,
-  addingTab,
-  activeElsewhere,
-}: {
-  sessionId: string
-  providers: string[]
-  defaultProvider: string
-  atTabCap: boolean
-  addingTab: boolean
-  activeElsewhere: boolean
-}) {
-  return (
-    <DropdownMenuSub>
-      <DropdownMenuSubTrigger
-        disabled={atTabCap || addingTab || activeElsewhere}
-      >
-        <Plus />
-        <span className="min-w-0 truncate">New agent tab…</span>
-      </DropdownMenuSubTrigger>
-      <DropdownMenuSubContent>
-        {providers.map((provider) => {
-          const isDefault = provider === defaultProvider
-          return (
-            <DropdownMenuItem
-              key={provider}
-              onClick={() => addTab(sessionId, provider)}
-            >
-              {isDefault ? <Check /> : <Bot />}
-              {provider}
-              {isDefault ? (
-                <span className="ml-auto text-xs text-muted-foreground">
-                  default
-                </span>
-              ) : null}
-            </DropdownMenuItem>
-          )
-        })}
-      </DropdownMenuSubContent>
-    </DropdownMenuSub>
-  )
-}
-
-function AgentProjectSubmenu({
-  projectId,
-  projectName,
-}: {
-  projectId: string | null
-  projectName?: string
-}) {
-  if (projectId === null) return null
-  return (
-    <DropdownMenuSub>
-      <DropdownMenuSubTrigger>
-        <Folder />
-        <span className="min-w-0 truncate">
-          {projectName ? <>Project &quot;{projectName}&quot;…</> : <>Project…</>}
-        </span>
-      </DropdownMenuSubTrigger>
-      <DropdownMenuSubContent>
-        <ProjectMenuItems id={projectId} />
-      </DropdownMenuSubContent>
-    </DropdownMenuSub>
-  )
-}
-
-function AgentIdentityAndSetupItems({
-  sessionId,
-  branchGit,
-  ghAvailable,
-  prOverridden,
-  prAssociated,
-  prSuppressed,
-  activeElsewhere,
-}: {
-  sessionId: string
-  branchGit: boolean
-  ghAvailable: boolean
-  prOverridden: boolean
-  prAssociated: boolean
-  prSuppressed: boolean
-  activeElsewhere: boolean
-}) {
-  return (
-    <>
-      {branchGit ? (
-        <DropdownMenuItem onClick={() => openForkAgent(sessionId)}>
-          <GitFork />
-          Fork agent…
-        </DropdownMenuItem>
-      ) : null}
-      <DropdownMenuItem
-        disabled={activeElsewhere}
-        onClick={() => openChangeProvider(sessionId)}
-      >
-        <Cpu />
-        Change agent provider…
-      </DropdownMenuItem>
-      {branchGit && ghAvailable ? (
-        <DropdownMenuItem
-          disabled={activeElsewhere}
-          onClick={() => openAttachPullRequest(sessionId)}
-        >
-          <GitPullRequest />
-          {prOverridden
-            ? "Change attached pull request…"
-            : "Attach pull request…"}
-        </DropdownMenuItem>
-      ) : null}
-      {branchGit && prAssociated ? (
-        <DropdownMenuItem
-          disabled={activeElsewhere}
-          onClick={() => detachPullRequest(sessionId)}
-        >
-          <Unlink />
-          Detach pull request
-        </DropdownMenuItem>
-      ) : null}
-      {branchGit && prSuppressed ? (
-        <DropdownMenuItem
-          disabled={activeElsewhere}
-          onClick={() => resumePullRequestAutodetection(sessionId)}
-        >
-          <Radar />
-          Resume PR autodetection
-        </DropdownMenuItem>
-      ) : null}
-      <DropdownMenuItem onClick={() => openAgentInfo(sessionId)}>
-        <Info />
-        Agent info…
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      {branchGit ? (
-        <>
-          <DropdownMenuItem onClick={() => openAgentStartupCommand(sessionId)}>
-            <SquareChevronRight />
-            Configure startup command…
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => openAgentEnv(sessionId)}>
-            <Variable />
-            Configure environment variables…
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => rerunStartupCommand(sessionId)}>
-            <Play />
-            Rerun startup command
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => openStartupLogs(sessionId)}>
-            <ScrollText />
-            Startup command logs…
-          </DropdownMenuItem>
-        </>
-      ) : null}
-    </>
-  )
 }
 
 // Display-only project label on a row's second line. It shows which project the
@@ -859,8 +462,14 @@ function AgentFlatRow({
               <Ellipsis />
             </DropdownMenuTrigger>
           </div>
+          {/* THE PANE'S ONE MENU, at the row's anchor. The same body the
+              desktop pane header's `⋯` and the phone's flap open, so an agent's
+              menu is one menu a user learns once, in whichever place they
+              reached it from. Its INPUT group is still one home at a time: what
+              the group holds is the pane's own published answer, not something
+              this anchor decides. */}
           <DropdownMenuContent side="right" align="start">
-            <AgentActionsMenu session={session} />
+            <AgentPaneMenuBody session={session} />
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

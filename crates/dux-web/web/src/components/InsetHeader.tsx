@@ -2,6 +2,7 @@ import { PanelRightOpen } from "lucide-react"
 
 import { AppMenu } from "@/components/AppMenu"
 import { MacroPopover } from "@/components/MacroPopover"
+import { PaneMenu } from "@/components/PaneMenu"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { TheaterToggle } from "@/components/TheaterToggle"
@@ -284,6 +285,19 @@ export function InsetHeader() {
           the eye should land on first. Same `h-8` token as its neighbours. */}
       <TheaterToggle />
       {selectedTarget ? <MacroPopover target={selectedTarget} /> : null}
+      {/* THE PANE'S TOP MENU on a computer, the twin of the phone flap's `⋯`.
+          It opens the WHOLE agent menu, the same body the sidebar row's `⋯`
+          opens, rather than a header-sized subset: a pane in front of you and
+          a row in a list are two anchors on one agent, and two menus about the
+          same agent are two things that can disagree. It sits with the pane's
+          own controls, on the pane's right edge, and not in the cog beside it,
+          because the cog's menu is the app's and this one is about one pane.
+
+          Only for an agent: a focused terminal's own menu arrives with the
+          terminal treatment. */}
+      {session && selectedTarget?.kind === "agent" ? (
+        <PaneMenu session={session} appearance="header" />
+      ) : null}
 
       {/* The spacer IS the control cluster, rather than an empty box in front of
           it, and that is the whole trick. An empty spacer followed by the
@@ -309,6 +323,7 @@ export function InsetHeader() {
           the top of the header (absolutely positioned, full-box percentage)
           owns that job; see its comment. */}
       <div
+        data-testid="changes-pane-spacer"
         className="flex min-w-fit shrink-0 items-center justify-end gap-2"
         style={{ width: `${spacer}%` }}
       >

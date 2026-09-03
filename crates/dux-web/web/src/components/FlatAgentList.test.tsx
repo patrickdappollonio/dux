@@ -944,6 +944,17 @@ describe("FlatAgentList input group in the row menus", () => {
     group.resetPaneInputGroups()
   })
 
+  // ONE COMPONENT, TWO ANCHORS. The row's `⋯` and the desktop pane header's
+  // open the same body, so the Settings drill it ends with is the proof the
+  // row is rendering the merged menu rather than a copy of the agent's actions
+  // that would drift from it.
+  it("opens the same merged pane menu the pane header opens", async () => {
+    await openAgentMenu()
+    const items = screen.getAllByRole("menuitem").map((el) => el.textContent)
+    expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
+    expect(items.some((t) => t?.includes("Settings"))).toBe(true)
+  })
+
   it("carries the group, labelled, once the agent's pane publishes one", async () => {
     const mod = await import("@/lib/paneInputGroup")
     // The first displayed agent is Alpha (name sort), and its session-slot

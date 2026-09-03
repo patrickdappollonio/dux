@@ -212,6 +212,21 @@ describe("the header trigger", () => {
     )
   })
 
+  it("says the word on a computer and keeps the glyph alone on a phone", () => {
+    // A mode with no other way in cannot be a lone glyph in a row of glyphs.
+    // The word is "Theater", the name the exit, the menus and the docs use.
+    // The label changes the WIDTH only: both size tokens are 32px tall.
+    mockState = makeState(false)
+    const { rerender } = render(<TheaterToggle />)
+    const desktop = screen.getByRole("button", { name: "Theater mode" })
+    expect(desktop.textContent).toBe("Theater")
+    expect(desktop.className).toContain("h-8")
+
+    rerender(<TheaterToggle size="mobile" />)
+    const phone = screen.getByRole("button", { name: "Theater mode" })
+    expect(phone.textContent).toBe("")
+  })
+
   it("renders nothing with no pane focused, since there is nothing to fill", () => {
     mockState = { ...makeState(false), selectedTarget: null } as DuxState
     const { container } = render(<TheaterToggle />)

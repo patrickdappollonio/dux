@@ -5,7 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { AppMenuBody } from "@/components/AppMenu"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { MobileActionCluster } from "@/components/MobileActionCluster"
-import { MobilePaneMenu } from "@/components/MobilePaneMenu"
+import { PaneMenu } from "@/components/PaneMenu"
 import { PaneInputGroup } from "@/components/PaneInputGroup"
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
@@ -231,7 +231,7 @@ export function TheaterPill({
           // the desktop pill does.
           ellipsis={
             session ? (
-              <MobilePaneMenu session={session} side="top" />
+              <PaneMenu session={session} side="top" />
             ) : (
               <TheaterAppMenu paneId={paneId} />
             )

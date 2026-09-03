@@ -2,7 +2,7 @@ import type * as React from "react"
 import { useLayoutEffect, useRef, useState } from "react"
 
 import { MobileActionCluster } from "@/components/MobileActionCluster"
-import { MobilePaneMenu } from "@/components/MobilePaneMenu"
+import { PaneMenu } from "@/components/PaneMenu"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import { buildFlapShape } from "@/lib/flapShape"
 import { FLAP_FILL_VAR, registerFlapElement } from "@/lib/theaterFlight"
@@ -123,7 +123,7 @@ export function MobileActionFlap({
         // The one pane menu, which the floating pill opens too: the cluster
         // flies across the screen as one object, so its `⋯` cannot mean
         // something else once it lands.
-        ellipsis={<MobilePaneMenu session={session} side="bottom" />}
+        ellipsis={<PaneMenu session={session} side="bottom" />}
       />
     </div>
   )

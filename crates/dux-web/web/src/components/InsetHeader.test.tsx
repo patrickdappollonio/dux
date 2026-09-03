@@ -117,15 +117,20 @@ describe("InsetHeader app menu", () => {
     const settings = screen.getByRole("button", { name: /^settings$/i })
     const reopen = screen.getByRole("button", { name: /show changes pane/i })
     const macros = screen.getByRole("button", { name: /run a macro/i })
-    expect(settings.className).toContain("h-8")
-    expect(macros.className).toContain("h-8")
-    // The reopen control carries the changed-file count here (an agent is
-    // selected), so it is a text-bearing control on the same height token
-    // rather than a square.
-    expect(reopen.className).toContain("h-8")
+    // The theater button is labelled too ("Theater" beside its glyph), so it
+    // is the second control whose label may only change its width.
+    const theater = screen.getByRole("button", { name: /theater mode/i })
+    const paneMenu = screen.getByRole("button", { name: /session actions/i })
+    // The token, not a measurement: jsdom computes no layout, and the two
+    // tokens the cluster uses (`default` and `icon`) both resolve to 32px.
+    for (const el of [settings, reopen, macros, theater]) {
+      expect(el.className).toContain("h-8")
+    }
+    expect(paneMenu.className).toContain("size-8")
     // …and no control in the row forces its own height on top of the token.
-    for (const el of [settings, reopen, macros]) {
+    for (const el of [settings, reopen, macros, theater, paneMenu]) {
       expect(el.className).not.toMatch(/\bh-(9|10|11)\b/)
+      expect(el.className).not.toMatch(/\bsize-(9|10|11)\b/)
     }
   })
 })
@@ -330,19 +335,28 @@ describe("InsetHeader chip tooltips", () => {
 })
 
 describe("InsetHeader macros and the pane-edge spacer", () => {
-  it("puts the macro trigger before a spacer sized to the Changes panel", () => {
+  it("puts the pane's own controls before a spacer sized to the Changes panel", () => {
     mockState = { ...stateFor("main", "main"), changesPanePercent: 31 }
     render(<InsetHeader />)
-    const macros = screen.getByRole("button", { name: /run a macro/i })
-    const spacer = macros.nextElementSibling as HTMLElement
+    const spacer = screen.getByTestId("changes-pane-spacer")
     expect(spacer.style.width).toBe("31%")
+    // Theater, Macros and the pane menu are the PANE's controls: they sit
+    // ahead of the spacer, so they land on the terminal pane's right edge
+    // rather than the window's.
+    for (const name of [/theater/i, /run a macro/i, /session actions/i]) {
+      const control = screen.getByRole("button", { name })
+      expect(spacer.contains(control)).toBe(false)
+      expect(
+        control.compareDocumentPosition(spacer) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy()
+    }
   })
 
   it("tracks a dragged divider, because the width is the live percentage", () => {
     mockState = { ...stateFor("main", "main"), changesPanePercent: 44.5 }
     render(<InsetHeader />)
-    const macros = screen.getByRole("button", { name: /run a macro/i })
-    expect((macros.nextElementSibling as HTMLElement).style.width).toBe("44.5%")
+    expect(screen.getByTestId("changes-pane-spacer").style.width).toBe("44.5%")
   })
 
   it("collapses the spacer to zero when the Changes pane is hidden", () => {
@@ -353,8 +367,7 @@ describe("InsetHeader macros and the pane-edge spacer", () => {
       bootstrap: { show_changes_pane: false },
     } as unknown as DuxState
     render(<InsetHeader />)
-    const macros = screen.getByRole("button", { name: /run a macro/i })
-    expect((macros.nextElementSibling as HTMLElement).style.width).toBe("0%")
+    expect(screen.getByTestId("changes-pane-spacer").style.width).toBe("0%")
   })
 
   it("puts the controls INSIDE the spacer, right-aligned, with a floor", () => {
@@ -366,8 +379,7 @@ describe("InsetHeader macros and the pane-edge spacer", () => {
     // hidden pane (0%) and a pane dragged narrower than the buttons.
     mockState = { ...stateFor("main", "main"), changesPanePercent: 26 }
     render(<InsetHeader />)
-    const macros = screen.getByRole("button", { name: /run a macro/i })
-    const cluster = macros.nextElementSibling as HTMLElement
+    const cluster = screen.getByTestId("changes-pane-spacer")
     expect(cluster.contains(screen.getByRole("button", { name: /^settings$/i })))
       .toBe(true)
     expect(cluster.className).toContain("justify-end")

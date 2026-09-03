@@ -58,7 +58,7 @@ function installStubs() {
   )
 }
 installStubs()
-const { AgentActionsMenu } = await import("./FlatAgentList")
+const { AgentActionsMenu } = await import("./AgentActionsMenu")
 const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } = await import(
   "@/components/ui/dropdown-menu"
 )
@@ -108,15 +108,12 @@ function seed(session: SessionView, ghAvailable: boolean) {
   } as unknown as DuxState
 }
 
-function openMenu(
-  session: SessionView,
-  context: "hub" | "terminal" = "hub",
-) {
+function openMenu(session: SessionView) {
   render(
     <DropdownMenu>
       <DropdownMenuTrigger>open</DropdownMenuTrigger>
       <DropdownMenuContent>
-        <AgentActionsMenu session={session} context={context} />
+        <AgentActionsMenu session={session} />
       </DropdownMenuContent>
     </DropdownMenu>,
   )
@@ -275,7 +272,7 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
   })
 })
 
-describe("AgentActionsMenu context and tab availability", () => {
+describe("AgentActionsMenu contents and tab availability", () => {
   const desktopWidth = window.innerWidth
   let media: MatchMediaStub | null = null
 
@@ -288,11 +285,11 @@ describe("AgentActionsMenu context and tab availability", () => {
     })
   })
 
-  it("carries no view toggles or changed-file row in either context", async () => {
-    // Both moved to `MobilePaneMenu`, which renders this body as its agent
-    // group and then adds them once, below it. This menu is the AGENT's
-    // actions wherever it is opened from, and a phone row menu carrying the
-    // phone terminal screen's chrome toggles was how it stopped being that.
+  it("carries no view toggles, changed-file row or input group", async () => {
+    // All of them belong to `PaneMenu`, which renders this body as its agent
+    // group and adds them once, around it. This menu is the AGENT's actions
+    // wherever it is opened from, and a row menu carrying the terminal
+    // screen's chrome toggles was how it stopped being that.
     const session = makeSession({ id: "s1" })
     seed(session, true)
     Object.defineProperty(window, "innerWidth", {
@@ -301,13 +298,12 @@ describe("AgentActionsMenu context and tab availability", () => {
     })
     media = stubCoarsePointer()
 
-    await openMenu(session, "terminal")
+    await openMenu(session)
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
     expect(screen.queryByText(/^Changes/)).toBeNull()
-
-    cleanup()
-    await openMenu(session, "hub")
-    expect(screen.queryByText("Hide terminal keys")).toBeNull()
+    // The INPUT group's label, which the wrapper prints and this body must
+    // not: one group per menu, and this is not the menu.
+    expect(screen.queryByText("Input")).toBeNull()
   })
 
   it("keeps the new-tab submenu disabled at the configured tab cap", async () => {
