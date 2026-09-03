@@ -111,9 +111,10 @@ A worktree that already has an agent names that agent and offers no delete. Dele
 instead.
 
 > [!TIP]
-> That checkbox is the manual override for a branch dux will not delete on its own, since
-> deleting an agent only removes branches dux created. It works for as long as the worktree
-> is still listed here; once it is gone, `git branch -D` is the way.
+> This is where you remove the branch of a worktree that has no agent. A worktree that does
+> have one is not listed as removable, and its agent's own delete dialog is the place: it
+> offers the same branch box. Once a worktree is gone neither surface can reach its branch,
+> and `git branch -D` is the way.
 
 The terminal UI has the same manager, as the `manage-worktrees` palette command, and both
 drive the same rules.
@@ -205,13 +206,17 @@ at once. Every stop confirms first.
 dux tints red, and it always confirms first. The confirmation includes an unchecked "also
 delete the git worktree" box, so by default your worktree survives a delete.
 
-What ticking it does to the branch depends on where that branch came from:
+Tick it and a second box appears, named after the branch. It only appears there because git
+will not delete a branch that is still checked out in a worktree, so with the worktree
+staying there is nothing to offer. Where it starts depends on where the branch came from:
 
-- For an agent whose branch dux created, both go: the branch the agent is on now, and the one
-  it was created on if it has since moved.
-- For an agent that attached to a branch that already existed, or that was adopted along with
-  an existing worktree, only the worktree goes. The confirmation says so before you tick
-  anything.
+- **Ticked**, for a branch dux created for the agent. That is the old behavior: the branch
+  goes with the worktree, along with the one the agent was created on if it has since moved.
+  Untick it to keep the branch.
+- **Unticked**, for a branch that already existed, or that was adopted along with an existing
+  worktree. Underneath it dux says which of the two it is, and adds "It has N commits not
+  pushed anywhere" when there are any. Tick it and the branch goes anyway; this is the only
+  way to remove such a branch from dux once its worktree is gone.
 
 If git refuses to delete a branch dux did try to remove, dux says which branch is still there
 and why rather than reporting a deletion that did not happen.

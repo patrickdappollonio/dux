@@ -80,8 +80,10 @@ to that branch instead, which is what you want when continuing work that already
 
 > [!IMPORTANT]
 > Attaching matters at the other end of the agent's life. dux remembers that the branch
-> existed first, so deleting the agent never deletes it. The worktree goes if you ask for
-> it; the branch stays, because it was yours before the agent was.
+> existed first, so the delete dialog's "also delete the branch" box starts **unticked**
+> for it, with a line saying the branch predates the agent and how many of its commits
+> are pushed nowhere. Tick it and the branch goes anyway; leave it and the worktree goes
+> alone.
 
 ### Pulling before create
 
@@ -235,11 +237,11 @@ what the fetch targets: dux fetches the PR's head ref into that local branch, th
 creates a worktree on it.
 
 If the branch already exists locally, from a previous fetch say, dux attaches to it
-without fetching again, and deleting the agent later leaves that branch alone. Otherwise
-the local branch is dux's own, whether dux fetched the pull request head or checked out a
-copy your project had already fetched from the remote, and it is deleted with the agent
-unless you had the branch first. Nothing dux does to it reaches the remote: the branch on
-GitHub, and the pull request itself, are untouched either way.
+without fetching again, and the delete dialog later offers that branch unticked, the way
+it does for any branch you had first. Otherwise the local branch is dux's own, whether
+dux fetched the pull request head or checked out a copy your project had already fetched
+from the remote, and the box is ticked by default. Nothing dux does to it reaches the
+remote: the branch on GitHub, and the pull request itself, are untouched either way.
 
 ### How PR status stays fresh
 
@@ -279,8 +281,8 @@ for that project's repository, in two groups:
 
 - **Managed worktrees**, already under dux's `worktrees/` directory. One with no agent
   yet gets a new session attached without touching the branch or files. An adopted
-  worktree's branch came with it, so deleting that agent removes the worktree and keeps
-  the branch.
+  worktree's branch came with it, so the delete dialog offers that branch unticked, with
+  a line saying it came with the worktree.
 - **External worktrees** (terminal UI only), which exist in the repository but live
   outside dux's managed directory, such as one you created with `git worktree add`. dux
   forks these: a new managed worktree branched from the external worktree's current
@@ -314,10 +316,10 @@ below them, each row naming its branch and saying whether there is uncommitted w
 Worktrees a live agent is holding are listed but unselectable: removing one from under a
 running session leaves it broken. Delete the agent instead.
 
-Either manager is the manual override for deleting a branch dux is keeping, for as long as
-its worktree is still there. Deleting an agent only ever deletes branches dux created.
-Once the worktree is gone the manager can no longer reach the branch, and `git branch -D`
-is the way.
+Either manager is how you remove a branch belonging to a worktree that has no agent. For a
+worktree that does have one, the agent's own delete dialog is the place: it names the
+branch, says whether it predates the agent, and offers to remove it there and then. Once
+the worktree is gone neither surface can reach the branch, and `git branch -D` is the way.
 
 ## Forking an existing agent
 
