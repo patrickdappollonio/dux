@@ -1,6 +1,13 @@
 # Isolated dux preview stack. Brought up by ./up.sh, which builds the dux binary
 # on the host and exports DUX_BIN before invoking compose.
 #
+# Every variable here has a default, deliberately: compose interpolates the whole
+# file whatever service or profile you asked for, so a required-variable form on
+# the capture service would make a bare `./up.sh` and even a bare
+# `docker compose down` fail over a screenshot journey neither of them runs. The
+# defaults are the same paths the scripts pass, so running compose by hand does
+# the same thing the scripts do.
+#
 # Isolation: the long-running preview shares only the read-only binary. Its
 # config, sessions, and repos live in Docker volumes. The opt-in capture profile
 # additionally mounts one journey read-only and its output directory. Neither
@@ -29,7 +36,7 @@ services:
     volumes:
       # Host-built binary, read-only. Rebuild on the host + `docker compose
       # restart dux` to pick up new code (a new inode needs a container restart).
-      - ${DUX_BIN:?set DUX_BIN to the built dux binary (up.sh does this)}:/usr/local/bin/dux:ro
+      - ${DUX_BIN:-../../target/release/dux}:/usr/local/bin/dux:ro
       - dux-data:/data
       - dux-repos:/repos
     # A PTY-heavy app; the defaults are enough (Docker provides /dev/ptmx), but
@@ -53,9 +60,12 @@ services:
       - LANG=C.UTF-8
       - TZ=UTC
     volumes:
-      - ${DUX_BIN:?set DUX_BIN to the built dux binary (tui-shot.sh does this)}:/usr/local/bin/dux:ro
-      - ${DUX_TUI_OUTPUT_DIR:?set DUX_TUI_OUTPUT_DIR (tui-shot.sh does this)}:/output
-      - ${DUX_TUI_JOURNEY:?set DUX_TUI_JOURNEY (tui-shot.sh does this)}:/journey.js:ro
+      # tui-shot.sh exports all three; the defaults are its own defaults, so
+      # `docker compose --profile capture run --rm tui-shot` by hand captures
+      # the example journey into ./shots.
+      - ${DUX_BIN:-../../target/release/dux}:/usr/local/bin/dux:ro
+      - ${DUX_TUI_OUTPUT_DIR:-./shots}:/output
+      - ${DUX_TUI_JOURNEY:-./tui-journey.example.js}:/journey.js:ro
     tmpfs:
       - /capture
 

@@ -18,6 +18,13 @@ import {
 import { agentRoot, rootKey } from "@/lib/editorRoot"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 
+// These cases render the whole editor shell and then wait on `waitFor` polls, so
+// a busy machine can push a perfectly healthy run past the default per-test
+// window and fail on the clock rather than on the assertion. The larger window
+// is scoped to this file: it buys nothing anywhere else, and a global raise
+// would hide a genuinely hung test in every other file.
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 })
+
 // What this file exists for, and it is one property.
 //
 // `website/docs/web-editor.md` promises that a save refused for being too large

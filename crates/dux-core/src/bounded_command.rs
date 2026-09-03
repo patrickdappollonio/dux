@@ -15,9 +15,14 @@
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-/// How long to wait for the output-reader threads after the child is gone before
-/// abandoning them. They finish on their own once the pipe closes; the bound is
-/// there so a grandchild holding the pipe open can never freeze the caller.
+/// The FLOOR on how long to wait for the output-reader threads once the child is
+/// gone before abandoning them. They finish on their own the moment the pipe
+/// closes; the bound is there so a grandchild holding the pipe open can never
+/// freeze the caller. It is a floor rather than the whole allowance because a
+/// reader that has already read everything still has to be scheduled to hand its
+/// buffer over, and on a loaded machine that hand-off can lose a race with a
+/// short fixed window, which would silently return empty output for a command
+/// that in fact succeeded. See [`run_command_with_timeout`] for the ceiling.
 pub const DEFAULT_READER_DRAIN: Duration = Duration::from_secs(2);
 
 /// Outcome of a bounded invocation. `Failed` carries the failure text (a spawn or
@@ -37,6 +42,13 @@ pub enum CommandOutcome {
 /// cap. On every non-[`CommandOutcome::Completed`] exit the child is killed and
 /// reaped, the reader threads are drained with a bounded wait and then abandoned
 /// (they self-terminate at EOF), so the caller can never block.
+///
+/// A reader is waited on until the command's own wall-clock cap runs out, or for
+/// `reader_drain` when less than that is left, so the whole call still returns
+/// within roughly `timeout + reader_drain` however wedged the pipe is. Spending
+/// the cap's leftover on the readers is what keeps a fast command's output from
+/// being dropped on a loaded machine, where handing the buffer over is a
+/// scheduling race rather than a wedge.
 ///
 /// `label` names the program in failure text (e.g. `gh`, `tailscale`); it is only
 /// used for messages.
@@ -85,10 +97,18 @@ pub fn run_command_with_timeout(
         }
     }
 
-    let drain =
-        |rx: &std::sync::mpsc::Receiver<Vec<u8>>| rx.recv_timeout(reader_drain).unwrap_or_default();
-
     let start = Instant::now();
+    let deadline = start + timeout;
+    // Whatever is left of the command's own cap, and never less than the floor.
+    // Both drains share the one deadline, so two wedged pipes cost the floor
+    // once each on top of the cap rather than a multiple of it.
+    let drain = |rx: &std::sync::mpsc::Receiver<Vec<u8>>| {
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .max(reader_drain);
+        rx.recv_timeout(wait).unwrap_or_default()
+    };
+
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -162,6 +182,32 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "the cap must return promptly, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_pipe_open_cannot_outlast_the_cap_plus_the_floor() {
+        // The child exits at once, so the wait loop is done immediately, but a
+        // background grandchild keeps stdout open for far longer than either
+        // bound. Spending the cap's leftover on the readers must not turn into
+        // waiting for the pipe: the call returns with what it has.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf hello; sleep 30 &"]);
+        let start = Instant::now();
+        let outcome = run_command_with_timeout(
+            cmd,
+            Duration::from_millis(300),
+            Duration::from_millis(100),
+            "sh",
+        );
+        assert!(
+            matches!(outcome, CommandOutcome::Completed(_)),
+            "the child exited on its own: {outcome:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "a held-open pipe must not outlast the cap plus the floor, took {:?}",
             start.elapsed()
         );
     }

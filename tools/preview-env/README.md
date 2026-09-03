@@ -133,6 +133,9 @@ docker compose down            # stop, keep volumes
 docker compose down -v         # stop + wipe all preview state
 ```
 
+These need no environment set: every variable in `compose.yml` defaults to what
+the scripts pass, so plain compose commands work from this directory.
+
 ## Login-walled providers
 
 `claude` and `codex` run but require login on first spawn; that login screen

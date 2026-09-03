@@ -7,6 +7,13 @@ import type { Bootstrap } from "./bootstrapApi"
 // a focused extra tab back to the session-slot tab and DELETEs; retargetTab validates + PATCHes.
 // The tabsApi wire behaviour itself is in tabsApi.test.ts.
 
+// These cases await the store's real async lifecycle against a faked network, so
+// a busy machine can push a perfectly healthy run past the default per-test
+// window and fail on the clock rather than on the assertion. The larger window
+// is scoped to this file: it buys nothing anywhere else, and a global raise
+// would hide a genuinely hung test in every other file.
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 })
+
 function makeBootstrap(): Bootstrap {
   return {
     available_providers: ["claude", "codex", "opencode"],

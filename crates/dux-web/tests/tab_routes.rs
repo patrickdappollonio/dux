@@ -1,6 +1,11 @@
-//! End-to-end tests for the agent-tab REST routes: create/close/retarget under
-//! `/api/v1/sessions/:id/tabs`, the Main-tab detach special-case, Support-tab
-//! ownership (cross-session 404), and provider validation.
+//! End-to-end tests for the agent-tab routes under
+//! `/api/v1/sessions/:id/tabs`: creating, closing and retargeting a tab,
+//! provider validation, the slot tab's promotion when it is closed and the
+//! refusal to close a session's only tab, the focused-tab memory, tab ownership
+//! (a tab addressed under another session is a 404), and the nested per-tab PTY
+//! socket's ownership check and per-agent connection cap. A tab whose launch
+//! fails asynchronously is covered here too, along with the explicit start that
+//! retries it.
 
 use std::net::SocketAddr;
 
@@ -116,7 +121,7 @@ async fn boot_with_tab_per_agent(tab_per_agent: u32) -> (SocketAddr, tempfile::T
 
 /// Like `boot()`, but also configures a `"broken"` provider whose command is a
 /// nonexistent binary, so a tab created against it fails its async launch
-/// instead of coming up live. Used by the G-T2 async-launch-failure test.
+/// instead of coming up live.
 async fn boot_with_broken_provider() -> (SocketAddr, tempfile::TempDir) {
     boot_with_broken_provider_and_claude("cat").await
 }
@@ -768,9 +773,9 @@ async fn put_focused_tab_with_bad_session_id_is_unknown_session() {
 
 // ── WebSocket route: ownership + per-agent socket cap ────────────────────────
 
-/// A Support-tab PTY socket under the WRONG session id is rejected before the
-/// upgrade, while the owning session connects — the WS counterpart to the REST
-/// `cross_session_tab_delete_is_404` check.
+/// An extra tab's PTY socket under the WRONG session id is rejected before the
+/// upgrade, while the owning session connects: the socket counterpart to the
+/// REST `cross_session_tab_delete_is_404` check.
 #[tokio::test]
 async fn nested_tab_pty_socket_enforces_session_ownership() {
     let (addr, _tmp) = boot().await;
@@ -936,10 +941,10 @@ async fn deleting_a_tab_closes_its_attached_socket_and_frees_the_sub_quota() {
     );
 }
 
-// G-T2: every existing async-tab-launch test used `cat`, which always comes up
-// live, so the actual ASYNC launch-failure path (as opposed to the synchronous
-// 400 for an unconfigured provider) was never exercised. Use a provider whose
-// command is a nonexistent binary: the create call still 201s (the row is
+// The ASYNC launch-failure path, as opposed to the synchronous 400 for an
+// unconfigured provider: a provider whose command is a nonexistent binary
+// cannot come up live the way `cat` always does. The create call still 201s
+// (the row is
 // minted synchronously; only the launch is async), but the tab must never
 // reach `has_live_process`, and the failure must be surfaced by removing the
 // dead row rather than leaving a tab that looks alive but never is.

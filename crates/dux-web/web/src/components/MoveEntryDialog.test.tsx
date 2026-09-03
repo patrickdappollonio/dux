@@ -5,6 +5,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { MoveEntryDialog } from "./MoveEntryDialog"
 import { agentRoot } from "@/lib/editorRoot"
 
+// These cases drive the real dialog against a faked network and wait on
+// `waitFor` polls, so a busy machine can push a perfectly healthy run past the
+// default per-test window and fail on the clock rather than on the assertion.
+// The larger window is scoped to this file: it buys nothing anywhere else, and
+// a global raise would hide a genuinely hung test in every other file.
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 })
+
 // A tiny worktree: the root holds `lib/`, `src/`, `src-old/` and a README;
 // `lib/` holds `util/`; `src/` is empty. Only the network is faked, so the
 // real component drives the real fileApi against it.

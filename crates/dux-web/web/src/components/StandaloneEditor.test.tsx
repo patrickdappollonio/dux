@@ -9,6 +9,13 @@ import {
 } from "@/lib/editorLayout"
 import { agentRoot, rootKey } from "@/lib/editorRoot"
 
+// These cases render the whole editor shell and then wait on `waitFor` polls, so
+// a busy machine can push a perfectly healthy run past the default per-test
+// window and fail on the clock rather than on the assertion. The larger window
+// is scoped to this file: it buys nothing anywhere else, and a global raise
+// would hide a genuinely hung test in every other file.
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 })
+
 // The standalone editor surface: a whole browser tab that is nothing but the
 // editor (plan (b)). What is pinned here: the shell composes EditorBody (the
 // code editor mounts), names the agent, deliberately offers NO in-app exit
