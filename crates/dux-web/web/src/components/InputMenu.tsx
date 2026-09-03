@@ -20,8 +20,9 @@ import { cn } from "@/lib/utils"
 // always within reach; asking to type directly in the terminal now takes the
 // whole bottom bar, and a row kept alive purely to hold an `⋯` is exactly the
 // chrome that choice is asking to be rid of. What must always be reachable
-// (attaching a file, the way back to the virtual input) moved up into the top
-// menu every surface already has, through `PaneInputGroup`.
+// (attaching a file, the way out of theater, the way back to the virtual input)
+// moved up into the top menu every surface already has, through
+// `PaneInputGroup`, and this menu has no gates for any of them any more.
 //
 // It renders at the leading edge of the bottom-most input row that exists: the
 // compose row's leading slot when the message box is up, the accessory bar's
@@ -34,12 +35,10 @@ import { cn } from "@/lib/utils"
 // and this component asks again for the callers that do not.
 export function InputMenu({
   gates,
-  onAttach,
   composeSurface,
   className,
 }: {
   gates: InputMenuGates
-  onAttach?: () => void
   composeSurface?: boolean
   className?: string
 }) {
@@ -66,11 +65,7 @@ export function InputMenu({
           window, where a downward popup has nowhere to go. On a phone the
           primitive renders every menu as a bottom sheet and ignores this. */}
       <DropdownMenuContent side="top" align="start">
-        <InputMenuItems
-          gates={gates}
-          onAttach={onAttach}
-          composeSurface={composeSurface}
-        />
+        <InputMenuItems gates={gates} composeSurface={composeSurface} />
       </DropdownMenuContent>
     </DropdownMenu>
   )

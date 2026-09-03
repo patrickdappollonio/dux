@@ -64,11 +64,10 @@ export function PaneInputGroup({
       <DropdownMenuGroup>
         <DropdownMenuLabel>{PANE_INPUT_GROUP_LABEL}</DropdownMenuLabel>
         <InputMenuItems
+          attach={attach}
           gates={{
-            attach,
             surfaceSwitch: gates?.surfaceSwitch ?? false,
             keysToggle: gates?.keysToggle ?? false,
-            theaterExit: false,
           }}
           // The top menu only ever offers the way BACK to the virtual input:
           // the other direction is the bottom `⋯`, which exists exactly while

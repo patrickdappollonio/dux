@@ -610,15 +610,8 @@ function TheaterAppMenu({ paneId }: { paneId: string }) {
         <PaneInputGroup ptyIds={[paneId]} />
         <AppMenuBody />
         <DropdownMenuSeparator />
-        <InputMenuItems
-          gates={{
-            attach: false,
-            surfaceSwitch: false,
-            keysToggle: false,
-            // The guaranteed way out, whatever the pane published.
-            theaterExit: true,
-          }}
-        />
+        {/* The guaranteed way out, whatever the pane published. */}
+        <InputMenuItems theaterExit />
       </DropdownMenuContent>
     </DropdownMenu>
   )

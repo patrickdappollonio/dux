@@ -61,9 +61,36 @@ describe("typing-surface choice", () => {
   })
 
   it("ignores a value it has no case for", async () => {
+    // A fresh page, so "unchosen" is the module's own answer rather than an
+    // in-memory choice a previous case left lying around.
     installStorage({ "dux:typing-surface": "sideways" })
+    vi.resetModules()
     const m = await load()
     expect(m.readTypingSurface()).toBeNull()
+  })
+
+  // A GARBAGE VALUE IS NOT A DECISION EITHER, and a storage that cannot be
+  // written over it must not pin the toggle. This is the shape a browser that
+  // allows reads and refuses writes lands in: the stored string is whatever was
+  // there, and the choice the user just made lives only in memory. Reading the
+  // unrecognized string as "nothing chosen" and then ignoring the in-memory
+  // answer left the switch looking dead for the rest of the page.
+  it("falls back to the live choice when the stored value makes no sense", async () => {
+    vi.resetModules()
+    const mem = new Map([["dux:typing-surface", "sideways"]])
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: () => {
+        throw new Error("denied")
+      },
+      removeItem: () => {
+        throw new Error("denied")
+      },
+    })
+    const m = await load()
+    expect(m.readTypingSurface()).toBeNull()
+    m.setTypingSurface("direct")
+    expect(m.readTypingSurface()).toBe("direct")
   })
 
   it("notifies subscribers so every open pane agrees at once", async () => {

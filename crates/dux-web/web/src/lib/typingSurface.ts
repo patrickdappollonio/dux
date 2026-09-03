@@ -55,7 +55,16 @@ let fallback: TypingSurface | null = null
 
 const listeners = new Set<() => void>()
 
-/** Read the device-local choice. An unrecognized stored value reads as unchosen. */
+/**
+ * Read the device-local choice.
+ *
+ * Only a value this module wrote counts. Anything else, missing or garbage, is
+ * "nothing stored", and nothing stored falls through to the in-memory answer.
+ * That last step is what a storage which allows reads and refuses writes needs:
+ * the string sitting under the key is stale or nonsense, the choice the user
+ * just made lives only in `fallback`, and reading the nonsense as a decision
+ * would leave the toggle looking dead for the rest of the page.
+ */
 export function readTypingSurface(): TypingSurface | null {
   let raw: string | null
   try {
@@ -64,7 +73,7 @@ export function readTypingSurface(): TypingSurface | null {
     return fallback
   }
   if (raw === "compose" || raw === "direct") return raw
-  return raw === null ? fallback : null
+  return fallback
 }
 
 /** Write the choice (or `null` to hand the decision back to the pointer). */

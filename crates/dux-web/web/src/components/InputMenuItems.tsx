@@ -7,20 +7,14 @@ import {
   SquareTerminal,
 } from "lucide-react"
 
-import {
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu"
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu"
 import {
   exitTheater,
   mobileAccessoryBarVisible,
   setAccessoryBarVisibility,
   useDux,
 } from "@/lib/store"
-import {
-  inputMenuHasItems,
-  type InputMenuGates,
-} from "@/lib/inputMenu"
+import type { InputMenuGates } from "@/lib/inputMenu"
 import { switchTypingSurface } from "@/lib/typingSurface"
 
 // THE INPUT ITEMS, shared by every menu that carries any of them: the input
@@ -43,12 +37,27 @@ import { switchTypingSurface } from "@/lib/typingSurface"
 // opens the operating system's picker dialog.
 
 export function InputMenuItems({
-  gates,
+  gates = { surfaceSwitch: false, keysToggle: false },
+  attach = false,
+  theaterExit = false,
   onAttach,
   composeSurface = false,
-  trailingSeparator = false,
 }: {
-  gates: InputMenuGates
+  /// The two rows either menu can carry. Defaulted off for the callers whose
+  /// menu carries neither, which is every caller of the theater exit.
+  gates?: InputMenuGates
+  /// "Attach a file…", which lives in the top menu's INPUT group and nowhere
+  /// else. Off when uploads are switched off server-side
+  /// (`file_drop_max_bytes = 0`) and for anyone who does not own the input: a
+  /// non-owner cannot paste the saved path afterwards, so the file would
+  /// strand. It is a prop rather than a gate because the caller that sets it is
+  /// also the one holding `onAttach`, and the two are the same fact.
+  attach?: boolean
+  /// "Leave theater mode". A way BACK and not a way there: entering is the
+  /// header's expand button, and in theater that header is exactly what is not
+  /// on screen. Only the top menus pass it, for the same reason: the bottom
+  /// `⋯` lives inside the virtual input, so it is nobody's guaranteed exit.
+  theaterExit?: boolean
   /// Opens the file picker. Called synchronously from the item's click, so the
   /// browser's user activation still covers the `.click()` on the hidden input.
   onAttach?: () => void
@@ -56,15 +65,12 @@ export function InputMenuItems({
   /// box is up, `false` while keystrokes go straight to the terminal. Only read
   /// when `gates.surfaceSwitch` is set.
   composeSurface?: boolean
-  /// A separator AFTER the items, for the header menus that continue with their
-  /// own entries below.
-  trailingSeparator?: boolean
 }) {
   const duxState = useDux()
   const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
   return (
     <>
-      {gates.attach ? (
+      {attach ? (
         <DropdownMenuItem onClick={() => onAttach?.()}>
           <Paperclip />
           Attach a file…
@@ -101,14 +107,11 @@ export function InputMenuItems({
           no matching "Enter theater mode": entering is the header's expand
           button, and this menu exists precisely for the state where that header
           is not on screen. Same two-arrow glyph as the button it undoes. */}
-      {gates.theaterExit ? (
+      {theaterExit ? (
         <DropdownMenuItem onClick={() => exitTheater()}>
           <Minimize2 />
           Leave theater mode
         </DropdownMenuItem>
-      ) : null}
-      {trailingSeparator && inputMenuHasItems(gates) ? (
-        <DropdownMenuSeparator />
       ) : null}
     </>
   )

@@ -245,20 +245,15 @@ describe("Escape in theater", () => {
     render(
       <>
         <Escape />
-        <InputMenu
-          gates={{
-            attach: false,
-            surfaceSwitch: false,
-            keysToggle: true,
-            theaterExit: true,
-          }}
-        />
+        {/* Any real row will do; this menu carries no theater exit of its own,
+            because it lives inside the virtual input and dies with it. */}
+        <InputMenu gates={{ surfaceSwitch: false, keysToggle: true }} />
       </>,
     )
     fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    const item = screen.getByText("Leave theater mode")
+    const item = screen.getByText("Hide terminal keys")
     pressEscape(item)
-    expect(screen.queryByText("Leave theater mode")).toBeNull()
+    expect(screen.queryByText("Hide terminal keys")).toBeNull()
     expect(exitTheaterMock).not.toHaveBeenCalled()
     // The menu is gone, so the next press is theater's.
     pressEscape()

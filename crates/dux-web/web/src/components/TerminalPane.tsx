@@ -783,7 +783,6 @@ export function TerminalPane(props: TerminalPaneProps) {
       input={input}
       composeInputRef={composeInputRef}
       kind={kind}
-      onAttach={upload.attachFromPicker}
     />
   )
 }
@@ -983,7 +982,8 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
   // virtual input, and the keys toggle. "Attach a file…" moved up to the top
   // menu's INPUT group, which is on screen whether or not these rows are, and
   // the theater exit went with it: this menu is not a permanent surface any
-  // more, so it cannot be anybody's guaranteed way back.
+  // more, so it cannot be anybody's guaranteed way back. Neither is a gate
+  // here any more either, so no caller can reintroduce one by passing `true`.
   // THE BOTTOM BAR IS THE VIRTUAL INPUT, and there is nothing under the
   // terminal when it is down. There is deliberately no minimal `⋯` row any
   // more: it existed so the menu could be reachable in every bar state, and
@@ -992,13 +992,11 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
   // whole height to the terminal, which is what the choice says.
   const bottomBarShown = accessoryBarShown || composeBarShown
   const inputMenuGates = {
-    attach: false,
     surfaceSwitch:
       input.isOwner &&
       inputMenuSurfaceSwitchOffered(input.composeMode) &&
       bottomBarShown,
     keysToggle: input.isOwner && input.virtualInput && bottomBarShown,
-    theaterExit: false,
   }
   const menuHasItems = inputMenuHasItems(inputMenuGates)
   // THE TOP MENU'S INPUT GROUP, published for whichever menu is over this pane
@@ -1407,7 +1405,6 @@ type TerminalPaneLayoutProps = {
   input: InputSurface
   composeInputRef: RefObject<HTMLTextAreaElement | null>
   kind: TerminalPaneProps["kind"]
-  onAttach: () => void
 }
 
 function TerminalPaneLayout({
@@ -1422,14 +1419,9 @@ function TerminalPaneLayout({
   input,
   composeInputRef,
   kind,
-  onAttach,
 }: TerminalPaneLayoutProps) {
   const inputMenu = (
-    <InputMenu
-      gates={inputMenuGates}
-      onAttach={onAttach}
-      composeSurface={composeBarEnabled}
-    />
+    <InputMenu gates={inputMenuGates} composeSurface={composeBarEnabled} />
   )
 
   return (

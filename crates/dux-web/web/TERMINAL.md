@@ -1740,10 +1740,14 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     the one way to hide the phone's top bar.** For one unreleased arc it was a real
     preference hiding the mobile terminal screens' header and tab strip, riding the
     generic settings machinery end to end. It is removed because theater mode
-    collapses the same chrome and carries its own way back (the floating pill, and
-    the input menu's Leave theater mode), while the preference had no way back of
-    its own, and two flows for hiding one thing could disagree about what was on
-    screen.
+    collapses the same chrome and carries its own way back (the floating pill: its
+    theater toggle on a phone, its exit button on a computer, and Leave theater mode in
+    the one ⋯ it opens), while the preference had no way back of its own, and two flows
+    for hiding one thing could disagree about what was on screen. The way back is the
+    PILL rather than the input menu, on every screen: that menu belongs to the virtual
+    input and goes down with it, so a pane the user is typing directly into would have
+    had none. That is also why the phone's project and standalone terminal screens paint
+    a pill over the pane, having no flap to fly one out of.
     NEVER SHIPPED, so nothing migrates: the key was added on `server-mode` and is
     not in `main` (the check-shipped rule). `UiConfig` has no `deny_unknown_fields`,
     so a config file still carrying a `mobile_top_bar` line loads exactly as it did
@@ -2183,12 +2187,16 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Pinned: `components/TerminalPane.test.tsx` "shows the Reconnect affordance on
     'failed' without doubling the spinner" and C12's test.
 
-9. **`inColumn` decides the pane's flex role; the menu's own row counts as company.**
-    Trap: leaving the third-anchor row out of the column test made the desktop shell
-    drop the row carrying the way back. Bars take height OUT of the terminal in the
-    desktop shell (panel geometry untouched); the pane's own RO reports the reflow.
-    Fix: TP:475-485, TP:905-939. Pinned: `components/TerminalPane.test.tsx` input
-    menu anchor suite ("renders its own row when neither bar is up").
+9. **The bottom bar IS the virtual input, and there is no third anchor row.** The pane
+    column is the terminal plus whichever of the two input rows the OWNER has up, so
+    asking to type directly in the terminal leaves nothing under the terminal at all.
+    The old `inColumn` flag and the minimal row it kept alive for the input ⋯ are gone:
+    the trigger has no permanent home to be given, and what had to outlive the bar moved
+    to the top menu's INPUT group. Bars still take height OUT of the terminal in the
+    desktop shell (panel geometry untouched) and the pane's own RO reports the reflow.
+    Fix: `terminalInputLayout` and `TerminalPaneLayout` in `TerminalPane.tsx`. Pinned:
+    `components/TerminalPane.test.tsx` "TerminalPane input menu anchors" and "TerminalPane
+    input group for the top menu" suites.
 
 10. **Both hint latches are MODULE scope: once per page session, surviving the pane
     remounts every agent/tab switch causes.** Fix: src/components/terminal/pageSessionHints.ts:18-19 + src/components/terminal/constants.ts:8-12.

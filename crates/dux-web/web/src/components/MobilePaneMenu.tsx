@@ -100,14 +100,7 @@ export function MobilePaneMenuBody({ session }: { session: SessionView }) {
         <>
           <DropdownMenuSeparator />
           {/* The way back, from the surface the mode leaves on screen. */}
-          <InputMenuItems
-            gates={{
-              attach: false,
-              surfaceSwitch: false,
-              keysToggle: false,
-              theaterExit: true,
-            }}
-          />
+          <InputMenuItems theaterExit />
         </>
       ) : null}
       <DropdownMenuSeparator />

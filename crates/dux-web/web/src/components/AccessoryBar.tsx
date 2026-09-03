@@ -44,9 +44,10 @@ interface AccessoryBarProps {
   // the buffered message box, and the browser cannot tell the two apart
   // (measured), so the user swaps it. It sits in THIS row because this row is
   // where the thumb already is in both states, and it is one tap rather than
-  // two. It is not the guaranteed way back any more: the input ⋯ menu is, and
-  // that menu renders in every bar state including bars-all-hidden. Both write
-  // through the same `setTypingSurface` helper, so they cannot drift. Absent
+  // two. It is not the guaranteed way back any more: pressing it takes this
+  // whole row away, and the way back is the INPUT group in the surface's top
+  // menu, which is on screen whatever the pane is doing. Both write through the
+  // same `switchTypingSurface` helper, so they cannot drift. Absent
   // (undefined) where the toggle would change nothing, which is every case
   // except the `auto` setting on a touch device.
   composeSurface?: boolean

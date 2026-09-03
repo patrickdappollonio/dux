@@ -61,10 +61,8 @@ const { InputMenu } = await import("./InputMenu")
 const { inputMenuHasItems } = await import("@/lib/inputMenu")
 
 const ALL_OFF: InputMenuGates = {
-  attach: false,
   surfaceSwitch: false,
   keysToggle: false,
-  theaterExit: false,
 }
 
 function state(keys = true): DuxState {
@@ -76,7 +74,7 @@ function state(keys = true): DuxState {
 
 function open(
   gates: Partial<InputMenuGates>,
-  props: { onAttach?: () => void; composeSurface?: boolean } = {},
+  props: { composeSurface?: boolean } = {},
 ) {
   render(<InputMenu gates={{ ...ALL_OFF, ...gates }} {...props} />)
   const trigger = screen.queryByRole("button", { name: "Input options" })
@@ -107,29 +105,16 @@ describe("InputMenu", () => {
     expect(open({})).toBeNull()
   })
 
-  it("offers Attach a file… only on its own gate, and calls back", () => {
-    const onAttach = vi.fn()
-    open({ attach: true }, { onAttach })
-    // The trailing ellipsis marks the item as opening a dialog: here the
-    // operating system's own file picker.
-    fireEvent.click(screen.getByText("Attach a file…"))
-    expect(onAttach).toHaveBeenCalledTimes(1)
-  })
-
-  it("carries the way out of theater, and only while theater is on", () => {
-    // Not from the input `⋯` any more, which exists only inside the virtual
-    // input: the top menus carry the exit, and this gate is what they pass.
-    open({ keysToggle: true })
-    expect(screen.queryByText("Leave theater mode")).toBeNull()
-    cleanup()
-    open({ theaterExit: true })
-    fireEvent.click(screen.getByText("Leave theater mode"))
-    expect(exitTheater).toHaveBeenCalledTimes(1)
-  })
-
-  it("hides Attach a file… when the caller says so", () => {
-    open({ keysToggle: true })
+  // NEITHER OF THESE HAS A GATE HERE ANY MORE, and that is the point: this
+  // menu lives inside the virtual input and dies with it, so it can be nobody's
+  // permanent home for attaching a file or for leaving theater. Both live in
+  // the top menu's INPUT group instead, and there is no longer a field a caller
+  // could set to put them back.
+  it("carries neither the attach item nor the way out of theater", () => {
+    open({ surfaceSwitch: true, keysToggle: true })
     expect(screen.queryByText("Attach a file…")).toBeNull()
+    expect(screen.queryByText("Leave theater mode")).toBeNull()
+    expect(exitTheater).not.toHaveBeenCalled()
   })
 
   // The two directions live in different menus (the way out inside the virtual
@@ -165,7 +150,7 @@ describe("InputMenu", () => {
   // hide the phone's chrome, so no gate and no label may bring a second one
   // back.
   it("carries no top-bar toggle whatever the caller asks for", () => {
-    open({ attach: true, surfaceSwitch: true, keysToggle: true, theaterExit: true })
+    open({ surfaceSwitch: true, keysToggle: true })
     expect(screen.queryByText("Hide top bar")).toBeNull()
     expect(screen.queryByText("Show top bar")).toBeNull()
   })
@@ -174,8 +159,7 @@ describe("InputMenu", () => {
   // is what lets the input ⋯ widen the keys item to a coarse-pointer tablet
   // while the phone header menus keep their own narrower gate.
   it("renders exactly the items the caller asked for", () => {
-    open({ attach: true, surfaceSwitch: true }, { composeSurface: false })
-    expect(screen.getByText("Attach a file…")).toBeTruthy()
+    open({ surfaceSwitch: true }, { composeSurface: false })
     expect(screen.getByText("Use virtual input")).toBeTruthy()
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
   })
