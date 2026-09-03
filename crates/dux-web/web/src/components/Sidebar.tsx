@@ -37,6 +37,7 @@ import {
   DIVIDER_CHROME,
   DIVIDER_DRAG_THRESHOLD_PX,
   dividerKeyAction,
+  SIDEBAR_RESIZING_ATTR,
 } from "@/lib/paneDivider"
 import { useDividerDrag } from "@/hooks/use-divider-drag"
 import {
@@ -302,12 +303,54 @@ function SidebarDragEdge({
   })
   const grabbedPxRef = useRef(sidebarWidthToPx(sidebarWidth))
 
+  // The wrapper the `--sidebar-width` variable lives on, resolved once from the
+  // edge's own element rather than threaded down as a prop: it belongs to the
+  // sidebar primitive, several levels above this component, and the only thing
+  // wanted from it is a style property and an attribute.
+  const wrapperRef = useRef<HTMLElement | null>(null)
+  // The width the DOM is currently painted at, which during a gesture is ahead
+  // of the store. Every path that ends a gesture reads it, so a cancel can
+  // leave the sidebar exactly where the finger left it.
+  const paintedRef = useRef(sidebarWidth)
+
+  // THE LIVE WIDTH IS PAINTED, NOT STORED. A per-move `setSidebarWidth` goes
+  // through the global store, so every `useDux` consumer (the whole agent list
+  // among them) re-rendered on every pointer move of a drag that only ever
+  // changes one CSS variable. Writing the variable straight onto the wrapper
+  // costs one style mutation instead, and the store is written once, at the end
+  // of the gesture, which is also the only value worth persisting.
+  const paintWidth = useCallback((widthRem: string) => {
+    paintedRef.current = widthRem
+    wrapperRef.current?.style.setProperty("--sidebar-width", widthRem)
+  }, [])
+
+  // Whether a gesture is in flight. For its whole duration the width does not
+  // animate: it is following a finger, and a tween restarted on every move is
+  // an edge that trails it and keeps moving after it lifts.
+  const gestureRef = useRef(false)
+  const beginGesture = useCallback(() => {
+    if (gestureRef.current) return
+    gestureRef.current = true
+    wrapperRef.current?.setAttribute(SIDEBAR_RESIZING_ATTR, "")
+  }, [])
+  const endGesture = useCallback(() => {
+    if (!gestureRef.current) return
+    gestureRef.current = false
+    wrapperRef.current?.removeAttribute(SIDEBAR_RESIZING_ATTR)
+  }, [])
+
   // Every way of moving this divider ends here, so a drag, an arrow key and a
   // double-click cannot disagree about the band or about when the sidebar snaps
   // to its rail. Reports whether it collapsed, because a keyboard gesture that
   // collapses has to hand focus on to the strip that replaces this edge.
+  //
+  // The paint and the store write carry the SAME value on purpose: React only
+  // rewrites the variable when the value it renders differs from the one it
+  // rendered last, so a committed width that happens to equal the last rendered
+  // one would otherwise leave the painted value standing on its own.
   const commit = (px: number): boolean => {
     const { widthRem, collapse } = sidebarResizeRelease(px)
+    paintWidth(widthRem)
     setSidebarWidth(widthRem, true)
     if (collapse) setOpen(false)
     return collapse
@@ -321,6 +364,8 @@ function SidebarDragEdge({
     onGrab: () => {
       grabbedPxRef.current = sidebarWidthToPx(widthRef.current)
       draggedRef.current = false
+      paintedRef.current = widthRef.current
+      beginGesture()
     },
     // Live, unpersisted: the width follows the finger by the DELTA from the
     // press, so a press that landed off centre in the grab band does not
@@ -328,7 +373,7 @@ function SidebarDragEdge({
     onDrag: (deltaX) => {
       draggedRef.current = true
       const { widthRem } = sidebarResizeRelease(grabbedPxRef.current + deltaX)
-      setSidebarWidth(widthRem)
+      paintWidth(widthRem)
     },
     // A PRESS THAT WENT NOWHERE DECIDES NOTHING, which includes deciding to
     // remember the width it already had. Measured on a touch tablet: a tap on
@@ -345,19 +390,40 @@ function SidebarDragEdge({
     onDrop: (deltaX) => {
       if (Math.abs(deltaX) < DIVIDER_DRAG_THRESHOLD_PX) {
         if (draggedRef.current) {
-          setSidebarWidth(sidebarResizeRelease(grabbedPxRef.current).widthRem)
+          const { widthRem } = sidebarResizeRelease(grabbedPxRef.current)
+          paintWidth(widthRem)
+          setSidebarWidth(widthRem)
         }
+        endGesture()
         return
       }
       commit(grabbedPxRef.current + deltaX)
+      endGesture()
     },
     // A cancelled gesture writes nothing and leaves the sidebar where the
-    // finger left it, which is what the panel library's divider does too.
-    onCancel: () => {},
+    // finger left it, which is what the panel library's divider does too. What
+    // the finger left is what the drag PAINTED, so the store is squared with it
+    // here (unpersisted): the paint is not a value anyone else can read, and a
+    // store left behind would be put back on the next unrelated render.
+    onCancel: () => {
+      if (draggedRef.current) setSidebarWidth(paintedRef.current)
+      endGesture()
+    },
     // Back to the width the page loaded with, which is exactly what the
     // Changes divider's double-click restores on its side.
     onReset: () => void commit(sidebarWidthToPx(SIDEBAR_INITIAL_WIDTH)),
   })
+
+  // A GESTURE MUST NOT OUTLIVE THE EDGE THAT STARTED IT. The drag hook's own
+  // teardown drops the listeners without calling a handler, so an edge unmounted
+  // mid-drag (theater mode taking the sidebar away under a finger) would leave
+  // the suppression standing on a wrapper nothing is dragging.
+  useEffect(() => {
+    wrapperRef.current =
+      ref.current?.closest<HTMLElement>('[data-slot="sidebar-wrapper"]') ?? null
+    return () => endGesture()
+  }, [ref, endGesture])
+
   useFocusHandoff(focusOnMount, onFocusClaimed, ref)
 
   // The library's separator keyboard vocabulary, in the sidebar's own units.
@@ -395,6 +461,10 @@ function SidebarDragEdge({
       aria-orientation="vertical"
       aria-valuemin={MIN_SIDEBAR_PX}
       aria-valuemax={MAX_SIDEBAR_PX}
+      // The COMMITTED width, so it is correct at rest, which is when assistive
+      // technology reads it. During a drag it lags the painted width, because
+      // the drag deliberately does not go through the store, and it catches up
+      // the moment the gesture ends.
       aria-valuenow={Math.round(sidebarWidthToPx(sidebarWidth))}
       tabIndex={0}
       onKeyDown={onKeyDown}

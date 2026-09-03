@@ -65,6 +65,29 @@ export const DIVIDER_HELD_ATTR = "data-dux-held"
 export const DIVIDER_HELD_ON = "true"
 export const DIVIDER_HELD_OFF = "false"
 
+// WHILE THE SIDEBAR'S EDGE IS HELD, ITS WIDTH MUST NOT ANIMATE.
+//
+// The sidebar primitive tweens its width over 200ms, which is right for the
+// deliberate collapse toggle and wrong for a drag: every pointer move restarts
+// the tween, so the edge trails the finger, keeps moving after the finger
+// lifts, and hands the terminal a fresh layout on every frame of every tween.
+// The drag is a direct manipulation, so the width follows the pointer with no
+// tween at all; the toggle keeps its 200ms because nothing is following it.
+//
+// Written on the sidebar wrapper (the element the `--sidebar-width` variable
+// lives on) rather than on the animated elements themselves, because the two
+// that animate are a primitive's internals and the gesture is driven from a
+// component several levels below them. Present only during a gesture, unlike
+// the always-present held paint above: this one suppresses a rule rather than
+// answering a question anyone asks of it.
+export const SIDEBAR_RESIZING_ATTR = "data-dux-sidebar-resizing"
+
+// The suppression itself, worn by every element whose width the sidebar
+// animates. Tailwind scans source text for literal class names, so this is
+// written out once here and shared rather than built from the attribute above.
+export const SIDEBAR_RESIZING_NO_TRANSITION =
+  "[[data-dux-sidebar-resizing]_&]:transition-none"
+
 // The held tone. Deliberately the same `bg-ring` the hover rule paints, so the
 // two rules cannot disagree whichever order Tailwind emits them in: a mouse
 // hovering and a finger holding mean the same thing to the eye.

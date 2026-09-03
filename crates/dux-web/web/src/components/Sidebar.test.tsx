@@ -4,6 +4,10 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import type { ReactNode } from "react"
 
 import { SidebarProvider } from "@/components/ui/sidebar"
+import {
+  SIDEBAR_RESIZING_ATTR,
+  SIDEBAR_RESIZING_NO_TRANSITION,
+} from "@/lib/paneDivider"
 import type { DuxState } from "@/lib/store"
 import { stubMatchMedia, type MatchMediaStub } from "@/test/matchMedia"
 
@@ -18,6 +22,10 @@ let mockState: DuxState
 const addTabMock = vi.fn()
 const selectSessionMock = vi.fn()
 const createProjectTerminalMock = vi.fn()
+// Counted, not replaced: the resize tests below assert what actually reaches
+// localStorage, so this has to keep doing the real thing while recording how
+// OFTEN a gesture reaches the store at all (once, at its end).
+const setSidebarWidthSpy = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -26,6 +34,10 @@ vi.mock("@/lib/store", async (importOriginal) => {
     addTab: addTabMock,
     selectSession: selectSessionMock,
     createProjectTerminal: createProjectTerminalMock,
+    setSidebarWidth: (width: string, persist?: boolean) => {
+      setSidebarWidthSpy(width, persist)
+      return actual.setSidebarWidth(width, persist)
+    },
   }
 })
 
@@ -199,6 +211,7 @@ beforeEach(() => {
   addTabMock.mockClear()
   selectSessionMock.mockClear()
   createProjectTerminalMock.mockClear()
+  setSidebarWidthSpy.mockClear()
 })
 
 afterEach(() => {
@@ -1175,6 +1188,163 @@ describe("AppSidebar resize affordances", () => {
       fireEvent.pointerLeave(document, { pointerType: "mouse" })
     })
     expect(document.getElementById("dux-divider-cursor")).toBeNull()
+  })
+})
+
+// The sidebar's width animates over 200ms, which is right for the collapse
+// toggle and wrong for a drag: unsuppressed, every pointer move restarted the
+// tween, so the edge trailed the finger, kept moving after the release, and
+// relaid out the terminal on every frame of every tween.
+describe("AppSidebar drag suppresses the width transition", () => {
+  function renderSidebar() {
+    mockState = makeState()
+    const rendered = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    const wrapper = rendered.container.querySelector(
+      '[data-slot="sidebar-wrapper"]',
+    ) as HTMLElement
+    return { ...rendered, wrapper, handle: grabHandle(rendered.container) }
+  }
+
+  it("marks the wrapper for the whole gesture and clears it on release", () => {
+    const { wrapper, handle } = renderSidebar()
+
+    expect(wrapper.hasAttribute(SIDEBAR_RESIZING_ATTR)).toBe(false)
+    pressEdge(handle)
+    expect(wrapper.hasAttribute(SIDEBAR_RESIZING_ATTR)).toBe(true)
+    moveEdge(340)
+    moveEdge(400)
+    expect(wrapper.hasAttribute(SIDEBAR_RESIZING_ATTR)).toBe(true)
+    releaseEdge(400)
+    expect(wrapper.hasAttribute(SIDEBAR_RESIZING_ATTR)).toBe(false)
+  })
+
+  // A cancelled gesture is a gesture that ended, so the mark goes with it. A
+  // browser takes a touch away without a pointerup all the time (a page pan it
+  // decided to claim, a call arriving, a palm), and a suppression left standing
+  // would kill the collapse animation for the rest of the page's life.
+  it("clears the mark when the browser cancels the gesture", () => {
+    const { wrapper, handle } = renderSidebar()
+
+    pressEdge(handle, { pointerId: 3, pointerType: "touch" })
+    moveEdge(340, { pointerId: 3, pointerType: "touch" })
+    expect(wrapper.hasAttribute(SIDEBAR_RESIZING_ATTR)).toBe(true)
+    act(() => {
+      fireEvent.pointerCancel(document, {
+        pointerId: 3,
+        pointerType: "touch",
+        clientX: 340,
+        clientY: 100,
+      })
+    })
+    expect(wrapper.hasAttribute(SIDEBAR_RESIZING_ATTR)).toBe(false)
+  })
+
+  // A press that never moved is still a gesture: it marked the wrapper on the
+  // way in, so it has to unmark it on the way out.
+  it("clears the mark after a press that went nowhere", () => {
+    const { wrapper, handle } = renderSidebar()
+
+    pressEdge(handle)
+    releaseEdge(SIDEBAR_EDGE_X)
+    expect(wrapper.hasAttribute(SIDEBAR_RESIZING_ATTR)).toBe(false)
+  })
+
+  // The wrapper outlives the edge: theater mode unmounts the sidebar and keeps
+  // the provider, so a mark left behind by an edge that went away mid-drag
+  // would kill the collapse animation with no gesture anywhere in sight.
+  it("clears the mark when the edge is unmounted mid-drag", () => {
+    const { wrapper, handle, unmount } = renderSidebar()
+
+    pressEdge(handle)
+    moveEdge(400)
+    expect(wrapper.hasAttribute(SIDEBAR_RESIZING_ATTR)).toBe(true)
+    act(() => unmount())
+    expect(wrapper.hasAttribute(SIDEBAR_RESIZING_ATTR)).toBe(false)
+  })
+
+  // The suppression is a rule about a mark on an ancestor, so the animated
+  // elements have to opt into it; the tween itself stays on them for the
+  // deliberate collapse toggle, which nothing is following.
+  it("keeps the 200ms tween on the animated elements and wears the opt-in", () => {
+    const { container } = renderSidebar()
+
+    for (const slot of ["sidebar-gap", "sidebar-container"]) {
+      const el = container.querySelector(`[data-slot="${slot}"]`) as HTMLElement
+      expect(el, slot).toBeTruthy()
+      const tokens = el.className.split(/\s+/)
+      expect(tokens, slot).toContain("duration-200")
+      expect(tokens, slot).toContain(SIDEBAR_RESIZING_NO_TRANSITION)
+      expect(
+        tokens.some((token) => token.startsWith("transition-[")),
+        slot,
+      ).toBe(true)
+    }
+  })
+})
+
+// The live width is painted straight onto the wrapper's CSS variable. A
+// per-move store write re-rendered every `useDux` consumer (the whole agent
+// list among them) for a change only one CSS variable ever saw.
+describe("AppSidebar drag writes the store once, at the end", () => {
+  it("paints the width per move and commits exactly one store write", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    const wrapper = container.querySelector(
+      '[data-slot="sidebar-wrapper"]',
+    ) as HTMLElement
+    const handle = grabHandle(container)
+
+    pressEdge(handle)
+    moveEdge(340)
+    expect(wrapper.style.getPropertyValue("--sidebar-width")).toBe("21.25rem")
+    moveEdge(370)
+    moveEdge(400)
+    expect(wrapper.style.getPropertyValue("--sidebar-width")).toBe("25rem")
+    // Three moves, and the store has heard nothing at all.
+    expect(setSidebarWidthSpy).not.toHaveBeenCalled()
+
+    releaseEdge(400)
+    expect(setSidebarWidthSpy).toHaveBeenCalledTimes(1)
+    expect(setSidebarWidthSpy).toHaveBeenCalledWith("25rem", true)
+    // The painted value and the committed value are the same, so React's own
+    // render of the variable cannot disagree with what is on the glass.
+    expect(wrapper.style.getPropertyValue("--sidebar-width")).toBe("25rem")
+  })
+
+  // A cancel writes no localStorage entry, but it does square the store with
+  // what the drag painted, so the width the finger left is the width the next
+  // unrelated render puts back.
+  it("squares the store with the paint on a cancel, without persisting", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    const handle = grabHandle(container)
+
+    pressEdge(handle, { pointerId: 4, pointerType: "touch" })
+    moveEdge(336, { pointerId: 4, pointerType: "touch" })
+    act(() => {
+      fireEvent.pointerCancel(document, {
+        pointerId: 4,
+        pointerType: "touch",
+        clientX: 336,
+        clientY: 100,
+      })
+    })
+
+    expect(setSidebarWidthSpy).toHaveBeenCalledTimes(1)
+    expect(setSidebarWidthSpy).toHaveBeenCalledWith("21rem", undefined)
+    expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
   })
 })
 
