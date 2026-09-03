@@ -100,6 +100,26 @@ pub fn agent_pty_ready_to_prune(
 /// and far shorter than any session a person actually uses. It is deliberately
 /// judged on the run's own length rather than on how the run ended, because the
 /// exit status is exactly the fact that carries no information here.
+///
+/// The LOOP it breaks is the web's. Only the web starts a tab because somebody
+/// looked at it (selecting an agent starts its healthy dormant first tab), so
+/// only there can a click turn into an endless start-exit-start cycle. In the
+/// terminal UI a start is always an explicit act, and an explicit start clears
+/// the tab's verdict by design, so the window costs a TUI user nothing beyond
+/// the dormant card's wording after a run that was over in a blink. The verdict
+/// is enforced server-side rather than in either client for the same reason it
+/// is recorded here: no surface can forget it and no client can talk past it.
+///
+/// Two shapes are false positives, and both are accepted:
+/// - a provider that DOUBLE-FORKS, exiting its foreground process immediately
+///   while the real session runs on. dux judges the child it spawned, so such a
+///   provider records a failed run on every launch. No supported provider does
+///   this today (dux embeds an interactive CLI in a PTY, which is the opposite
+///   shape), and the cost is a dormant card the user starts past.
+/// - a quit that was not TYPED: a macro or another programmatic write ending the
+///   CLI within the window is not stamped as input, so it reads as a run that
+///   never came up. The exemption keys on typing because that is the fact that
+///   separates a person quitting from a provider that never started.
 pub const RAPID_EXIT_WINDOW: Duration = Duration::from_secs(5);
 
 /// Whether a finished run ended badly by virtue of how BRIEF it was: shorter
@@ -257,12 +277,24 @@ struct ExitedAgentPty {
 }
 
 /// Whether an exited agent tab's row should be closed along with the prune:
-/// only an EXTRA tab (the slot tab's row stays, so its slot survives) that exited CLEANLY
-/// (code 0 — the user deliberately ended the conversation, e.g. /exit). The
-/// one shared rule both surfaces' exit paths consult, so the TUI loop and the
-/// web's `prune_exited_ptys` cannot drift.
-pub fn clean_exit_closes_tab_row(is_session_slot: bool, exit_success: Option<bool>) -> bool {
-    !is_session_slot && exit_success == Some(true)
+/// only an EXTRA tab (the slot tab's row stays, so its slot survives) that
+/// exited CLEANLY (code 0 — the user deliberately ended the conversation, e.g.
+/// /exit) and whose run did not end badly for any other reason. The one shared
+/// rule both surfaces' exit paths consult, so the TUI loop and the web's
+/// `prune_exited_ptys` cannot drift.
+///
+/// `ended_badly` is the same verdict the prune records for the tab, and it is
+/// asked here so the two cannot disagree about one exit. A run that was over
+/// inside [`RAPID_EXIT_WINDOW`] without anybody typing into it is a provider
+/// that never came up, whatever status it managed to exit with, and closing its
+/// row throws away both the diagnosis surface the verdict exists for and the
+/// verdict itself, since removing a row clears the tab's recorded failure.
+pub fn clean_exit_closes_tab_row(
+    is_session_slot: bool,
+    exit_success: Option<bool>,
+    ended_badly: bool,
+) -> bool {
+    !is_session_slot && exit_success == Some(true) && !ended_badly
 }
 
 /// A deferred worktree removal that must wait for a WHOLE GROUP of an agent's
@@ -554,10 +586,17 @@ impl Engine {
             // ask about again, so a verdict for it would be one leaked entry per
             // orphan on a long-running server.
             //
-            // A RESUMED launch that dies this fast is not judged here at all: the
-            // resume-fallback sweep runs before this prune, tears the tab down
-            // and relaunches it fresh, so only the fresh retry's own quick death
-            // ever reaches this point.
+            // A RESUMED launch usually never reaches this point: the
+            // resume-fallback sweep runs first, and for a resume that exited with
+            // minimal output it pulls the tab out of `providers` and relaunches it
+            // fresh, so only the fresh retry's own quick death is judged here. The
+            // ONE arm that falls through is `DropNonMinimalExit`, a resume that
+            // printed more than `RESUME_MINIMAL_OUTPUT_LINES` visible lines and
+            // then ended: the sweep drops the candidate and hands the exit to this
+            // prune deliberately. If that also happened inside the rapid window
+            // with nobody typing, it is judged here like any other run, which is
+            // the intended answer: a resume that put a screenful up and quit on
+            // its own within five seconds is a run that did not come up either.
             let ended_badly = exit_success == Some(false)
                 || rapid_exit_ends_run_badly(run_duration, was_typed_into);
             if ended_badly && owning.is_some() {
@@ -573,7 +612,12 @@ impl Engine {
                     "tab \"{tab_id}\" ({label}) was killed after a read error, exit status unknown: {error}"
                 ));
             }
-            let tab_closed = clean_exit_closes_tab_row(is_session_slot, exit_success)
+            // The verdict decides the row as well as the mark. Closing the row
+            // clears the recorded failure, so a rapid clean exit used to record a
+            // verdict and delete it again in the same breath, leaving an extra tab
+            // with no row, no verdict and nothing on screen about a provider that
+            // never came up.
+            let tab_closed = clean_exit_closes_tab_row(is_session_slot, exit_success, ended_badly)
                 && self.remove_agent_tab_row(tab_id.as_str());
             pruned.push(PrunedPty {
                 kind: PrunedPtyKind::Agent,
@@ -1137,6 +1181,12 @@ mod tests {
         };
         engine.providers.insert(TabId::new("tab-clean"), spawn("0"));
         engine.providers.insert(TabId::new("tab-crash"), spawn("3"));
+        // The deliberate end this test is about is somebody typing /exit, and
+        // `sh -c "exit 0"` is over in milliseconds. Without the input stamp the
+        // rapid-exit rule reads it as a provider that never came up, which is a
+        // bad ending and keeps the row: a different case, covered by
+        // `prune_keeps_an_extra_tab_row_when_a_clean_exit_was_instant`.
+        engine.note_pty_input("tab-clean");
 
         // Wait until BOTH facts prune needs are in for both tabs, end of input
         // AND a reaped exit status, then prune ONCE.
@@ -1206,6 +1256,61 @@ mod tests {
         assert!(
             !engine.tab_last_run_failed("tab-clean"),
             "a clean exit leaves a clean slate"
+        );
+    }
+
+    /// An EXTRA tab whose provider came up and quit inside the rapid-exit window
+    /// keeps its row, exit code 0 or not. The verdict and the row-close were two
+    /// answers to one question and they disagreed: the prune recorded the tab's
+    /// last run as failed and then deleted the row, which clears that very
+    /// verdict, so a provider that never came up left nothing behind at all.
+    #[test]
+    fn prune_keeps_an_extra_tab_row_when_a_clean_exit_was_instant() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine
+            .session_store
+            .create_session(&session)
+            .expect("persist the agent and its first tab");
+        engine.sessions.push(session);
+        let tab = TabId::new("tab-instant");
+        engine
+            .agent_tabs
+            .insert(tab.clone(), sample_tab("tab-instant", "s1", "claude", 1));
+        engine
+            .providers
+            .insert(tab.clone(), spawn_exit(worktree.path(), "0"));
+
+        wait_for_exit(&mut engine, &tab);
+        let pruned = engine.prune_exited_ptys();
+
+        let entry = pruned
+            .iter()
+            .find(|p| p.id == tab.as_str())
+            .expect("the tab must actually be pruned for this test to say anything");
+        assert!(
+            !entry.tab_closed,
+            "a run that was over in a blink is a provider that never came up, so \
+             the row is the diagnosis surface rather than a conversation somebody ended"
+        );
+        assert!(
+            engine.agent_tabs.contains_key(tab.as_ref_id()),
+            "the row must survive to be selected again"
+        );
+        assert!(
+            engine.tab_last_run_failed(tab.as_str()),
+            "and the verdict must survive with it, or selecting the tab starts the \
+             same doomed run again"
         );
     }
 
@@ -1904,6 +2009,11 @@ mod tests {
         engine
             .agent_tabs
             .insert(TabId::new("tab-x"), sample_tab("tab-x", "s1", "claude", 1));
+        // This test is about the STATUS arriving in time, so it stamps the input
+        // that a deliberate /exit would have left: without it the fixture's
+        // fraction-of-a-second run is a rapid exit, which keeps the row for its
+        // own separate reason and would pass this assertion for the wrong one.
+        engine.note_pty_input("tab-x");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let pruned = loop {

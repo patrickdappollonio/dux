@@ -231,12 +231,19 @@ impl App {
             return;
         }
         self.log_minimal_agent_exit(pty);
-        let status =
-            agent_exit_status_message(pty.exit_success, pty.is_minimal, &pty.output_excerpt, &key);
+        let status = agent_exit_status_message(
+            pty.exit_success,
+            pty.is_minimal,
+            &pty.output_excerpt,
+            pty.read_error.as_deref(),
+            &key,
+        );
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.focus = FocusPane::Left;
-        if pty.exit_success == Some(false) {
+        // A read error is dux killing the agent, not the agent ending, so it
+        // reads as an error even though it left no exit status behind to say so.
+        if pty.exit_success == Some(false) || pty.read_error.is_some() {
             self.set_error(status);
         } else {
             self.set_info(status);
@@ -1639,42 +1646,57 @@ fn initial_commit_project_status(
     }
 }
 
+/// The status line for an agent PTY that has been pruned.
+///
+/// `read_error` is the one fact no other field carries. After a read error there
+/// is almost never an exit status, so without it the message is identical to the
+/// one a child that was merely slow to be reaped gets, and the user is told the
+/// agent exited when what actually happened is that dux stopped being able to
+/// read the terminal and killed a process that may have been perfectly healthy.
 fn agent_exit_status_message(
     exit_success: Option<bool>,
     is_minimal: bool,
     excerpt: &str,
+    read_error: Option<&str>,
     reconnect_key: &str,
 ) -> String {
     const MAX_EXIT_OUTPUT_CHARS: usize = 120;
 
-    let outcome = match exit_success {
-        Some(false) => "exited with an error",
-        Some(true) => "exited",
-        None => "exited",
-    };
     let output = excerpt
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    if output.is_empty() {
-        return format!("Agent CLI process has exited. Press \"{reconnect_key}\" to relaunch.");
-    }
-    if is_minimal {
+    // What the provider left on screen, when there is a short enough run of it
+    // to be worth quoting. Built once so the read-error message can carry it too.
+    let output_clause = if is_minimal && !output.is_empty() {
         let output = truncate_status_output(&output, MAX_EXIT_OUTPUT_CHARS);
         let more = if output.truncated {
             " Full output was written to the logs."
         } else {
             ""
         };
+        format!(" Output: {}.{more}", output.text)
+    } else {
+        String::new()
+    };
+
+    if let Some(error) = read_error {
         return format!(
-            "Agent CLI process {outcome}. Output: {}.{more} Press \"{reconnect_key}\" to relaunch.",
-            output.text
+            "Agent CLI process was killed after a terminal read error, so its exit status is \
+             unknown: {error}.{output_clause} Press \"{reconnect_key}\" to relaunch."
         );
     }
 
-    format!("Agent CLI process has exited. Press \"{reconnect_key}\" to relaunch.")
+    if output_clause.is_empty() {
+        return format!("Agent CLI process has exited. Press \"{reconnect_key}\" to relaunch.");
+    }
+    let outcome = match exit_success {
+        Some(false) => "exited with an error",
+        Some(true) | None => "exited",
+    };
+    format!("Agent CLI process {outcome}.{output_clause} Press \"{reconnect_key}\" to relaunch.")
 }
 
 struct TruncatedStatusOutput {
@@ -1851,6 +1873,11 @@ mod tests {
         )
         .expect("spawn pty");
         app.engine.providers.insert(TabId::new("tab-x"), client);
+        // The exit these tests are about is a deliberate one, and `sh -c` is over
+        // in milliseconds: without the input stamp the rapid-exit rule reads it as
+        // a provider that never came up, which keeps the row for a reason that has
+        // nothing to do with what is under test here.
+        app.engine.note_pty_input("tab-x");
         app.focused_tabs
             .insert(session_id.clone(), "tab-x".to_string());
         app.focus = FocusPane::Center;
@@ -2544,7 +2571,7 @@ mod tests {
     fn agent_exit_status_message_caps_long_provider_output() {
         let long_output = "x".repeat(200);
 
-        let message = agent_exit_status_message(Some(false), true, &long_output, "r");
+        let message = agent_exit_status_message(Some(false), true, &long_output, None, "r");
 
         assert!(message.contains("Output: "));
         assert!(message.contains("…"));
@@ -2557,11 +2584,41 @@ mod tests {
 
     #[test]
     fn agent_exit_status_message_concats_short_provider_output() {
-        let message = agent_exit_status_message(Some(false), true, "first\nsecond", "r");
+        let message = agent_exit_status_message(Some(false), true, "first\nsecond", None, "r");
 
         assert!(message.contains("Output: first second."));
         assert!(!message.contains('|'));
         assert!(!message.contains("Full output was written"));
+    }
+
+    /// A PTY that ended at a READ ERROR says so. The read error leaves no exit
+    /// status, so without this the message is word for word the one a child that
+    /// was merely slow to be reaped gets: the user is told the agent exited, when
+    /// dux stopped being able to read the terminal and killed it.
+    #[test]
+    fn agent_exit_status_message_says_a_read_error_ended_the_run() {
+        let message =
+            agent_exit_status_message(None, true, "boot\nfailed", Some("bad file descriptor"), "r");
+
+        assert!(
+            message.contains("read error"),
+            "the one fact no other field carries must be in the line: {message}"
+        );
+        assert!(
+            message.contains("bad file descriptor"),
+            "the error itself is what makes the line actionable: {message}"
+        );
+        assert!(
+            message.contains("Output: boot failed."),
+            "what the provider managed to print is still worth showing: {message}"
+        );
+        assert!(message.contains("to relaunch"));
+
+        let ordinary = agent_exit_status_message(None, true, "boot\nfailed", None, "r");
+        assert!(
+            !ordinary.contains("read error"),
+            "an ordinary end of input must not gain a read-error clause: {ordinary}"
+        );
     }
 
     #[test]
