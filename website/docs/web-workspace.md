@@ -155,14 +155,14 @@ so and offers to try again. And if the connection is really gone, the blocking
 
 ### Theater mode: one pane, no chrome
 
-The expand button hands the whole screen to the terminal. On a computer it is in the
-terminal's header, next to **Macros…**; on a phone it is the first button in the flap
-that hangs off the band above the terminal. That band is the tab strip when the agent has
+The **Theater** button hands the whole screen to the terminal. On a computer it is in the
+terminal's header, beside **Macros…** and the pane's own `⋯`; on a phone it is the first
+button in the flap that hangs off the band above the terminal. That band is the tab strip when the agent has
 more than one tab and the header itself when it does not, and the flap takes the colour of
 whichever one it is hanging from, so it always reads as part of it. The header, the
 pull-request band and the tab strip slide away and the terminal grows into the space they
 were using; on a phone the app header goes with them, and the flap lifts off the band and
-flies to the floating pill, which is the same four buttons in the same order.
+flies to the floating pill, which is the same buttons in the same order.
 The compose box and the terminal keys stay exactly as you had them, and the pill's `⋯`
 keeps offering the way back to them, so theater is as bare or as equipped as
 you want it. Theater is the only thing that takes the top bar away, and it all comes
@@ -177,12 +177,12 @@ terminal. On a computer it holds the way out, the macro picker and a `⋯` carry
 same **Settings** menu the header's cog carries, so Preferences, new agents and
 everything else stay one tap away, with **Leave theater mode** at the bottom of it. On a
 phone it is the flap that flew there: the theater button (now showing the way out), the
-macro picker, the changed-file count and the same `⋯`, opening the same menu it opened on
-the band. That menu opens with the **Input** group (**Attach a file…**, and the way
-back to the typing bar when you have turned it off), then the agent's own actions, the way
-out of theater while the mode is on, and **Settings**, which drills into
-the app menu the cog carries, so nothing about an agent goes out of reach because you
-went full screen. The changed-file count is the button beside it rather than a row in it.
+macro picker, the changed-file count where there is one, and the same `⋯`, opening the same
+menu it opened on the band. That menu opens with the **Input** group (**Attach a file…**,
+and the way back to the typing bar when you have turned it off), then the pane's own
+actions, the way out of theater while the mode is on, and **Settings**, which drills into
+the app menu the cog carries, so nothing goes out of reach because you went full screen.
+The changed-file count is the button beside it rather than a row in it.
 
 ![Theater mode on a phone: the top bar is gone, the floating pill hovers over the terminal, and the keys and message box are still there.](/screens/phone-theater-pill.png)
 
@@ -429,6 +429,10 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
   the agent's actions and a **Settings** drill into the app
   menu. The flap takes no room from the terminal, so theater does not take it away: it
   lifts off the band and flies to the floating pill instead.
+- A **project or standalone terminal** gets the same screen and the same flap, minus the
+  two things a terminal does not have: there is no changed-file count and no PR chip. Its
+  `⋯` opens the terminal's own menu, with the **Input** group, **Open editor here**,
+  **Open editor in new tab** and **Close…**, then the same **Settings** drill.
 - The **changes** screen is the full Changes pane.
 
 An **accessory bar** sits above the soft keyboard with the keys a phone keyboard lacks:
@@ -479,7 +483,7 @@ What the browser cannot see is a keyboard case, so there is a **typing-surface s
 **Type directly in the terminal**, and **Use virtual input** to come back. Both live in the
 input `⋯`, at the left edge of whichever input row you have, for as long as you have one.
 Once nothing is left under the terminal, **Use virtual input** moves up into the **Input**
-group at the top of the pane's own `⋯` menu (the flap's on a phone, the row menu in the
+group at the top of the pane's own `⋯` menu (the flap's on a phone, the pane header's in the
 sidebar on a computer), which is on screen whatever the pane is doing.
 
 **Your choice wins, on any device, in both directions.** The pointer only decides where you
@@ -504,10 +508,10 @@ Switch to Direct and all of that goes back to the way a plain terminal behaves.
 The message box and the terminal keys are two separate switches, so all four combinations
 are yours to pick: both, the box alone, the keys alone, or neither.
 
-Terminal rows are precious on a phone, so the terminal keys are hideable. Every phone
-terminal screen's `⋯` menu (in the flap on the agent screen, in the header on project and
-standalone terminals) has **Hide terminal keys**, backed by a preference that is also a
-row in Preferences.
+Terminal rows are precious on a phone, so the terminal keys are hideable. **Hide terminal
+keys** sits in the input `⋯` for as long as any row is under the terminal, and in the
+**Input** group of the pane's own `⋯` (the flap's, on every phone pane screen) once none
+is, backed by a preference that is also a row in Preferences.
 
 For the top bar the answer is [theater mode](#theater-mode-one-pane-no-chrome), not a preference. It takes
 the header and the tab strip together, and it hands you the way back at the same time: the

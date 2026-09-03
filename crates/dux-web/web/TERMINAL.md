@@ -1755,8 +1755,9 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     for hiding one thing could disagree about what was on screen. The way back is the
     PILL rather than the input menu, on every screen: that menu belongs to the virtual
     input and goes down with it, so a pane the user is typing directly into would have
-    had none. That is also why the phone's project and standalone terminal screens paint
-    a pill over the pane, having no flap to fly one out of.
+    had none. (The phone's project and standalone terminal screens painted a pill with
+    no flight for one arc, having no flap to fly one out of; they have a flap now, so
+    their pill flies like the agent screen's. See H28.)
     NEVER SHIPPED, so nothing migrates: the key was added on `server-mode` and is
     not in `main` (the check-shipped rule). `UiConfig` has no `deny_unknown_fields`,
     so a config file still carrying a `mobile_top_bar` line loads exactly as it did
@@ -1775,7 +1776,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `setMobileBarVisibility`, collapsed into `setAccessoryBarVisibility`), the five
     UI entry points (`src/lib/settingsDescriptors.ts`'s Preferences row with
     `CustomizeWebappDialog`'s override-awareness, `InputMenuItems`' toggle item with
-    its `topBarToggle` gate, `MobilePaneMenu`'s gate, `MobileShell`'s header-menu
+    its `topBarToggle` gate, the merged pane menu's gate (`MobilePaneMenu` then,
+    `PaneMenu` now), `MobileShell`'s header-menu
     gate, and `TheaterPill`'s hardwired-off gate), the viewer's menu-only row
     (`viewerNeedsMenuRow`, see H20), and the flap band's `topBarVisible` conjunct
     in `MobileShell` (the band is now "strip" exactly when the tab strip shows).
@@ -1788,9 +1790,41 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     top-bar preference at all"; `components/InputMenu.test.tsx` "carries no
     top-bar toggle whatever the caller asks for";
     `components/MobileShell.test.tsx` "ignores a stored mobile_top_bar preference
-    entirely" / "there too"; `components/MobilePaneMenu.test.tsx` (no top-bar item
+    entirely" / "there too"; `components/PaneMenu.test.tsx` (no top-bar item
     in the merged menu); `components/TerminalPane.test.tsx` "TerminalPane input
     menu for a non-owner" suite (no viewer row).
+
+28. **ONE pane menu, four anchors, one body per kind of pane; and the desktop pane
+    header is the computer's anchor.** The merged body (`PaneMenuBody` in
+    `src/components/PaneMenu.tsx`) is opened by the phone's flap, the floating pill,
+    the desktop pane header's `⋯` and the sidebar row's, and it wraps a subject group
+    (`AgentActionsMenu` or `TerminalActionsMenu`, each in its own module) with the
+    pane's INPUT group above and the theater exit plus the Settings drill below. Trap
+    that motivated it: the header used to carry no menu at all, so a computer's only
+    route to an agent's actions was the sidebar row, and the sidebar is exactly what a
+    maximized window and theater take away. Second trap: an anchor that renders a
+    SUBSET is how two menus about one agent drift, so an anchor may change only where
+    the menu opens and how the trigger is drawn (`appearance`: the flap and pill's bare
+    40px circle, or the header cluster's outline `size-8`).
+    THE INPUT GROUP'S ONE-HOME RULE IS UNAFFECTED: what the group holds is the pane's
+    published answer (`lib/paneInputGroup.ts`), so two anchors of the same menu show the
+    same rows and the split that matters is still top menu versus the input `⋯`.
+    WHICH body a surface opens is read off the TARGET, never off `selectedSessionId`,
+    which still names the agent a project terminal was reached from; a session-owned
+    terminal takes the AGENT's body, because the header, the count and the PR chip
+    around it are that agent's.
+    The phone's project and standalone terminal screens moved from three header buttons
+    to the flap in the same change (`MobileActionFlap` is parameterized by subject: a
+    terminal has no changed-file count, and its band is always "plain" because only an
+    agent can have a tab strip), and their pill now runs the ordinary flight.
+    Pinned: `components/PaneMenu.test.tsx` "the pane menu at the desktop header's
+    anchor" suite; `components/InsetHeader.test.tsx` "InsetHeader pane menu" suite;
+    `components/MobileActionFlap.test.tsx` "the docked action flap over a terminal"
+    suite; `components/MobileShell.test.tsx` "hangs the flap off the band and leaves the
+    header to Back and identity" / "opens the terminal's own menu from the flap, not an
+    agent's"; `components/inputWayBack.test.tsx` (both subjects);
+    `components/FlatAgentList.test.tsx` "opens the same merged pane menu the pane header
+    opens".
 
 ## I. Viewer suppression and notifications
 

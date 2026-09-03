@@ -22,9 +22,9 @@ image on your clipboard takes the same route.
 **Attach a file…** opens your browser's ordinary file picker, and lives in two places:
 
 - The **Input** group at the top of the pane's own `⋯` menu (see
-  [The workspace in the browser](/docs/web-workspace)): the flap's on a phone, the agent's
-  or terminal's row menu in the sidebar on a computer, the floating pill's in theater
-  mode. This is the phone entry point, since there is no drag gesture on a touch screen,
+  [The workspace in the browser](/docs/web-workspace)): the flap's on a phone, the pane
+  header's on a computer (the same menu the agent's or terminal's sidebar row opens), the
+  floating pill's in theater mode. This is the phone entry point, since there is no drag gesture on a touch screen,
   and on a computer it is what gives a keyboard-only desktop one. The entry appears while
   that session's terminal is open in front of you and you are the one driving it; close
   the terminal and the entry goes.
