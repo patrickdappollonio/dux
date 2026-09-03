@@ -105,15 +105,7 @@ export function TheaterPill({
   useTheaterPillFocus(exitRef)
   const coarse = useIsCoarsePointer()
   const reducedMotion = usePrefersReducedMotion()
-  // THE PILL DOES NOT RE-CLAMP ITSELF OUT FROM UNDER ITS OWN FLIGHT HOME. The
-  // returning top chrome shrinks the surface while the pill is still resting on
-  // it, and a bottom-hugging pill would be clamped upward with the settle
-  // animation carrying it there over a tenth of a second, so the user watches it
-  // crawl before the flight they asked for even starts. The flight replaces the
-  // position outright, so the clamp has nothing to contribute; an abandoned exit
-  // resumes ordinary clamping at rest.
-  const returning = flight === "expanding" || flight === "returning"
-  const drag = usePillDrag(boxRef, returning)
+  const drag = usePillDrag(boxRef)
   usePillHint()
   const sessionId = session?.id
   // The PTY behind the pane this pill is painted over, named the same way the
@@ -126,6 +118,15 @@ export function TheaterPill({
   // pins the pill at the ones it is leaving and parks it on the flap's, neither
   // of which is a place the drag state has any business holding.
   const flightPlaces = flight !== null && flightOwnsPosition(flight)
+  // THE RETURNING CHROME'S RE-CLAMP IS A SNAP, NEVER A SETTLE. The top chrome
+  // coming back shrinks the surface out from under a resting pill, and a
+  // bottom-hugging one has to come up with it or it spends the whole chrome
+  // stage hanging below the surface, off screen, and the flight then enters
+  // from a place the user never saw it in. So the clamp still runs, instantly:
+  // it is the 150ms settle that made it look wrong, crawling the pill upward
+  // ahead of the gesture it belongs to. The flight leaves from wherever that
+  // clamp put it, which is where the pill is actually painted.
+  const positionSnaps = flightPlaces || flight === "expanding"
 
   return (
     <div
@@ -152,7 +153,7 @@ export function TheaterPill({
         !reducedMotion &&
           !drag.dragging &&
           !drag.justDropped &&
-          !flightPlaces &&
+          !positionSnaps &&
           "transition-[left,top] duration-150 ease-out",
         gripless && PILL_GRIPLESS_CLASS,
         flight === "detaching" && "dux-flight-out",
@@ -726,13 +727,7 @@ interface DragGesture {
  * underneath from ever seeing the move; the handlers stop propagation as well,
  * so nothing in the pane's own tree can start a selection from this gesture.
  */
-function usePillDrag(
-  boxRef: React.RefObject<HTMLDivElement | null>,
-  /// True while a flight home is pending or running, which is the one time a
-  /// re-clamp must not write a position: the flight is about to say where the
-  /// pill is, and moving it first is a slide the user did not ask for.
-  returnPending: boolean,
-): PillDrag {
+function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
   const [position, setPosition] = useState<PillPosition | null>(null)
   const [dragging, setDragging] = useState(false)
   const [justDropped, setJustDropped] = useState(false)
@@ -754,9 +749,6 @@ function usePillDrag(
     pill: { width: 0, height: 0 },
   })
   const gestureRef = useRef<DragGesture | null>(null)
-  // Read rather than depended on, so a phase change does not rebuild the
-  // observer that is watching the surface the phase is currently reshaping.
-  const returnPendingRef = useRef(returnPending)
 
   const place = useCallback((next: PillPosition, persist: boolean) => {
     posRef.current = next
@@ -802,12 +794,11 @@ function usePillDrag(
     )
     if (!next) return
     const current = posRef.current
-    // The sizes above are still recorded, because the next clamp after the
-    // gesture has to be against the surface as it is now; only the RE-CLAMP is
-    // withheld. A pill that has no position at all is a different case and is
-    // placed anyway: a pane remounting mid-flight mounts one, and a pill with
-    // nowhere to be has no flight to fly.
-    if (returnPendingRef.current && current) return
+    // EVERY SURFACE CHANGE RE-CLAMPS, the ones a flight home is about to run
+    // over included: a pill left hanging outside the surface is off screen,
+    // which is worse than any place inside it. What the flight stages change is
+    // whether the move is animated (see `positionSnaps`), never whether it
+    // happens.
     if (current && current.x === next.x && current.y === next.y) return
     // Nothing here writes to storage. The user did not move the pill, a window
     // did, and the position they chose has to survive the window changing back.
@@ -867,16 +858,6 @@ function usePillDrag(
     if (box) ro.observe(box)
     return () => ro.disconnect()
   }, [boxRef, measure, endGesture])
-
-  // An exit that was abandoned leaves the pill on coordinates that were never
-  // re-clamped for the surface it is resting on again, and nothing else is going
-  // to ask: the observer only fires when a box changes shape. So the end of the
-  // suppression is itself a reason to clamp.
-  useLayoutEffect(() => {
-    returnPendingRef.current = returnPending
-    if (returnPending) return
-    measure()
-  }, [returnPending, measure])
 
   // The suppression lasts exactly one painted frame: long enough for the drop's
   // own coordinates to land without easing, short enough that the next nudge or

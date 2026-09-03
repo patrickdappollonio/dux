@@ -977,9 +977,8 @@ describe("the phone flight, with real boxes to measure", () => {
     expect(pill().style.top).toBe("300px")
 
     // The top chrome coming back shrinks the surface under the resting pill.
-    // The flight is about to say where it goes, so nothing re-clamps it there
-    // first: a settle animation crawling the pill upward before the gesture it
-    // belongs to is a slide the user did not ask for.
+    // This pill still fits, so it does not move, and the flight leaves from the
+    // coordinates it has been sitting on all along.
     act(() => view.rerender(flying("expanding")))
     surfaceBox = { left: 0, top: 0, width: 800, height: 380 }
     act(() => playResize())
@@ -991,6 +990,71 @@ describe("the phone flight, with real boxes to measure", () => {
     expect(box.style.top).toBe("300px")
     // From THERE to the flap: (200 - 120, 4 - 300).
     expect(box.style.transform).toBe("translate(80px, -296px)")
+  })
+
+  it("snaps a pill the returning chrome would push off screen back inside", () => {
+    // THE CHROME COMES BACK BEFORE THE FLIGHT DOES, and it takes the surface's
+    // height with it. A bottom-hugging pill that is not re-clamped for the
+    // shorter surface spends the whole chrome stage hanging below it, out of
+    // sight, and the flight then enters from a place the user never saw it in.
+    // So it moves, and it moves instantly: the settle is what made re-clamping
+    // here look wrong, not the clamp.
+    localStorage.setItem(THEATER_PILL_POSITION_KEY, '{"x":120,"y":520}')
+    flapBox = { left: 200, top: 4, width: 200, height: 48 }
+    const view = render(flying("floating"))
+    expect(pill().style.top).toBe("520px")
+
+    act(() => view.rerender(flying("expanding")))
+    surfaceBox = { left: 0, top: 0, width: 800, height: 380 }
+    act(() => playResize())
+    // Inside the shrunken surface: 380 - 48.
+    expect(pill().style.top).toBe("332px")
+    expect(pill().className).not.toContain("transition-[left,top]")
+
+    // And the flight leaves from the clamped spot, which is where it is painted.
+    act(() => view.rerender(flying("returning")))
+    const box = pill()
+    expect(box.style.top).toBe("332px")
+    expect(box.style.transform).toBe("translate(80px, -328px)")
+  })
+
+  it("flies home in the surface's own coordinate space, not the viewport's", () => {
+    // The pill's coordinates are written in its offset parent's space and the
+    // dock is measured in the viewport's, so the translation is only right if
+    // the parent's own origin is added back. A surface at the origin cannot tell
+    // that apart from subtracting it, or from ignoring it altogether.
+    localStorage.setItem(THEATER_PILL_POSITION_KEY, '{"x":120,"y":300}')
+    surfaceBox = { left: 50, top: 30, width: 800, height: 600 }
+    flapBox = { left: 200, top: 4, width: 200, height: 48 }
+    render(flying("returning"))
+    const box = pill()
+    expect(box.style.left).toBe("120px")
+    expect(box.style.top).toBe("300px")
+    // Viewport-wise the pill is at (50 + 120, 30 + 300), and the dock is at
+    // (200, 4): translate(200 - 170, 4 - 330).
+    expect(box.style.transform).toBe("translate(30px, -326px)")
+  })
+
+  it("keeps clamping a pill whose exit was abandoned mid-chrome", () => {
+    // A mode flipped back during the chrome stage rests at `floating` with no
+    // flight at all. Nothing special is owed to that pill: it was clamped on the
+    // way through and it goes on being clamped, with the settle back.
+    localStorage.setItem(THEATER_PILL_POSITION_KEY, '{"x":120,"y":520}')
+    const view = render(flying("floating"))
+    act(() => view.rerender(flying("expanding")))
+    surfaceBox = { left: 0, top: 0, width: 800, height: 380 }
+    act(() => playResize())
+    expect(pill().style.top).toBe("332px")
+
+    act(() => view.rerender(flying("floating")))
+    expect(pill().style.top).toBe("332px")
+    expect(pill().className).toContain("transition-[left,top]")
+
+    // Still live, and still re-derived from the position the user asked for
+    // rather than from the place the last clamp pushed it to: 200 - 48.
+    surfaceBox = { left: 0, top: 0, width: 800, height: 200 }
+    act(() => playResize())
+    expect(pill().style.top).toBe("152px")
   })
 
   it("parks on the dock's real coordinates before it squares up", () => {
