@@ -356,6 +356,23 @@ describe("DeleteSessionDialog", () => {
     expect(screen.queryByText(/not pushed anywhere\./)).toBeNull()
   })
 
+  // One commit is still a whole history, and "all 1 of its commits" is the
+  // sentence admitting a number was slotted into a plural.
+  it("counts a single unpushed commit in the singular", async () => {
+    branchUnpushed.mockResolvedValue({
+      branches: ["develop"],
+      unpushed: { count: 1, has_remote_refs: false },
+    })
+    seed("s3", [attachedSession])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
+    expect(
+      await screen.findByText(
+        /Nothing on it has been pushed anywhere: its only commit exists only on this machine\./,
+      ),
+    ).toBeTruthy()
+  })
+
   it("says nothing about commits when there are none unpushed", async () => {
     branchUnpushed.mockResolvedValue({
     branches: ["develop"],

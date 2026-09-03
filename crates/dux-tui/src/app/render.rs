@@ -840,19 +840,28 @@ pub(super) fn delete_agent_branch_warning(
         // it has nowhere to have pushed to, and the count is its whole history.
         // Saying "not pushed anywhere" there reads as an accusation about work
         // that was never going anywhere, so the sentence says what is true.
-        text.push_str(&match (answer.has_remote_refs, drifted) {
-            (true, false) => format!(" It has {count} {plural} not pushed anywhere."),
-            (true, true) => {
+        text.push_str(&if answer.has_remote_refs {
+            if drifted {
                 format!(" They have {count} {plural} not pushed anywhere between them.")
+            } else {
+                format!(" It has {count} {plural} not pushed anywhere.")
             }
-            (false, false) => format!(
-                " Nothing on it has been pushed anywhere: all {count} of its commits exist \
-                 only on this machine."
-            ),
-            (false, true) => format!(
-                " Nothing on them has been pushed anywhere: all {count} of their commits \
-                 exist only on this machine."
-            ),
+        } else {
+            let (subject, possessive) = if drifted {
+                ("them", "their")
+            } else {
+                ("it", "its")
+            };
+            // A single commit gets its own clause: "all 1 of its commits" is
+            // the sentence admitting it was assembled rather than written.
+            let existence = if count == 1 {
+                format!("{possessive} only commit exists")
+            } else {
+                format!("all {count} of {possessive} commits exist")
+            };
+            format!(
+                " Nothing on {subject} has been pushed anywhere: {existence} only on this machine."
+            )
         });
     }
     Some(text)
@@ -912,6 +921,54 @@ pub(super) fn delete_worktree_branch_line(branch: &str, delete_branch: bool) -> 
     } else {
         format!("The branch \"{branch}\" is kept. Only the working directory is removed.")
     }
+}
+
+/// A paragraph of dialog body text as one string per rendered row, each
+/// carrying the body's one-space indent.
+///
+/// The dialog bodies hand-split their fixed sentences into lines that each
+/// start with a space. A sentence assembled at runtime has no fixed length, so
+/// it is wrapped here instead: handing the whole thing to the `Paragraph` would
+/// indent the first row and leave every continuation flush against the frame,
+/// which is the hanging indent this exists to prevent.
+///
+/// Widths are counted in characters, never bytes, and a word too long for the
+/// line is hard-broken rather than pushed past the frame.
+pub(super) fn indented_body_lines(text: &str, inner_width: u16) -> Vec<String> {
+    let width = usize::from(inner_width).saturating_sub(1);
+    if width == 0 {
+        return vec![format!(" {text}")];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for word in text.split_whitespace() {
+        let mut word = word;
+        loop {
+            let word_width = word.chars().count();
+            let separator = usize::from(current_width > 0);
+            if current_width + separator + word_width <= width {
+                if separator == 1 {
+                    current.push(' ');
+                }
+                current.push_str(word);
+                current_width += separator + word_width;
+                break;
+            }
+            if current_width > 0 {
+                lines.push(std::mem::take(&mut current));
+                current_width = 0;
+                continue;
+            }
+            let head: String = word.chars().take(width).collect();
+            word = &word[head.len()..];
+            lines.push(head);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines.into_iter().map(|line| format!(" {line}")).collect()
 }
 
 fn wrapped_line_count(lines: &[Line<'_>], width: u16, trim: bool) -> u16 {
@@ -9456,10 +9513,12 @@ impl App {
             if let Some(warning) =
                 delete_agent_branch_warning(branch_provenance, &warned_branches, *unpushed_commits)
             {
-                body_lines.push(Line::from(Span::styled(
-                    format!(" {warning}"),
-                    Style::default().fg(self.theme.warning_fg),
-                )));
+                for line in indented_body_lines(&warning, inner_width) {
+                    body_lines.push(Line::from(Span::styled(
+                        line,
+                        Style::default().fg(self.theme.warning_fg),
+                    )));
+                }
             }
         } else {
             body_lines.push(Line::from(Span::styled(
@@ -22076,6 +22135,109 @@ mod tests {
                  only on this machine."
             )),
             Some(true)
+        );
+    }
+
+    /// One commit is still a whole history, and "all 1 of its commits" is the
+    /// sentence admitting a number was slotted into a plural.
+    #[test]
+    fn the_delete_dialog_counts_a_single_commit_in_the_singular() {
+        let one_commit = Some(dux_core::git::UnpushedCommits {
+            count: 1,
+            has_remote_refs: false,
+        });
+        assert_eq!(
+            super::delete_agent_branch_warning(
+                dux_core::model::BranchProvenance::AttachedExisting,
+                &["feature"],
+                one_commit
+            )
+            .as_deref(),
+            Some(
+                "This branch existed before the agent. Nothing on it has been pushed \
+                 anywhere: its only commit exists only on this machine."
+            )
+        );
+        assert_eq!(
+            super::delete_agent_branch_warning(
+                dux_core::model::BranchProvenance::AttachedExisting,
+                &["develop-next", "develop"],
+                one_commit
+            )
+            .as_deref()
+            .map(|text| text.contains(
+                "Nothing on them has been pushed anywhere: their only commit exists only \
+                 on this machine."
+            )),
+            Some(true)
+        );
+    }
+
+    /// The warning is one runtime-assembled sentence long enough to wrap, and
+    /// every row of it must share the left edge the rest of the body has. The
+    /// `Paragraph` would indent the first row alone and leave the rest flush
+    /// against the frame, which reads as a paragraph that lost its footing.
+    #[test]
+    fn the_delete_warning_paragraph_keeps_one_left_edge() {
+        let mut app = test_app(default_bindings());
+        app.prompt = delete_agent_prompt_on(
+            dux_core::model::BranchProvenance::AttachedExisting,
+            "develop-next",
+            "develop",
+            true,
+            true,
+            Some(dux_core::git::UnpushedCommits {
+                count: 12,
+                has_remote_refs: false,
+            }),
+        );
+        let screen = rendered_screen(&mut app);
+        let rows: Vec<&str> = screen.lines().collect();
+        let first = rows
+            .iter()
+            .position(|row| row.contains("The worktree moved from"))
+            .unwrap_or_else(|| panic!("the warning must be on screen:\n{screen}"));
+        let last = rows
+            .iter()
+            .rposition(|row| row.contains("machine."))
+            .unwrap_or_else(|| panic!("the warning must end on screen:\n{screen}"));
+        assert!(
+            last > first,
+            "the warning must actually wrap for this test to mean anything:\n{screen}"
+        );
+        // The column the first row's text starts at, counted in characters
+        // because every row is full of box-drawing glyphs.
+        let byte = rows[first]
+            .find("The worktree moved from")
+            .expect("the row");
+        let column = rows[first][..byte].chars().count();
+        for row in &rows[first..=last] {
+            let cells: Vec<char> = row.chars().collect();
+            assert_eq!(
+                (cells[column - 2], cells[column - 1], cells[column] == ' '),
+                ('│', ' ', false),
+                "every warning row starts one column in from the frame, {row:?} does not:\n{screen}"
+            );
+        }
+    }
+
+    /// The wrapper is the reason the rows above line up, so its own contract is
+    /// pinned here: every line indented once, nothing wider than the frame, and
+    /// a word too long to fit broken rather than pushed through the border.
+    #[test]
+    fn indented_body_lines_indents_every_row_within_the_frame() {
+        let wrapped = super::indented_body_lines("one two three four five six", 12);
+        assert!(
+            wrapped.iter().all(|line| line.starts_with(' ')
+                && !line.starts_with("  ")
+                && line.chars().count() <= 12),
+            "{wrapped:?}"
+        );
+        assert_eq!(wrapped.concat().split_whitespace().count(), 6);
+        assert_eq!(
+            super::indented_body_lines("supercalifragilistic", 8),
+            vec![" superca", " lifragi", " listic"],
+            "a word wider than the line is broken, never overflowed"
         );
     }
 

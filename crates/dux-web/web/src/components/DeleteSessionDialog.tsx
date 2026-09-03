@@ -78,10 +78,16 @@ function branchWarning(
           : `It has ${count} ${plural} not pushed anywhere.`,
       )
     } else {
+      const subject = drifted ? "them" : "it"
+      const possessive = drifted ? "their" : "its"
+      // A single commit gets its own clause: "all 1 of its commits" is the
+      // sentence admitting it was assembled rather than written.
+      const existence =
+        count === 1
+          ? `${possessive} only commit exists`
+          : `all ${count} of ${possessive} commits exist`
       parts.push(
-        drifted
-          ? `Nothing on them has been pushed anywhere: all ${count} of their commits exist only on this machine.`
-          : `Nothing on it has been pushed anywhere: all ${count} of its commits exist only on this machine.`,
+        `Nothing on ${subject} has been pushed anywhere: ${existence} only on this machine.`,
       )
     }
   }
