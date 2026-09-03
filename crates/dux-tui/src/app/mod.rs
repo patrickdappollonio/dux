@@ -275,6 +275,10 @@ pub struct App {
     /// busy→final status rides the engine's own worker channel; only the notes
     /// themselves come back here. `Some` means a fetch is in flight, which is
     /// what stops the palette command from starting a second one.
+    /// The delete-agent dialog's pending unpushed-commit count. One-shot: set
+    /// when the dialog opens on a branch that predates its agent, cleared by
+    /// `drain_unpushed_count` when the answer lands.
+    pub(crate) unpushed_count_rx: Option<mpsc::Receiver<UnpushedCountAnswer>>,
     pub(crate) notes_fetch_rx: Option<mpsc::Receiver<NotesFetched>>,
     /// Notes that arrived while the user had a DIFFERENT modal open.
     /// `PromptState` is a single slot, so showing the what's-new screen the
@@ -1879,15 +1883,61 @@ impl DeleteAgentTarget {
             Self::Folder { .. } => false,
         }
     }
+
+    /// Whether this dialog offers the "also delete the branch" checkbox, given
+    /// the worktree box's current state.
+    ///
+    /// THE ONE ANSWER again, for the same reason: the renderer, the focus ring
+    /// and the click handler must agree about whether the control is there.
+    /// git will not delete a branch that is still checked out in a worktree, so
+    /// with the worktree staying there is genuinely nothing on offer, and a
+    /// permanently disabled box that happens to look ticked would promise
+    /// exactly the deletion it cannot do.
+    pub(crate) fn offers_branch_checkbox(&self, delete_worktree: bool) -> bool {
+        delete_worktree && self.offers_worktree_checkbox()
+    }
+
+    /// The branch the box names and the unpushed count is about: the one the
+    /// agent was BORN on, whose provenance the warning describes. Matches
+    /// `BranchDeleteInputs::warned_branch` in the engine, so the dialog and the
+    /// count can never name different branches.
+    pub(crate) fn warned_branch(&self) -> Option<&str> {
+        match self {
+            Self::Managed {
+                branch_name,
+                initial_branch,
+                ..
+            } => Some(if initial_branch.is_empty() {
+                branch_name.as_str()
+            } else {
+                initial_branch.as_str()
+            }),
+            Self::Folder { .. } => None,
+        }
+    }
+}
+
+/// A landed unpushed-commit count, tagged with the agent it was computed for so
+/// a stale one cannot be rendered against a different branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UnpushedCountAnswer {
+    pub(crate) session_id: String,
+    /// `None` when git could not answer, which the dialog renders as silence.
+    pub(crate) count: Option<u32>,
 }
 
 /// Which selectable element has focus in the Delete Agent confirmation modal.
-/// Focus cycles through all three via Tab / arrow keys / h / l.
+/// Focus cycles through the available stops via the movement bindings; which
+/// stops exist is answered once by [`DeleteAgentTarget::offers_worktree_checkbox`]
+/// and by whether the worktree is actually going.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeleteAgentFocus {
     Cancel,
     Delete,
-    Checkbox,
+    WorktreeCheckbox,
+    /// The "also delete the branch" box, which exists only while the worktree
+    /// box is ticked.
+    BranchCheckbox,
 }
 
 /// Which selectable element has focus in the Non-Default Branch confirmation
@@ -2100,6 +2150,19 @@ pub(crate) enum PromptState {
         target: DeleteAgentTarget,
         focus: DeleteAgentFocus,
         delete_worktree: bool,
+        /// The "also delete the branch" answer. Starts in the provenance
+        /// default (ticked for a branch dux made, unticked for one that
+        /// predates the agent) and is overridable in both directions, which is
+        /// what makes it a control rather than a label. Only meaningful while
+        /// `delete_worktree` is set: git will not delete a branch that is still
+        /// checked out in a worktree, so the box is not offered otherwise.
+        delete_branch: bool,
+        /// Commits on that branch reachable from no remote-tracking ref, once
+        /// the background worker has answered. `None` is "not known": either
+        /// the answer has not landed yet or git could not give one, and the
+        /// dialog says nothing about commits in both cases rather than
+        /// guessing a number.
+        unpushed_commits: Option<u32>,
     },
     ConfirmDeleteTerminal {
         terminal_id: String,
@@ -2878,6 +2941,9 @@ impl OverlayMouseLayoutState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayCheckboxId {
     DeleteAgentWorktree,
+    /// The delete-agent dialog's "also delete the branch" box. Distinct from
+    /// [`Self::DeleteWorktreeBranch`], which is the worktree manager's.
+    DeleteAgentBranch,
     DeleteWorktreeBranch,
     RenameSessionBranch,
     NonDefaultBranchCheckoutDefault,
@@ -3016,6 +3082,9 @@ pub(crate) enum OverlayMouseLayout {
         cancel_button: Rect,
         delete_button: Rect,
         checkbox: Option<OverlayCheckbox>,
+        /// The branch box, published only where it is actually painted, which
+        /// is only while the worktree box is ticked.
+        branch_checkbox: Option<OverlayCheckbox>,
     },
     ConfirmDeleteTerminal {
         cancel_button: Rect,
@@ -3665,6 +3734,7 @@ impl App {
             last_error_dialog_height: 0,
             last_error_dialog_lines: 0,
             pending_first_load: None,
+            unpushed_count_rx: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,
             notes_fetch_explicit_request: Arc::new(AtomicBool::new(false)),

@@ -4722,6 +4722,7 @@ impl App {
         let PromptState::ConfirmDeleteAgent {
             focus,
             delete_worktree,
+            delete_branch,
             target,
             ..
         } = &mut self.prompt
@@ -4732,8 +4733,12 @@ impl App {
             (DeleteAgentFocus::Cancel, true),
             (DeleteAgentFocus::Delete, true),
             (
-                DeleteAgentFocus::Checkbox,
+                DeleteAgentFocus::WorktreeCheckbox,
                 target.offers_worktree_checkbox(),
+            ),
+            (
+                DeleteAgentFocus::BranchCheckbox,
+                target.offers_branch_checkbox(*delete_worktree),
             ),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
@@ -4741,7 +4746,15 @@ impl App {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(forward) => *focus = next_focus(&ring, *focus, forward),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
-                DeleteAgentFocus::Checkbox => *delete_worktree = !*delete_worktree,
+                DeleteAgentFocus::WorktreeCheckbox => {
+                    *delete_worktree = !*delete_worktree;
+                    // Unticking the worktree takes the branch box away with it,
+                    // and focus must not be left on a control that is no longer
+                    // painted. Focus cannot BE the branch box here (this arm ran
+                    // because the worktree box had focus), so the worktree box
+                    // is where it stays.
+                }
+                DeleteAgentFocus::BranchCheckbox => *delete_branch = !*delete_branch,
                 DeleteAgentFocus::Cancel => {
                     return Some(self.resolve_confirm_delete_agent(false));
                 }
@@ -6432,15 +6445,23 @@ impl App {
                 cancel_button,
                 delete_button,
                 checkbox,
-            } => Self::checkbox_before_buttons_target(
-                checkbox,
-                &[
-                    (cancel_button, PromptMouseTarget::ConfirmDeleteCancel),
-                    (delete_button, PromptMouseTarget::ConfirmDeleteConfirm),
-                ],
-                column,
-                row,
-            ),
+                branch_checkbox,
+            } => {
+                if let Some(branch_checkbox) = branch_checkbox
+                    && contains_point(branch_checkbox.rect, column, row)
+                {
+                    return Some(PromptMouseTarget::Checkbox(branch_checkbox.id));
+                }
+                Self::checkbox_before_buttons_target(
+                    checkbox,
+                    &[
+                        (cancel_button, PromptMouseTarget::ConfirmDeleteCancel),
+                        (delete_button, PromptMouseTarget::ConfirmDeleteConfirm),
+                    ],
+                    column,
+                    row,
+                )
+            }
             OverlayMouseLayout::ConfirmDeleteTerminal {
                 cancel_button,
                 delete_button,
@@ -7518,12 +7539,26 @@ impl App {
     }
 
     pub(super) fn resolve_confirm_delete_agent(&mut self, confirm: bool) -> bool {
-        let (session_id, delete_worktree) = match &self.prompt {
+        let (session_id, delete_worktree, branch_answer) = match &self.prompt {
             PromptState::ConfirmDeleteAgent {
                 session_id,
                 delete_worktree,
+                delete_branch,
+                target,
                 ..
-            } => (session_id.clone(), *delete_worktree),
+            } => (
+                session_id.clone(),
+                *delete_worktree,
+                // The answer travels only when the box was actually on screen.
+                // With the worktree kept there is no branch offer at all, and a
+                // shared worktree preserves everything whatever is ticked, so
+                // both send nothing and the engine keeps its own default: an
+                // answer nobody was asked for is a decision made on a click
+                // that never happened.
+                target
+                    .offers_branch_checkbox(*delete_worktree)
+                    .then_some(*delete_branch),
+            ),
             _ => return false,
         };
         self.prompt = PromptState::None;
@@ -7531,7 +7566,7 @@ impl App {
             // Dispatches git work to a worker when needed, so the UI stays
             // responsive. Errors arrive asynchronously via
             // `WorkerEvent::WorktreeRemoveCompleted`.
-            self.begin_delete_session(&session_id, delete_worktree, None);
+            self.begin_delete_session(&session_id, delete_worktree, branch_answer);
         }
         false
     }
@@ -8195,7 +8230,21 @@ impl App {
                     && target.offers_worktree_checkbox()
                 {
                     *delete_worktree = !*delete_worktree;
-                    *focus = DeleteAgentFocus::Checkbox;
+                    *focus = DeleteAgentFocus::WorktreeCheckbox;
+                }
+            }
+            OverlayCheckboxId::DeleteAgentBranch => {
+                if let PromptState::ConfirmDeleteAgent {
+                    delete_worktree,
+                    delete_branch,
+                    focus,
+                    target,
+                    ..
+                } = &mut self.prompt
+                    && target.offers_branch_checkbox(*delete_worktree)
+                {
+                    *delete_branch = !*delete_branch;
+                    *focus = DeleteAgentFocus::BranchCheckbox;
                 }
             }
             OverlayCheckboxId::DeleteWorktreeBranch => {
@@ -11990,6 +12039,7 @@ mod tests {
         };
 
         app.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
+            branch_checkbox: None,
             cancel_button: hit,
             delete_button: hit,
             checkbox: Some(checkbox),
@@ -12390,6 +12440,7 @@ not_a_real_action = ["x"]
 
     fn install_confirm_delete_overlay(app: &mut App) {
         app.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
+            branch_checkbox: None,
             cancel_button: Rect::new(34, 10, 16, 3),
             delete_button: Rect::new(52, 10, 16, 3),
             checkbox: Some(OverlayCheckbox {
@@ -23250,6 +23301,8 @@ cyan = "#00ffff"
         // immediate feedback for cursor moves and toggles.
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            delete_branch: false,
+            unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -23275,7 +23328,10 @@ cyan = "#00ffff"
 
         match &app.prompt {
             PromptState::ConfirmDeleteAgent {
-                delete_worktree, ..
+                delete_branch: false,
+                unpushed_commits: None,
+                delete_worktree,
+                ..
             } => {
                 assert!(*delete_worktree, "checkbox toggles on mouse-down");
             }
@@ -25819,6 +25875,8 @@ cyan = "#00ffff"
     fn mouse_click_delete_dialog_cancel_button_closes_prompt() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            delete_branch: false,
+            unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -25849,6 +25907,8 @@ cyan = "#00ffff"
     fn mouse_click_delete_dialog_checkbox_toggles_delete_worktree() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            delete_branch: false,
+            unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -25872,12 +25932,14 @@ cyan = "#00ffff"
 
         match &app.prompt {
             PromptState::ConfirmDeleteAgent {
+                delete_branch: false,
+                unpushed_commits: None,
                 delete_worktree,
                 focus,
                 ..
             } => {
                 assert!(*delete_worktree);
-                assert_eq!(*focus, DeleteAgentFocus::Checkbox);
+                assert_eq!(*focus, DeleteAgentFocus::WorktreeCheckbox);
             }
             other => panic!("expected delete prompt, got {other:?}"),
         }
@@ -25890,6 +25952,8 @@ cyan = "#00ffff"
 
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            delete_branch: false,
+            unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -25916,6 +25980,7 @@ cyan = "#00ffff"
 
         let (checkbox, cancel_button) = match app.overlay_layout.active {
             OverlayMouseLayout::ConfirmDeleteAgent {
+                branch_checkbox: None,
                 checkbox: Some(checkbox),
                 cancel_button,
                 ..
@@ -25941,10 +26006,135 @@ cyan = "#00ffff"
         );
     }
 
+    /// A delete-agent prompt on a managed agent in a chosen state.
+    fn delete_agent_prompt_state(
+        app: &App,
+        provenance: dux_core::model::BranchProvenance,
+        delete_worktree: bool,
+        delete_branch: bool,
+    ) -> PromptState {
+        PromptState::ConfirmDeleteAgent {
+            session_id: app.engine.sessions[0].id.clone(),
+            agent_label: "agent".to_string(),
+            target: crate::app::DeleteAgentTarget::Managed {
+                branch_name: "develop".to_string(),
+                initial_branch: "develop".to_string(),
+                branch_provenance: provenance,
+                worktree_shared: false,
+            },
+            focus: DeleteAgentFocus::Cancel,
+            delete_worktree,
+            delete_branch,
+            unpushed_commits: None,
+        }
+    }
+
+    fn delete_agent_focus(app: &App) -> DeleteAgentFocus {
+        match &app.prompt {
+            PromptState::ConfirmDeleteAgent { focus, .. } => *focus,
+            other => panic!("expected delete-agent confirmation, got {other:?}"),
+        }
+    }
+
+    /// The branch box is a focus stop only while it is painted, so the ring
+    /// asks the same question the renderer does.
+    #[test]
+    fn the_branch_box_is_a_focus_stop_only_while_the_worktree_is_going() {
+        let mut app = test_app(default_bindings());
+        app.prompt = delete_agent_prompt_state(
+            &app,
+            dux_core::model::BranchProvenance::AttachedExisting,
+            false,
+            false,
+        );
+        // Cancel, Delete, worktree box, and back to Cancel: three stops.
+        for expected in [
+            DeleteAgentFocus::Delete,
+            DeleteAgentFocus::WorktreeCheckbox,
+            DeleteAgentFocus::Cancel,
+        ] {
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(delete_agent_focus(&app), expected);
+        }
+
+        app.prompt = delete_agent_prompt_state(
+            &app,
+            dux_core::model::BranchProvenance::AttachedExisting,
+            true,
+            false,
+        );
+        for expected in [
+            DeleteAgentFocus::Delete,
+            DeleteAgentFocus::WorktreeCheckbox,
+            DeleteAgentFocus::BranchCheckbox,
+            DeleteAgentFocus::Cancel,
+        ] {
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(
+                delete_agent_focus(&app),
+                expected,
+                "the branch box joins the ring once the worktree is going"
+            );
+        }
+    }
+
+    /// Space acts on the focused control, which is the universal convention
+    /// every dialog follows.
+    #[test]
+    fn space_toggles_the_focused_delete_agent_checkbox() {
+        let mut app = test_app(default_bindings());
+        app.prompt = delete_agent_prompt_state(
+            &app,
+            dux_core::model::BranchProvenance::AttachedExisting,
+            true,
+            false,
+        );
+        app.prompt = match app.prompt {
+            PromptState::ConfirmDeleteAgent {
+                session_id,
+                agent_label,
+                target,
+                delete_worktree,
+                delete_branch,
+                unpushed_commits,
+                ..
+            } => PromptState::ConfirmDeleteAgent {
+                session_id,
+                agent_label,
+                target,
+                focus: DeleteAgentFocus::BranchCheckbox,
+                delete_worktree,
+                delete_branch,
+                unpushed_commits,
+            },
+            other => panic!("expected delete-agent confirmation, got {other:?}"),
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::ConfirmDeleteAgent {
+                delete_branch,
+                delete_worktree,
+                ..
+            } => {
+                assert!(*delete_branch, "Space must tick the focused branch box");
+                assert!(
+                    *delete_worktree,
+                    "and must not disturb the box it does not have focus on"
+                );
+            }
+            other => panic!("expected delete-agent confirmation, got {other:?}"),
+        }
+    }
+
     #[test]
     fn shift_tab_moves_delete_agent_focus_backwards() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            delete_branch: false,
+            unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -25970,7 +26160,7 @@ cyan = "#00ffff"
             PromptState::ConfirmDeleteAgent { focus, .. } => {
                 assert_eq!(
                     *focus,
-                    DeleteAgentFocus::Checkbox,
+                    DeleteAgentFocus::WorktreeCheckbox,
                     "Shift-Tab should move backward from Cancel to the checkbox"
                 );
             }
@@ -25996,6 +26186,8 @@ cyan = "#00ffff"
     fn tab_with_shift_moves_delete_agent_focus_backwards() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            delete_branch: false,
+            unpushed_commits: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -26021,7 +26213,7 @@ cyan = "#00ffff"
             PromptState::ConfirmDeleteAgent { focus, .. } => {
                 assert_eq!(
                     *focus,
-                    DeleteAgentFocus::Checkbox,
+                    DeleteAgentFocus::WorktreeCheckbox,
                     "Shift-Tab delivered as Tab + Shift should move backward to the checkbox"
                 );
             }
@@ -35763,6 +35955,8 @@ cyan = "#00ffff"
         // ── ConfirmDeleteAgent: Cancel -> Delete -> Checkbox.
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            delete_branch: false,
+            unpushed_commits: None,
             session_id: "s1".to_string(),
             agent_label: "b".to_string(),
             target: crate::app::DeleteAgentTarget::Managed {
@@ -35778,7 +35972,7 @@ cyan = "#00ffff"
         match &app.prompt {
             PromptState::ConfirmDeleteAgent { focus, .. } => assert_eq!(
                 *focus,
-                DeleteAgentFocus::Checkbox,
+                DeleteAgentFocus::WorktreeCheckbox,
                 "reverse from the first stop must land on the LAST"
             ),
             other => panic!("expected the delete confirmation, got {other:?}"),

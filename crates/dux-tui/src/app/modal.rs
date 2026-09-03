@@ -1033,6 +1033,8 @@ mod tests {
             (
                 "ConfirmDeleteAgent",
                 PromptState::ConfirmDeleteAgent {
+                    delete_branch: false,
+                    unpushed_commits: None,
                     session_id: "s1".to_string(),
                     agent_label: "b".to_string(),
                     target: crate::app::DeleteAgentTarget::Managed {

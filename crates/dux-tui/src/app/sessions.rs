@@ -1891,14 +1891,78 @@ impl App {
                 }
             }
         };
+        // The branch box starts in the provenance default: ticked for a branch
+        // dux made, unticked for one that predates the agent. Both are
+        // overridable, which is the whole point of it being a control.
+        let delete_branch = session
+            .branch_provenance()
+            .is_some_and(|provenance| provenance.dux_may_delete_branch());
         self.prompt = PromptState::ConfirmDeleteAgent {
             session_id: session.id.clone(),
             agent_label: session.display_label(),
             target,
             focus: DeleteAgentFocus::Cancel, // Cancel is the safe default
             delete_worktree: false,          // Opt-in destructive action
+            delete_branch,
+            unpushed_commits: None,
         };
+        // Asked only where the warning would use it: a branch dux created is
+        // going because the user made it, and counting its commits would buy a
+        // git call per open to say nothing new. Never on the UI thread.
+        if !delete_branch {
+            self.spawn_unpushed_commit_count(&session.id);
+        }
         Ok(())
+    }
+
+    /// Count the branch's commits that no remote-tracking ref reaches, off the
+    /// UI thread, and hand the answer back through a one-shot channel that
+    /// `drain_unpushed_count` reads.
+    ///
+    /// One-shot rather than a stored fact: the number is only ever rendered by
+    /// the dialog that asked for it, and it goes stale the moment the user
+    /// commits or pushes, so caching it would mean showing a stale count on the
+    /// one screen that must be right.
+    fn spawn_unpushed_commit_count(&mut self, session_id: &str) {
+        let Some(inputs) = self.engine.branch_delete_inputs(session_id) else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.unpushed_count_rx = Some(rx);
+        let session_id = session_id.to_string();
+        std::thread::spawn(move || {
+            let count = dux_core::git::unpushed_commit_count(
+                std::path::Path::new(&inputs.project_path),
+                inputs.warned_branch(),
+            )
+            .ok();
+            let _ = tx.send(UnpushedCountAnswer { session_id, count });
+        });
+    }
+
+    /// Fold a landed unpushed-commit count into the dialog that asked for it.
+    ///
+    /// Tagged with the session id and dropped when it does not match, because
+    /// the user can close this dialog and open another one while the git call
+    /// is still running, and a count from the previous branch rendered against
+    /// this one is a number about the wrong thing.
+    pub(crate) fn drain_unpushed_count(&mut self) {
+        let Some(rx) = self.unpushed_count_rx.as_ref() else {
+            return;
+        };
+        let Ok(answer) = rx.try_recv() else {
+            return;
+        };
+        self.unpushed_count_rx = None;
+        if let PromptState::ConfirmDeleteAgent {
+            session_id,
+            unpushed_commits,
+            ..
+        } = &mut self.prompt
+            && *session_id == answer.session_id
+        {
+            *unpushed_commits = answer.count;
+        }
     }
 
     /// Delete the agent session identified by `session_id`, blocking the
@@ -4498,6 +4562,7 @@ mod tests {
             last_error_dialog_height: 0,
             last_error_dialog_lines: 0,
             pending_first_load: None,
+            unpushed_count_rx: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,
             notes_fetch_explicit_request: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
