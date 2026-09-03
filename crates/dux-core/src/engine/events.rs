@@ -1116,14 +1116,19 @@ impl Engine {
             self.resume_fallback_candidates
                 .insert(tab_id.clone(), Instant::now());
         }
-        // Session-level running state follows the SLOT tab only: an extra-tab
-        // launch must not flip the whole agent to Active or persist
-        // desired_running (that would light the sidebar and auto-reopen the
-        // provider the agent comes back as).
+        // AUTO-REOPEN INTENT follows the SLOT tab only: an extra-tab launch must
+        // not persist desired_running, or the agent comes back running the
+        // provider of a tab nobody asked to be the agent.
         if is_slot_tab {
             self.mark_session_desired_running(&session.id, true);
-            self.mark_session_status(&session.id, SessionStatus::Active);
         }
+        // STATUS is an any-tab rollup, exactly like liveness and attention, so
+        // any tab coming up makes the agent active. Adding a tab to a dormant
+        // agent launches it and used to leave the agent sitting under Inactive
+        // on both surfaces, with a live provider in it and nothing saying so.
+        // The exit path already agrees: it detaches the agent only once its LAST
+        // live tab is gone.
+        self.mark_session_status(&session.id, SessionStatus::Active);
         // Record the provider that actually launched (the effective per-tab
         // provider), so directory-scoped resume state stays correct even when a
         // extra tab ran a different provider than the session default.

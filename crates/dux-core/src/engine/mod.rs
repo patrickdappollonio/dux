@@ -10208,10 +10208,16 @@ mod tab_ops_tests {
         );
     }
 
+    /// Launching an extra tab wakes the AGENT, because a live tab is a live
+    /// agent however it was reached, and leaves the auto-reopen intent alone,
+    /// because that names which provider the agent comes back as.
     #[test]
-    fn extra_tab_launch_ready_does_not_flip_session_state() {
+    fn extra_tab_launch_ready_wakes_the_agent_without_claiming_its_auto_reopen() {
         let (mut engine, tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
+        // A dormant agent nobody asked to be reopened, which is what an extra
+        // tab's launch must leave alone.
+        engine.mark_session_desired_running("s1", false);
         let tab = AgentTab {
             id: "tab-1".to_string(),
             session_id: "s1".to_string(),
@@ -10241,9 +10247,11 @@ mod tab_ops_tests {
 
         // The extra tab's PTY is tracked under its own key...
         assert!(engine.providers.contains_key(TabIdRef::new("tab-1")));
-        // ...but the session's own running state is untouched: not flipped to
-        // Active, because only the slot tab moves it.
-        assert_eq!(engine.sessions[0].status, SessionStatus::Detached);
+        // ...and the agent it belongs to is visibly running on both surfaces,
+        // rather than sitting under Inactive with a live provider in it.
+        assert_eq!(engine.sessions[0].status, SessionStatus::Active);
+        // The auto-reopen intent stays where it was: only the slot tab moves it.
+        assert!(!engine.sessions[0].desired_running);
     }
 
     #[test]

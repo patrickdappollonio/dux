@@ -887,8 +887,10 @@ describe("FlatAgentList attach-a-file entries", () => {
   it("appears in the agent menu once one of its panes publishes it", async () => {
     const attach = vi.fn()
     const mod = await import("@/lib/attachRegistry")
-    // The first displayed agent is Alpha (name sort). Its session-slot tab's id
-    // IS the session id, which is what a mounted pane registers under.
+    // The first displayed agent is Alpha (name sort), and this fixture gives
+    // every session a slot tab id equal to its own id, which is what a mounted
+    // pane registers under. A real slot tab id is generated and is not the
+    // session id.
     mod.registerAttachCapability("alpha", attach)
     await openAgentMenu()
     fireEvent.click(item()!)
@@ -957,8 +959,10 @@ describe("FlatAgentList input group in the row menus", () => {
 
   it("carries the group, labelled, once the agent's pane publishes one", async () => {
     const mod = await import("@/lib/paneInputGroup")
-    // The first displayed agent is Alpha (name sort), and its session-slot
-    // tab's id IS the session id, which is what a mounted pane registers under.
+    // The first displayed agent is Alpha (name sort), and this fixture gives
+    // every session a slot tab id equal to its own id, which is what a mounted
+    // pane registers under. A real slot tab id is generated and is not the
+    // session id.
     mod.registerPaneInputGroup("alpha", {
       surfaceSwitch: true,
       keysToggle: false,
