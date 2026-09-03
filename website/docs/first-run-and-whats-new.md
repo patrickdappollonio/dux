@@ -26,7 +26,9 @@ an empty sidebar. It is a short orientation:
 
 Underneath sit the same three steps: add a project, create an agent, launch. Two
 buttons close it out, one opening the project picker so you can add your first project
-right there, the other opening [getdux.app](https://getdux.app).
+right there, the other simply closing the screen. The address of
+[getdux.app](https://getdux.app) sits alongside them so you know where to find the rest,
+and the frame itself tells you which key closes the screen.
 
 Here is the whole thing on a fresh install, rubber duck included:
 

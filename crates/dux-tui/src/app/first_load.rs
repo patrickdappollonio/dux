@@ -206,16 +206,25 @@ impl FirstLoadPrompt {
     }
 
     /// Exactly two buttons per screen; the first is the primary.
+    ///
+    /// Both screens' SECONDARY is "Close": a way out has to be visible on the
+    /// first screen a new user ever sees, exactly as it already is on the
+    /// what's-new screen. The welcome screen's old secondary opened the website,
+    /// which left the modal with no visible way to leave at all.
     pub(crate) fn buttons(&self) -> [&'static str; 2] {
         match &self.screen {
-            FirstLoadScreen::Welcome(_) => ["Add a project", "Visit getdux.app"],
+            FirstLoadScreen::Welcome(_) => ["Add a project", "Close"],
             FirstLoadScreen::WhatsNew(_) => ["Open full notes", "Close"],
         }
     }
 
-    /// The destination the screen's link button opens, shown right-aligned and
-    /// dimmed next to the buttons so the user can see where a link goes before
-    /// pressing it.
+    /// The destination shown right-aligned and dimmed next to the buttons.
+    ///
+    /// On the what's-new screen it is where the primary button goes, so the user
+    /// can see the link before pressing it. On the welcome screen it is plain
+    /// text: nothing there opens it (the palette's own commands and the app menu
+    /// are the routes to the site), and it stays because a new user should be
+    /// able to read where dux lives.
     pub(crate) fn link(&self) -> String {
         match &self.screen {
             FirstLoadScreen::Welcome(_) => dux_core::urls::WEBSITE.to_string(),
@@ -240,9 +249,7 @@ pub(crate) enum FirstLoadAction {
 pub(crate) fn button_action(prompt: &FirstLoadPrompt) -> FirstLoadAction {
     match (&prompt.screen, prompt.focus) {
         (FirstLoadScreen::Welcome(_), FirstLoadButton::Primary) => FirstLoadAction::AddProject,
-        (FirstLoadScreen::Welcome(_), FirstLoadButton::Secondary) => {
-            FirstLoadAction::OpenUrl(prompt.link())
-        }
+        (FirstLoadScreen::Welcome(_), FirstLoadButton::Secondary) => FirstLoadAction::Dismiss,
         (FirstLoadScreen::WhatsNew(_), FirstLoadButton::Primary) => {
             FirstLoadAction::OpenUrl(prompt.link())
         }
@@ -472,7 +479,7 @@ pub(crate) fn button_rects(row: Rect, labels: [&str; 2]) -> [Rect; 2] {
 
 /// The button row: two pills (the focused one takes the accent fill, mirroring
 /// the app's confirm-button treatment) plus, when the column is wide enough, the
-/// destination the link button opens, right-aligned and dimmed.
+/// screen's destination, right-aligned and dimmed.
 pub(crate) fn button_row(
     labels: [&str; 2],
     focus: FirstLoadButton,
@@ -554,18 +561,30 @@ pub(crate) struct FirstLoadRender {
 ///
 /// A free function rather than an `App` method so the caller can keep its
 /// `&self.prompt` borrow alive while writing the measured geometry back into its
-/// own (disjoint) fields.
+/// own (disjoint) fields. `close_key` is the RESOLVED label for
+/// `Action::CloseOverlay`; the binding is looked up by the caller, which has the
+/// `RuntimeBindings` this function deliberately does not take.
 pub(crate) fn render_modal(
     frame: &mut Frame,
     area: Rect,
     prompt: &FirstLoadPrompt,
     theme: &Theme,
+    close_key: &str,
 ) -> FirstLoadRender {
     let colors = FirstLoadColors::from_theme(theme);
 
     // The ordinary rounded overlay border, in the ordinary overlay border color.
     // Only the TITLE takes the accent: coloring the border too would make it the
     // same hue as the duck and flatten the composition.
+    //
+    // The bottom title is the house Report-modal hint (Agent Info's idiom): both
+    // screens say how to leave, on the border row, so the frame costs no rows.
+    let mut hint = vec![Span::raw(" ")];
+    hint.extend(theme.key_badge_default(close_key));
+    hint.push(Span::styled(
+        " close",
+        Style::default().fg(theme.hint_desc_fg),
+    ));
     let block = Block::default()
         .title(Line::from(Span::styled(
             prompt.title(),
@@ -573,6 +592,7 @@ pub(crate) fn render_modal(
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
         )))
+        .title_bottom(Line::from(hint))
         .borders(Borders::ALL)
         .border_set(border::ROUNDED)
         .border_style(Style::default().fg(theme.overlay_border))
@@ -1023,6 +1043,9 @@ impl App {
             return false;
         };
         let action = button_action(prompt);
+        // Which screen is closing decides what the dismissal says, and it has to
+        // be read BEFORE the dismissal clears the state.
+        let welcome = matches!(prompt.screen, FirstLoadScreen::Welcome(_));
         // Dismiss FIRST: `PromptState` holds one modal at a time, so opening the
         // project browser replaces this screen rather than stacking on it, and
         // the stamp must land before the state is overwritten.
@@ -1038,7 +1061,15 @@ impl App {
                 self.open_url_in_browser(url, success);
             }
             FirstLoadAction::Dismiss => {
-                self.set_info("Closed the release notes. Run show-release-notes to reopen them.");
+                if welcome {
+                    self.set_info(
+                        "Closed the welcome screen. Run show-welcome-screen to see it again.",
+                    );
+                } else {
+                    self.set_info(
+                        "Closed the release notes. Run show-release-notes to reopen them.",
+                    );
+                }
             }
         }
         false
@@ -1202,7 +1233,7 @@ mod tests {
     fn each_screen_has_exactly_two_buttons_with_the_agreed_labels() {
         assert_eq!(
             FirstLoadPrompt::welcome(sample_welcome(), false).buttons(),
-            ["Add a project", "Visit getdux.app"]
+            ["Add a project", "Close"]
         );
         assert_eq!(
             FirstLoadPrompt::whats_new(sample_notes(), false).buttons(),
@@ -1251,7 +1282,10 @@ mod tests {
         welcome.focus = FirstLoadButton::Secondary;
         assert_eq!(
             button_action(&welcome),
-            FirstLoadAction::OpenUrl(dux_core::urls::WEBSITE.to_string())
+            FirstLoadAction::Dismiss,
+            "the welcome screen's secondary must LEAVE, exactly as the what's-new \
+             screen's does; it used to open the website and the modal then had no \
+             visible way out at all"
         );
 
         let mut whats_new = FirstLoadPrompt::whats_new(sample_notes(), false);
@@ -1268,11 +1302,11 @@ mod tests {
     #[test]
     fn button_rects_sit_side_by_side_with_a_misclick_safe_gap() {
         let row = Rect::new(4, 9, 50, 1);
-        let [primary, secondary] = button_rects(row, ["Add a project", "Visit getdux.app"]);
+        let [primary, secondary] = button_rects(row, ["Add a project", "Close"]);
         assert_eq!(primary.x, 4);
         assert_eq!(primary.width, 15, "\" Add a project \"");
         assert_eq!(secondary.x, 4 + 15 + 2, "two-column gap between targets");
-        assert_eq!(secondary.width, 18, "\" Visit getdux.app \"");
+        assert_eq!(secondary.width, 7, "\" Close \"");
         assert!(
             secondary.x > primary.x + primary.width,
             "the two click targets must not touch"
@@ -1570,10 +1604,7 @@ mod tests {
         assert!(rendered.contains('⣿'), "the duck must be painted");
         assert!(rendered.contains('│'), "the ruled divider must be painted");
         assert!(rendered.contains("Add a project"), "primary button missing");
-        assert!(
-            rendered.contains("Visit getdux.app"),
-            "secondary button missing"
-        );
+        assert!(rendered.contains("Close"), "secondary button missing");
         assert!(
             rendered.contains("One git worktree per coding agent"),
             "the tagline must be painted"
@@ -1597,6 +1628,40 @@ mod tests {
             "primary button missing"
         );
         assert!(rendered.contains("Close"), "secondary button missing");
+    }
+
+    #[test]
+    fn the_welcome_secondary_button_leaves_the_screen() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), false));
+        if let PromptState::FirstLoad(prompt) = &mut app.prompt {
+            prompt.focus = FirstLoadButton::Secondary;
+        }
+        assert!(!app.activate_first_load_button(), "closing must not quit");
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "the welcome screen's Close button must dismiss the modal"
+        );
+    }
+
+    #[test]
+    fn both_screens_say_how_to_leave_on_the_frame() {
+        let bindings = default_bindings();
+        let close_key = bindings.label_for(Action::CloseOverlay);
+        assert!(!close_key.is_empty(), "the close binding must have a label");
+
+        for prompt in [
+            FirstLoadPrompt::welcome(sample_welcome(), false),
+            FirstLoadPrompt::whats_new(sample_notes(), false),
+        ] {
+            let mut app = test_app(default_bindings());
+            app.prompt = PromptState::FirstLoad(prompt);
+            let rendered = render_prompt_to_string(&mut app, 120, 40);
+            assert!(
+                rendered.contains(&format!("<{close_key}> close")),
+                "the frame must carry the resolved close hint: {close_key}"
+            );
+        }
     }
 
     #[test]

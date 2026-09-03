@@ -6954,7 +6954,8 @@ impl App {
         // `centered_rect_exact` clamps it on short terminals.
         let area = first_load::modal_area(frame.area());
         self.clear_overlay_area(frame, area);
-        let rendered = first_load::render_modal(frame, area, prompt, &self.theme);
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let rendered = first_load::render_modal(frame, area, prompt, &self.theme, &close_key);
         self.last_first_load_height = rendered.content_height;
         self.last_first_load_lines = rendered.content_lines;
         self.overlay_layout.active = OverlayMouseLayout::FirstLoad {
