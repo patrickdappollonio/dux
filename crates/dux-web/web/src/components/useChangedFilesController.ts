@@ -1,8 +1,11 @@
 import { useState } from "react"
 import {
   filterChangedFiles,
+  mergeChangedFilesRecaps,
   reconcileSelection,
+  summarizeChangedFiles,
   type ChangedFileSelection,
+  type ChangedFilesRecap,
 } from "@/lib/changedFiles"
 import { git } from "@/lib/git"
 import { notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
@@ -24,6 +27,11 @@ interface ScopedSelection extends ChangedFileSelection {
 interface ChangedFilesModel {
   changed: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
   filtered: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
+  recap: {
+    staged: ChangedFilesRecap
+    unstaged: ChangedFilesRecap
+    all: ChangedFilesRecap
+  }
   query: string
   filtering: boolean
   selected: ChangedFileSelection
@@ -58,6 +66,12 @@ function changedFilesModel(
     staged: filterChangedFiles(changed.staged, query),
     unstaged: filterChangedFiles(changed.unstaged, query),
   }
+  // The recap describes exactly the rows visible beneath it, so it is summed
+  // over the FILTERED lists, matching the first number in the group badge's
+  // "3 of 17". The header's figure is the two visible sets added together, not
+  // an unfiltered total.
+  const stagedRecap = summarizeChangedFiles(filtered.staged)
+  const unstagedRecap = summarizeChangedFiles(filtered.unstaged)
   const selected = reconcileSelection(
     selection.sessionId === selectedSessionId ? selection : emptySelection(),
     changed,
@@ -73,6 +87,11 @@ function changedFilesModel(
   return {
     changed,
     filtered,
+    recap: {
+      staged: stagedRecap,
+      unstaged: unstagedRecap,
+      all: mergeChangedFilesRecaps(stagedRecap, unstagedRecap),
+    },
     query,
     filtering: query.trim() !== "",
     selected,

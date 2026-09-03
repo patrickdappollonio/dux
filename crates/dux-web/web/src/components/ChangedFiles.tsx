@@ -66,6 +66,7 @@ import { Separator } from "@/components/ui/separator"
 import {
   fileStatusMeta,
   type ChangedFileSelection,
+  type ChangedFilesRecap,
 } from "@/lib/changedFiles"
 import {
   forceRefreshChanges,
@@ -355,6 +356,10 @@ interface FileGroupProps {
   // The unfiltered group size, so the badge can show "N of M" while a search is
   // active. Equal to `files.length` when nothing is filtered out.
   total: number
+  // The aggregate for the rows this group actually shows: summed over `files`,
+  // the filtered set, because the recap describes exactly the rows visible
+  // beneath it.
+  recap: ChangedFilesRecap
   filtering: boolean
   action: "stage" | "unstage"
   sessionId: string
@@ -363,10 +368,65 @@ interface FileGroupProps {
   onOpenDiff: (path: string) => void
 }
 
+// What a recap says out loud. The glyphs are a dense column of figures, fine to
+// look at and useless to hear, so the spoken form spells the numbers out.
+function recapLabel(scope: string, recap: ChangedFilesRecap): string {
+  const lines = (n: number, verb: string) =>
+    `${n} line${n === 1 ? "" : "s"} ${verb}`
+  const parts: string[] = []
+  if (recap.additions > 0) parts.push(lines(recap.additions, "added"))
+  if (recap.deletions > 0) parts.push(lines(recap.deletions, "removed"))
+  if (recap.binaryCount > 0) {
+    parts.push(
+      `${recap.binaryCount} binary file${recap.binaryCount === 1 ? "" : "s"}`,
+    )
+  }
+  return `${scope}: ${parts.join(", ")}`
+}
+
+// The aggregate for a set of rows, rendered above them. It reuses the row's own
+// +/− classes so the header and its rows read as one column of figures, and it
+// carries no thousands separators, because the rows carry none either.
+//
+// Binary files contribute no lines (git reports none for them), so they are
+// counted apart in a quiet "· N bin" marker rather than silently pulling the
+// sums toward zero.
+function ChangesRecap({
+  scope,
+  recap,
+}: {
+  scope: string
+  recap: ChangedFilesRecap
+}) {
+  const { additions, deletions, binaryCount } = recap
+  const hasLines = additions > 0 || deletions > 0
+  // Nothing to say: an empty set, or one whose files changed no lines and are
+  // not binary either (a mode change, an empty new file). No "+0 −0".
+  if (!hasLines && binaryCount === 0) return null
+
+  return (
+    <span
+      className="shrink-0 font-mono text-xs"
+      aria-label={recapLabel(scope, recap)}
+    >
+      {additions > 0 && <span className="text-green-500">+{additions}</span>}
+      {additions > 0 && deletions > 0 && " "}
+      {deletions > 0 && <span className="text-red-500">−{deletions}</span>}
+      {binaryCount > 0 && (
+        <span className="text-muted-foreground">
+          {hasLines ? " · " : ""}
+          {binaryCount} bin
+        </span>
+      )}
+    </span>
+  )
+}
+
 function FileGroup({
   heading,
   files,
   total,
+  recap,
   filtering,
   action,
   sessionId,
@@ -387,6 +447,7 @@ function FileGroup({
           all / Select none, which spans both sections at once. */}
       <CollapsibleTrigger className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium hover:bg-muted max-md:min-h-11">
         <span className="flex-1 text-left">{heading}</span>
+        <ChangesRecap scope={heading} recap={recap} />
         <Badge variant="secondary">
           {filtering ? `${files.length} of ${total}` : files.length}
         </Badge>
@@ -413,6 +474,9 @@ function FileGroup({
 interface ChangesHeaderProps {
   sessionId: string
   stagedCount: number
+  // Summed over both groups' VISIBLE rows, the same rule the group headers
+  // follow: the pane's recap describes exactly what is on screen under it.
+  recap: ChangedFilesRecap
   branchGit: boolean
   isMobile: boolean
 }
@@ -420,6 +484,7 @@ interface ChangesHeaderProps {
 function ChangesHeader({
   sessionId,
   stagedCount,
+  recap,
   branchGit,
   isMobile,
 }: ChangesHeaderProps) {
@@ -433,7 +498,10 @@ function ChangesHeader({
 
   return (
     <CardHeader className="flex items-center justify-between gap-2 border-b">
-      <CardTitle>Changes</CardTitle>
+      <div className="flex min-w-0 items-baseline gap-2">
+        <CardTitle>Changes</CardTitle>
+        <ChangesRecap scope="Changes" recap={recap} />
+      </div>
       <CardAction className="self-center">
         <DropdownMenu>
           <DropdownMenuTrigger
@@ -586,6 +654,7 @@ function BulkToolbar({
 interface ChangesListProps {
   changed: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
   filtered: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
+  recap: { staged: ChangedFilesRecap; unstaged: ChangedFilesRecap }
   selected: ChangedFileSelection
   sessionId: string
   query: string
@@ -597,6 +666,7 @@ interface ChangesListProps {
 function ChangesList({
   changed,
   filtered,
+  recap,
   selected,
   sessionId,
   query,
@@ -642,6 +712,7 @@ function ChangesList({
           heading="Staged"
           files={filtered.staged}
           total={changed.staged.length}
+          recap={recap.staged}
           filtering={filtering}
           action="unstage"
           sessionId={sessionId}
@@ -656,6 +727,7 @@ function ChangesList({
           heading="Unstaged"
           files={filtered.unstaged}
           total={changed.unstaged.length}
+          recap={recap.unstaged}
           filtering={filtering}
           action="stage"
           sessionId={sessionId}
@@ -774,6 +846,7 @@ export function ChangedFiles() {
   const {
     changed,
     filtered,
+    recap,
     query,
     filtering,
     selected,
@@ -800,6 +873,7 @@ export function ChangedFiles() {
         <ChangesHeader
           sessionId={sessionId}
           stagedCount={changed.staged.length}
+          recap={recap.all}
           branchGit={branchGit}
           isMobile={isMobile}
         />
@@ -834,6 +908,7 @@ export function ChangedFiles() {
           <ChangesList
             changed={changed}
             filtered={filtered}
+            recap={recap}
             selected={selected}
             sessionId={sessionId}
             query={query}

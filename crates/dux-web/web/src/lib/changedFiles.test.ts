@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest"
 import {
   fileStatusMeta,
   filterChangedFiles,
+  mergeChangedFilesRecaps,
   reconcileSelection,
   shouldShowChangedFiles,
+  summarizeChangedFiles,
 } from "./changedFiles"
 import type { ChangedFileView } from "./types"
 
@@ -135,5 +137,78 @@ describe("reconcileSelection", () => {
     )
     expect(next.staged.size).toBe(0)
     expect(next.unstaged.size).toBe(0)
+  })
+})
+
+function counted(
+  path: string,
+  additions: number,
+  deletions: number,
+  binary = false,
+): ChangedFileView {
+  return { status: "M", path, additions, deletions, binary }
+}
+
+describe("summarizeChangedFiles", () => {
+  it("adds the lines up across the files it is given", () => {
+    expect(
+      summarizeChangedFiles([
+        counted("a.ts", 12, 3),
+        counted("b.ts", 7, 40),
+      ]),
+    ).toEqual({ count: 2, additions: 19, deletions: 43, binaryCount: 0 })
+  })
+
+  // Binary files carry no line counts on the wire, so they must be counted
+  // apart rather than folded into the sums as zeroes.
+  it("counts binary files apart and takes no lines from them", () => {
+    expect(
+      summarizeChangedFiles([
+        counted("a.ts", 5, 1),
+        counted("logo.png", 0, 0, true),
+        counted("clip.mp4", 0, 0, true),
+      ]),
+    ).toEqual({ count: 3, additions: 5, deletions: 1, binaryCount: 2 })
+  })
+
+  it("reports an all-binary set as lineless", () => {
+    expect(summarizeChangedFiles([counted("logo.png", 0, 0, true)])).toEqual({
+      count: 1,
+      additions: 0,
+      deletions: 0,
+      binaryCount: 1,
+    })
+  })
+
+  it("reports an empty set as all zeroes", () => {
+    expect(summarizeChangedFiles([])).toEqual({
+      count: 0,
+      additions: 0,
+      deletions: 0,
+      binaryCount: 0,
+    })
+  })
+
+  // The recap describes exactly the rows visible beneath it, so a caller hands
+  // it the filtered list and gets the filtered figures.
+  it("describes only the files handed to it, filtering included", () => {
+    const all = [counted("src/a.ts", 10, 0), counted("docs/b.md", 100, 5)]
+    expect(summarizeChangedFiles(filterChangedFiles(all, "src/"))).toEqual({
+      count: 1,
+      additions: 10,
+      deletions: 0,
+      binaryCount: 0,
+    })
+  })
+})
+
+describe("mergeChangedFilesRecaps", () => {
+  it("adds two recaps field by field", () => {
+    expect(
+      mergeChangedFilesRecaps(
+        { count: 2, additions: 5, deletions: 1, binaryCount: 0 },
+        { count: 3, additions: 4, deletions: 9, binaryCount: 2 },
+      ),
+    ).toEqual({ count: 5, additions: 9, deletions: 10, binaryCount: 2 })
   })
 })

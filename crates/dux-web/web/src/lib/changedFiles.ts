@@ -65,6 +65,54 @@ export function filterChangedFiles(
   return files.filter((f) => f.path.toLowerCase().includes(needle))
 }
 
+// A group's aggregate recap: how many files, how many lines they add and
+// remove between them, and how many of them are binary. Binary files carry no
+// line counts (the wire reports zeroes for them), so they contribute nothing to
+// the sums and are counted separately instead, which is what lets the header
+// say "no lines here, these are binaries" rather than a bare "+0 −0".
+export interface ChangedFilesRecap {
+  count: number
+  additions: number
+  deletions: number
+  binaryCount: number
+}
+
+// The recap describes exactly the rows visible beneath it, so callers pass the
+// FILTERED list, never the source one.
+export function summarizeChangedFiles(
+  files: ChangedFileView[],
+): ChangedFilesRecap {
+  const recap: ChangedFilesRecap = {
+    count: files.length,
+    additions: 0,
+    deletions: 0,
+    binaryCount: 0,
+  }
+  for (const file of files) {
+    if (file.binary) {
+      recap.binaryCount += 1
+      continue
+    }
+    recap.additions += file.additions
+    recap.deletions += file.deletions
+  }
+  return recap
+}
+
+// Two recaps added together, for the header's whole-pane figure over both
+// groups' visible rows.
+export function mergeChangedFilesRecaps(
+  a: ChangedFilesRecap,
+  b: ChangedFilesRecap,
+): ChangedFilesRecap {
+  return {
+    count: a.count + b.count,
+    additions: a.additions + b.additions,
+    deletions: a.deletions + b.deletions,
+    binaryCount: a.binaryCount + b.binaryCount,
+  }
+}
+
 // The changed-files engine state (`watched_worktree`/`changed_files`) is GLOBAL
 // and broadcast to every client, but selection is per-client. So a client must
 // only trust the broadcast lists when they belong to the session it actually has

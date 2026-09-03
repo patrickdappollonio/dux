@@ -994,3 +994,114 @@ describe("the multi-file discard confirm", () => {
     expect(notifyWarning).not.toHaveBeenCalled()
   })
 })
+
+// Each file group, and the pane header above them, carries an aggregate recap:
+// the lines the visible rows add and remove between them, plus a quiet marker
+// for the binaries, which carry no line counts at all.
+describe("the changes pane's group recaps", () => {
+  function counted(
+    path: string,
+    additions: number,
+    deletions: number,
+    binary = false,
+  ) {
+    return { path, status: "M", additions, deletions, binary }
+  }
+
+  function withCounted(
+    staged: ReturnType<typeof counted>[],
+    unstaged: ReturnType<typeof counted>[],
+  ): DuxState {
+    return {
+      selectedSessionId: "s1",
+      changes: { ...loadedChanges(), staged, unstaged },
+    } as unknown as DuxState
+  }
+
+  function recap(scope: string) {
+    return screen.getByLabelText(new RegExp(`^${scope}: `))
+  }
+
+  it("sums the lines of each group and of the pane as a whole", () => {
+    mockState = withCounted(
+      [counted("staged.ts", 12, 3)],
+      [counted("a.ts", 7, 40), counted("b.ts", 0, 2)],
+    )
+    render(<ChangedFiles />)
+
+    expect(recap("Staged").textContent).toBe("+12 −3")
+    expect(recap("Unstaged").textContent).toBe("+7 −42")
+    expect(recap("Changes").textContent).toBe("+19 −45")
+  })
+
+  // No thousands separators: the rows below carry none either.
+  it("prints the digits plainly, with no thousands separator", () => {
+    mockState = withCounted([], [counted("big.ts", 12345, 6789)])
+    render(<ChangedFiles />)
+
+    expect(recap("Unstaged").textContent).toBe("+12345 −6789")
+  })
+
+  // The recap describes exactly the rows visible beneath it, which is the
+  // filtered set, matching the first number in the group badge's "1 of 2".
+  it("follows the filter, describing only the rows still on screen", () => {
+    mockState = withCounted(
+      [],
+      [counted("src/a.ts", 10, 1), counted("docs/b.md", 100, 5)],
+    )
+    render(<ChangedFiles />)
+    expect(recap("Unstaged").textContent).toBe("+110 −6")
+
+    fireEvent.change(screen.getByLabelText("Filter changed files"), {
+      target: { value: "src/" },
+    })
+
+    expect(recap("Unstaged").textContent).toBe("+10 −1")
+    expect(recap("Changes").textContent).toBe("+10 −1")
+  })
+
+  it("marks the binaries quietly beside the line counts", () => {
+    mockState = withCounted(
+      [],
+      [counted("a.ts", 5, 1), counted("logo.png", 0, 0, true)],
+    )
+    render(<ChangedFiles />)
+
+    expect(recap("Unstaged").textContent).toBe("+5 −1 · 1 bin")
+    expect(recap("Unstaged").getAttribute("aria-label")).toBe(
+      "Unstaged: 5 lines added, 1 line removed, 1 binary file",
+    )
+  })
+
+  // An all-binary group has no lines to report, so it says so rather than
+  // claiming "+0 −0".
+  it("says only the binary count for a group with no lines in it", () => {
+    mockState = withCounted(
+      [],
+      [counted("logo.png", 0, 0, true), counted("clip.mp4", 0, 0, true)],
+    )
+    render(<ChangedFiles />)
+
+    expect(recap("Unstaged").textContent).toBe("2 bin")
+    expect(screen.queryByText("+0")).toBeNull()
+  })
+
+  // A group whose files changed no lines and are not binary (a mode change, an
+  // empty new file) gets no recap at all.
+  it("renders no recap for a lineless, binary-free group", () => {
+    mockState = withCounted([], [counted("mode-only.sh", 0, 0)])
+    render(<ChangedFiles />)
+
+    expect(screen.queryByLabelText(/^Unstaged: /)).toBeNull()
+    expect(screen.queryByLabelText(/^Changes: /)).toBeNull()
+  })
+
+  // An empty group is hidden entirely, recap and all.
+  it("shows no staged recap while nothing is staged", () => {
+    mockState = withCounted([], [counted("a.ts", 1, 0)])
+    render(<ChangedFiles />)
+
+    expect(screen.queryByLabelText(/^Staged: /)).toBeNull()
+    expect(recap("Changes").textContent).toBe("+1")
+  })
+})
