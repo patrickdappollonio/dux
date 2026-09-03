@@ -21704,13 +21704,6 @@ mod tests {
         assert!(title.contains("Edit Macro: greet"), "got {title:?}");
     }
 
-    /// A footer may be incomplete; it may never be WRONG. The
-    /// `Space act on focus` / `Space toggle` segment is a promise about what
-    /// Space does RIGHT NOW, and with a text field focused Space is content:
-    /// it types a space into a single-line field, and on an unengaged
-    /// full-text field it does nothing at all. The segment must therefore be
-    /// as state-aware as its `move focus` neighbour, which already drops
-    /// itself when no key reaches focus movement.
     /// A drifted agent gives up two branches, and the box names both: the one
     /// the worktree moved onto goes with the one it was born on, so naming one
     /// of them would ask permission for half of what happens.
@@ -22151,6 +22144,13 @@ mod tests {
         );
     }
 
+    /// A footer may be incomplete; it may never be WRONG. The
+    /// `Space act on focus` / `Space toggle` segment is a promise about what
+    /// Space does RIGHT NOW, and with a text field focused Space is content:
+    /// it types a space into a single-line field, and on an unengaged
+    /// full-text field it does nothing at all. The segment must therefore be
+    /// as state-aware as its `move focus` neighbour, which already drops
+    /// itself when no key reaches focus movement.
     #[test]
     fn the_space_hint_only_appears_when_space_acts_on_something() {
         // ── The three configure modals: focus on the unengaged full-text

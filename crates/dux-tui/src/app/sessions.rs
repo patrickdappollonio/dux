@@ -2060,12 +2060,15 @@ impl App {
             move |o: &TuiDeleteOutcome| match o {
                 // The keep path: nothing was deleted, so the line names the
                 // branches that stayed and why, plus the manual way out (the
-                // worktree is gone, so no dux surface can reach them now).
+                // worktree is gone, so no dux surface can reach them now). The
+                // reason is not always "they were not dux's to delete": a
+                // branch dux made and the user unticked is kept too, and says
+                // so in its own words.
                 TuiDeleteOutcome::SucceededPresent {
-                    branches: dux_core::engine::RemovedBranches::Kept(provenance),
+                    branches: dux_core::engine::RemovedBranches::Kept(kept_reason),
                 } => dux_core::engine::Final::info(format!(
                     "Deleted {provider} agent \"{branch_name}\" and removed its worktree. {}",
-                    provenance.kept_branches_note(&branch_name, &initial_branch)
+                    kept_reason.kept_branches_note(&branch_name, &initial_branch)
                 )),
                 TuiDeleteOutcome::SucceededPresent {
                     branches: dux_core::engine::RemovedBranches::Deleted(branches),
@@ -2246,17 +2249,18 @@ impl App {
                         session.directory(),
                     ));
                 }
-                // The worktree went and the branches stayed: they were not
-                // dux's to delete. Every kept branch is named with its own
+                // The worktree went and the branches stayed, either because
+                // they were not dux's to delete or because the user unticked a
+                // box for one that was. Every kept branch is named with its own
                 // reason, and the line says how to remove one by hand.
                 WorktreeRemoval::Performed {
-                    branches: dux_core::engine::RemovedBranches::Kept(provenance),
+                    branches: dux_core::engine::RemovedBranches::Kept(kept_reason),
                 } => {
                     self.set_info(format!(
                         "Deleted {} agent \"{}\" and removed its worktree. {}",
                         session.provider.as_str(),
                         branch_name,
-                        provenance.kept_branches_note(&branch_name, &initial_branch),
+                        kept_reason.kept_branches_note(&branch_name, &initial_branch),
                     ));
                 }
                 WorktreeRemoval::Performed {

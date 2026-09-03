@@ -271,14 +271,14 @@ pub struct App {
     /// consumed; a `Welcome` or `Nothing` plan never lands here because neither
     /// needs the network.
     pub(crate) pending_first_load: Option<dux_core::first_load::FirstLoadPlan>,
+    /// The delete-agent dialog's pending unpushed-commit count. One-shot: set
+    /// when the dialog opens on branches its warning would say something about,
+    /// cleared by `drain_unpushed_count` when the answer lands.
+    pub(crate) unpushed_count_rx: Option<mpsc::Receiver<UnpushedCountAnswer>>,
     /// Payload channel for the in-flight release-notes worker. The keyed
     /// busy→final status rides the engine's own worker channel; only the notes
     /// themselves come back here. `Some` means a fetch is in flight, which is
     /// what stops the palette command from starting a second one.
-    /// The delete-agent dialog's pending unpushed-commit count. One-shot: set
-    /// when the dialog opens on a branch that predates its agent, cleared by
-    /// `drain_unpushed_count` when the answer lands.
-    pub(crate) unpushed_count_rx: Option<mpsc::Receiver<UnpushedCountAnswer>>,
     pub(crate) notes_fetch_rx: Option<mpsc::Receiver<NotesFetched>>,
     /// Notes that arrived while the user had a DIFFERENT modal open.
     /// `PromptState` is a single slot, so showing the what's-new screen the
@@ -1895,6 +1895,21 @@ impl DeleteAgentTarget {
     /// exactly the deletion it cannot do.
     pub(crate) fn offers_branch_checkbox(&self, delete_worktree: bool) -> bool {
         delete_worktree && self.offers_worktree_checkbox()
+    }
+
+    /// The branch answer this dialog sends with its delete request, given the
+    /// state of its two boxes.
+    ///
+    /// `None` means nobody was asked, and the engine then keeps the provenance
+    /// default. That is not the same as `Some(false)`: an answer nobody was
+    /// asked for is a decision made on a click that never happened, and it
+    /// would override the default in a dialog that showed no control to
+    /// override it with. So the answer travels only where the box was actually
+    /// on screen, which is the same question the renderer and the focus ring
+    /// ask.
+    pub(crate) fn branch_answer(&self, delete_worktree: bool, delete_branch: bool) -> Option<bool> {
+        self.offers_branch_checkbox(delete_worktree)
+            .then_some(delete_branch)
     }
 
     /// Every branch the box names and the unpushed count is about: the one the
@@ -6838,6 +6853,41 @@ pub(crate) fn runtime_project_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The answer the delete request carries, in the three states the dialog
+    /// can be in. The absent case is the load-bearing one: it is what keeps the
+    /// engine's provenance default, and sending `Some(false)` there would
+    /// override a default from a dialog that offered no control to override it
+    /// with.
+    #[test]
+    fn the_delete_dialog_sends_a_branch_answer_only_where_it_asked_for_one() {
+        let managed = |shared: bool| DeleteAgentTarget::Managed {
+            branch_name: "feature".to_string(),
+            initial_branch: "feature".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::AttachedExisting,
+            worktree_shared: shared,
+        };
+        assert_eq!(managed(false).branch_answer(true, true), Some(true));
+        assert_eq!(managed(false).branch_answer(true, false), Some(false));
+        assert_eq!(
+            managed(false).branch_answer(false, true),
+            None,
+            "with the worktree kept there is no branch box, so nothing was asked"
+        );
+        assert_eq!(
+            managed(true).branch_answer(true, true),
+            None,
+            "a shared worktree is preserved whatever is ticked, so no box is shown"
+        );
+        assert_eq!(
+            DeleteAgentTarget::Folder {
+                folder_label: "~/notes".to_string(),
+            }
+            .branch_answer(true, true),
+            None,
+            "a standalone agent has no branch to answer about"
+        );
+    }
 
     #[test]
     fn run_loop_uses_raw_input_only_for_unobscured_terminal_targets() {

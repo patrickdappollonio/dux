@@ -7549,15 +7549,7 @@ impl App {
             } => (
                 session_id.clone(),
                 *delete_worktree,
-                // The answer travels only when the box was actually on screen.
-                // With the worktree kept there is no branch offer at all, and a
-                // shared worktree preserves everything whatever is ticked, so
-                // both send nothing and the engine keeps its own default: an
-                // answer nobody was asked for is a decision made on a click
-                // that never happened.
-                target
-                    .offers_branch_checkbox(*delete_worktree)
-                    .then_some(*delete_branch),
+                target.branch_answer(*delete_worktree, *delete_branch),
             ),
             _ => return false,
         };

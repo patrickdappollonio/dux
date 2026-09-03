@@ -1590,11 +1590,11 @@ fn branch_still_exists(repo_path: &Path, branch_name: &str) -> bool {
 /// This is the half of [`remove_worktree`] that the callers who were NOT asked
 /// to delete a branch want. Deleting a branch is a second, separate act of
 /// destruction: `git branch -D` force-deletes it even when it holds commits that
-/// exist nowhere else, so it happens only when the user asked for it. The web
-/// worktree manager asks per removal (its confirmation carries a checkbox, and
-/// a request that does not mention the branch lands here); [`remove_worktree`]
-/// is the agent-delete path, where dux created the branch and owns its whole
-/// lifecycle, so it always deletes.
+/// exist nowhere else, so it happens only when the user asked for it. Both
+/// worktree managers ask per removal (their confirmation carries a checkbox,
+/// and a request that does not mention the branch lands here), and so does the
+/// agent-delete path, which routes to one of the two halves on the branch's
+/// recorded provenance and on the delete dialog's answer, in either direction.
 ///
 /// `--force` matches the existing behavior: a worktree with uncommitted work is
 /// removed anyway, so every caller must confirm with the user first.
