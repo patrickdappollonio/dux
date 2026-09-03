@@ -891,6 +891,27 @@ impl Engine {
     }
 }
 
+/// What became of the client `insert_launched_provider` was handed: it took the
+/// tab, or it was dropped because a live process was already holding it.
+///
+/// Named rather than a bare `bool` so the caller's follow-up reads as the
+/// question it is ("did the process we just launched actually join this tab?")
+/// instead of an unlabelled flag at the call site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaunchedProviderInsert {
+    /// The launched client is the tab's provider now.
+    Kept,
+    /// The launched client (and its just-spawned child) was dropped; the process
+    /// in this tab is the one that was already there.
+    Dropped,
+}
+
+impl LaunchedProviderInsert {
+    fn kept(self) -> bool {
+        matches!(self, LaunchedProviderInsert::Kept)
+    }
+}
+
 impl Engine {
     /// Combine a launch View reaction with the create op's resolved final (when
     /// the launch was a create-kind, whose shared op is resolved engine-side). The
@@ -934,9 +955,22 @@ impl Engine {
     /// launch's own view is left to say whatever it would ordinarily say; there
     /// is a live process in the tab either way, which is what the user asked
     /// for.
-    fn insert_launched_provider(&mut self, tab_id: &TabId, client: crate::pty::PtyClient) {
+    ///
+    /// The outcome is RETURNED rather than swallowed, because the caller's
+    /// follow-up bookkeeping is all about the process this call may have just
+    /// killed. Republishing the drop-paste form and arming a resume-fallback
+    /// candidate for a child that never joined the tab are both wrong, and the
+    /// candidate is actively destructive: the survivor is the OLD child, and if
+    /// it stays quiet past its resume wait the sweep tears the tab down and
+    /// SIGKILLs it.
+    #[must_use]
+    fn insert_launched_provider(
+        &mut self,
+        tab_id: &TabId,
+        client: crate::pty::PtyClient,
+    ) -> LaunchedProviderInsert {
         if let Some(running) = self.providers.get(tab_id)
-            && !running.is_exited()
+            && running.is_live()
         {
             let describe = |pid: Option<u32>| {
                 pid.map(|pid| pid.to_string())
@@ -948,9 +982,10 @@ impl Engine {
                 describe(client.child_process_id()),
                 describe(running.child_process_id()),
             ));
-            return;
+            return LaunchedProviderInsert::Dropped;
         }
         self.providers.insert(tab_id.clone(), client);
+        LaunchedProviderInsert::Kept
     }
 
     pub fn process_agent_launch_ready(
@@ -998,10 +1033,24 @@ impl Engine {
                     create_final,
                 );
             }
-            let detached =
-                self.detach_conflicting_worktree_session(session.directory(), &session.id);
-            self.insert_launched_provider(&tab_id, client);
-            self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
+            // The insert decides FIRST, and everything that speaks for the
+            // just-launched process is gated on it having actually joined the
+            // tab. See the non-create path below for the whole ordering rule; a
+            // create's tab is brand new, so its client is never the latecomer,
+            // and the two paths are written the same way so neither can be read
+            // as the exception.
+            let inserted = self.insert_launched_provider(&tab_id, client);
+            let detached = inserted
+                .kept()
+                .then(|| self.detach_conflicting_worktree_session(session.directory(), &session.id))
+                .flatten();
+            if inserted.kept() {
+                self.record_launched_drop_paste(
+                    &tab_id,
+                    &request.provider,
+                    &request.provider_config,
+                );
+            }
             self.sessions.insert(0, session.clone());
             // Correlate this create op with the session it just produced so a REST
             // create handler holding the op id (from `WireCommandOutcome.created_op_id`)
@@ -1013,7 +1062,7 @@ impl Engine {
             // truth from the first frame instead of starting at "not looked
             // yet" (which fails closed). A no-op for every other kind.
             self.spawn_folder_repo_probe(&session.id);
-            if request.resume {
+            if inserted.kept() && request.resume {
                 self.resume_fallback_candidates
                     .insert(tab_id.clone(), Instant::now());
             }
@@ -1109,12 +1158,35 @@ impl Engine {
             );
         }
 
-        let detached = self.detach_conflicting_worktree_session(session.directory(), &session.id);
-        self.insert_launched_provider(&tab_id, client);
-        self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
-        if request.resume {
-            self.resume_fallback_candidates
-                .insert(tab_id.clone(), Instant::now());
+        // The insert DECIDES, and the bookkeeping below follows it. A launch that
+        // lands on a tab a live process already holds is dropped, and everything
+        // that speaks for the just-launched process is then a statement about a
+        // child that no longer exists:
+        //
+        // - the drop-paste form would be republished for a dead pid;
+        // - the resume-fallback candidate is worse than wrong. The child in the
+        //   tab is the OLD one, which was never resuming; if it happens to stay
+        //   quiet past `resume_wait_timeout_ms` the sweep calls the resume hung,
+        //   tears the tab's runtime down and SIGKILLs a healthy agent.
+        //
+        // The detach moved BELOW the insert for the same reason: detaching
+        // somebody else's session off this worktree is done on behalf of the
+        // launch, so a launch that never took the tab must not do it.
+        //
+        // What stays unconditional is what remains TRUE either way: a live
+        // process is in this tab, so the agent is Active, and the slot tab's
+        // auto-reopen intent is what the user asked for.
+        let inserted = self.insert_launched_provider(&tab_id, client);
+        let detached = inserted
+            .kept()
+            .then(|| self.detach_conflicting_worktree_session(session.directory(), &session.id))
+            .flatten();
+        if inserted.kept() {
+            self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
+            if request.resume {
+                self.resume_fallback_candidates
+                    .insert(tab_id.clone(), Instant::now());
+            }
         }
         // AUTO-REOPEN INTENT follows the SLOT tab only: an extra-tab launch must
         // not persist desired_running, or the agent comes back running the
@@ -1131,8 +1203,12 @@ impl Engine {
         self.mark_session_status(&session.id, SessionStatus::Active);
         // Record the provider that actually launched (the effective per-tab
         // provider), so directory-scoped resume state stays correct even when a
-        // extra tab ran a different provider than the session default.
-        self.mark_session_provider_started(&session.id, &request.provider);
+        // extra tab ran a different provider than the session default. "Actually
+        // launched" is the whole point, so a dropped client records nothing: the
+        // provider running in the tab is still the surviving child's.
+        if inserted.kept() {
+            self.mark_session_provider_started(&session.id, &request.provider);
+        }
 
         let view = match request.kind {
             AgentLaunchKind::Reconnect { status_message }
@@ -6040,8 +6116,13 @@ mod tests {
             running_pid, latecomer_pid,
             "the two children must be distinguishable for this test to say anything"
         );
-        engine.insert_launched_provider(&tab, latecomer);
+        let inserted = engine.insert_launched_provider(&tab, latecomer);
 
+        assert_eq!(
+            inserted,
+            LaunchedProviderInsert::Dropped,
+            "the outcome is what the caller's follow-up bookkeeping keys on"
+        );
         assert_eq!(
             engine
                 .providers
@@ -6049,6 +6130,80 @@ mod tests {
                 .and_then(crate::pty::PtyClient::child_process_id),
             running_pid,
             "the live child must survive a launch that landed on top of it"
+        );
+    }
+
+    /// A launch whose client is DROPPED arms no resume-fallback candidate. The
+    /// candidate is about the process that was launched, and that process is
+    /// gone; the child left in the tab is the OLD one, which was never resuming.
+    /// Left armed, a survivor that simply stayed quiet past its resume wait was
+    /// read as a hung resume, and the sweep tore the tab down and SIGKILLed a
+    /// healthy agent.
+    #[test]
+    fn a_dropped_launch_arms_no_resume_fallback_and_leaves_the_survivor_running() {
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("dir");
+        let spawn_cat = || {
+            crate::pty::PtyClient::spawn_with_env("cat", &[], dir.path(), 24, 80, 100, &[])
+                .expect("spawn cat")
+        };
+        let session = sample_session("s1", "project-1", "feat/x");
+        let tab = session.slot_tab_id().to_owned();
+        engine.sessions.push(session.clone());
+
+        let running = spawn_cat();
+        let running_pid = running.child_process_id();
+        engine.providers.insert(tab.clone(), running);
+
+        let latecomer = spawn_cat();
+        assert_ne!(
+            running_pid,
+            latecomer.child_process_id(),
+            "the two children must be distinguishable for this test to say anything"
+        );
+        let data = AgentLaunchReadyData {
+            request: AgentLaunchRequest {
+                tab_id: tab.clone(),
+                provider: session.provider.clone(),
+                session,
+                provider_config: ProviderCommandConfig::default(),
+                env: Vec::new(),
+                identity: Default::default(),
+                // The launch this drop is about is the one kind that arms a
+                // candidate; without it the test would pass on any code.
+                resume: true,
+                pty_size: (24, 80),
+                scrollback_lines: 1000,
+                kind: AgentLaunchKind::Reconnect {
+                    status_message: String::new(),
+                },
+                wants_fullscreen: false,
+            },
+            client: latecomer,
+        };
+        let _ = engine.process_agent_launch_ready(data);
+
+        assert!(
+            !engine
+                .resume_fallback_candidates
+                .contains_key(tab.as_ref_id()),
+            "a launch that never joined the tab must not arm a resume retry for it"
+        );
+        assert!(
+            !engine.launched_drop_paste.contains_key(tab.as_ref_id()),
+            "the drop-paste form describes the launched process, which is gone"
+        );
+
+        // The sweep is the thing that would have done the killing: with no
+        // candidate armed it has nothing to act on, so the survivor stays.
+        engine.sweep_resume_fallbacks((24, 80));
+        assert_eq!(
+            engine
+                .providers
+                .get(tab.as_ref_id())
+                .and_then(crate::pty::PtyClient::child_process_id),
+            running_pid,
+            "the healthy child that was already in the tab must still be running"
         );
     }
 

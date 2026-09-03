@@ -1468,6 +1468,26 @@ impl PtyClient {
         self.exited.load(Ordering::Acquire)
     }
 
+    /// Whether a RUNNING child still holds this PTY: neither end of input nor a
+    /// reaped exit status has arrived.
+    ///
+    /// The predicate every "may I launch over this tab" question asks, because
+    /// [`PtyClient::is_exited`] alone answers a narrower one. EOF and the reap
+    /// are independent facts that arrive in either order (see
+    /// [`crate::engine::REAPED_DRAIN_GRACE`]), so a child that has been reaped
+    /// while something else keeps the PTY read side open (a grandchild that
+    /// inherited it) reads as running to `is_exited` for as long as the prune
+    /// leaves it standing, which is up to `REAPED_DRAIN_GRACE`. Nothing is
+    /// running in that tab, and refusing a launch for it, or dropping a healthy
+    /// new client in its favour, is refusing on behalf of a process that is
+    /// already dead.
+    ///
+    /// Reads the memoized reap rather than polling, so it needs no `&mut self`
+    /// and cannot steal the status from the prune.
+    pub fn is_live(&self) -> bool {
+        !self.is_exited() && self.reaped_at().is_none()
+    }
+
     /// Check whether the PTY has received any output from the child process.
     pub fn has_output(&self) -> bool {
         self.has_output.load(Ordering::Acquire)
@@ -5385,6 +5405,43 @@ mod tests {
             Some((31, 101)),
             "a viewer reading a stale grid would decide it agrees with the PTY \
              when it does not"
+        );
+    }
+
+    #[test]
+    fn a_reaped_child_is_not_live_even_while_its_pty_stays_open() {
+        // The launch-over-live gate asks `is_live`, and asking `is_exited`
+        // alone gets this case wrong: the shell exits and is reapable at once,
+        // but the backgrounded `sleep` inherited the PTY, so the read side never
+        // reaches end of input and `is_exited` stays false for as long as the
+        // prune's drain grace lets the entry stand. Nothing is running in that
+        // tab, and a refusal naming it would be about a process that is gone.
+        //
+        // The grandchild has to ignore SIGHUP to hold the slave open: the kernel
+        // hangs the terminal up when the session leader exits, and a plain
+        // `sleep` dies with it, which EOFs the read side and reproduces nothing.
+        let args = vec![
+            "-c".to_string(),
+            "trap '' HUP; sleep 30 & exit 0".to_string(),
+        ];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
+        assert!(client.is_live(), "the shell has not exited yet");
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while client.try_wait().is_none() {
+            assert!(Instant::now() < deadline, "the shell did not exit in time");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert!(
+            !client.is_exited(),
+            "the backgrounded child holds the PTY open, so there is no end of \
+             input to observe: without that this test would prove nothing"
+        );
+        assert!(
+            !client.is_live(),
+            "a reaped child is not running, whatever is still holding the PTY open"
         );
     }
 

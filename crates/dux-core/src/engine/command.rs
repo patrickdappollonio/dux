@@ -542,12 +542,15 @@ impl Engine {
                 // here with a live provider means the launch is redundant, and
                 // the live child is the one worth keeping.
                 //
-                // "Live" excludes a child that has already reached end of input
-                // and is only waiting to be pruned: that one is nobody's working
-                // agent, and refusing for it would refuse the relaunch of a tab
-                // that just died.
+                // "Live" is `PtyClient::is_live`, which excludes a child that has
+                // reached end of input AND one that has already been reaped: both
+                // are waiting to be pruned rather than being anybody's working
+                // agent, and refusing for either would refuse the relaunch of a
+                // tab that just died. Asking `is_exited` alone got the reaped one
+                // wrong, and the refusal below would then have named a process
+                // that no longer existed.
                 if let Some(client) = self.providers.get(&tab_id)
-                    && !client.is_exited()
+                    && client.is_live()
                 {
                     let pid = client
                         .child_process_id()
