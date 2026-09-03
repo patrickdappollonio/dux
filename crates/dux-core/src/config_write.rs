@@ -338,7 +338,6 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.terminal_font_size,
     );
     patch_table_str(doc, "ui", "compose_bar", &config.ui.compose_bar);
-    patch_table_bool(doc, "ui", "mobile_top_bar", config.ui.mobile_top_bar);
     patch_table_bool(
         doc,
         "ui",
@@ -1685,20 +1684,18 @@ build = { text = \"cargo build\", surface = \"terminal\" }
     }
 
     #[test]
-    fn mobile_bar_preferences_render_and_round_trip() {
-        // Both default true, and the defaults render and re-parse.
+    fn the_accessory_bar_preference_renders_and_round_trips() {
+        // Defaults true, and the default renders and re-parses.
         let rendered = render_config_plain(&Config::default());
         let parsed: Config = toml::from_str(&rendered).expect("re-parse");
-        assert!(parsed.ui.mobile_top_bar);
         assert!(parsed.ui.mobile_accessory_bar);
 
-        // A user-set false survives a regenerate for each field independently.
-        // Same shape as `compose_bar_renders_and_round_trips` above: this is
-        // the half that catches a missing `patch_table_bool` line, where the
-        // re-parse would silently fall back to the default (true).
+        // A user-set false survives a regenerate. Same shape as
+        // `compose_bar_renders_and_round_trips` above: this is the half that
+        // catches a missing `patch_table_bool` line, where the re-parse would
+        // silently fall back to the default (true).
         let config = Config {
             ui: crate::config::UiConfig {
-                mobile_top_bar: false,
                 mobile_accessory_bar: false,
                 ..Default::default()
             },
@@ -1706,7 +1703,6 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         };
         let rendered = render_config_plain(&config);
         let parsed: Config = toml::from_str(&rendered).expect("re-parse");
-        assert!(!parsed.ui.mobile_top_bar);
         assert!(!parsed.ui.mobile_accessory_bar);
     }
 

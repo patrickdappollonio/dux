@@ -46,7 +46,6 @@ import {
 import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
-  mobileTopBarVisible,
   navigateUp,
   openDeleteTerminal,
   selectSession,
@@ -153,23 +152,16 @@ function AgentlessTerminalScreen({
   // the crumb still disambiguates against its true siblings.
   const ownedTerminals = terminalsForOwner(spine?.terminals ?? [], owner)
   const terminal = ownedTerminals.find((t) => t.id === terminalId)
-  // The same `ui.mobile_top_bar` gate as the agent terminal screen: both
-  // preferences deliberately cover every mobile terminal surface. Hiding
-  // happens from this screen's own ⋯ menu (the shared items below), exactly as
-  // on the agent screen; restoring from the input ⋯ menu below the terminal,
-  // which is on screen in every bar state, or from Preferences.
-  const topBarVisible = mobileTopBarVisible(duxState)
   const isMobile = useIsMobile()
   const touchSurfaces = useTouchSurfaces()
-  // On the phone shell the app header IS the chrome stack theater takes away,
-  // and it goes whatever the top-bar preference says: theater is the stronger,
-  // deliberate statement of the same intent. The preference is untouched
-  // underneath it, so leaving theater lands back on whichever bars the user had.
+  // On the phone shell the app header IS the chrome stack theater takes away.
+  // It is the only way to hide this header, deliberately: a preference that
+  // hid it too was a second flow for the same intent with no way back of its
+  // own, and the two could disagree about what was on screen.
   const theater = duxState.theater
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <TheaterChrome hidden={theater}>
-      {topBarVisible ? (
         <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
           {/* Up to the hub, by name. A relative history step would walk out
               of the app whenever this screen is the entry the browser opened
@@ -191,9 +183,9 @@ function AgentlessTerminalScreen({
           </div>
           {/* The macro quick-picker's mobile entry point, a header icon like
               the agent screen's (a floating trigger over the PTY covered the
-              text under it). Hiding the top bar hides it with the header —
-              the same more-space trade the tab strip makes; restore is the
-              input ⋯ menu below the terminal, or Preferences. */}
+              text under it). Theater takes it away with the header, the same
+              more-space trade the tab strip makes; leaving theater brings it
+              back. */}
           <TheaterToggle size="mobile" />
           <MacroPopover
             variant="icon"
@@ -220,10 +212,8 @@ function AgentlessTerminalScreen({
                   ConfirmDeleteTerminalDialog are the danger signal), routed
                   through the same confirm target.
 
-                  The top-bar toggle rides `isMobile`: this header is the phone
-                  shell's own chrome, which is the gate this menu has always
-                  had. The keys toggle rides the touch surfaces as well, so it
-                  is present exactly where pressing it puts a key row on screen:
+                  The keys toggle rides the touch surfaces as well, so it is
+                  present exactly where pressing it puts a key row on screen:
                   in a narrow window on a laptop the width alone said yes and
                   the press did nothing. Asking for the message box from the
                   input `⋯` brings the surfaces, and this item, along. */}
@@ -232,7 +222,6 @@ function AgentlessTerminalScreen({
                   attach: false,
                   surfaceSwitch: false,
                   keysToggle: isMobile && touchSurfaces,
-                  topBarToggle: isMobile,
                   // Same reason as the agent screen's header menu: this menu
                   // lives in the header theater takes away, so it is never on
                   // screen in theater and carries no exit.
@@ -270,7 +259,6 @@ function AgentlessTerminalScreen({
             </DropdownMenuContent>
           </DropdownMenu>
         </header>
-      ) : null}
       </TheaterChrome>
       <div className="relative min-h-0 flex-1">
         <ChunkBoundary>
@@ -554,9 +542,7 @@ function TerminalScreen() {
   const projectName = spine?.projects.find(
     (project) => project.id === workspaceProjectId(session.workspace),
   )?.name
-  const topBarVisible = mobileTopBarVisible(duxState)
   const stripShown =
-    topBarVisible &&
     selectedTarget.kind === "agent" &&
     shouldShowTabStrip(tabs, bootstrap?.always_show_tab_strip ?? false)
 
@@ -565,23 +551,22 @@ function TerminalScreen() {
       {/* The phone shell's chrome stack: its header AND the tab strip, which is
           what "the app header goes with them" means here. Both leave on the one
           flag; the actions they used to sit beside are in the flap below, which
-          detaches into the floating pill rather than leaving with them. */}
+          detaches into the floating pill rather than leaving with them. Theater
+          is the only thing that hides them: a preference that hid the top bar
+          too was a second flow for the same intent with no way back of its
+          own. */}
       <TheaterChrome hidden={duxState.theater}>
-        {topBarVisible ? (
-          <>
-            <TerminalHeader
-              session={session}
-              focusedTab={focusedTab}
-              projectName={projectName}
-            />
-            {stripShown ? (
-              <AgentTabsStrip
-                session={session}
-                activeTabId={selectedTarget.tabId}
-                maxTabs={bootstrap?.agent_tabs_max}
-              />
-            ) : null}
-          </>
+        <TerminalHeader
+          session={session}
+          focusedTab={focusedTab}
+          projectName={projectName}
+        />
+        {stripShown ? (
+          <AgentTabsStrip
+            session={session}
+            activeTabId={selectedTarget.tabId}
+            maxTabs={bootstrap?.agent_tabs_max}
+          />
         ) : null}
       </TheaterChrome>
       <div className="relative min-h-0 flex-1">

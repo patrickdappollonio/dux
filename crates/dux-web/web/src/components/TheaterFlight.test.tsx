@@ -118,7 +118,6 @@ function makeState(theater: boolean): DuxState {
     routeNotFound: null,
     createTabInFlight: [],
     mobileScreen: "terminal",
-    mobileTopBarOverride: null,
     changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
   } as unknown as DuxState
 }

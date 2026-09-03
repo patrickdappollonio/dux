@@ -1466,18 +1466,11 @@ pub struct UiConfig {
     /// dialog persists the new value here. Web-only behavior.
     #[serde(deserialize_with = "deserialize_compose_bar")]
     pub compose_bar: String,
-    /// Whether the web UI's mobile terminal screens show the top bar (the
-    /// back-chevron header with the branch crumb and actions, plus the agent
-    /// tab strip below it). Set to false to hide it and give those rows back
-    /// to the terminal. Hidden bars can be restored from the show-bars
-    /// button below the terminal or from the web UI's Preferences dialog.
-    /// Web-only behavior; the hub and Changes screens are unaffected.
-    pub mobile_top_bar: bool,
     /// Whether the web UI's mobile terminal screens show the terminal-keys
     /// accessory bar (Esc, Tab, Ctrl, Alt, the arrows and paging keys). Set
-    /// to false to hide it and give those rows back to the terminal. Hidden
-    /// bars can be restored from the show-bars button below the terminal or
-    /// from the web UI's Preferences dialog. Web-only behavior.
+    /// to false to hide it and give those rows back to the terminal. It can be
+    /// restored from the input `⋯` menu below the terminal or from the web
+    /// UI's Preferences dialog. Web-only behavior.
     pub mobile_accessory_bar: bool,
     /// Directory, RELATIVE to the agent's worktree, that a file dropped or
     /// pasted onto an AGENT pane is saved into. An absolute path, a `..`
@@ -2068,7 +2061,6 @@ impl Default for UiConfig {
             terminal_font_family: String::new(),
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             compose_bar: ComposeBarMode::Auto.as_str().to_string(),
-            mobile_top_bar: true,
             mobile_accessory_bar: true,
             upload_directory: DEFAULT_UPLOAD_DIRECTORY.to_string(),
             upload_write_gitignore: true,
@@ -2624,7 +2616,6 @@ impl Default for Config {
                 terminal_font_family: String::new(),
                 terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
                 compose_bar: ComposeBarMode::Auto.as_str().to_string(),
-                mobile_top_bar: true,
                 mobile_accessory_bar: true,
                 upload_directory: DEFAULT_UPLOAD_DIRECTORY.to_string(),
                 upload_write_gitignore: true,
@@ -5078,6 +5069,18 @@ mod agent_tabs_cap_tests {
     #[test]
     fn a_leftover_watcher_view_line_is_ignored_rather_than_failing_the_load() {
         let parsed: Config = toml::from_str("[ui]\nwatcher_view = \"fit_window\"\n")
+            .expect("a retired key must not fail the whole config load");
+        assert_eq!(parsed.ui, UiConfig::default());
+    }
+
+    // `ui.mobile_top_bar` hid the web's phone terminal header and tab strip
+    // and is gone: theater mode hides the same chrome and offers a way back,
+    // and two flows for hiding one thing could disagree about what was on
+    // screen. Same treatment as `watcher_view` above: a config file still
+    // carrying the line loads unchanged and `dux config regenerate` tidies it.
+    #[test]
+    fn a_leftover_mobile_top_bar_line_is_ignored_rather_than_failing_the_load() {
+        let parsed: Config = toml::from_str("[ui]\nmobile_top_bar = false\n")
             .expect("a retired key must not fail the whole config load");
         assert_eq!(parsed.ui, UiConfig::default());
     }

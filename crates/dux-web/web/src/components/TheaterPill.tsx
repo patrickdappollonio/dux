@@ -626,7 +626,6 @@ function TheaterAppMenu({ paneId }: { paneId: string }) {
             keysToggle: paneMenu?.gates.keysToggle ?? false,
             // Never here: the top bar is one of the things theater took away,
             // and this menu only exists while the mode is on.
-            topBarToggle: false,
             // The guaranteed way out, whatever the pane published.
             theaterExit: true,
           }}

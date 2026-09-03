@@ -1683,18 +1683,20 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 19. **The input ⋯ menu: items computed before the trigger exists, exactly one instance
     on screen in every bar state, and its own third-anchor row when neither bar is up.**
     Trap: an ⋯ opening an empty popup is reachable (fine pointer, stored compose
-    choice, uploads off); the state "keys up, box off, top bar hidden" used to render
-    two menus; a chrome-free PWA screen has no browser Back button, so the menu's own
-    row is the way back. A fine-pointer desktop grows no new row. Fix: TP:455-485,
+    choice, uploads off); the state "keys up, box off" used to render two menus; a
+    chrome-free PWA screen has no browser Back button, so the menu's own row is the
+    way back. A fine-pointer desktop grows no new row. Fix: TP:455-485,
     TP:952-953, TP:1037-1048, `src/lib/inputMenu.ts`.
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane input menu anchors" suite
-    ("renders exactly one menu with the keys up, the box off and the top bar hidden",
+    ("renders exactly one menu with the keys up and the box off",
     "renders its own row when neither bar is up"), "input menu follows the touch
     surfaces" suite, "offers nothing on a fine pointer with an empty item list".
 
-20. **A non-owner's menu carries the top-bar toggle only.** Attach and the surface
-    switch are input; the keys toggle would be a write with no visible effect on the
-    viewer's screen that re-hides the OWNER's keys. Fix: TP:457-471.
+20. **A non-owner gets no input row at all.** Attach and the surface switch are input;
+    the keys toggle would be a write with no visible effect on the viewer's screen that
+    re-hides the OWNER's keys. The row it used to get carried the retired top-bar
+    toggle, which was the one thing a viewer could act on; theater hides that chrome
+    now and the pill carries the way back. Fix: TP:457-471.
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane input menu for a non-owner"
     suite.
 

@@ -570,16 +570,9 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Str(c.ui.compose_bar.clone()),
         },
         ConfigEntry::Field {
-            key: "mobile_top_bar",
-            comment: Some(CommentSource::Static(
-                "# Web UI only: on a phone, show the terminal screen's top bar (the back\n# chevron, branch crumb and actions, plus the agent tab strip below it).\n# Set to false to hide it and give those rows back to the terminal. Bring\n# hidden bars back with the show-bars button below the terminal, or from\n# the web UI's Preferences dialog. The hub and Changes screens are unaffected.",
-            )),
-            value_fn: |c| FieldValue::Bool(c.ui.mobile_top_bar),
-        },
-        ConfigEntry::Field {
             key: "mobile_accessory_bar",
             comment: Some(CommentSource::Static(
-                "# Web UI only: on a phone, show the terminal-keys bar (Esc, Tab, Ctrl,\n# Alt, the arrows and paging keys) above the compose box. Set to false to\n# hide it and give those rows back to the terminal. Bring hidden bars back\n# with the show-bars button below the terminal, or from the web UI's\n# Preferences dialog.",
+                "# Web UI only: on a phone, show the terminal-keys bar (Esc, Tab, Ctrl,\n# Alt, the arrows and paging keys) above the compose box. Set to false to\n# hide it and give those rows back to the terminal. Bring it back from the\n# input ... menu below the terminal, or from the web UI's Preferences\n# dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.mobile_accessory_bar),
         },
@@ -2415,7 +2408,6 @@ mod tests {
         assert!(rendered.contains("terminal_font_family = \"\""));
         assert!(rendered.contains("terminal_font_size = 14"));
         assert!(rendered.contains("compose_bar = \"auto\""));
-        assert!(rendered.contains("mobile_top_bar = true"));
         assert!(rendered.contains("mobile_accessory_bar = true"));
         assert!(rendered.contains("attention_grace_seconds = 3"));
         assert!(rendered.contains("auto_reopen_agents = false"));

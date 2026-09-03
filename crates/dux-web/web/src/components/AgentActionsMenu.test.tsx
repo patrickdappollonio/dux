@@ -303,13 +303,11 @@ describe("AgentActionsMenu context and tab availability", () => {
 
     await openMenu(session, "terminal")
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
-    expect(screen.queryByText("Hide top bar")).toBeNull()
     expect(screen.queryByText(/^Changes/)).toBeNull()
 
     cleanup()
     await openMenu(session, "hub")
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
-    expect(screen.queryByText("Hide top bar")).toBeNull()
   })
 
   it("keeps the new-tab submenu disabled at the configured tab cap", async () => {

@@ -767,11 +767,6 @@ pub struct SettingsPatch {
     /// unrecognized value REJECTS the whole command rather than being coerced.
     /// A plain field write with no side effects otherwise.
     pub compose_bar: Option<String>,
-    /// `ui.mobile_top_bar`: the web mobile terminal screens' top bar (the
-    /// back/branch header plus the agent tab strip). A plain field write with
-    /// no side effects (a pure render gate), so it rides the generic settings
-    /// path like `compose_bar`.
-    pub mobile_top_bar: Option<bool>,
     /// `ui.mobile_accessory_bar`: the web mobile terminal screens' accessory
     /// key bar (Esc/Tab/Ctrl/Alt/arrows). A plain field write with no side
     /// effects (a pure render gate), so it rides the generic settings path
@@ -881,16 +876,14 @@ impl SettingsPatch {
             }
     }
 
-    /// True when the patch carries at least one of the two mobile-bar fields
-    /// and no other settings field. This is the gate that scopes `quiet`: the
-    /// whole-struct compare (every field its own default except the pair and
-    /// the flag) cannot go stale when a field is added, mirroring
-    /// `any_present`.
+    /// True when the patch carries the accessory-bar field and no other
+    /// settings field. This is the gate that scopes `quiet`: the whole-struct
+    /// compare (every field its own default except that one and the flag)
+    /// cannot go stale when a field is added, mirroring `any_present`.
     pub fn is_mobile_bar_only(&self) -> bool {
-        (self.mobile_top_bar.is_some() || self.mobile_accessory_bar.is_some())
+        self.mobile_accessory_bar.is_some()
             && *self
                 == Self {
-                    mobile_top_bar: self.mobile_top_bar,
                     mobile_accessory_bar: self.mobile_accessory_bar,
                     quiet: self.quiet,
                     ..Self::default()
@@ -1309,7 +1302,6 @@ enum WireCommandMapping {
 struct SettingsUiBehaviorPatch {
     copy_on_select: Option<bool>,
     compose_bar: Option<String>,
-    mobile_top_bar: Option<bool>,
     mobile_accessory_bar: Option<bool>,
     upload_write_gitignore: Option<bool>,
     upload_pasted_text_chars: Option<usize>,
@@ -1326,9 +1318,6 @@ impl SettingsUiBehaviorPatch {
         }
         if let Some(value) = self.compose_bar {
             config.ui.compose_bar = value;
-        }
-        if let Some(value) = self.mobile_top_bar {
-            config.ui.mobile_top_bar = value;
         }
         if let Some(value) = self.mobile_accessory_bar {
             config.ui.mobile_accessory_bar = value;
@@ -1790,7 +1779,6 @@ impl Engine {
             quiet: _,
             copy_on_select,
             compose_bar,
-            mobile_top_bar,
             mobile_accessory_bar,
             upload_write_gitignore,
             upload_pasted_text_chars,
@@ -1817,7 +1805,6 @@ impl Engine {
         SettingsUiBehaviorPatch {
             copy_on_select,
             compose_bar,
-            mobile_top_bar,
             mobile_accessory_bar,
             upload_write_gitignore,
             upload_pasted_text_chars,
@@ -11051,7 +11038,6 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let outcome = engine
             .apply_wire(WireCommand::SetSettings(SettingsPatch {
-                mobile_top_bar: Some(false),
                 mobile_accessory_bar: Some(false),
                 quiet: true,
                 ..Default::default()
@@ -11061,8 +11047,10 @@ mod tests {
             outcome.status.is_none(),
             "a quiet mobile-bar write must emit no status"
         );
-        assert!(!engine.config.ui.mobile_top_bar, "the write still lands");
-        assert!(!engine.config.ui.mobile_accessory_bar);
+        assert!(
+            !engine.config.ui.mobile_accessory_bar,
+            "the write still lands"
+        );
     }
 
     /// Quiet is honored ONLY for a patch confined to the two mobile-bar
@@ -11073,7 +11061,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let outcome = engine
             .apply_wire(WireCommand::SetSettings(SettingsPatch {
-                mobile_top_bar: Some(false),
+                mobile_accessory_bar: Some(false),
                 copy_on_select: Some(false),
                 quiet: true,
                 ..Default::default()
@@ -11092,10 +11080,10 @@ mod tests {
     #[test]
     fn set_settings_quiet_suppresses_the_unchanged_status_too() {
         let (mut engine, _tmp) = test_engine();
-        let already = engine.config.ui.mobile_top_bar;
+        let already = engine.config.ui.mobile_accessory_bar;
         let outcome = engine
             .apply_wire(WireCommand::SetSettings(SettingsPatch {
-                mobile_top_bar: Some(already),
+                mobile_accessory_bar: Some(already),
                 quiet: true,
                 ..Default::default()
             }))
@@ -11108,9 +11096,9 @@ mod tests {
     #[test]
     fn settings_patch_without_quiet_field_deserializes_as_not_quiet() {
         let patch: SettingsPatch =
-            serde_json::from_str(r#"{"mobile_top_bar": false}"#).expect("deserialize");
+            serde_json::from_str(r#"{"mobile_accessory_bar": false}"#).expect("deserialize");
         assert!(!patch.quiet);
-        assert_eq!(patch.mobile_top_bar, Some(false));
+        assert_eq!(patch.mobile_accessory_bar, Some(false));
     }
 
     /// One accepted `SetSettings` field, described end to end: how to seed the
@@ -11145,13 +11133,6 @@ mod tests {
                 sent: serde_json::json!("never"),
                 read: |c| c.ui.compose_bar.clone(),
                 expect: "never",
-            },
-            SettingsFieldRow {
-                key: "mobile_top_bar",
-                seed: |c| c.ui.mobile_top_bar = true,
-                sent: serde_json::json!(false),
-                read: |c| c.ui.mobile_top_bar.to_string(),
-                expect: "false",
             },
             SettingsFieldRow {
                 key: "mobile_accessory_bar",
@@ -11311,7 +11292,7 @@ mod tests {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            23,
+            22,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -11359,7 +11340,6 @@ mod tests {
             } else {
                 "never".to_string()
             }),
-            mobile_top_bar: Some(!before.ui.mobile_top_bar),
             mobile_accessory_bar: Some(!before.ui.mobile_accessory_bar),
             upload_write_gitignore: Some(!before.ui.upload_write_gitignore),
             upload_pasted_text_chars: Some(before.ui.upload_pasted_text_chars + 1),
@@ -11397,7 +11377,6 @@ mod tests {
         let after = &engine.config;
         assert_eq!(after.ui.copy_on_select, !before.ui.copy_on_select);
         assert_eq!(after.ui.compose_bar, "never");
-        assert_eq!(after.ui.mobile_top_bar, !before.ui.mobile_top_bar);
         assert_eq!(
             after.ui.mobile_accessory_bar,
             !before.ui.mobile_accessory_bar
@@ -11461,7 +11440,6 @@ mod tests {
         let disk: crate::config::Config = toml::from_str(&raw).expect("parse config");
         assert_eq!(disk.ui.copy_on_select, after.ui.copy_on_select);
         assert_eq!(disk.ui.compose_bar, after.ui.compose_bar);
-        assert_eq!(disk.ui.mobile_top_bar, after.ui.mobile_top_bar);
         assert_eq!(disk.ui.mobile_accessory_bar, after.ui.mobile_accessory_bar);
         assert_eq!(disk.ui.auto_reopen_agents, after.ui.auto_reopen_agents);
         assert_eq!(disk.ui.show_changes_pane, after.ui.show_changes_pane);

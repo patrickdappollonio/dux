@@ -2459,22 +2459,15 @@ describe("TerminalPane input menu anchors", () => {
     expect(row.querySelector('[aria-label="Esc"]')).toBeTruthy()
   })
 
-  // THE DUPLICATE STATE. The keys are up, the message box is off and the top
-  // bar is hidden. The old fallback row's condition ("compose off AND something
-  // hidden") was true here at the same time as the accessory anchor, so this
-  // exact state would have shipped TWO menus.
-  it("renders exactly one menu with the keys up, the box off and the top bar hidden", () => {
+  // THE DUPLICATE STATE. The keys are up and the message box is off. The old
+  // fallback row's condition ("compose off AND something hidden") was true here
+  // at the same time as the accessory anchor, so this exact state would have
+  // shipped TWO menus.
+  it("renders exactly one menu with the keys up and the box off", () => {
     goMobile()
     const state = makeState()
-    ;(
-      state.bootstrap as unknown as {
-        compose_bar?: string
-        mobile_top_bar?: boolean
-      }
-    ).compose_bar = "never"
-    ;(
-      state.bootstrap as unknown as { mobile_top_bar?: boolean }
-    ).mobile_top_bar = false
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+      "never"
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(triggers()).toHaveLength(1)
@@ -2498,7 +2491,7 @@ describe("TerminalPane input menu anchors", () => {
     expect(triggers()).toHaveLength(1)
   })
 
-  it("carries the per-bar Show items, each writing only its own field", () => {
+  it("carries the keys Show item, writing that one field", () => {
     goMobile()
     const state = makeState()
     ;(
@@ -2507,9 +2500,10 @@ describe("TerminalPane input menu anchors", () => {
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     openMenu()
-    // The individual toggles replaced the one-tap restore-both: the menu names
-    // what each one does, and each is its own preference.
-    expect(screen.getByText("Hide top bar")).toBeTruthy()
+    // The menu names what the item does, in the direction it will move the
+    // bar. It is the only bar this menu can move: theater mode owns the
+    // phone's chrome, so there is nothing here for the top bar.
+    expect(screen.queryByText(/top bar/i)).toBeNull()
     fireEvent.click(screen.getByText("Show terminal keys"))
     const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
     expect(fetchSpy).toHaveBeenCalledWith(
@@ -3744,10 +3738,11 @@ describe("TerminalPane input menu follows the touch surfaces", () => {
     expect(screen.queryByText("Type directly in the terminal")).toBeNull()
   })
 
-  // The TOP bar is the mobile shell's own chrome. The desktop shell never
-  // renders it, so its preference being off hides nothing here and must not
-  // put an unexplained row under a desktop terminal.
-  it("ignores the top-bar preference in the desktop shell", () => {
+  // A CONFIG STILL CARRYING THE RETIRED `ui.mobile_top_bar` MUST CHANGE
+  // NOTHING. It hid the phone's chrome once; theater mode does that now, and a
+  // value left in a config file (or published by an older server) must not put
+  // an unexplained extra row under a terminal or an item back in the menu.
+  it("ignores a stored top-bar preference entirely", () => {
     pointerStub = stubCoarsePointer(true)
     const state = makeState()
     ;(
@@ -3755,23 +3750,20 @@ describe("TerminalPane input menu follows the touch surfaces", () => {
     ).mobile_top_bar = false
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    // The keys are up, so the menu is anchored in them; what must not happen
-    // is a second, minimal row appearing because of a bar this shell has not
-    // got. The top-bar item is likewise absent from the menu.
     expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
     expect(
       screen.queryAllByRole("button", { name: "Input options" }),
     ).toHaveLength(1)
     fireEvent.click(trigger()!)
-    expect(screen.queryByText("Show top bar")).toBeNull()
+    expect(screen.queryByText(/top bar/i)).toBeNull()
   })
 })
 
-// THE VIEWER'S WAY BACK. Everything below the terminal used to be owner-gated,
-// so a non-owner on a phone who hid the top bar from the header menu had hidden
-// the only menu that could bring it back. The input ⋯ renders for them too,
-// carrying that one item: not the keys (a write with no visible effect on their
-// screen that would re-hide the owner's), and nothing about input.
+// A NON-OWNER GETS NO INPUT ROW OF ITS OWN. It owns no input, so it has no
+// typing surfaces to reach and nothing to anchor: on a phone the top bar and
+// the flap are on screen outside theater, and in theater the floating pill
+// carries the items. The row it used to get existed only for the retired
+// top-bar preference, which was the one thing a viewer could still act on.
 describe("TerminalPane input menu for a non-owner", () => {
   const desktopWidth = window.innerWidth
   let pointerStub: MatchMediaStub | null = null
@@ -3813,26 +3805,22 @@ describe("TerminalPane input menu for a non-owner", () => {
     })
   }
 
-  it("offers the top-bar item once the top bar is hidden", () => {
+  it("gets no typing surfaces and no input row", () => {
+    renderViewer(makeState())
+    // No typing surfaces for a viewer, per the tenet.
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
+  })
+
+  it("gets none even with a stored top-bar preference on the bootstrap", () => {
+    // The retired preference used to be the viewer's one reason for a row.
     const state = makeState()
     ;(
       state.bootstrap as unknown as { mobile_top_bar?: boolean }
     ).mobile_top_bar = false
     renderViewer(state)
-    // No typing surfaces for a viewer, per the tenet.
-    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
-    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
-    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    expect(screen.getByText("Show top bar")).toBeTruthy()
-    expect(screen.queryByText("Show terminal keys")).toBeNull()
-    expect(screen.queryByText("Attach a file…")).toBeNull()
-  })
-
-  it("stays out of the way while the top bar is on screen", () => {
-    renderViewer(makeState())
-    expect(
-      screen.queryByRole("button", { name: "Input options" }),
-    ).toBeNull()
+    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
   })
 })
 
@@ -4772,13 +4760,13 @@ describe("TerminalPane and theater mode", () => {
     expect(theaterOwnershipLost).toHaveBeenCalledWith("agent", "s1")
   })
 
-  it("stops offering a top bar theater has already taken away", () => {
+  it("carries the way out of the mode and nothing about the top bar", () => {
     goMobile()
     mockState = { ...makeState(), theater: true } as DuxState
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    // The item promised to show a bar this mode removes, which is a lie about
-    // what the press does. The way OUT of the mode is what belongs here.
+    // Theater is the one thing that hides the phone's chrome, so the way OUT
+    // of the mode is the only entry this menu has on the subject.
     expect(screen.queryByText(/top bar/i)).toBeNull()
     expect(screen.getByText("Leave theater mode")).toBeTruthy()
   })
@@ -4801,11 +4789,10 @@ describe("TerminalPane and theater mode", () => {
     surface.setTypingSurface(null)
   })
 
-  it("keeps the top-bar item outside theater", () => {
+  it("offers no way out while the mode is off", () => {
     goMobile()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    expect(screen.getByText(/top bar/i)).toBeTruthy()
     expect(screen.queryByText("Leave theater mode")).toBeNull()
   })
 

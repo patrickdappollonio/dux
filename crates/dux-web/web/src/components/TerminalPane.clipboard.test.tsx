@@ -288,7 +288,6 @@ function makeState(): DuxState {
       agent_tabs_max: 20,
       status_clear_seconds: 6,
       compose_bar: "auto",
-      mobile_top_bar: true,
       mobile_accessory_bar: true,
       file_drop_max_bytes: 1024,
       upload_pasted_text_chars: 1000,

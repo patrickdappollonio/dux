@@ -17,7 +17,6 @@ const sampleBootstrap: Bootstrap = {
   terminal_font_family: "Fira Code",
   terminal_font_size: 18,
   compose_bar: "never",
-  mobile_top_bar: false,
   mobile_accessory_bar: false,
   upload_write_gitignore: false,
   auto_reopen_agents: true,
@@ -69,7 +68,6 @@ describe("settingsDescriptors", () => {
         "ui.terminal_font_family",
         "ui.terminal_font_size",
         "ui.compose_bar",
-        "ui.mobile_top_bar",
         "ui.mobile_accessory_bar",
         "ui.upload_write_gitignore",
         "ui.upload_pasted_text_chars",
@@ -136,7 +134,6 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.terminal_font_family"]).toBe("Fira Code")
     expect(byKey["ui.terminal_font_size"]).toBe(18)
     expect(byKey["ui.compose_bar"]).toBe("never")
-    expect(byKey["ui.mobile_top_bar"]).toBe(false)
     expect(byKey["ui.mobile_accessory_bar"]).toBe(false)
     expect(byKey["ui.auto_reopen_agents"]).toBe(true)
     expect(byKey["capabilities.web_notifications"]).toBe(false)
@@ -282,7 +279,6 @@ describe("settingsDescriptors", () => {
       "ui.disable_automated_welcome_screen",
       "ui.disable_release_notes",
       "ui.mobile_accessory_bar",
-      "ui.mobile_top_bar",
       "ui.pr_banner_position",
       "ui.status_clear_seconds",
       "ui.tab_reaches_agent",
@@ -378,7 +374,6 @@ describe("settingsDescriptors", () => {
     delete bare.attention_on_bell
     delete bare.global_default_provider
     delete bare.compose_bar
-    delete bare.mobile_top_bar
     delete bare.mobile_accessory_bar
     delete bare.auto_reopen_agents
     const byKey = Object.fromEntries(
@@ -389,27 +384,33 @@ describe("settingsDescriptors", () => {
     expect(byKey["defaults.provider"]).toBe("claude")
     // The three-way mode's documented default, not a boolean.
     expect(byKey["ui.compose_bar"]).toBe("auto")
-    expect(byKey["ui.mobile_top_bar"]).toBe(true)
     expect(byKey["ui.mobile_accessory_bar"]).toBe(true)
-    // Unlike the mobile-bar preferences, the auto-reopen fallback is FALSE
+    // Unlike the terminal-keys preference, the auto-reopen fallback is FALSE
     // (the config default).
     expect(byKey["ui.auto_reopen_agents"]).toBe(false)
   })
 
-  // Escape-hatch truth: each mobile-bar description must name BOTH restore
+  // Escape-hatch truth: the terminal-keys description must name BOTH restore
   // routes (the input ⋯ menu below the terminal, which sits in the compose row
   // when the message box is on, in the key row when it is not, and in its own
   // minimal row when neither is, plus this Preferences dialog) rather than
   // leaving the user to rediscover them. Deliberately NOT "the compose bar's
   // button": that wording was false with the compose bar disabled.
-  it("both mobile-bar descriptions name the restore routes", () => {
-    for (const key of ["ui.mobile_top_bar", "ui.mobile_accessory_bar"]) {
-      const d = allSettingDescriptors().find((x) => x.key === key)
-      expect(d?.writeTarget, key).toBe("settings")
-      expect(d?.default, key).toBe(true)
-      expect(d?.description, key).toContain("below the terminal")
-      expect(d?.description, key).toContain("Preferences")
-    }
+  it("the terminal-keys description names the restore routes", () => {
+    const key = "ui.mobile_accessory_bar"
+    const d = allSettingDescriptors().find((x) => x.key === key)
+    expect(d?.writeTarget, key).toBe("settings")
+    expect(d?.default, key).toBe(true)
+    expect(d?.description, key).toContain("below the terminal")
+    expect(d?.description, key).toContain("Preferences")
+  })
+
+  // The phone top bar is hidden by theater mode and by nothing else. A
+  // preference for it would be a second flow for the same intent, and the two
+  // could disagree about what is on screen, so no descriptor may name one.
+  it("offers no preference for hiding the phone top bar", () => {
+    const keys = allSettingDescriptors().map((d) => d.key)
+    expect(keys).not.toContain("ui.mobile_top_bar")
   })
 
   // The global default-provider row's options aren't known statically: they

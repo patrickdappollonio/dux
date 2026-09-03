@@ -17,9 +17,6 @@ export interface InputMenuGates {
   surfaceSwitch: boolean
   /// Hide/Show terminal keys (`ui.mobile_accessory_bar`).
   keysToggle: boolean
-  /// Hide/Show top bar (`ui.mobile_top_bar`). Phone shell only: the top bar is
-  /// the mobile shell's own chrome and does not exist in the wide layout.
-  topBarToggle: boolean
   /// "Leave theater mode". Only while theater is actually on, because this is a
   /// way BACK and not a way there: the header's expand button is the way there,
   /// and in theater that header is exactly what is not on screen. This menu is
@@ -41,7 +38,6 @@ export function inputMenuHasItems(gates: InputMenuGates): boolean {
     gates.attach ||
     gates.surfaceSwitch ||
     gates.keysToggle ||
-    gates.topBarToggle ||
     gates.theaterExit
   )
 }

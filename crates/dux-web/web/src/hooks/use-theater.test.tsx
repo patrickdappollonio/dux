@@ -250,7 +250,6 @@ describe("Escape in theater", () => {
             attach: false,
             surfaceSwitch: false,
             keysToggle: true,
-            topBarToggle: false,
             theaterExit: true,
           }}
         />

@@ -185,6 +185,9 @@ describe("the phone's one pane menu", () => {
     await openFrom(screen.getByLabelText(MOBILE_PANE_MENU_LABEL))
     const items = labels()
     expect(items.some((t) => t?.includes("terminal keys"))).toBe(true)
-    expect(items.some((t) => t?.includes("top bar"))).toBe(true)
+    // And nothing for the top bar: theater mode is the one way to hide the
+    // phone's chrome, and a second flow for the same intent is exactly what
+    // this menu must not grow back.
+    expect(items.some((t) => t?.includes("top bar"))).toBe(false)
   })
 })

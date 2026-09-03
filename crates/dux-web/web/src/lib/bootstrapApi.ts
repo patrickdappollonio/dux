@@ -77,16 +77,13 @@ export interface Bootstrap {
    * the mode existed; an older server omits the field entirely, and both that
    * and an unrecognized value read as `"auto"` through `composeBarMode`. */
   compose_bar?: string
-  /** Mirrors `config.ui.mobile_top_bar`: whether the mobile terminal screens
-   * show the top bar (the back/branch header plus the agent tab strip). A
-   * pure render gate; hidden bars are restored from the input ⋯ menu below
-   * the terminal or from the Preferences dialog. Older servers omit it, so
-   * consumers fall back to true. */
-  mobile_top_bar?: boolean
-  /** Mirrors `config.ui.mobile_accessory_bar`: whether the mobile terminal
-   * screens show the accessory key bar (Esc/Tab/Ctrl/Alt/arrows). Same
-   * render-gate/restore story as `mobile_top_bar`; older servers omit it, so
-   * consumers fall back to true. */
+  /** Mirrors `config.ui.mobile_accessory_bar`: whether the touch terminal
+   * screens show the accessory key bar (Esc/Tab/Ctrl/Alt/arrows). A pure
+   * render gate; a hidden bar is restored from the input ⋯ menu below the
+   * terminal or from the Preferences dialog. Older servers omit it, so
+   * consumers fall back to true. A `mobile_top_bar` sibling published the
+   * same gate for the phone's top bar and is gone: theater mode hides that
+   * chrome and carries its own way back. */
   mobile_accessory_bar?: boolean
   /** Mirrors `config.ui.upload_write_gitignore`: whether the agent upload
    * directory keeps a `.gitignore` holding a single `*`, so a file dropped or

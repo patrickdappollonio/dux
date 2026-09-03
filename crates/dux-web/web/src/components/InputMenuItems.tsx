@@ -3,8 +3,6 @@ import {
   KeyboardOff,
   MessageSquare,
   Minimize2,
-  PanelTopClose,
-  PanelTopOpen,
   Paperclip,
   SquareTerminal,
 } from "lucide-react"
@@ -16,8 +14,7 @@ import {
 import {
   exitTheater,
   mobileAccessoryBarVisible,
-  mobileTopBarVisible,
-  setMobileBarVisibility,
+  setAccessoryBarVisibility,
   useDux,
 } from "@/lib/store"
 import {
@@ -64,12 +61,11 @@ export function InputMenuItems({
   trailingSeparator?: boolean
 }) {
   const duxState = useDux()
-  const topBarVisible = mobileTopBarVisible(duxState)
   const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
   // The separator between "Attach a file…" (an action on a file) and the view
   // toggles below it (preferences about this screen's chrome) only earns its
   // place when both sides exist.
-  const viewItems = gates.surfaceSwitch || gates.keysToggle || gates.topBarToggle
+  const viewItems = gates.surfaceSwitch || gates.keysToggle
   return (
     <>
       {gates.attach ? (
@@ -95,19 +91,11 @@ export function InputMenuItems({
       {gates.keysToggle ? (
         <DropdownMenuItem
           onClick={() =>
-            void setMobileBarVisibility("accessory", !accessoryBarVisible)
+            void setAccessoryBarVisibility(!accessoryBarVisible)
           }
         >
           {accessoryBarVisible ? <KeyboardOff /> : <Keyboard />}
           {accessoryBarVisible ? "Hide terminal keys" : "Show terminal keys"}
-        </DropdownMenuItem>
-      ) : null}
-      {gates.topBarToggle ? (
-        <DropdownMenuItem
-          onClick={() => void setMobileBarVisibility("top", !topBarVisible)}
-        >
-          {topBarVisible ? <PanelTopClose /> : <PanelTopOpen />}
-          {topBarVisible ? "Hide top bar" : "Show top bar"}
         </DropdownMenuItem>
       ) : null}
       {/* The guaranteed way out of theater. It is a way BACK only, so there is

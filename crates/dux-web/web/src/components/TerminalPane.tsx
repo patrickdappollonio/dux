@@ -50,7 +50,6 @@ import { ESC, TAB } from "@/lib/termkeys"
 import {
   ejectSelectionForReconnect,
   mobileAccessoryBarVisible,
-  mobileTopBarVisible,
   noteTheaterOwnershipLost,
   useDux,
 } from "@/lib/store"
@@ -146,7 +145,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     touchSurfaces,
     surfaceToggleOffered,
     accessoryBarVisible,
-    topBarVisible,
     theater,
     session,
     hasOutput,
@@ -477,8 +475,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     touchSurfaces,
     accessoryBarVisible,
     composeBarEnabled,
-    isMobile,
-    topBarVisible,
     theater,
   })
 
@@ -701,12 +697,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Every dependency is a primitive: the gates object is rebuilt on each render,
   // and a registration keyed on its identity would publish on every commit,
   // re-render the pill and come straight back round.
-  const { attach, surfaceSwitch, keysToggle, topBarToggle, theaterExit } =
-    inputMenuGates
+  const { attach, surfaceSwitch, keysToggle, theaterExit } = inputMenuGates
   useEffect(() => {
     if (!inputMenuInPill) return
     return registerPaneInputMenu(id, {
-      gates: { attach, surfaceSwitch, keysToggle, topBarToggle, theaterExit },
+      gates: { attach, surfaceSwitch, keysToggle, theaterExit },
       composeSurface: composeBarEnabled,
     })
   }, [
@@ -715,7 +710,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     attach,
     surfaceSwitch,
     keysToggle,
-    topBarToggle,
     theaterExit,
     composeBarEnabled,
   ])
@@ -975,7 +969,6 @@ function terminalTouchSettings(
       typingSurface,
     ),
     accessoryBarVisible: mobileAccessoryBarVisible(duxState),
-    topBarVisible: mobileTopBarVisible(duxState),
     theater: duxState.theater,
   }
 }
@@ -987,8 +980,6 @@ type TerminalInputLayoutInputs = {
   touchSurfaces: boolean
   accessoryBarVisible: boolean
   composeBarEnabled: boolean
-  isMobile: boolean
-  topBarVisible: boolean
   theater: boolean
 }
 
@@ -1001,11 +992,6 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
     surfaceSwitch:
       input.isOwner && inputMenuSurfaceSwitchOffered(input.composeMode),
     keysToggle: input.isOwner && input.touchSurfaces,
-    // Not in theater: the top bar is one of the things theater took away, and
-    // an item offering to show a bar this mode has already removed is a lie
-    // about what the press will do. Leaving theater brings back whichever bars
-    // the preference had.
-    topBarToggle: input.isMobile && !input.theater,
     // Offered to EVERY viewer, owner or not: a watcher can put a pane in
     // theater too, and the way back must not depend on owning the input.
     theaterExit: input.theater,
@@ -1014,10 +1000,10 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
   // THE OWNER'S `⋯` IS UNCONDITIONAL, in its own minimal row when no bar is up
   // to carry it. It is the one guaranteed way into the virtual input, so gating
   // it on the very surfaces it turns on is circular: on a laptop that gate left
-  // the switch nowhere at all. A viewer has no input surfaces to reach, so its
-  // row stays the narrow phone-chrome fallback. `menuHasItems` above still
-  // decides whether the row has anything to show.
-  const viewerNeedsMenuRow = input.isMobile && !input.topBarVisible
+  // the switch nowhere at all. A viewer owns no input, so it gets no row of its
+  // own: on a phone the top bar and the flap are always on screen outside
+  // theater, and in theater the pill carries the items. `menuHasItems` above
+  // still decides whether the row has anything to show.
   // NOT IN THEATER ON A COMPUTER, where the mode has taken the whole window and
   // the floating pill is the only chrome left. A bordered row under the
   // terminal there is a second `⋯` beside the pill's own, and it is exactly the
@@ -1028,7 +1014,8 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
     !accessoryBarShown &&
     !composeBarShown &&
     menuHasItems &&
-    ((input.isOwner && !input.theater) || viewerNeedsMenuRow)
+    input.isOwner &&
+    !input.theater
   // The pill carries the items exactly while theater is on and nothing else in
   // the pane is anchoring them, so they can never be in two menus at once: a
   // phone in theater keeps its own row (a pill there can end up under the soft

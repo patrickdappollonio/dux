@@ -113,10 +113,6 @@ export function MobilePaneMenuBody({ session }: { session: SessionView }) {
           // narrow window on a laptop the width alone said yes and the press
           // did nothing.
           keysToggle: isMobile && touchSurfaces,
-          // Never while theater is on: the top bar is one of the things the
-          // mode took away, and an item offering to show it is a lie about what
-          // the press will do.
-          topBarToggle: isMobile && !theater,
           // The way back, from the surface the mode leaves on screen.
           theaterExit: theater,
         }}

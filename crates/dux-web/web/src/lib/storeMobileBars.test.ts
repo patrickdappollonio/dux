@@ -21,14 +21,18 @@ vi.mock("sonner", () => ({ toast: toastMock }))
 // location/localStorage, registers listeners, and fires a bootstrap fetch on
 // import, so stub the minimum for it to settle.
 //
-// The two mobile-bar preferences (`ui.mobile_top_bar`,
-// `ui.mobile_accessory_bar`) ride the GENERIC settings PATCH
-// (`PATCH /api/v1/config/settings`) rather than a bespoke endpoint: they are
-// pure render gates with no server-side side effect. What the quick toggles
-// add is purely client-side: an optimistic override reconciled against the
-// next bootstrap exactly like `changesPaneOverride`.
+// The terminal-keys bar preference (`ui.mobile_accessory_bar`) rides the
+// GENERIC settings PATCH (`PATCH /api/v1/config/settings`) rather than a
+// bespoke endpoint: it is a pure render gate with no server-side side effect.
+// What the quick toggle adds is purely client-side: an optimistic override
+// reconciled against the next bootstrap exactly like `changesPaneOverride`.
+//
+// It is the ONLY hideable bar. A `ui.mobile_top_bar` sibling hid the phone's
+// top bar and is gone: theater mode hides that chrome and carries its own way
+// back, and two flows for hiding one header could disagree about what was on
+// screen.
 
-function makeBootstrap(topBar: boolean, accessoryBar: boolean): Bootstrap {
+function makeBootstrap(accessoryBar: boolean): Bootstrap {
   return {
     available_providers: [],
     macros: [],
@@ -42,12 +46,11 @@ function makeBootstrap(topBar: boolean, accessoryBar: boolean): Bootstrap {
     always_show_tab_strip: false,
     global_env: {},
     status_clear_seconds: 6,
-    mobile_top_bar: topBar,
     mobile_accessory_bar: accessoryBar,
   } as Bootstrap
 }
 
-let bootstrapBody: Bootstrap = makeBootstrap(true, true)
+let bootstrapBody: Bootstrap = makeBootstrap(true)
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
@@ -90,7 +93,7 @@ class FakeWebSocket {
 }
 
 beforeEach(() => {
-  bootstrapBody = makeBootstrap(true, true)
+  bootstrapBody = makeBootstrap(true)
   vi.stubGlobal("location", { host: "localhost:0" })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -116,16 +119,18 @@ async function loadStore() {
   return mod
 }
 
-describe("mobile bar visibility", () => {
-  it("selectors: override wins, else bootstrap default, else visible", async () => {
+describe("terminal-keys bar visibility", () => {
+  it("the store publishes no top-bar preference at all", async () => {
+    const mod = await loadStore()
+    // The retired preference must not come back as a half-wired selector: it
+    // is not exported, and the snapshot carries no override slot for it.
+    expect("mobileTopBarVisible" in mod).toBe(false)
+    expect("mobileTopBarOverride" in mod.getSnapshot()).toBe(false)
+  })
+
+  it("selector: override wins, else bootstrap default, else visible", async () => {
     const mod = await loadStore()
     type S = ReturnType<typeof mod.getSnapshot>
-    const top = (override: boolean | null, configValue?: boolean) =>
-      mod.mobileTopBarVisible({
-        mobileTopBarOverride: override,
-        bootstrap:
-          configValue === undefined ? null : { mobile_top_bar: configValue },
-      } as unknown as S)
     const keys = (override: boolean | null, configValue?: boolean) =>
       mod.mobileAccessoryBarVisible({
         mobileAccessoryBarOverride: override,
@@ -136,65 +141,39 @@ describe("mobile bar visibility", () => {
       } as unknown as S)
 
     // No override and no bootstrap yet (pre-load window) → visible.
-    expect(top(null, undefined)).toBe(true)
     expect(keys(null, undefined)).toBe(true)
     // No override → follows the bootstrap value.
-    expect(top(null, false)).toBe(false)
     expect(keys(null, false)).toBe(false)
     // An explicit override beats the bootstrap value either way.
-    expect(top(false, true)).toBe(false)
-    expect(top(true, false)).toBe(true)
     expect(keys(false, true)).toBe(false)
     expect(keys(true, false)).toBe(true)
   })
 
-  it("setMobileBarVisibility(top) sets an optimistic override and PATCHes only that field", async () => {
+  it("setAccessoryBarVisibility sets an optimistic override and PATCHes only that field", async () => {
     const mod = await loadStore()
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(null)
-    await expect(mod.setMobileBarVisibility("top", false)).resolves.toBe(true)
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(false)
     expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(null)
-    expect(mod.mobileTopBarVisible(mod.getSnapshot())).toBe(false)
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/v1/config/settings",
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({ ui: { mobile_top_bar: false }, quiet: true }),
-      }),
-    )
-  })
-
-  it("setMobileBarVisibility(accessory) sets an optimistic override and PATCHes only that field", async () => {
-    const mod = await loadStore()
-    await expect(mod.setMobileBarVisibility("accessory", false)).resolves.toBe(
-      true,
-    )
+    await expect(mod.setAccessoryBarVisibility(false)).resolves.toBe(true)
     expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(false)
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(null)
     expect(mod.mobileAccessoryBarVisible(mod.getSnapshot())).toBe(false)
     expect(fetchMock).toHaveBeenLastCalledWith(
       "/api/v1/config/settings",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ ui: { mobile_accessory_bar: false }, quiet: true }),
+        body: JSON.stringify({
+          ui: { mobile_accessory_bar: false },
+          quiet: true,
+        }),
       }),
     )
   })
 
-  // The one-tap restore-BOTH action is gone with the button that carried it.
-  // The input ⋯ menu names a Show item per bar instead, so restoring is the
-  // same per-field write as hiding, and a user gets back the bar they are
-  // missing rather than both.
-  it("restores each bar through its own per-field write", async () => {
+  // Restoring is the same write as hiding: the input ⋯ menu's item names the
+  // direction it will move the bar in and writes the same field either way.
+  it("restores the bar through the same write that hid it", async () => {
     const mod = await loadStore()
-    await mod.setMobileBarVisibility("top", false)
-    await mod.setMobileBarVisibility("accessory", false)
-    await expect(mod.setMobileBarVisibility("accessory", true)).resolves.toBe(
-      true,
-    )
-    // Only the bar that was asked for comes back.
+    await mod.setAccessoryBarVisibility(false)
+    await expect(mod.setAccessoryBarVisibility(true)).resolves.toBe(true)
     expect(mod.mobileAccessoryBarVisible(mod.getSnapshot())).toBe(true)
-    expect(mod.mobileTopBarVisible(mod.getSnapshot())).toBe(false)
     expect(fetchMock).toHaveBeenLastCalledWith(
       "/api/v1/config/settings",
       expect.objectContaining({
@@ -205,27 +184,23 @@ describe("mobile bar visibility", () => {
         }),
       }),
     )
-    await expect(mod.setMobileBarVisibility("top", true)).resolves.toBe(true)
-    expect(mod.mobileTopBarVisible(mod.getSnapshot())).toBe(true)
   })
 
   it("a config.changed refetch clears an override once the server confirms it", async () => {
     const mod = await loadStore()
-    await mod.setMobileBarVisibility("top", false)
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(false)
-    bootstrapBody = makeBootstrap(false, true)
+    await mod.setAccessoryBarVisibility(false)
+    expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(false)
+    bootstrapBody = makeBootstrap(false)
     mod.eventsSocket.onEvent({ event: "config.changed" })
     await vi.waitFor(() => {
-      expect(mod.getSnapshot().mobileTopBarOverride).toBe(null)
+      expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(null)
     })
-    // The untouched accessory override stays untouched (null).
-    expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(null)
   })
 
   it("a config.changed refetch keeps an override until the server value matches", async () => {
     const mod = await loadStore()
-    await mod.setMobileBarVisibility("accessory", false)
-    bootstrapBody = makeBootstrap(true, true)
+    await mod.setAccessoryBarVisibility(false)
+    bootstrapBody = makeBootstrap(true)
     mod.eventsSocket.onEvent({ event: "config.changed" })
     await vi.waitFor(() => {
       expect(mod.getSnapshot().bootstrap?.mobile_accessory_bar).toBe(true)
@@ -240,8 +215,8 @@ describe("mobile bar visibility", () => {
     toastMock.success.mockClear()
     toastMock.info.mockClear()
     toastMock.custom.mockClear()
-    await expect(mod.setMobileBarVisibility("top", false)).resolves.toBe(true)
-    await expect(mod.setMobileBarVisibility("top", true)).resolves.toBe(true)
+    await expect(mod.setAccessoryBarVisibility(false)).resolves.toBe(true)
+    await expect(mod.setAccessoryBarVisibility(true)).resolves.toBe(true)
     expect(toastMock).not.toHaveBeenCalled()
     expect(toastMock.error).not.toHaveBeenCalled()
     expect(toastMock.success).not.toHaveBeenCalled()
@@ -262,7 +237,7 @@ describe("mobile bar visibility", () => {
           headers: { get: () => null },
         }) as unknown as Response,
     )
-    await expect(mod.setMobileBarVisibility("top", false)).resolves.toBe(false)
+    await expect(mod.setAccessoryBarVisibility(false)).resolves.toBe(false)
     // With the duration dux's policy gives an error: four times the 6s
     // default. Before every raise went through `lib/notify.ts` this was
     // sonner's own bare 4000ms.
@@ -283,9 +258,9 @@ describe("mobile bar visibility", () => {
           headers: { get: () => null },
         }) as unknown as Response,
     )
-    await expect(mod.setMobileBarVisibility("top", false)).resolves.toBe(false)
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(null)
-    expect(mod.mobileTopBarVisible(mod.getSnapshot())).toBe(true)
+    await expect(mod.setAccessoryBarVisibility(false)).resolves.toBe(false)
+    expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(null)
+    expect(mod.mobileAccessoryBarVisible(mod.getSnapshot())).toBe(true)
   })
 
   it("a late failure of an overtaken write does not clobber a newer override", async () => {
@@ -302,21 +277,20 @@ describe("mobile bar visibility", () => {
           rejectFirst = reject
         }) as unknown as Promise<Response>,
     )
-    const first = mod.setMobileBarVisibility("top", false)
+    const first = mod.setAccessoryBarVisibility(false)
     // The second tap goes through the default (succeeding) fetch mock.
-    await expect(mod.setMobileBarVisibility("top", true)).resolves.toBe(true)
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(true)
+    await expect(mod.setAccessoryBarVisibility(true)).resolves.toBe(true)
+    expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(true)
     rejectFirst(new Error("boom"))
     await expect(first).resolves.toBe(false)
     // The overtaken failure must NOT roll the override back to the first
     // call's captured previous value (null).
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(true)
+    expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(true)
   })
 
-  it("rolls a failed restore back to hidden, leaving the other bar alone", async () => {
+  it("rolls a failed restore back to hidden", async () => {
     const mod = await loadStore()
-    await mod.setMobileBarVisibility("top", false)
-    await mod.setMobileBarVisibility("accessory", false)
+    await mod.setAccessoryBarVisibility(false)
     fetchMock.mockImplementationOnce(
       async () =>
         ({
@@ -327,10 +301,7 @@ describe("mobile bar visibility", () => {
           headers: { get: () => null },
         }) as unknown as Response,
     )
-    await expect(mod.setMobileBarVisibility("accessory", true)).resolves.toBe(
-      false,
-    )
+    await expect(mod.setAccessoryBarVisibility(true)).resolves.toBe(false)
     expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(false)
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(false)
   })
 })

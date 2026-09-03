@@ -115,11 +115,6 @@ pub struct BootstrapView {
     /// the browser never receives a value it has no case for. Read by the
     /// terminal pane and by the web's Preferences dialog. Web-only.
     pub compose_bar: String,
-    /// Mirrors `config.ui.mobile_top_bar`: whether the web's mobile terminal
-    /// screens show the top bar (the back/branch header plus the agent tab
-    /// strip), default true. A pure render gate read by the mobile shell and
-    /// by the web's Preferences dialog. Web-only.
-    pub mobile_top_bar: bool,
     /// Mirrors `config.ui.mobile_accessory_bar`: whether the web's mobile
     /// terminal screens show the accessory key bar (Esc/Tab/Ctrl/Alt/arrows),
     /// default true. A pure render gate read by the terminal pane and by the
@@ -1389,7 +1384,6 @@ impl Engine {
             )
             .as_str()
             .to_string(),
-            mobile_top_bar: self.config.ui.mobile_top_bar,
             mobile_accessory_bar: self.config.ui.mobile_accessory_bar,
             upload_write_gitignore: self.config.ui.upload_write_gitignore,
             upload_pasted_text_chars: crate::config::normalized_upload_pasted_text_chars(
@@ -2670,14 +2664,9 @@ mod tests {
     }
 
     #[test]
-    fn mobile_bar_preferences_are_projected_from_config() {
+    fn the_accessory_bar_preference_is_projected_from_config() {
         let (mut engine, _tmp) = test_engine();
 
-        assert!(engine.bootstrap().mobile_top_bar);
-        assert!(engine.bootstrap().mobile_accessory_bar);
-
-        engine.config.ui.mobile_top_bar = false;
-        assert!(!engine.bootstrap().mobile_top_bar);
         assert!(engine.bootstrap().mobile_accessory_bar);
 
         engine.config.ui.mobile_accessory_bar = false;
@@ -3094,7 +3083,6 @@ mod tests {
             "terminal_font_family",
             "terminal_font_size",
             "compose_bar",
-            "mobile_top_bar",
             "mobile_accessory_bar",
             "upload_write_gitignore",
             "upload_pasted_text_chars",

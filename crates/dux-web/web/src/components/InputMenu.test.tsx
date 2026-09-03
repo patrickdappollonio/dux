@@ -5,17 +5,18 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import type { DuxState } from "@/lib/store"
 import type { InputMenuGates } from "@/lib/inputMenu"
 
-// The two bar preferences are read through the store and written through it,
-// so the store is stubbed at both ends: a settable state for the labels
-// (Hide vs Show) and spies for the writes.
-const setMobileBarVisibility = vi.fn()
+// The terminal-keys preference is read through the store and written through
+// it, so the store is stubbed at both ends: a settable state for the label
+// (Hide vs Show) and a spy for the write.
+const setAccessoryBarVisibility = vi.fn()
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
     ...actual,
     useDux: () => mockState,
-    setMobileBarVisibility: (...a: unknown[]) => setMobileBarVisibility(...a),
+    setAccessoryBarVisibility: (...a: unknown[]) =>
+      setAccessoryBarVisibility(...a),
     exitTheater: (...a: unknown[]) => exitTheater(...a),
   }
 })
@@ -60,13 +61,11 @@ const ALL_OFF: InputMenuGates = {
   attach: false,
   surfaceSwitch: false,
   keysToggle: false,
-  topBarToggle: false,
   theaterExit: false,
 }
 
-function state(topBar = true, keys = true): DuxState {
+function state(keys = true): DuxState {
   return {
-    mobileTopBarOverride: topBar,
     mobileAccessoryBarOverride: keys,
     bootstrap: null,
   } as unknown as DuxState
@@ -84,7 +83,7 @@ function open(
 
 beforeEach(() => {
   mockState = state()
-  setMobileBarVisibility.mockClear()
+  setAccessoryBarVisibility.mockClear()
   setTypingSurface.mockClear()
 })
 afterEach(() => cleanup())
@@ -142,29 +141,27 @@ describe("InputMenu", () => {
   })
 
   // Selecting an item closes the menu, so each write gets its own open.
-  it("flips each bar toggle's label and write with the bar's own state", () => {
-    const both: Partial<InputMenuGates> = { keysToggle: true, topBarToggle: true }
+  it("flips the keys toggle's label and write with the bar's own state", () => {
     const pick = (label: string, visible: boolean) => {
       cleanup()
-      setMobileBarVisibility.mockClear()
-      mockState = state(visible, visible)
-      open(both)
+      setAccessoryBarVisibility.mockClear()
+      mockState = state(visible)
+      open({ keysToggle: true })
       fireEvent.click(screen.getByText(label))
     }
     pick("Hide terminal keys", true)
-    expect(setMobileBarVisibility).toHaveBeenCalledExactlyOnceWith(
-      "accessory",
-      false,
-    )
-    pick("Hide top bar", true)
-    expect(setMobileBarVisibility).toHaveBeenCalledExactlyOnceWith("top", false)
+    expect(setAccessoryBarVisibility).toHaveBeenCalledExactlyOnceWith(false)
     pick("Show terminal keys", false)
-    expect(setMobileBarVisibility).toHaveBeenCalledExactlyOnceWith(
-      "accessory",
-      true,
-    )
-    pick("Show top bar", false)
-    expect(setMobileBarVisibility).toHaveBeenCalledExactlyOnceWith("top", true)
+    expect(setAccessoryBarVisibility).toHaveBeenCalledExactlyOnceWith(true)
+  })
+
+  // The top bar has no toggle here any more: theater mode is the one way to
+  // hide the phone's chrome, so no gate and no label may bring a second one
+  // back.
+  it("carries no top-bar toggle whatever the caller asks for", () => {
+    open({ attach: true, surfaceSwitch: true, keysToggle: true, theaterExit: true })
+    expect(screen.queryByText("Hide top bar")).toBeNull()
+    expect(screen.queryByText("Show top bar")).toBeNull()
   })
 
   // Visibility is the CALLER's: the component gates nothing for itself, which
@@ -175,6 +172,5 @@ describe("InputMenu", () => {
     expect(screen.getByText("Attach a file…")).toBeTruthy()
     expect(screen.getByText("Use the message box")).toBeTruthy()
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
-    expect(screen.queryByText("Hide top bar")).toBeNull()
   })
 })

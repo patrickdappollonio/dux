@@ -151,7 +151,6 @@ function makeState(
     routeNotFound: null,
     createTabInFlight: [],
     mobileScreen: "terminal",
-    mobileTopBarOverride: null,
     changes: { bySession: {} },
     ...over,
   } as unknown as DuxState

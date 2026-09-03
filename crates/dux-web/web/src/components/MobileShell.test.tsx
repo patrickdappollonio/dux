@@ -643,7 +643,7 @@ describe("MobileShell Changes-pane show button absence", () => {
   })
 })
 
-describe("MobileShell hideable top bar (ui.mobile_top_bar)", () => {
+describe("MobileShell phone terminal chrome", () => {
   function terminalState(overrides: Record<string, unknown> = {}): DuxState {
     return makeState({
       spine: makeSessionSpine(2),
@@ -659,13 +659,12 @@ describe("MobileShell hideable top bar (ui.mobile_top_bar)", () => {
       startedDormantTabs: [],
       pendingSlotTab: {},
       terminalEpoch: 0,
-      mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
       ...overrides,
     } as unknown as Partial<DuxState>)
   }
 
-  it("shows the header and tab strip by default (preference absent falls back to on)", () => {
+  it("shows the header and tab strip", () => {
     mockState = terminalState()
     render(<MobileShell />)
     expect(screen.getByLabelText("Back")).toBeTruthy()
@@ -673,7 +672,12 @@ describe("MobileShell hideable top bar (ui.mobile_top_bar)", () => {
     expect(screen.getAllByRole("tab").length).toBeGreaterThan(0)
   })
 
-  it("hides the header AND the tab strip when the preference is off", () => {
+  // THEATER IS THE ONE WAY TO HIDE THIS CHROME. `ui.mobile_top_bar` used to
+  // hide it too, and a config written while that preference existed is still
+  // on disk out there; an old server may even still publish the field. It must
+  // now change nothing at all, because a hidden header with no way back is
+  // exactly what the retirement removed.
+  it("ignores a stored mobile_top_bar preference entirely", () => {
     mockState = terminalState({
       bootstrap: {
         title: "dux",
@@ -683,24 +687,13 @@ describe("MobileShell hideable top bar (ui.mobile_top_bar)", () => {
       },
     })
     render(<MobileShell />)
-    expect(screen.queryByLabelText("Back")).toBeNull()
-    expect(screen.queryAllByRole("tab").length).toBe(0)
-    // The FLAP is not the top bar and costs no layout space: it floats over
-    // the terminal, so hiding the bars (which is a request for more room) has
-    // nothing to reclaim from it. It stays, and with it the only way into
-    // theater, the changed-file count and the session's own actions.
+    expect(screen.getByLabelText("Back")).toBeTruthy()
+    expect(screen.getAllByRole("tab").length).toBeGreaterThan(0)
     expect(screen.getByLabelText("Session actions")).toBeTruthy()
   })
 
-  it("an optimistic override hides the bar before the bootstrap confirms", () => {
-    mockState = terminalState({ mobileTopBarOverride: false })
-    render(<MobileShell />)
-    expect(screen.queryByLabelText("Back")).toBeNull()
-  })
-
-  // The agentless (project/standalone) terminal screens share the same
-  // preference; one state builder serves the hidden test and its positive
-  // control so the two can only ever differ in the preference itself.
+  // The agentless (project/standalone) terminal screens are the other surface
+  // the retired preference used to reach, so they get the same pair.
   function agentlessState(bootstrap: Record<string, unknown>): DuxState {
     return terminalState({
       spine: {
@@ -732,17 +725,17 @@ describe("MobileShell hideable top bar (ui.mobile_top_bar)", () => {
     })
   }
 
-  it("shows the agentless terminal screen's header while the preference is on (positive control)", () => {
-    mockState = agentlessState({ mobile_top_bar: true })
+  it("shows the agentless terminal screen's header", () => {
+    mockState = agentlessState({})
     render(<MobileShell />)
     expect(screen.getByLabelText("Back")).toBeTruthy()
     expect(screen.getByText("Repo")).toBeTruthy()
   })
 
-  it("hides the agentless terminal screen's header through the same preference", () => {
+  it("ignores a stored mobile_top_bar preference there too", () => {
     mockState = agentlessState({ mobile_top_bar: false })
     render(<MobileShell />)
-    expect(screen.queryByLabelText("Back")).toBeNull()
+    expect(screen.getByLabelText("Back")).toBeTruthy()
   })
 })
 
@@ -780,7 +773,6 @@ describe("MobileShell terminal-screen macro trigger", () => {
       startedDormantTabs: [],
       pendingSlotTab: {},
       terminalEpoch: 0,
-      mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
       ...overrides,
     } as unknown as Partial<DuxState>)
@@ -788,16 +780,6 @@ describe("MobileShell terminal-screen macro trigger", () => {
 
   it("puts the macro trigger in the agent terminal screen's header", () => {
     mockState = terminalState()
-    render(<MobileShell />)
-    expect(screen.getByLabelText("Run a macro")).toBeTruthy()
-  })
-
-  it("keeps the flap's macro trigger through a hidden top bar", () => {
-    // Hiding the top bar states an intent (more space) and the flap takes
-    // none: it hangs over the terminal rather than in the column. So the
-    // cluster survives the bars going away, which is also what keeps theater
-    // and the session actions reachable in that state.
-    mockState = terminalState({ mobileTopBarOverride: false })
     render(<MobileShell />)
     expect(screen.getByLabelText("Run a macro")).toBeTruthy()
   })
@@ -870,18 +852,19 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
       startedDormantTabs: [],
       pendingSlotTab: {},
       terminalEpoch: 0,
-      mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
       ...overrides,
     } as unknown as Partial<DuxState>)
   }
 
-  it("offers Hide top bar and Hide terminal keys on the terminal screen", () => {
+  it("offers Hide terminal keys on the terminal screen, and nothing for the top bar", () => {
     mockState = terminalState()
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    expect(screen.getByText("Hide top bar")).toBeTruthy()
     expect(screen.getByText("Hide terminal keys")).toBeTruthy()
+    // Theater mode is the one way to hide the phone's chrome, so this menu
+    // carries no second flow for it.
+    expect(screen.queryByText("Hide top bar")).toBeNull()
   })
 
   // NEVER INERT. A narrow window on a laptop is a mobile LAYOUT with a fine
@@ -893,33 +876,31 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     mockState = terminalState()
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    expect(screen.getByText("Hide top bar")).toBeTruthy()
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
+    // The rest of the menu is still there, so this is a dropped ITEM rather
+    // than a menu that failed to open.
+    expect(screen.getByText("New agent tab…")).toBeTruthy()
   })
 
-  it("labels flip to Show when a bar is already hidden", () => {
+  it("labels flip to Show when the keys bar is already hidden", () => {
     mockState = terminalState({
       bootstrap: {
         title: "dux",
         dux_version: "v1",
         available_providers: ["claude"],
-        // The top bar stays visible so its ⋯ menu is still reachable; the
-        // ACCESSORY preference is the hidden one whose label must flip.
-        mobile_top_bar: true,
         mobile_accessory_bar: false,
       },
     })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    expect(screen.getByText("Hide top bar")).toBeTruthy()
     expect(screen.getByText("Show terminal keys")).toBeTruthy()
   })
 
-  it("tapping Hide top bar persists through the generic settings PATCH", () => {
+  it("tapping Hide terminal keys persists through the generic settings PATCH", () => {
     mockState = terminalState()
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    fireEvent.click(screen.getByText("Hide top bar"))
+    fireEvent.click(screen.getByText("Hide terminal keys"))
     const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/config/settings",
@@ -927,7 +908,10 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
         method: "PATCH",
         // `quiet: true` asks the server to skip the "Settings updated."
         // status for this write; the bar disappearing is the feedback.
-        body: JSON.stringify({ ui: { mobile_top_bar: false }, quiet: true }),
+        body: JSON.stringify({
+          ui: { mobile_accessory_bar: false },
+          quiet: true,
+        }),
       }),
     )
   })
@@ -946,26 +930,7 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
     expect(screen.getByText("New agent tab…")).toBeTruthy()
-    expect(screen.queryByText("Hide top bar")).toBeNull()
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
-  })
-
-  it("survives its own menu unmounting when Hide top bar removes the header", () => {
-    // Tapping "Hide top bar" hides the header that CONTAINS the open menu's
-    // trigger. Simulate the confirmed state landing (the mocked store state
-    // flips) and re-render: the menu and header must simply be gone, with no
-    // crash from unmounting under an open menu.
-    mockState = terminalState()
-    const view = render(<MobileShell />)
-    fireEvent.click(screen.getByLabelText("Session actions"))
-    fireEvent.click(screen.getByText("Hide top bar"))
-    mockState = terminalState({ mobileTopBarOverride: false })
-    view.rerender(<MobileShell />)
-    expect(screen.queryByText("Hide top bar")).toBeNull()
-    expect(screen.queryByLabelText("Back")).toBeNull()
-    // The trigger itself lives in the flap, which the preference does not
-    // touch; what must not survive is the OPEN menu it had spawned.
-    expect(screen.getByLabelText("Session actions")).toBeTruthy()
   })
 
   it("gives the submenu trigger rows the same phone touch-target height as sibling items", () => {
@@ -977,7 +942,9 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     mockState = terminalState()
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    const item = screen.getByText("Hide top bar").closest('[role="menuitem"]')!
+    const item = screen
+      .getByText("Hide terminal keys")
+      .closest('[role="menuitem"]')!
     const subTriggers = [
       screen.getByText("New agent tab…").closest('[role="menuitem"]')!,
       screen.getByText(/^Project /).closest('[role="menuitem"]')!,
@@ -1011,8 +978,8 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
 })
 
 describe("MobileShell agentless terminal screen ⋯ menu", () => {
-  // Every mobile terminal screen carries the quick toggles; without them,
-  // hiding the bars means a trip through Preferences.
+  // Every mobile terminal screen carries the keys quick toggle; without it,
+  // hiding the bar means a trip through Preferences.
   // The toggles read `useIsMobile`, so the viewport shrinks below the 768px
   // breakpoint exactly like the agent-screen quick-toggle suite above, and the
   // keys toggle rides the touch surfaces, hence the pointer stub.
@@ -1063,7 +1030,6 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
       startedDormantTabs: [],
       pendingSlotTab: {},
       terminalEpoch: 0,
-      mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
       bootstrap: {
         title: "dux",
@@ -1100,7 +1066,6 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
       startedDormantTabs: [],
       pendingSlotTab: {},
       terminalEpoch: 0,
-      mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
     } as unknown as Partial<DuxState>)
   }
@@ -1117,38 +1082,35 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
     expect(screen.getByLabelText("Terminal actions")).toBeTruthy()
   })
 
-  it("offers both bar quick toggles, exactly as the agent screen words them", () => {
+  it("offers the keys quick toggle, exactly as the agent screen words it", () => {
     mockState = projectTerminalState()
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Terminal actions"))
-    expect(screen.getByText("Hide top bar")).toBeTruthy()
     expect(screen.getByText("Hide terminal keys")).toBeTruthy()
+    expect(screen.queryByText("Hide top bar")).toBeNull()
   })
 
-  it("labels flip to Show when a bar is already hidden", () => {
-    mockState = projectTerminalState({
-      // The top bar stays visible so its ⋯ menu is still reachable; the
-      // ACCESSORY preference is the hidden one whose label must flip.
-      mobile_top_bar: true,
-      mobile_accessory_bar: false,
-    })
+  it("labels flip to Show when the keys bar is already hidden", () => {
+    mockState = projectTerminalState({ mobile_accessory_bar: false })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Terminal actions"))
-    expect(screen.getByText("Hide top bar")).toBeTruthy()
     expect(screen.getByText("Show terminal keys")).toBeTruthy()
   })
 
-  it("tapping Hide top bar persists through the generic settings PATCH", () => {
+  it("tapping Hide terminal keys persists through the generic settings PATCH", () => {
     mockState = projectTerminalState()
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Terminal actions"))
-    fireEvent.click(screen.getByText("Hide top bar"))
+    fireEvent.click(screen.getByText("Hide terminal keys"))
     const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/config/settings",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ ui: { mobile_top_bar: false }, quiet: true }),
+        body: JSON.stringify({
+          ui: { mobile_accessory_bar: false },
+          quiet: true,
+        }),
       }),
     )
   })
@@ -1192,7 +1154,6 @@ describe("MobileShell agent header identity", () => {
       startedDormantTabs: [],
       pendingSlotTab: {},
       terminalEpoch: 0,
-      mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
     })
   }
@@ -1259,7 +1220,6 @@ describe("MobileShell agent header and its flap cluster", () => {
       startedDormantTabs: [],
       pendingSlotTab: {},
       terminalEpoch: 0,
-      mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
     })
   }
@@ -1358,7 +1318,6 @@ describe("MobileShell agent header lanes", () => {
       startedDormantTabs: [],
       pendingSlotTab: {},
       terminalEpoch: 0,
-      mobileTopBarOverride: null,
       mobileAccessoryBarOverride: null,
     })
   }

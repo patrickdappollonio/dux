@@ -244,21 +244,6 @@ export const SETTING_GROUPS: SettingGroup[] = [
         read: (b) => b.compose_bar ?? "auto",
       },
       {
-        key: "ui.mobile_top_bar",
-        // "Mobile" is accurate here and deliberately kept: the top bar is the
-        // phone shell's own chrome (MobileShell renders it and nothing else
-        // does), so unlike the keys below it genuinely does not exist in the
-        // wide layout.
-        label: "Mobile terminal top bar",
-        description:
-          "On phones, shows the terminal screen's top bar: the back chevron, branch crumb and actions, plus the agent tab strip. Hide it to give those rows to the terminal; bring it back from the input ⋯ menu below the terminal or from this Preferences dialog.",
-        surface: "web",
-        control: { kind: "bool" },
-        default: true,
-        writeTarget: "settings",
-        read: (b) => b.mobile_top_bar ?? true,
-      },
-      {
         key: "ui.mobile_accessory_bar",
         // The key stays `mobile_accessory_bar` for compatibility, but the copy
         // says TOUCH: the keys travel with the pointer, so a tablet in
