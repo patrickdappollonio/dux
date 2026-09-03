@@ -342,6 +342,30 @@ describe("MobileShell standalone terminals", () => {
     expect(historyBack).not.toHaveBeenCalled()
     expect(navigateUpMock).toHaveBeenCalledTimes(1)
   })
+
+  // THE TRAP THIS PINS: every control on this screen lives in the header, and
+  // theater takes the header away. With no pill over the pane, a phone that
+  // entered theater on a project or standalone terminal had nothing left on
+  // screen that could leave the mode again.
+  it("floats the pill over an agentless terminal in theater, with a way out", () => {
+    mockState = { ...standaloneState(), theater: true } as DuxState
+    render(<MobileShell />)
+    const pill = screen.getByTestId("theater-pill")
+    expect(screen.getByTestId("terminal-pane-stub").contains(pill)).toBe(true)
+    // The way out, reachable without opening a menu first: the cluster's
+    // toggle reads as the exit while the mode is on.
+    const exit = screen.getByLabelText("Leave theater mode")
+    expect(pill.contains(exit)).toBe(true)
+    // And the header really is gone, which is what makes the pill the only
+    // control left.
+    expect(screen.queryByLabelText("Terminal actions")).toBeNull()
+  })
+
+  it("floats no pill over an agentless terminal outside theater", () => {
+    mockState = standaloneState()
+    render(<MobileShell />)
+    expect(screen.queryByTestId("theater-pill")).toBeNull()
+  })
 })
 
 describe("MobileShell attention dot", () => {

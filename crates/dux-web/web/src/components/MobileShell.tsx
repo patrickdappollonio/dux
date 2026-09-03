@@ -212,7 +212,9 @@ function AgentlessTerminalScreen({
 
                   No theater exit, for the same reason as the agent screen's
                   header menu: this menu lives in the header theater takes away,
-                  so it is never on screen in the mode. */}
+                  so it is never on screen in the mode. The way out of the mode
+                  is the floating pill below, which is the only chrome this
+                  screen keeps once the header has gone. */}
               <PaneInputGroup ptyIds={[terminalId]} />
               {/* The new-tab editor entry only, matching the agent screen's
                   menu: the in-app overlay is desktop-only, so its item would be
@@ -253,6 +255,25 @@ function AgentlessTerminalScreen({
               kind="terminal"
               id={terminalId}
               owner={owner}
+              // THE ONLY CHROME LEFT IN THEATER, and the reason this screen has
+              // one at all. Everything else here lives in the header, which the
+              // mode takes away: without the pill, entering theater on a
+              // project or standalone terminal leaves nothing on screen that
+              // can leave it again. It carries the way out, the pane's INPUT
+              // group and the app menu, exactly as the desktop pane's does.
+              //
+              // No flight, for the same reason the desktop's has none: the
+              // cluster flies between a docked flap and the pill, and this
+              // screen has no flap for it to come from.
+              overlay={
+                theater ? (
+                  <TheaterPill
+                    target={{ kind: "terminal", terminalId, owner }}
+                    session={undefined}
+                    variant="mobile"
+                  />
+                ) : null
+              }
             />
           </Suspense>
         </ChunkBoundary>
