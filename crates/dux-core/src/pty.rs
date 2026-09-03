@@ -777,6 +777,13 @@ pub struct PtyClient {
     /// "the child just died" from "the child died a while ago and this PTY's
     /// read side is still being held open by something else".
     reaped: Option<(portable_pty::ExitStatus, Instant)>,
+    /// When the child was spawned. The start of the clock every "how long did
+    /// this run last" question is answered against; paired with whichever of
+    /// `exited_at` / `reaped` arrives first it gives the run's real duration
+    /// without any caller having to stamp a launch time of its own (a stamp in
+    /// an engine map would have to be cleared on every teardown path, and the
+    /// one that matters here is the teardown the prune itself performs).
+    spawned_at: Instant,
     exited: Arc<AtomicBool>,
     /// When the reader thread reached end of input, written once immediately
     /// BEFORE it sets `exited`, so anyone who observes `exited` (an `Acquire`
@@ -1145,6 +1152,7 @@ impl PtyClient {
             spawn_dir: cwd.to_path_buf(),
             scrollback_capacity: scrollback_lines,
             reaped: None,
+            spawned_at: Instant::now(),
             exited,
             exited_at,
             has_output,
@@ -1579,6 +1587,24 @@ impl PtyClient {
     /// and keeps running reaches EOF and is never reapable at all.
     pub fn exited_at(&self) -> Option<Instant> {
         self.exited_at.get().copied()
+    }
+
+    /// How long this child ran, from the spawn to the FIRST end-of-run fact
+    /// observed, or `None` while it is still running (neither fact in yet).
+    ///
+    /// The earlier of the two clocks is the honest answer: EOF and the reap
+    /// arrive in either order and neither implies the other (see
+    /// [`crate::engine::REAPED_DRAIN_GRACE`]), so taking the later one would
+    /// charge the run for however long the missing half took to show up. A run
+    /// that has EOFed without ever being reaped still has a duration, which is
+    /// what lets a caller judge a launch that died instantly even when no exit
+    /// status was ever available for it.
+    pub fn run_duration(&self) -> Option<std::time::Duration> {
+        [self.exited_at(), self.reaped_at()]
+            .into_iter()
+            .flatten()
+            .min()
+            .map(|end| end.saturating_duration_since(self.spawned_at))
     }
 
     /// Returns the PID of the shell process spawned in this PTY.

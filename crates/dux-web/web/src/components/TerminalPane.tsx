@@ -39,7 +39,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { isFirstTab } from "@/lib/agentTabs"
+import { exitEjectsToWelcome, isFirstTab } from "@/lib/agentTabs"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useTypingSurface } from "@/hooks/use-typing-surface"
@@ -153,6 +153,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     setViewerOverflow,
     liveSettingsFor,
     isSessionSlotTab,
+    lastRunFailed,
   } = useTerminalPaneSetup(props)
 
   // True while the PTY socket has dropped and is retrying (non-blocking), or
@@ -717,15 +718,18 @@ export function TerminalPane(props: TerminalPaneProps) {
   // `isSessionSlotTab`: an extra tab's own exit just turns it dormant via the spine
   // (handled in `App`, its card rendered there), so we don't eject the user from
   // here in that case.
+  // A run the server recorded as ended badly stays put: its dormant card is the
+  // diagnosis surface and it takes this pane's place where the user is already
+  // looking. The decision itself is the pure `exitEjectsToWelcome`.
   const sessionStatus = session?.status
   useEffect(() => {
-    if (isSessionSlotTab && everReady && sessionStatus && sessionStatus !== "active") {
+    if (exitEjectsToWelcome(isSessionSlotTab, everReady, sessionStatus, lastRunFailed)) {
       // Marked as OUR eject (not a user navigation) so a re-armed reconnect
       // deep-link can tell it apart from a deliberate home nav and restore the
       // route once this agent finishes resuming. See `ejectSelectionForReconnect`.
       ejectSelectionForReconnect()
     }
-  }, [isSessionSlotTab, everReady, sessionStatus])
+  }, [isSessionSlotTab, everReady, sessionStatus, lastRunFailed])
 
   // There is deliberately no extra ping on gaining ownership any more. There is
   // exactly ONE periodic client frame and one timer behind it (see
@@ -1115,6 +1119,9 @@ function useTerminalPaneSetup(props: TerminalPaneProps) {
     setViewerOverflow,
     liveSettingsFor,
     isSessionSlotTab: target.isSessionSlotTab,
+    // The server's verdict on this pane's own tab: its last run ended badly, so
+    // the dormant card is what the user should meet when the process goes.
+    lastRunFailed: target.focusedTab?.last_run_failed === true,
   }
 }
 

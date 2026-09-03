@@ -5,6 +5,7 @@ import {
   closeTabConsequences,
   defaultProviderForSession,
   dormantTabNeedsCard,
+  exitEjectsToWelcome,
   isFirstTab,
   isSlotTabTarget,
   isTabGone,
@@ -522,5 +523,22 @@ describe("closeTabConsequences", () => {
     expect(result.sessionLabel).toBe("the session")
     expect(result.willDetach).toBe(true)
     expect(result.successorLabel).toBeUndefined()
+  })
+})
+
+describe("exitEjectsToWelcome", () => {
+  it("ejects when the agent we were attached to stops", () => {
+    expect(exitEjectsToWelcome(true, true, "detached", false)).toBe(true)
+  })
+
+  it("stays put when the run ended badly, so the diagnosis card replaces the pane", () => {
+    expect(exitEjectsToWelcome(true, true, "detached", true)).toBe(false)
+  })
+
+  it("never ejects on an extra tab, a pane that never came up, or a live agent", () => {
+    expect(exitEjectsToWelcome(false, true, "detached", false)).toBe(false)
+    expect(exitEjectsToWelcome(true, false, "detached", false)).toBe(false)
+    expect(exitEjectsToWelcome(true, true, "active", false)).toBe(false)
+    expect(exitEjectsToWelcome(true, true, undefined, false)).toBe(false)
   })
 })

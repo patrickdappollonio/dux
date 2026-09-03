@@ -119,6 +119,28 @@ export function dormantTabNeedsCard(
   return focusedTab.last_run_failed === true
 }
 
+// Whether an exited agent should drop the user back to the welcome screen.
+//
+// It normally should: the agent we were attached to stopped, so there is nothing
+// left to look at, and the "Agent exited" toast says why. The exception is a run
+// the server recorded as having ended BADLY. That tab's dormant card is the
+// diagnosis surface, it renders in place of this pane the moment the process is
+// gone, and ejecting would replace the one screen that explains what happened
+// with the welcome screen, one click away from starting the same doomed run
+// again. Gated on `everReady` so a pane that never came up cannot eject on a
+// status it never saw change, and on slot-ness because an extra tab's exit only
+// turns that tab dormant.
+export function exitEjectsToWelcome(
+  isSessionSlotTab: boolean,
+  everReady: boolean,
+  sessionStatus: string | undefined,
+  lastRunFailed: boolean,
+): boolean {
+  if (!isSessionSlotTab || !everReady) return false
+  if (!sessionStatus || sessionStatus === "active") return false
+  return !lastRunFailed
+}
+
 // Whether an extra tab has vanished from the spine's tab list (e.g. another
 // client closed it while this client's PTY
 // socket was retrying). A gone tab's socket must stop reconnecting instead of

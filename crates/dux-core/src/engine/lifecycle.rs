@@ -85,6 +85,36 @@ pub fn agent_pty_ready_to_prune(
         .any(|elapsed| elapsed >= REAPED_DRAIN_GRACE)
 }
 
+/// How briefly a launched provider may run before its exit counts as the tab's
+/// last run ending BADLY, whatever its exit status.
+///
+/// The gate that stops a dormant tab from relaunching on every passive attach
+/// keys on a launch failure or a non-zero exit, and a provider that comes up and
+/// quits immediately with status 0 satisfies neither: a wrong subcommand a CLI
+/// answers with a usage line, a wrapper script that checks something and ends, a
+/// resume against a conversation that is not there. Selecting the agent starts
+/// it, it exits, the surface drops the user back where they were, and the next
+/// click does the same thing again with nothing on screen ever explaining it.
+///
+/// Five seconds is the window: far longer than the instant-exit shapes above,
+/// and far shorter than any session a person actually uses. It is deliberately
+/// judged on the run's own length rather than on how the run ended, because the
+/// exit status is exactly the fact that carries no information here.
+pub const RAPID_EXIT_WINDOW: Duration = Duration::from_secs(5);
+
+/// Whether a finished run ended badly by virtue of how BRIEF it was: shorter
+/// than [`RAPID_EXIT_WINDOW`] and never typed into.
+///
+/// Typing is the exemption because it is the one thing that separates "this
+/// never worked" from "the user opened it and quit": quitting a CLI means typing
+/// `/exit`, `q`, or Ctrl-C into it, and a run that a person spoke to is a run
+/// that came up. A run still in flight (`None`) has no verdict to give.
+///
+/// Pure, so the policy is testable without waiting out a real window.
+pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, was_typed_into: bool) -> bool {
+    !was_typed_into && run_duration.is_some_and(|ran_for| ran_for < RAPID_EXIT_WINDOW)
+}
+
 /// Which kind of PTY was pruned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrunedPtyKind {
@@ -203,6 +233,19 @@ pub struct PrunedPty {
     /// exit-status message and error log; the web ignores it. Captured off the
     /// live client at reap time for the same once-only reason as `exit_success`.
     pub output_excerpt: String,
+}
+
+/// The facts `prune_exited_ptys` reads off a dying agent PTY in its first pass,
+/// while the client is still in `providers`. Every one of them is gone by the
+/// time the exit is acted on (`clear_tab_runtime` drops the client), and the
+/// exit status and the excerpt can each be read exactly once, so they are
+/// captured together rather than re-derived.
+struct ExitedAgentPty {
+    tab_id: TabId,
+    exit_success: Option<bool>,
+    is_minimal: bool,
+    output_excerpt: String,
+    run_duration: Option<Duration>,
 }
 
 /// Whether an exited agent tab's row should be closed along with the prune:
@@ -367,7 +410,7 @@ impl Engine {
         // `PtyClient::try_wait` memoizes the status, so deferring costs nothing:
         // a reap observed on the first tick is still available on the tick that
         // finally prunes.
-        let exited_agents: Vec<(TabId, Option<bool>, bool, String)> = self
+        let exited_agents: Vec<ExitedAgentPty> = self
             .providers
             .iter_mut()
             .filter_map(|(id, client)| {
@@ -386,13 +429,26 @@ impl Engine {
                     } else {
                         String::new()
                     };
-                    Some((id.clone(), exit_success, is_minimal, output_excerpt))
+                    Some(ExitedAgentPty {
+                        tab_id: id.clone(),
+                        exit_success,
+                        is_minimal,
+                        output_excerpt,
+                        run_duration: client.run_duration(),
+                    })
                 } else {
                     None
                 }
             })
             .collect();
-        for (tab_id, exit_success, is_minimal, output_excerpt) in exited_agents {
+        for ExitedAgentPty {
+            tab_id,
+            exit_success,
+            is_minimal,
+            output_excerpt,
+            run_duration,
+        } in exited_agents
+        {
             // Resolve the exited PTY's owning session and whether it held the
             // slot. `providers` is keyed by tab id and a tab id names no session,
             // so resolve via the tab index first, or the label falls back to a
@@ -432,6 +488,11 @@ impl Engine {
                 }
                 None => (None, tab_id.as_str().to_string()),
             };
+            // Whether anybody typed into this tab during THIS run, read before
+            // the teardown below drops the stamp. `pty_input` is cleared with
+            // the rest of a tab's runtime, so an entry here can only have been
+            // made since this provider came up.
+            let was_typed_into = self.pty_input.contains_key(tab_id.as_str());
             // Clear EVERY runtime map keyed by this tab via the single-source
             // helper — not just providers/activity/input. In particular
             // `running_provider_pins` (set when a live tab is retargeted) would
@@ -472,16 +533,24 @@ impl Engine {
                 }
                 self.mark_session_status(sid, SessionStatus::Detached);
             }
-            // A non-zero exit is the tab's last run ending badly, and it is
-            // recorded AFTER `clear_tab_runtime` above (which wipes the flag for
-            // every deliberate end) so the verdict survives its own teardown. A
-            // clean exit and a bare EOF with no status both leave the slate
-            // clean: only a status that actually says "this failed" may stop the
-            // next selection from starting the tab. The guard is existence, the
-            // same one the launch-failed path uses: an orphan PTY has no tab
-            // anything can ever ask about again, so a verdict for it would be one
-            // leaked entry per orphan on a long-running server.
-            if exit_success == Some(false) && owning.is_some() {
+            // A run ends BADLY in one of two ways, and either records the tab's
+            // verdict: a non-zero exit says so itself, and a run that was over
+            // within `RAPID_EXIT_WINDOW` without anybody typing into it says the
+            // same thing about a provider that never came up, whatever status it
+            // managed to exit with. Recorded AFTER `clear_tab_runtime` above
+            // (which wipes the flag for every deliberate end) so the verdict
+            // survives its own teardown. The guard is existence, the same one the
+            // launch-failed path uses: an orphan PTY has no tab anything can ever
+            // ask about again, so a verdict for it would be one leaked entry per
+            // orphan on a long-running server.
+            //
+            // A RESUMED launch that dies this fast is not judged here at all: the
+            // resume-fallback sweep runs before this prune, tears the tab down
+            // and relaunches it fresh, so only the fresh retry's own quick death
+            // ever reaches this point.
+            let ended_badly = exit_success == Some(false)
+                || rapid_exit_ends_run_badly(run_duration, was_typed_into);
+            if ended_badly && owning.is_some() {
                 self.mark_tab_run_failed(&tab_id);
             }
             let tab_closed = clean_exit_closes_tab_row(is_session_slot, exit_success)
@@ -986,6 +1055,7 @@ mod tests {
 
     use super::PrunedPtyKind;
     use super::TerminatingPty;
+    use super::{RAPID_EXIT_WINDOW, rapid_exit_ends_run_badly};
     use super::{REAPED_DRAIN_GRACE, agent_pty_ready_to_prune};
     use super::{format_shutdown_result, format_shutdown_start};
     use crate::engine::Engine;
@@ -1257,6 +1327,184 @@ mod tests {
             SessionStatus::Detached,
             "a clean exit of the last live tab detaches the agent instead"
         );
+    }
+
+    /// The rapid-exit rule itself, without waiting out a real window.
+    #[test]
+    fn rapid_exit_ends_run_badly_only_for_a_brief_untyped_run() {
+        assert!(
+            rapid_exit_ends_run_badly(Some(Duration::from_millis(80)), false),
+            "a provider that came up and quit in under a second never came up"
+        );
+        assert!(
+            !rapid_exit_ends_run_badly(Some(RAPID_EXIT_WINDOW), false),
+            "the window is exclusive: a run that reached it is a run"
+        );
+        assert!(
+            !rapid_exit_ends_run_badly(Some(Duration::from_secs(600)), false),
+            "a long session ending is just a session ending"
+        );
+        assert!(
+            !rapid_exit_ends_run_badly(Some(Duration::from_millis(80)), true),
+            "a run somebody typed into came up; quitting it is what they typed"
+        );
+        assert!(
+            !rapid_exit_ends_run_badly(None, false),
+            "a run still in flight has no verdict to give"
+        );
+    }
+
+    /// A launch that comes up and quits IMMEDIATELY records the tab's last run
+    /// as failed even though it exited 0, so the next selection meets the
+    /// diagnosis card instead of starting the same doomed run again. Without
+    /// this the exit is invisible: nothing is marked, the surface drops the user
+    /// back where they were, and the next click repeats the whole cycle.
+    #[test]
+    fn prune_records_a_failure_for_a_rapid_clean_exit() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine
+            .session_store
+            .create_session(&session)
+            .expect("persist the agent and its first tab");
+        let slot = session.slot_tab_id().to_owned();
+        engine.sessions.push(session);
+        engine
+            .providers
+            .insert(slot.clone(), spawn_exit(worktree.path(), "0"));
+
+        wait_for_exit(&mut engine, &slot);
+        let pruned = engine.prune_exited_ptys();
+
+        assert!(
+            pruned.iter().any(|p| p.id == slot.as_str()),
+            "the tab must actually be pruned for this test to say anything"
+        );
+        assert!(
+            engine.tab_last_run_failed(slot.as_str()),
+            "a provider that exited within the rapid-exit window without being \
+             typed into must be recorded as a bad ending, whatever its status"
+        );
+    }
+
+    /// The same instant exit, on a tab somebody typed into: that is a person
+    /// quitting a CLI they were using, and it leaves a clean slate.
+    #[test]
+    fn prune_records_no_failure_when_a_rapid_exit_was_typed_into() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine
+            .session_store
+            .create_session(&session)
+            .expect("persist the agent and its first tab");
+        let slot = session.slot_tab_id().to_owned();
+        engine.sessions.push(session);
+        engine
+            .providers
+            .insert(slot.clone(), spawn_exit(worktree.path(), "0"));
+        engine.note_pty_input(slot.as_str());
+
+        wait_for_exit(&mut engine, &slot);
+        engine.prune_exited_ptys();
+
+        assert!(
+            !engine.tab_last_run_failed(slot.as_str()),
+            "a run the user typed into came up, so quitting it is not a failure"
+        );
+    }
+
+    /// A deliberate stop takes the provider out of `providers` before any prune
+    /// can see it, so however briefly the agent ran, no verdict is recorded and
+    /// the next selection starts it again.
+    #[test]
+    fn a_deliberate_stop_of_a_brand_new_provider_arms_nothing() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine
+            .session_store
+            .create_session(&session)
+            .expect("persist the agent and its first tab");
+        let slot = session.slot_tab_id().to_owned();
+        engine.sessions.push(session);
+        // `cat` sits there until its input closes, so this one is stopped while
+        // it is genuinely alive, seconds after launching.
+        engine
+            .providers
+            .insert(slot.clone(), spawn_cat(worktree.path()));
+
+        let outcome = engine.kill_tab_runtime(slot.as_str());
+        assert!(outcome.killed, "the live provider must actually be killed");
+        engine.prune_exited_ptys();
+
+        assert!(
+            !engine.tab_last_run_failed(slot.as_str()),
+            "a stop the user asked for is not a run that ended badly"
+        );
+    }
+
+    /// Spawn a shell that exits immediately with `code`.
+    fn spawn_exit(cwd: &Path, code: &str) -> PtyClient {
+        PtyClient::spawn_with_env(
+            "sh",
+            &["-c".to_string(), format!("exit {code}")],
+            cwd,
+            24,
+            80,
+            100,
+            &[],
+        )
+        .expect("spawn sh")
+    }
+
+    /// Block until both facts `prune_exited_ptys` waits for are in for `tab`, so
+    /// a single prune must act on it. See `REAPED_DRAIN_GRACE` for why waiting
+    /// on either one alone races.
+    fn wait_for_exit(engine: &mut Engine, tab: &TabId) {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let done = engine
+                .providers
+                .get_mut(tab.as_ref_id())
+                .is_some_and(|c| c.is_exited() && c.try_wait().is_some());
+            if done {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the PTY never reached end of input"
+            );
+            sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
