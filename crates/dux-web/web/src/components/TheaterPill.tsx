@@ -105,7 +105,15 @@ export function TheaterPill({
   useTheaterPillFocus(exitRef)
   const coarse = useIsCoarsePointer()
   const reducedMotion = usePrefersReducedMotion()
-  const drag = usePillDrag(boxRef)
+  // THE PILL DOES NOT RE-CLAMP ITSELF OUT FROM UNDER ITS OWN FLIGHT HOME. The
+  // returning top chrome shrinks the surface while the pill is still resting on
+  // it, and a bottom-hugging pill would be clamped upward with the settle
+  // animation carrying it there over a tenth of a second, so the user watches it
+  // crawl before the flight they asked for even starts. The flight replaces the
+  // position outright, so the clamp has nothing to contribute; an abandoned exit
+  // resumes ordinary clamping at rest.
+  const returning = flight === "expanding" || flight === "returning"
+  const drag = usePillDrag(boxRef, returning)
   usePillHint()
   const sessionId = session?.id
   // The PTY behind the pane this pill is painted over, named the same way the
@@ -361,7 +369,9 @@ function useFlightChoreography(
       if (flight === "detaching") {
         runDetach(box, from, (on) => setStageGripless("detaching", on))
       } else {
-        runReturn(box, from, (on) => setStageGripless("returning", on))
+        runReturn(box, from, position, (on) =>
+          setStageGripless("returning", on),
+        )
       }
       return
     }
@@ -446,12 +456,18 @@ function pinTopLeft(
   box.style.bottom = "auto"
 }
 
+/// Where the pill's offset parent sits in the viewport, which is the origin the
+/// pill's own coordinates are written in.
+function parentPoint(box: HTMLElement): { left: number; top: number } {
+  const parent = box.parentElement?.getBoundingClientRect()
+  return { left: parent?.left ?? 0, top: parent?.top ?? 0 }
+}
+
 function surfaceOffset(box: HTMLElement, rect: DOMRect): {
   left: number
   top: number
 } {
-  const parent = box.parentElement?.getBoundingClientRect()
-  return flightOffset(rect, parent ?? { left: 0, top: 0 })
+  return flightOffset(rect, parentPoint(box))
 }
 
 /// PULL-OFF. The pill starts as the flap, in the flap's place, and becomes a
@@ -501,14 +517,28 @@ function runDetach(
 
 /// THE WAY HOME. Travel first, as a finished capsule; the shape morph is the
 /// separate arrival snap, so nothing flies through the air wearing a tab shape.
+///
+/// WHERE IT LEAVES FROM IS THE PILL'S OWN STATE, never a measurement taken here.
+/// The commit that hands the stage over is also the commit React stops writing
+/// the pill's inline coordinates in (the flight owns them from `returning`
+/// onward), so by the time this runs the element has already been let go to its
+/// static-layout corner and a box read now would fly the capsule home from a
+/// place the user never saw it in. The state is the truth, it is already in the
+/// offset-parent space `pinTopLeft` writes, and the viewport point the
+/// translation needs is that plus the parent's own origin.
 function runReturn(
   box: HTMLElement,
   dock: DOMRect,
+  position: PillPosition,
   setGripless: (on: boolean) => void,
 ): void {
   const shadow = transparentShadow(getComputedStyle(box).boxShadow)
-  const from = box.getBoundingClientRect()
-  const here = surfaceOffset(box, from)
+  const here = { left: position.x, top: position.y }
+  const parent = parentPoint(box)
+  const from = {
+    left: parent.left + here.left,
+    top: parent.top + here.top,
+  }
   const move = flightTranslation(dock, from)
 
   box.style.transition = "none"
@@ -696,7 +726,13 @@ interface DragGesture {
  * underneath from ever seeing the move; the handlers stop propagation as well,
  * so nothing in the pane's own tree can start a selection from this gesture.
  */
-function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
+function usePillDrag(
+  boxRef: React.RefObject<HTMLDivElement | null>,
+  /// True while a flight home is pending or running, which is the one time a
+  /// re-clamp must not write a position: the flight is about to say where the
+  /// pill is, and moving it first is a slide the user did not ask for.
+  returnPending: boolean,
+): PillDrag {
   const [position, setPosition] = useState<PillPosition | null>(null)
   const [dragging, setDragging] = useState(false)
   const [justDropped, setJustDropped] = useState(false)
@@ -718,6 +754,9 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     pill: { width: 0, height: 0 },
   })
   const gestureRef = useRef<DragGesture | null>(null)
+  // Read rather than depended on, so a phase change does not rebuild the
+  // observer that is watching the surface the phase is currently reshaping.
+  const returnPendingRef = useRef(returnPending)
 
   const place = useCallback((next: PillPosition, persist: boolean) => {
     posRef.current = next
@@ -763,6 +802,12 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     )
     if (!next) return
     const current = posRef.current
+    // The sizes above are still recorded, because the next clamp after the
+    // gesture has to be against the surface as it is now; only the RE-CLAMP is
+    // withheld. A pill that has no position at all is a different case and is
+    // placed anyway: a pane remounting mid-flight mounts one, and a pill with
+    // nowhere to be has no flight to fly.
+    if (returnPendingRef.current && current) return
     if (current && current.x === next.x && current.y === next.y) return
     // Nothing here writes to storage. The user did not move the pill, a window
     // did, and the position they chose has to survive the window changing back.
@@ -822,6 +867,16 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     if (box) ro.observe(box)
     return () => ro.disconnect()
   }, [boxRef, measure, endGesture])
+
+  // An exit that was abandoned leaves the pill on coordinates that were never
+  // re-clamped for the surface it is resting on again, and nothing else is going
+  // to ask: the observer only fires when a box changes shape. So the end of the
+  // suppression is itself a reason to clamp.
+  useLayoutEffect(() => {
+    returnPendingRef.current = returnPending
+    if (returnPending) return
+    measure()
+  }, [returnPending, measure])
 
   // The suppression lasts exactly one painted frame: long enough for the drop's
   // own coordinates to land without easing, short enough that the next nudge or

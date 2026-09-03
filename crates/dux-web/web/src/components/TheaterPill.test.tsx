@@ -93,6 +93,7 @@ const {
 const { FLAP_FILL_VAR, registerFlapElement } = await import(
   "@/lib/theaterFlight"
 )
+type FlightPhase = import("@/lib/theaterFlight").FlightPhase
 
 function tab(over: Partial<AgentTabView> & { id: string }): AgentTabView {
   return {
@@ -152,10 +153,30 @@ function rect(box: { left: number; top: number; width: number; height: number })
   } as DOMRect
 }
 
+// WHERE AN UNPLACED BOX FALLS. A real browser does not hold an absolutely
+// positioned element wherever it last was when the inline insets are taken off
+// it: the box drops to wherever static layout puts it, which for the pill's
+// overlay is the top-left corner. A stub that answered with the pill's placed
+// coordinates whether or not they were on the element could not tell a
+// measurement of the real pill from a measurement of that corner, which is
+// exactly the difference the return flight got wrong.
+const PILL_UNPLACED = { left: 4, top: 6 }
+
+/// The pill's box, DERIVED from what is actually on the element.
+function pillRect(el: HTMLElement): DOMRect {
+  const placed = el.style.left !== "" && el.style.top !== ""
+  return rect({
+    left: placed ? Number.parseFloat(el.style.left) : PILL_UNPLACED.left,
+    top: placed ? Number.parseFloat(el.style.top) : PILL_UNPLACED.top,
+    width: pillBox.width,
+    height: pillBox.height,
+  })
+}
+
 function stubRects() {
   Element.prototype.getBoundingClientRect = function (this: Element) {
     const id = this instanceof HTMLElement ? this.dataset.testid : undefined
-    if (id === "theater-pill") return rect(pillBox)
+    if (id === "theater-pill") return pillRect(this as HTMLElement)
     if (id === "flap-dock") return rect(flapBox)
     return rect(surfaceBox)
   }
@@ -861,7 +882,7 @@ describe("the phone flight, with real boxes to measure", () => {
     }
   }
 
-  function flying(flight: "detaching" | "returning" | "attaching" | "floating") {
+  function flying(flight: FlightPhase) {
     return (
       <TheaterPill
         target={mobileTarget}
@@ -941,6 +962,35 @@ describe("the phone flight, with real boxes to measure", () => {
     // Both axes are said, so the fallback corner class cannot fight it.
     expect(box.style.right).toBe("auto")
     expect(box.style.bottom).toBe("auto")
+  })
+
+  it("leaves from where the user last saw it, through the real sequence", () => {
+    // THE WHOLE EXIT, in order, for a pill that is not in its default corner.
+    // The commit that starts the flight is also the commit React stops writing
+    // the pill's inline coordinates in, so anything the flight measures off the
+    // element by then is the static-layout corner rather than the pill: it flew
+    // home from a place the user never saw it in. The state is the truth.
+    localStorage.setItem(THEATER_PILL_POSITION_KEY, '{"x":120,"y":300}')
+    flapBox = { left: 200, top: 4, width: 200, height: 48 }
+    const view = render(flying("floating"))
+    expect(pill().style.left).toBe("120px")
+    expect(pill().style.top).toBe("300px")
+
+    // The top chrome coming back shrinks the surface under the resting pill.
+    // The flight is about to say where it goes, so nothing re-clamps it there
+    // first: a settle animation crawling the pill upward before the gesture it
+    // belongs to is a slide the user did not ask for.
+    act(() => view.rerender(flying("expanding")))
+    surfaceBox = { left: 0, top: 0, width: 800, height: 380 }
+    act(() => playResize())
+    expect(pill().style.top).toBe("300px")
+
+    act(() => view.rerender(flying("returning")))
+    const box = pill()
+    expect(box.style.left).toBe("120px")
+    expect(box.style.top).toBe("300px")
+    // From THERE to the flap: (200 - 120, 4 - 300).
+    expect(box.style.transform).toBe("translate(80px, -296px)")
   })
 
   it("parks on the dock's real coordinates before it squares up", () => {
