@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import type { ReactNode } from "react"
 
 import { SidebarProvider } from "@/components/ui/sidebar"
+import { layoutGestureDepth } from "@/lib/layoutGesture"
 import {
   SIDEBAR_RESIZING_ATTR,
   SIDEBAR_RESIZING_NO_TRANSITION,
@@ -1345,6 +1346,71 @@ describe("AppSidebar drag writes the store once, at the end", () => {
     expect(setSidebarWidthSpy).toHaveBeenCalledTimes(1)
     expect(setSidebarWidthSpy).toHaveBeenCalledWith("21rem", undefined)
     expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
+  })
+})
+
+// One refit per gesture: the drag moves the terminal's box on every pointer
+// move, and the pane's debounce only coalesces the moves inside one quiet
+// window, so a finger that pauses mid-drag bought a full refit at a geometry it
+// was merely passing through.
+describe("AppSidebar drag holds the layout gesture", () => {
+  it("holds from the press to the release, and lets go once", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    const handle = grabHandle(container)
+
+    expect(layoutGestureDepth()).toBe(0)
+    pressEdge(handle)
+    expect(layoutGestureDepth()).toBe(1)
+    moveEdge(400)
+    expect(layoutGestureDepth()).toBe(1)
+    releaseEdge(400)
+    expect(layoutGestureDepth()).toBe(0)
+  })
+
+  it("lets go when the browser cancels the gesture", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    const handle = grabHandle(container)
+
+    pressEdge(handle, { pointerId: 5, pointerType: "touch" })
+    moveEdge(340, { pointerId: 5, pointerType: "touch" })
+    act(() => {
+      fireEvent.pointerCancel(document, {
+        pointerId: 5,
+        pointerType: "touch",
+        clientX: 340,
+        clientY: 100,
+      })
+    })
+    expect(layoutGestureDepth()).toBe(0)
+  })
+
+  // The drag hook's teardown drops its listeners without calling a handler, so
+  // an edge unmounted mid-drag (theater mode taking the sidebar away under a
+  // finger) would otherwise hold the terminal's refit for good.
+  it("lets go when the edge is unmounted mid-drag", () => {
+    mockState = makeState()
+    const { container, unmount } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    const handle = grabHandle(container)
+
+    pressEdge(handle)
+    moveEdge(400)
+    expect(layoutGestureDepth()).toBe(1)
+    act(() => unmount())
+    expect(layoutGestureDepth()).toBe(0)
   })
 })
 

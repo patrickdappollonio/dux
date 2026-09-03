@@ -8,6 +8,7 @@ import {
   dividerCursor,
   dividerPressHits,
 } from "@/lib/paneDivider"
+import { beginLayoutGesture, endLayoutGesture } from "@/lib/layoutGesture"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 
 // The drag half of the shared divider mechanism, for the dividers dux drives
@@ -91,10 +92,18 @@ function paintHeld(el: HTMLElement | null, held: boolean) {
  * attribute stays lit until the next press. This hook hears the cancel, so the
  * held paint ends when the gesture does.
  *
- * It paints and nothing else: the drag, the layout and the persistence stay
- * with the library and App.tsx. Acquisition is the shared rule
+ * It paints and BRACKETS, and nothing else: the drag, the layout and the
+ * persistence stay with the library and App.tsx. Acquisition is the shared rule
  * (`dividerPressHits`) against the same grab band the library claims, so the
  * two dividers light on exactly the same presses.
+ *
+ * THE BRACKET is the layout gesture. Dragging this separator moves the terminal
+ * pane's box on every pointer move, and the pane's own debounce only coalesces
+ * the moves that fall inside one quiet window: a finger that pauses mid-drag
+ * buys a full refit at a geometry it is merely passing through. Holding the
+ * gesture from the press to the release is the same guarantee theater mode
+ * already takes, for the same reason, and pays for exactly one fit at the width
+ * the drag settles on.
  */
 export function useDividerHeld(): React.RefObject<HTMLDivElement | null> {
   const ref = React.useRef<HTMLDivElement | null>(null)
@@ -105,6 +114,18 @@ export function useDividerHeld(): React.RefObject<HTMLDivElement | null> {
       ? DIVIDER_TARGET_MIN.coarse
       : DIVIDER_TARGET_MIN.fine
     let heldPointer: number | null = null
+    let holding = false
+
+    const hold = () => {
+      if (holding) return
+      holding = true
+      beginLayoutGesture()
+    }
+    const unhold = () => {
+      if (!holding) return
+      holding = false
+      endLayoutGesture()
+    }
 
     const onPointerDown = (event: PointerEvent) => {
       // Deliberately NOT gated on `defaultPrevented`: the library's own
@@ -116,12 +137,14 @@ export function useDividerHeld(): React.RefObject<HTMLDivElement | null> {
       if (!dividerPressHits(ref.current, event, minWidth)) return
       heldPointer = event.pointerId
       paintHeld(ref.current, true)
+      hold()
     }
 
     const onPointerEnd = (event: PointerEvent) => {
       if (heldPointer === null || event.pointerId !== heldPointer) return
       heldPointer = null
       paintHeld(ref.current, false)
+      unhold()
     }
 
     const el = ref.current
@@ -140,6 +163,8 @@ export function useDividerHeld(): React.RefObject<HTMLDivElement | null> {
         "lostpointercapture",
         onPointerEnd as EventListener,
       )
+      // A hold must not outlive the listeners that would have released it.
+      unhold()
     }
   }, [coarse])
 

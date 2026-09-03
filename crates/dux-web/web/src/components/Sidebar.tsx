@@ -39,6 +39,7 @@ import {
   dividerKeyAction,
   SIDEBAR_RESIZING_ATTR,
 } from "@/lib/paneDivider"
+import { beginLayoutGesture, endLayoutGesture } from "@/lib/layoutGesture"
 import { useDividerDrag } from "@/hooks/use-divider-drag"
 import {
   MAX_SIDEBAR_PX,
@@ -324,19 +325,23 @@ function SidebarDragEdge({
     wrapperRef.current?.style.setProperty("--sidebar-width", widthRem)
   }, [])
 
-  // Whether a gesture is in flight. For its whole duration the width does not
-  // animate: it is following a finger, and a tween restarted on every move is
-  // an edge that trails it and keeps moving after it lifts.
+  // Whether a gesture is in flight, and the two things that are true for its
+  // whole duration. The width does not animate: it is following a finger, and a
+  // tween restarted on every move is an edge that trails it and keeps moving
+  // after it lifts. And the terminal owes exactly one refit, at the geometry
+  // the gesture settles on, rather than one per geometry it passes through.
   const gestureRef = useRef(false)
   const beginGesture = useCallback(() => {
     if (gestureRef.current) return
     gestureRef.current = true
     wrapperRef.current?.setAttribute(SIDEBAR_RESIZING_ATTR, "")
+    beginLayoutGesture()
   }, [])
   const endGesture = useCallback(() => {
     if (!gestureRef.current) return
     gestureRef.current = false
     wrapperRef.current?.removeAttribute(SIDEBAR_RESIZING_ATTR)
+    endLayoutGesture()
   }, [])
 
   // Every way of moving this divider ends here, so a drag, an arrow key and a
@@ -417,7 +422,8 @@ function SidebarDragEdge({
   // A GESTURE MUST NOT OUTLIVE THE EDGE THAT STARTED IT. The drag hook's own
   // teardown drops the listeners without calling a handler, so an edge unmounted
   // mid-drag (theater mode taking the sidebar away under a finger) would leave
-  // the suppression standing on a wrapper nothing is dragging.
+  // the suppression standing on a wrapper nothing is dragging, and the
+  // terminal's refit held for the rest of the page's life.
   useEffect(() => {
     wrapperRef.current =
       ref.current?.closest<HTMLElement>('[data-slot="sidebar-wrapper"]') ?? null

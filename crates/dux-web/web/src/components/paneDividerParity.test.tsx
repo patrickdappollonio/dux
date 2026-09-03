@@ -8,6 +8,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render } from "@testing-library/react"
 
+import { layoutGestureDepth } from "@/lib/layoutGesture"
 import type { DuxState } from "@/lib/store"
 import { stubMatchMedia } from "@/test/matchMedia"
 
@@ -413,6 +414,40 @@ describe("both dividers, driven by a finger", () => {
       expect(handle.getAttribute(DIVIDER_HELD_ATTR), mount.name).toBe(
         DIVIDER_HELD_OFF,
       )
+      cleanup()
+    }
+  })
+
+  // ONE REFIT PER GESTURE, on both dividers. Either drag moves the terminal
+  // pane's box on every pointer move, and the pane's own debounce coalesces
+  // only the moves that fall inside one quiet window, so a finger that pauses
+  // mid-drag buys a full refit at a geometry it is merely passing through.
+  // Holding the layout for the length of the gesture is the same guarantee
+  // theater mode already takes, and it has to be released whichever way the
+  // gesture ends or the terminal never fits again.
+  it("both hold the layout for the length of the gesture", () => {
+    for (const mount of [sidebarDivider, changesDivider]) {
+      const handle = mount()
+      handle.setPointerCapture = () => {}
+      expect(layoutGestureDepth(), mount.name).toBe(0)
+      press(handle, EDGE_CENTRE)
+      expect(layoutGestureDepth(), mount.name).toBe(1)
+      move(EDGE_CENTRE + DRAG_BY)
+      expect(layoutGestureDepth(), mount.name).toBe(1)
+      release(EDGE_CENTRE + DRAG_BY)
+      expect(layoutGestureDepth(), mount.name).toBe(0)
+      cleanup()
+    }
+  })
+
+  it("both let the layout go when the browser takes the gesture away", () => {
+    for (const mount of [sidebarDivider, changesDivider]) {
+      const handle = mount()
+      handle.setPointerCapture = () => {}
+      press(handle, EDGE_CENTRE)
+      move(EDGE_CENTRE + DRAG_BY)
+      cancel(EDGE_CENTRE + DRAG_BY)
+      expect(layoutGestureDepth(), mount.name).toBe(0)
       cleanup()
     }
   })
