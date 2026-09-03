@@ -164,9 +164,9 @@ pull-request band and the tab strip slide away and the terminal grows into the s
 were using; on a phone the app header goes with them, and the flap lifts off the band and
 flies to the floating pill, which is the same four buttons in the same order.
 The compose box and the terminal keys stay exactly as you had them, and the input `⋯`
-menu keeps offering to show or hide either one, so theater is as bare or as equipped as
-you want it. The top bar is not on that list while theater is on: it is one of the things
-this mode took away, and it comes back with the rest when you leave. On a computer both
+menu keeps offering to show or hide the keys, so theater is as bare or as equipped as
+you want it. Theater is the only thing that takes the top bar away, and it all comes
+back when you leave. On a computer both
 side panels leave too, the agent list and the changes list, and they come back as you had
 them: open, collapsed to the rail, hidden, and at the widths you dragged them to. Open a
 link that goes straight into theater and there was no layout on screen to remember, so
@@ -419,8 +419,8 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
   right, in a small tab-shaped flap over the terminal: theater mode, the macro picker,
   the changed-file count, and the session's `⋯` menu, which carries the agent's actions,
   the changed files, this screen's view toggles and a **Settings** drill into the app
-  menu. The flap stays put when you hide the top bar, since it takes no room from the
-  terminal.
+  menu. The flap takes no room from the terminal, so theater does not take it away: it
+  lifts off the band and flies to the floating pill instead.
 - The **changes** screen is the full Changes pane.
 
 An **accessory bar** sits above the soft keyboard with the keys a phone keyboard lacks:
@@ -486,32 +486,31 @@ puts your cursor back in the box, right-clicking pastes the clipboard into your 
 instead of sending it, and the terminal is skipped when you tab backwards out of the pane.
 Switch to Direct and all of that goes back to the way a plain terminal behaves.
 
-Terminal rows are precious on a phone, so the chrome is hideable. Every phone terminal
-screen's `⋯` menu (in the flap on the agent screen, in the header on project and
-standalone terminals) has **Hide top bar** (which on the agent screen also takes the tab
-strip) and **Hide terminal keys**, each backed by its own preference and each also a row
-in Preferences. The agent screen's flap is not part of the top bar and stays where it is:
-it floats over the terminal rather than taking a row from it, so hiding the bar has
-nothing to reclaim from it, and theater, the changed-file count and the session's actions
-stay one tap away.
+Terminal rows are precious on a phone, so the terminal keys are hideable. Every phone
+terminal screen's `⋯` menu (in the flap on the agent screen, in the header on project and
+standalone terminals) has **Hide terminal keys**, backed by a preference that is also a
+row in Preferences.
 
-The way back is a `⋯` **input menu** at the left edge of whatever input row you have: beside
-the message box, in the key row when the box is off, or on its own slim row when you have
-hidden both. It is there whether or not anything is hidden. Inside it are **Attach a file…**
-(see [Dropping and pasting files](/docs/dropping-files)), the typing-surface switch, and a
-**Show** entry for each bar you have hidden, so you get back the one you are missing rather
-than both.
+For the top bar the answer is [theater mode](#theater-mode-one-pane-no-chrome), not a preference. It takes
+the header and the tab strip together, and it hands you the way back at the same time: the
+floating pill, and **Leave theater mode** in the input `⋯`. A preference that hid the same
+chrome would be a second way to reach the same place, with no way back of its own.
 
-Those preferences live on the server, so they follow you to every device. The top bar does
-not exist in the wide layout, but the terminal keys travel with your pointer, so hiding them
-from your phone also hides them on the tablet you pick up next. The input menu is under
-every terminal you are driving, desktop included, because it is how you ask for the message
-box in the first place. In theater mode on a computer there is no input row to put it on, so
-its entries move into the floating pill's own `⋯` and there is still exactly one menu on
-screen. **Hide terminal keys** appears only where a key row could actually
-show up, so it is never a button that does nothing. Watching someone else's
-terminal on a phone with the top bar hidden, you still get the menu, with the top-bar entry
-in it, so you can never end up with a screen you cannot get out of.
+That input `⋯` menu sits at the left edge of whatever input row you have: beside the
+message box, in the key row when the box is off, or on its own slim row when you have
+hidden both. It is there whether or not anything is hidden. Inside it are **Attach a
+file…** (see [Dropping and pasting files](/docs/dropping-files)), the typing-surface
+switch, **Show terminal keys** when you have hidden them, and the way out of theater while
+theater is on.
+
+The terminal-keys preference lives on the server, so it follows you to every device, and
+the keys travel with your pointer, so hiding them from your phone also hides them on the
+tablet you pick up next. The input menu is under every terminal you are driving, desktop
+included, because it is how you ask for the message box in the first place. In theater mode
+on a computer there is no input row to put it on, so its entries move into the floating
+pill's own `⋯` and there is still exactly one menu on screen. **Hide terminal keys**
+appears only where a key row could actually show up, so it is never a button that does
+nothing.
 
 ## Install it like an app
 
