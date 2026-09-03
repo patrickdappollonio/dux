@@ -183,6 +183,11 @@ toggles, the way out of theater while the mode is on, and **Settings**, which dr
 the app menu the cog carries, so nothing about an agent goes out of reach because you
 went full screen.
 
+![Theater mode on a phone: the top bar is gone, the floating pill hovers over the terminal, and the keys and message box are still there.](/screens/phone-theater-pill.png)
+
+Notice what did **not** leave: the terminal keys and the message box. Theater takes the
+chrome above the terminal, not the way you answer it.
+
 The pill carries no tab status. What the other tabs are doing is in the agents list and
 the tab strip, and one copy of that is enough. Theater on a phone hides both, so a tab
 you cannot see that needs you will be waiting when you come back out: that is the trade
