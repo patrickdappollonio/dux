@@ -50,7 +50,6 @@ import {
   readPillPosition,
   resolvePillPosition,
   THEATER_PILL_GRIP_SLOT_PX,
-  THEATER_PILL_HOLD_MS,
   writePillPosition,
   type PillPosition,
   type PillSize,
@@ -180,7 +179,7 @@ export function TheaterPill({
       }
     >
       {mobile ? <FlapFillets /> : null}
-      <SimpleTooltip content={coarse ? "" : "Hold to drag"}>
+      <SimpleTooltip content={coarse ? "" : "Drag to move"}>
         <Button
           variant="ghost"
           size="icon"
@@ -188,9 +187,9 @@ export function TheaterPill({
           // The pill floats over the newest lines of output, so the answer to
           // it covering something is to move it. The grip is where that gesture
           // lives, and it is a real 40px control rather than the pill's whole
-          // body precisely because the body is buttons: a hold that started
-          // anywhere would make every tap ambiguous.
-          aria-label="Drag handle: hold to move the pill"
+          // body precisely because the body is buttons: a gesture that could
+          // start anywhere would make every tap ambiguous.
+          aria-label="Drag handle: drag to move the pill"
           // `touch-none` is load-bearing twice over: it stops the browser
           // scrolling or long-pressing the page out from under the drag, and it
           // is what keeps the terminal's own long-press selection from starting
@@ -696,7 +695,7 @@ function usePillHint(): void {
     // Marked BEFORE the raise, so a double-invoked effect (React's development
     // strict mode) cannot produce two toasts.
     markPillHintShown()
-    notifyInfo("Hold the pill's grip to drag it anywhere in the terminal.")
+    notifyInfo("Drag the pill's grip to move it anywhere in the terminal.")
   }, [])
 }
 
@@ -732,11 +731,9 @@ interface DragGesture {
   pointerType: string
   startX: number
   startY: number
-  startedAt: number
   base: PillPosition
   last: PillPosition
   lifted: boolean
-  timer: ReturnType<typeof setTimeout> | null
   frame: number | null
 }
 
@@ -841,7 +838,6 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
       const g = gestureRef.current
       if (!g) return
       gestureRef.current = null
-      if (g.timer !== null) clearTimeout(g.timer)
       if (g.frame !== null) cancelAnimationFrame(g.frame)
       const box = boxRef.current
       if (box) box.style.transform = ""
@@ -901,10 +897,6 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     const g = gestureRef.current
     if (!g || g.lifted) return
     g.lifted = true
-    if (g.timer !== null) {
-      clearTimeout(g.timer)
-      g.timer = null
-    }
     setDragging(true)
   }, [])
 
@@ -939,27 +931,22 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
         // Some browsers refuse capture for a pointer that has already been
         // released. The gesture still works while the pointer is over the grip.
       }
+      // NOTHING IS ARMED ON A CLOCK. The grip lifts on the first move past its
+      // slop, for a finger exactly as for a mouse, so the press itself only has
+      // to record where it landed.
       const gesture: DragGesture = {
         pointerId: ev.pointerId,
         pointerType: ev.pointerType,
         startX: ev.clientX,
         startY: ev.clientY,
-        startedAt: Date.now(),
         base,
         last: base,
         lifted: false,
-        timer: null,
         frame: null,
       }
       gestureRef.current = gesture
-      // A FINGER lifts on time, and it must lift even if it never moves: a hold
-      // with no travel is exactly the gesture, and there would otherwise be no
-      // event left to notice it.
-      if (ev.pointerType === "touch") {
-        gesture.timer = setTimeout(() => lift(), THEATER_PILL_HOLD_MS)
-      }
     },
-    [lift, measure],
+    [measure],
   )
 
   const onPointerMove = useCallback(
@@ -972,14 +959,9 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
       if (!g.lifted) {
         const verdict = classifyPillGesture({
           pointerType: g.pointerType,
-          heldMs: Date.now() - g.startedAt,
           travel: Math.hypot(dx, dy),
           ended: false,
         })
-        if (verdict === "cancel") {
-          endGesture(false)
-          return
-        }
         if (verdict !== "lift") return
         lift()
       }
@@ -991,7 +973,7 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
       )
       paint()
     },
-    [endGesture, lift, paint],
+    [lift, paint],
   )
 
   const onPointerUp = useCallback(
@@ -1007,7 +989,6 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
         ? "lift"
         : classifyPillGesture({
             pointerType: g.pointerType,
-            heldMs: Date.now() - g.startedAt,
             travel: Math.hypot(ev.clientX - g.startX, ev.clientY - g.startY),
             ended: true,
           })
@@ -1042,9 +1023,9 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     [endGesture],
   )
 
-  // A pill that goes away under the finger takes its gesture with it: the hold
-  // timer and the paint frame are the pill's, and neither has anything left to
-  // do. Nothing is committed, because an unmount is not a drop.
+  // A pill that goes away under the finger takes its gesture with it: the paint
+  // frame is the pill's and has nothing left to do. Nothing is committed,
+  // because an unmount is not a drop.
   useEffect(() => () => endGesture(false), [endGesture])
 
   // The same rule for a window that loses focus. An alt-tab out of a live drag

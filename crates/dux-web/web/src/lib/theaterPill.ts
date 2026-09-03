@@ -56,15 +56,15 @@ export const PILL_GRIPLESS_CLASS = "dux-pill-gripless"
 /// pane takes a held key rather than a hundred presses.
 export const THEATER_PILL_NUDGE_PX = 16
 
-/// A finger has to hold this long on the grip before the pill lifts.
-/// The same hold the sidebar's reorder drag uses, for the same reasons written
-/// down there: below it a scroll-intent touch arms the drag, above it the
-/// browser's own long-press behaviors start competing.
-export const THEATER_PILL_HOLD_MS = TOUCH_DRAG_ACTIVATION.delay
-
-/// How far a finger may slide during the hold before the gesture is read as a
-/// scroll and abandoned.
-export const THEATER_PILL_TOUCH_TOLERANCE = TOUCH_DRAG_ACTIVATION.tolerance
+/// How far a finger has to slide on the grip before the pill lifts.
+///
+/// There is deliberately no hold behind it, unlike the sidebar's reorder drag:
+/// a row is a row first and a drag handle only on a hold, while the grip is
+/// nothing but a drag handle, carries `touch-none`, and has no scroll gesture
+/// underneath it to be told apart from. So the only thing left to decide is tap
+/// versus drag, and a small slop decides that without a wait. It is wider than
+/// the mouse's because a finger wobbles on contact.
+export const THEATER_PILL_TOUCH_DISTANCE = TOUCH_DRAG_ACTIVATION.tolerance
 
 /// How far a mouse has to pull before the press becomes a drag. A plain click
 /// stays a click, exactly like the reorder drags.
@@ -177,13 +177,11 @@ export function nudgePillPosition(
 }
 
 /** What one press on the grip has turned out to be, so far. */
-export type PillGestureVerdict = "pending" | "lift" | "cancel" | "tap"
+export type PillGestureVerdict = "pending" | "lift" | "tap"
 
 export interface PillGestureInput {
   /// The pointer event's own `pointerType`.
   pointerType: string
-  /// How long the press has been held, in milliseconds.
-  heldMs: number
   /// How far the pointer has travelled from where it landed, in pixels.
   travel: number
   /// Whether the press has been released (or cancelled by the browser).
@@ -193,23 +191,23 @@ export interface PillGestureInput {
 /**
  * Tap or drag?
  *
- * The two pointer kinds need OPPOSITE gates, the same split the reorder drags
- * are built on. A MOUSE lifts on travel, because a mouse can be held still and
- * a click must stay instant. A FINGER lifts on time, because a finger cannot be
- * held still and every drag would otherwise start on contact and fight the
- * gesture underneath it; sliding away before the hold completes is a scroll,
- * not a slow drag, so it cancels outright rather than waiting for the timer.
+ * ONE GATE FOR BOTH POINTER KINDS, and it is travel: the pill lifts as soon as
+ * the pointer has moved past the slop, and the only thing the pointer kind
+ * changes is how much slop that is. Nothing waits on a clock, because the grip
+ * is a dedicated drag handle rather than a control with a second meaning, so
+ * there is no other gesture on it a hold would have to disambiguate from.
  *
- * A press that ends before either gate is a plain tap, which is what keeps the
- * grip harmless: it does nothing, and the buttons beside it keep their meanings.
+ * A press that ends before the slop is crossed is a plain tap, which is what
+ * keeps the grip harmless: it does nothing, and the buttons beside it keep
+ * their meanings.
  */
 export function classifyPillGesture(input: PillGestureInput): PillGestureVerdict {
   if (input.ended) return "tap"
-  if (input.pointerType === "touch") {
-    if (input.travel > THEATER_PILL_TOUCH_TOLERANCE) return "cancel"
-    return input.heldMs >= THEATER_PILL_HOLD_MS ? "lift" : "pending"
-  }
-  return input.travel >= THEATER_PILL_MOUSE_DISTANCE ? "lift" : "pending"
+  const slop =
+    input.pointerType === "touch"
+      ? THEATER_PILL_TOUCH_DISTANCE
+      : THEATER_PILL_MOUSE_DISTANCE
+  return input.travel >= slop ? "lift" : "pending"
 }
 
 // Storage can be absent (a test that never stubbed it) or throw outright

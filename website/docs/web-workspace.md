@@ -196,9 +196,10 @@ the tab strip, and one copy of that is enough. Theater on a phone hides both, so
 you cannot see that needs you will be waiting when you come back out: that is the trade
 this mode makes for a screen with nothing on it but the terminal.
 
-The pill does not have to stay in that corner. Its leading edge is a grip: hold the grip
-and drag, with a finger or with the mouse, and the pill goes anywhere over the terminal,
-never further than its edges. A quick tap does nothing, so the buttons beside the grip
+The pill does not have to stay in that corner. Its leading edge is a grip: drag the grip,
+with a finger or with the mouse, and the pill goes anywhere over the terminal, never
+further than its edges. There is nothing to hold first; it moves as soon as you do. A
+quick tap does nothing, so the buttons beside the grip
 keep working as buttons. If you would rather not drag, focus the grip and the arrow keys
 move it a step at a time. Where you leave it is remembered on that device, for every
 agent and every terminal, and it is nudged back inside if you rotate the phone or shrink

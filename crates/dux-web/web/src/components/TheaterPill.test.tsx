@@ -341,7 +341,8 @@ describe("the floating theater pill", () => {
 // The pill is the one thing left floating over a full-height terminal, so it is
 // also the one thing that can cover the line the user is waiting for. The answer
 // is a drag, and these pin the two halves that make a drag safe here: the grip's
-// hold is what separates it from the taps of the buttons beside it, and nothing
+// travel slop is what separates it from the taps of the buttons beside it (a
+// hold is deliberately not part of it, on either pointer kind), and nothing
 // under the pill may see the pointer while it moves, or the terminal starts a
 // long-press selection under the user's finger.
 const CORNER = { left: "586px", top: "538px" }
@@ -401,7 +402,7 @@ describe("moving the theater pill", () => {
 
   it("carries a grip that says what it is for", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
-    expect(grip().getAttribute("aria-label")).toMatch(/hold to move/i)
+    expect(grip().getAttribute("aria-label")).toMatch(/drag to move/i)
   })
 
   it("moves with a mouse drag and remembers where it landed", () => {
@@ -447,24 +448,14 @@ describe("moving the theater pill", () => {
     expect(stored()).toBeNull()
   })
 
-  it("lets go of a pending hold when the pill is unmounted under the finger", () => {
-    vi.useFakeTimers()
-    try {
-      const view = render(
-        <TheaterPill target={terminalTarget} session={undefined} />,
-      )
-      // Counted as a DELTA: the tooltip library keeps timers of its own, and
-      // the one this test is about is the hold the press arms.
-      const idle = vi.getTimerCount()
-      down(grip(), { pointerType: "touch", clientX: 600, clientY: 550 })
-      expect(vi.getTimerCount()).toBe(idle + 1)
-      view.unmount()
-      expect(vi.getTimerCount()).toBeLessThanOrEqual(idle)
-      act(() => void vi.advanceTimersByTime(600))
-      expect(stored()).toBeNull()
-    } finally {
-      vi.useRealTimers()
-    }
+  it("commits nothing when the pill is unmounted under the finger", () => {
+    const view = render(<TheaterPill target={terminalTarget} session={undefined} />)
+    down(grip(), { pointerType: "touch", clientX: 600, clientY: 550 })
+    move(560, 500, "touch")
+    view.unmount()
+    // An unmount is not a drop, so the place the finger had reached is not the
+    // place the device remembers.
+    expect(stored()).toBeNull()
   })
 
   // A SURFACE THAT CHANGES SHAPE MID-DRAG ENDS THE DRAG.
@@ -547,50 +538,34 @@ describe("moving the theater pill", () => {
     expect(stored()).toEqual({ x: 486, y: 388 })
   })
 
-  it("lifts under a finger only after the hold, and moves from there", () => {
-    vi.useFakeTimers()
-    try {
-      render(<TheaterPill target={terminalTarget} session={undefined} />)
-      down(grip(), { pointerType: "touch", clientX: 600, clientY: 550 })
-      act(() => void vi.advanceTimersByTime(300))
-      move(560, 500, "touch")
-      up(560, 500, "touch")
-      expect(pill().style.left).toBe("546px")
-      expect(pill().style.top).toBe("488px")
-    } finally {
-      vi.useRealTimers()
-    }
+  it("lifts under a finger on its first move past the slop, with no hold at all", () => {
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    down(grip(), { pointerType: "touch", clientX: 600, clientY: 550 })
+    // No clock is advanced anywhere in this test: the grip is a dedicated drag
+    // handle, so the move itself is the whole gate.
+    move(560, 500, "touch")
+    up(560, 500, "touch")
+    expect(pill().style.left).toBe("546px")
+    expect(pill().style.top).toBe("488px")
+    expect(stored()).toEqual({ x: 546, y: 488 })
   })
 
-  it("leaves a short finger press alone, so a tap stays a tap", () => {
-    vi.useFakeTimers()
-    try {
-      render(<TheaterPill target={terminalTarget} session={undefined} />)
-      down(grip(), { pointerType: "touch", clientX: 600, clientY: 550 })
-      act(() => void vi.advanceTimersByTime(120))
-      up(600, 550, "touch")
-      act(() => void vi.advanceTimersByTime(500))
-      expect(pill().style.left).toBe(CORNER.left)
-      expect(stored()).toBeNull()
-    } finally {
-      vi.useRealTimers()
-    }
+  it("keeps a finger inside the slop a tap, so the pill does not twitch", () => {
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    down(grip(), { pointerType: "touch", clientX: 600, clientY: 550 })
+    move(596, 547, "touch")
+    up(596, 547, "touch")
+    expect(pill().style.left).toBe(CORNER.left)
+    expect(pill().style.top).toBe(CORNER.top)
+    expect(stored()).toBeNull()
   })
 
-  it("abandons a finger that slid away before the hold, which was a scroll", () => {
-    vi.useFakeTimers()
-    try {
-      render(<TheaterPill target={terminalTarget} session={undefined} />)
-      down(grip(), { pointerType: "touch", clientX: 600, clientY: 550 })
-      move(600, 500, "touch")
-      act(() => void vi.advanceTimersByTime(600))
-      move(600, 400, "touch")
-      up(600, 400, "touch")
-      expect(pill().style.left).toBe(CORNER.left)
-      expect(pill().style.top).toBe(CORNER.top)
-    } finally {
-      vi.useRealTimers()
-    }
+  it("leaves a finger press that never moved alone, so a tap stays a tap", () => {
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    down(grip(), { pointerType: "touch", clientX: 600, clientY: 550 })
+    up(600, 550, "touch")
+    expect(pill().style.left).toBe(CORNER.left)
+    expect(stored()).toBeNull()
   })
 
   // NOTHING ABOVE THE PILL SEES THE GESTURE, for either pointer kind.
@@ -604,27 +579,20 @@ describe("moving the theater pill", () => {
   it.each(["mouse", "touch"])(
     "keeps every %s event of the gesture away from the tree above it",
     (pointerType) => {
-      vi.useFakeTimers()
-      try {
-        const seen: string[] = []
-        render(
-          <div
-            onPointerDown={() => seen.push("down")}
-            onPointerMove={() => seen.push("move")}
-            onPointerUp={() => seen.push("up")}
-          >
-            <TheaterPill target={terminalTarget} session={undefined} />
-          </div>,
-        )
-        down(grip(), { pointerType, clientX: 600, clientY: 550 })
-        // A finger only owns the pill after the hold, so give it one.
-        act(() => void vi.advanceTimersByTime(300))
-        move(500, 450, pointerType)
-        up(500, 450, pointerType)
-        expect(seen).toEqual([])
-      } finally {
-        vi.useRealTimers()
-      }
+      const seen: string[] = []
+      render(
+        <div
+          onPointerDown={() => seen.push("down")}
+          onPointerMove={() => seen.push("move")}
+          onPointerUp={() => seen.push("up")}
+        >
+          <TheaterPill target={terminalTarget} session={undefined} />
+        </div>,
+      )
+      down(grip(), { pointerType, clientX: 600, clientY: 550 })
+      move(500, 450, pointerType)
+      up(500, 450, pointerType)
+      expect(seen).toEqual([])
     },
   )
 

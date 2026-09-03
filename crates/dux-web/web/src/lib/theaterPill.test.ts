@@ -151,49 +151,52 @@ describe("nudging the pill with the arrow keys", () => {
 describe("telling a tap from a drag", () => {
   it("lifts a mouse press that has travelled past the threshold", () => {
     expect(
-      classifyPillGesture({ pointerType: "mouse", heldMs: 10, travel: 6, ended: false }),
+      classifyPillGesture({ pointerType: "mouse", travel: 6, ended: false }),
     ).toBe("lift")
   })
 
   it("waits while a mouse press has barely moved", () => {
     expect(
-      classifyPillGesture({ pointerType: "mouse", heldMs: 900, travel: 5, ended: false }),
+      classifyPillGesture({ pointerType: "mouse", travel: 5, ended: false }),
     ).toBe("pending")
   })
 
   it("treats a mouse press that never travelled as a tap", () => {
     expect(
-      classifyPillGesture({ pointerType: "mouse", heldMs: 80, travel: 2, ended: true }),
+      classifyPillGesture({ pointerType: "mouse", travel: 2, ended: true }),
     ).toBe("tap")
   })
 
-  it("lifts a finger that has been held long enough", () => {
+  it("lifts a finger on its first move past the slop, with nothing to wait for", () => {
     expect(
-      classifyPillGesture({ pointerType: "touch", heldMs: 300, travel: 2, ended: false }),
+      classifyPillGesture({ pointerType: "touch", travel: 8, ended: false }),
     ).toBe("lift")
   })
 
-  it("waits while a finger is still early in its hold", () => {
+  it("waits while a finger is still inside its slop", () => {
     expect(
-      classifyPillGesture({ pointerType: "touch", heldMs: 299, travel: 2, ended: false }),
+      classifyPillGesture({ pointerType: "touch", travel: 7, ended: false }),
     ).toBe("pending")
   })
 
-  it("cancels a finger that slid away before the hold completed, which is a scroll", () => {
+  it("gives a finger the wider slop, since a finger wobbles on contact", () => {
     expect(
-      classifyPillGesture({ pointerType: "touch", heldMs: 100, travel: 9, ended: false }),
-    ).toBe("cancel")
+      classifyPillGesture({ pointerType: "touch", travel: 6, ended: false }),
+    ).toBe("pending")
+    expect(
+      classifyPillGesture({ pointerType: "mouse", travel: 6, ended: false }),
+    ).toBe("lift")
   })
 
-  it("treats a short finger press as a tap", () => {
+  it("treats a finger press that never travelled as a tap", () => {
     expect(
-      classifyPillGesture({ pointerType: "touch", heldMs: 120, travel: 1, ended: true }),
+      classifyPillGesture({ pointerType: "touch", travel: 1, ended: true }),
     ).toBe("tap")
   })
 
   it("gives a pen the mouse's travel gate, since it points", () => {
     expect(
-      classifyPillGesture({ pointerType: "pen", heldMs: 10, travel: 7, ended: false }),
+      classifyPillGesture({ pointerType: "pen", travel: 7, ended: false }),
     ).toBe("lift")
   })
 })
