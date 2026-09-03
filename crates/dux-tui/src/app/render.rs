@@ -4265,8 +4265,15 @@ impl App {
     ) -> Rect {
         let pane_focused = self.focus == FocusPane::Files;
         let is_active_section = pane_focused && self.right_section == section;
-        let title = format!("{title_prefix} ({})", files.len());
-        let block = self.themed_block(&title, is_active_section);
+        let block = self.themed_block_line(
+            changed_files_group_title(
+                title_prefix,
+                files,
+                &self.theme,
+                self.theme.title_style(is_active_section),
+            ),
+            is_active_section,
+        );
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
 
@@ -11038,11 +11045,18 @@ impl App {
     }
 
     fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {
+        self.themed_block_line(
+            Line::from(Span::styled(title, self.theme.title_style(focused))),
+            focused,
+        )
+    }
+
+    /// The same block for a title that is already several styled pieces, such
+    /// as the changes groups' recap, whose figures wear the diff colors rather
+    /// than the title's.
+    fn themed_block_line<'a>(&self, title: Line<'a>, focused: bool) -> Block<'a> {
         Block::default()
-            .title(Line::from(Span::styled(
-                title,
-                self.theme.title_style(focused),
-            )))
+            .title(title)
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
             .border_style(self.theme.border_style(focused))
@@ -11726,6 +11740,60 @@ pub(crate) fn format_line_stats(
         ));
     }
     spans
+}
+
+/// The title of a changed-files group: its name, its file count, and an
+/// aggregate recap of what those files hold — the lines they add and remove
+/// between them, and a quiet marker for the binaries among them.
+///
+/// Binary files carry no line counts, so they contribute nothing to the sums
+/// and are counted apart instead; a group of nothing but binaries reads as
+/// "2 bin" rather than claiming "+0 -0". The figures wear the same diff colors
+/// the rows below them use, through the very same helper, so a group's title
+/// and its rows cannot drift into two vocabularies.
+///
+/// The recap describes exactly the rows visible beneath it. The TUI's list
+/// never filters (its search jumps to a match rather than hiding the rest), so
+/// here that is the whole list.
+pub(crate) fn changed_files_group_title(
+    prefix: &str,
+    files: &[ChangedFile],
+    theme: &crate::theme::Theme,
+    title_style: Style,
+) -> Line<'static> {
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    let mut binaries = 0usize;
+    for file in files {
+        if file.binary {
+            binaries += 1;
+            continue;
+        }
+        additions += file.additions;
+        deletions += file.deletions;
+    }
+
+    let mut spans = vec![Span::styled(
+        format!("{prefix} ({})", files.len()),
+        title_style,
+    )];
+    let stats = format_line_stats(additions, deletions, false, theme);
+    let has_lines = !stats.is_empty();
+    if has_lines {
+        spans.push(Span::styled(" ", title_style));
+        spans.extend(stats);
+    }
+    if binaries > 0 {
+        spans.push(Span::styled(
+            if has_lines { " · " } else { " " },
+            title_style,
+        ));
+        spans.push(Span::styled(
+            format!("{binaries} bin"),
+            Style::default().fg(theme.diff_binary_fg),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Compact top-bar branch value for an agent (no label prefix — the caller owns
@@ -22593,5 +22661,138 @@ mod tests {
                 "width {width} published the wrong thing"
             );
         }
+    }
+
+    // -- The changes groups' aggregate recap --
+
+    fn recap_file(additions: usize, deletions: usize, binary: bool) -> ChangedFile {
+        ChangedFile {
+            path: format!("f{additions}-{deletions}.rs"),
+            status: "M".to_string(),
+            additions,
+            deletions,
+            binary,
+        }
+    }
+
+    fn recap_title(app: &App, files: &[ChangedFile]) -> Line<'static> {
+        changed_files_group_title("Changes", files, &app.theme, app.theme.title_style(false))
+    }
+
+    fn span_color(line: &Line<'_>, text: &str) -> Option<ratatui::style::Color> {
+        line.spans
+            .iter()
+            .find(|span| span.content.as_ref() == text)
+            .and_then(|span| span.style.fg)
+    }
+
+    /// The group's title carries the lines its files add and remove between
+    /// them, in the same colors the rows below it use.
+    #[test]
+    fn the_changes_group_title_sums_the_lines_of_its_files() {
+        let app = test_app(default_bindings());
+        let title = recap_title(&app, &[recap_file(12, 3, false), recap_file(7, 40, false)]);
+
+        assert_eq!(line_text(&title), "Changes (2) +19 -43");
+        assert_eq!(
+            span_color(&title, "+19"),
+            Some(app.theme.diff_stat_add_fg),
+            "added lines wear the diff's add color"
+        );
+        assert_eq!(
+            span_color(&title, "-43"),
+            Some(app.theme.diff_stat_remove_fg),
+            "removed lines wear the diff's remove color"
+        );
+    }
+
+    /// Binary files carry no line counts, so they are counted apart in the
+    /// title's own "bin" marker rather than folded into the sums as zeroes.
+    #[test]
+    fn the_changes_group_title_counts_binaries_apart_from_the_lines() {
+        let app = test_app(default_bindings());
+        let title = recap_title(
+            &app,
+            &[
+                recap_file(5, 1, false),
+                recap_file(0, 0, true),
+                recap_file(1, 1, true),
+            ],
+        );
+
+        assert_eq!(line_text(&title), "Changes (3) +5 -1 · 2 bin");
+        assert_eq!(
+            span_color(&title, "2 bin"),
+            Some(app.theme.diff_binary_fg),
+            "the binary marker wears the same color the rows' own bin marker does"
+        );
+    }
+
+    /// A group of nothing but binaries has no lines to report, so it says so
+    /// rather than claiming "+0 -0".
+    #[test]
+    fn a_changes_group_of_binaries_reports_no_lines_at_all() {
+        let app = test_app(default_bindings());
+        let title = recap_title(&app, &[recap_file(0, 0, true), recap_file(0, 0, true)]);
+
+        assert_eq!(line_text(&title), "Changes (2) 2 bin");
+    }
+
+    /// Files that changed no lines and are not binary either (a mode change,
+    /// an empty new file) leave the title as it always was, and so does an
+    /// empty group.
+    #[test]
+    fn a_lineless_changes_group_keeps_the_bare_count() {
+        let app = test_app(default_bindings());
+
+        assert_eq!(line_text(&recap_title(&app, &[])), "Changes (0)");
+        assert_eq!(
+            line_text(&recap_title(&app, &[recap_file(0, 0, false)])),
+            "Changes (1)"
+        );
+    }
+
+    /// The recap is on screen, not merely computed: the pane's block really
+    /// paints it in its title.
+    #[test]
+    fn the_changes_pane_paints_the_recap_in_its_title() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = test_app(default_bindings());
+        app.engine.unstaged_files = vec![
+            ChangedFile {
+                path: "notes.md".to_string(),
+                status: "M".to_string(),
+                additions: 12,
+                deletions: 3,
+                binary: false,
+            },
+            ChangedFile {
+                path: "logo.png".to_string(),
+                status: "M".to_string(),
+                additions: 0,
+                deletions: 0,
+                binary: true,
+            },
+        ];
+        app.right_hidden = false;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .map(|y| {
+                let line: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                format!("{line}\n")
+            })
+            .collect();
+
+        assert!(
+            screen.contains("Changes (2) +12 -3 · 1 bin"),
+            "the group title carries its recap:\n{screen}"
+        );
     }
 }
