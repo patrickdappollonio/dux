@@ -173,12 +173,11 @@ link that goes straight into theater and there was no layout on screen to rememb
 leaving lands on your saved preferences instead.
 
 A small floating pill in the bottom-right corner is the only thing left over the
-terminal. On a computer it holds the way out, the macro picker and a `⋯` carrying the
-same **Settings** menu the header's cog carries, so Preferences, new agents and
-everything else stay one tap away, with **Leave theater mode** at the bottom of it. On a
-phone it is the flap that flew there: the theater button (now showing the way out), the
-macro picker, the changed-file count where there is one, and the same `⋯`, opening the same
-menu it opened on the band. That menu opens with the **Input** group (**Attach a file…**,
+terminal. On a computer it holds the way out, the macro picker and the same `⋯` the pane
+header carries, so nothing you could reach before you went full screen has gone anywhere.
+On a phone it is the flap that flew there: the theater button (now showing the way out),
+the macro picker, the changed-file count where there is one, and the same `⋯`, opening the
+same menu it opened on the band. That menu opens with the **Input** group (**Attach a file…**,
 and the way back to the typing bar when you have turned it off), then the pane's own
 actions, the way out of theater while the mode is on, and **Settings**, which drills into
 the app menu the cog carries, so nothing goes out of reach because you went full screen.
@@ -429,9 +428,12 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
   the agent's actions and a **Settings** drill into the app
   menu. The flap takes no room from the terminal, so theater does not take it away: it
   lifts off the band and flies to the floating pill instead.
+- One of that agent's own **terminals** keeps the agent's screen and the agent's menu,
+  because the header and the count around it are that agent's, and adds a **Terminal**
+  group for the terminal in front of you: **Open editor in new tab** and **Close…**.
 - A **project or standalone terminal** gets the same screen and the same flap, minus the
   two things a terminal does not have: there is no changed-file count and no PR chip. Its
-  `⋯` opens the terminal's own menu, with the **Input** group, **Open editor here**,
+  `⋯` opens the terminal's own menu, with the **Input** group,
   **Open editor in new tab** and **Close…**, then the same **Settings** drill.
 - The **changes** screen is the full Changes pane.
 
@@ -483,8 +485,8 @@ What the browser cannot see is a keyboard case, so there is a **typing-surface s
 **Type directly in the terminal**, and **Use virtual input** to come back. Both live in the
 input `⋯`, at the left edge of whichever input row you have, for as long as you have one.
 Once nothing is left under the terminal, **Use virtual input** moves up into the **Input**
-group at the top of the pane's own `⋯` menu (the flap's on a phone, the pane header's in the
-sidebar on a computer), which is on screen whatever the pane is doing.
+group at the top of the pane's own `⋯` menu (the flap's on a phone, the pane header's on a
+computer, the floating pill's in theater), which is on screen whatever the pane is doing.
 
 **Your choice wins, on any device, in both directions.** The pointer only decides where you
 start. Ask for the message box on a laptop and you get it, keys and all, and while it is up
@@ -524,8 +526,8 @@ them does, so what is inside it is only what they are about: the typing-surface 
 ways, and **Hide terminal keys**.
 
 Everything you must be able to reach when there is no input row at all is one level up, in
-the **Input** group at the top of the pane's own `⋯` menu: the flap's on a phone, the
-agent's or terminal's row menu in the sidebar on a computer, the floating pill's in theater.
+the **Input** group at the top of the pane's own `⋯` menu: the flap's on a phone, the pane
+header's on a computer, the floating pill's in theater.
 That group carries **Attach a file…** (see
 [Dropping and pasting files](/docs/dropping-files)) and **Use virtual input**, which appears
 only once nothing is left under the terminal, since until then the input `⋯` is offering it

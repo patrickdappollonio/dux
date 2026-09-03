@@ -278,7 +278,7 @@ export function InsetHeader() {
           absolute offset resolves against the header's full box, so this
           hairline lands on the divider at every split, width, and zoom. It is
           also outside the flex flow, so it collects no `gap-2` and cannot push
-          the macro button off the pane edge. Same visibility rule as before:
+          the pane's own controls off the pane edge. Same visibility rule as before:
           only while the Changes pane is actually on screen, because hidden
           there is no divider below to continue.
 
@@ -357,15 +357,16 @@ export function InsetHeader() {
 
       {/* The spacer IS the control cluster, rather than an empty box in front of
           it, and that is the whole trick. An empty spacer followed by the
-          controls would push Macros left by the controls' own width, so it
-          would land well short of the divider and only pixel math could correct
-          it. Sizing the cluster itself to the Changes panel's percentage and
-          right-aligning its contents puts the cog on the window's right edge and
-          Macros on the terminal pane's, out of one number and no measurement.
+          controls would push the pane's own cluster left by the controls' own
+          width, so it would land well short of the divider and only pixel math
+          could correct it. Sizing the cluster itself to the Changes panel's
+          percentage and right-aligning its contents puts the cog on the window's
+          right edge and the pane's `⋯`, which is the last control before this
+          box, on the terminal pane's, out of one number and no measurement.
 
           `min-w-fit` is what makes the hidden case work: at 0% the box collapses
-          to its buttons instead of crushing them, so Macros simply slides right
-          with the terminal pane that just grew under it. It is also the floor
+          to its buttons instead of crushing them, so the pane's controls simply
+          slide right with the terminal pane that just grew under them. It is also the floor
           that keeps the buttons intact if the user drags the Changes pane
           narrower than they are. */}
       {/* The rule at the pane boundary. It is a BORDER ON THE CLUSTER rather

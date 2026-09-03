@@ -69,7 +69,7 @@ import type { SessionView } from "@/lib/types"
 // The AGENT'S OWN ACTIONS, every per-agent entry from the parity inventory, in
 // one place so no surface can drift from another.
 //
-// It is never rendered on its own: `AgentPaneMenuBody` is the menu, and this is
+// It is never rendered on its own: `PaneMenuBody` is the menu, and this is
 // the group inside it that is about the agent. That is why the pane's INPUT
 // group is not here — it is the wrapper's, once per menu, above these rows —
 // and why there is no context parameter left to pass: the sidebar row, the

@@ -6,9 +6,9 @@ import { useSyncExternalStore } from "react"
 // The pane is the only thing that knows the answers: whether it owns the input,
 // whether uploads are switched on, whether the virtual input is up and whether
 // its key row is. The menus that have to OFFER those answers are all somewhere
-// else (the phone's merged pane menu, the phone's agentless terminal header,
-// the sidebar row's menu on a computer, the floating pill's one menu), and none
-// of them is inside the pane. So the pane publishes and the menus read.
+// else (the phone's flap, the desktop pane header's `⋯`, the sidebar row's and
+// the floating pill's, which are four anchors on one body), and none of them is
+// inside the pane. So the pane publishes and the menus read.
 //
 // This used to be a narrower thing: the items the input `⋯` would have shown if
 // it had had a row to sit in, published only in the one state that took its row
@@ -22,7 +22,10 @@ import { useSyncExternalStore } from "react"
 //
 // Keyed rather than a single slot, on the `attachRegistry` precedent: several
 // panes can be mounted at once, and a menu must read the one it belongs to
-// rather than whichever mounted last.
+// rather than whichever mounted last. WHICH key that is comes from the anchor,
+// the only thing that knows what is on screen under it: a companion terminal's
+// pane publishes under the terminal's id while the menu over it is its agent's,
+// so a scan derived from the menu's subject would find nothing at all.
 
 /// The INPUT group's items for one pane, as gates rather than as rendering.
 ///

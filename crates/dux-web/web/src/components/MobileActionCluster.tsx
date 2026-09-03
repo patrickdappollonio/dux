@@ -13,12 +13,12 @@ import { cn } from "@/lib/utils"
 
 // THE PHONE'S ONE ACTION CLUSTER, in the two places it is ever painted.
 //
-// It is the same four controls whether it is docked in the tab strip's flap or
-// floating in theater's pill: the theater toggle, Macros, the changed-file
-// count, and the surface `⋯`. Both surfaces render THIS component, because the
-// two are not merely similar: the detach animation flies one into the other as
-// a single object, and a button that sat at a different offset in the two would
-// tear visibly at the handoff.
+// It is the same controls whether it is docked in the flap or floating in
+// theater's pill: the theater toggle, Macros, the changed-file count where
+// there is an agent to have one, and the surface `⋯`. Both surfaces render
+// THIS component, because the two are not merely similar: the detach animation
+// flies one into the other as a single object, and a button that sat at a
+// different offset in the two would tear visibly at the handoff.
 //
 // The geometry is therefore load-bearing, not decorative. Every control is
 // 40px tall (the touch-target floor), the row's gap is 2px, and the count is
@@ -43,9 +43,11 @@ export function MobileActionCluster({
   /// The theater toggle's node, so the surface around it can hand focus back
   /// when the OTHER surface's press brought it on screen.
   theaterRef?: React.RefObject<HTMLButtonElement | null>
-  /// The surface's own `⋯`. The docked flap and the floating pill answer to
-  /// different menus (the agent's actions versus the app menu theater took the
-  /// cog away from), and that is the ONE thing the two clusters do not share.
+  /// The surface's own `⋯`. It is the SAME menu at both docks, which is what
+  /// makes the flight honest: a button that changed what it opens on arrival
+  /// would be the one thing the animation says cannot happen. It is a prop
+  /// rather than something this component builds because only the surface knows
+  /// which pane it is over and what that pane is about.
   ellipsis: ReactNode
 }) {
   return (

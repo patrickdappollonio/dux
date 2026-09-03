@@ -1808,17 +1808,36 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     40px circle, or the header cluster's outline `size-8`).
     THE INPUT GROUP'S ONE-HOME RULE IS UNAFFECTED: what the group holds is the pane's
     published answer (`lib/paneInputGroup.ts`), so two anchors of the same menu show the
-    same rows and the split that matters is still top menu versus the input `⋯`.
+    same rows and the split that matters is still top menu versus the input `⋯`. WHICH
+    pane's answer is the one thing an anchor hands over (`PaneMenuPane`, the target it is
+    painted over): a companion terminal's pane registers under the TERMINAL's id while
+    the menu over it is the agent's, so deriving the ids from the subject scanned the
+    agent's session and tab ids, found nothing, and left that pane with no attach item and
+    no way back from typing straight into the terminal. A sidebar row hands over nothing
+    and keeps the subject-wide scan, which is right for a row that is over no pane.
     WHICH body a surface opens is read off the TARGET, never off `selectedSessionId`,
-    which still names the agent a project terminal was reached from; a session-owned
-    terminal takes the AGENT's body, because the header, the count and the PR chip
-    around it are that agent's.
+    which still names the agent a project terminal was reached from, and by an exhaustive
+    owner match rather than the lossy `ownerSessionId`, because this decides what is
+    rendered; a session-owned terminal takes the AGENT's body, because the header, the
+    count and the PR chip around it are that agent's, plus a labelled Terminal group
+    carrying its own Close and editor entries, which were otherwise reachable only from
+    the sidebar row that a narrow window and theater take away.
+    THE FLOATING PILL OPENS THE MERGED MENU ON BOTH SURFACES. The desktop pill carried
+    only `TheaterAppMenu` for one arc, which put a computer in theater in exactly the
+    state the phone's merge had just fixed; that wrapper is now the fallback for a pane
+    that is neither an agent nor a terminal, and the app menu reaches every surface as the
+    Settings drill inside the merged body.
     The phone's project and standalone terminal screens moved from three header buttons
     to the flap in the same change (`MobileActionFlap` is parameterized by subject: a
     terminal has no changed-file count, and its band is always "plain" because only an
-    agent can have a tab strip), and their pill now runs the ordinary flight.
-    Pinned: `components/PaneMenu.test.tsx` "the pane menu at the desktop header's
-    anchor" suite; `components/InsetHeader.test.tsx` "InsetHeader pane menu" suite;
+    agent can have a tab strip), and their pill now runs the ordinary flight. ONE FLIGHT
+    MACHINE PER SCREEN: `MobileShell`'s terminal spoke is a hookless router, because it
+    held `useTheaterFlight` above its own early returns and an agentless terminal screen
+    then ran a second machine, stepping timers and re-rendering the tree for a flight it
+    was not showing.
+    Pinned: `components/PaneMenu.test.tsx` "the pane menu at the computer's anchors" and
+    "an agent's menu over one of its companion terminals" suites;
+    `components/InsetHeader.test.tsx` "InsetHeader pane menu" suite;
     `components/MobileActionFlap.test.tsx` "the docked action flap over a terminal"
     suite; `components/MobileShell.test.tsx` "hangs the flap off the band and leaves the
     header to Back and identity" / "opens the terminal's own menu from the flap, not an

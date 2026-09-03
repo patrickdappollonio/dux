@@ -13,10 +13,12 @@ import {
 /**
  * THE PHONE'S THEATER CHOREOGRAPHY, ticking.
  *
- * One phase for the whole gesture, mounted once on the agent screen: the flap
- * and the pill are rendered FROM it rather than each deciding for itself, so
- * "which cluster exists right now" cannot have two answers and the handoff
- * cannot land in the gap between them.
+ * One phase for the whole gesture, mounted once per pane screen (the agent's
+ * and the agentless terminal's alike): the flap and the pill are rendered FROM
+ * it rather than each deciding for itself, so "which cluster exists right now"
+ * cannot have two answers and the handoff cannot land in the gap between them.
+ * A screen that hands over to another must therefore run none of its own, which
+ * is why the phone's terminal spoke is a router with no hooks in it.
  *
  * A FLIGHT RUNS WHEN THE MODE MOVES, and that is the whole condition. A page
  * that OPENS in theater (a shared link, a restored pane) has no flight to run,
