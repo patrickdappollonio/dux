@@ -593,16 +593,23 @@ pub struct BranchDeleteInputs {
 }
 
 impl BranchDeleteInputs {
-    /// The branch the dialog names and counts commits on: the one the agent was
-    /// BORN on, which is the one whose provenance the warning is about. A
-    /// drifted agent's current branch was created inside the worktree, so it is
-    /// not the branch a user is at risk of losing work on.
-    pub fn warned_branch(&self) -> &str {
-        if self.initial_branch.is_empty() {
-            &self.branch_name
-        } else {
-            &self.initial_branch
+    /// Every branch the delete would remove, which is exactly what the dialogs
+    /// name and count commits on.
+    ///
+    /// THE CONSENT RULE. A delete that removes the branch removes both the one
+    /// the worktree is on now and the one the agent was born on (see
+    /// [`crate::git::remove_worktree`]), so a dialog that names only one of
+    /// them asks permission for something smaller than what happens. An agent
+    /// that never drifted has one branch under both names and this is one name.
+    ///
+    /// The current branch leads, because that is the one every other surface
+    /// shows for the agent.
+    pub fn warned_branches(&self) -> Vec<&str> {
+        let mut branches = vec![self.branch_name.as_str()];
+        if !self.initial_branch.is_empty() && self.initial_branch != self.branch_name {
+            branches.push(self.initial_branch.as_str());
         }
+        branches
     }
 }
 
@@ -3540,6 +3547,107 @@ mod tests {
             !branches.contains("born-here"),
             "the branch the agent was born on must be gone too, or recreating it \
              fails with \"branch already exists\": {branches}"
+        );
+    }
+
+    /// THE CONSENT PROPERTY: the branches the dialog names are exactly the
+    /// branches the delete removes.
+    ///
+    /// Both halves are read from the real thing rather than asserted against a
+    /// hand-written list: the names come from `warned_branches`, which is what
+    /// both dialogs render, and the deletions are the difference between the
+    /// repository's branches before and after. A drifted agent is the case that
+    /// separates them, and the branch the user is being asked about here is one
+    /// dux did not create, so the tick is the only permission there is.
+    #[test]
+    fn a_drifted_delete_removes_exactly_the_branches_the_dialog_named() {
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        fn branches(repo: &std::path::Path) -> std::collections::BTreeSet<String> {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-C",
+                    repo.to_str().unwrap(),
+                    "for-each-ref",
+                    "--format=%(refname:strip=2)",
+                    "refs/heads/",
+                ])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|line| line.to_string())
+                .collect()
+        }
+
+        let (mut engine, tmp) = test_engine();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "hi").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        // A branch the user already had, which the agent attached to.
+        git(&repo, &["branch", "develop"]);
+        let worktree = tmp.path().join("wt-develop");
+        git(
+            &repo,
+            &["worktree", "add", worktree.to_str().unwrap(), "develop"],
+        );
+        // The drift: work continues on a new branch made inside the worktree.
+        git(&worktree, &["switch", "-c", "develop-next"]);
+
+        engine
+            .projects
+            .push(sample_project("p1", repo.to_str().unwrap()));
+        let mut session = sample_session("s1", "p1", "develop-next");
+        {
+            let managed = session
+                .workspace
+                .as_managed_mut()
+                .expect("managed test session");
+            managed.initial_branch = "develop".to_string();
+            managed.worktree_path = worktree.to_str().unwrap().to_string();
+            managed.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+        }
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let named: std::collections::BTreeSet<String> = engine
+            .branch_delete_inputs("s1")
+            .expect("a managed agent with a project has branch inputs")
+            .warned_branches()
+            .into_iter()
+            .map(|branch| branch.to_string())
+            .collect();
+        let before = branches(&repo);
+
+        engine
+            .do_delete_session("s1", true, Some(true))
+            .unwrap()
+            .expect("the delete should have run");
+
+        let gone: std::collections::BTreeSet<String> =
+            before.difference(&branches(&repo)).cloned().collect();
+        assert_eq!(
+            gone, named,
+            "the delete must remove exactly the branches the dialog asked about"
+        );
+        assert!(
+            gone.contains("develop-next") && gone.contains("develop"),
+            "the drifted case is the one being pinned: {gone:?}"
         );
     }
 

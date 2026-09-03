@@ -130,9 +130,11 @@ export interface ResolvedPullRequestReference {
   uninspected_summary: string | null
 }
 
-// The answer to `GET /api/v1/sessions/:id/branch-unpushed`.
+// The answer to `GET /api/v1/sessions/:id/branch-unpushed`. `branches` is every
+// branch the delete would remove (two for a drifted agent) and the count is
+// their union, so the dialog can name exactly what would go.
 export type BranchUnpushed = {
-  branch: string
+  branches: string[]
   unpushed_commits: number | null
 }
 
@@ -157,8 +159,8 @@ export const sessionsApi = {
       `/api/v1/sessions/${encodeURIComponent(id)}?delete_worktree=${deleteWorktree}` +
         (deleteBranch === null ? "" : `&delete_branch=${deleteBranch}`),
     ),
-  // How much work ticking that box would destroy: the branch the delete would
-  // remove, and how many of its commits no remote-tracking ref reaches. The
+  // How much work ticking that box would destroy: the branches the delete would
+  // remove, and how many of their commits no remote-tracking ref reaches. The
   // count is `null` when git could not answer, and the dialog then says nothing
   // about it rather than guessing.
   branchUnpushed: (id: string) =>

@@ -408,16 +408,18 @@ struct CreatedRef {
 
 // ── Branch risk (read) ───────────────────────────────────────────────────────
 
-/// What the delete dialog says about the branch it is offering to remove.
+/// What the delete dialog says about the branches it is offering to remove.
 #[derive(Serialize)]
 struct BranchUnpushedResponse {
-    /// The branch the answer is about, so the dialog and the count can never
-    /// name different branches.
-    branch: String,
-    /// Commits on that branch reachable from no remote-tracking ref, or `null`
-    /// when git could not answer (a branch that is already gone, a locked or
-    /// unreadable repository). The dialog then simply omits the sentence: it
-    /// warns about what it knows and never guesses a number.
+    /// Every branch the delete would remove, which is what the dialog names.
+    /// A drifted agent gives up two, and the dialog renders THIS list rather
+    /// than working the pair out again from its own copy of the session, so
+    /// what the user is asked about is what the server would delete.
+    branches: Vec<String>,
+    /// Commits on those branches reachable from no remote-tracking ref, counted
+    /// as a union, or `null` when git could not answer (a branch that is already
+    /// gone, a locked or unreadable repository). The dialog then simply omits
+    /// the sentence: it warns about what it knows and never guesses a number.
     unpushed_commits: Option<u32>,
 }
 
@@ -436,18 +438,23 @@ async fn session_branch_unpushed(
     let Some(inputs) = state.engine.session_branch_delete_inputs(id).await else {
         return unknown_session();
     };
-    let branch = inputs.warned_branch().to_string();
+    let branches: Vec<String> = inputs
+        .warned_branches()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     let repo = std::path::PathBuf::from(&inputs.project_path);
     let counted = {
-        let branch = branch.clone();
+        let branches = branches.clone();
         tokio::task::spawn_blocking(move || {
-            dux_core::git::unpushed_commit_count(&repo, &branch).ok()
+            let refs: Vec<&str> = branches.iter().map(String::as_str).collect();
+            dux_core::git::unpushed_commit_count(&repo, &refs).ok()
         })
         .await
         .unwrap_or(None)
     };
     axum::Json(BranchUnpushedResponse {
-        branch,
+        branches,
         unpushed_commits: counted,
     })
     .into_response()

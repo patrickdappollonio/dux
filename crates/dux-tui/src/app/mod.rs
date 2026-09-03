@@ -1897,22 +1897,26 @@ impl DeleteAgentTarget {
         delete_worktree && self.offers_worktree_checkbox()
     }
 
-    /// The branch the box names and the unpushed count is about: the one the
-    /// agent was BORN on, whose provenance the warning describes. Matches
-    /// `BranchDeleteInputs::warned_branch` in the engine, so the dialog and the
-    /// count can never name different branches.
-    pub(crate) fn warned_branch(&self) -> Option<&str> {
+    /// Every branch the box names and the unpushed count is about: the one the
+    /// worktree is on now and, when the agent has drifted, the one it was born
+    /// on. Both are deleted, so both are named. Mirrors
+    /// `BranchDeleteInputs::warned_branches` in the engine, so what the dialog
+    /// says, what the count covers and what the delete removes cannot disagree.
+    /// Empty for a standalone agent, which has no branch at all.
+    pub(crate) fn warned_branches(&self) -> Vec<&str> {
         match self {
             Self::Managed {
                 branch_name,
                 initial_branch,
                 ..
-            } => Some(if initial_branch.is_empty() {
-                branch_name.as_str()
-            } else {
-                initial_branch.as_str()
-            }),
-            Self::Folder { .. } => None,
+            } => {
+                let mut branches = vec![branch_name.as_str()];
+                if !initial_branch.is_empty() && initial_branch != branch_name {
+                    branches.push(initial_branch.as_str());
+                }
+                branches
+            }
+            Self::Folder { .. } => Vec::new(),
         }
     }
 }

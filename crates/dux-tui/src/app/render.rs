@@ -768,41 +768,80 @@ fn resource_monitor_columns(inner_width: u16) -> ResourceMonitorColumns {
 /// would drift and the dialog's height would stop matching its contents.
 pub(super) const DELETE_AGENT_WORKTREE_LABEL: &str = "Also delete the worktree";
 
-/// The delete-agent branch checkbox label, naming the branch it would delete.
+/// The delete-agent branch checkbox label, naming every branch it would delete.
 /// One function for the same measure-then-render reason.
-pub(super) fn delete_agent_branch_checkbox_label(branch: &str) -> String {
-    format!("Also delete the branch {branch}")
+///
+/// A drifted agent gives up two branches, so the label names two: a box that
+/// promised one deletion and performed two would be taking consent it was never
+/// given.
+pub(super) fn delete_agent_branch_checkbox_label(branches: &[&str]) -> String {
+    match branches {
+        [] => String::new(),
+        [branch] => format!("Also delete the branch {branch}"),
+        _ => format!("Also delete the branches {}", branches.join(" and ")),
+    }
 }
 
-/// The warning under the branch box for a branch that predates its agent: which
-/// kind of "predates" it is, and how much work on it exists nowhere else.
+/// Whether the branch box needs a warning under it, and what it says.
+///
+/// Two reasons to warn, either enough on its own. The branch predates the
+/// agent, so it was never dux's to delete; or the agent has drifted, so the
+/// tick removes a second branch and the user should know which and why. A
+/// branch dux created for an agent that stayed on it gets nothing: it is dux's
+/// own, and a sentence there would be noise on the one screen that has to be
+/// read carefully.
 ///
 /// The danger lives in this sentence rather than in a red checkbox: the box is
-/// an ordinary control and the prose is what says this one is not dux's branch
-/// to remove. `unpushed` is `None` while the count is still being computed and
-/// when git could not answer, and the sentence is simply absent in both cases:
-/// the dialog warns about what it knows and never guesses a number.
+/// an ordinary control and the prose is what says what is at stake. `unpushed`
+/// is `None` while the count is still being computed and when git could not
+/// answer, and that sentence is simply absent in both cases: the dialog warns
+/// about what it knows and never guesses a number.
 pub(super) fn delete_agent_branch_warning(
     provenance: dux_core::model::BranchProvenance,
+    branches: &[&str],
     unpushed: Option<u32>,
-) -> String {
-    // Mirrors `BranchProvenance::kept_reason`, in the dialog's own voice.
-    let mut text = match provenance {
-        dux_core::model::BranchProvenance::Adopted => {
-            "This branch came with the worktree this agent adopted.".to_string()
+) -> Option<String> {
+    let drifted = branches.len() > 1;
+    let predates = !provenance.dux_may_delete_branch();
+    if !drifted && !predates {
+        return None;
+    }
+    let mut text = String::new();
+    if let [current, birth, ..] = branches {
+        text.push_str(&format!(
+            "The worktree moved from {birth} onto {current}, so deleting the agent removes both."
+        ));
+    }
+    if predates {
+        // Mirrors `BranchProvenance::kept_reason`, in the dialog's own voice.
+        // The provenance is recorded about the BIRTH branch, so with two
+        // branches on screen the sentence names it rather than saying "this".
+        let subject = if drifted { branches[1] } else { "This branch" };
+        let clause = match provenance {
+            dux_core::model::BranchProvenance::Adopted => {
+                format!("{subject} came with the worktree this agent adopted.")
+            }
+            dux_core::model::BranchProvenance::Unknown => {
+                format!("{subject} is not one dux created.")
+            }
+            _ => format!("{subject} existed before the agent."),
+        };
+        if !text.is_empty() {
+            text.push(' ');
         }
-        dux_core::model::BranchProvenance::Unknown => {
-            "This branch is not one dux created.".to_string()
-        }
-        _ => "This branch existed before the agent.".to_string(),
-    };
+        text.push_str(&clause);
+    }
     if let Some(count) = unpushed
         && count > 0
     {
         let plural = if count == 1 { "commit" } else { "commits" };
-        text.push_str(&format!(" It has {count} {plural} not pushed anywhere."));
+        text.push_str(&if drifted {
+            format!(" They have {count} {plural} not pushed anywhere between them.")
+        } else {
+            format!(" It has {count} {plural} not pushed anywhere.")
+        });
     }
-    text
+    Some(text)
 }
 
 /// The worktree-manager checkbox label, naming the branch it would delete.
@@ -9324,10 +9363,8 @@ impl App {
         // height has to ask the same question the renderer and the focus ring
         // ask, or the dialog's frame stops matching its contents.
         let offers_branch_checkbox = target.offers_branch_checkbox(*delete_worktree);
-        let branch_label = target
-            .warned_branch()
-            .map(delete_agent_branch_checkbox_label)
-            .unwrap_or_default();
+        let warned_branches = target.warned_branches();
+        let branch_label = delete_agent_branch_checkbox_label(&warned_branches);
         // ONE measuring pass over every checkbox that will be painted, so a
         // second box cannot silently overflow the frame the first one sized.
         let measure = |label: &str, checked: bool, focused: bool| {
@@ -9399,17 +9436,14 @@ impl App {
                 " worktree will be permanently lost.",
                 Style::default().fg(self.theme.warning_fg),
             )));
-            // The branch box below decides the branch, so the only thing left
-            // to say is why THIS branch is one to think twice about. Nothing
-            // is said for a branch dux created: it is dux's own, there is no
-            // prior owner to warn about, and a sentence here would be noise on
-            // the one screen that has to be read carefully.
-            if !branch_provenance.dux_may_delete_branch() {
+            // The branch box below decides the branches, so the only thing left
+            // to say is why these are ones to think twice about. When there is
+            // nothing to say the helper says nothing.
+            if let Some(warning) =
+                delete_agent_branch_warning(branch_provenance, &warned_branches, *unpushed_commits)
+            {
                 body_lines.push(Line::from(Span::styled(
-                    format!(
-                        " {}",
-                        delete_agent_branch_warning(branch_provenance, *unpushed_commits)
-                    ),
+                    format!(" {warning}"),
                     Style::default().fg(self.theme.warning_fg),
                 )));
             }
@@ -21663,11 +21697,11 @@ mod tests {
     /// full-text field it does nothing at all. The segment must therefore be
     /// as state-aware as its `move focus` neighbour, which already drops
     /// itself when no key reaches focus movement.
-    /// A drifted agent keeps two branches, and the one the box names is the
-    /// BIRTH branch: the branch it moved onto was created inside the worktree,
-    /// so it is not the one the user risks losing work on.
+    /// A drifted agent gives up two branches, and the box names both: the one
+    /// the worktree moved onto goes with the one it was born on, so naming one
+    /// of them would ask permission for half of what happens.
     #[test]
-    fn the_branch_box_names_the_branch_the_agent_was_born_on() {
+    fn the_branch_box_names_every_branch_a_drifted_delete_removes() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: "s1".to_string(),
@@ -21685,8 +21719,8 @@ mod tests {
         };
         let screen = rendered_screen(&mut app);
         assert!(
-            screen.contains("Also delete the branch main"),
-            "the box names the branch whose provenance the warning is about:\n{screen}"
+            screen.contains("Also delete the branches feature-x and main"),
+            "the box names every branch the tick would delete:\n{screen}"
         );
     }
 
@@ -21824,12 +21858,32 @@ mod tests {
         delete_branch: bool,
         unpushed_commits: Option<u32>,
     ) -> PromptState {
+        delete_agent_prompt_on(
+            provenance,
+            "feature",
+            "feature",
+            delete_worktree,
+            delete_branch,
+            unpushed_commits,
+        )
+    }
+
+    /// The same, with the branch pair spelled out, so a DRIFTED agent (the two
+    /// differ) can be rendered.
+    fn delete_agent_prompt_on(
+        provenance: dux_core::model::BranchProvenance,
+        branch_name: &str,
+        initial_branch: &str,
+        delete_worktree: bool,
+        delete_branch: bool,
+        unpushed_commits: Option<u32>,
+    ) -> PromptState {
         PromptState::ConfirmDeleteAgent {
             session_id: "s1".to_string(),
             agent_label: "b".to_string(),
             target: crate::app::DeleteAgentTarget::Managed {
-                branch_name: "feature".to_string(),
-                initial_branch: "feature".to_string(),
+                branch_name: branch_name.to_string(),
+                initial_branch: initial_branch.to_string(),
                 branch_provenance: provenance,
                 worktree_shared: false,
             },
@@ -21858,7 +21912,7 @@ mod tests {
             "the rendered worktree label must be the constant's:\n{screen}"
         );
         assert!(
-            screen.contains(&super::delete_agent_branch_checkbox_label("feature")),
+            screen.contains(&super::delete_agent_branch_checkbox_label(&["feature"])),
             "the rendered branch label must be the helper's:\n{screen}"
         );
     }
@@ -21933,31 +21987,107 @@ mod tests {
         assert_eq!(
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::AttachedExisting,
+                &["feature"],
                 Some(3)
-            ),
-            "This branch existed before the agent. It has 3 commits not pushed anywhere."
+            )
+            .as_deref(),
+            Some("This branch existed before the agent. It has 3 commits not pushed anywhere.")
         );
         assert_eq!(
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::AttachedExisting,
+                &["feature"],
                 Some(1)
-            ),
-            "This branch existed before the agent. It has 1 commit not pushed anywhere."
+            )
+            .as_deref(),
+            Some("This branch existed before the agent. It has 1 commit not pushed anywhere.")
         );
         for unknown in [None, Some(0)] {
             assert_eq!(
                 super::delete_agent_branch_warning(
                     dux_core::model::BranchProvenance::AttachedExisting,
+                    &["feature"],
                     unknown
-                ),
-                "This branch existed before the agent.",
+                )
+                .as_deref(),
+                Some("This branch existed before the agent."),
                 "neither an uncounted nor an empty answer may invent a number"
             );
         }
         assert_eq!(
-            super::delete_agent_branch_warning(dux_core::model::BranchProvenance::Unknown, None),
-            "This branch is not one dux created.",
+            super::delete_agent_branch_warning(
+                dux_core::model::BranchProvenance::Unknown,
+                &["feature"],
+                None
+            )
+            .as_deref(),
+            Some("This branch is not one dux created."),
             "a provenance this binary has never heard of says only what is known"
+        );
+    }
+
+    /// THE CONSENT PIN, terminal half. A drifted agent's delete removes the
+    /// branch the worktree moved onto AND the one it was born on, so the box
+    /// names both and the count covers both: a label promising one deletion
+    /// would be taking consent for the other.
+    #[test]
+    fn the_delete_dialog_names_both_branches_of_a_drifted_agent() {
+        let mut app = test_app(default_bindings());
+        app.prompt = delete_agent_prompt_on(
+            dux_core::model::BranchProvenance::AttachedExisting,
+            "develop-next",
+            "develop",
+            true,
+            true,
+            Some(4),
+        );
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains(&super::delete_agent_branch_checkbox_label(&[
+                "develop-next",
+                "develop"
+            ])),
+            "the box must name every branch the tick would delete:\n{screen}"
+        );
+        assert_eq!(
+            super::delete_agent_branch_warning(
+                dux_core::model::BranchProvenance::AttachedExisting,
+                &["develop-next", "develop"],
+                Some(4)
+            )
+            .as_deref(),
+            Some(
+                "The worktree moved from develop onto develop-next, so deleting the agent \
+                 removes both. develop existed before the agent. They have 4 commits not \
+                 pushed anywhere between them."
+            )
+        );
+    }
+
+    /// Drift warns even about a branch dux created, because the branch the
+    /// worktree moved onto is not one dux made and the tick takes it too.
+    #[test]
+    fn a_drifted_agent_warns_even_when_dux_created_its_branch() {
+        assert_eq!(
+            super::delete_agent_branch_warning(
+                dux_core::model::BranchProvenance::CreatedByDux,
+                &["dux/s1-next", "dux/s1"],
+                None
+            )
+            .as_deref(),
+            Some(
+                "The worktree moved from dux/s1 onto dux/s1-next, so deleting the agent \
+                 removes both."
+            )
+        );
+        assert_eq!(
+            super::delete_agent_branch_warning(
+                dux_core::model::BranchProvenance::CreatedByDux,
+                &["dux/s1"],
+                Some(9)
+            ),
+            None,
+            "a branch dux created for an agent that stayed on it warns about nothing"
         );
     }
 

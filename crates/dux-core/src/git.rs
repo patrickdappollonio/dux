@@ -917,42 +917,57 @@ pub fn local_branch_exists(repo_path: &Path, name: &str) -> bool {
     ref_exists(repo_path, &format!("refs/heads/{name}"))
 }
 
-/// How many commits on `branch` are reachable from no remote-tracking ref, i.e.
-/// how much work on it exists only on this machine.
+/// How many commits on `branches` are reachable from no remote-tracking ref,
+/// i.e. how much work on them exists only on this machine.
 ///
 /// Asked by the delete-agent dialogs before they offer to remove a branch that
 /// predates the agent: "this branch is yours" is a weaker warning than "this
 /// branch is yours and holds 12 commits that are nowhere else". Callers run it
 /// in a background worker; it shells out to git.
 ///
+/// It takes a LIST because one delete can remove more than one branch: a
+/// drifted agent gives up both the branch its worktree is on now and the one it
+/// was born on, and a count for only one of them understates what ticking the
+/// box costs. The answer is the union, counting a commit both branches reach
+/// once, which is what naming several revisions on one `rev-list` already means.
+///
 /// `--not --remotes` excludes everything under `refs/remotes/`, which is every
 /// remote-tracking ref of every remote. A repository with NO remotes therefore
-/// counts the branch's whole history, and that is the honest answer: nothing in
-/// it has been pushed anywhere, because there is nowhere to have pushed it.
+/// counts the whole history, and that is the honest answer: nothing in it has
+/// been pushed anywhere, because there is nowhere to have pushed it.
 ///
 /// Git-config immune by construction: `rev-list --count` is plumbing and prints
-/// one integer. The branch is passed fully qualified as `refs/heads/<name>`,
+/// one integer. Each branch is passed fully qualified as `refs/heads/<name>`,
 /// which cannot begin with a dash, so it can never be read as an option (the
 /// same technique `pull` uses); the trailing `--` pins the pathspec boundary so
 /// nothing after the revision list is read as a path either.
-pub fn unpushed_commit_count(repo_path: &Path, branch: &str) -> Result<u32> {
+pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<u32> {
+    // No branches means nothing would be deleted, so nothing is at risk. Git
+    // would refuse an empty revision list, and an error here would read to the
+    // caller as "git could not answer" about a question nobody asked.
+    if branches.is_empty() {
+        return Ok(0);
+    }
     let repo = repo_path.to_string_lossy();
-    let qualified = format!("refs/heads/{branch}");
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo.as_ref(),
-            "rev-list",
-            "--count",
-            qualified.as_str(),
-            "--not",
-            "--remotes",
-            "--",
-        ])
-        .output()?;
+    let mut args: Vec<String> = vec![
+        "-C".to_string(),
+        repo.to_string(),
+        "rev-list".to_string(),
+        "--count".to_string(),
+    ];
+    args.extend(branches.iter().map(|branch| format!("refs/heads/{branch}")));
+    args.push("--not".to_string());
+    args.push("--remotes".to_string());
+    args.push("--".to_string());
+    let output = Command::new("git").args(&args).output()?;
     if !output.status.success() {
+        let named = branches
+            .iter()
+            .map(|branch| format!("\"{branch}\""))
+            .collect::<Vec<_>>()
+            .join(" and ");
         return Err(anyhow!(
-            "git rev-list failed for branch \"{branch}\": {}",
+            "git rev-list failed for branch {named}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
@@ -5718,7 +5733,7 @@ mod tests {
         commit_on_branch(repo.path(), "feature", "one");
         // One `init` commit plus the one above, and no remote-tracking ref
         // anywhere, so none of it has been pushed.
-        assert_eq!(unpushed_commit_count(repo.path(), "feature").unwrap(), 2);
+        assert_eq!(unpushed_commit_count(repo.path(), &["feature"]).unwrap(), 2);
     }
 
     #[test]
@@ -5733,7 +5748,7 @@ mod tests {
                 "refs/heads/feature",
             ],
         );
-        assert_eq!(unpushed_commit_count(repo.path(), "feature").unwrap(), 0);
+        assert_eq!(unpushed_commit_count(repo.path(), &["feature"]).unwrap(), 0);
     }
 
     #[test]
@@ -5750,7 +5765,7 @@ mod tests {
         );
         commit_on_branch(repo.path(), "feature", "two");
         commit_on_branch(repo.path(), "feature", "three");
-        assert_eq!(unpushed_commit_count(repo.path(), "feature").unwrap(), 2);
+        assert_eq!(unpushed_commit_count(repo.path(), &["feature"]).unwrap(), 2);
     }
 
     /// A remote-tracking ref of ANY remote counts as pushed, not just the one
@@ -5767,7 +5782,7 @@ mod tests {
                 "refs/heads/feature",
             ],
         );
-        assert_eq!(unpushed_commit_count(repo.path(), "feature").unwrap(), 0);
+        assert_eq!(unpushed_commit_count(repo.path(), &["feature"]).unwrap(), 0);
     }
 
     /// Without the fully-qualified `refs/heads/` form, `git rev-list --count
@@ -5779,13 +5794,55 @@ mod tests {
         // `git branch` refuses a dash-leading name but plumbing does not, and
         // such a ref is exactly what dux would then be asked about.
         commit_on_branch(repo.path(), "--all", "one");
-        assert_eq!(unpushed_commit_count(repo.path(), "--all").unwrap(), 2);
+        assert_eq!(unpushed_commit_count(repo.path(), &["--all"]).unwrap(), 2);
+    }
+
+    /// A drifted agent's delete removes two branches, so the dialog's number
+    /// has to cover both: what is only on the birth branch AND what is only on
+    /// the branch the worktree moved onto, with the history they share counted
+    /// once.
+    #[test]
+    fn unpushed_commit_count_unions_several_branches() {
+        let repo = init_test_repo();
+        commit_on_branch(repo.path(), "born-here", "one");
+        run_git(
+            repo.path(),
+            &[
+                "update-ref",
+                "refs/remotes/origin/born-here",
+                "refs/heads/born-here",
+            ],
+        );
+        commit_on_branch(repo.path(), "born-here", "two");
+        commit_on_branch(repo.path(), "drifted", "three");
+        assert_eq!(
+            unpushed_commit_count(repo.path(), &["born-here"]).unwrap(),
+            1
+        );
+        assert_eq!(
+            unpushed_commit_count(repo.path(), &["drifted"]).unwrap(),
+            2,
+            "`drifted` sits on top of `born-here`, so it reaches both commits"
+        );
+        assert_eq!(
+            unpushed_commit_count(repo.path(), &["born-here", "drifted"]).unwrap(),
+            2,
+            "the union counts the commit both branches reach once"
+        );
+    }
+
+    /// Nothing would be deleted, so nothing is at risk, and the caller gets a
+    /// number rather than git's complaint about an empty revision list.
+    #[test]
+    fn unpushed_commit_count_of_no_branches_is_zero() {
+        let repo = init_test_repo();
+        assert_eq!(unpushed_commit_count(repo.path(), &[]).unwrap(), 0);
     }
 
     #[test]
     fn unpushed_commit_count_fails_for_a_branch_that_does_not_exist() {
         let repo = init_test_repo();
-        let result = unpushed_commit_count(repo.path(), "nope");
+        let result = unpushed_commit_count(repo.path(), &["nope"]);
         assert!(result.is_err(), "expected an error: {result:?}");
     }
 

@@ -1906,18 +1906,27 @@ impl App {
             delete_branch,
             unpushed_commits: None,
         };
-        // Asked only where the warning would use it: a branch dux created is
-        // going because the user made it, and counting its commits would buy a
+        // Asked wherever the warning could use it, which is where a branch
+        // predates the agent OR where the agent drifted and the tick therefore
+        // takes a second branch with it. A branch dux created for an agent that
+        // stayed on it warns about nothing, so counting its commits would buy a
         // git call per open to say nothing new. Never on the UI thread.
-        if !delete_branch {
+        let drifted = matches!(
+            &self.prompt,
+            PromptState::ConfirmDeleteAgent { target, .. } if target.warned_branches().len() > 1
+        );
+        if !delete_branch || drifted {
             self.spawn_unpushed_commit_count(&session.id);
         }
         Ok(())
     }
 
-    /// Count the branch's commits that no remote-tracking ref reaches, off the
-    /// UI thread, and hand the answer back through a one-shot channel that
-    /// `drain_unpushed_count` reads.
+    /// Count the commits on the branches the delete would remove that no
+    /// remote-tracking ref reaches, off the UI thread, and hand the answer back
+    /// through a one-shot channel that `drain_unpushed_count` reads.
+    ///
+    /// Every branch at once, because a drifted delete removes two and a number
+    /// covering one of them understates what the tick costs.
     ///
     /// One-shot rather than a stored fact: the number is only ever rendered by
     /// the dialog that asked for it, and it goes stale the moment the user
@@ -1933,7 +1942,7 @@ impl App {
         std::thread::spawn(move || {
             let count = dux_core::git::unpushed_commit_count(
                 std::path::Path::new(&inputs.project_path),
-                inputs.warned_branch(),
+                &inputs.warned_branches(),
             )
             .ok();
             let _ = tx.send(UnpushedCountAnswer { session_id, count });

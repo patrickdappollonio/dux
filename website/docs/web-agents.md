@@ -210,13 +210,18 @@ Tick it and a second box appears, named after the branch. It only appears there 
 will not delete a branch that is still checked out in a worktree, so with the worktree
 staying there is nothing to offer. Where it starts depends on where the branch came from:
 
-- **Ticked**, for a branch dux created for the agent. That is the old behavior: the branch
-  goes with the worktree, along with the one the agent was created on if it has since moved.
-  Untick it to keep the branch.
+- **Ticked**, for a branch dux created for the agent. That is the old behavior. Untick it to
+  keep the branch.
 - **Unticked**, for a branch that already existed, or that was adopted along with an existing
   worktree. Underneath it dux says which of the two it is, and adds "It has N commits not
   pushed anywhere" when there are any. Tick it and the branch goes anyway; this is the only
   way to remove such a branch from dux once its worktree is gone.
+
+If the worktree has moved onto another branch since the agent was created, the tick removes
+**both**: the branch it is on now and the one it was born on, which is what keeps creating
+an agent under the old name from failing with "branch already exists". The box names both
+branches, dux says which one predates the agent, and the commit count covers the two of them
+together.
 
 If git refuses to delete a branch dux did try to remove, dux says which branch is still there
 and why rather than reporting a deletion that did not happen.

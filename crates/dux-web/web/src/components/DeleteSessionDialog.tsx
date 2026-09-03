@@ -20,12 +20,59 @@ import { closeDelete, deleteSession, useDux } from "@/lib/store"
 // The sentence naming why a branch predates the agent, one clause per
 // provenance. The unrecognized one gets its own rather than borrowing "existed
 // before this agent": that is a claim about a branch nothing here can make.
-// Mirrors `BranchProvenance::kept_reason`.
-function existedBeforeSentence(provenance: string): string {
+// `subject` is the branch's name once there are two branches on screen, because
+// the provenance is recorded about the birth branch and "this branch" would no
+// longer say which. Mirrors `BranchProvenance::kept_reason` and the TUI's
+// `delete_agent_branch_warning`.
+function existedBeforeSentence(provenance: string, subject: string): string {
   if (provenance === "adopted")
-    return "This branch came with the worktree this agent adopted."
-  if (provenance === "unknown") return "This branch is not one dux created."
-  return "This branch existed before the agent."
+    return `${subject} came with the worktree this agent adopted.`
+  if (provenance === "unknown") return `${subject} is not one dux created.`
+  return `${subject} existed before the agent.`
+}
+
+// The branch checkbox's label, naming every branch the tick would delete. A box
+// that promised one deletion and performed two would be taking consent it was
+// never given.
+function branchCheckboxLabel(branches: string[]): string {
+  if (branches.length === 0) return ""
+  if (branches.length === 1) return `Also delete the branch ${branches[0]}`
+  return `Also delete the branches ${branches.join(" and ")}`
+}
+
+// The warning under the branch box, or `null` when there is nothing to warn
+// about. Two reasons, either enough on its own: the branch predates the agent,
+// so it was never dux's to delete, or the agent drifted and the tick takes a
+// second branch with it. `unpushed` is null while the count is in flight and
+// when git could not answer; the count sentence is absent in both cases.
+function branchWarning(
+  provenance: string,
+  branches: string[],
+  unpushed: number | null,
+): string | null {
+  const drifted = branches.length > 1
+  const predates = provenance !== "created"
+  if (!drifted && !predates) return null
+  const parts: string[] = []
+  if (drifted) {
+    parts.push(
+      `The worktree moved from ${branches[1]} onto ${branches[0]}, so deleting the agent removes both.`,
+    )
+  }
+  if (predates) {
+    parts.push(
+      existedBeforeSentence(provenance, drifted ? branches[1] : "This branch"),
+    )
+  }
+  if (unpushed !== null && unpushed > 0) {
+    const plural = unpushed === 1 ? "commit" : "commits"
+    parts.push(
+      drifted
+        ? `They have ${unpushed} ${plural} not pushed anywhere between them.`
+        : `It has ${unpushed} ${plural} not pushed anywhere.`,
+    )
+  }
+  return parts.join(" ")
 }
 
 export function DeleteSessionDialog() {
@@ -41,6 +88,14 @@ export function DeleteSessionDialog() {
   // way through means git could not answer, and the dialog then says nothing
   // about it rather than guessing a number.
   const [unpushed, setUnpushed] = useState<number | null>(null)
+  // The branches the server says the delete would remove, straight from the
+  // answer that counted them. Rendered in preference to working the pair out
+  // here a second time, so what this dialog asks about is what the server would
+  // actually delete. `null` until the answer lands, and the local pair below
+  // stands in until then.
+  const [answeredBranches, setAnsweredBranches] = useState<string[] | null>(
+    null,
+  )
 
   const session = spine?.sessions.find((s) => s.id === deleteTarget)
   const name = session ? sessionLabel(session) : undefined
@@ -53,13 +108,18 @@ export function DeleteSessionDialog() {
   const folder = session ? folderWorkspace(session.workspace) : null
   const provenance = managed?.branch_provenance ?? "created"
   const branchIsDuxs = provenance === "created"
-  // The branch the box names and the count is about: the one the agent was BORN
-  // on, which is the one whose provenance the warning is about. Matches
-  // `BranchDeleteInputs::warned_branch` on the server, so the two can never name
-  // different branches.
-  const warnedBranch = managed
-    ? managed.initial_branch || managed.branch_name
-    : ""
+  // Every branch the box names and the count is about: the one the worktree is
+  // on now and, when the agent has drifted, the one it was born on. Both are
+  // deleted, so both are named. The server's answer wins once it lands; this is
+  // the same rule (`BranchDeleteInputs::warned_branches`) applied to the spine
+  // so the label is never blank while the git call is out.
+  const localBranches = managed
+    ? managed.initial_branch && managed.initial_branch !== managed.branch_name
+      ? [managed.branch_name, managed.initial_branch]
+      : [managed.branch_name]
+    : []
+  const warnedBranches = answeredBranches ?? localBranches
+  const branchWarningText = branchWarning(provenance, warnedBranches, unpushed)
   // The box starts in the provenance default: ticked for a branch dux made,
   // unticked for one that predates the agent. Both are overridable, which is
   // the whole point of it being a control.
@@ -69,6 +129,7 @@ export function DeleteSessionDialog() {
     setDeleteWorktree(false)
     setBranchAnswer(null)
     setUnpushed(null)
+    setAnsweredBranches(null)
   }
 
   // The component stays mounted across opens, so a vanish-close must also
@@ -83,17 +144,20 @@ export function DeleteSessionDialog() {
     },
   )
 
-  // Asked only where the warning would use it: a branch dux created is going
-  // because the user made it, and counting its commits would buy a git call per
-  // open to say nothing new.
-  const askUnpushed = isOpen && managed !== null && !branchIsDuxs
+  // Asked exactly when the branch offer is on screen, because the answer is
+  // where both the branch names and the count come from. With the worktree kept
+  // there is no branch box at all, so nothing here would be rendered and the
+  // git call would buy nothing.
+  const askUnpushed = isOpen && managed !== null && deleteWorktree
   useEffect(() => {
     if (!askUnpushed || !deleteTarget) return
     let live = true
     sessionsApi
       .branchUnpushed(deleteTarget)
       .then((answer) => {
-        if (live) setUnpushed(answer.unpushed_commits)
+        if (!live) return
+        setUnpushed(answer.unpushed_commits)
+        setAnsweredBranches(answer.branches)
       })
       // A failure is simply "no number to show". The dialog is already telling
       // the user the branch predates the agent, which is the part that must not
@@ -175,26 +239,16 @@ export function DeleteSessionDialog() {
               checked={deleteBranch}
               onCheckedChange={setBranchAnswer}
             />
-            <label htmlFor="delete-branch" className="text-sm">
-              Also delete the branch &ldquo;
-              <span className="break-all">{warnedBranch}</span>&rdquo;
+            <label htmlFor="delete-branch" className="break-all text-sm">
+              {branchCheckboxLabel(warnedBranches)}
             </label>
           </div>
         )}
-        {managed && deleteWorktree && !branchIsDuxs && (
+        {managed && deleteWorktree && branchWarningText !== null && (
           // The danger sits in the warning text, never in a red checkbox: the
           // box is an ordinary control and the sentence under it is what says
-          // this one is not dux's branch to remove.
-          <p className="text-sm text-muted-foreground">
-            {existedBeforeSentence(provenance)}
-            {unpushed !== null && unpushed > 0 && (
-              <>
-                {" "}
-                It has {unpushed}{" "}
-                {unpushed === 1 ? "commit" : "commits"} not pushed anywhere.
-              </>
-            )}
-          </p>
+          // what is at stake.
+          <p className="text-sm text-muted-foreground">{branchWarningText}</p>
         )}
         <div className="h-2" />
         <DialogFooter>
