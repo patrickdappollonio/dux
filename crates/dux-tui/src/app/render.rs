@@ -11742,6 +11742,30 @@ pub(crate) fn format_line_stats(
     spans
 }
 
+/// A recap's line count, abbreviated so a large sum cannot push the file count
+/// out of a narrow title: under a thousand it is printed as it is, and from a
+/// thousand up it reads in thousands with one decimal, trimmed when that
+/// decimal is zero (1000 → "1k", 1300 → "1.3k", 12345 → "12.3k").
+///
+/// The decimal is TRUNCATED rather than rounded, so the figure never claims
+/// more lines than there are: 1999 reads "1.9k", never "2k". Only line sums
+/// abbreviate, and only in a recap; the per-row `+N -N` badges stay raw. There
+/// is deliberately no "M" step above this: a diff that large is already far
+/// past the point where the exact figure matters, and one unit is one thing to
+/// learn.
+pub(crate) fn format_recap_count(n: usize) -> String {
+    if n < 1000 {
+        return n.to_string();
+    }
+    let thousands = n / 1000;
+    let tenths = (n % 1000) / 100;
+    if tenths == 0 {
+        format!("{thousands}k")
+    } else {
+        format!("{thousands}.{tenths}k")
+    }
+}
+
 /// The title of a changed-files group: its name, its file count, and an
 /// aggregate recap of what those files hold — the lines they add and remove
 /// between them, and a quiet marker for the binaries among them.
@@ -11749,8 +11773,11 @@ pub(crate) fn format_line_stats(
 /// Binary files carry no line counts, so they contribute nothing to the sums
 /// and are counted apart instead; a group of nothing but binaries reads as
 /// "2 bin" rather than claiming "+0 -0". The figures wear the same diff colors
-/// the rows below them use, through the very same helper, so a group's title
-/// and its rows cannot drift into two vocabularies.
+/// the rows below them use, so a group's title and its rows cannot drift into
+/// two vocabularies, but the sums are abbreviated past a thousand (see
+/// `format_recap_count`) where the rows below stay raw: a row's figure is data
+/// beside a path, while a title's is a sense of scale competing for a narrow
+/// line. The file count is a count of files, not of lines, so it stays raw too.
 ///
 /// The recap describes exactly the rows visible beneath it. The TUI's list
 /// never filters (its search jumps to a match rather than hiding the rest), so
@@ -11777,11 +11804,24 @@ pub(crate) fn changed_files_group_title(
         format!("{prefix} ({})", files.len()),
         title_style,
     )];
-    let stats = format_line_stats(additions, deletions, false, theme);
-    let has_lines = !stats.is_empty();
+    let has_lines = additions > 0 || deletions > 0;
     if has_lines {
         spans.push(Span::styled(" ", title_style));
-        spans.extend(stats);
+        if additions > 0 {
+            spans.push(Span::styled(
+                format!("+{}", format_recap_count(additions)),
+                Style::default().fg(theme.diff_stat_add_fg),
+            ));
+        }
+        if additions > 0 && deletions > 0 {
+            spans.push(Span::raw(" "));
+        }
+        if deletions > 0 {
+            spans.push(Span::styled(
+                format!("-{}", format_recap_count(deletions)),
+                Style::default().fg(theme.diff_stat_remove_fg),
+            ));
+        }
     }
     if binaries > 0 {
         spans.push(Span::styled(
@@ -22750,6 +22790,42 @@ mod tests {
             line_text(&recap_title(&app, &[recap_file(0, 0, false)])),
             "Changes (1)"
         );
+    }
+
+    /// A recap's line sums abbreviate from a thousand up, truncated so the
+    /// figure never claims more lines than there are. The web's
+    /// `formatRecapCount` answers these very cases identically.
+    #[test]
+    fn a_recap_count_abbreviates_from_a_thousand_up() {
+        assert_eq!(format_recap_count(0), "0");
+        assert_eq!(format_recap_count(999), "999");
+        assert_eq!(format_recap_count(1000), "1k");
+        assert_eq!(format_recap_count(1049), "1k");
+        assert_eq!(format_recap_count(1050), "1k");
+        assert_eq!(format_recap_count(1300), "1.3k");
+        assert_eq!(format_recap_count(1999), "1.9k");
+        assert_eq!(format_recap_count(9999), "9.9k");
+        assert_eq!(format_recap_count(10000), "10k");
+        assert_eq!(format_recap_count(12345), "12.3k");
+    }
+
+    /// The title's line sums abbreviate; its file count does not, because a
+    /// count of files is not a count of lines.
+    #[test]
+    fn the_changes_group_title_abbreviates_its_lines_but_not_its_files() {
+        let app = test_app(default_bindings());
+        let files: Vec<ChangedFile> = (0..1200)
+            .map(|index| ChangedFile {
+                path: format!("f{index}.rs"),
+                status: "M".to_string(),
+                additions: 10,
+                deletions: 1,
+                binary: false,
+            })
+            .collect();
+        let title = recap_title(&app, &files);
+
+        assert_eq!(line_text(&title), "Changes (1200) +12k -1.2k");
     }
 
     /// The recap is on screen, not merely computed: the pane's block really

@@ -1034,12 +1034,53 @@ describe("the changes pane's group recaps", () => {
     expect(recap("Changes").textContent).toBe("+19 −45")
   })
 
-  // No thousands separators: the rows below carry none either.
-  it("prints the digits plainly, with no thousands separator", () => {
+  // Big sums abbreviate so they cannot crowd the file count beside them, and
+  // the spoken label keeps the exact figures the glyphs give up.
+  it("abbreviates a big sum and keeps the full number in the label", () => {
     mockState = withCounted([], [counted("big.ts", 12345, 6789)])
     render(<ChangedFiles />)
 
-    expect(recap("Unstaged").textContent).toBe("+12345 −6789")
+    expect(recap("Unstaged").textContent).toBe("+12.3k −6.7k")
+    expect(recap("Unstaged").getAttribute("aria-label")).toBe(
+      "Unstaged: 12345 lines added, 6789 lines removed",
+    )
+  })
+
+  // Under a thousand nothing changes, and no thousands separator appears: the
+  // rows below carry none either.
+  it("prints a sum under a thousand plainly", () => {
+    mockState = withCounted([], [counted("big.ts", 999, 100)])
+    render(<ChangedFiles />)
+
+    expect(recap("Unstaged").textContent).toBe("+999 −100")
+  })
+
+  // The pane header is a two-cell grid with the ⋯ trigger in the second cell,
+  // so its recap must give way rather than paint over the trigger at the widths
+  // where the two meet. jsdom lays nothing out, so the degradation is pinned by
+  // the classes that produce it.
+  it("lets the pane's recap shrink away rather than reach the ⋯ trigger", () => {
+    mockState = withCounted([], [counted("big.ts", 12345, 9999)])
+    render(<ChangedFiles />)
+
+    const paneRecap = recap("Changes")
+    expect(paneRecap.className).toContain("truncate")
+    expect(paneRecap.className).not.toContain("shrink-0")
+    // A group heading keeps its figure whole: its badge shrinks with it.
+    expect(recap("Unstaged").className).toContain("shrink-0")
+  })
+
+  // Only LINE counts abbreviate: the badge beside the sum counts files, and it
+  // is printed exactly.
+  it("leaves the group's file count exact beside an abbreviated sum", () => {
+    mockState = withCounted(
+      [],
+      Array.from({ length: 12 }, (_, index) => counted(`f${index}.ts`, 1000, 0)),
+    )
+    render(<ChangedFiles />)
+
+    expect(recap("Unstaged").textContent).toBe("+12k")
+    expect(screen.getByText("12")).toBeTruthy()
   })
 
   // The recap describes exactly the rows visible beneath it, which is the

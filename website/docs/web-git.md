@@ -15,8 +15,11 @@ collapsible groups, **Staged** and **Unstaged**, each with a count badge, and a 
 narrows a long list by path. Every row leads with its status icon, then the file path and
 the green and red line counts. Each group heading, and the pane's own header, adds those
 counts up for the rows below it, so you can see at a glance how much has moved; binary
-files have no lines to count, so they are tallied separately as a quiet "bin" marker. The
-figures follow the filter, describing exactly the rows you can see. When the worktree is
+files have no lines to count, so they are tallied separately as a quiet "bin" marker. A
+summed-up figure of a thousand lines or more is shortened to read in thousands, rounded
+down so it never overstates: 1,300 lines reads "1.3k" and 12,345 reads "12.3k". Only these
+sums shorten; the counts on the rows themselves always show every digit. The figures follow
+the filter, describing exactly the rows you can see. When the worktree is
 clean it says so plainly.
 
 Click any row to open its diff in the [code editor](/docs/web-editor), read-only and

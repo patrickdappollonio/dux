@@ -99,6 +99,26 @@ export function summarizeChangedFiles(
   return recap
 }
 
+// A recap's line count, abbreviated so a large sum cannot crowd out the file
+// count beside it: under a thousand it is printed as it is, and from a thousand
+// up it reads in thousands with one decimal, trimmed when that decimal is zero
+// (1000 -> "1k", 1300 -> "1.3k", 12345 -> "12.3k").
+//
+// The decimal is TRUNCATED rather than rounded, so the figure never claims more
+// lines than there are: 1999 reads "1.9k", never "2k". Only LINE counts
+// abbreviate: file counts and the binary count stay raw, because a count of
+// files is a small number the user is meant to read exactly, and so do the
+// per-row +N -N badges, which are data beside a path. There is deliberately no
+// "M" step above this: one unit is one thing to learn, and a diff that large is
+// past the point where the exact figure matters. The TUI's `format_recap_count`
+// answers the same cases identically.
+export function formatRecapCount(n: number): string {
+  if (n < 1000) return String(n)
+  const thousands = Math.floor(n / 1000)
+  const tenths = Math.floor((n % 1000) / 100)
+  return tenths === 0 ? `${thousands}k` : `${thousands}.${tenths}k`
+}
+
 // Two recaps added together, for the header's whole-pane figure over both
 // groups' visible rows.
 export function mergeChangedFilesRecaps(

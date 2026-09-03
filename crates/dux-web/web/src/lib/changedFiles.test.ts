@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   fileStatusMeta,
   filterChangedFiles,
+  formatRecapCount,
   mergeChangedFilesRecaps,
   reconcileSelection,
   shouldShowChangedFiles,
@@ -199,6 +200,31 @@ describe("summarizeChangedFiles", () => {
       deletions: 0,
       binaryCount: 0,
     })
+  })
+})
+
+// The TUI's `format_recap_count` answers these very cases identically; the two
+// helpers are kept in step by hand, so a change here belongs in both suites.
+describe("formatRecapCount", () => {
+  it("prints anything under a thousand as it is", () => {
+    expect(formatRecapCount(0)).toBe("0")
+    expect(formatRecapCount(999)).toBe("999")
+  })
+
+  it("reads in thousands from a thousand up, dropping a zero decimal", () => {
+    expect(formatRecapCount(1000)).toBe("1k")
+    expect(formatRecapCount(1300)).toBe("1.3k")
+    expect(formatRecapCount(10000)).toBe("10k")
+    expect(formatRecapCount(12345)).toBe("12.3k")
+  })
+
+  // Truncated, never rounded: the figure must not claim more lines than there
+  // are, so 1050 stays "1k" and 1999 stays "1.9k".
+  it("truncates the decimal rather than rounding it up", () => {
+    expect(formatRecapCount(1049)).toBe("1k")
+    expect(formatRecapCount(1050)).toBe("1k")
+    expect(formatRecapCount(1999)).toBe("1.9k")
+    expect(formatRecapCount(9999)).toBe("9.9k")
   })
 })
 

@@ -65,6 +65,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import {
   fileStatusMeta,
+  formatRecapCount,
   type ChangedFileSelection,
   type ChangedFilesRecap,
 } from "@/lib/changedFiles"
@@ -370,6 +371,10 @@ interface FileGroupProps {
 
 // What a recap says out loud. The glyphs are a dense column of figures, fine to
 // look at and useless to hear, so the spoken form spells the numbers out.
+//
+// The label keeps the FULL number where the glyphs abbreviate: precision belongs
+// here, where there is room for it and no count beside it to crowd. It carries
+// no thousands separators, matching the figures the pane prints everywhere else.
 function recapLabel(scope: string, recap: ChangedFilesRecap): string {
   const lines = (n: number, verb: string) =>
     `${n} line${n === 1 ? "" : "s"} ${verb}`
@@ -388,15 +393,23 @@ function recapLabel(scope: string, recap: ChangedFilesRecap): string {
 // +/− classes so the header and its rows read as one column of figures, and it
 // carries no thousands separators, because the rows carry none either.
 //
+// A sum of a thousand lines or more is abbreviated ("+12.3k"), which is the one
+// way the recap's figures differ from the rows': a row's number is data beside a
+// path, while this one sits on a heading beside a file count and is there to
+// give a sense of scale. Only LINE counts abbreviate; the file count in the
+// badge and the "N bin" marker stay raw. The aria-label keeps the full numbers.
+//
 // Binary files contribute no lines (git reports none for them), so they are
 // counted apart in a quiet "· N bin" marker rather than silently pulling the
 // sums toward zero.
 function ChangesRecap({
   scope,
   recap,
+  className,
 }: {
   scope: string
   recap: ChangedFilesRecap
+  className?: string
 }) {
   const { additions, deletions, binaryCount } = recap
   const hasLines = additions > 0 || deletions > 0
@@ -406,12 +419,16 @@ function ChangesRecap({
 
   return (
     <span
-      className="shrink-0 font-mono text-xs"
+      className={cn("shrink-0 font-mono text-xs", className)}
       aria-label={recapLabel(scope, recap)}
     >
-      {additions > 0 && <span className="text-green-500">+{additions}</span>}
+      {additions > 0 && (
+        <span className="text-green-500">+{formatRecapCount(additions)}</span>
+      )}
       {additions > 0 && deletions > 0 && " "}
-      {deletions > 0 && <span className="text-red-500">−{deletions}</span>}
+      {deletions > 0 && (
+        <span className="text-red-500">−{formatRecapCount(deletions)}</span>
+      )}
       {binaryCount > 0 && (
         <span className="text-muted-foreground">
           {hasLines ? " · " : ""}
@@ -499,8 +516,19 @@ function ChangesHeader({
   return (
     <CardHeader className="flex items-center justify-between gap-2 border-b">
       <div className="flex min-w-0 items-baseline gap-2">
-        <CardTitle>Changes</CardTitle>
-        <ChangesRecap scope="Changes" recap={recap} />
+        <CardTitle className="shrink-0">Changes</CardTitle>
+        {/* The pane's own recap is the one figure with a control beside it: the
+            header is a two-cell grid and the ⋯ trigger owns the second cell, so
+            a recap that refused to shrink painted over the trigger at the
+            widths where the two meet. It gives way instead, ellipsizing down to
+            nothing while the title stays whole, and the aria-label keeps saying
+            the whole thing. The group headings need none of this: their badge
+            is inside the same shrinking row. */}
+        <ChangesRecap
+          scope="Changes"
+          recap={recap}
+          className="min-w-0 shrink truncate"
+        />
       </div>
       <CardAction className="self-center">
         <DropdownMenu>
