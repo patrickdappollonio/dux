@@ -61,9 +61,11 @@ import { cn } from "@/lib/utils"
 // THE FLOATING PILL: the only chrome theater mode leaves on screen.
 //
 // It carries controls that ACT, and nothing that merely reports. On a computer
-// that is the macros trigger, the app menu and the way out; on a phone it is
-// the docked flap's own four, in the flap's order, because the pill IS the flap
-// in the air.
+// that is the macros trigger, the pane's own menu and the way out; on a phone it
+// is the docked flap's own four, in the flap's order, because the pill IS the
+// flap in the air. The `⋯` is the same merged menu on both, so theater is not
+// the state in which a computer loses the agent's actions along with the
+// sidebar that used to be the only other place to reach them.
 //
 // IT CARRIES NO TAB STATUS. It used to grow a status half that bobbed while a
 // hidden tab worked, wore an attention dot, and folded out a mini strip of tab
@@ -112,10 +114,12 @@ export function TheaterPill({
   // shells key the pane itself, so the pill reads the input menu of the pane it
   // is actually on rather than whichever one registered last.
   const paneId = target.kind === "agent" ? target.tabId : target.terminalId
-  // WHAT THE PHONE'S `⋯` IS ABOUT, resolved the same way the docked flap
-  // resolves it: the agent when there is one, otherwise the terminal on screen.
-  // A session-owned terminal is the agent's own screen, so it keeps the agent's
-  // menu, which is also what its identity, its count and its PR chip are about.
+  // WHAT THE `⋯` IS ABOUT, resolved the same way the docked flap resolves it:
+  // the agent when there is one, otherwise the terminal on screen. A
+  // session-owned terminal is the agent's own screen, so it keeps the agent's
+  // menu, which is also what its identity, its count and its PR chip are about;
+  // the pane goes down with the subject, so that terminal's own verbs and its
+  // INPUT group come with it.
   const paneSubject: PaneMenuSubject | null = session
     ? { kind: "agent", session }
     : target.kind === "terminal"
@@ -241,7 +245,7 @@ export function TheaterPill({
           // survive anyway.
           ellipsis={
             paneSubject ? (
-              <PaneMenu subject={paneSubject} side="top" />
+              <PaneMenu subject={paneSubject} pane={target} side="top" />
             ) : (
               <TheaterAppMenu paneId={paneId} />
             )
@@ -251,7 +255,16 @@ export function TheaterPill({
         <>
           <MacroPopover variant="pill" target={target} />
 
-          <TheaterAppMenu paneId={paneId} />
+          {/* THE SAME MENU THE PANE HEADER OPENS, for the same reason the phone
+              pill carries the flap's: theater unmounts the header and the
+              sidebar together, so a computer in this mode had no route to the
+              agent's own actions at all. The app menu rides along inside it as
+              the Settings drill, which is what it used to be the whole of. */}
+          {paneSubject ? (
+            <PaneMenu subject={paneSubject} pane={target} side="top" />
+          ) : (
+            <TheaterAppMenu paneId={paneId} />
+          )}
 
           <span aria-hidden className="mx-0.5 h-5.5 w-px shrink-0 bg-border" />
 
@@ -604,6 +617,12 @@ function runAttach(box: HTMLElement, dock: DOMRect): void {
 }
 
 // THE APP MENU, WHILE THE MODE HAS TAKEN EVERY OTHER ANCHOR AWAY.
+//
+// THE FALLBACK, not the ordinary case: both variants open the merged pane menu
+// (which carries this same body as its Settings drill) whenever there is a pane
+// subject to open one for. This is what is left for a pane that is neither an
+// agent nor a terminal, which the types say cannot happen and the surface should
+// survive anyway, and it keeps the app's own actions reachable there too.
 //
 // On a computer theater unmounts the sidebar (and with it the launcher corner's
 // `⋯`) and the whole header stack (and with it the cog); on a phone it takes

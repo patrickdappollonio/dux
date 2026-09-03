@@ -447,26 +447,36 @@ function TerminalViewport({
   )
 }
 
+// WHICH PANE SCREEN IS ON, and nothing else.
+//
+// It is deliberately a router with no state of its own: the flight machine is
+// the screen's, and a screen that hands over to another must not be running one
+// too. This used to hold the hook above its own early returns, so an agentless
+// terminal screen mounted a second machine that stepped its own timers and
+// re-rendered this tree on every stage of a flight it was not showing.
 function TerminalScreen() {
-  const duxState = useDux()
-  const {
-    spine,
-    bootstrap,
-    selectedSessionId,
-    selectedTarget,
-    terminalEpoch,
-    startedDormantTabs,
-    pendingSlotTab,
-  } = duxState
-  // The one phase both clusters are rendered from. Above the early returns,
-  // because a hook cannot be conditional, and harmless there: with no agent on
-  // screen it simply rests.
-  const flight = useTheaterFlight()
+  const { spine, selectedSessionId, selectedTarget } = useDux()
   const ownerScreen = terminalOwnerScreen(selectedTarget)
   if (ownerScreen) return ownerScreen
 
   const session = spine?.sessions.find((item) => item.id === selectedSessionId)
   if (!selectedTarget || !session) return <HomeScreen />
+  return <AgentTerminalScreen session={session} target={selectedTarget} />
+}
+
+// The agent spoke: the agent's chrome stack over its pane, with the flap and
+// the pill rendered from the ONE flight phase this screen owns.
+function AgentTerminalScreen({
+  session,
+  target: selectedTarget,
+}: {
+  session: SessionView
+  target: SelectedTarget
+}) {
+  const duxState = useDux()
+  const { spine, bootstrap, terminalEpoch, startedDormantTabs, pendingSlotTab } =
+    duxState
+  const flight = useTheaterFlight()
 
   const targetId =
     selectedTarget.kind === "terminal"

@@ -226,7 +226,7 @@ describe("TerminalArea in theater", () => {
       keysToggle: false,
     })
     try {
-      fireEvent.click(screen.getByLabelText("Settings"))
+      fireEvent.click(screen.getByLabelText("Session actions"))
       await screen.findByRole("menu")
       expect(screen.getByText("Use virtual input")).toBeTruthy()
     } finally {

@@ -76,6 +76,29 @@ function installBootStubs() {
     })),
   )
 }
+// EVERY LIVE FLIGHT MACHINE ON SCREEN, so a screen that hands over to another
+// can be shown to be running none of its own. The hook is the phone's theater
+// choreography: it holds a phase, steps it on timers and re-renders whoever
+// called it, so a second instance behind an early return is a whole machine
+// ticking over a screen it does not show.
+const flightMachines = new Set<object>()
+vi.mock("@/hooks/use-theater-flight", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/hooks/use-theater-flight")>()
+  const React = await import("react")
+  return {
+    ...actual,
+    useTheaterFlight: () => {
+      const key = React.useRef({})
+      React.useEffect(() => {
+        const mine = key.current
+        flightMachines.add(mine)
+        return () => void flightMachines.delete(mine)
+      }, [])
+      return actual.useTheaterFlight()
+    },
+  }
+})
 installBootStubs()
 const { MobileShell } = await import("./MobileShell")
 const { registerPaneInputGroup, resetPaneInputGroups } = await import(
@@ -333,6 +356,16 @@ describe("MobileShell standalone terminals", () => {
     // no Back control and no directory crumb at all.
     expect(screen.getByLabelText("Back")).toBeTruthy()
     expect(screen.getByText("~/code")).toBeTruthy()
+  })
+
+  // ONE MACHINE PER SCREEN. The agent screen used to hold the flight hook above
+  // its own early returns, so an agentless terminal screen ran a second one:
+  // two phases, two sets of timers, and every stage of a flight re-rendering a
+  // tree that was showing somebody else's screen.
+  it("runs exactly one flight machine on an agentless terminal screen", () => {
+    mockState = standaloneState()
+    render(<MobileShell />)
+    expect(flightMachines.size).toBe(1)
   })
 
   it("sends the standalone terminal screen's chevron up instead of back", () => {

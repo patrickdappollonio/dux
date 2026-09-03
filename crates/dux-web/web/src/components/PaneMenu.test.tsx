@@ -312,11 +312,31 @@ describe("an agent's menu over one of its companion terminals", () => {
   })
 })
 
-// THE COMPUTER'S ANCHOR. The desktop pane header's `⋯` is the same menu the
+// THE COMPUTER'S ANCHORS. The desktop pane header's `⋯` is the same menu the
 // phone's flap opens, in a trigger that matches the header's cluster instead of
-// the flap's bare circle. Two anchors, one body: the header and the sidebar row
-// must never be two different menus about one agent.
-describe("the pane menu at the desktop header's anchor", () => {
+// the flap's bare circle, and the pill it hands over to in theater opens it too.
+// Two anchors, one body: the header and the sidebar row must never be two
+// different menus about one agent.
+describe("the pane menu at the computer's anchors", () => {
+  // THE COMPUTER'S PILL, under the same rule. Theater unmounts the sidebar and
+  // the header together, so the desktop pill carrying only the app menu left a
+  // computer in this mode with no route to the agent's own actions at all,
+  // which is exactly the gap the phone's merge closed.
+  it("carries the same body from the desktop pill, with the app menu inside it", async () => {
+    mockState = makeState(true)
+    registerPaneInputGroup("s1", { surfaceSwitch: true, keysToggle: false })
+    render(<TheaterPill target={target} session={session()} />)
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    const items = labels()
+    expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
+    expect(items.some((t) => t?.includes("Delete agent…"))).toBe(true)
+    expect(items.some((t) => t?.includes("Use virtual input"))).toBe(true)
+    expect(items.some((t) => t?.includes("Leave theater mode"))).toBe(true)
+    // The app menu is still reachable, as the drill named for the cog the mode
+    // took away.
+    expect(items.some((t) => t?.includes("Settings"))).toBe(true)
+  })
+
   it("opens the whole agent menu, not a header-sized subset", async () => {
     registerPaneInputGroup("s1", { surfaceSwitch: true, keysToggle: false })
     render(<PaneMenu subject={{ kind: "agent", session: session() }} appearance="header" />)

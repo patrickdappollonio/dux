@@ -191,7 +191,10 @@ beforeEach(() => {
   pillBox = PILL_BOX
   flapBox = { left: 0, top: 0, width: 200, height: 48 }
   stubRects()
-  mockState = { bootstrap: null } as unknown as DuxState
+  // THE PILL ONLY EXISTS IN THEATER, so the state it is rendered against says
+  // so: its menu's way out is the shared item, which is present exactly while
+  // the mode is on.
+  mockState = { bootstrap: null, theater: true } as unknown as DuxState
 })
 
 afterEach(() => {
@@ -218,21 +221,43 @@ describe("the app menu the pill carries", () => {
   const settle = () => new Promise((r) => setTimeout(r, 40))
 
   async function openMenu() {
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }))
+    fireEvent.click(screen.getByRole("button", { name: "Terminal actions" }))
     await screen.findByRole("menu")
+    await settle()
+  }
+
+  // The app menu is a DRILL inside the pane menu now, named for the cog it
+  // stands in for, so reaching it is two steps on this surface as it already
+  // is on the phone's.
+  async function openAppMenu() {
+    await openMenu()
+    const drill = screen
+      .getAllByRole("menuitem")
+      .find((e) => e.textContent?.includes("Settings"))
+    fireEvent.click(drill!)
     await settle()
   }
 
   it("carries the trigger even in its collapsed form", () => {
     // A terminal pane has no tab strip, so the pill is grip, macros, `⋯` and
-    // the way out. The app menu is not one of the parts that folds away.
+    // the way out. The menu is not one of the parts that folds away.
     render(<TheaterPill target={terminalTarget} session={undefined} />)
-    expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Terminal actions" })).toBeTruthy()
+  })
+
+  it("opens the pane's own actions, which theater took the sidebar away from", async () => {
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    await openMenu()
+    const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
+    expect(rendered.some((t) => t?.includes("Close…"))).toBe(true)
+    expect(rendered.some((t) => t?.includes("Open editor in new tab"))).toBe(
+      true,
+    )
   })
 
   it("opens the same menu the header's cog opens", async () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
-    await openMenu()
+    await openAppMenu()
 
     // Driven from the model, never a hand-written list: the pill renders the
     // shared body, so a new app-menu entry arrives here with no change of ours.
@@ -778,7 +803,7 @@ describe("the input items the pill folds in", () => {
   const settle = () => new Promise((r) => setTimeout(r, 40))
 
   async function openMenu() {
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }))
+    fireEvent.click(screen.getByRole("button", { name: "Terminal actions" }))
     await screen.findByRole("menu")
     await settle()
   }
