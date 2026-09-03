@@ -6,8 +6,8 @@ order: 60
 ---
 
 Server mode is dux in a browser. It serves the same workspace the terminal UI serves:
-the same projects, the same agents on the same worktrees, the same live engine driving
-the same PTYs, the same config file. Nothing is mirrored or re-synced. An agent you
+the same projects, the same agents on the same worktrees, the same dux driving the same
+terminals live, the same config file. Nothing is mirrored or re-synced. An agent you
 start in one front end is the same agent in the other.
 
 Both front ends are first class, and they differ on purpose:
@@ -90,10 +90,10 @@ Already in the TUI and want a browser instead? Open the command palette and run
 trigger it by accident.
 
 Your **agents keep running the entire time**: no relaunch, no lost conversations. The
-live engine is handed to the web server in-process. Your terminal turns into a themed
-dux status screen showing the serve URLs and an activity panel. Press `q` or `Esc` there
-to drop back into the TUI around the same still-running engine, which stops serving the
-web UI; you can flip again whenever you like. `Ctrl-c` quits the whole process.
+dux you already have starts serving in place. Your terminal turns into a themed dux
+status screen showing the serve URLs and an activity panel. Press `q` or `Esc` there to
+drop back into the TUI with everything still running, which stops serving the web UI;
+you can flip again whenever you like. `Ctrl-c` quits dux entirely.
 
 > [!IMPORTANT]
 > `dux server` honors your configured `[server] host` and `--bind`. The in-app flip

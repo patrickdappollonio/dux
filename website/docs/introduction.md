@@ -11,7 +11,7 @@ CLI for each agent (Claude Code, Codex, Copilot, OpenCode, or anything else you 
 in a terminal) inside an embedded pseudo-terminal. No protocol layer, no adapters, no
 JSON-RPC. Just the tools you already use, side by side, each in its own branch.
 
-## Two front ends, one engine
+## Two front ends, one workspace
 
 dux has a terminal UI and a web UI. Both are first class, and both share the same
 projects, agents, worktrees and config file, so an agent you start in one is the same
@@ -38,8 +38,8 @@ menus list what it can do.
 
 The web UI is [server mode](/docs/server-mode), started with `dux server`, flipped on
 from a running terminal UI, or served quietly in the background of one. It is always
-one dux process, so moving between the front ends is a hand-off rather than a second
-copy, and your agents keep running either way.
+one dux, so moving between the front ends never starts a second copy of anything, and
+your agents keep running either way.
 
 ## The mental model
 
