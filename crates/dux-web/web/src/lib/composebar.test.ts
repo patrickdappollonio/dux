@@ -10,7 +10,8 @@ import {
   composeBarShown,
   insertIntoComposeDraft,
   inactiveCursorStyle,
-  virtualInputUp,
+  bottomBarSurvivesDirect,
+  terminalKeysApply,
   inputMenuSurfaceSwitchOffered,
   typingSurfaceToggleOffered,
 } from "./composebar"
@@ -284,39 +285,70 @@ describe("resolvedTypingSurface over every state", () => {
 // SURFACE (is a finger doing the typing, so does the text need a buffer
 // autocorrect and swipe can work in). These helpers answer only the second one,
 // and nothing here has a width in it.
-describe("virtualInputUp", () => {
+describe("terminalKeysApply", () => {
   it("is up wherever the pointer is coarse and nothing has been chosen", () => {
-    expect(virtualInputUp("auto", true, null)).toBe(true)
+    expect(terminalKeysApply("auto", true, null)).toBe(true)
   })
 
   it("is down for a fine pointer unless the user or the setting asked", () => {
-    expect(virtualInputUp("auto", false, null)).toBe(false)
-    expect(virtualInputUp("never", false, null)).toBe(false)
-    expect(virtualInputUp("always", false, null)).toBe(true)
+    expect(terminalKeysApply("auto", false, null)).toBe(false)
+    expect(terminalKeysApply("never", false, null)).toBe(false)
+    expect(terminalKeysApply("always", false, null)).toBe(true)
   })
 
   // The inert-toggle bug: choosing the message box on a laptop used to leave
   // the keys behind, because the key row was gated on the pointer alone.
   it("brings the keys to a fine pointer that chose the message box", () => {
-    expect(virtualInputUp("auto", false, "compose")).toBe(true)
+    expect(terminalKeysApply("auto", false, "compose")).toBe(true)
   })
 
-  // CHOOSING TO TYPE DIRECTLY TAKES THE WHOLE BAR, keys included: that is what
-  // the choice says, and the way back is the top menu's INPUT group rather than
-  // a key row left behind to carry it.
-  it("goes down entirely on a phone that chose direct typing", () => {
-    expect(virtualInputUp("auto", true, "direct")).toBe(false)
+  // THE KEY ROW AND THE MESSAGE BOX ARE INDEPENDENT. Direct typing is a
+  // statement about where the TEXT is composed; Esc, Tab and a Ctrl chord are
+  // keys a soft keyboard cannot produce at all, and holding the virtual Ctrl
+  // while a physical keyboard types the letter is a real way to work.
+  it("keeps the keys on a phone that chose direct typing", () => {
+    expect(terminalKeysApply("auto", true, "direct")).toBe(true)
     expect(composeBarShown("auto", true, "direct")).toBe(false)
   })
 
-  // `never` IS NOT THAT CHOICE. It is configuration saying "no message box",
-  // and it offers no surface switch anywhere to bring a key row back with, so a
-  // finger keeps its keys and the bar is that row alone.
   it("keeps the keys on a phone whose compose box is switched off", () => {
-    expect(virtualInputUp("never", true, null)).toBe(true)
+    expect(terminalKeysApply("never", true, null)).toBe(true)
     expect(composeBarShown("never", true, null)).toBe(false)
-    // Even against a stored choice, which `never` overrides in both places.
-    expect(virtualInputUp("never", true, "direct")).toBe(true)
+    expect(terminalKeysApply("never", true, "direct")).toBe(true)
+  })
+
+  // ALL FOUR COMBINATIONS ARE LEGAL, which is the whole point of keeping the
+  // two apart: box and keys, box alone, keys alone, and neither.
+  it("spans the four states the two surfaces can be in", () => {
+    const state = (
+      coarse: boolean,
+      choice: "compose" | "direct" | null,
+      keysVisible: boolean,
+    ) => ({
+      box: composeBarShown("auto", coarse, choice),
+      keys: keysVisible && terminalKeysApply("auto", coarse, choice),
+    })
+    expect(state(true, "compose", true)).toEqual({ box: true, keys: true })
+    expect(state(true, "compose", false)).toEqual({ box: true, keys: false })
+    expect(state(true, "direct", true)).toEqual({ box: false, keys: true })
+    expect(state(true, "direct", false)).toEqual({ box: false, keys: false })
+  })
+})
+
+describe("bottomBarSurvivesDirect", () => {
+  // What decides whether the one-time way-back hint has anything to say: with a
+  // key row still under the terminal, the bottom `⋯` is visibly carrying the
+  // way back and a toast pointing at another menu is noise.
+  it("survives on a phone whose keys are on", () => {
+    expect(bottomBarSurvivesDirect("auto", true, true)).toBe(true)
+  })
+
+  it("does not survive once the keys are hidden by preference", () => {
+    expect(bottomBarSurvivesDirect("auto", true, false)).toBe(false)
+  })
+
+  it("does not survive on a fine pointer, whose keys go with the box", () => {
+    expect(bottomBarSurvivesDirect("auto", false, true)).toBe(false)
   })
 })
 

@@ -42,6 +42,7 @@ export function InputMenuItems({
   theaterExit = false,
   onAttach,
   composeSurface = false,
+  directLeavesNothingBelow = true,
 }: {
   /// The two rows either menu can carry. Defaulted off for the callers whose
   /// menu carries neither, which is every caller of the theater exit.
@@ -65,6 +66,12 @@ export function InputMenuItems({
   /// box is up, `false` while keystrokes go straight to the terminal. Only read
   /// when `gates.surfaceSwitch` is set.
   composeSurface?: boolean
+  /// Would switching to direct typing leave NOTHING under the terminal? It
+  /// decides whether the one-time "here is the way back" hint fires, so only
+  /// the menu that can flip that way has to answer it. Defaults to the loud
+  /// answer for the top menu, which offers the opposite direction only and can
+  /// therefore never reach the hint at all.
+  directLeavesNothingBelow?: boolean
 }) {
   const duxState = useDux()
   const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
@@ -76,17 +83,19 @@ export function InputMenuItems({
           Attach a file…
         </DropdownMenuItem>
       ) : null}
-      {/* NAMED FOR WHAT IT DOES, not for the state it is in, unlike the key
-          row's "Box"/"Direct" cap (which has one cell of width and reads as a
-          status light beside its neighbours). A menu row is a sentence, and
-          "Use virtual input" says what tapping it gets you. The two directions
-          live in DIFFERENT menus (the way out inside the virtual input, the way
-          back in the top menu that outlives it), and both write through the one
-          `switchTypingSurface`, so they cannot drift. */}
+      {/* NAMED FOR WHAT IT DOES, not for the state it is in. A menu row is a
+          sentence, and "Use virtual input" says what tapping it gets you. The
+          bottom `⋯` carries BOTH directions, because it exists for as long as
+          any row under the terminal does; the top menu carries the way back
+          alone, for the pane that has no row left to hold one. Both write
+          through the one `switchTypingSurface`, so they cannot drift. */}
       {gates.surfaceSwitch ? (
         <DropdownMenuItem
           onClick={() =>
-            switchTypingSurface(composeSurface ? "direct" : "compose")
+            switchTypingSurface(
+              composeSurface ? "direct" : "compose",
+              directLeavesNothingBelow,
+            )
           }
         >
           {composeSurface ? <SquareTerminal /> : <MessageSquare />}

@@ -126,11 +126,13 @@ describe("typing-surface choice", () => {
   })
 })
 
-// THE ONE-TIME HINT, for the switch that takes the whole bottom bar away.
+// THE ONE-TIME HINT, for the switch that leaves nothing under the terminal.
 //
-// Choosing to type directly leaves nothing under the terminal: no message box,
-// no key row, no `⋯`. The first time that happens on a device, dux says where
-// the way back went. Once, and never again on this device.
+// Choosing to type directly takes the message box away, and on a pane whose key
+// row is down too it takes the last row with it: no `⋯`, nothing. The first
+// time THAT happens on a device, dux says where the way back went. Once, and
+// never again on this device. A switch that leaves a key row behind says
+// nothing, because the bottom `⋯` is still on screen carrying the way back.
 describe("the direct-typing hint", () => {
   beforeEach(() => void notified.splice(0))
 
@@ -138,13 +140,13 @@ describe("the direct-typing hint", () => {
     installStorage()
     vi.resetModules()
     const m = await load()
-    m.switchTypingSurface("direct")
+    m.switchTypingSurface("direct", true)
     expect(notified).toHaveLength(1)
     // It says where the way back is, which is the whole reason it exists.
     expect(notified[0]).toContain("Use virtual input")
 
-    m.switchTypingSurface("compose")
-    m.switchTypingSurface("direct")
+    m.switchTypingSurface("compose", true)
+    m.switchTypingSurface("direct", true)
     expect(notified).toHaveLength(1)
   })
 
@@ -152,7 +154,7 @@ describe("the direct-typing hint", () => {
     installStorage()
     vi.resetModules()
     const m = await load()
-    m.switchTypingSurface("compose")
+    m.switchTypingSurface("compose", true)
     expect(notified).toHaveLength(0)
   })
 
@@ -161,7 +163,7 @@ describe("the direct-typing hint", () => {
     installStorage({ [m.DIRECT_INPUT_HINT_KEY]: "shown" })
     vi.resetModules()
     const fresh = await load()
-    fresh.switchTypingSurface("direct")
+    fresh.switchTypingSurface("direct", true)
     expect(notified).toHaveLength(0)
   })
 
@@ -181,7 +183,7 @@ describe("the direct-typing hint", () => {
       },
     })
     const m = await load()
-    m.switchTypingSurface("direct")
+    m.switchTypingSurface("direct", true)
     expect(notified).toHaveLength(0)
   })
 
@@ -213,7 +215,7 @@ describe("the direct-typing hint", () => {
       value: 390,
     })
     try {
-      m.switchTypingSurface("direct")
+      m.switchTypingSurface("direct", true)
     } finally {
       Object.defineProperty(window, "innerWidth", {
         configurable: true,
@@ -223,13 +225,30 @@ describe("the direct-typing hint", () => {
     expect(notified).toEqual([m.directHintMessage("phone")])
   })
 
+  // A KEY ROW LEFT BEHIND IS THE WAY BACK, visibly, in the bottom `⋯` that
+  // hangs off it. Sending the reader to a different menu would point at the
+  // wrong control, so the switch that keeps a row says nothing at all, and it
+  // does not spend the device's one hint either.
+  it("stays quiet while a row is left under the terminal", async () => {
+    const mem = installStorage()
+    vi.resetModules()
+    const m = await load()
+    m.switchTypingSurface("direct", false)
+    expect(notified).toHaveLength(0)
+    expect(mem.get(m.DIRECT_INPUT_HINT_KEY)).toBeUndefined()
+    // And the hint is still owed, for the day nothing is left below.
+    m.switchTypingSurface("compose", false)
+    m.switchTypingSurface("direct", true)
+    expect(notified).toHaveLength(1)
+  })
+
   // The write still happens whatever the hint does: `setTypingSurface` is the
   // writer, and the toast is a side effect of the first switch only.
   it("still writes the choice", async () => {
     const mem = installStorage()
     vi.resetModules()
     const m = await load()
-    m.switchTypingSurface("direct")
+    m.switchTypingSurface("direct", true)
     expect(mem.get(m.TYPING_SURFACE_KEY)).toBe("direct")
   })
 })

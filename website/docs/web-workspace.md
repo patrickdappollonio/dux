@@ -188,7 +188,9 @@ went full screen. The changed-file count is the button beside it rather than a r
 
 Notice what did **not** leave: the terminal keys and the message box. Theater takes the
 chrome above the terminal, not the way you answer it. If you have asked to type straight
-into the terminal, there is nothing below it either, and the pill's `⋯` is the way back.
+into the terminal, the message box goes and the keys stay, with their `⋯` on them; hide the
+keys as well and there is nothing below the terminal at all, and the pill's `⋯` is the way
+back.
 
 The pill carries no tab status. What the other tabs are doing is in the agents list and
 the tab strip, and one copy of that is enough. Theater on a phone hides both, so a tab
@@ -473,19 +475,21 @@ Automatic and `false` as Never.
 > mouse on a narrow window starts with neither. Rotating a tablet never swaps your typing
 > surface out from under you.
 
-What the browser cannot see is a keyboard case, so there is a **typing-surface toggle**.
-Turning it off is at hand while the typing bar is up: **Direct** at the end of the
-accessory bar's key row, and **Type directly in the terminal** in the input `⋯` beside the
-message box. Turning it back on is **Use virtual input**, in the **Input** group at the top
-of the pane's own `⋯` menu (the flap's on a phone, the row menu in the sidebar on a
-computer), because by then the typing bar is gone and so is everything that was on it.
+What the browser cannot see is a keyboard case, so there is a **typing-surface switch**:
+**Type directly in the terminal**, and **Use virtual input** to come back. Both live in the
+input `⋯`, at the left edge of whichever input row you have, for as long as you have one.
+Once nothing is left under the terminal, **Use virtual input** moves up into the **Input**
+group at the top of the pane's own `⋯` menu (the flap's on a phone, the row menu in the
+sidebar on a computer), which is on screen whatever the pane is doing.
 
 **Your choice wins, on any device, in both directions.** The pointer only decides where you
 start. Ask for the message box on a laptop and you get it, keys and all, and while it is up
-your keystrokes go into the box rather than straight to the terminal; switch back to Direct
-and the whole bar goes, message box, keys and menu together, giving the terminal every row
-on the screen. The first time you do that dux tells you once, on that device, where the way
-back is. Your choice sticks across reloads and survives folding a
+your keystrokes go into the box rather than straight to the terminal. Switching to Direct
+takes the **message box** away and leaves the terminal keys where they are, so a phone keeps
+Esc, Tab and the Ctrl latch while every keystroke goes straight to the terminal: tap the
+virtual **Ctrl**, then press the letter on your keyboard. Hide the terminal keys too and
+there is nothing under the terminal at all, which is when dux tells you once, on that
+device, where the way back went. Your choice sticks across reloads and survives folding a
 convertible or unplugging a mouse, until you change it. It is not a setting: it is
 remembered on that device and changes nothing in your config, and it appears only under
 **Automatic**, since **Always** and **Never** have already decided. Switching the
@@ -496,6 +500,9 @@ While the message box is up it really is the typing surface. Clicking into the t
 puts your cursor back in the box, right-clicking pastes the clipboard into your draft
 instead of sending it, and the terminal is skipped when you tab backwards out of the pane.
 Switch to Direct and all of that goes back to the way a plain terminal behaves.
+
+The message box and the terminal keys are two separate switches, so all four combinations
+are yours to pick: both, the box alone, the keys alone, or neither.
 
 Terminal rows are precious on a phone, so the terminal keys are hideable. Every phone
 terminal screen's `⋯` menu (in the flap on the agent screen, in the header on project and
@@ -508,19 +515,17 @@ floating pill, and **Leave theater mode** in the menu it opens. A preference tha
 chrome would be a second way to reach the same place, with no way back of its own.
 
 The input `⋯` sits at the left edge of whatever input row you have: beside the message box,
-or in the key row when the box is off. It belongs to the typing bar and it goes when the bar
-does, so what is inside it is only what that bar is about: **Type directly in the terminal**
-and **Hide terminal keys**.
+or in the key row when the box is off. It belongs to those rows and it goes when the last of
+them does, so what is inside it is only what they are about: the typing-surface switch, both
+ways, and **Hide terminal keys**.
 
-Everything you must be able to reach when the bar is not there is one level up, in the
-**Input** group at the top of the pane's own `⋯` menu: the flap's on a phone, the agent's
-or terminal's row menu in the sidebar on a computer, the floating pill's in theater. That
-group carries **Attach a
-file…** (see [Dropping and pasting files](/docs/dropping-files)) and **Use virtual input**,
-which only appears while the typing bar is down, since while it is up the menu beside the
-message box already offers the other direction. **Show terminal keys** joins the group the
-same way, in the one case where the message box is switched off in Preferences and you have
-hidden the keys as well.
+Everything you must be able to reach when there is no input row at all is one level up, in
+the **Input** group at the top of the pane's own `⋯` menu: the flap's on a phone, the
+agent's or terminal's row menu in the sidebar on a computer, the floating pill's in theater.
+That group carries **Attach a file…** (see
+[Dropping and pasting files](/docs/dropping-files)) and **Use virtual input**, which appears
+only once nothing is left under the terminal, since until then the input `⋯` is offering it
+already. **Show terminal keys** joins the group the same way.
 
 The terminal-keys preference lives on the server, so it follows you to every device, and
 the keys travel with your pointer, so hiding them from your phone also hides them on the

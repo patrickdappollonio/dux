@@ -74,7 +74,7 @@ function state(keys = true): DuxState {
 
 function open(
   gates: Partial<InputMenuGates>,
-  props: { composeSurface?: boolean } = {},
+  props: { composeSurface?: boolean; directLeavesNothingBelow?: boolean } = {},
 ) {
   render(<InputMenu gates={{ ...ALL_OFF, ...gates }} {...props} />)
   const trigger = screen.queryByRole("button", { name: "Input options" })
@@ -123,12 +123,25 @@ describe("InputMenu", () => {
   it("names the typing-surface switch after what it does, both ways", () => {
     open({ surfaceSwitch: true }, { composeSurface: true })
     fireEvent.click(screen.getByText("Type directly in the terminal"))
-    expect(switchTypingSurface).toHaveBeenCalledExactlyOnceWith("direct")
+    expect(switchTypingSurface).toHaveBeenCalledExactlyOnceWith("direct", true)
     cleanup()
     switchTypingSurface.mockClear()
     open({ surfaceSwitch: true }, { composeSurface: false })
     fireEvent.click(screen.getByText("Use virtual input"))
-    expect(switchTypingSurface).toHaveBeenCalledExactlyOnceWith("compose")
+    expect(switchTypingSurface).toHaveBeenCalledExactlyOnceWith("compose", true)
+  })
+
+  // WHETHER THE HINT HAS ANYTHING TO SAY IS THE PANE'S ANSWER, not this menu's.
+  // A key row that survives the switch keeps this very `⋯` on screen with the
+  // way back inside it, and a toast sending the reader to another menu would
+  // name the wrong control.
+  it("carries the pane's answer about what the switch would leave behind", () => {
+    open(
+      { surfaceSwitch: true },
+      { composeSurface: true, directLeavesNothingBelow: false },
+    )
+    fireEvent.click(screen.getByText("Type directly in the terminal"))
+    expect(switchTypingSurface).toHaveBeenCalledExactlyOnceWith("direct", false)
   })
 
   // Selecting an item closes the menu, so each write gets its own open.

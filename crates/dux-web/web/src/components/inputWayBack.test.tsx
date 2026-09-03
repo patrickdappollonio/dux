@@ -9,9 +9,11 @@ import type { SessionView } from "@/lib/types"
 // them at once.
 //
 // It replaces the old "the input `⋯` renders in every bar state" contract.
-// Choosing to type directly in the terminal now takes the whole bottom bar
-// away, that `⋯` with it, so the promise moved: whatever the pane is doing,
-// SOME menu the surface always has carries "Use virtual input". The per-surface
+// The bottom `⋯` lives on whatever row is under the terminal, and a pane can
+// have no rows at all, so the promise moved: whatever the pane is doing, SOME
+// menu carries "Use virtual input". ONE HOME AT A TIME, and the pane decides
+// which: while any bottom row is up it is the bottom `⋯`, and only once
+// nothing is left below does the top menu carry the way back. The per-surface
 // files pin each menu's own behavior; what this pins is that no shell was left
 // out of the move, which is exactly the failure a per-file suite cannot see.
 
@@ -141,9 +143,11 @@ describe("the way back from typing directly in the terminal", () => {
       expect(screen.getByText(WAY_BACK)).toBeTruthy()
     })
 
-    it(`leaves it out on the ${shell} while the virtual input is up`, async () => {
-      // Absent, never disabled: the bottom `⋯` owns the other direction while
-      // it exists, and one row must never be in two menus at once.
+    it(`leaves it out on the ${shell} while a bottom row is up`, async () => {
+      // Absent, never disabled: the bottom `⋯` owns both directions while any
+      // row it can hang off exists, and one row must never be in two menus at
+      // once. That covers the key row standing alone with the message box
+      // gone, which is what the pane publishes here.
       registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: false })
       await openBody(body())
       expect(screen.queryByText(WAY_BACK)).toBeNull()

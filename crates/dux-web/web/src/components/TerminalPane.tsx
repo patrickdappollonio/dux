@@ -16,11 +16,12 @@ import {
 } from "@/components/ComposeBar"
 import { InputMenu } from "@/components/InputMenu"
 import {
+  bottomBarSurvivesDirect,
   composeBarMode,
   composeBarShown,
   inactiveCursorStyle,
+  terminalKeysApply,
   inputMenuSurfaceSwitchOffered,
-  virtualInputUp,
   typingSurfaceToggleOffered,
 } from "@/lib/composebar"
 import {
@@ -142,7 +143,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     fileDropEnabled,
     composeMode,
     composeBarEnabled,
-    virtualInput,
+    keysApply,
+    directLeavesNothingBelow,
     surfaceToggleOffered,
     accessoryBarVisible,
     session,
@@ -469,7 +471,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   } = terminalInputLayout({
     isOwner,
     composeMode,
-    virtualInput,
+    keysApply,
     accessoryBarVisible,
     composeBarEnabled,
   })
@@ -779,6 +781,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       inputMenuGates={inputMenuGates}
       menuHasItems={menuHasItems}
       composeBarEnabled={composeBarEnabled}
+      directLeavesNothingBelow={directLeavesNothingBelow}
       surfaceToggleOffered={surfaceToggleOffered}
       input={input}
       composeInputRef={composeInputRef}
@@ -950,10 +953,15 @@ function terminalTouchSettings(
       isCoarsePointer,
       typingSurface,
     ),
-    virtualInput: virtualInputUp(
+    keysApply: terminalKeysApply(
       composeMode,
       isCoarsePointer,
       typingSurface,
+    ),
+    directLeavesNothingBelow: !bottomBarSurvivesDirect(
+      composeMode,
+      isCoarsePointer,
+      mobileAccessoryBarVisible(duxState),
     ),
     surfaceToggleOffered: typingSurfaceToggleOffered(
       composeMode,
@@ -967,36 +975,39 @@ function terminalTouchSettings(
 type TerminalInputLayoutInputs = {
   isOwner: boolean
   composeMode: ReturnType<typeof composeBarMode>
-  /// Is the virtual input up at all on this device (see `virtualInputUp`)?
-  virtualInput: boolean
+  /// Do the terminal keys belong under this terminal at all on this device
+  /// (see `terminalKeysApply`)? Independent of the message box.
+  keysApply: boolean
   accessoryBarVisible: boolean
   composeBarEnabled: boolean
 }
 
 function terminalInputLayout(input: TerminalInputLayoutInputs) {
+  // TWO ROWS, TWO SWITCHES, FOUR LEGAL STATES. The key row answers "keys a soft
+  // keyboard cannot produce", the message box answers "where the text is
+  // composed", and neither is the other's on-switch: keys with no box is how a
+  // finger holds a virtual Ctrl while a physical keyboard types the letter.
   const accessoryBarShown =
-    input.isOwner && input.virtualInput && input.accessoryBarVisible
+    input.isOwner && input.keysApply && input.accessoryBarVisible
   const composeBarShown = input.isOwner && input.composeBarEnabled
   // THE BOTTOM `⋯`, which lives INSIDE the virtual input and nowhere else. It
-  // carries only what is local to the rows around it: the way out of the
-  // virtual input, and the keys toggle. "Attach a file…" moved up to the top
+  // carries only what is local to the rows around it: the surface switch, in
+  // BOTH directions, and the keys toggle. "Attach a file…" moved up to the top
   // menu's INPUT group, which is on screen whether or not these rows are, and
   // the theater exit went with it: this menu is not a permanent surface any
   // more, so it cannot be anybody's guaranteed way back. Neither is a gate
   // here any more either, so no caller can reintroduce one by passing `true`.
-  // THE BOTTOM BAR IS THE VIRTUAL INPUT, and there is nothing under the
-  // terminal when it is down. There is deliberately no minimal `⋯` row any
-  // more: it existed so the menu could be reachable in every bar state, and
-  // that guarantee now belongs to the top menu, which is on screen whatever the
-  // pane is doing. Asking to type directly in the terminal therefore gives the
-  // whole height to the terminal, which is what the choice says.
+  // It exists while ANY bottom row does, which is what makes it the way back
+  // for a pane left with the keys alone; there is deliberately no minimal row
+  // of its own, so a pane with neither row has nothing under its terminal and
+  // the top menu is the way back instead.
   const bottomBarShown = accessoryBarShown || composeBarShown
   const inputMenuGates = {
     surfaceSwitch:
       input.isOwner &&
       inputMenuSurfaceSwitchOffered(input.composeMode) &&
       bottomBarShown,
-    keysToggle: input.isOwner && input.virtualInput && bottomBarShown,
+    keysToggle: input.isOwner && input.keysApply && bottomBarShown,
   }
   const menuHasItems = inputMenuHasItems(inputMenuGates)
   // THE TOP MENU'S INPUT GROUP, published for whichever menu is over this pane
@@ -1011,7 +1022,7 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
       input.isOwner &&
       inputMenuSurfaceSwitchOffered(input.composeMode) &&
       !bottomBarShown,
-    keysToggle: input.isOwner && input.virtualInput && !bottomBarShown,
+    keysToggle: input.isOwner && input.keysApply && !bottomBarShown,
   }
   return {
     accessoryBarShown,
@@ -1401,6 +1412,7 @@ type TerminalPaneLayoutProps = {
   inputMenuGates: InputMenuGates
   menuHasItems: boolean
   composeBarEnabled: boolean
+  directLeavesNothingBelow: boolean
   surfaceToggleOffered: boolean
   input: InputSurface
   composeInputRef: RefObject<HTMLTextAreaElement | null>
@@ -1415,13 +1427,18 @@ function TerminalPaneLayout({
   inputMenuGates,
   menuHasItems,
   composeBarEnabled,
+  directLeavesNothingBelow,
   surfaceToggleOffered,
   input,
   composeInputRef,
   kind,
 }: TerminalPaneLayoutProps) {
   const inputMenu = (
-    <InputMenu gates={inputMenuGates} composeSurface={composeBarEnabled} />
+    <InputMenu
+      gates={inputMenuGates}
+      composeSurface={composeBarEnabled}
+      directLeavesNothingBelow={directLeavesNothingBelow}
+    />
   )
 
   return (
@@ -1433,6 +1450,7 @@ function TerminalPaneLayout({
           composeBarShown={composeBarShown}
           menuHasItems={menuHasItems}
           composeBarEnabled={composeBarEnabled}
+          directLeavesNothingBelow={directLeavesNothingBelow}
           surfaceToggleOffered={surfaceToggleOffered}
           input={input}
           composeInputRef={composeInputRef}
@@ -1449,6 +1467,7 @@ type TerminalInputRowsProps = {
   composeBarShown: boolean
   menuHasItems: boolean
   composeBarEnabled: boolean
+  directLeavesNothingBelow: boolean
   surfaceToggleOffered: boolean
   input: InputSurface
   composeInputRef: RefObject<HTMLTextAreaElement | null>
@@ -1461,6 +1480,7 @@ function TerminalInputRows({
   composeBarShown,
   menuHasItems,
   composeBarEnabled,
+  directLeavesNothingBelow,
   surfaceToggleOffered,
   input,
   composeInputRef,
@@ -1484,7 +1504,10 @@ function TerminalInputRows({
           onToggleSurface={
             surfaceToggleOffered
               ? () =>
-                  switchTypingSurface(composeBarEnabled ? "direct" : "compose")
+                  switchTypingSurface(
+                    composeBarEnabled ? "direct" : "compose",
+                    directLeavesNothingBelow,
+                  )
               : undefined
           }
           inputMenu={!composeBarShown && menuHasItems ? inputMenu : undefined}

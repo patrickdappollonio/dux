@@ -3864,18 +3864,44 @@ describe("TerminalPane typing-surface toggle", () => {
     expect(composeUp()).toBe(false)
   })
 
-  // ONE DIRECTION, because the press takes the whole bar away: the cap goes
-  // with the row it sits in. The way back is the top menu's INPUT group, which
-  // is on screen whatever the pane is doing, and both write through the same
-  // helper.
-  it("takes its own row with it, leaving the way back to the top menu", async () => {
+  // THE BOX GOES, THE KEYS STAY. They are independent surfaces answering
+  // different questions, and keys with no box is a real way to work: the finger
+  // holds the virtual Ctrl and the physical keyboard types the letter. The
+  // bottom `⋯` hangs off whichever row is left, so the way back stays down
+  // there and the top menu does not offer a second copy of it.
+  it("keeps the terminal keys when the message box goes", async () => {
     const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(toggle()).toBeTruthy()
     fireEvent.pointerDown(toggle())
     expect(composeUp()).toBe(false)
-    expect(screen.queryByRole("button", { name: /^Typing surface:/ })).toBeNull()
-    expect(paneInputGroupFor(["s1"])?.surfaceSwitch).toBe(true)
+    expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
+    expect(screen.getByText("Use virtual input")).toBeTruthy()
+    expect(paneInputGroupFor(["s1"])?.surfaceSwitch).toBe(false)
+  })
+
+  // AND ALL FOUR STATES ARE REACHABLE, through the two independent switches:
+  // the typing-surface choice and the terminal-keys preference.
+  it("reaches every combination of the two rows", async () => {
+    const surface = await import("@/lib/typingSurface")
+    const keysUp = () => screen.queryByRole("button", { name: "Esc" }) !== null
+    const show = (composeChoice: "compose" | "direct", keys: boolean) => {
+      cleanup()
+      surface.setTypingSurface(composeChoice)
+      const state = makeState()
+      ;(
+        state.bootstrap as unknown as { mobile_accessory_bar?: boolean }
+      ).mobile_accessory_bar = keys
+      mockState = state
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      return [composeUp(), keysUp()]
+    }
+    expect(show("compose", true)).toEqual([true, true])
+    expect(show("compose", false)).toEqual([true, false])
+    // KEYS WITHOUT THE BOX: a finger holds the virtual Ctrl while a physical
+    // keyboard types the letter, which is exactly what direct typing is for.
+    expect(show("direct", true)).toEqual([false, true])
+    expect(show("direct", false)).toEqual([false, false])
   })
 
   it("writes the choice to localStorage, so a reload does not snap back", async () => {
@@ -4801,11 +4827,11 @@ describe("TerminalPane and theater mode", () => {
     surface.setTypingSurface(null)
   })
 
-  // THEATER PLUS DIRECT ON A PHONE: nothing under the terminal at all, and the
-  // floating pill's menu is the only way back. Theater keeps the compose and
-  // key rows because they are the typing surface on a coarse pointer; asking
-  // not to have a typing surface there is a different question, and it wins.
-  it("leaves no bottom bar at all in theater once typing goes direct", async () => {
+  // THEATER PLUS DIRECT ON A PHONE: the message box goes and the terminal keys
+  // stay, because a mode about looking at the terminal must not take away the
+  // keys a soft keyboard cannot produce. The bottom `⋯` rides the surviving
+  // row, so the way back is there rather than in the pill's menu.
+  it("keeps the terminal keys in theater once typing goes direct", async () => {
     const surface = await import("@/lib/typingSurface")
     const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
     goMobile()
@@ -4814,6 +4840,26 @@ describe("TerminalPane and theater mode", () => {
     act(() => surface.setTypingSurface("direct"))
 
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Input options" })).toBeTruthy()
+    expect(paneInputGroupFor(["s1"])?.surfaceSwitch).toBe(false)
+    surface.setTypingSurface(null)
+  })
+
+  // AND WITH THE KEYS HIDDEN TOO there really is nothing under the terminal,
+  // which is the state the pill's own menu carries the way back for.
+  it("leaves no bottom bar in theater with the keys hidden as well", async () => {
+    const surface = await import("@/lib/typingSurface")
+    const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
+    goMobile()
+    const state = { ...makeState(), theater: true } as DuxState
+    ;(
+      state.bootstrap as unknown as { mobile_accessory_bar?: boolean }
+    ).mobile_accessory_bar = false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => surface.setTypingSurface("direct"))
+
     expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
     expect(paneInputGroupFor(["s1"])?.surfaceSwitch).toBe(true)

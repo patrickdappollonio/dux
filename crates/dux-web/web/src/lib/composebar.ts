@@ -193,39 +193,54 @@ export function composeBarShown(
 }
 
 /**
- * IS THE VIRTUAL INPUT UP AT ALL: the compose box, the terminal keys, and the
- * `⋯` that hangs off them, as ONE surface under the terminal.
+ * DO THE TERMINAL KEYS BELONG UNDER THIS TERMINAL AT ALL?
  *
- * TWO ORTHOGONAL QUESTIONS, and treating them as one was the bug. WIDTH decides
- * the LAYOUT: how much room is there, so which shell you get. The POINTER
- * decides the DEFAULT TYPING SURFACE: is a finger doing the typing, so does the
- * text need a buffer where autocorrect and swipe have something to work with. A
- * tablet in landscape wants the desktop layout AND the buffered input, so the
- * bar travels with the pointer and renders inside the desktop shell too.
+ * The message box and the key row are INDEPENDENT surfaces, and the question
+ * each answers is a different one. The box is about where the text is composed;
+ * the row is about keys a soft keyboard cannot produce at all (Esc, Tab, a Ctrl
+ * chord, a soft newline). So a finger always has the row on offer, whatever the
+ * typing surface resolves to: holding the virtual Ctrl and pressing the letter
+ * on a hardware keyboard is a real way to work, and it is the reason the row
+ * outlives the box.
  *
- * ASKING TO TYPE DIRECTLY IN THE TERMINAL TAKES THE WHOLE BAR, keys included.
- * That is the point of the choice: the mode is "this terminal, full height, my
- * keyboard", and leaving a key row behind made it a half measure. A coarse
- * pointer used to keep the keys whatever the surface resolved to; it no longer
- * does, and the way back is the top menu's INPUT group rather than anything
- * down here.
+ * A fine pointer has those keys on the keyboard already, so the row is offered
+ * there only once the box is up: asking for the message box on a laptop brings
+ * its keys along rather than leaving the press inert.
  *
- * `never` IS THE ONE EXCEPTION, and it is not the same statement. It is
- * configuration saying "no message box", written by whoever set dux up, not a
- * person choosing to type into the terminal on this device; a finger still
- * cannot produce a Ctrl chord, and under `never` there is no surface switch
- * anywhere to bring the keys back with. So a coarse pointer keeps its key row
- * there, and the bar is that row alone.
+ * This is eligibility and not the answer: the row is also subject to its own
+ * Hide-terminal-keys preference, and to owning the input.
+ *
+ * TWO ORTHOGONAL QUESTIONS decide the box, and treating them as one was an
+ * older bug. WIDTH decides the LAYOUT: how much room is there, so which shell
+ * you get. The POINTER decides the DEFAULT TYPING SURFACE: is a finger doing
+ * the typing, so does the text need a buffer where autocorrect and swipe have
+ * something to work with. A tablet in landscape wants the desktop layout AND
+ * the buffered input, so the box travels with the pointer and renders inside
+ * the desktop shell too.
  */
-export function virtualInputUp(
+export function terminalKeysApply(
   mode: ComposeBarMode,
   coarsePointer: boolean,
   choice: TypingSurfaceChoice | null
 ): boolean {
-  return (
-    composeBarShown(mode, coarsePointer, choice) ||
-    (mode === "never" && coarsePointer)
-  )
+  return coarsePointer || composeBarShown(mode, coarsePointer, choice)
+}
+
+/**
+ * Would anything still be under the terminal after a switch to direct typing?
+ *
+ * The one-time hint that says where the way back went is for the case where
+ * nothing is: with a key row still down there, the bottom `⋯` is visibly
+ * carrying the way back and a toast pointing somewhere else is noise. Pure, and
+ * asked of the SURFACE AFTER the flip, which is why the choice is pinned to
+ * `direct` rather than passed in.
+ */
+export function bottomBarSurvivesDirect(
+  mode: ComposeBarMode,
+  coarsePointer: boolean,
+  keysVisible: boolean
+): boolean {
+  return keysVisible && terminalKeysApply(mode, coarsePointer, "direct")
 }
 
 /**
@@ -239,17 +254,13 @@ export function virtualInputUp(
  * `switchTypingSurface` helper so none of them can disagree about what a switch
  * means.
  *
- * ONE DIRECTION, now that the choice takes the whole bar: this cap can only
- * ever read "Box", because the row it sits in is gone the moment it is pressed.
- * It is still a toggle rather than a button, because the row also exists under
- * `never`, where no cap is offered at all.
  */
 export function typingSurfaceToggleOffered(
   mode: ComposeBarMode,
   coarsePointer: boolean,
   choice: TypingSurfaceChoice | null
 ): boolean {
-  return mode === "auto" && virtualInputUp(mode, coarsePointer, choice)
+  return mode === "auto" && terminalKeysApply(mode, coarsePointer, choice)
 }
 
 /**

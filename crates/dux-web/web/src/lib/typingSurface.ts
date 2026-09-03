@@ -145,25 +145,34 @@ export function directHintMessage(shell: TypingSurfaceShell): string {
  * THE ONE GESTURE that changes the typing surface, and the reason the switch
  * cannot become a dead end.
  *
- * Choosing to type directly in the terminal takes the WHOLE bottom bar away:
- * the message box, the terminal keys, and the `⋯` that hung off them. That is
- * the point of the mode, and it is also the moment a user has no way of knowing
- * where the way back went. So the first time it happens on a device, dux says
- * so, once, through the one raiser. INFO and not sticky: nothing is lost if it
- * goes unread, and the menu it names is on screen either way.
+ * Choosing to type directly in the terminal takes the message box away, and on
+ * a pane whose terminal keys are down too it takes the last row under the
+ * terminal with it, the `⋯` that hung off it included. That is the moment a
+ * user has no way of knowing where the way back went, so the first time it
+ * happens on a device dux says so, once, through the one raiser. INFO and not
+ * sticky: nothing is lost if it goes unread, and the menu it names is on screen
+ * either way.
  *
- * `setTypingSurface` stays the writer. Every surface that flips the choice (the
- * key row's cap, the input `⋯`, the top menu's INPUT group) calls this instead,
- * so none of them can raise a different hint or none at all.
+ * `nothingLeftBelow` is what makes it that moment rather than every switch. A
+ * key row that stays is a bottom `⋯` that stays, visibly carrying the way back,
+ * and a toast sending the reader to a different menu would be noise pointing at
+ * the wrong control. The caller knows which case it is; this module cannot.
+ *
+ * `setTypingSurface` stays the writer. Every surface that flips the choice
+ * calls this instead, so none of them can raise a different hint or none at all.
  *
  * The sentence names a control that is actually on the shell reading it, which
  * is why the width is consulted here rather than a shell being threaded down
- * from each of the three call sites: none of them knows, and all three are on
- * screen on both shells.
+ * from each call site: none of them knows, and all of them are on screen on
+ * both shells.
  */
-export function switchTypingSurface(next: TypingSurface): void {
+export function switchTypingSurface(
+  next: TypingSurface,
+  nothingLeftBelow: boolean,
+): void {
   setTypingSurface(next)
   if (next !== "direct") return
+  if (!nothingLeftBelow) return
   if (!directHintPending()) return
   // Marked BEFORE the raise, so a double-invoked caller cannot produce two.
   markDirectHintShown()
