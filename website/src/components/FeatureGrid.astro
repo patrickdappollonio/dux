@@ -3,7 +3,7 @@
 // The mockups are static: what you see is HTML and Tailwind, no JS.
 //
 // Every tile carries a surface marker: `Terminal`, `Web`, or `Both`. dux has two
-// front ends over one engine and a reader deciding between them should not have
+// front ends over one workspace and a reader deciding between them should not have
 // to guess which one a feature lives in. The marker is a promise, so it is
 // checked against the code, not against the tile's own copy. `Both` is the one
 // that costs us if it is wrong, because it reads as "this works in my browser".
@@ -44,7 +44,7 @@
             and does not behave as a flex child, so leaving it visible inside a
             flex row puts it somewhere different in every browser. */}
         <legend class="sr-only">Filter tiles by which front end they run on</legend>
-        <span>dux has two front ends over one engine, so each tile says where it lives:</span>
+        <span>dux has two front ends over one workspace, so each tile says where it lives:</span>
         <label class="tile-filter__chip pill pill-xs">
           <input class="tile-filter__box" type="checkbox" value="terminal" />
           Terminal
@@ -546,7 +546,7 @@
           <span class="pill pill-xs mt-0.5 shrink-0"><span class="sr-only">Available in: </span>Terminal</span>
         </div>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          Hand a running terminal session to the browser and take it back again, as many times as you like. Nothing relaunches and no agent notices, because the engine is passed across rather than rebuilt. Or keep the terminal: <span class="mono text-[color:var(--color-text)]">start-background-server</span> serves the browser behind it, and both faces drive the same live engine. One catch worth knowing: either way this starts from the terminal. Launch straight into <span class="mono text-[color:var(--color-text)]">dux server</span> and there is no terminal session to come back to.
+          Hand a running terminal session to the browser and take it back again, as many times as you like. Nothing relaunches and no agent notices, because the dux you already have starts serving in place rather than starting over. Or keep the terminal: <span class="mono text-[color:var(--color-text)]">start-background-server</span> serves the browser behind it, and both faces drive the same live agents. One catch worth knowing: either way this starts from the terminal. Launch straight into <span class="mono text-[color:var(--color-text)]">dux server</span> and there is no terminal session to come back to.
         </p>
       </article>
     </div>

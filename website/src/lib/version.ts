@@ -86,7 +86,7 @@ export async function getLatestVersion(repo: string): Promise<string | null> {
  *     with no markup changes.
  *
  * IT ANNOUNCES THE SURFACE, NOT THE TRAVEL. dux has two front ends over one
- * engine, both first class; reaching the workspace from a phone is a consequence
+ * workspace, both first class; reaching it from a phone is a consequence
  * of the web UI existing, not what the release added, so the badge names the
  * surface.
  */
