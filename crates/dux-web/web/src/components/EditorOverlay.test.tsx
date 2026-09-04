@@ -1349,10 +1349,12 @@ describe("a file drop that misses the tree", () => {
   })
 })
 
-// Every file mutation the editor performs CONFIRMS itself. Delete is the
-// sharp one: its dialog closes the moment it is confirmed rather than when the
-// request settles, so a silent success would leave no trace on screen at all.
-describe("file mutations confirm themselves", () => {
+// A file mutation confirms itself only when its outcome is not already on
+// screen. Delete is the sharp one: its dialog closes the moment it is
+// confirmed rather than when the request settles, so a silent success would
+// leave no trace at all. A create and an in-place rename are the opposite: the
+// tree row and the open tab carry the result, so they say nothing.
+describe("file mutations confirm themselves when nothing else does", () => {
   const ENTRY = {
     name: "notes.md",
     path: "notes.md",
@@ -1383,7 +1385,7 @@ describe("file mutations confirm themselves", () => {
     fireEvent.click(await screen.findByText(item))
   }
 
-  it("says what it created, naming the file", async () => {
+  it("creates without a word, because the new entry is in the tree", async () => {
     await mountWithTab(PATH)
     fireEvent.click(screen.getByRole("button", { name: /new file/i }))
     fireEvent.change(await screen.findByPlaceholderText("example.ts"), {
@@ -1391,29 +1393,31 @@ describe("file mutations confirm themselves", () => {
     })
     fireEvent.click(screen.getByRole("button", { name: /^create$/i }))
     await waitFor(() => expect(createFileMock).toHaveBeenCalled())
-    await waitFor(() =>
-      expect(toastSuccess).toHaveBeenCalledWith(
-        "Created file new.ts",
-        expect.anything(),
-      ),
-    )
-    expect(toastSuccess).toHaveBeenCalledTimes(1)
+    expect(toastSuccess).not.toHaveBeenCalled()
     expect(toastError).not.toHaveBeenCalled()
   })
 
-  it("says what it renamed, and to what", async () => {
+  it("renames without a word, because the row and the tab carry the new name", async () => {
     await rowMenu(/^Rename…$/)
     const field = await screen.findByDisplayValue("notes.md")
     fireEvent.change(field, { target: { value: "notes.txt" } })
     fireEvent.click(screen.getByRole("button", { name: /^rename$/i }))
     await waitFor(() => expect(renameMock).toHaveBeenCalled())
-    await waitFor(() =>
-      expect(toastSuccess).toHaveBeenCalledWith(
-        "Renamed notes.md to notes.txt",
-        expect.anything(),
-      ),
-    )
-    expect(toastSuccess).toHaveBeenCalledTimes(1)
+    expect(toastSuccess).not.toHaveBeenCalled()
+    expect(toastError).not.toHaveBeenCalled()
+  })
+
+  it("still reports a refused create, which the tree cannot show", async () => {
+    createFileMock.mockRejectedValueOnce(new Error("permission denied"))
+    await mountWithTab(PATH)
+    fireEvent.click(screen.getByRole("button", { name: /new file/i }))
+    fireEvent.change(await screen.findByPlaceholderText("example.ts"), {
+      target: { value: "new.ts" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /^create$/i }))
+    await waitFor(() => expect(toastError).toHaveBeenCalled())
+    expect(String(toastError.mock.calls[0][0])).toContain("permission denied")
+    expect(toastSuccess).not.toHaveBeenCalled()
   })
 
   it("says what it deleted, even though the dialog is already gone", async () => {

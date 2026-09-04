@@ -332,7 +332,10 @@ describe("the changes pane's multi-select", () => {
 
   // One request per verb: the batch route stages the lot in one git call and
   // broadcasts once. A per-file loop would churn the pane.
-  it("stages every checked path in one request and says so once", async () => {
+  //
+  // And it says nothing: the rows cross from Unstaged to Staged in the pane
+  // the click happened in, so a toast restating it is noise.
+  it("stages every checked path in one request and says nothing", async () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("b.ts")
@@ -341,7 +344,7 @@ describe("the changes pane's multi-select", () => {
 
     expect(stageMany).toHaveBeenCalledTimes(1)
     expect(stageMany).toHaveBeenCalledWith("s1", ["a.ts", "b.ts"])
-    expect(notifySuccess).toHaveBeenCalledTimes(1)
+    expect(notifySuccess).not.toHaveBeenCalled()
     expect(notifyError).not.toHaveBeenCalled()
   })
 

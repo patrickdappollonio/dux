@@ -1,44 +1,14 @@
 import { describe, expect, it } from "vitest"
 
-import {
-  createdMessage,
-  deletedMessage,
-  movedMessage,
-  renamedMessage,
-} from "./editorMutations"
+import { deletedMessage, movedMessage } from "./editorMutations"
 
 // The sentences the editor says after a file mutation lands. Every one of
 // them names the ENTRY, because the confirmation is worthless if the user
 // cannot tell which file it is about, and the delete dialog in particular is
 // already gone from the screen by the time the request settles.
 
-describe("createdMessage", () => {
-  it("names the kind and the full path", () => {
-    expect(createdMessage("file", "src/new.ts")).toBe("Created file src/new.ts")
-    expect(createdMessage("folder", "src/vendor")).toBe(
-      "Created folder src/vendor",
-    )
-  })
-
-  it("keeps the full path for a root-level entry too", () => {
-    expect(createdMessage("file", "README.md")).toBe("Created file README.md")
-  })
-})
-
-describe("renamedMessage", () => {
-  it("names the source in full and the destination by its new name", () => {
-    // Repeating "src/" on both sides would bury the one word that changed.
-    expect(renamedMessage("src/config.toml", "src/config.bak")).toBe(
-      "Renamed src/config.toml to config.bak",
-    )
-  })
-
-  it("handles a root-level rename, where there is no directory to strip", () => {
-    expect(renamedMessage("config.toml", "config.bak")).toBe(
-      "Renamed config.toml to config.bak",
-    )
-  })
-})
+// A create and an in-place rename say nothing at all: the tree row and the
+// open tab carry the result. What is left here is the pair that does speak.
 
 describe("movedMessage", () => {
   it("names the entry and the destination directory", () => {

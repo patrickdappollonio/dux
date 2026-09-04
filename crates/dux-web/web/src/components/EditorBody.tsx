@@ -57,11 +57,7 @@ import {
   renameTarget as computeRenameTarget,
 } from "@/lib/fileTreeOps"
 import { performMove } from "@/lib/moveEntry"
-import {
-  createdMessage,
-  deletedMessage,
-  renamedMessage,
-} from "@/lib/editorMutations"
+import { deletedMessage } from "@/lib/editorMutations"
 import {
   effectiveLanguageLabel,
   languageOverrideFor,
@@ -898,7 +894,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     return create
       .then(() => {
         setNewEntryTarget(null)
-        notifySuccess(createdMessage(kind, path))
+        // No toast: the entry appears in the tree, and a new FILE also opens in
+        // a pinned tab. The failure arm below still speaks, because the dialog
+        // stays open with nothing else to say why.
         revalidateDirs([dir])
         if (kind === "file") {
           editorOpenFile(root, path, { mode: "file", pin: true })
@@ -928,7 +926,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       .rename(root, from, to)
       .then(() => {
         setRenameEntryTarget(null)
-        notifySuccess(renamedMessage(from, to))
+        // No toast: the tree row and the open tab both carry the new name. A
+        // MOVE keeps its toast (see `handleMoveSubmit`), because the entry
+        // leaves the folder the user was looking at.
         editorRenameTabPaths(root, from, to)
         retargetOverrides(from, to)
         revalidateDirs([parentDir(from), parentDir(to)])

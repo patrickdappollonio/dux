@@ -108,10 +108,11 @@ function bulkResultToast(
   result: { done: string[]; refused: string[] },
 ): void {
   const past = verb === "stage" ? "staged" : "unstaged"
-  if (result.refused.length === 0) {
-    notifySuccess(`${fileCount(result.done.length)} ${past}.`)
-    return
-  }
+  // A clean stage or unstage says nothing: the rows move between the two
+  // sections of the pane the click happened in, which is the whole feedback.
+  // A REFUSAL still speaks, because the rows that did not move are exactly the
+  // ones that are no longer on screen to be looked at.
+  if (result.refused.length === 0) return
   notifyWarning(
     `${fileCount(result.done.length)} ${past}. ${fileCount(
       result.refused.length,
