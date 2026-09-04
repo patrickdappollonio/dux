@@ -70,6 +70,10 @@ struct ChangeRenderContext<'a> {
     show_line_numbers: bool,
     line_number_width: usize,
     tab_width: u16,
+    /// False once the file is big enough that syntect's per-line cost is the
+    /// dominant one (see [`DiffSizeVerdict`]). The added/removed coloring is
+    /// unaffected; only the token colors inside a line go away.
+    highlight: bool,
 }
 
 fn render_change_line<'a>(
@@ -108,8 +112,19 @@ fn render_change_line<'a>(
         ));
     }
 
-    match highlighter.highlight_line(&content, &context.cache.syntax_set) {
-        Ok(ranges) if tag == ChangeTag::Equal => {
+    // `None` means "render this line plainly", which a skipped highlight and a
+    // highlighter that could not parse the line reach by different routes and
+    // want the same answer to.
+    let highlighted = if context.highlight {
+        highlighter
+            .highlight_line(&content, &context.cache.syntax_set)
+            .ok()
+    } else {
+        None
+    };
+
+    match highlighted {
+        Some(ranges) if tag == ChangeTag::Equal => {
             spans.push(Span::styled(prefix, Style::default().fg(base_fg)));
             spans.extend(
                 ranges
@@ -117,7 +132,7 @@ fn render_change_line<'a>(
                     .map(|(style, text)| Span::styled(text.to_string(), syntect_to_ratatui(style))),
             );
         }
-        Ok(ranges) => {
+        Some(ranges) => {
             let background = background.unwrap_or(Color::Reset);
             spans.push(Span::styled(
                 prefix,
@@ -127,7 +142,7 @@ fn render_change_line<'a>(
                 Span::styled(text.to_string(), syntect_to_ratatui(style).bg(background))
             }));
         }
-        Err(_) => spans.push(Span::styled(
+        None => spans.push(Span::styled(
             format!("{prefix}{content}"),
             Style::default()
                 .fg(base_fg)
@@ -137,11 +152,146 @@ fn render_change_line<'a>(
     Line::from(spans)
 }
 
+/// Everything that identifies one diff request, so an answer that arrives after
+/// the user has moved on can be recognised and dropped.
+///
+/// The paths say WHICH file, and the two render settings say which shape of it:
+/// toggling line numbers re-requests the same file and the old answer, keyed on
+/// the path alone, would be indistinguishable from the new one. `seq` separates
+/// two requests that agree on all of that, which is what a plain refresh of an
+/// unchanged view is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffRequestKey {
+    pub(crate) worktree_path: String,
+    pub(crate) rel_path: String,
+    pub(crate) show_line_numbers: bool,
+    pub(crate) tab_width: u16,
+    pub(crate) seq: u64,
+}
+
+/// A finished diff, tagged with the request that asked for it.
+pub(crate) struct DiffAnswer {
+    pub(crate) key: DiffRequestKey,
+    /// The rendered diff, or the message the read failed with. Carried rather
+    /// than flattened into empty lines: "git could not answer" and "this file
+    /// has no changes" are different facts.
+    pub(crate) result: Result<DiffOutput, String>,
+}
+
+/// Compute one diff on a thread of its own and post the answer back.
+///
+/// The only way to reach [`diff_file`] from outside this module. The theme is
+/// copied and the syntax cache is shared by `Arc`, so the worker owns
+/// everything it renders with and the run loop keeps drawing while it works.
+pub(crate) fn spawn_diff_job(
+    key: DiffRequestKey,
+    theme: AppTheme,
+    cache: std::sync::Arc<SyntaxCache>,
+    tx: std::sync::mpsc::Sender<DiffAnswer>,
+) {
+    std::thread::spawn(move || {
+        let result = diff_file(
+            Path::new(&key.worktree_path),
+            &key.rel_path,
+            &theme,
+            &cache,
+            key.show_line_numbers,
+            key.tab_width,
+        )
+        .map_err(|error| format!("{error:#}"));
+        let _ = tx.send(DiffAnswer { key, result });
+    });
+}
+
+/// Combined size of the two versions, in bytes, above which the diff is
+/// rendered with no syntax highlighting.
+///
+/// A megabyte of source is where syntect stops being free: it highlights every
+/// line of every hunk, a whole-file rewrite makes every line a hunk line, and
+/// the per-line cost is what turns a diff that took a moment into one that
+/// takes seconds. Dropping the token colors keeps the part of a diff people
+/// actually read (which lines went, which arrived) and costs only the colors
+/// inside them.
+pub(crate) const DIFF_PLAIN_ABOVE_BYTES: usize = 1 << 20;
+
+/// Combined line count of the two versions above which the diff is rendered
+/// with no syntax highlighting.
+///
+/// Bytes alone miss the shape that hurts most: a file of very short lines is
+/// cheap to read and expensive to highlight, because the cost is per line
+/// rather than per byte. Twenty thousand lines is comfortably above anything
+/// hand-written and comfortably below the point where the wait is noticeable.
+pub(crate) const DIFF_PLAIN_ABOVE_LINES: usize = 20_000;
+
+/// Combined size of the two versions, in bytes, above which dux says so
+/// instead of diffing.
+///
+/// The diff itself, not the highlighting, is what costs here: `similar` is
+/// superlinear in the number of differing lines, so a pair of multi-megabyte
+/// files can hold a worker thread for minutes. Sixteen megabytes is far past
+/// anything a person reads in a terminal pane and still leaves generated
+/// lockfiles and vendored sources comfortably inside.
+pub(crate) const DIFF_REFUSE_ABOVE_BYTES: usize = 16 << 20;
+
+/// Combined line count of the two versions above which dux says so instead of
+/// diffing. The line-shaped twin of [`DIFF_REFUSE_ABOVE_BYTES`], for the same
+/// reason [`DIFF_PLAIN_ABOVE_LINES`] exists.
+pub(crate) const DIFF_REFUSE_ABOVE_LINES: usize = 200_000;
+
+/// What the two versions' size says dux should do with them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiffSizeVerdict {
+    /// Small enough for the ordinary syntax-highlighted diff.
+    Full,
+    /// Diff it, but without syntax highlighting.
+    Plain,
+    /// Too large to diff at all; say so rather than freezing on it.
+    TooLarge,
+}
+
+/// Judge the two versions by both bytes and lines, taking the worse answer.
+///
+/// Sums the two sides rather than looking at the larger one: the work is done
+/// over both, and a one-line file replaced by a ten-megabyte one costs the same
+/// as two five-megabyte ones.
+pub(crate) fn diff_size_verdict(old: &[u8], new: &[u8]) -> DiffSizeVerdict {
+    let bytes = old.len() + new.len();
+    let lines = count_lines(old) + count_lines(new);
+    if bytes > DIFF_REFUSE_ABOVE_BYTES || lines > DIFF_REFUSE_ABOVE_LINES {
+        DiffSizeVerdict::TooLarge
+    } else if bytes > DIFF_PLAIN_ABOVE_BYTES || lines > DIFF_PLAIN_ABOVE_LINES {
+        DiffSizeVerdict::Plain
+    } else {
+        DiffSizeVerdict::Full
+    }
+}
+
+/// Count the lines the diff will actually walk: newlines, plus a last line with
+/// no newline after it.
+fn count_lines(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count();
+    if bytes.last() == Some(&b'\n') {
+        newlines
+    } else {
+        newlines + 1
+    }
+}
+
 /// Compute a syntax-highlighted, unified diff for a single file.
 ///
 /// `worktree_path` is the root of the git worktree and `rel_path` is the
 /// file path relative to it (as reported by `git status --porcelain`).
-pub fn diff_file(
+///
+/// Private on purpose: every one of the git reads, the whole-file read, the
+/// line diff and the highlighting inside it is slow enough to freeze the run
+/// loop on a large file, and the only way to reach it from the app is
+/// [`spawn_diff_job`], which runs it on a thread of its own. Keeping it out of
+/// the module's public surface is what makes "never on the UI thread" a
+/// compile-time fact rather than a convention.
+fn diff_file(
     worktree_path: &Path,
     rel_path: &str,
     theme: &AppTheme,
@@ -164,6 +314,16 @@ pub fn diff_file(
         || !dux_core::diff::is_renderable_text(&new_bytes)
     {
         return Ok(binary_diff_output(
+            rel_path,
+            old_bytes.len(),
+            new_bytes.len(),
+            theme,
+        ));
+    }
+
+    let verdict = diff_size_verdict(&old_bytes, &new_bytes);
+    if verdict == DiffSizeVerdict::TooLarge {
+        return Ok(too_large_diff_output(
             rel_path,
             old_bytes.len(),
             new_bytes.len(),
@@ -199,6 +359,7 @@ pub fn diff_file(
         show_line_numbers,
         line_number_width: ln_width,
         tab_width: diff_tab_width,
+        highlight: verdict == DiffSizeVerdict::Full,
     };
 
     // File header.
@@ -264,6 +425,43 @@ pub fn diff_file(
         lines,
         gutter_width,
     })
+}
+
+/// What the pane shows instead of a diff dux refused to compute.
+///
+/// Honest rather than empty: it names the sizes it judged and says what the
+/// user can still do, because the file itself is perfectly readable, just not
+/// here.
+fn too_large_diff_output(
+    rel_path: &str,
+    old_size: usize,
+    new_size: usize,
+    theme: &AppTheme,
+) -> DiffOutput {
+    DiffOutput {
+        lines: vec![
+            Line::from(Span::styled(
+                format!("--- a/{rel_path}"),
+                Style::default()
+                    .fg(theme.diff_file_header)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("+++ b/{rel_path}"),
+                Style::default()
+                    .fg(theme.diff_file_header)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("File too large to diff."),
+            Line::from(format!("Old size: {old_size} bytes")),
+            Line::from(format!("New size: {new_size} bytes")),
+            Line::from(
+                "Comparing versions this large would hold dux up for minutes, so it does not \
+                 start. Open the file in your editor, or diff it with git directly.",
+            ),
+        ],
+        gutter_width: 0,
+    }
 }
 
 fn binary_diff_output(
@@ -1007,5 +1205,174 @@ mod tests {
         )
         .unwrap();
         assert_eq!(without_ln.gutter_width, 0);
+    }
+
+    #[test]
+    fn the_size_verdict_takes_the_worse_of_bytes_and_lines() {
+        let small = b"one\ntwo\n".as_slice();
+        assert_eq!(diff_size_verdict(small, small), DiffSizeVerdict::Full);
+
+        // Over the byte threshold on one side alone, with almost no lines.
+        let wide = vec![b'x'; DIFF_PLAIN_ABOVE_BYTES + 1];
+        assert_eq!(diff_size_verdict(&wide, b""), DiffSizeVerdict::Plain);
+
+        // Over the line threshold, comfortably under the byte one.
+        let tall = b"x\n".repeat(DIFF_PLAIN_ABOVE_LINES + 1);
+        assert!(tall.len() < DIFF_PLAIN_ABOVE_BYTES);
+        assert_eq!(diff_size_verdict(&tall, b""), DiffSizeVerdict::Plain);
+
+        // The two sides are summed, so neither alone has to cross the line.
+        let half = b"x\n".repeat(DIFF_PLAIN_ABOVE_LINES / 2 + 1);
+        assert_eq!(diff_size_verdict(&half, &half), DiffSizeVerdict::Plain);
+
+        let huge = b"x\n".repeat(DIFF_REFUSE_ABOVE_LINES + 1);
+        assert_eq!(diff_size_verdict(&huge, b""), DiffSizeVerdict::TooLarge);
+    }
+
+    #[test]
+    fn a_last_line_with_no_newline_still_counts() {
+        assert_eq!(count_lines(b""), 0);
+        assert_eq!(count_lines(b"one\n"), 1);
+        assert_eq!(count_lines(b"one"), 1);
+        assert_eq!(count_lines(b"one\ntwo"), 2);
+    }
+
+    /// Below both thresholds the diff is highlighted, so a line of Rust comes
+    /// back as several differently-styled spans rather than one.
+    #[test]
+    fn a_small_file_is_still_syntax_highlighted() {
+        let dir = setup_text_repo("small.rs", "fn main() {}\n", "fn main() { let x = 1; }\n");
+        let cache = SyntaxCache::new();
+
+        let output = diff_file(
+            dir.path(),
+            "small.rs",
+            &AppTheme::default_dark(),
+            &cache,
+            false,
+            4,
+        )
+        .unwrap();
+
+        let inserted = output
+            .lines
+            .iter()
+            .find(|line| line.to_string().starts_with('+') && line.to_string().contains("let"))
+            .expect("the added line");
+        assert!(
+            inserted.spans.len() > 2,
+            "a highlighted line of Rust is split into token spans, got {:?}",
+            inserted.spans
+        );
+    }
+
+    /// Past the line threshold the token colors go away and the added/removed
+    /// coloring stays: the line is one span carrying its `+` prefix.
+    #[test]
+    fn a_file_past_the_line_threshold_is_diffed_without_highlighting() {
+        let base: String = "let value = 1;\n".repeat(DIFF_PLAIN_ABOVE_LINES / 2 + 10);
+        let changed = format!("{base}let extra = 2;\n");
+        assert!(
+            base.len() + changed.len() < DIFF_PLAIN_ABOVE_BYTES,
+            "this fixture must cross the LINE threshold and no other"
+        );
+        let dir = setup_text_repo("big.rs", &base, &changed);
+        let cache = SyntaxCache::new();
+
+        let output = diff_file(
+            dir.path(),
+            "big.rs",
+            &AppTheme::default_dark(),
+            &cache,
+            false,
+            4,
+        )
+        .unwrap();
+
+        let inserted = output
+            .lines
+            .iter()
+            .find(|line| line.to_string().starts_with("+let extra"))
+            .expect("the added line");
+        assert_eq!(
+            inserted.spans.len(),
+            1,
+            "an unhighlighted line is one span, got {:?}",
+            inserted.spans
+        );
+        assert_eq!(inserted.spans[0].content, "+let extra = 2;");
+        assert_eq!(
+            inserted.spans[0].style.fg,
+            Some(AppTheme::default_dark().diff_add),
+            "the added coloring survives losing the syntax highlighting"
+        );
+    }
+
+    /// Past the hard cap dux says so in the pane rather than holding a worker
+    /// thread for minutes on a diff nobody can read anyway.
+    #[test]
+    fn a_file_past_the_hard_cap_is_refused_in_words() {
+        let base: String = "x\n".repeat(DIFF_REFUSE_ABOVE_LINES + 1);
+        let changed = format!("{base}y\n");
+        let dir = setup_text_repo("huge.txt", &base, &changed);
+        let cache = SyntaxCache::new();
+
+        let output = diff_file(
+            dir.path(),
+            "huge.txt",
+            &AppTheme::default_dark(),
+            &cache,
+            false,
+            4,
+        )
+        .unwrap();
+
+        let rendered: Vec<String> = output.lines.iter().map(|line| line.to_string()).collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("File too large to diff.")),
+            "got {rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|line| line.contains("Old size:")),
+            "the refusal names the sizes it judged, got {rendered:?}"
+        );
+        assert_eq!(output.gutter_width, 0);
+    }
+
+    /// The worker path is the only way in from the app, so it has to produce
+    /// exactly what the direct call does, tagged with the request that asked.
+    #[test]
+    fn the_worker_posts_the_answer_back_tagged_with_its_request() {
+        let dir = setup_text_repo("worker.txt", "aaa\n", "aaa\nbbb\n");
+        let key = DiffRequestKey {
+            worktree_path: dir.path().to_string_lossy().to_string(),
+            rel_path: "worker.txt".to_string(),
+            show_line_numbers: true,
+            tab_width: 4,
+            seq: 7,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        spawn_diff_job(
+            key.clone(),
+            AppTheme::default_dark(),
+            std::sync::Arc::new(SyntaxCache::new()),
+            tx,
+        );
+
+        let answer = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the worker answers");
+        assert_eq!(answer.key, key);
+        let output = answer.result.expect("a diff");
+        assert_eq!(output.gutter_width, 6);
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.to_string().contains("+bbb"))
+        );
     }
 }

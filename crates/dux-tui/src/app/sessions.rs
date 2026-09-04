@@ -3684,27 +3684,29 @@ impl App {
             return Ok(());
         };
         let worktree_path = worktree_path.to_string_lossy().to_string();
-        let output = crate::diff::diff_file(
-            Path::new(&worktree_path),
-            &rel_path,
-            &self.theme,
-            &self.syntax_cache,
-            self.show_diff_line_numbers,
-            self.engine.config.ui.diff_tab_width,
-        )?;
+        // The pane switches to Diff straight away and starts empty. Everything
+        // that fills it (a git read, a whole-file read, the line diff, the
+        // highlighting) runs on a worker, so a multi-megabyte file no longer
+        // holds the run loop while it is computed.
         self.center_mode = CenterMode::Diff {
-            lines: Arc::new(output.lines),
+            lines: Arc::new(Vec::new()),
             scroll: 0,
-            gutter_width: output.gutter_width,
-            worktree_path,
-            rel_path,
+            gutter_width: 0,
+            worktree_path: worktree_path.clone(),
+            rel_path: rel_path.clone(),
         };
         self.focus = FocusPane::Center;
+        self.begin_diff_computation(worktree_path, rel_path, 0);
         Ok(())
     }
 
-    /// Re-generate the currently displayed diff (e.g. after toggling line numbers).
-    pub(crate) fn refresh_current_diff(&mut self) -> Result<()> {
+    /// Re-generate the currently displayed diff (e.g. after toggling line
+    /// numbers, or after a config reload changed the tab width).
+    ///
+    /// The already-rendered lines stay on screen until the new ones land: this
+    /// is a re-render of something the user is already reading, not an opening,
+    /// so blanking the pane would be a flicker rather than an explanation.
+    pub(crate) fn refresh_current_diff(&mut self) {
         let (worktree_path, rel_path, scroll) = match &self.center_mode {
             CenterMode::Diff {
                 worktree_path,
@@ -3712,24 +3714,130 @@ impl App {
                 scroll,
                 ..
             } => (worktree_path.clone(), rel_path.clone(), *scroll),
-            _ => return Ok(()),
+            _ => return,
         };
-        let output = crate::diff::diff_file(
-            Path::new(&worktree_path),
-            &rel_path,
-            &self.theme,
-            &self.syntax_cache,
-            self.show_diff_line_numbers,
-            self.engine.config.ui.diff_tab_width,
-        )?;
-        self.center_mode = CenterMode::Diff {
-            lines: Arc::new(output.lines),
+        self.begin_diff_computation(worktree_path, rel_path, scroll);
+    }
+
+    /// Dispatch one diff computation to a worker, superseding any in flight.
+    ///
+    /// The busy is deferred by [`SLOW_DIFF_READ`] for the same reason a
+    /// selection-driven changed-files read defers its own: most diffs land
+    /// before anyone could read a spinner, and writing over the status line on
+    /// every file the user arrows through would bury whatever it was saying.
+    fn begin_diff_computation(&mut self, worktree_path: String, rel_path: String, scroll: u16) {
+        self.diff_request_seq = self.diff_request_seq.wrapping_add(1);
+        let key = crate::diff::DiffRequestKey {
+            worktree_path,
+            rel_path: rel_path.clone(),
+            show_line_numbers: self.show_diff_line_numbers,
+            tab_width: self.engine.config.ui.diff_tab_width,
+            seq: self.diff_request_seq,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        crate::diff::spawn_diff_job(key.clone(), self.theme, Arc::clone(&self.syntax_cache), tx);
+        self.pending_diff = Some(PendingDiff {
+            key,
+            rx,
+            label: rel_path,
             scroll,
-            gutter_width: output.gutter_width,
+            announce_at: Some(Instant::now() + SLOW_DIFF_READ),
+        });
+    }
+
+    /// Explain a blank Diff pane once the computation has gone on long enough
+    /// to be a wait. Called once per run-loop tick; a diff that lands first
+    /// takes its pending record with it and never gets here.
+    pub(crate) fn announce_slow_diff(&mut self, now: Instant) {
+        let Some(pending) = self.pending_diff.as_mut() else {
+            return;
+        };
+        let Some(announce_at) = pending.announce_at else {
+            return;
+        };
+        if now < announce_at {
+            return;
+        }
+        pending.announce_at = None;
+        let message = diff_read_busy(&pending.label);
+        self.status.set(
+            now,
+            Some(DIFF_STATUS_KEY.to_string()),
+            StatusTone::Busy,
+            message,
+        );
+    }
+
+    /// Drop the in-flight diff because the pane it was for is gone.
+    ///
+    /// Retiring the spinner here rather than waiting for the worker matters:
+    /// the wait it was explaining is over from the user's point of view the
+    /// moment the pane closes, and a busy nobody retires expires to a warning
+    /// about work that was abandoned rather than lost.
+    pub(crate) fn abandon_pending_diff(&mut self) {
+        if self.pending_diff.take().is_some() {
+            self.status.clear(DIFF_STATUS_KEY, None);
+        }
+    }
+
+    /// Fold a landed diff into the pane that asked for it.
+    ///
+    /// The answer is dropped unless its key is still the pending one. A diff of
+    /// a multi-megabyte file can easily outlast the user's interest in it, and
+    /// painting a superseded answer over the pane would show one file's diff
+    /// under another file's name.
+    pub(crate) fn drain_pending_diff(&mut self) {
+        let Some(pending) = self.pending_diff.as_ref() else {
+            return;
+        };
+        let Ok(answer) = pending.rx.try_recv() else {
+            return;
+        };
+        let pending = self.pending_diff.take().expect("checked just above");
+        if answer.key != pending.key {
+            return;
+        }
+        // The user closed the diff (or moved to another agent) while the worker
+        // was running. Retire the spinner without writing over the status line.
+        let CenterMode::Diff {
             worktree_path,
             rel_path,
+            ..
+        } = &self.center_mode
+        else {
+            self.status.clear(DIFF_STATUS_KEY, None);
+            return;
         };
-        Ok(())
+        if *worktree_path != answer.key.worktree_path || *rel_path != answer.key.rel_path {
+            self.status.clear(DIFF_STATUS_KEY, None);
+            return;
+        }
+        match answer.result {
+            Ok(output) => {
+                self.center_mode = CenterMode::Diff {
+                    lines: Arc::new(output.lines),
+                    scroll: pending.scroll,
+                    gutter_width: output.gutter_width,
+                    worktree_path: answer.key.worktree_path,
+                    rel_path: answer.key.rel_path,
+                };
+                self.status.clear(DIFF_STATUS_KEY, None);
+            }
+            Err(error) => {
+                self.center_mode = CenterMode::Agent;
+                self.focus = FocusPane::Files;
+                self.status.set(
+                    Instant::now(),
+                    Some(DIFF_STATUS_KEY.to_string()),
+                    StatusTone::Error,
+                    format!(
+                        "Could not diff \"{}\": {}. The diff view is closed; the file itself is untouched.",
+                        pending.label,
+                        error.trim().trim_end_matches('.')
+                    ),
+                );
+            }
+        }
     }
 
     pub(crate) fn copy_selected_path(&mut self) -> Result<()> {
@@ -4645,7 +4753,9 @@ mod tests {
             welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
             pr_banner_at_bottom: true,
-            syntax_cache: crate::diff::SyntaxCache::new(),
+            syntax_cache: Arc::new(crate::diff::SyntaxCache::new()),
+            pending_diff: None,
+            diff_request_seq: 0,
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,

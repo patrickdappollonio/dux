@@ -60,6 +60,10 @@ const GITHUB_PR_OPEN_LABEL: OpalineColor = OpalineColor::new(0, 255, 0);
 const GITHUB_PR_MERGED_LABEL: OpalineColor = OpalineColor::new(170, 100, 220);
 const GITHUB_PR_CLOSED_LABEL: OpalineColor = OpalineColor::new(140, 80, 80);
 
+/// Every field is a `Color`, so the whole palette is trivially copyable. That
+/// is what lets a background worker be handed the theme it must render with
+/// instead of borrowing the app's.
+#[derive(Clone, Copy)]
 pub struct Theme {
     /// Base surface color for the dux app — used as a frame-wide pre-fill so
     /// every cell that no widget explicitly paints (gutters, modal interiors,

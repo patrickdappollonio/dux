@@ -549,7 +549,15 @@ pub struct App {
     pub(crate) welcome_logo_alt: bool,
     pub(crate) pr_banner_at_bottom: bool,
     /// Cached syntax highlighting resources shared across diff computations.
-    pub(crate) syntax_cache: SyntaxCache,
+    /// Shared by `Arc` because every computation runs on a worker thread.
+    pub(crate) syntax_cache: Arc<SyntaxCache>,
+    /// The in-flight diff computation, if any. One slot: the center pane shows
+    /// one diff, so a new request supersedes the old one rather than queueing
+    /// behind it.
+    pub(crate) pending_diff: Option<PendingDiff>,
+    /// Monotonic request counter, stamped into every [`crate::diff::DiffRequestKey`]
+    /// so two requests that agree on file and settings are still told apart.
+    pub(crate) diff_request_seq: u64,
     /// Reusable snapshot buffer to avoid per-frame allocation of terminal cells.
     pub(crate) snapshot_buf: TerminalSnapshot,
     /// ID of the provider that last populated `snapshot_buf`, used to detect
@@ -911,6 +919,38 @@ fn changed_files_read_busy(label: &str) -> String {
 /// narrated; above it the user is looking at an empty Changes pane and deserves
 /// to know why.
 pub const SLOW_CHANGED_FILES_READ: Duration = Duration::from_millis(300);
+
+/// The in-flight diff computation: the request it is for, the channel its
+/// answer arrives on, and whether the status line still owes the user a
+/// spinner.
+pub struct PendingDiff {
+    pub key: crate::diff::DiffRequestKey,
+    pub rx: mpsc::Receiver<crate::diff::DiffAnswer>,
+    /// The file the diff is for, for the status messages.
+    pub label: String,
+    /// Where the pane was scrolled to when the request went out, restored when
+    /// the answer lands so a re-render (a line-numbers toggle, a config reload)
+    /// does not throw the user back to the top of the file.
+    pub scroll: u16,
+    /// When the busy is still owed to the status line, and from when. `None`
+    /// once it has been shown.
+    pub announce_at: Option<Instant>,
+}
+
+/// The status key every diff computation shares. One slot in the app means one
+/// key: a new request retires the previous one's spinner rather than leaving
+/// two open at once.
+pub const DIFF_STATUS_KEY: &str = "diff-file";
+
+/// How long a diff may take before the status line explains the empty pane.
+/// The same judgement as [`SLOW_CHANGED_FILES_READ`], and deliberately the same
+/// number: both are "the pane is blank and the user is looking at it".
+pub const SLOW_DIFF_READ: Duration = Duration::from_millis(300);
+
+/// The one busy wording for a diff computation.
+fn diff_read_busy(label: &str) -> String {
+    format!("Computing the diff for \"{label}\"\u{2026}")
+}
 
 // The reconnect / fresh-restart status-op outcome is the CORE-owned
 // `dux_core::engine::LaunchOutcome`, and its message mapping is the core-owned
@@ -3850,7 +3890,9 @@ impl App {
             welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
             pr_banner_at_bottom,
-            syntax_cache: SyntaxCache::new(),
+            syntax_cache: Arc::new(SyntaxCache::new()),
+            pending_diff: None,
+            diff_request_seq: 0,
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
@@ -4032,6 +4074,7 @@ impl App {
         self.tick_count = self.tick_count.wrapping_add(1);
         self.reconcile_scroll_mode();
         self.announce_slow_changed_files_read(Instant::now());
+        self.announce_slow_diff(Instant::now());
         self.status.tick(Instant::now(), BUSY_TIMEOUT);
     }
 
@@ -4384,6 +4427,7 @@ impl App {
         if matches!(self.center_mode, CenterMode::Diff { .. }) {
             self.center_mode = CenterMode::Agent;
             self.focus = FocusPane::Files;
+            self.abandon_pending_diff();
             self.set_info("Closed diff view, returned to agent output.");
             return true;
         }
@@ -4398,6 +4442,7 @@ impl App {
     pub(crate) fn close_diff_view(&mut self) {
         if matches!(self.center_mode, CenterMode::Diff { .. }) {
             self.center_mode = CenterMode::Agent;
+            self.abandon_pending_diff();
         }
     }
 
@@ -4956,7 +5001,7 @@ impl App {
                 self.engine
                     .config_writer
                     .save_lazy(self.engine.config.clone());
-                let _ = self.refresh_current_diff();
+                self.refresh_current_diff();
                 let state = if self.show_diff_line_numbers {
                     "enabled"
                 } else {
@@ -5200,7 +5245,7 @@ impl App {
             self.engine.spawn_pr_sync_worker();
         }
         self.reload_changed_files();
-        self.refresh_current_diff()?;
+        self.refresh_current_diff();
         // `[server] serve_while_tui` is both the startup default and a live
         // switch, so a reload that flipped it acts now rather than at the next
         // start: a user who edited the file to turn the listener off has asked for

@@ -12830,6 +12830,142 @@ not_a_real_action = ["x"]
         );
     }
 
+    /// Point the selected agent at a real repository holding one modified file,
+    /// with that file selected in the changes pane, so the diff actions have
+    /// something to open.
+    fn select_a_modified_file_in_a_repo(app: &mut App, repo: &std::path::Path) {
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .expect("git");
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        std::fs::write(repo.join("notes.md"), "hello\n").expect("write");
+        git(&["add", "notes.md"]);
+        git(&["commit", "-m", "initial"]);
+        std::fs::write(repo.join("notes.md"), "hello\nworld\n").expect("write");
+
+        select_standalone_agent(app, repo);
+        app.engine.folder_repo_statuses.insert(
+            app.engine.sessions[0].id.clone(),
+            dux_core::git::FolderRepoStatus::WorkingRepo,
+        );
+        app.engine.unstaged_files = vec![dux_core::model::ChangedFile {
+            path: "notes.md".to_string(),
+            status: "M".to_string(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }];
+        app.right_section = RightSection::Unstaged;
+        app.files_index = 0;
+    }
+
+    /// Opening a diff must not compute it. Everything expensive rides a worker,
+    /// so the call returns with the pane switched, empty, and a request in
+    /// flight; the lines arrive on a later tick.
+    #[test]
+    fn opening_a_diff_returns_before_the_diff_is_computed() {
+        let repo = tempfile::tempdir().expect("repo");
+        let mut app = test_app(default_bindings());
+        select_a_modified_file_in_a_repo(&mut app, repo.path());
+
+        app.open_diff_for_selected_file().expect("open the diff");
+
+        let CenterMode::Diff { ref lines, .. } = app.center_mode else {
+            panic!("the pane switched to the diff view");
+        };
+        assert!(
+            lines.is_empty(),
+            "nothing is rendered until the worker answers"
+        );
+        let pending = app.pending_diff.as_ref().expect("a request is in flight");
+        assert_eq!(pending.key.rel_path, "notes.md");
+
+        // The worker's answer fills the pane on a later drain.
+        let answer = pending
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the worker answers");
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(answer).expect("hand it back for the drain");
+        app.pending_diff.as_mut().expect("pending").rx = rx;
+        app.drain_pending_diff();
+
+        let CenterMode::Diff { ref lines, .. } = app.center_mode else {
+            panic!("still the diff view");
+        };
+        assert!(
+            lines.iter().any(|line| line.to_string().contains("+world")),
+            "the computed diff landed"
+        );
+        assert!(app.pending_diff.is_none(), "the request is retired");
+    }
+
+    /// A diff of a big file can easily outlast the user's interest in it. An
+    /// answer whose request is no longer the pending one is dropped: painting
+    /// it would show one file's diff under another file's name.
+    #[test]
+    fn a_superseded_diff_answer_is_dropped() {
+        let repo = tempfile::tempdir().expect("repo");
+        let mut app = test_app(default_bindings());
+        select_a_modified_file_in_a_repo(&mut app, repo.path());
+
+        app.open_diff_for_selected_file().expect("open the diff");
+        let stale_key = app.pending_diff.as_ref().expect("pending").key.clone();
+        let real_answer = app
+            .pending_diff
+            .as_ref()
+            .expect("pending")
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the worker answers");
+        assert_eq!(real_answer.key, stale_key);
+
+        // The user asked again (a line-numbers toggle, say) before the first
+        // answer was drained, so the pending key moved on.
+        app.show_diff_line_numbers = !app.show_diff_line_numbers;
+        app.refresh_current_diff();
+        let live_key = app.pending_diff.as_ref().expect("pending").key.clone();
+        assert_ne!(live_key, stale_key);
+
+        // Deliver the stale answer on the live channel.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(real_answer).expect("send the stale answer");
+        app.pending_diff.as_mut().expect("pending").rx = rx;
+        app.drain_pending_diff();
+
+        let CenterMode::Diff { ref lines, .. } = app.center_mode else {
+            panic!("still the diff view");
+        };
+        assert!(
+            lines.is_empty(),
+            "the superseded answer never reaches the pane"
+        );
+    }
+
+    /// Closing the diff retires the spinner straight away: the wait it was
+    /// explaining is over from the user's point of view, whatever the worker is
+    /// still doing.
+    #[test]
+    fn closing_the_diff_retires_its_pending_request() {
+        let repo = tempfile::tempdir().expect("repo");
+        let mut app = test_app(default_bindings());
+        select_a_modified_file_in_a_repo(&mut app, repo.path());
+
+        app.open_diff_for_selected_file().expect("open the diff");
+        assert!(app.pending_diff.is_some());
+
+        app.close_diff_view();
+
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+        assert!(app.pending_diff.is_none(), "the request is abandoned");
+    }
+
     #[test]
     fn pull_from_remote_blocks_repeat_presses_while_pull_is_running() {
         let mut app = test_app(default_bindings());
