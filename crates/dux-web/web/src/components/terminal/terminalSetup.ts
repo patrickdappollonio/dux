@@ -19,6 +19,7 @@ import {
 import { createLinkPress, type LinkPress } from "./linkPress"
 import type { LiveSettings } from "./liveValues"
 import type { ResizeCoordinator } from "./resizeCoordinator"
+import { attachWebglRenderer } from "./webglRenderer"
 
 type Disposable = { dispose: () => void }
 
@@ -30,6 +31,10 @@ export type TerminalSetup = {
   fontSize: number
   disposeAgentNotifications: () => void
   disposeOsc8Gate: Disposable
+  /// The webgl renderer, when this browser got one. Written by `openTerminal`
+  /// (the addon needs an open terminal) and released by `disposeTerminalSetup`;
+  /// null on every DOM-renderer rung of the ladder in `webglRenderer.ts`.
+  renderer: Disposable | null
 }
 
 type CreateTerminalSetupOptions = {
@@ -110,6 +115,7 @@ export function createTerminalSetup(
     fontSize,
     disposeAgentNotifications,
     disposeOsc8Gate,
+    renderer: null,
   }
 }
 
@@ -142,6 +148,11 @@ export function openTerminal(options: OpenTerminalOptions): Disposable {
     term.textarea.setAttribute("autocapitalize", "off")
     term.textarea.setAttribute("spellcheck", "false")
   }
+  // BEFORE the first fit, so the grid is measured against the renderer that
+  // will actually paint it. Null on every browser the ladder in
+  // `webglRenderer.ts` keeps on the DOM renderer, which is the behavior this
+  // pane had before the addon existed.
+  setup.renderer = attachWebglRenderer(term)
   resize.fitAfterOpen()
 
   noteLocalGrid({ rows: term.rows, cols: term.cols })
@@ -163,5 +174,12 @@ export function openTerminal(options: OpenTerminalOptions): Disposable {
 export function disposeTerminalSetup(setup: TerminalSetup): void {
   setup.disposeAgentNotifications()
   setup.disposeOsc8Gate.dispose()
+  // The GPU context goes back BEFORE the terminal does. `term.dispose()` would
+  // release the addon too (xterm disposes what `loadAddon` registered), but a
+  // browser caps live WebGL contexts per page and drops the oldest when the cap
+  // is hit, so the pane that closes hands its context back explicitly rather
+  // than relying on someone else's teardown order.
+  setup.renderer?.dispose()
+  setup.renderer = null
   setup.term.dispose()
 }

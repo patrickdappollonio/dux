@@ -2269,7 +2269,53 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     suppressed click" (fires once); `src/lib/termkeys.test.ts` "hints only once per
     session".
 
+11. **The pane renders through the WebGL renderer where the browser has one, and the
+    DOM renderer everywhere else.** Why: the DOM renderer paints every cell as a styled
+    span, so a box-drawing or block glyph (U+2500-U+259F) is a real font glyph laid into
+    a cell whose height is ceil'd from the TEXT face's metrics and whose width is
+    fractional. A provider's solid block banner therefore arrives as a grid of hairline
+    seams, one at every cell boundary (opencode's banner is the reported case). The
+    webgl renderer's `customGlyphs` path is the fix and is deliberately left at its
+    default of on: for those code points it does not use the font at all, it rasterizes
+    integer-snapped rectangles that fill the cell exactly, so neighbours share an edge
+    with nothing between them. No line-height or letter-spacing tuning does this; a font
+    glyph cannot tile a fractional cell. Measured in the shipped bundles:
+    `tryDrawCustomChar` is called only from the addon's atlas path, and `customGlyphs`
+    appears in xterm core only as the option's default, so the DOM renderer never
+    consults it.
+
+    **The fallback ladder, in order:** no WebGL2 context (old browser, blocklisted GPU,
+    software rendering) means the addon is never loaded; an activation throw is caught;
+    a context lost at runtime disposes the addon and lets xterm fall back to the DOM
+    renderer, leaving the terminal, the socket and the pane alone. The second and third
+    rungs set a PAGE-scoped give-up flag, because both say something is wrong with this
+    browser's GL and a remounting pane would otherwise walk straight back into it.
+    A lost context is never re-created: a loop of context churn is worse than a seam.
+
+    **What it does not touch.** The renderer swaps the paint path only. The touch
+    selection drives xterm's public selection API, the link hit test and the forwarded
+    touch gestures dispatch DOM events at `.xterm-screen` (which the webgl canvas is a
+    child of, not a replacement for), and the viewer-report suppression sits on the
+    parser. Nothing in the web UI reads xterm's per-row spans; `.xterm-screen` is the
+    only xterm node anything queries. The faithful-view shrink is one applied font size
+    per settled layout, not a sweep (the search in `lib/viewerFit.ts` is arithmetic from
+    a single measurement), and the addon's atlas cache is refcounted per terminal: a
+    changed cell size disposes and splices the terminal's previous atlas before
+    allocating the new one, so the 0.5px steps do not accumulate atlases.
+    Fix: `src/components/terminal/webglRenderer.ts`, loaded in
+    `src/components/terminal/terminalSetup.ts` (`openTerminal`, before the first fit)
+    and released in `disposeTerminalSetup` ahead of `term.dispose()`.
+    Pinned: `src/components/terminal/webglRenderer.test.ts` (the ladder's decision and
+    the lost-context handling) and `webglRenderer.jsdom.test.ts` (the probe's contract).
+
 ## Known limits, explicitly accepted
+
+- **The WebGL renderer's picture is unverified by the test suite.** jsdom has no WebGL
+  of any kind, so the tests pin the ladder's decision, the probe's contract and the
+  lost-context handling, and nothing more. That the seams are actually gone, and that
+  selection, links and touch forwarding still land on the right cell under the webgl
+  canvas, is a preview-container pass and is stated here rather than implied by a green
+  suite.
 
 - **Scrollback-trim selection shift.** `selectAnchor` holds absolute buffer rows; when
   the ring is full and the child writes, xterm trims the top, every absolute row
