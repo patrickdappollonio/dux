@@ -4093,26 +4093,31 @@ impl App {
 
         if self.right_collapsed {
             let focused = self.focus == FocusPane::Files;
-            let all_files: Vec<(&str, Color)> = self
+            let block = self.themed_block("", focused);
+            let total = self.engine.unstaged_files.len() + self.engine.staged_files.len();
+            // The rail is one status glyph per row, but a row is still a row:
+            // slice to the visible window exactly as the full pane does.
+            let viewport = block.inner(area).height as usize;
+            let window_start = list_window_start(total, Some(self.files_index), viewport);
+            let items: Vec<ListItem> = self
                 .engine
                 .unstaged_files
                 .iter()
                 .chain(self.engine.staged_files.iter())
-                .map(|f| (f.status.as_str(), self.theme.file_status_fg))
-                .collect();
-            let items: Vec<ListItem> = all_files
-                .iter()
-                .map(|(s, color)| {
+                .skip(window_start)
+                .take(viewport)
+                .map(|file| {
                     ListItem::new(Line::from(Span::styled(
-                        s.to_string(),
-                        Style::default().fg(*color),
+                        file.status.clone(),
+                        Style::default().fg(self.theme.file_status_fg),
                     )))
                 })
                 .collect();
-            let mut state = ListState::default().with_selected(Some(self.files_index));
+            let mut state = ListState::default()
+                .with_selected(Some(self.files_index.saturating_sub(window_start)));
             StatefulWidget::render(
                 List::new(items)
-                    .block(self.themed_block("", focused))
+                    .block(block)
                     .highlight_style(self.theme.selection_style()),
                 area,
                 frame.buffer_mut(),
@@ -4316,10 +4321,19 @@ impl App {
         // border, mirroring the ~1-column left inset from the status prefix.
         let content_width = inner_width.saturating_sub(1);
         let sel_style = self.theme.selection_style();
-        let items = files
+        // Build rows for the VISIBLE window only. A worktree with thousands of
+        // changed files was paying thousands of allocations, ellipsizations and
+        // width measurements per frame to paint the couple of dozen rows that
+        // fit, on every keystroke and every tick.
+        let selected = is_active_section.then_some(self.files_index);
+        let viewport = list_area.height as usize;
+        let window_start = list_window_start(files.len(), selected, viewport);
+        let window_end = window_start.saturating_add(viewport).min(files.len());
+        let items = files[window_start..window_end]
             .iter()
             .enumerate()
-            .map(|(index, file)| {
+            .map(|(offset, file)| {
+                let index = window_start + offset;
                 let is_selected = is_active_section && index == self.files_index;
 
                 // Build the right-aligned stats string, e.g. "+12 -3".
@@ -4380,12 +4394,13 @@ impl App {
                 ListItem::new(Line::from(spans))
             })
             .collect::<Vec<_>>();
-        let selected = if is_active_section {
-            Some(self.files_index)
-        } else {
-            None
-        };
-        let mut state = ListState::default().with_selected(selected);
+        // The window already starts where the list would have scrolled to, so
+        // the selection is addressed within it and ratatui scrolls no further.
+        let mut state = ListState::default().with_selected(
+            selected
+                .filter(|_| !files.is_empty())
+                .map(|index| index.min(files.len().saturating_sub(1)) - window_start),
+        );
         StatefulWidget::render(List::new(items), list_area, frame.buffer_mut(), &mut state);
 
         // Hint bar inside the block (same style as agent terminal / diff view).
@@ -11708,6 +11723,26 @@ fn companion_terminal_status_color(theme: &Theme, status: CompanionTerminalStatu
 
 /// Format additions/deletions as right-aligned colored spans.
 /// Returns an empty vec when both counts are zero for text files.
+/// The first row a single-line-item list shows, reproducing what ratatui's
+/// `List` computes for a fresh `ListState`: the list scrolls only as far as it
+/// must to keep the selected row on screen, and not at all when nothing is
+/// selected.
+///
+/// dux computes this itself so row BUILDING can be sliced to the viewport. A
+/// list widget only paints what fits, but it is handed every item first, so a
+/// pane listing thousands of changed files built thousands of rows per frame to
+/// show a couple of dozen. Keep this in step with the widget: it holds only
+/// while every item is exactly one line tall and no scroll padding is set.
+pub(crate) fn list_window_start(len: usize, selected: Option<usize>, viewport: usize) -> usize {
+    if len == 0 || viewport == 0 {
+        return 0;
+    }
+    match selected.map(|index| index.min(len - 1)) {
+        Some(index) if index >= viewport => index + 1 - viewport,
+        _ => 0,
+    }
+}
+
 pub(crate) fn format_line_stats(
     additions: usize,
     deletions: usize,
@@ -12572,6 +12607,104 @@ mod tests {
         assert!(
             rendered.contains("provider:"),
             "and keep the provider crumb it used to lose; got:\n{rendered}"
+        );
+    }
+
+    /// The window a list scrolls to, which is what lets the changes pane build
+    /// rows for the viewport instead of for the whole worktree. These are the
+    /// numbers ratatui's own `List` arrives at for one-line items.
+    #[test]
+    fn a_list_window_follows_the_selection_and_nothing_else() {
+        assert_eq!(list_window_start(0, Some(0), 10), 0, "an empty list");
+        assert_eq!(
+            list_window_start(100, None, 10),
+            0,
+            "no selection, no scroll"
+        );
+        assert_eq!(
+            list_window_start(100, Some(9), 10),
+            0,
+            "the last row that still fits from the top"
+        );
+        assert_eq!(
+            list_window_start(100, Some(10), 10),
+            1,
+            "one row past the fold scrolls by exactly one"
+        );
+        assert_eq!(
+            list_window_start(100, Some(99), 10),
+            90,
+            "the selection sits on the bottom row"
+        );
+        assert_eq!(
+            list_window_start(100, Some(400), 10),
+            90,
+            "a selection past the end is clamped, never a panic"
+        );
+        assert_eq!(
+            list_window_start(100, Some(50), 0),
+            0,
+            "a pane with no room shows nothing"
+        );
+    }
+
+    /// A worktree with thousands of changed files paints the rows around the
+    /// selection and no others. Rendered rather than reasoned about, because
+    /// the window dux slices to has to agree with where the list widget would
+    /// have scrolled on its own.
+    #[test]
+    fn the_changes_pane_paints_the_window_around_the_selection() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.selected_left = 1;
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+        app.engine.unstaged_files = (0..3000)
+            .map(|index| dux_core::model::ChangedFile {
+                status: "M".to_string(),
+                path: format!("src/file{index:04}.rs"),
+                additions: 1,
+                deletions: 0,
+                binary: false,
+            })
+            .collect();
+        app.files_index = 1500;
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        let mut painted: Vec<usize> = Vec::new();
+        let mut rest = rendered.as_str();
+        while let Some(at) = rest.find("file") {
+            rest = &rest[at + 4..];
+            if let Some(index) = rest
+                .get(..4)
+                .and_then(|digits| digits.parse::<usize>().ok())
+            {
+                painted.push(index);
+            }
+        }
+        assert!(!painted.is_empty(), "no file rows reached the buffer");
+        assert_eq!(
+            painted.last().copied(),
+            Some(1500),
+            "the selection is the bottom row of the window the list scrolled to"
+        );
+        let expected: Vec<usize> = (1500 + 1 - painted.len()..=1500).collect();
+        assert_eq!(
+            painted, expected,
+            "the painted rows are the contiguous run ending at the selection"
         );
     }
 
