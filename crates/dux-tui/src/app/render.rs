@@ -4673,11 +4673,11 @@ impl App {
         // ── About dux ──────────────────────────────────────────
         push_banner(&mut lines, "About dux", content_width);
         lines.push(Line::from(Span::styled(
-            "dux has two front ends over one engine: a terminal UI",
+            "dux has two front ends over one workspace: a terminal",
             body_style,
         )));
         lines.push(Line::from(Span::styled(
-            "and a web UI, both driving the same workspace.",
+            "UI and a web UI, both driving the same agents.",
             body_style,
         )));
         lines.push(Line::from(Span::styled(

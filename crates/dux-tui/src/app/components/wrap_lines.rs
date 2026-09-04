@@ -382,7 +382,7 @@ mod tests {
         let mut lines = vec![
             Line::from(""),
             Line::from(Span::styled(
-                "dux has two front ends over one engine: a terminal UI",
+                "dux has two front ends over one workspace: a terminal",
                 body,
             )),
             Line::from(vec![

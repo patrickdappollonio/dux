@@ -92,7 +92,7 @@ pub fn welcome_screen(config_path: &Path) -> WelcomeScreen {
             // (see `crate::lockfile`), so a reader who took "run dux server" as
             // the only route would try it in a second shell alongside a running
             // TUI and hit the lock. The hand-off is the honest instruction.
-            "dux has two front ends over one engine: a terminal UI and a web UI. Both are \
+            "dux has two front ends over one workspace: a terminal UI and a web UI. Both are \
              first class, and they share the same projects, the same agents, the same \
              worktrees and the same config file, so an agent you start in one is the same \
              agent in the other. Start the web one with dux server, or flip a running \
