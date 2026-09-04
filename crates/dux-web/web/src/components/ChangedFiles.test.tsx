@@ -729,6 +729,27 @@ describe("the changes pane's selection on a touch screen", () => {
     expect(box.className).toContain("pointer-coarse:after:-inset-[15px]")
     expect(box.className).toContain("pointer-coarse:after:block")
   })
+
+  // The row's ⋯ answers the same question the slot above answers, and used to
+  // answer it with the viewport-width breakpoint instead of the pointer, so a
+  // landscape tablet had no way to any row's actions at all. The marker/
+  // checkbox swap is a separate mechanism with its own coarse rule (above) and
+  // is deliberately untouched by this.
+  it("always reveals the row's ⋯ where the pointer is coarse", () => {
+    render(<ChangedFiles />)
+    const wrapper = screen
+      .getByLabelText("Actions for a.ts")
+      .closest("div") as HTMLElement
+    expect(wrapper.className).toContain("pointer-coarse:max-w-none")
+    expect(wrapper.className).toContain("pointer-coarse:opacity-100")
+    // A mouse still gets the collapsed slot and the hover reveal, plus the
+    // two states that hold it open: the menu, and an action in flight.
+    expect(wrapper.className).toContain("md:max-w-0")
+    expect(wrapper.className).toContain("md:opacity-0")
+    expect(wrapper.className).toContain("md:group-hover:max-w-10")
+    expect(wrapper.className).toContain("md:has-[[data-popup-open]]:max-w-10")
+    expect(wrapper.className).toContain("md:has-[[aria-busy=true]]:max-w-10")
+  })
 })
 
 describe("the bulk bar's Select all toggle", () => {

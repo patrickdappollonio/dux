@@ -83,6 +83,7 @@ import {
   type FlatTerminal,
 } from "@/lib/flatTerminals"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
+import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { launcherVerb } from "@/lib/launcherVerb"
 import { partitionProjects } from "@/lib/projects"
 import { moveItem, ordersMatch, reorderById } from "@/lib/reorder"
@@ -439,7 +440,12 @@ function AgentFlatRow({
         </SimpleTooltip>
 
         <DropdownMenu>
-          <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/flat-row:max-w-8 md:group-hover/flat-row:opacity-100 md:group-focus-within/flat-row:max-w-8 md:group-focus-within/flat-row:opacity-100 md:has-[[data-popup-open]]:max-w-8 md:has-[[data-popup-open]]:opacity-100">
+          <div
+            className={cn(
+              "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/flat-row:max-w-8 md:group-hover/flat-row:opacity-100 md:group-focus-within/flat-row:max-w-8 md:group-focus-within/flat-row:opacity-100 md:has-[[data-popup-open]]:max-w-8 md:has-[[data-popup-open]]:opacity-100",
+              ALWAYS_REVEALED_ON_TOUCH,
+            )}
+          >
             <DropdownMenuTrigger
               render={
                 <Button
@@ -595,7 +601,12 @@ function TerminalFlatRow({
         </span>
       </button>
       <DropdownMenu>
-        <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/flat-term:max-w-8 md:group-hover/flat-term:opacity-100 md:group-focus-within/flat-term:max-w-8 md:group-focus-within/flat-term:opacity-100 md:has-[[data-popup-open]]:max-w-8 md:has-[[data-popup-open]]:opacity-100">
+        <div
+          className={cn(
+            "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/flat-term:max-w-8 md:group-hover/flat-term:opacity-100 md:group-focus-within/flat-term:max-w-8 md:group-focus-within/flat-term:opacity-100 md:has-[[data-popup-open]]:max-w-8 md:has-[[data-popup-open]]:opacity-100",
+            ALWAYS_REVEALED_ON_TOUCH,
+          )}
+        >
           <DropdownMenuTrigger
             render={
               <Button

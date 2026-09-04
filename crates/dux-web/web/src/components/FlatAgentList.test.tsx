@@ -1416,3 +1416,64 @@ describe("FlatAgentList line two alignment", () => {
     expect(frames![1]).not.toMatch(/transform|translate|top:|margin/)
   })
 })
+
+// The row ⋯ trigger is hover-revealed, and a finger has no hover. Its escape
+// hatch used to be the viewport-width breakpoint, which is the wrong question:
+// a landscape tablet gets the desktop layout with a finger for a pointer, and
+// the only way to any row's menu simply was not on screen. The classes below
+// are asserted rather than measured because jsdom evaluates no media query;
+// what a class assertion CAN pin is that the coarse-pointer override is
+// present and that the mouse's own rules were not touched on the way in.
+describe("FlatAgentList row actions on a coarse pointer", () => {
+  function wrapperOf(label: string): HTMLElement {
+    const trigger = screen.getAllByLabelText(label)[0]
+    const wrapper = trigger.closest("div")
+    if (!wrapper) throw new Error(`no wrapper for ${label}`)
+    return wrapper
+  }
+
+  it("always reveals the agent row's ⋯ where the pointer is coarse", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    const wrapper = wrapperOf("Session actions")
+    expect(wrapper.className).toContain("pointer-coarse:max-w-none")
+    expect(wrapper.className).toContain("pointer-coarse:opacity-100")
+  })
+
+  it("always reveals the terminal row's ⋯ where the pointer is coarse", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    const wrapper = wrapperOf("Terminal actions")
+    expect(wrapper.className).toContain("pointer-coarse:max-w-none")
+    expect(wrapper.className).toContain("pointer-coarse:opacity-100")
+  })
+
+  it("leaves the mouse's resting and reveal rules exactly as they were", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    for (const [label, group] of [
+      ["Session actions", "flat-row"],
+      ["Terminal actions", "flat-term"],
+    ] as const) {
+      const cls = wrapperOf(label).className
+      // Idle: no slot and no paint, so the identity gets the whole row.
+      expect(cls).toContain("md:max-w-0")
+      expect(cls).toContain("md:opacity-0")
+      // Revealed by hover, by keyboard focus anywhere in the row, and held
+      // open while the menu itself is open.
+      expect(cls).toContain(`md:group-hover/${group}:max-w-8`)
+      expect(cls).toContain(`md:group-focus-within/${group}:max-w-8`)
+      expect(cls).toContain("md:has-[[data-popup-open]]:max-w-8")
+    }
+  })
+
+  // The phone's own layout does not move: below the breakpoint the wrapper
+  // already held its slot open, so the coarse override adds paint and no
+  // width. The trigger cannot squeeze the identity either way, because it
+  // never grows (`shrink-0`) and the name truncates instead.
+  it("adds no width to a phone row, where the slot was already open", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    for (const label of ["Session actions", "Terminal actions"]) {
+      const cls = wrapperOf(label).className
+      expect(cls).toContain("max-md:max-w-none")
+      expect(cls).toContain("shrink-0")
+    }
+  })
+})

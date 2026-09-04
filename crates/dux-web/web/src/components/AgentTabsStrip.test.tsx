@@ -210,4 +210,23 @@ describe("AgentTabsStrip phone height", () => {
       expect(control.className).not.toContain("max-md:size-11")
     }
   })
+
+  // The pill's ⋯ said "always revealed on touch" in a comment and was not: the
+  // width breakpoint gave the slot back below `md` but nothing ever restored
+  // the paint, so a finger got an invisible 44px target at every width. The
+  // pointer override is what actually keeps the promise.
+  it("always reveals the pill's ⋯ where the pointer is coarse", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    const wrapper = screen.getAllByLabelText("Tab actions")[0].closest("div")
+    expect(wrapper).not.toBeNull()
+    expect(wrapper!.className).toContain("pointer-coarse:max-w-none")
+    expect(wrapper!.className).toContain("pointer-coarse:opacity-100")
+    // The mouse's rules are untouched: collapsed at rest, opening on hover,
+    // focus-within, or while the menu is open.
+    expect(wrapper!.className).toContain("max-w-0")
+    expect(wrapper!.className).toContain("opacity-0")
+    expect(wrapper!.className).toContain("group-hover/tab:max-w-8")
+    expect(wrapper!.className).toContain("group-focus-within/tab:max-w-8")
+    expect(wrapper!.className).toContain("has-[[data-popup-open]]:max-w-8")
+  })
 })

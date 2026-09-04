@@ -80,6 +80,7 @@ import {
 } from "@/lib/store"
 import type { ChangesSlice } from "@/lib/store"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { cn } from "@/lib/utils"
 import type { ChangedFileView, SessionView } from "@/lib/types"
 import { agentRoot } from "@/lib/editorRoot"
@@ -297,7 +298,10 @@ function FileRow({
           items from bubbling to the row's open-diff onClick — React routes portal
           events through this React-tree ancestor. */}
       <div
-        className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-10 md:group-hover:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100 md:has-[[aria-busy=true]]:max-w-10 md:has-[[aria-busy=true]]:opacity-100"
+        className={cn(
+          "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-10 md:group-hover:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100 md:has-[[aria-busy=true]]:max-w-10 md:has-[[aria-busy=true]]:opacity-100",
+          ALWAYS_REVEALED_ON_TOUCH,
+        )}
         onClick={(e) => e.stopPropagation()}
       >
         <DropdownMenu>
