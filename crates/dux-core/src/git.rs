@@ -6,7 +6,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow};
-use content_inspector::{ContentType, inspect};
 use percent_encoding::percent_decode_str;
 use url::Url;
 
@@ -69,6 +68,7 @@ pub fn create_agent_branch_preflight(repo_path: &Path, name: &str) -> CreateAgen
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum DiffStat {
     Text(usize, usize),
     Binary,
@@ -81,6 +81,22 @@ struct StatusEntry {
 }
 
 const NULL_DEVICE: &str = "/dev/null";
+
+/// How much of a file git looks at before deciding it is binary
+/// (`buffer_is_binary`'s `FIRST_FEW_BYTES`). Matched exactly so dux and git
+/// call the same files binary.
+const BINARY_SNIFF_BYTES: usize = 8000;
+
+/// How many UNTRACKED files one changed-files sweep counts lines for.
+///
+/// Every untracked file costs a read, and a worktree can hold a hundred
+/// thousand of them (an unignored `node_modules`, a build directory) while the
+/// panel is re-read by a poller. Past this many, the remaining untracked rows
+/// are still LISTED, in full, with their status; they just carry no line
+/// counts, which renders exactly as an empty file's does today (no `+`/`-`
+/// column) and leaves them out of the panel's totals. Listing every change
+/// matters; the last few thousand line counts do not.
+const UNTRACKED_STATS_MAX_FILES: usize = 2000;
 
 pub fn current_branch(repo_path: &Path) -> Result<String> {
     let output = Command::new("git")
@@ -2001,6 +2017,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
         }
     }
 
+    let mut untracked_stats_budget = UNTRACKED_STATS_MAX_FILES;
     if let Ok(ns) = Command::new("git")
         .args(["-C", wt.as_ref(), "diff", "--numstat", "-z"])
         .output()
@@ -2019,19 +2036,17 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
                     }
                 }
             } else if file.status == "?" {
-                match untracked_file_diff_stat(worktree_path, &file.path) {
-                    Some(DiffStat::Text(a, d)) => {
+                if untracked_stats_budget == 0 {
+                    continue;
+                }
+                untracked_stats_budget -= 1;
+                match untracked_file_stat(&worktree_path.join(&file.path)) {
+                    DiffStat::Text(a, d) => {
                         file.additions = a;
                         file.deletions = d;
                     }
-                    Some(DiffStat::Binary) => {
+                    DiffStat::Binary => {
                         file.binary = true;
-                    }
-                    None => {
-                        let (additions, binary) =
-                            classify_untracked_file_fallback(&worktree_path.join(&file.path));
-                        file.additions = additions;
-                        file.binary = binary;
                     }
                 }
             }
@@ -2062,6 +2077,68 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     Ok((staged, unstaged))
 }
 
+/// Line counts for one UNTRACKED file, read in this process.
+///
+/// git has no recorded state to diff a file it has never seen against, so these
+/// numbers have to be produced some other way. dux used to ask git itself, with
+/// one `git diff --no-index` subprocess PER untracked file. A worktree carrying
+/// a few thousand untracked files (a `node_modules`, a build directory, a fresh
+/// clone of somebody's assets) therefore spawned a few thousand processes every
+/// time the changes panel was read, and it is read by a poller. Opening the
+/// file and counting newlines is the same answer for a tiny fraction of the
+/// cost.
+///
+/// The rules are git's own, so the numbers do not move: a NUL byte anywhere in
+/// the first [`BINARY_SNIFF_BYTES`] bytes makes the file binary (git's
+/// `buffer_is_binary`), and otherwise every line counts as an addition,
+/// including a last line with no newline after it. Encoding does not enter into
+/// it: a latin-1 file with no NUL in it is text to git and is text here.
+///
+/// The one thing this deliberately does not do is consult `.gitattributes`. A
+/// file marked `-diff` there was reported as binary by the subprocess and is
+/// counted as text now; that is the accepted cost of not asking git.
+///
+/// The file is streamed rather than read whole: an untracked disk image is not
+/// a reason to hold a gigabyte in memory.
+fn untracked_file_stat(path: &Path) -> DiffStat {
+    let Ok(file) = fs::File::open(path) else {
+        // Unreadable, or a dangling symlink, or gone between the status sweep
+        // and now. Nothing to count and nothing to claim about it.
+        return DiffStat::Text(0, 0);
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut buffer = [0_u8; 8192];
+    let mut lines = 0_usize;
+    let mut read_so_far = 0_usize;
+    let mut last_byte = None;
+    loop {
+        let filled = match std::io::Read::read(&mut reader, &mut buffer) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(ref err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return DiffStat::Text(0, 0),
+        };
+        let chunk = &buffer[..filled];
+        if read_so_far < BINARY_SNIFF_BYTES {
+            let sniff = &chunk[..filled.min(BINARY_SNIFF_BYTES - read_so_far)];
+            if sniff.contains(&0) {
+                return DiffStat::Binary;
+            }
+        }
+        lines += chunk.iter().filter(|byte| **byte == b'\n').count();
+        last_byte = chunk.last().copied();
+        read_so_far = read_so_far.saturating_add(filled);
+    }
+    // A final line with no newline after it is still a line git counts.
+    if matches!(last_byte, Some(byte) if byte != b'\n') {
+        lines += 1;
+    }
+    DiffStat::Text(lines, 0)
+}
+
+/// The git oracle the in-process counting replaced, kept as the thing the
+/// parity test measures against. Never called outside tests.
+#[cfg(test)]
 fn untracked_file_diff_stat(worktree_path: &Path, rel_path: &str) -> Option<DiffStat> {
     let output = Command::new("git")
         .args([
@@ -2083,19 +2160,6 @@ fn untracked_file_diff_stat(worktree_path: &Path, rel_path: &str) -> Option<Diff
     }
 
     parse_numstat(&output.stdout).into_values().next()
-}
-
-fn classify_untracked_file_fallback(path: &Path) -> (usize, bool) {
-    let Ok(bytes) = fs::read(path) else {
-        return (0, false);
-    };
-    match inspect(&bytes) {
-        ContentType::UTF_8 => match std::str::from_utf8(&bytes) {
-            Ok(text) => (text.lines().count(), false),
-            Err(_) => (0, true),
-        },
-        _ => (0, true),
-    }
 }
 
 fn parse_numstat(raw: &[u8]) -> HashMap<String, DiffStat> {
@@ -6550,6 +6614,81 @@ mod tests {
             diff.is_empty(),
             "diff should be empty when nothing is staged"
         );
+    }
+
+    /// The in-process untracked counting has to answer exactly what the
+    /// per-file `git diff --no-index` subprocess answered, because that is what
+    /// the changes panel has been showing. git itself is the oracle here: the
+    /// fixture covers the shapes that pull the two apart if the rules drift
+    /// (a missing trailing newline, an empty file, a NUL, a BOM, an encoding
+    /// that is not UTF-8, and a NUL that arrives after the sniff window).
+    #[test]
+    fn untracked_line_counts_match_what_git_reports() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "untracked-parity");
+
+        let mut late_nul = vec![b'x'; BINARY_SNIFF_BYTES + 10];
+        late_nul.push(0);
+        let mut early_nul = vec![b'a', b'\n', 0, b'b'];
+        early_nul.extend_from_slice(b"\n");
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("trailing-newline.txt", b"one\ntwo\n".to_vec()),
+            ("no-trailing-newline.txt", b"one\ntwo".to_vec()),
+            ("single-line-no-newline.txt", b"only".to_vec()),
+            ("empty.txt", Vec::new()),
+            ("just-newlines.txt", b"\n\n\n".to_vec()),
+            ("early-nul.bin", early_nul),
+            ("late-nul.bin", late_nul),
+            ("bom.txt", b"\xef\xbb\xbfhello\nworld\n".to_vec()),
+            ("latin1.txt", b"caf\xe9\nna\xefve\n".to_vec()),
+            ("crlf.txt", b"one\r\ntwo\r\n".to_vec()),
+        ];
+        for (name, bytes) in &cases {
+            fs::write(wt.join(name), bytes).unwrap();
+        }
+
+        for (name, _) in &cases {
+            let oracle = untracked_file_diff_stat(&wt, name);
+            let ours = untracked_file_stat(&wt.join(name));
+            match oracle {
+                Some(expected) => assert_eq!(
+                    ours, expected,
+                    "{name}: in-process counting disagrees with git"
+                ),
+                // git reports no record at all for a file with nothing in it.
+                None => assert_eq!(
+                    ours,
+                    DiffStat::Text(0, 0),
+                    "{name}: git had nothing to say, so neither should dux"
+                ),
+            }
+        }
+    }
+
+    /// Past the ceiling the untracked rows are still listed in full; only their
+    /// line counts are dropped, which is what an empty file already renders as.
+    #[test]
+    fn untracked_files_past_the_ceiling_are_listed_without_line_counts() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "untracked-ceiling");
+        // One more file than the sweep will count lines for. Names are padded
+        // so the porcelain's path order is the obvious one.
+        let total = UNTRACKED_STATS_MAX_FILES + 1;
+        for index in 0..total {
+            fs::write(wt.join(format!("f{index:06}.txt")), "one line\n").unwrap();
+        }
+
+        let (_staged, unstaged) = changed_files(&wt).unwrap();
+
+        assert_eq!(unstaged.len(), total, "every change is listed");
+        let counted = unstaged.iter().filter(|f| f.additions > 0).count();
+        assert_eq!(
+            counted, UNTRACKED_STATS_MAX_FILES,
+            "the ceiling bounds the reads, not the rows"
+        );
+        let last = unstaged.last().expect("a last row");
+        assert_eq!(last.status, "?");
+        assert_eq!((last.additions, last.deletions, last.binary), (0, 0, false));
     }
 
     #[test]
