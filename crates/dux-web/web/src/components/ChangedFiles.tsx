@@ -5,6 +5,7 @@ import {
   Check,
   Ellipsis,
   EllipsisVertical,
+  FileCode2,
   GitCommitVertical,
   Loader2,
   Minus,
@@ -75,6 +76,7 @@ import {
   openDiscard,
   openEditor,
   refreshChanges,
+  standaloneEditorHash,
   toggleChangesPane,
   useDux,
 } from "@/lib/store"
@@ -492,6 +494,64 @@ function FileGroup({
   )
 }
 
+// THE DIRECT ROUTE TO THE EDITOR for the agent whose changes are on screen.
+//
+// One button, one act: the in-page overlay on a computer, exactly what the
+// menus' "Open editor here" does, so there is no second way to open an editor
+// to keep in step. The new-tab variant stays a menu item rather than riding a
+// modifier on this button.
+//
+// On a phone the overlay does not exist (EditorOverlay renders null there), so
+// this is the same anchor the phone's menu entries are: a real `<a>` to the
+// standalone editor's address, which is the phone's editor surface. Keeping it
+// an anchor rather than a handler also keeps long-press and middle-click doing
+// what the browser makes them do.
+//
+// Weight: it matches the `⋯` on geometry and is quieter than it. This control
+// navigates to another surface rather than acting on the changes, and the
+// header's one outline control stays the menu of acts.
+function OpenEditorButton({
+  sessionId,
+  isMobile,
+}: {
+  sessionId: string
+  isMobile: boolean
+}) {
+  const root = agentRoot(sessionId)
+  const label = "Open editor"
+  const shared = {
+    size: "icon",
+    variant: "ghost",
+    "aria-label": label,
+    className: "max-md:size-11",
+  } as const
+  return (
+    <SimpleTooltip content={label}>
+      {isMobile ? (
+        <Button
+          {...shared}
+          // It really is an anchor, so the primitive is told not to expect a
+          // native <button>: a link keeps a link's own semantics and gestures.
+          nativeButton={false}
+          render={
+            <a
+              href={standaloneEditorHash(root)}
+              target="_blank"
+              rel="noopener"
+            />
+          }
+        >
+          <FileCode2 />
+        </Button>
+      ) : (
+        <Button {...shared} onClick={() => openEditor(root)}>
+          <FileCode2 />
+        </Button>
+      )}
+    </SimpleTooltip>
+  )
+}
+
 interface ChangesHeaderProps {
   sessionId: string
   stagedCount: number
@@ -534,7 +594,11 @@ function ChangesHeader({
           className="min-w-0 shrink truncate"
         />
       </div>
-      <CardAction className="self-center">
+      {/* Two controls now, so the cell is a row of its own: `gap-2` is the
+          misclick spacing between the editor button and the `⋯`, which are
+          otherwise adjacent icon squares of the same size. */}
+      <CardAction className="flex shrink-0 items-center gap-2 self-center">
+        <OpenEditorButton sessionId={sessionId} isMobile={isMobile} />
         <DropdownMenu>
           <DropdownMenuTrigger
             render={

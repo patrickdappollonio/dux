@@ -129,6 +129,12 @@ function installBootStubs() {
 
 installBootStubs()
 const { ChangedFiles } = await import("./ChangedFiles")
+// Imported after the boot stubs, like the component itself: the real store
+// module boots at import time. `standaloneEditorHash` is the actual one (the
+// mock above spreads the original), so the phone button's address is checked
+// against the router's own grammar rather than a hand-written string.
+const { standaloneEditorHash } = await import("@/lib/store")
+const { agentRoot } = await import("@/lib/editorRoot")
 
 function loadedChanges(): ChangesSlice {
   return {
@@ -1168,5 +1174,114 @@ describe("the changes pane's group recaps", () => {
 
     expect(screen.queryByLabelText(/^Staged: /)).toBeNull()
     expect(recap("Changes").textContent).toBe("+1")
+  })
+})
+
+// The pane header's direct route to the editor for the agent whose changes are
+// on screen. One button, one act: the in-page overlay on a computer, the
+// standalone editor's address on a phone (where the overlay renders nothing at
+// all), with the new-tab variant left to the row menus.
+describe("the Changes pane header's Open editor button", () => {
+  function setViewportWidth(width: number) {
+    Object.defineProperty(window, "innerWidth", {
+      value: width,
+      configurable: true,
+      writable: true,
+    })
+  }
+
+  const editorButton = () => screen.getByLabelText("Open editor")
+  const actionsTrigger = () => screen.getByLabelText("Changes actions")
+
+  afterEach(() => {
+    setViewportWidth(1024)
+  })
+
+  it("opens the in-page editor for the selected agent on a computer", () => {
+    setViewportWidth(1024)
+    render(<ChangedFiles />)
+
+    fireEvent.click(editorButton())
+
+    expect(openEditor).toHaveBeenCalledTimes(1)
+    expect(openEditor).toHaveBeenCalledWith({ kind: "agent", sessionId: "s1" })
+  })
+
+  // The overlay is the act; the new-tab variant stays a menu item rather than
+  // riding a modifier on this button, so on a computer it is not an anchor.
+  it("is a plain button on a computer, with no address of its own", () => {
+    setViewportWidth(1024)
+    render(<ChangedFiles />)
+
+    expect(editorButton().getAttribute("href")).toBeNull()
+  })
+
+  // On a phone the overlay renders null, so the button is the same anchor the
+  // phone's menu entries are: the standalone editor's own address.
+  it("navigates to the standalone editor's address on a phone", () => {
+    setViewportWidth(400)
+    render(<ChangedFiles />)
+
+    const link = editorButton()
+    expect(link.tagName).toBe("A")
+    expect(link.getAttribute("href")).toBe(standaloneEditorHash(agentRoot("s1")))
+    expect(link.getAttribute("target")).toBe("_blank")
+    expect(link.getAttribute("rel")).toBe("noopener")
+
+    fireEvent.click(link)
+    expect(openEditor).not.toHaveBeenCalled()
+  })
+
+  it("sits beside the pane's ⋯, in the header's action cell", () => {
+    render(<ChangedFiles />)
+    const button = editorButton()
+    const ellipsis = actionsTrigger()
+
+    expect(button.parentElement).toBe(ellipsis.parentElement)
+    expect(
+      ellipsis.compareDocumentPosition(button) &
+        Node.DOCUMENT_POSITION_PRECEDING,
+    ).toBeTruthy()
+    // The misclick spacing between two adjacent icon squares.
+    expect(button.parentElement!.className).toContain("gap-2")
+  })
+
+  // Same geometry as the `⋯` (including the touch floor), quieter weight: this
+  // control navigates to another surface rather than acting on the changes.
+  it("matches the ⋯ on geometry and stays quieter than it", () => {
+    render(<ChangedFiles />)
+    const button = editorButton()
+    const ellipsis = actionsTrigger()
+
+    expect(button.className).toContain("size-8")
+    expect(button.className).toContain("max-md:size-11")
+    expect(ellipsis.className).toContain("size-8")
+    expect(ellipsis.className).toContain("max-md:size-11")
+
+    expect(ellipsis.className).toContain("border-border")
+    expect(button.className).not.toContain("border-border")
+  })
+
+  it("names itself for a screen reader and hints the same words on hover", () => {
+    render(<ChangedFiles />)
+    const cell = editorButton().parentElement!
+    expect(
+      within(cell)
+        .getAllByTestId("tooltip-content")
+        .some((node) => node.textContent === "Open editor"),
+    ).toBe(true)
+  })
+
+  // The pane with no editor target is not a pane with a disabled button: there
+  // is no header at all, because there is no agent behind it.
+  it("is absent when no session is selected", () => {
+    mockState = {
+      selectedSessionId: null,
+      changes: loadedChanges(),
+    } as unknown as DuxState
+    render(<ChangedFiles />)
+
+    expect(screen.queryByLabelText("Open editor")).toBeNull()
+    expect(screen.getByText("No session selected")).toBeTruthy()
   })
 })

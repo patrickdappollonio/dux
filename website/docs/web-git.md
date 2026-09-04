@@ -80,7 +80,9 @@ file, hover a row for its `⋯` menu:
 
 ## Commit, push, pull
 
-The changes pane's header `⋯` menu carries the rest:
+The changes pane's header carries two controls: an **Open editor** button that takes you
+straight to the editor for the agent whose changes you are looking at (in the page on a
+computer, in the editor's own tab on a phone), and the `⋯` menu with the rest:
 
 - **Commit…** opens a dialog for a multi-line message and commits **only the staged
   files**. It is disabled until something is staged, and `Cmd/Ctrl+Enter` submits.
