@@ -164,12 +164,35 @@ describe("AppMenuSheet", () => {
   it("opens a standalone terminal from the drilled New list", async () => {
     const onOpenChange = vi.fn()
     render(<AppMenuSheet open onOpenChange={onOpenChange} />)
-    expect(screen.queryByText("New standalone terminal")).toBeNull()
+    expect(screen.queryByText("New standalone terminal in your home folder")).toBeNull()
     fireEvent.click(screen.getByText("New"))
     await settle()
-    fireEvent.click(screen.getByText("New standalone terminal"))
+    fireEvent.click(screen.getByText("New standalone terminal in your home folder"))
     expect(createStandaloneTerminal).toHaveBeenCalledOnce()
     expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  // The terminal rows now carry their location, which makes them the longest
+  // titles in the sheet. The row lets a title wrap instead of clipping it, so
+  // the half that says WHERE the shell opens survives a 390px phone.
+  it("lets a long creation title wrap rather than clipping it", async () => {
+    render(<AppMenuSheet open onOpenChange={vi.fn()} />)
+    fireEvent.click(screen.getByText("New"))
+    await settle()
+    const label = screen.getByText(
+      "New standalone terminal in your home folder",
+    )
+    const row = label.closest('[role="menuitem"]')
+    expect(row).toBeTruthy()
+    for (
+      let node: Element | null = label;
+      node && node !== row?.parentElement;
+      node = node.parentElement
+    ) {
+      expect(node.className).not.toMatch(
+        /truncate|text-ellipsis|whitespace-nowrap|line-clamp/,
+      )
+    }
   })
 
   it("hides the from-PR variant when gh is unavailable", async () => {

@@ -700,11 +700,14 @@ function TerminalsSection({
             40px floor. Its only neighbour on either axis is the collapse
             toggle 8px to its left, which expands a section and executes
             nothing; on touch it takes the floor on both axes anyway. */}
-        <SimpleTooltip content="New standalone terminal">
+        {/* Icon-only, so the tooltip and the accessible name are the only
+            place the location can be said; they carry the same sentence the
+            menu entries do. */}
+        <SimpleTooltip content="New standalone terminal in your home folder">
           <Button
             variant="ghost"
             size="icon-sm"
-            aria-label="New standalone terminal"
+            aria-label="New standalone terminal in your home folder"
             onClick={() => createStandaloneTerminal()}
             className="shrink-0 text-muted-foreground max-md:min-h-10 max-md:min-w-10"
           >

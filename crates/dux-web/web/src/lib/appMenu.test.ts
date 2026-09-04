@@ -199,7 +199,7 @@ describe("appMenuModel", () => {
     expect(titleOf("reload-config")?.title).toBe("Reload config")
     // Same for the standalone terminal: it opens the terminal on the spot.
     expect(titleOf("new-standalone-terminal")?.title).toBe(
-      "New standalone terminal",
+      "New standalone terminal in your home folder",
     )
   })
 

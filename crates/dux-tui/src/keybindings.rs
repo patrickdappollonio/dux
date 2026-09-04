@@ -2845,9 +2845,11 @@ mod tests {
                 "copy-path",
                 "open-worktree",
                 "open-worktree-with",
+                "show-terminal",
                 "open-current-pr",
                 "detach-pull-request",
                 "resume-pull-request-autodetection",
+                "new-terminal-for-agent",
                 "agent-info",
                 "refresh-changes",
             ]

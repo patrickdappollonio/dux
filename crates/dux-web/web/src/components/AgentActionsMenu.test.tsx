@@ -169,7 +169,7 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
     "Rerun startup command",
     "Startup command logs…",
     "Open editor in new tab",
-    "New terminal",
+    "New terminal in the worktree",
     "Copy local path",
   ]
 
@@ -376,9 +376,50 @@ describe("AgentActionsMenu for a standalone agent", () => {
       "Rename agent…",
       "Change agent provider…",
       "Agent info…",
-      "New terminal",
+      "New terminal in the folder",
     ]) {
       expect(screen.getByText(present)).toBeTruthy()
+    }
+  })
+})
+
+describe("AgentActionsMenu terminal entry names where the shell opens", () => {
+  it("says the worktree for a managed agent and the folder for a standalone one", async () => {
+    seed(makeSession({ id: "s1" }), false)
+    await openMenu(makeSession({ id: "s1" }))
+    expect(screen.getByText("New terminal in the worktree")).toBeTruthy()
+    // A standalone agent has no worktree at all, so promising one here would
+    // be a label about something that does not exist.
+    expect(screen.queryByText(/New terminal in the folder/)).toBeNull()
+    cleanup()
+
+    const standalone = makeStandaloneSession("sa1")
+    seed(standalone, false)
+    await openMenu(standalone)
+    expect(screen.getByText("New terminal in the folder")).toBeTruthy()
+    expect(screen.queryByText(/worktree/)).toBeNull()
+  })
+
+  // The label is longer than the one it replaced, and this menu is the phone's
+  // too (the pane flap and the mobile row both render it). Nothing between the
+  // text and the menu item may clip it: the popup caps its own width and lets
+  // an item wrap, so a stray truncate/nowrap class is what would hide the half
+  // of the label that carries the location.
+  it("lets the label wrap rather than clipping it on a narrow screen", async () => {
+    const session = makeSession({ id: "s1" })
+    seed(session, false)
+    await openMenu(session)
+    const text = screen.getByText("New terminal in the worktree")
+    const item = text.closest('[role="menuitem"]')
+    expect(item).toBeTruthy()
+    for (
+      let node: Element | null = text;
+      node && node !== item?.parentElement;
+      node = node.parentElement
+    ) {
+      expect(node.className).not.toMatch(
+        /truncate|text-ellipsis|whitespace-nowrap|line-clamp/,
+      )
     }
   })
 })

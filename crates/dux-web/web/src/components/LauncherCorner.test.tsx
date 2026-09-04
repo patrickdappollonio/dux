@@ -93,7 +93,7 @@ describe("LauncherCorner overflow", () => {
       "New agent from PR…",
       "New agent from existing worktree…",
       "New standalone agent…",
-      "New standalone terminal",
+      "New standalone terminal in your home folder",
       "Add project…",
       "Initialize a repository…",
     ])
@@ -108,7 +108,7 @@ describe("LauncherCorner overflow", () => {
   it("routes the menu entries to their store actions", async () => {
     render(<LauncherCorner />)
     await openMenu()
-    fireEvent.click(screen.getByText("New standalone terminal"))
+    fireEvent.click(screen.getByText("New standalone terminal in your home folder"))
     expect(createStandaloneTerminal).toHaveBeenCalledOnce()
 
     await openMenu()

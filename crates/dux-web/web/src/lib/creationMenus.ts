@@ -43,8 +43,8 @@ export interface CreationMenuAction {
    *  splices them into one tree whose ids must stay globally unique. */
   id: string
   /** Human title. Trailing "…" iff the item opens a dialog: every agent and
-   *  project variant does, and "New standalone terminal" deliberately does
-   *  not, because it opens the terminal immediately with nothing to confirm. */
+   *  project variant does, and the standalone terminal deliberately does not,
+   *  because it opens the terminal immediately with nothing to confirm. */
   title: string
   icon: LucideIcon
   run: () => void
@@ -88,7 +88,7 @@ export const NEW_AGENT_PLAIN_ID = "new-agent-plain"
  * the project from it. That variant is gated on GitHub / `gh` availability,
  * matching the launcher corner's `⋯` menu and the per-project `⋯` menu.
  *
- * "New standalone terminal" lives here rather than in a row's own `⋯` menu
+ * The standalone terminal lives here rather than in a row's own `⋯` menu
  * because it is GLOBAL and parameter-free: it needs no agent, no project and
  * nothing selected (it is the twin of the TUI's `new-standalone-terminal`
  * palette command). Keeping it in this one list gives it the same home on
@@ -139,7 +139,10 @@ export function newMenuItems(ctx: {
     {
       kind: "item",
       id: "new-standalone-terminal",
-      title: "New standalone terminal",
+      // The location is spelled out for the same reason the agent and project
+      // entries spell theirs out: a menu item that opens a shell has to say
+      // where it lands, and home is the one answer nobody guesses.
+      title: "New standalone terminal in your home folder",
       icon: SquareTerminal,
       run: () => createStandaloneTerminal(),
     },

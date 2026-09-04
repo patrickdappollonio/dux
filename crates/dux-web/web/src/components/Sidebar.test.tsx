@@ -469,7 +469,7 @@ describe("AppSidebar project terminals", () => {
     expect(screen.getByText("Terminal 2")).toBeTruthy()
   })
 
-  it("offers 'New project terminal' in the project ⋯ menu and calls createProjectTerminal", () => {
+  it("offers a project-root terminal in the project ⋯ menu and calls createProjectTerminal", () => {
     // An agent-less project (only a project terminal) has no agent row, so its
     // project actions live in the New-agent picker's per-project ⋯ menu.
     mockState = makeState({
@@ -479,7 +479,7 @@ describe("AppSidebar project terminals", () => {
     })
     render(<NewAgentPickerDialog />)
     fireEvent.click(screen.getByLabelText("Project actions"))
-    const item = screen.getByText("New project terminal")
+    const item = screen.getByText("New terminal at the project root")
     expect(
       item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
     ).not.toBe("true")
@@ -487,7 +487,7 @@ describe("AppSidebar project terminals", () => {
     expect(createProjectTerminalMock).toHaveBeenCalledWith("p1")
   })
 
-  it("disables 'New project terminal' when the project's path is missing", () => {
+  it("disables the project-root terminal entry when the project's path is missing", () => {
     const spine = projectTerminalSpine() as unknown as {
       projects: { path_missing: boolean }[]
     }
@@ -499,13 +499,13 @@ describe("AppSidebar project terminals", () => {
     })
     render(<NewAgentPickerDialog />)
     fireEvent.click(screen.getByLabelText("Project actions"))
-    const item = screen.getByText("New project terminal")
+    const item = screen.getByText("New terminal at the project root")
     expect(item.closest('[role="menuitem"]')?.getAttribute("aria-disabled")).toBe(
       "true",
     )
   })
 
-  it("hides 'New project terminal' for an orphaned group", () => {
+  it("hides the project-root terminal entry for an orphaned group", () => {
     // An orphaned group has no real project: the menu shows only "Remove
     // project…", so there must be no terminal entry point.
     mockState = makeState({
@@ -560,7 +560,7 @@ describe("AppSidebar project terminals", () => {
     // under the "Project…" submenu.
     fireEvent.click(screen.getByLabelText("Session actions"))
     fireEvent.click(screen.getByText(/^Project[ …]/))
-    expect(screen.queryByText("New project terminal")).toBeNull()
+    expect(screen.queryByText("New terminal at the project root")).toBeNull()
     expect(screen.getByText("Remove project…")).toBeTruthy()
   })
 })

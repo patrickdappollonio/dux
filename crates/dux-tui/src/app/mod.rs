@@ -1657,7 +1657,7 @@ impl ProjectChooserIntent {
             ProjectChooserIntent::FromWorktree => "New agent from worktree",
             ProjectChooserIntent::Manage => "Manage project",
             ProjectChooserIntent::ManageWorktrees => "Manage worktrees in project",
-            ProjectChooserIntent::ProjectTerminal => "New terminal in project",
+            ProjectChooserIntent::ProjectTerminal => "New terminal at the project root",
         }
     }
 }

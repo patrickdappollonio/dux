@@ -75,14 +75,16 @@ export function ProjectMenuItems({ id }: { id: string }) {
           </DropdownMenuItem>
           {/* A project terminal: a plain shell at the project's repo root with
               no agent attached. Immediate action (no trailing "…"), mirroring
-              the agent menu's "New terminal"; disabled when the project's path
-              is missing on disk (there is no root to open a shell at). */}
+              the agent menu's own terminal entry; disabled when the project's
+              path is missing on disk (there is no root to open a shell at).
+              The label names the root rather than the ownership, because where
+              the shell lands is what the reader cannot otherwise guess. */}
           <DropdownMenuItem
             disabled={project.path_missing}
             onClick={() => createProjectTerminal(id)}
           >
             <SquareTerminal />
-            New project terminal
+            New terminal at the project root
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => pullProject(id)}>
             <Download />

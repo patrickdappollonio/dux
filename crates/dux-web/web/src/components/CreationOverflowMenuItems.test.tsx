@@ -64,7 +64,7 @@ describe("CreationOverflowMenuItems", () => {
       "New agent from PR…",
       "New agent from existing worktree…",
       "New standalone agent…",
-      "New standalone terminal",
+      "New standalone terminal in your home folder",
       "Add project…",
       "Initialize a repository…",
     ])
@@ -115,7 +115,7 @@ describe("CreationOverflowMenuItems", () => {
     expect(screen.getAllByRole("menuitem").map((i) => i.textContent)).toEqual([
       "New agent from existing worktree…",
       "New standalone agent…",
-      "New standalone terminal",
+      "New standalone terminal in your home folder",
       "Add project…",
       "Initialize a repository…",
     ])

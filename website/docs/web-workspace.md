@@ -356,8 +356,8 @@ sidebar:
   in the foreground ("vim", "htop").
 - A **project terminal** opens at the project's repo root with no agent attached. It is
   the escape hatch when dux will not do something for you remotely, even over Tailscale
-  with no local terminal in sight. Spawn one from the project's ⋯ menu ("New project
-  terminal"); it shows up in the Task Manager and is destroyed on close.
+  with no local terminal in sight. Spawn one from the project's ⋯ menu ("New terminal at
+  the project root"); it shows up in the Task Manager and is destroyed on close.
 - A **standalone terminal** opens in your home directory with no agent and no project, so
   you can reach for one before you have added a single project. Open one from the
   **Terminals** group of the launcher's `⋯` menu, from the **+** on the Terminals divider,

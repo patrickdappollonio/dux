@@ -46,7 +46,7 @@ describe("newMenuItems", () => {
       "New agent from PR…",
       "New agent from existing worktree…",
       "New standalone agent…",
-      "New standalone terminal",
+      "New standalone terminal in your home folder",
     ])
   })
 

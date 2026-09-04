@@ -1169,7 +1169,7 @@ describe("FlatAgentList Terminals divider", () => {
   it("creates a standalone terminal in one tap", () => {
     render(<FlatAgentList handlers={handlers} />)
     fireEvent.click(
-      screen.getByRole("button", { name: "New standalone terminal" }),
+      screen.getByRole("button", { name: "New standalone terminal in your home folder" }),
     )
     expect(createStandaloneTerminalMock).toHaveBeenCalledOnce()
   })
@@ -1180,7 +1180,7 @@ describe("FlatAgentList Terminals divider", () => {
     render(<FlatAgentList handlers={handlers} />)
     const toggle = screen.getByText("Terminals").closest("button")!
     const plus = screen.getByRole("button", {
-      name: "New standalone terminal",
+      name: "New standalone terminal in your home folder",
     })
     expect(toggle.contains(plus)).toBe(false)
     expect(plus.contains(toggle)).toBe(false)
@@ -1194,7 +1194,7 @@ describe("FlatAgentList Terminals divider", () => {
     const toggle = () => screen.getByText("Terminals").closest("button")!
     expect(toggle().getAttribute("aria-expanded")).toBe("true")
     fireEvent.click(
-      screen.getByRole("button", { name: "New standalone terminal" }),
+      screen.getByRole("button", { name: "New standalone terminal in your home folder" }),
     )
     expect(toggle().getAttribute("aria-expanded")).toBe("true")
     fireEvent.click(toggle())
@@ -1213,7 +1213,7 @@ describe("FlatAgentList Terminals divider", () => {
     render(<FlatAgentList handlers={handlers} />)
     expect(screen.queryByText("Terminals")).toBeNull()
     expect(
-      screen.queryByRole("button", { name: "New standalone terminal" }),
+      screen.queryByRole("button", { name: "New standalone terminal in your home folder" }),
     ).toBeNull()
   })
 })

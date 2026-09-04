@@ -166,6 +166,18 @@ export function workspaceDirectory(workspace: AgentWorkspaceWire): string {
   })
 }
 
+/** What the agent menu's terminal entry says. A menu item that creates a
+ * terminal has to name where the shell opens, and a companion terminal opens in
+ * the agent's own directory, which is a worktree dux manages for one kind of
+ * agent and the user's own folder for the other. Naming the worktree for both
+ * would promise a standalone agent something it does not have. */
+export function newTerminalLabel(workspace: AgentWorkspaceWire): string {
+  return matchWorkspace(workspace, {
+    managed: () => "New terminal in the worktree",
+    folder: () => "New terminal in the folder",
+  })
+}
+
 /** What the agent row's second line names: the project (resolved by the
  * caller, which has the project list) or the folder, home-collapsed.
  *

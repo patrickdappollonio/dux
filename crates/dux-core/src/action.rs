@@ -404,7 +404,7 @@ impl Action {
                 "Open the selected agent fullscreen, where keys go to the agent verbatim."
             }
             Action::ShowTerminal => {
-                "Open the first companion terminal for the selected agent, or launch a new one if none exists."
+                "Open the first companion terminal for the selected agent, or launch a new one in the agent's directory if none exists."
             }
             Action::NextTab => "Focus the next tab of the selected agent.",
             Action::PrevTab => "Focus the previous tab of the selected agent.",
@@ -421,8 +421,10 @@ impl Action {
             Action::SelectTab7 => "Focus tab 7 of the selected agent.",
             Action::SelectTab8 => "Focus tab 8 of the selected agent.",
             Action::SelectTab9 => "Focus tab 9 of the selected agent.",
-            Action::NewTerminal => "Spawn a new companion terminal for the selected agent.",
-            Action::NewProjectTerminal => "Open a terminal for a project you pick.",
+            Action::NewTerminal => {
+                "Spawn a new companion terminal in the selected agent's directory."
+            }
+            Action::NewProjectTerminal => "Open a terminal at the repo root of a project you pick.",
             Action::NewStandaloneTerminal => {
                 "Open a standalone terminal in your home directory, belonging to no project or agent."
             }

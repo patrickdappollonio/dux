@@ -309,7 +309,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::ShowTerminal,
         name: "show-terminal",
-        description: "Open the first companion terminal, or launch a new one",
+        description: "Open the first companion terminal, or launch a new one in the agent's directory",
         // Per-session: web manages companion terminals per session inline.
     },
     PaletteCommand {
@@ -399,13 +399,13 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::NewTerminal,
         name: "new-terminal-for-agent",
-        description: "Spawn a new companion terminal for the selected agent",
+        description: "Spawn a new companion terminal in the selected agent's directory",
         // Per-session: web spawns agent terminals from the session row menu inline.
     },
     PaletteCommand {
         action: Action::NewProjectTerminal,
         name: "new-terminal-for-project",
-        description: "Open a terminal for a project you pick",
+        description: "Open a terminal at the repo root of a project you pick",
         // Per-project: web spawns project terminals from the project row menu inline.
     },
     PaletteCommand {

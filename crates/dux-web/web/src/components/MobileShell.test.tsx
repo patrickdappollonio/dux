@@ -288,7 +288,7 @@ describe("MobileShell project terminals", () => {
     expect(screen.getByText("Terminal")).toBeTruthy()
   })
 
-  it("offers 'New project terminal' in the project ⋯ menu", () => {
+  it("offers the project-root terminal entry in the project ⋯ menu", () => {
     // Agent-less project actions live in the New-agent picker's per-project ⋯.
     mockState = makeState({
       spine: projectTerminalSpine(),
@@ -297,7 +297,7 @@ describe("MobileShell project terminals", () => {
     })
     render(<NewAgentPickerDialog />)
     fireEvent.click(screen.getByLabelText("Project actions"))
-    const item = screen.getByText("New project terminal")
+    const item = screen.getByText("New terminal at the project root")
     expect(
       item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
     ).not.toBe("true")

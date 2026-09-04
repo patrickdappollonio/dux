@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { defaultProviderForSession } from "@/lib/agentTabs"
 import {
+  newTerminalLabel,
   supportsBranchGit,
   workspaceDirectory,
   workspaceProjectId,
@@ -206,9 +207,13 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         <ExternalLink />
         Open editor in new tab
       </DropdownMenuItem>
+      {/* The label names where the shell opens, because "New terminal" alone
+          leaves the reader guessing at the current working directory. It is
+          workspace-derived rather than fixed: this same menu serves a
+          standalone agent, which has a folder and no worktree. */}
       <DropdownMenuItem onClick={() => createTerminal(session.id)}>
         <SquareTerminal />
-        New terminal
+        {newTerminalLabel(session.workspace)}
       </DropdownMenuItem>
       <DropdownMenuItem
         onClick={() => clipboardWorktree(workspaceDirectory(session.workspace))}

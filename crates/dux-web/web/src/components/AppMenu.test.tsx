@@ -189,7 +189,7 @@ describe("AppMenu", () => {
     expect(screen.getByText("New agent from existing worktree…")).toBeTruthy()
     // The terminal rides along in the same submenu, and it is the cog's only
     // route to it now that the top-level entry is gone.
-    expect(screen.getByText("New standalone terminal")).toBeTruthy()
+    expect(screen.getByText("New standalone terminal in your home folder")).toBeTruthy()
     fireEvent.click(screen.getByText("New agent from PR…"))
     expect(openCreateAgentFromPr).toHaveBeenCalledWith(null)
   })
@@ -200,7 +200,7 @@ describe("AppMenu", () => {
     await screen.findByRole("menu")
     fireEvent.click(screen.getByText("New"))
     await settle()
-    fireEvent.click(screen.getByText("New standalone terminal"))
+    fireEvent.click(screen.getByText("New standalone terminal in your home folder"))
     expect(createStandaloneTerminal).toHaveBeenCalledOnce()
   })
 
