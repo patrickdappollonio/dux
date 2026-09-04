@@ -82,7 +82,12 @@ import {
   terminalStateWord,
   type FlatTerminal,
 } from "@/lib/flatTerminals"
-import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
+import {
+  prAriaLabel,
+  prIconClass,
+  prIconHoverClass,
+  prStateLabel,
+} from "@/lib/pr"
 import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { launcherVerb } from "@/lib/launcherVerb"
 import { partitionProjects } from "@/lib/projects"
@@ -375,7 +380,7 @@ function AgentFlatRow({
                       href={session.pr.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
+                      aria-label={prAriaLabel(session.pr.number, session.pr.state)}
                       className={cn(
                         "inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 transition-colors",
                         prIconClass(session.pr.state),

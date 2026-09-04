@@ -703,7 +703,7 @@ describe("FlatAgentList PR chip", () => {
       state: "open",
     } as SessionView["pr"]
     render(<FlatAgentList handlers={handlers} />)
-    const chip = screen.getByLabelText("PR #42 (open)")
+    const chip = screen.getByLabelText("Pull request #42, open")
     const click = new MouseEvent("click", { bubbles: true, cancelable: true })
     fireEvent(chip, click)
     expect(open).toHaveBeenCalledTimes(1)
@@ -723,7 +723,7 @@ describe("FlatAgentList PR chip", () => {
     } as SessionView["pr"]
     render(<FlatAgentList handlers={handlers} />)
     handlers.onSelectSession.mockClear()
-    fireEvent.click(screen.getByLabelText("PR #42 (open)"))
+    fireEvent.click(screen.getByLabelText("Pull request #42, open"))
     expect(handlers.onSelectSession).not.toHaveBeenCalled()
   })
 })

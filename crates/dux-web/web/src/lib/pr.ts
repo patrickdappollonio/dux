@@ -20,6 +20,18 @@ export function prStateLabel(state: PrStateLike): string {
   return "unknown"
 }
 
+// The sentence a screen reader speaks for a PR link. Spelled out ("Pull
+// request") rather than the written abbreviation, which is read as letters, and
+// the state is a clause rather than a parenthetical so it is spoken as prose. A
+// state this build does not recognize is left off entirely: naming it "unknown"
+// tells the listener nothing the link did not already say.
+export function prAriaLabel(number: number, state: PrStateLike): string {
+  const label = prStateLabel(state)
+  return label === "unknown"
+    ? `Pull request #${number}`
+    : `Pull request #${number}, ${label}`
+}
+
 // Icon-only tint for the sidebar/mobile session row: just the glyph color, no
 // background (the row carries its own hover/active surface).
 export function prIconClass(state: PrStateLike): string {

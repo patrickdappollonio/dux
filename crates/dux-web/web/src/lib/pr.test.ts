@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  prAriaLabel,
   prBannerClass,
   prIconClass,
   prIconHoverClass,
@@ -59,5 +60,19 @@ describe("prBannerClass", () => {
 
   it("falls back to a neutral strip for unknown states", () => {
     expect(prBannerClass("draft")).toContain("bg-muted")
+  })
+})
+
+describe("prAriaLabel", () => {
+  it("spells the words out and speaks the state as a clause", () => {
+    expect(prAriaLabel(123, "open")).toBe("Pull request #123, open")
+    expect(prAriaLabel(7, "merged")).toBe("Pull request #7, merged")
+    expect(prAriaLabel(7, "closed")).toBe("Pull request #7, closed")
+  })
+
+  it("says nothing about a state it does not know", () => {
+    // "Pull request #7, unknown" would be worse than silence: it announces a
+    // word the listener has to decide is meaningless.
+    expect(prAriaLabel(7, "draft")).toBe("Pull request #7")
   })
 })

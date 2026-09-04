@@ -33,7 +33,12 @@ import {
   selectTerminal,
   useDux,
 } from "@/lib/store"
-import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
+import {
+  prAriaLabel,
+  prIconClass,
+  prIconHoverClass,
+  prStateLabel,
+} from "@/lib/pr"
 import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import type { AgentTabView, SessionView } from "@/lib/types"
 import { matchOwner } from "@/lib/terminalOwner"
@@ -341,6 +346,9 @@ interface TerminalHeaderProps {
 // The pull request stays, as the compact chip: it is the phone's whole PR
 // surface (the desktop's wide band has no room here), it is one tap to the
 // review, and it opens the same URL every other PR control in the app opens.
+// It carries `#N` beside the glyph, the way the sidebar row and the desktop
+// banner already do: the slimmed header has the room, and the number is what
+// lets you match the chip against the tab you have open in the review.
 function TerminalHeader({ session, focusedTab, projectName }: TerminalHeaderProps) {
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
@@ -368,14 +376,23 @@ function TerminalHeader({ session, focusedTab, projectName }: TerminalHeaderProp
             href={session.pr.url}
             target="_blank"
             rel="noopener noreferrer"
-            aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
+            aria-label={prAriaLabel(session.pr.number, session.pr.state)}
             className={cn(
-              "inline-flex size-10 shrink-0 items-center justify-center rounded-md transition-colors",
+              "inline-flex h-10 w-auto shrink-0 items-center justify-center gap-1 rounded-md px-2 transition-colors",
               prIconClass(session.pr.state),
               prIconHoverClass(session.pr.state),
             )}
           >
-            <GitPullRequest className="size-4" />
+            <GitPullRequest className="size-4 shrink-0" />
+            {/* The number is DATA, so it stays on the phone where this surface
+                otherwise prefers icon-only, and it is why the chip is
+                content-sized rather than square. `shrink-0` on the whole chip
+                is what makes the IDENTITY beside it give up width first: a
+                truncated agent name is still readable, half a PR number is
+                not. */}
+            <span className="text-xs font-medium tabular-nums">
+              #{session.pr.number}
+            </span>
           </a>
         </SimpleTooltip>
       ) : null}

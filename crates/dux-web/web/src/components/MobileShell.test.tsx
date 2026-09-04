@@ -1399,6 +1399,135 @@ describe("MobileShell agent header and its flap cluster", () => {
   })
 })
 
+// THE PHONE HEADER'S PR CHIP CARRIES THE NUMBER.
+//
+// The number is data, so it stays on a surface that otherwise prefers
+// icon-only, and it is what lets you match the chip against the review tab you
+// already have open. The sidebar row and the desktop banner have always shown
+// it; this chip was the one PR surface that did not.
+describe("MobileShell agent header PR chip", () => {
+  function prState(pr: Record<string, unknown> | null): DuxState {
+    const state = makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      selectedSessionId: "s1",
+      mobileScreen: "terminal",
+      changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      pendingSlotTab: {},
+      terminalEpoch: 0,
+      mobileAccessoryBarOverride: null,
+    })
+    const sessions = (
+      state.spine as unknown as { sessions: Record<string, unknown>[] }
+    ).sessions
+    if (pr) sessions[0].pr = pr
+    return state
+  }
+
+  const openPr = {
+    number: 123,
+    state: "open",
+    title: "Teach the chip its number",
+    url: "https://github.com/o/r/pull/123",
+  }
+
+  const chip = () => screen.getByLabelText(/^Pull request #/)
+
+  it("renders the number beside the glyph", () => {
+    mockState = prState(openPr)
+    render(<MobileShell />)
+    expect(chip().textContent).toBe("#123")
+    expect(chip().querySelector("svg")).not.toBeNull()
+  })
+
+  it("is absent entirely when no pull request is attached", () => {
+    mockState = prState(null)
+    render(<MobileShell />)
+    expect(screen.queryByLabelText(/^Pull request #/)).toBeNull()
+  })
+
+  it("keeps the 40px height token, sizes its width to the number, and never shrinks", () => {
+    mockState = prState(openPr)
+    render(<MobileShell />)
+    const cls = chip().className
+    // Height is the cluster's one token; width follows the content, which is
+    // the whole point of the change.
+    expect(cls).toMatch(/(?:^|\s)h-10(?:\s|$)/)
+    expect(cls).toMatch(/(?:^|\s)w-auto(?:\s|$)/)
+    // The IDENTITY gives up width first: a truncated agent name is readable,
+    // half a PR number is not.
+    expect(cls).toMatch(/(?:^|\s)shrink-0(?:\s|$)/)
+  })
+
+  it("keeps the state coloring and the same one-tap open", () => {
+    mockState = prState(openPr)
+    render(<MobileShell />)
+    expect(chip().className).toContain("text-green-500")
+    expect(chip().getAttribute("href")).toBe("https://github.com/o/r/pull/123")
+    expect(chip().getAttribute("target")).toBe("_blank")
+    expect(chip().getAttribute("rel")).toBe("noopener noreferrer")
+  })
+
+  it("keeps the state coloring for a merged and a closed pull request", () => {
+    mockState = prState({ ...openPr, state: "merged" })
+    render(<MobileShell />)
+    expect(chip().className).toContain("text-purple-400")
+    cleanup()
+    mockState = prState({ ...openPr, state: "closed" })
+    render(<MobileShell />)
+    expect(chip().className).toContain("text-red-400")
+  })
+
+  it("speaks the whole sentence to a screen reader", () => {
+    mockState = prState(openPr)
+    render(<MobileShell />)
+    expect(chip().getAttribute("aria-label")).toBe("Pull request #123, open")
+  })
+
+  // WIDTH BUDGET. jsdom has no layout engine, so this is arithmetic over the
+  // geometry the classes above pin down rather than a rendered measurement:
+  // the header is `px-3 gap-2` around Back (`min-w-11`), the identity (the
+  // flexible child), and the chip (`px-2 gap-1`, a 16px glyph, and the number
+  // at text-xs). The digit width is a deliberate OVER-estimate, so the
+  // remaining identity width computed here is a lower bound on the real one.
+  it("leaves the identity a usable width even at five digits on the narrowest phone", () => {
+    mockState = prState({ ...openPr, number: 12345 })
+    render(<MobileShell />)
+    expect(chip().textContent).toBe("#12345")
+
+    const HEADER_PADDING = 12 // px-3, both sides
+    const GAP = 8 // gap-2, twice (Back|identity, identity|chip)
+    const BACK = 44 // min-w-11
+    const CHIP_PADDING = 8 // px-2, both sides
+    const CHIP_GAP = 4 // gap-1
+    const GLYPH = 16 // size-4
+    const DIGIT = 8 // text-xs tabular-nums, rounded up from about 7.2px
+    const chipWidth =
+      CHIP_PADDING * 2 + GLYPH + CHIP_GAP + "#12345".length * DIGIT
+    const identityWidth = (viewport: number) =>
+      viewport - HEADER_PADDING * 2 - GAP * 2 - BACK - chipWidth
+
+    // 84px of chip at its widest realistic content; the identity keeps 222px
+    // of a 390px phone and 152px of a 320px one, which is roughly 28 and 19
+    // characters of agent name at text-sm before it ellipsizes. That is not
+    // unreasonable truncation, and it is the worst case: an ordinary
+    // three-digit PR gives the identity 16px more.
+    expect(chipWidth).toBe(84)
+    expect(identityWidth(390)).toBe(222)
+    expect(identityWidth(320)).toBe(152)
+    for (const viewport of [390, 320]) {
+      expect(identityWidth(viewport)).toBeGreaterThanOrEqual(140)
+      expect(identityWidth(viewport) / viewport).toBeGreaterThan(0.45)
+    }
+  })
+})
+
 // The phone header's two lanes. The approved mock draws lane one as the robot
 // glyph plus the agent name and lane two as folder+project and chip+assistant
 // at 11px muted; the phone deliberately carries only those two secondary
