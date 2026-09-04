@@ -229,7 +229,7 @@ Every device pointed at the same terminal sees the same output at the same time,
 watcher unless nobody is driving.** If nobody holds the terminal, the first device to
 look at it picks it up.
 
-![A card covering the terminal that says the agent is open on another device, with a Take over button.](/screens/take-over-card.png)
+![A card covering the terminal that says the agent is active on another device, with a Take over button.](/screens/take-over-card.png)
 
 **The terminal UI is one of those devices.** When dux is
 [serving in the background of a running TUI](/docs/server-mode#serve-in-the-background-and-keep-the-tui),
