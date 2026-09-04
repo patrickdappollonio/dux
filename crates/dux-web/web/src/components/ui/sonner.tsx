@@ -24,6 +24,64 @@ export const TOAST_SWIPE_DIRECTIONS: ToasterProps["swipeDirections"] = [
   "right",
 ]
 
+/// The same rule read off the top edge, for the phone's placement below.
+///
+/// The vertical direction follows the anchor rather than the other way round:
+/// pushing a top toast back off the top edge is the gesture it invites, and
+/// dragging it DOWN would pull it further into the screen, over the terminal.
+export const TOAST_SWIPE_DIRECTIONS_TOP: ToasterProps["swipeDirections"] = [
+  "top",
+  "left",
+  "right",
+]
+
+/// Where the toasts sit, per shell.
+///
+/// On a phone the bottom of every pane screen is the typing surface: the
+/// compose bar and the terminal key rows live there, and a stack of toasts over
+/// them covers the thing the user is answering with. So the phone anchors at
+/// the top, ALWAYS, rather than only while a PTY is on screen: one home per
+/// shell, and the bottom is spoken for on that shell generally. The computer
+/// keeps the bottom, where nothing is competing for the corner.
+///
+/// The two offsets are the same expression on purpose. sonner switches from
+/// `--offset-*` to `--mobile-offset-*` at its OWN 600px media query, which is
+/// not the app's 768px shell breakpoint, so a 700px-wide phone in landscape
+/// would otherwise read a different inset from the one this placement chose.
+/// Only the named side is given; sonner fills the other three with its own
+/// defaults (24px desktop, 16px mobile).
+///
+/// The safe-area inset is ours to add. The toaster is `position: fixed` and
+/// sits outside the mobile root that pads for the notch, so without this a top
+/// toast would land under the status bar on a notched phone (`viewport-fit=cover`
+/// is set on the viewport meta, so the inset is real there and zero elsewhere).
+const TOP_INSET = "calc(env(safe-area-inset-top) + 1rem)"
+const BOTTOM_INSET = "calc(env(safe-area-inset-bottom) + 2.5rem)"
+
+export function toastPlacement(isMobile: boolean): {
+  position: NonNullable<ToasterProps["position"]>
+  offset: NonNullable<ToasterProps["offset"]>
+  mobileOffset?: ToasterProps["mobileOffset"]
+  swipeDirections: ToasterProps["swipeDirections"]
+} {
+  if (isMobile) {
+    return {
+      position: "top-center",
+      offset: { top: TOP_INSET },
+      mobileOffset: { top: TOP_INSET },
+      swipeDirections: TOAST_SWIPE_DIRECTIONS_TOP,
+    }
+  }
+  // No `mobileOffset` on this branch, deliberately: the computer's placement is
+  // left exactly as it was, and sonner's mobile variables are unreachable from
+  // a viewport wide enough to be on this shell anyway.
+  return {
+    position: "bottom-center",
+    offset: { bottom: BOTTOM_INSET },
+    swipeDirections: TOAST_SWIPE_DIRECTIONS,
+  }
+}
+
 // Per-tone icon color, so "this is fine" and "this is on fire" are not the same
 // picture. Shape still differs per tone (check / info / triangle / octagon), so
 // color is an addition to the signal and never the only carrier of it.
@@ -54,14 +112,19 @@ export const VISIBLE_TOASTS_MOBILE = 3
 
 const Toaster = ({ ...props }: ToasterProps) => {
   const isMobile = useIsMobile()
+  // Read live, so a rotation across the shell breakpoint moves the stack with
+  // the shell rather than leaving it over the compose bar until the next toast.
+  // Crossing it re-keys sonner's per-position list, so the toasts already up are
+  // remounted: they survive (the store outlives the component) and their
+  // dismissal timers restart. A busy toast is unaffected, having no timer of its
+  // own, and a rotation mid-toast is rare enough to pay one restarted window for.
+  const placement = toastPlacement(isMobile)
   return (
     <Sonner
       theme="dark"
       visibleToasts={isMobile ? VISIBLE_TOASTS_MOBILE : VISIBLE_TOASTS_DESKTOP}
       className="toaster group"
-      position="bottom-center"
-      offset={{ bottom: "calc(env(safe-area-inset-bottom) + 2.5rem)" }}
-      swipeDirections={TOAST_SWIPE_DIRECTIONS}
+      {...placement}
       // Every toast now auto-dismisses on a severity-graded timer (see
       // `lib/notify.ts`), so the close button is a shortcut rather than the
       // only exit. Keep it for mouse users; touch users swipe.

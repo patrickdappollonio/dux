@@ -5,7 +5,9 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest"
 
 import {
   TOAST_SWIPE_DIRECTIONS,
+  TOAST_SWIPE_DIRECTIONS_TOP,
   Toaster,
+  toastPlacement,
   VISIBLE_TOASTS_DESKTOP,
   VISIBLE_TOASTS_MOBILE,
 } from "./sonner"
@@ -214,6 +216,103 @@ describe("Toaster swipe to dismiss", () => {
     })
     await screen.findByText("hold still")
     await swipe(toastEl(), -6, 0)
+    expect(toastEl().getAttribute("data-removed")).not.toBe("true")
+  })
+})
+
+describe("Toaster placement", () => {
+  function toasterEl(): HTMLElement {
+    const el = document.querySelector("[data-sonner-toaster]")
+    if (!el) throw new Error("no toaster rendered")
+    return el as HTMLElement
+  }
+
+  const originalWidth = window.innerWidth
+
+  function renderAtWidth(width: number) {
+    window.innerWidth = width
+    render(<Toaster />)
+  }
+
+  afterEach(() => {
+    window.innerWidth = originalWidth
+  })
+
+  it("keeps the computer at the bottom, offsets and all", () => {
+    const placement = toastPlacement(false)
+    expect(placement.position).toBe("bottom-center")
+    expect(placement.offset).toEqual({
+      bottom: "calc(env(safe-area-inset-bottom) + 2.5rem)",
+    })
+    expect(placement.swipeDirections).toBe(TOAST_SWIPE_DIRECTIONS)
+    // Nothing is said about sonner's own sub-600px variables from this shell.
+    expect(placement.mobileOffset).toBeUndefined()
+  })
+
+  it("anchors the phone at the top, where the typing surfaces are not", () => {
+    const placement = toastPlacement(true)
+    expect(placement.position).toBe("top-center")
+    expect(placement.swipeDirections).toBe(TOAST_SWIPE_DIRECTIONS_TOP)
+    expect(TOAST_SWIPE_DIRECTIONS_TOP).toContain("top")
+    // Dragging a top toast DOWN pulls it over the terminal, so it is not an exit.
+    expect(TOAST_SWIPE_DIRECTIONS_TOP).not.toContain("bottom")
+  })
+
+  it("clears the notch at the top, on both of sonner's own breakpoints", () => {
+    const placement = toastPlacement(true)
+    const top = "calc(env(safe-area-inset-top) + 1rem)"
+    expect(placement.offset).toEqual({ top })
+    // sonner swaps to its mobile variables at 600px, which is not the app's
+    // 768px shell breakpoint: both have to say the same thing.
+    expect(placement.mobileOffset).toEqual({ top })
+  })
+
+  // sonner renders nothing at all until something is in the store, so every
+  // placement read needs a toast up first.
+  async function raiseOne() {
+    act(() => {
+      toast.success("placed", { duration: Infinity })
+    })
+    await screen.findByText("placed")
+  }
+
+  it("renders bottom-anchored on a desktop window", async () => {
+    renderAtWidth(1280)
+    await raiseOne()
+    expect(toasterEl().getAttribute("data-y-position")).toBe("bottom")
+  })
+
+  it("renders top-anchored on a phone window", async () => {
+    renderAtWidth(390)
+    await raiseOne()
+    expect(toasterEl().getAttribute("data-y-position")).toBe("top")
+    expect(toasterEl().style.getPropertyValue("--offset-top")).toBe(
+      "calc(env(safe-area-inset-top) + 1rem)",
+    )
+    expect(toasterEl().style.getPropertyValue("--mobile-offset-top")).toBe(
+      "calc(env(safe-area-inset-top) + 1rem)",
+    )
+  })
+
+  it("dismisses a phone toast on an upward swipe", async () => {
+    renderAtWidth(390)
+    act(() => {
+      toast.error("swipe me up")
+    })
+    await screen.findByText("swipe me up")
+    await swipe(toastEl(), 0, -120)
+    await waitFor(() => {
+      expect(toastEl().getAttribute("data-removed")).toBe("true")
+    })
+  })
+
+  it("keeps a phone toast on a downward swipe, which pulls it over the terminal", async () => {
+    renderAtWidth(390)
+    act(() => {
+      toast.error("stay put")
+    })
+    await screen.findByText("stay put")
+    await swipe(toastEl(), 0, 120)
     expect(toastEl().getAttribute("data-removed")).not.toBe("true")
   })
 })
