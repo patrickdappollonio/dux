@@ -112,14 +112,70 @@ export type ContextLossSource = Disposable & {
 /// re-creates the renderer here or in the next pane to mount: a context that
 /// was taken once will be taken again, and a loop of context churn is worse
 /// than a seam.
-export function wireContextLoss(addon: ContextLossSource): void {
+export function wireContextLoss(
+  addon: ContextLossSource,
+  onLoss?: () => void,
+): void {
   addon.onContextLoss(() => {
     noteGlGaveUp()
     addon.dispose()
+    onLoss?.()
     console.warn(
       "dux: the terminal's WebGL context was lost; falling back to the DOM renderer",
     )
   })
+}
+
+/// PROMOTE THE TERMINAL SO ITS DEVICE-PIXEL BOX STOPS MOVING UNDER IT.
+///
+/// The webgl addon watches its canvas with a `device-pixel-content-box`
+/// ResizeObserver and answers every callback by assigning `canvas.width` and
+/// `canvas.height` (`WebglRenderer.ts:610-619` in `@xterm/addon-webgl@0.19.0`),
+/// which is what corrects the blurry rendering a fractional device pixel ratio
+/// would otherwise cause. Assigning either one CLEARS the GL drawing buffer,
+/// and the repaint it then asks for arrives on a later animation frame, so each
+/// callback costs one blank frame.
+///
+/// That box is snapped to the device pixel grid, so it depends on where the
+/// canvas IS and not only on how big it is. A canvas of a fixed CSS size that
+/// slides across the screen by fractional device pixels therefore reports a box
+/// that flips by one pixel and back, over and over, for the length of the slide.
+/// Measured at a device pixel ratio of 2.625 on the phone shell, entering
+/// theater mode churned the buffer five times and leaving it six, while the
+/// canvas's CSS size never changed at all. That is the flicker: it is WebGL
+/// only, because the DOM renderer has no drawing buffer to clear, and it is
+/// phones only, because a whole-number ratio maps a fixed CSS size to the same
+/// device size wherever it sits.
+///
+/// The layout gesture (`lib/layoutGesture.ts`) does not and cannot answer this.
+/// It parks dux's own refits so the grid is measured once at the geometry the
+/// gesture settles on, and it does that correctly: the canvas's CSS box is
+/// constant for the whole flight. The churn is the addon's own reaction to
+/// MOVING, which no amount of holding the grid prevents.
+///
+/// Promoting the terminal's own box to a compositing layer does prevent it: the
+/// snapping is then done against the layer rather than against a screen
+/// position that is mid-animation, and the reported box holds still. Measured
+/// in the same journey, both directions fell to zero mid-flight buffer writes,
+/// leaving only the single settle refit the gesture already pays for.
+///
+/// It is applied for as long as the webgl renderer is attached rather than for
+/// the length of a gesture, deliberately. Applying it at the start of a gesture
+/// re-snaps the box once, which costs the very blank frame the pin exists to
+/// remove, and the theater flight is not the only thing that moves a terminal:
+/// a divider drag, a sidebar collapse and a rotation slide it too. The DOM
+/// renderer never gets it, so a browser on that rung keeps subpixel-antialiased
+/// text and pays for no layer it has no canvas to put in.
+export function pinDevicePixelBox(element: HTMLElement): void {
+  element.style.willChange = "transform"
+}
+
+/// Hands the layer back. Called when the renderer goes, whether that is the
+/// pane tearing down or a lost context dropping to the DOM renderer, so a
+/// terminal that is no longer painting with GL is not left holding a layer for
+/// a canvas that no longer exists.
+export function releaseDevicePixelBox(element: HTMLElement): void {
+  element.style.removeProperty("will-change")
 }
 
 /// Loads the webgl renderer over an already-OPEN terminal, or does nothing and
@@ -135,7 +191,10 @@ export function wireContextLoss(addon: ContextLossSource): void {
 /// async, and an async attach has to be raced against a pane that unmounted
 /// while the chunk was in flight. A few tens of kilobytes inside a chunk the
 /// user is already downloading a terminal from is cheaper than that race.
-export function attachWebglRenderer(term: Terminal): Disposable | null {
+export function attachWebglRenderer(
+  term: Terminal,
+  container: HTMLElement,
+): Disposable | null {
   const choice = chooseTerminalRenderer({
     webgl2: detectWebgl2(),
     glGaveUp: hasGlGivenUp(),
@@ -146,9 +205,15 @@ export function attachWebglRenderer(term: Terminal): Disposable | null {
     const addon = new WebglAddon()
     // Wired BEFORE activation, so a context lost during activation itself is
     // still heard.
-    wireContextLoss(addon)
+    wireContextLoss(addon, () => releaseDevicePixelBox(container))
     term.loadAddon(addon)
-    return addon
+    pinDevicePixelBox(container)
+    return {
+      dispose: () => {
+        releaseDevicePixelBox(container)
+        addon.dispose()
+      },
+    }
   } catch {
     noteGlGaveUp()
     console.warn(

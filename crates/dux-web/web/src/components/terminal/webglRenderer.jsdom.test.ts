@@ -5,9 +5,20 @@
 // means no rather than a crashed pane.
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { detectWebgl2 } from "./webglRenderer"
+import type { Terminal } from "@xterm/xterm"
 
-afterEach(() => vi.restoreAllMocks())
+import {
+  attachWebglRenderer,
+  detectWebgl2,
+  pinDevicePixelBox,
+  releaseDevicePixelBox,
+  resetGlGaveUpForTests,
+} from "./webglRenderer"
+
+afterEach(() => {
+  resetGlGaveUpForTests()
+  vi.restoreAllMocks()
+})
 
 describe("detectWebgl2", () => {
   it("reports yes and releases the probe context immediately", () => {
@@ -43,5 +54,48 @@ describe("detectWebgl2", () => {
       throw new Error("context type refused")
     })
     expect(detectWebgl2()).toBe(false)
+  })
+})
+
+describe("the device-pixel pin", () => {
+  it("promotes the element and hands the layer back again", () => {
+    const el = document.createElement("div")
+    pinDevicePixelBox(el)
+    expect(el.style.willChange).toBe("transform")
+
+    releaseDevicePixelBox(el)
+    // Removed rather than set to a value: an emptied-out declaration is still
+    // a declaration, and the element should end up exactly as it started.
+    expect(el.style.willChange).toBe("")
+    expect(el.getAttribute("style")).toBe("")
+  })
+
+  it("is idempotent, so a re-pin cannot stack up", () => {
+    const el = document.createElement("div")
+    pinDevicePixelBox(el)
+    pinDevicePixelBox(el)
+    releaseDevicePixelBox(el)
+    expect(el.style.willChange).toBe("")
+  })
+
+  it("survives a release on an element that was never pinned", () => {
+    const el = document.createElement("div")
+    releaseDevicePixelBox(el)
+    expect(el.style.willChange).toBe("")
+  })
+})
+
+describe("attaching the renderer", () => {
+  const fakeTerminal = () => ({ loadAddon: vi.fn() }) as unknown as Terminal
+
+  it("leaves the DOM fallback's container untouched", () => {
+    // No WebGL2 means no canvas, so there is no drawing buffer to clear and
+    // nothing for a compositing layer to buy: the DOM renderer keeps its
+    // subpixel-antialiased text.
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null)
+    const container = document.createElement("div")
+
+    expect(attachWebglRenderer(fakeTerminal(), container)).toBeNull()
+    expect(container.style.willChange).toBe("")
   })
 })

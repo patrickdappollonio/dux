@@ -91,6 +91,21 @@ describe("a lost context", () => {
     )
   })
 
+  it("runs the caller's release, so the terminal does not keep a layer it no longer paints into", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {})
+    const addon = fakeAddon()
+    const release = vi.fn()
+    wireContextLoss(addon, release)
+    expect(release).not.toHaveBeenCalled()
+
+    addon.lose()
+
+    // The device-pixel pin exists for the addon's canvas; once the addon is
+    // gone and xterm is back on the DOM renderer, there is no canvas to keep
+    // still and the promotion is pure cost.
+    expect(release).toHaveBeenCalledTimes(1)
+  })
+
   it("says what happened, because a silent renderer swap looks like a repaint bug", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
     const addon = fakeAddon()

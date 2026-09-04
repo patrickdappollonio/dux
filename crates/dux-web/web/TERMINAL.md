@@ -2359,6 +2359,43 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Pinned: `src/components/terminal/webglRenderer.test.ts` (the ladder's decision and
     the lost-context handling) and `webglRenderer.jsdom.test.ts` (the probe's contract).
 
+12. **A terminal painted by WebGL is promoted to its own compositing layer, for as
+    long as the renderer is attached.** Why: the addon watches its canvas with a
+    `device-pixel-content-box` ResizeObserver and answers every callback by assigning
+    `canvas.width`/`canvas.height` (`WebglRenderer.ts:610-619` in
+    `@xterm/addon-webgl@0.19.0`), which clears the GL drawing buffer and asks for a
+    repaint that lands on a later frame: one blank frame per callback. That box is
+    snapped to the device pixel grid, so it depends on where the canvas IS, not only on
+    how big it is, and a canvas of a FIXED CSS size that slides by fractional device
+    pixels reports a box that flips by one pixel and back for the length of the slide.
+    Measured in the preview container on the phone shell at a real device pixel ratio of
+    2.625 (`--force-device-scale-factor`, never CDP emulation, which reports that box in
+    CSS pixels and cannot show this at all): entering theater mode churned the buffer 5
+    times and leaving it 6, while the canvas's CSS height stayed 686px throughout. WebGL
+    only, because the DOM renderer has no buffer to clear; phones only, because a
+    whole-number ratio maps a fixed CSS size to the same device size wherever it sits.
+
+    **The layout gesture is not the answer and never was.** `lib/layoutGesture.ts` parks
+    dux's own refits so the grid is measured once at the geometry the gesture settles
+    on, and the same measurement shows it doing exactly that: the canvas's CSS box is
+    constant for all 17 layout ticks of the flight. The churn is the addon reacting to
+    the canvas MOVING, which holding the grid cannot prevent, and a pin on the
+    container's pixel SIZE cannot either, because the size never changed.
+
+    **Why for the renderer's life rather than for a gesture.** Applying the promotion at
+    a gesture's start re-snaps the box once, which costs the very blank frame the pin
+    exists to remove; and the theater flight is not the only thing that moves a terminal
+    (a divider drag, a sidebar collapse, a rotation). Held across both directions the
+    same journey measured zero mid-flight buffer writes, leaving only the single settle
+    refit the gesture already pays for. The DOM renderer never gets it, so a browser on
+    that rung keeps subpixel-antialiased text and pays for no layer.
+    Fix: `pinDevicePixelBox`/`releaseDevicePixelBox` in
+    `src/components/terminal/webglRenderer.ts`, applied by `attachWebglRenderer` and
+    released both by the handle it returns and by the lost-context wiring.
+    Pinned: `webglRenderer.jsdom.test.ts` (the pin's lifecycle, and that the DOM
+    fallback's container is left untouched) and `webglRenderer.test.ts` (a lost context
+    runs the release).
+
 ## Known limits, explicitly accepted
 
 - **The WebGL renderer's picture is unverified by the test suite.** jsdom has no WebGL

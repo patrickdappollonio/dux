@@ -152,7 +152,7 @@ export function openTerminal(options: OpenTerminalOptions): Disposable {
   // will actually paint it. Null on every browser the ladder in
   // `webglRenderer.ts` keeps on the DOM renderer, which is the behavior this
   // pane had before the addon existed.
-  setup.renderer = attachWebglRenderer(term)
+  setup.renderer = attachWebglRenderer(term, container)
   resize.fitAfterOpen()
 
   noteLocalGrid({ rows: term.rows, cols: term.cols })
