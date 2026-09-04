@@ -2,6 +2,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
+import {
+  DUX_MONO_FAMILY,
+  DUX_MONO_SYMBOLS_FAMILY,
+} from "@/lib/terminalFont"
+
 import { AccessoryBar } from "./AccessoryBar"
 
 // The accessory keys' activation contract, the same one the compose bar's Send
@@ -83,5 +88,18 @@ describe("AccessoryBar surface controls", () => {
     expect(screen.queryByRole("button", { name: /^Typing surface:/ })).toBeNull()
     expect(screen.queryByText("Box")).toBeNull()
     expect(screen.queryByText("Direct")).toBeNull()
+  })
+})
+
+// The caps sit against the terminal, so they are drawn with the bundled
+// terminal stack rather than bare `font-mono`, which resolves to whatever the
+// OS calls monospace and reads as a different typeface next to the PTY.
+describe("AccessoryBar cap typeface", () => {
+  it("draws the text caps with the bundled terminal stack, not font-mono", () => {
+    renderBar()
+    const esc = screen.getByRole("button", { name: "Esc" })
+    expect(esc.style.fontFamily).toContain(DUX_MONO_SYMBOLS_FAMILY)
+    expect(esc.style.fontFamily).toContain(DUX_MONO_FAMILY)
+    expect(esc.className).not.toContain("font-mono")
   })
 })

@@ -228,9 +228,13 @@ export function ComposeBar({
         autoCorrect="on"
         autoCapitalize="sentences"
         spellCheck={true}
-        // text-sm (14px) matches the xterm canvas next door (Terminal option
-        // fontSize: 14); the browser-default 16px visibly towered over the
-        // terminal text on a phone. An input font under 16px normally trips
+        // text-sm (14px) matches the xterm canvas next door in SIZE only
+        // (Terminal option fontSize: 14); the browser-default 16px visibly
+        // towered over the terminal text on a phone. The FACE is deliberately
+        // the app's sans, not the bundled terminal stack: this is a message
+        // box a person composes prose in, with autocorrect and an IME working
+        // on it, not a view of terminal content. An input font under 16px
+        // normally trips
         // iOS Safari's auto-zoom-on-focus; index.html's viewport
         // `maximum-scale=1` disables that zoom (see the comment there).
         // leading-5 pins the line-height to a parseable 20px so `autosize`'s

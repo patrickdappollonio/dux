@@ -2,6 +2,7 @@ import type * as React from "react"
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { DUX_TERMINAL_FONT_STACK } from "@/lib/terminalFont"
 import { cn } from "@/lib/utils"
 
 // A viewport page-scroll intent emitted by the second accessory row's PgUp/PgDn
@@ -101,8 +102,12 @@ function ShiftEnterIcon() {
 
 // One key cell. flex-1 makes the cells evenly fill the row; h-10 (40px) is a
 // comfortable thumb target while keeping the two-row bar from eating the phone's
-// scarce vertical space. Text labels are font-mono so Esc/Tab/Ctrl/Alt read like
-// keycaps; arrow and newline cells pass an icon child instead.
+// scarce vertical space. Text labels get the bundled terminal stack (not bare
+// font-mono, which resolves to whatever the OS calls monospace) so Esc/Tab/Ctrl/
+// Alt read like keycaps cut from the same face the terminal beside them draws
+// with; arrow and newline cells pass an icon child instead. The stack is the
+// bundled default only, deliberately not the user's configured terminal family:
+// these caps are dux's own chrome rather than terminal content.
 function KeyButton({
   label,
   ariaLabel,
@@ -126,8 +131,9 @@ function KeyButton({
       aria-pressed={pressed}
       onPointerDown={keyDown(onActivate)}
       onClick={keyClick(onActivate)}
+      style={{ fontFamily: DUX_TERMINAL_FONT_STACK }}
       className={cn(
-        "h-10 min-w-0 flex-1 font-mono",
+        "h-10 min-w-0 flex-1",
         // Latched modifiers get an accent fill so the active state is
         // unmistakable on a glance — accent tokens, never raw colors.
         pressed && "bg-primary text-primary-foreground hover:bg-primary/80",
