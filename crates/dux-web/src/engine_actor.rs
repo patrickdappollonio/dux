@@ -1911,31 +1911,42 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
     }
 }
 
-/// The browser-facing notice for one reaped PTY.
+/// The browser-facing notice for one reaped PTY, or `None` where the reaping is
+/// its own announcement.
 ///
 /// Shared by the web layer's own maintenance sweep and by
 /// [`EngineService::note_drained_maintenance`], which stands in for it when the
 /// terminal UI is the surface that swept. One builder so the two paths cannot
 /// drift into telling a browser different things about the same exit.
-fn prune_wire_status(pruned: &dux_core::engine::PrunedPty) -> WireStatus {
+///
+/// `None` is the answer whenever the row itself LEAVES the screen in the same
+/// sweep: the strip and the sidebar are what the user is looking at, and a toast
+/// restating a disappearance they just watched is noise. What survives is the
+/// case where something REMAINS and nothing else says why: a dormant tab whose
+/// row is still sitting there, and the workspace-level warning that the whole
+/// agent detached.
+fn prune_wire_status(pruned: &dux_core::engine::PrunedPty) -> Option<WireStatus> {
     match pruned.kind {
         // A last-tab exit detaches the whole agent, which is a workspace-level
         // event worth a warning. A tab exit that leaves siblings running is
-        // routine and scoped: a quiet info notice naming the tab, never the loud
-        // "Agent exited" warning (which would falsely imply the agent died).
-        PrunedPtyKind::Agent if pruned.agent_detached => {
-            WireStatus::new("warning", format!("Agent \"{}\" exited.", pruned.label))
-        }
-        // A clean exit closed the tab itself (its row is gone), so say so:
-        // "exited" alone would imply a dormant tab is left behind.
-        PrunedPtyKind::Agent if pruned.tab_closed => WireStatus::new(
+        // routine and scoped: never the loud "Agent exited" warning (which would
+        // falsely imply the agent died).
+        PrunedPtyKind::Agent if pruned.agent_detached => Some(WireStatus::new(
+            "warning",
+            format!("Agent \"{}\" exited.", pruned.label),
+        )),
+        // The tab closed itself on a clean exit, taking its pill out of the
+        // strip. The strip is the announcement.
+        PrunedPtyKind::Agent if pruned.tab_closed => None,
+        // The tab stays, dormant. Nothing else on screen distinguishes a pill
+        // whose process just ended from one that was never launched, so this
+        // sentence is the only word the user gets.
+        PrunedPtyKind::Agent => Some(WireStatus::new(
             "info",
-            format!("Tab ({}) exited cleanly and was closed.", pruned.label),
-        ),
-        PrunedPtyKind::Agent => WireStatus::new("info", format!("Tab ({}) exited.", pruned.label)),
-        PrunedPtyKind::Terminal => {
-            WireStatus::new("info", format!("Terminal \"{}\" closed.", pruned.label))
-        }
+            format!("Tab ({}) exited.", pruned.label),
+        )),
+        // The terminal's row is gone from the sidebar in the same breath.
+        PrunedPtyKind::Terminal => None,
     }
 }
 
@@ -2385,7 +2396,9 @@ impl EngineService {
             self.note_mutation();
         }
         for pruned in pruned {
-            let _ = self.status.send(prune_wire_status(&pruned));
+            if let Some(status) = prune_wire_status(&pruned) {
+                let _ = self.status.send(status);
+            }
         }
     }
 
@@ -2409,7 +2422,9 @@ impl EngineService {
         }
         self.note_mutation();
         for pruned in &maintenance.pruned {
-            let _ = self.status.send(prune_wire_status(pruned));
+            if let Some(status) = prune_wire_status(pruned) {
+                let _ = self.status.send(status);
+            }
         }
     }
 
@@ -2827,6 +2842,14 @@ impl StatusEmitter {
         &mut self,
         status: WireStatus,
     ) -> Result<usize, broadcast::error::SendError<WireStatus>> {
+        // A quiet status is the command's answer and not a notification: it
+        // already rode back to its caller in the outcome, so it must not enter
+        // the controller (which would replay it to every joining tab) and must
+        // not be broadcast. This is the ONE gate, so a site marking a status
+        // quiet cannot be undone by whichever path it happens to travel.
+        if status.quiet {
+            return Ok(0);
+        }
         let tone = StatusTone::from_wire(&status.tone);
         let generation = self.controller.set_scoped(
             Instant::now(),
@@ -2892,6 +2915,9 @@ impl StatusEmitter {
                 message: up.message,
                 scope: up.scope,
                 sticky: up.sticky,
+                // A quiet status never reaches the controller, so nothing it
+                // hands back here can be one.
+                quiet: false,
             });
         }
     }
@@ -4538,6 +4564,82 @@ mod tests {
             "a passive attach onto a failed promoted slot must not relaunch it"
         );
         assert!(rx.blocking_recv().expect("a reply").is_err());
+    }
+
+    fn pruned(
+        kind: PrunedPtyKind,
+        detached: bool,
+        tab_closed: bool,
+    ) -> dux_core::engine::PrunedPty {
+        dux_core::engine::PrunedPty {
+            kind,
+            id: "t1".to_string(),
+            owner: None,
+            agent_detached: detached,
+            label: "Claude".to_string(),
+            tab_closed,
+            exit_success: Some(tab_closed),
+            is_minimal: false,
+            output_excerpt: String::new(),
+            read_error: None,
+        }
+    }
+
+    /// A reaping whose row leaves the screen says nothing; a reaping that leaves
+    /// something behind still has to explain itself.
+    #[test]
+    fn a_reaped_pty_is_announced_only_when_something_is_left_on_screen() {
+        assert_eq!(
+            prune_wire_status(&pruned(PrunedPtyKind::Agent, false, true)),
+            None,
+            "the pill left the strip in the same sweep"
+        );
+        assert_eq!(
+            prune_wire_status(&pruned(PrunedPtyKind::Terminal, false, false)),
+            None,
+            "the terminal's row left the sidebar in the same sweep"
+        );
+
+        let dormant = prune_wire_status(&pruned(PrunedPtyKind::Agent, false, false))
+            .expect("a dormant pill is indistinguishable from a never-launched one");
+        assert_eq!(dormant.tone, "info");
+        assert!(dormant.message.contains("Tab (Claude) exited."));
+        assert!(!dormant.quiet, "there is nothing else to say it");
+
+        let detached = prune_wire_status(&pruned(PrunedPtyKind::Agent, true, false))
+            .expect("losing the whole agent stays a warning");
+        assert_eq!(detached.tone, "warning");
+        assert!(!detached.quiet);
+    }
+
+    /// The quiet flag is honored at the one gate, so a status marked quiet
+    /// reaches neither the live broadcast nor the replay snapshot a joining tab
+    /// reads.
+    #[test]
+    fn a_quiet_status_is_neither_broadcast_nor_replayed() {
+        let (status_tx, mut status_rx) = broadcast::channel(8);
+        let (clear_tx, _clear_rx) = broadcast::channel(8);
+        let (snapshot_tx, snapshot_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
+
+        let _ = status.send(WireStatus::new("info", "the pane you are looking at moved").quiet());
+        assert!(
+            status_rx.try_recv().is_err(),
+            "a quiet status raises no toast"
+        );
+        assert!(
+            snapshot_rx.borrow().is_empty(),
+            "and never joins the snapshot replayed to a new tab"
+        );
+
+        let _ = status.send(WireStatus::new("info", "loud"));
+        assert_eq!(
+            status_rx
+                .try_recv()
+                .expect("an unmarked status still goes out")
+                .message,
+            "loud"
+        );
     }
 
     /// The per-tab REST verbs (`DELETE`, `PATCH`, `POST .../start`) accept a tab

@@ -979,6 +979,27 @@ pub struct WireStatus {
     /// [`dux_core::statusline::KeyedWireStatus::sticky`]: crate::statusline::KeyedWireStatus::sticky
     #[serde(default)]
     pub sticky: bool,
+    /// Presentation-only: the status is the command's ANSWER but not a
+    /// notification. It still rides back to the caller in
+    /// [`WireCommandOutcome::status`], so an API client (and the tests that
+    /// distinguish one no-op from another) keeps the sentence; the web's
+    /// status emitter drops it instead of broadcasting, so no toast is raised.
+    ///
+    /// Reserve it for an unkeyed INFO whose outcome the user is already looking
+    /// straight at: a preference the dialog visibly flipped, a pane that just
+    /// appeared, a row that just left the screen. A sentence that teaches the
+    /// way BACK from something that has just vanished is not one of these, and
+    /// neither is a warning or an error, which stay loud whatever this says.
+    ///
+    /// This generalizes [`SettingsPatch::quiet`], which asks the same question
+    /// for one field of one command and answers it by returning no status at
+    /// all. Marking rather than dropping is what keeps the wire answer intact.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quiet: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl WireStatus {
@@ -990,6 +1011,7 @@ impl WireStatus {
             key: None,
             scope: StatusScope::All,
             sticky: false,
+            quiet: false,
         }
     }
 
@@ -1005,6 +1027,7 @@ impl WireStatus {
             key: Some(key.into()),
             scope: StatusScope::All,
             sticky: false,
+            quiet: false,
         }
     }
 
@@ -1014,6 +1037,13 @@ impl WireStatus {
     /// [`dux_core::statusline::KeyedWireStatus::sticky`]: crate::statusline::KeyedWireStatus::sticky
     pub fn sticky(mut self) -> Self {
         self.sticky = true;
+        self
+    }
+
+    /// Builder that keeps this status as the command's answer while raising no
+    /// notification for it. See [`WireStatus::quiet`] for when that is right.
+    pub fn quiet(mut self) -> Self {
+        self.quiet = true;
         self
     }
 
@@ -1036,6 +1066,10 @@ impl WireStatus {
             key: update.key.clone(),
             scope: update.scope.clone(),
             sticky: update.sticky,
+            // A `StatusUpdate` is the engine's own status-line traffic, which
+            // both surfaces render. Quieting is decided by the web-facing wire
+            // builders, never inherited from one of these.
+            quiet: false,
         }
     }
 }
@@ -1124,10 +1158,12 @@ fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
     match reaction {
         EventReaction::Status(update) => Some(WireStatus::from_update(update)),
         EventReaction::Multi(items) => items.iter().find_map(wire_status_from_reaction),
+        // Quiet: the terminal's row leaves the sidebar in the same breath, so
+        // the answer is kept for the caller and raises nothing.
         EventReaction::DeleteTerminalView(view) => view
             .label
             .as_ref()
-            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\"."))),
+            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")).quiet()),
         _ => None,
     }
 }
@@ -1192,11 +1228,12 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         // here, avoiding a double status.
         EventReaction::AgentLaunchFailedView(_) | EventReaction::AgentLaunchReadyView(_) => vec![],
         // DeleteTerminal is a one-shot info; no busy precedes it, so it stays
-        // unkeyed (anonymous slot).
+        // unkeyed (anonymous slot). Quiet for the same reason as its sibling in
+        // `wire_status_from_reaction`: the row is already gone.
         EventReaction::DeleteTerminalView(view) => view
             .label
             .as_ref()
-            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")))
+            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")).quiet())
             .into_iter()
             .collect(),
         EventReaction::OpenConfigReloadFailedModal(message) => {
@@ -2322,9 +2359,8 @@ impl Engine {
     ///
     /// Both names are read BEFORE the close, from the strip the user was looking
     /// at when they asked. That is the strip the confirmation named its
-    /// successor from, so a toast built the same way cannot contradict the
-    /// dialog that raised it, and the closed tab's own row is still there to be
-    /// named.
+    /// successor from, so the answer cannot contradict the dialog that raised
+    /// it, and the closed tab's own row is still there to be named.
     fn close_agent_tab_wire(
         &mut self,
         session_id: &str,
@@ -2347,7 +2383,10 @@ impl Engine {
             (_, Some(closed), _) => format!("Closed the {closed} tab."),
             (_, None, _) => "Closed the tab.".to_string(),
         };
-        Ok((WireStatus::new("info", message), outcome))
+        // Quiet: the closed pill leaves the strip and the promoted tab is
+        // already the one the user lands on, both of which the browser drives
+        // off `CloseTabOutcome`. The sentence stays as the command's answer.
+        Ok((WireStatus::new("info", message).quiet(), outcome))
     }
 
     /// Retarget one tab's provider, validating the choice server-side. The
@@ -5099,6 +5138,12 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].tone, "info");
         assert!(s[0].message.contains("Closed terminal \"Terminal 1\""));
+        assert!(
+            s[0].quiet,
+            "the row left the sidebar in the same breath, so the answer raises no toast"
+        );
+        let single = wire_status_from_reaction(&r).expect("the same answer, singly");
+        assert!(single.quiet);
     }
 
     #[test]
@@ -6225,9 +6270,14 @@ mod tests {
             .expect("apply close");
 
         assert_eq!(outcome.promoted.as_deref(), Some("t2"));
+        let status = outcome.status.expect("a status");
         assert_eq!(
-            outcome.status.expect("a status").message,
+            status.message,
             "Closed the first tab, Claude. Codex took its place as the agent's first tab."
+        );
+        assert!(
+            status.quiet,
+            "the strip and the landed-on tab already say this, so no toast"
         );
     }
 
@@ -6258,10 +6308,9 @@ mod tests {
             .expect("apply close");
 
         assert!(outcome.promoted.is_none());
-        assert_eq!(
-            outcome.status.expect("a status").message,
-            "Closed the Codex tab."
-        );
+        let status = outcome.status.expect("a status");
+        assert_eq!(status.message, "Closed the Codex tab.");
+        assert!(status.quiet, "the pill left the strip; nothing more to say");
     }
 
     #[test]
