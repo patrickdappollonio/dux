@@ -22,6 +22,12 @@ sums shorten; the counts on the rows themselves always show every digit. The fig
 the filter, describing exactly the rows you can see. When the worktree is
 clean it says so plainly.
 
+Untracked files are the one place with a ceiling on the counting. git has never seen them,
+so their lines have to be counted by reading each file, and dux does that for the first two
+thousand untracked files in a worktree. Any beyond that are still listed, in full, with
+their status; they simply carry no line counts and are left out of the sums, the same way
+an empty file already looks.
+
 Click any row to open its diff in the [code editor](/docs/web-editor), read-only and
 syntax-highlighted, HEAD against the working copy.
 
