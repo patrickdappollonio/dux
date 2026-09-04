@@ -135,7 +135,18 @@ export function MobileActionFlap({
         // The one pane menu, which the floating pill opens too: the cluster
         // flies across the screen as one object, so its `⋯` cannot mean
         // something else once it lands.
-        ellipsis={<PaneMenu subject={subject} pane={target} side="bottom" />}
+        ellipsis={
+          <PaneMenu
+            subject={subject}
+            pane={target}
+            side="bottom"
+            // A phone pane screen's header is Back and identity only: the cog
+            // stayed behind on the hub, so the drill is the way to the app's
+            // own actions from here. It is also what keeps this `⋯` the same
+            // menu the pill opens when the cluster flies into theater.
+            settingsDrill
+          />
+        }
       />
     </div>
   )

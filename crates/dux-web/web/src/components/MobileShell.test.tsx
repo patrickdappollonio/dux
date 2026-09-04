@@ -429,7 +429,8 @@ describe("MobileShell standalone terminals", () => {
     const items = screen.getAllByRole("menuitem").map((el) => el.textContent)
     expect(items.some((t) => t?.includes("Close…"))).toBe(true)
     expect(items.some((t) => t?.includes("Open editor in new tab"))).toBe(true)
-    // The same merged body every other anchor opens, Settings drill and all.
+    // The same merged body every other anchor opens, and on a pane screen it
+    // keeps the Settings drill: the cog stayed behind on the hub.
     expect(items.some((t) => t?.includes("Settings"))).toBe(true)
     // And nothing about an agent, because there is none behind this pane.
     expect(items.some((t) => t?.includes("Rename agent…"))).toBe(false)

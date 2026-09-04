@@ -254,6 +254,7 @@ describe("an agent's menu over one of its companion terminals", () => {
         subject={{ kind: "agent", session: session() }}
         pane={terminalPane}
         appearance="header"
+        settingsDrill={false}
       />,
     )
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
@@ -283,6 +284,7 @@ describe("an agent's menu over one of its companion terminals", () => {
         subject={{ kind: "agent", session: session() }}
         pane={target}
         appearance="header"
+        settingsDrill={false}
       />,
     )
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
@@ -304,6 +306,7 @@ describe("an agent's menu over one of its companion terminals", () => {
           owner: { kind: "standalone" },
         }}
         appearance="header"
+        settingsDrill={false}
       />,
     )
     await openFrom(screen.getByLabelText("Terminal actions"))
@@ -339,27 +342,41 @@ describe("the pane menu at the computer's anchors", () => {
 
   it("opens the whole agent menu, not a header-sized subset", async () => {
     registerPaneInputGroup("s1", { surfaceSwitch: true, keysToggle: false })
-    render(<PaneMenu subject={{ kind: "agent", session: session() }} appearance="header" />)
+    render(<PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        appearance="header"
+        settingsDrill={false}
+      />)
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     const items = labels()
     expect(items.some((t) => t?.includes("Use virtual input"))).toBe(true)
     expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
     expect(items.some((t) => t?.includes("Delete agent…"))).toBe(true)
-    expect(items.some((t) => t?.includes("Settings"))).toBe(true)
+    // Everything except the drill: the cog is in this very header, so the whole
+    // menu here is the whole PANE menu and not a second copy of the app's.
+    expect(items.some((t) => t?.includes("Settings"))).toBe(false)
     expect(screen.getByText(PANE_INPUT_GROUP_LABEL)).toBeTruthy()
   })
 
   it("names itself what every other anchor names itself", () => {
     // One name across the surfaces, so a screen reader and a voice command do
     // not have to learn which anchor is on screen.
-    render(<PaneMenu subject={{ kind: "agent", session: session() }} appearance="header" />)
+    render(<PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        appearance="header"
+        settingsDrill={false}
+      />)
     expect(screen.getByLabelText(PANE_MENU_AGENT_LABEL)).toBeTruthy()
   })
 
   it("wears the header cluster's treatment, not the flap's circle", () => {
     // The cluster is one family (outline) at one height token; the flap and the
     // pill are each ONE rounded surface, where a bordered button reads as two.
-    render(<PaneMenu subject={{ kind: "agent", session: session() }} appearance="header" />)
+    render(<PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        appearance="header"
+        settingsDrill={false}
+      />)
     const trigger = screen.getByLabelText(PANE_MENU_AGENT_LABEL)
     expect(trigger.className).toContain("size-8")
     expect(trigger.className).not.toContain("rounded-full")
@@ -370,4 +387,86 @@ describe("the pane menu at the computer's anchors", () => {
     expect(clusterTrigger.className).toContain("size-10")
     expect(clusterTrigger.className).toContain("rounded-full")
   })
+})
+
+// THE SETTINGS DRILL RENDERS ONLY WHERE THE APP-MENU COG IS NOT ON SCREEN.
+//
+// One table per anchor, because the rule is about the chrome AROUND the anchor
+// and nothing inside the menu can see it. The sidebar and hub rows are the same
+// component at both widths and are covered where that component is rendered
+// whole (`FlatAgentList.test.tsx`); everything else that anchors this menu is
+// here.
+describe("the Settings drill, per anchor", () => {
+  const anchors: {
+    name: string
+    drill: boolean
+    render: () => void
+  }[] = [
+    {
+      // A phone pane screen's header is Back and identity: no cog travelled
+      // with it from the hub.
+      name: "the phone's docked flap",
+      drill: true,
+      render: () =>
+        render(
+          <MobileActionFlap
+            target={target}
+            subject={{ kind: "agent", session: session() }}
+            band="strip"
+          />,
+        ),
+    },
+    {
+      // Theater unmounts the top bar on a phone and the header stack on a
+      // computer, and the cog goes with it either way.
+      name: "the floating pill on a phone",
+      drill: true,
+      render: () => {
+        mockState = makeState(true)
+        render(
+          <TheaterPill
+            target={target}
+            session={session()}
+            variant="mobile"
+            flight="floating"
+          />,
+        )
+      },
+    },
+    {
+      name: "the floating pill on a computer",
+      drill: true,
+      render: () => {
+        mockState = makeState(true)
+        render(<TheaterPill target={target} session={session()} />)
+      },
+    },
+    {
+      // The cog is mounted in this very header, a couple of controls to the
+      // right, for as long as this `⋯` exists.
+      name: "the desktop pane header",
+      drill: false,
+      render: () =>
+        render(
+          <PaneMenu
+            subject={{ kind: "agent", session: session() }}
+            appearance="header"
+            settingsDrill={false}
+          />,
+        ),
+    },
+  ]
+
+  for (const anchor of anchors) {
+    it(`${anchor.drill ? "drills into the app menu from" : "leaves the app menu to the cog at"} ${anchor.name}`, async () => {
+      anchor.render()
+      await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+      const items = labels()
+      expect(items.some((t) => t?.includes("Settings"))).toBe(anchor.drill)
+      // NOTHING ELSE IN THE BODY MOVES WITH IT: the gate is the last row, not a
+      // second menu.
+      expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
+      expect(items.some((t) => t?.includes("Delete agent…"))).toBe(true)
+    })
+  }
 })

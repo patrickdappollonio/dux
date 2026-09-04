@@ -947,14 +947,16 @@ describe("FlatAgentList input group in the row menus", () => {
   })
 
   // ONE COMPONENT, TWO ANCHORS. The row's `⋯` and the desktop pane header's
-  // open the same body, so the Settings drill it ends with is the proof the
-  // row is rendering the merged menu rather than a copy of the agent's actions
-  // that would drift from it.
-  it("opens the same merged pane menu the pane header opens", async () => {
+  // open the same body, and both of them stand under a cog: the desktop
+  // sidebar's under the header's, the phone hub's under the hub header's own.
+  // So the merged body arrives here WITHOUT its Settings drill, which is the
+  // one row an anchor decides, and the proof the row is the merged menu is the
+  // input group the next test asserts.
+  it("opens the merged pane menu, leaving the app menu to the cog above it", async () => {
     await openAgentMenu()
     const items = screen.getAllByRole("menuitem").map((el) => el.textContent)
     expect(items.some((t) => t?.includes("Rename agent…"))).toBe(true)
-    expect(items.some((t) => t?.includes("Settings"))).toBe(true)
+    expect(items.some((t) => t?.includes("Settings"))).toBe(false)
   })
 
   it("carries the group, labelled, once the agent's pane publishes one", async () => {

@@ -173,14 +173,17 @@ link that goes straight into theater and there was no layout on screen to rememb
 leaving lands on your saved preferences instead.
 
 A small floating pill in the bottom-right corner is the only thing left over the
-terminal. On a computer it holds the way out, the macro picker and the same `⋯` the pane
-header carries, so nothing you could reach before you went full screen has gone anywhere.
+terminal. On a computer it holds the way out, the macro picker and the pane's own `⋯`,
+so nothing you could reach before you went full screen has gone anywhere.
 On a phone it is the flap that flew there: the theater button (now showing the way out),
 the macro picker, the changed-file count where there is one, and the same `⋯`, opening the
 same menu it opened on the band. That menu opens with the **Input** group (**Attach a file…**,
 and the way back to the typing bar when you have turned it off), then the pane's own
 actions, the way out of theater while the mode is on, and **Settings**, which drills into
 the app menu the cog carries, so nothing goes out of reach because you went full screen.
+That last one is there because theater took the cog off screen with the rest of the
+chrome: the pane's `⋯` in the terminal header, where the cog is still a couple of buttons
+away, does not repeat it.
 The changed-file count is the button beside it rather than a row in it.
 
 ![Theater mode on a phone: the top bar is gone, the floating pill hovers over the terminal, and the keys and message box are still there.](/screens/phone-theater-pill.png)

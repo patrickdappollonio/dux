@@ -471,7 +471,14 @@ function AgentFlatRow({
               the group holds is the pane's own published answer, not something
               this anchor decides. */}
           <DropdownMenuContent side="right" align="start">
-            <PaneMenuBody subject={{ kind: "agent", session }} />
+            <PaneMenuBody
+              subject={{ kind: "agent", session }}
+              // NO SETTINGS DRILL AT A ROW. This list is the desktop sidebar
+              // under a header whose cog is on screen, and the phone hub under
+              // its own cog in the hub header; either way the app menu is one
+              // press away outside this menu.
+              settingsDrill={false}
+            />
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -633,6 +640,9 @@ function TerminalFlatRow({
         <DropdownMenuContent side="right" align="start">
           <PaneMenuBody
             subject={{ kind: "terminal", terminalId: terminal.id, owner }}
+            // The agent row's answer, for the same reason: a row's surrounding
+            // chrome carries the cog on both form factors.
+            settingsDrill={false}
           />
         </DropdownMenuContent>
       </DropdownMenu>

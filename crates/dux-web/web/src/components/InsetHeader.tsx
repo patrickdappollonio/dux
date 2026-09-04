@@ -351,6 +351,11 @@ export function InsetHeader() {
             // TERMINAL's id while the menu around it is the agent's.
             pane={selectedTarget}
             appearance="header"
+            // NO SETTINGS DRILL HERE: the cog is mounted in this very header,
+            // on the window's right edge a couple of controls along, for as
+            // long as this `⋯` exists at all. Drilling into the app menu from
+            // here would be the same body offered twice on one strip of chrome.
+            settingsDrill={false}
           />
         </>
       ) : null}

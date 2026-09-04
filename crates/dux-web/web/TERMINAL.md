@@ -1799,13 +1799,23 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `src/components/PaneMenu.tsx`) is opened by the phone's flap, the floating pill,
     the desktop pane header's `⋯` and the sidebar row's, and it wraps a subject group
     (`AgentActionsMenu` or `TerminalActionsMenu`, each in its own module) with the
-    pane's INPUT group above and the theater exit plus the Settings drill below. Trap
+    pane's INPUT group above and the theater exit below. Trap
     that motivated it: the header used to carry no menu at all, so a computer's only
     route to an agent's actions was the sidebar row, and the sidebar is exactly what a
     maximized window and theater take away. Second trap: an anchor that renders a
     SUBSET is how two menus about one agent drift, so an anchor may change only where
-    the menu opens and how the trigger is drawn (`appearance`: the flap and pill's bare
-    40px circle, or the header cluster's outline `size-8`).
+    the menu opens, how the trigger is drawn (`appearance`: the flap and pill's bare
+    40px circle, or the header cluster's outline `size-8`), and whether the Settings
+    drill rides along.
+    THE SETTINGS DRILL RENDERS ONLY WHERE THE APP-MENU COG IS NOT ON SCREEN
+    (`settingsDrill`, required at both components so a new anchor has to answer it).
+    The drill exists so the app's own actions are never unreachable, not so they are
+    offered twice: the phone's pane screens keep it (their header is Back and identity,
+    the cog stayed on the hub) and so does the floating pill on both form factors
+    (theater unmounts the chrome the cog lives in), while the desktop pane header drops
+    it (the cog is in that same header) and so do the sidebar and hub rows (the desktop
+    header's cog and the hub header's own cog are on screen above them). Only the anchor
+    can answer this, because nothing inside the menu can see the chrome around it.
     THE INPUT GROUP'S ONE-HOME RULE IS UNAFFECTED: what the group holds is the pane's
     published answer (`lib/paneInputGroup.ts`), so two anchors of the same menu show the
     same rows and the split that matters is still top menu versus the input `⋯`. WHICH
@@ -1825,8 +1835,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     THE FLOATING PILL OPENS THE MERGED MENU ON BOTH SURFACES. The desktop pill carried
     only `TheaterAppMenu` for one arc, which put a computer in theater in exactly the
     state the phone's merge had just fixed; that wrapper is now the fallback for a pane
-    that is neither an agent nor a terminal, and the app menu reaches every surface as the
-    Settings drill inside the merged body.
+    that is neither an agent nor a terminal, and the app menu reaches a cogless surface as
+    the Settings drill inside the merged body.
     The phone's project and standalone terminal screens moved from three header buttons
     to the flap in the same change (`MobileActionFlap` is parameterized by subject: a
     terminal has no changed-file count, and its band is always "plain" because only an
@@ -1842,8 +1852,9 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     suite; `components/MobileShell.test.tsx` "hangs the flap off the band and leaves the
     header to Back and identity" / "opens the terminal's own menu from the flap, not an
     agent's"; `components/inputWayBack.test.tsx` (both subjects);
-    `components/FlatAgentList.test.tsx` "opens the same merged pane menu the pane header
-    opens".
+    `components/FlatAgentList.test.tsx` "opens the merged pane menu, leaving the app
+    menu to the cog above it"; `components/PaneMenu.test.tsx` "the Settings drill, per
+    anchor" (parameterized, one case per anchor).
 
 29. **ONE floating pill, one look, both form factors; the subject decides the control
     set and the surface decides nothing about how any of it is drawn.** `TheaterPill`

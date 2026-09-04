@@ -123,6 +123,7 @@ const SHELLS = {
       <PaneMenuBody
         subject={{ kind: "agent", session: session() }}
         pane={{ kind: "agent", sessionId: "s1", tabId: "tab1" }}
+        settingsDrill={false}
       />
     ),
   },
@@ -140,6 +141,7 @@ const SHELLS = {
           terminalId: "t9",
           owner: { kind: "standalone" },
         }}
+        settingsDrill={false}
       />
     ),
   },
@@ -158,6 +160,7 @@ const SHELLS = {
           terminalId: "t7",
           owner: { kind: "session", sessionId: "s1" },
         }}
+        settingsDrill={false}
       />
     ),
   },
@@ -166,7 +169,12 @@ const SHELLS = {
   // mounted pane.
   "sidebar row": {
     ptyId: "tab1",
-    body: () => <PaneMenuBody subject={{ kind: "agent", session: session() }} />,
+    body: () => (
+      <PaneMenuBody
+        subject={{ kind: "agent", session: session() }}
+        settingsDrill={false}
+      />
+    ),
   },
 } as const
 

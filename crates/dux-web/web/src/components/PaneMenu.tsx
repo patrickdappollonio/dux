@@ -53,15 +53,17 @@ function paneInputPtyIds(
 
 /// WHAT THE PANE IS ABOUT, which is the only thing that changes the menu's
 /// contents. An agent's menu is its actions; a terminal's is its own. Everything
-/// around them (the INPUT group above, the theater exit, the Settings drill) is
-/// the same for both, because those are about the SURFACE rather than about
-/// what is behind it.
+/// around them (the INPUT group above, the theater exit, the Settings drill
+/// where the anchor asks for one) is the same for both, because those are about
+/// the SURFACE rather than about what is behind it.
 export type PaneMenuSubject =
   | { kind: "agent"; session: SessionView }
   | { kind: "terminal"; terminalId: string; owner: TerminalOwnerRef }
 
 /// WHICH PANE THIS ANCHOR IS PAINTED OVER, which is a different question from
-/// what the menu is about and has to be asked separately.
+/// what the menu is about and has to be asked separately. The pane the anchor
+/// is on does not decide the Settings drill; the chrome AROUND the anchor does,
+/// which is a separate answer again (see `PaneMenuSettingsDrill`).
 ///
 /// The INPUT group is the pane's own published answer, keyed by the pty id the
 /// pane registers under, and a session-owned terminal's pane registers under the
@@ -83,6 +85,27 @@ export type PaneMenuPane = SelectedTarget
 /// `header` is the desktop pane header's outline treatment, shared with the
 /// Macros trigger and the theater button it sits beside.
 export type PaneMenuAppearance = "cluster" | "header"
+
+/// WHETHER THE APP MENU RIDES ALONG AS A "Settings" DRILL, which is the one
+/// thing about this body an anchor decides, because it is the one thing only
+/// the anchor knows: what chrome is on screen around it.
+///
+/// THE SETTINGS DRILL RENDERS ONLY WHERE THE APP-MENU COG IS NOT ON SCREEN. The
+/// drill exists so the app's own actions are never unreachable, not so they are
+/// reachable twice: a computer keeps the cog in the header's top-right corner
+/// for as long as that header is mounted, so a second copy of the same body two
+/// controls to its left is duplication, and the phone's hub header carries its
+/// own cog above the very rows whose menus would repeat it. The anchors that
+/// keep it are the ones whose surface has no cog at all: a phone pane screen,
+/// whose header is Back and identity only, and the floating pill, which is what
+/// theater leaves on screen after unmounting the chrome the cog lives in.
+///
+/// It is the same idiom as the anchor-decides-placement rules above: the body is
+/// one body, and the anchor passes what only it can answer. It has no default,
+/// so a new anchor has to answer it rather than inherit somebody else's chrome.
+export type PaneMenuSettingsDrill = {
+  settingsDrill: boolean
+}
 
 function paneMenuLabel(subject: PaneMenuSubject): string {
   return subject.kind === "agent"
@@ -106,8 +129,9 @@ function paneMenuLabel(subject: PaneMenuSubject): string {
 //
 // The body is, in this order: the pane's INPUT group, then the subject's own
 // actions, then the pane's own verbs when the pane is not the subject, then the
-// way out of theater while the mode is on, then the app menu as a drill named
-// for the cog it stands in for. A phone renders every one of these menus as a
+// way out of theater while the mode is on, and last, only where the anchor
+// stands somewhere the cog does not, the app menu as a drill named for the cog
+// it stands in for. A phone renders every one of these menus as a
 // bottom sheet with its own stacked sub-sheets, so a submenu is the sheet's own
 // idiom rather than a flyout squeezed against an edge.
 //
@@ -117,8 +141,10 @@ function paneMenuLabel(subject: PaneMenuSubject): string {
 // somewhere that never leaves. It is a thumb's reach from the `⋯` that opened
 // the sheet, which is where the hand already is.
 //
-// The anchors differ in exactly two things, neither of them content: where the
-// menu opens from, and what the trigger looks like. The INPUT group's ITEMS are
+// The anchors differ in where the menu opens from, in what the trigger looks
+// like, and in the one row that is about the chrome AROUND the anchor rather
+// than about the pane: the Settings drill, which is there only where the cog is
+// not. The INPUT group's ITEMS are
 // still one home at a time, because what the group contains is the pane's own
 // published answer (see `lib/paneInputGroup.ts`) rather than a per-anchor
 // decision: two anchors of this one menu show the same rows, and the split that
@@ -135,6 +161,7 @@ export function PaneMenu({
   pane,
   side = "bottom",
   appearance = "cluster",
+  settingsDrill,
 }: {
   subject: PaneMenuSubject
   /// The pane this anchor is painted over, for the anchors that are on one.
@@ -144,7 +171,7 @@ export function PaneMenu({
   /// A phone ignores it and renders a sheet.
   side?: "top" | "bottom"
   appearance?: PaneMenuAppearance
-}) {
+} & PaneMenuSettingsDrill) {
   const cluster = appearance === "cluster"
   const label = paneMenuLabel(subject)
   return (
@@ -164,7 +191,11 @@ export function PaneMenu({
         </DropdownMenuTrigger>
       </SimpleTooltip>
       <DropdownMenuContent align="end" side={side}>
-        <PaneMenuBody subject={subject} pane={pane} />
+        <PaneMenuBody
+          subject={subject}
+          pane={pane}
+          settingsDrill={settingsDrill}
+        />
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -174,10 +205,11 @@ export function PaneMenu({
 export function PaneMenuBody({
   subject,
   pane,
+  settingsDrill,
 }: {
   subject: PaneMenuSubject
   pane?: PaneMenuPane
-}) {
+} & PaneMenuSettingsDrill) {
   const theater = useDux().theater
   // The subject's own rows.
   const actions: ReactNode =
@@ -222,23 +254,28 @@ export function PaneMenuBody({
           <InputMenuItems theaterExit />
         </>
       ) : null}
-      <DropdownMenuSeparator />
-      {/* NAMED FOR THE CONTROL IT STANDS IN FOR. Theater takes the top bar,
-          and with it the cog; on a phone the flap's own header is gone in both
-          modes. A user looking for the app's own actions should find them under
-          the name they know, and in theater this is the one trigger on screen.
-          It rides along at every anchor rather than being conditioned on the
-          mode: one body, so the menu a user learns in one place is the menu
-          they get in the others. */}
-      <DropdownMenuSub>
-        <DropdownMenuSubTrigger>
-          <Settings />
-          Settings
-        </DropdownMenuSubTrigger>
-        <DropdownMenuSubContent side="left">
-          <AppMenuBody />
-        </DropdownMenuSubContent>
-      </DropdownMenuSub>
+      {settingsDrill ? (
+        <>
+          <DropdownMenuSeparator />
+          {/* NAMED FOR THE CONTROL IT STANDS IN FOR, and rendered only where
+              that control is not. Theater takes the top bar and with it the
+              cog, and a phone pane screen's header never had one; a user
+              looking for the app's own actions should find them under the name
+              they know. Where the cog IS on screen (the desktop header's
+              top-right corner, the phone hub's own header) this is the same
+              body offered twice, so the anchor says no. See
+              `PaneMenuSettingsDrill`. */}
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <Settings />
+              Settings
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent side="left">
+              <AppMenuBody />
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        </>
+      ) : null}
     </>
   )
 }

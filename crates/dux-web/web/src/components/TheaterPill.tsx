@@ -292,7 +292,15 @@ export function TheaterPill({
         // happen and the surface should survive anyway.
         ellipsis={
           paneSubject ? (
-            <PaneMenu subject={paneSubject} pane={target} side="top" />
+            <PaneMenu
+              subject={paneSubject}
+              pane={target}
+              side="top"
+              // THE DRILL IS THE POINT HERE. Theater unmounts the chrome the
+              // cog lives in on both form factors, so without it the mode is
+              // the one state in which the app's own actions are unreachable.
+              settingsDrill
+            />
           ) : (
             <TheaterAppMenu paneId={paneId} />
           )
