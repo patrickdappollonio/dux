@@ -358,6 +358,10 @@ describe("the floating theater pill", () => {
     expect(cls).toContain("cursor-grab")
     expect(cls).toContain("active:cursor-grabbing")
     expect(cls).toContain("hover:bg-transparent")
+    // The tooltip stamps data-popup-open on its trigger, and the button base
+    // repaints that state as a pressed fill; the grip must override it or a
+    // sustained hover ends up painting through the tooltip's side door.
+    expect(cls).toContain("data-[popup-open]:bg-transparent")
     expect(cls).not.toContain("hover:bg-muted")
     expect(cls).not.toContain("hover:text-foreground")
     expect(cls).not.toContain("translate-y-px")

@@ -248,8 +248,12 @@ export function TheaterPill({
           // what makes one pill wear one silhouette everywhere.
           className={cn(
             "dux-pill-grip h-10 w-[18px] shrink-0 cursor-grab touch-none rounded-full px-0 text-muted-foreground select-none active:cursor-grabbing",
-            // INERT PAINT: it indicates a grab, it does not offer a press.
+            // INERT PAINT: it indicates a grab, it does not offer a press. The
+            // popup-open pair matters too: the grip's own tooltip opening
+            // stamps data-popup-open, and the shared button base would repaint
+            // the "pressed" fill for a state that is just a tooltip showing.
             "hover:bg-transparent hover:text-muted-foreground dark:hover:bg-transparent",
+            "data-[popup-open]:bg-transparent data-[popup-open]:text-muted-foreground",
             "active:not-aria-[haspopup]:translate-y-0",
           )}
           onPointerDown={drag.onPointerDown}
