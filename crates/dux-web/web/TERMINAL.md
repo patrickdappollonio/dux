@@ -2317,6 +2317,18 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
   canvas, is a preview-container pass and is stated here rather than implied by a green
   suite.
 
+- **Emulated device-pixel ratios mis-scale the WebGL canvas.** DevTools device mode
+  and puppeteer's viewport `deviceScaleFactor` override `window.devicePixelRatio`
+  through CDP while the compositor's device-pixel accounting keeps the host's real
+  scale. The addon caches the ratio once (`WebglRenderer._devicePixelRatio`) and its
+  device-pixel observer resizes the buffer without updating the viewport, so under an
+  override the picture renders oversized (headful) or black (headless). Real hardware
+  reports one consistent ratio and is unaffected. Accepted as an upstream addon
+  limitation: a dux-side re-attach hook would burn a GL context per toggle and cannot
+  fix the observer half. Emulated-mobile checks of the terminal picture should use a
+  browser-level `--force-device-scale-factor` or a real device; everything around the
+  terminal is fine under emulation.
+
 - **Scrollback-trim selection shift.** `selectAnchor` holds absolute buffer rows; when
   the ring is full and the child writes, xterm trims the top, every absolute row
   shifts, and the anchor names different content for the rest of the gesture. The
