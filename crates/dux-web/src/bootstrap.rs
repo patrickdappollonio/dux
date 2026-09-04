@@ -179,6 +179,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         closing_sessions: HashSet::new(),
         deletion_busy_messages: HashMap::new(),
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
+        changed_files_refresh: Default::default(),
         watched_session_id: None,
         has_active_processes: Arc::new(AtomicBool::new(false)),
         current_origin: dux_core::statusline::StatusScope::All,

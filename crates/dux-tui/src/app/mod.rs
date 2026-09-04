@@ -3656,6 +3656,7 @@ impl App {
             closing_sessions: HashSet::new(),
             deletion_busy_messages: HashMap::new(),
             watched_worktree: Arc::clone(&watched_worktree),
+            changed_files_refresh: Default::default(),
             watched_session_id: None,
             has_active_processes,
             current_origin: dux_core::statusline::StatusScope::All,

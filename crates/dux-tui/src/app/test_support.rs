@@ -177,6 +177,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         closing_sessions: std::collections::HashSet::new(),
         deletion_busy_messages: std::collections::HashMap::new(),
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
+        changed_files_refresh: Default::default(),
         watched_session_id: None,
         current_origin: Default::default(),
         has_active_processes: Arc::new(AtomicBool::new(false)),

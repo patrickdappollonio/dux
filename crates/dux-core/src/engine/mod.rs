@@ -143,6 +143,69 @@ pub struct LaunchedDropPaste {
     pub command_name: String,
 }
 
+/// The coalescing queue behind [`Engine::spawn_changed_files_refresh`].
+///
+/// One changed-files read is a full git sweep over a worktree, and the TUI asks
+/// for one on every selection move. Without coalescing, holding a movement key
+/// down spawns a thread and a sweep per keypress, and every answer but the last
+/// is dropped as stale the moment it arrives: pure waste, paid on a repository
+/// slow enough that the waste is what the user feels.
+///
+/// So the queue keeps at most ONE worker alive and at most ONE queued request,
+/// and a new request REPLACES the queued one: the newest worktree is the one
+/// the user is looking at, so it is the one that gets read next. The pending
+/// slot and the running flag live under the same lock, which is what closes the
+/// gap between a worker deciding it has nothing left to do and a requester
+/// seeing a worker that is still marked as running.
+#[derive(Default)]
+pub struct ChangedFilesRefreshQueue {
+    pending: Option<PathBuf>,
+    running: bool,
+}
+
+impl ChangedFilesRefreshQueue {
+    /// Queue a read of `worktree`, replacing any read that has not started yet.
+    /// Answers whether the caller has to spawn the reader (no reader running).
+    pub fn request(&mut self, worktree: PathBuf) -> bool {
+        self.pending = Some(worktree);
+        if self.running {
+            return false;
+        }
+        self.running = true;
+        true
+    }
+
+    /// The next worktree to read. `None` means nothing is queued, and clears
+    /// the running flag so the reader can exit and the next requester spawns a
+    /// fresh one.
+    pub fn next_request(&mut self) -> Option<PathBuf> {
+        let next = self.pending.take();
+        if next.is_none() {
+            self.running = false;
+        }
+        next
+    }
+
+    /// Give up the reader slot without reading: the thread never started, or
+    /// the app is shutting down. Anything queued is dropped with it.
+    pub fn abandon(&mut self) {
+        self.pending = None;
+        self.running = false;
+    }
+}
+
+/// Take the changed-files queue lock, recovering from poisoning. A panic while
+/// the lock is held would otherwise stop every future refresh for the life of
+/// the process, and the guarded state is two plain fields that no panic can
+/// leave half-written.
+fn lock_changed_files_queue(
+    queue: &Mutex<ChangedFilesRefreshQueue>,
+) -> std::sync::MutexGuard<'_, ChangedFilesRefreshQueue> {
+    queue
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub struct Engine {
     pub config: Config,
     pub paths: DuxPaths,
@@ -377,6 +440,11 @@ pub struct Engine {
     /// alone). Cleared per-session when the worker event arrives.
     pub deletion_busy_messages: HashMap<String, String>,
     pub watched_worktree: Arc<Mutex<Option<PathBuf>>>,
+    /// Coalescing state for [`Engine::spawn_changed_files_refresh`]: at most one
+    /// reader thread and at most one queued worktree, newest wins. Shared by
+    /// handle with the reader so the worker and the requesters agree about
+    /// whether a read is in flight.
+    pub changed_files_refresh: Arc<Mutex<ChangedFilesRefreshQueue>>,
     /// The session id whose worktree is currently watched for changed files.
     /// Runtime state only (never config/persisted): paired with
     /// `watched_worktree` so the ViewModel can tell a client which session the
@@ -2509,18 +2577,51 @@ impl Engine {
     /// repository never renders as a clean worktree, and a surface waiting on
     /// this refresh (the TUI's `refresh-changes` command) can report the failure
     /// as a failure. Both surfaces call this right after `set_watched_session`.
+    ///
+    /// Requests COALESCE through [`ChangedFilesRefreshQueue`]: one worker at a
+    /// time, one queued request, newest wins. A surface that asks on every
+    /// selection move (the TUI does) would otherwise spawn a thread and a git
+    /// sweep per keypress while a key is held down, and every answer but the
+    /// last is dropped as stale on arrival anyway.
     pub fn spawn_changed_files_refresh(&self, worktree: PathBuf) {
-        let label = format!("changed-files-refresh:{}", worktree.display());
-        self.spawn_loop_worker(LoopWorkerSpec { label }, move |tx| {
-            let outcome = crate::git::changed_files(&worktree).map_err(|e| e.to_string());
-            let _ = tx.send(WorkerEvent::ChangedFilesReady {
-                outcome,
-                worktree: worktree.clone(),
-            });
-            // One-shot: compute once and stop. The drain side is race-safe
-            // (it path-checks `worktree` against the live watch).
-            LoopControl::Break
-        });
+        let queue = Arc::clone(&self.changed_files_refresh);
+        if !lock_changed_files_queue(&queue).request(worktree) {
+            // A worker is already reading; it will pick this request up next.
+            return;
+        }
+        let queue_for_worker = Arc::clone(&queue);
+        let spawned = self.spawn_loop_worker(
+            LoopWorkerSpec {
+                label: "changed-files-refresh".into(),
+            },
+            move |tx| {
+                let Some(path) = lock_changed_files_queue(&queue_for_worker).next_request() else {
+                    // Nothing queued: the flag is cleared under the same lock
+                    // the next requester takes, so the worker can exit without
+                    // a request slipping through the gap.
+                    return LoopControl::Break;
+                };
+                let outcome = crate::git::changed_files(&path).map_err(|e| e.to_string());
+                if tx
+                    .send(WorkerEvent::ChangedFilesReady {
+                        outcome,
+                        worktree: path,
+                    })
+                    .is_err()
+                {
+                    // Receiver dropped, the app is shutting down.
+                    lock_changed_files_queue(&queue_for_worker).abandon();
+                    return LoopControl::Break;
+                }
+                LoopControl::Continue
+            },
+        );
+        if !spawned {
+            // The thread never started, so nothing will ever clear the flag.
+            // Release it or every later refresh silently waits on a worker that
+            // does not exist.
+            lock_changed_files_queue(&queue).abandon();
+        }
     }
 
     pub fn spawn_changed_files_poller(&self) {
@@ -7883,6 +7984,70 @@ mod tests {
     //    poller sleeps before posting events, so counting events would be slow
     //    and flaky; the flag flips false->true on the first real spawn and a
     //    blocked second call leaves it unchanged.
+
+    // -- Changed-files refresh coalescing. The queue is a pure state machine so
+    //    the "rapid selection moves must not spawn a thread each" contract can
+    //    be pinned without racing real threads.
+
+    #[test]
+    fn changed_files_queue_spawns_one_reader_and_keeps_the_newest_request() {
+        let mut queue = ChangedFilesRefreshQueue::default();
+        assert!(
+            queue.request(PathBuf::from("/a")),
+            "the first request has to start the reader"
+        );
+        assert!(
+            !queue.request(PathBuf::from("/b")),
+            "a reader is already running, so no second thread"
+        );
+        assert!(
+            !queue.request(PathBuf::from("/c")),
+            "still no second thread however fast the requests arrive"
+        );
+        assert_eq!(
+            queue.next_request(),
+            Some(PathBuf::from("/c")),
+            "the newest worktree wins: /a and /b were superseded before the reader looked"
+        );
+        assert_eq!(queue.next_request(), None, "one sweep for three keypresses");
+        assert!(
+            queue.request(PathBuf::from("/d")),
+            "the reader exited, so the next request spawns a fresh one"
+        );
+    }
+
+    #[test]
+    fn changed_files_queue_abandon_releases_the_reader_slot() {
+        let mut queue = ChangedFilesRefreshQueue::default();
+        assert!(queue.request(PathBuf::from("/a")));
+        queue.abandon();
+        assert!(
+            queue.request(PathBuf::from("/b")),
+            "a spawn that never happened must not block every later refresh"
+        );
+    }
+
+    #[test]
+    fn changed_files_refresh_queues_behind_a_running_reader() {
+        let (engine, _tmp) = test_engine();
+        // Stand in for a reader that is mid-sweep. Nothing can spawn while this
+        // is set, so the absence of an event below is a fact rather than a
+        // race: no thread exists to send one.
+        assert!(
+            lock_changed_files_queue(&engine.changed_files_refresh)
+                .request(PathBuf::from("/reading"))
+        );
+        engine.spawn_changed_files_refresh(PathBuf::from("/queued"));
+        assert!(
+            engine.worker_rx.try_recv().is_err(),
+            "no second reader, so no second answer"
+        );
+        assert_eq!(
+            lock_changed_files_queue(&engine.changed_files_refresh).next_request(),
+            Some(PathBuf::from("/queued")),
+            "the request is queued for the running reader to pick up"
+        );
+    }
 
     #[test]
     fn changed_files_poller_spawns_once() {
