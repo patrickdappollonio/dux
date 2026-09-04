@@ -2017,41 +2017,15 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
         }
     }
 
-    let mut untracked_stats_budget = UNTRACKED_STATS_MAX_FILES;
-    if let Ok(ns) = Command::new("git")
-        .args(["-C", wt.as_ref(), "diff", "--numstat", "-z"])
-        .output()
-        && ns.status.success()
-    {
-        let stats = parse_numstat(&ns.stdout);
-        for file in &mut unstaged {
-            if let Some(stat) = stats.get(&file.path) {
-                match stat {
-                    DiffStat::Text(a, d) => {
-                        file.additions = *a;
-                        file.deletions = *d;
-                    }
-                    DiffStat::Binary => {
-                        file.binary = true;
-                    }
-                }
-            } else if file.status == "?" {
-                if untracked_stats_budget == 0 {
-                    continue;
-                }
-                untracked_stats_budget -= 1;
-                match untracked_file_stat(&worktree_path.join(&file.path)) {
-                    DiffStat::Text(a, d) => {
-                        file.additions = a;
-                        file.deletions = d;
-                    }
-                    DiffStat::Binary => {
-                        file.binary = true;
-                    }
-                }
-            }
-        }
-    }
+    // The tracked diff and the untracked counting are two independent sources,
+    // so the git call's answer is resolved to a map FIRST and the loop runs
+    // whatever came back. A failed `git diff` yields an empty map, which costs
+    // tracked rows their line counts and nothing else; when the loop lived
+    // inside the call's `Ok` a tracked failure silently took the untracked
+    // files' counts down with it, and those are counted in process without
+    // asking git anything.
+    let tracked_stats = unstaged_numstat(wt.as_ref());
+    apply_unstaged_stats(worktree_path, &mut unstaged, &tracked_stats);
 
     if let Ok(ns) = Command::new("git")
         .args(["-C", wt.as_ref(), "diff", "--cached", "--numstat", "-z"])
@@ -2075,6 +2049,64 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     }
 
     Ok((staged, unstaged))
+}
+
+/// Per-path line counts for the tracked, unstaged changes in `worktree`.
+///
+/// A git call that could not be run, or that exited non-zero, answers with an
+/// empty map rather than an error: it is one of two independent sources feeding
+/// the unstaged rows, and the other one still has something to say.
+fn unstaged_numstat(worktree: &str) -> HashMap<String, DiffStat> {
+    Command::new("git")
+        .args(["-C", worktree, "diff", "--numstat", "-z"])
+        .output()
+        .ok()
+        .filter(|ns| ns.status.success())
+        .map(|ns| parse_numstat(&ns.stdout))
+        .unwrap_or_default()
+}
+
+/// Fill in the line counts of the unstaged rows from the two sources that have
+/// them: `tracked` for anything git diffed, and an in-process read for the
+/// untracked files git has no recorded state for.
+///
+/// Taking the tracked stats as a plain map, rather than computing them here, is
+/// what makes the independence type-evident: an empty map is exactly what a
+/// failed `git diff --numstat` produces, and the untracked arm below does not
+/// look at it at all.
+fn apply_unstaged_stats(
+    worktree_path: &Path,
+    unstaged: &mut [ChangedFile],
+    tracked: &HashMap<String, DiffStat>,
+) {
+    let mut untracked_stats_budget = UNTRACKED_STATS_MAX_FILES;
+    for file in unstaged.iter_mut() {
+        if let Some(stat) = tracked.get(&file.path) {
+            match stat {
+                DiffStat::Text(a, d) => {
+                    file.additions = *a;
+                    file.deletions = *d;
+                }
+                DiffStat::Binary => {
+                    file.binary = true;
+                }
+            }
+        } else if file.status == "?" {
+            if untracked_stats_budget == 0 {
+                continue;
+            }
+            untracked_stats_budget -= 1;
+            match untracked_file_stat(&worktree_path.join(&file.path)) {
+                DiffStat::Text(a, d) => {
+                    file.additions = a;
+                    file.deletions = d;
+                }
+                DiffStat::Binary => {
+                    file.binary = true;
+                }
+            }
+        }
+    }
 }
 
 /// Line counts for one UNTRACKED file, read in this process.
@@ -6801,6 +6833,81 @@ mod tests {
         // that would never match downstream `file.path` comparisons.
         let stats = parse_numstat(b"1\t2\t\xFFbad.txt\0");
         assert!(stats.is_empty());
+    }
+
+    /// An empty map is exactly what `unstaged_numstat` returns when the tracked
+    /// `git diff --numstat` could not be run or exited non-zero. The untracked
+    /// counts are read in this process, so they must survive that failure.
+    ///
+    /// The failure is reproduced by handing the pure applier the map the failure
+    /// produces rather than by breaking git: every deterministic way to make
+    /// `git diff` fail in a worktree also fails the `git status` call that runs
+    /// before it, which returns early and never reaches this code at all.
+    #[test]
+    fn untracked_line_counts_survive_a_failed_tracked_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("new.txt"), "one\ntwo\nthree\n").unwrap();
+
+        let mut unstaged = vec![
+            ChangedFile {
+                status: "?".to_string(),
+                path: "new.txt".to_string(),
+                additions: 0,
+                deletions: 0,
+                binary: false,
+            },
+            ChangedFile {
+                status: "M".to_string(),
+                path: "tracked.txt".to_string(),
+                additions: 0,
+                deletions: 0,
+                binary: false,
+            },
+        ];
+
+        apply_unstaged_stats(dir.path(), &mut unstaged, &HashMap::new());
+
+        assert_eq!(
+            (unstaged[0].additions, unstaged[0].deletions),
+            (3, 0),
+            "the untracked file is counted in process and owes git nothing"
+        );
+        assert_eq!(
+            (unstaged[1].additions, unstaged[1].deletions),
+            (0, 0),
+            "the tracked row is the only thing a tracked-diff failure costs"
+        );
+    }
+
+    /// The other half of the same split: a tracked diff that DID answer fills
+    /// its own rows and leaves the untracked arm to the in-process read.
+    #[test]
+    fn a_tracked_diff_that_answers_fills_only_its_own_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("new.txt"), "one\ntwo\n").unwrap();
+
+        let mut unstaged = vec![
+            ChangedFile {
+                status: "?".to_string(),
+                path: "new.txt".to_string(),
+                additions: 0,
+                deletions: 0,
+                binary: false,
+            },
+            ChangedFile {
+                status: "M".to_string(),
+                path: "tracked.txt".to_string(),
+                additions: 0,
+                deletions: 0,
+                binary: false,
+            },
+        ];
+        let tracked = HashMap::from([("tracked.txt".to_string(), DiffStat::Text(7, 4))]);
+
+        apply_unstaged_stats(dir.path(), &mut unstaged, &tracked);
+
+        assert_eq!((unstaged[0].additions, unstaged[0].deletions), (2, 0));
+        assert_eq!((unstaged[1].additions, unstaged[1].deletions), (7, 4));
     }
 
     #[test]
