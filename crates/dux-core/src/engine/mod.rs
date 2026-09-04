@@ -194,6 +194,18 @@ impl ChangedFilesRefreshQueue {
     }
 }
 
+/// The longest the changed-files poller will wait between sweeps, whatever the
+/// previous sweep cost. One pathological read must not park the panel for
+/// minutes.
+pub const CHANGED_FILES_POLL_MAX_DELAY: Duration = Duration::from_secs(60);
+
+/// How long the changed-files poller waits before its next sweep: the plain
+/// interval on any repository that answers faster than that, and otherwise the
+/// length of the sweep just finished, capped.
+pub fn changed_files_poll_delay(interval: Duration, last_sweep: Duration) -> Duration {
+    interval.max(last_sweep.min(CHANGED_FILES_POLL_MAX_DELAY))
+}
+
 /// Take the changed-files queue lock, recovering from poisoning. A panic while
 /// the lock is held would otherwise stop every future refresh for the life of
 /// the process, and the guarded state is two plain fields that no panic can
@@ -2625,6 +2637,17 @@ impl Engine {
         }
     }
 
+    /// The poller polls a WORKTREE, and dux does not get to decide how long
+    /// reading one takes. On a fast repository the answer is the plain
+    /// interval, unchanged. On a repository where a sweep takes longer than the
+    /// interval, waiting only the interval means git runs almost continuously,
+    /// and a poller is not supposed to be a load generator: so the wait is at
+    /// least as long as the sweep that preceded it, which holds git to at most
+    /// half the time whatever the repository does.
+    ///
+    /// The wait is capped so one pathological sweep (an NFS stall, a repository
+    /// mid-`gc`) cannot park the panel for as long as it took: past the cap the
+    /// backpressure has made its point.
     pub fn spawn_changed_files_poller(&self) {
         // Idempotent: a long-lived poller must never be duplicated. The flip
         // hands a live engine to the other surface, which re-calls this; a
@@ -2637,6 +2660,10 @@ impl Engine {
         }
         let watched = Arc::clone(&self.watched_worktree);
         let has_agent = Arc::clone(&self.has_active_processes);
+        // How long the last sweep took, so the next wait can be paced against
+        // it. Zero until one has run, which leaves the first wait at the plain
+        // interval.
+        let mut last_sweep = Duration::ZERO;
         self.spawn_loop_worker(
             LoopWorkerSpec {
                 label: "changed-files-poller".into(),
@@ -2647,10 +2674,19 @@ impl Engine {
                 } else {
                     Duration::from_secs(10)
                 };
-                thread::sleep(interval);
+                thread::sleep(changed_files_poll_delay(interval, last_sweep));
                 let path = watched.lock().ok().and_then(|guard| guard.clone());
+                let started = Instant::now();
+                let swept = path
+                    .as_ref()
+                    .map(|worktree_path| crate::git::changed_files(worktree_path));
+                last_sweep = if swept.is_some() {
+                    started.elapsed()
+                } else {
+                    Duration::ZERO
+                };
                 if let Some(worktree_path) = path
-                    && let Ok((staged, unstaged)) = crate::git::changed_files(&worktree_path)
+                    && let Some(Ok((staged, unstaged))) = swept
                     && tx
                         .send(WorkerEvent::ChangedFilesReady {
                             // The poller only sends what it managed to read: a
@@ -8047,6 +8083,36 @@ mod tests {
             lock_changed_files_queue(&engine.changed_files_refresh).next_request(),
             Some(PathBuf::from("/queued")),
             "the request is queued for the running reader to pick up"
+        );
+    }
+
+    #[test]
+    fn the_changed_files_poller_paces_itself_against_the_last_sweep() {
+        let fast = Duration::from_secs(2);
+        assert_eq!(
+            changed_files_poll_delay(fast, Duration::from_millis(40)),
+            fast,
+            "a repository that answers quickly keeps the plain interval"
+        );
+        assert_eq!(
+            changed_files_poll_delay(fast, Duration::ZERO),
+            fast,
+            "the first wait, before any sweep has been measured"
+        );
+        assert_eq!(
+            changed_files_poll_delay(fast, Duration::from_secs(8)),
+            Duration::from_secs(8),
+            "a sweep slower than the interval buys itself an equal rest"
+        );
+        assert_eq!(
+            changed_files_poll_delay(Duration::from_secs(10), Duration::from_secs(4)),
+            Duration::from_secs(10),
+            "the idle interval still wins when it is the longer of the two"
+        );
+        assert_eq!(
+            changed_files_poll_delay(fast, Duration::from_secs(600)),
+            CHANGED_FILES_POLL_MAX_DELAY,
+            "one pathological sweep must not park the panel for ten minutes"
         );
     }
 
