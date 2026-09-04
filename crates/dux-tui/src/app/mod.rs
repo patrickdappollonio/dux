@@ -881,7 +881,36 @@ pub struct PendingChangedFilesRefresh {
     pub key: String,
     pub label: String,
     pub worktree: PathBuf,
+    pub voice: ChangedFilesReadVoice,
+    /// When the busy is still owed to the status line, and from when. `None`
+    /// once it has been shown (or for a read that never shows one).
+    pub announce_at: Option<Instant>,
 }
+
+/// How a changed-files read announces itself on the TUI's one status line.
+pub enum ChangedFilesReadVoice {
+    /// The `refresh-changes` command. It was asked for in words, so it answers
+    /// in words: a busy straight away and the counts when the read lands.
+    Spoken,
+    /// A selection move. Its answer is the file list filling in, and a status
+    /// line naming counts on every move would write over whatever the line was
+    /// already saying, pinned warnings included. So it says nothing at all
+    /// unless the read outlasts [`SLOW_CHANGED_FILES_READ`], and even then only
+    /// a spinner, retired with no message once the pane has the answer.
+    QuietUnlessSlow,
+}
+
+/// The one busy wording for a changed-files read, shared by the command's
+/// immediate spinner and the selection's late one.
+fn changed_files_read_busy(label: &str) -> String {
+    format!("Reading changed files for \"{label}\"\u{2026}")
+}
+
+/// How long a selection-driven changed-files read may take before the status
+/// line explains the empty pane. Below this the read is not a wait anyone needs
+/// narrated; above it the user is looking at an empty Changes pane and deserves
+/// to know why.
+pub const SLOW_CHANGED_FILES_READ: Duration = Duration::from_millis(300);
 
 // The reconnect / fresh-restart status-op outcome is the CORE-owned
 // `dux_core::engine::LaunchOutcome`, and its message mapping is the core-owned
@@ -4002,6 +4031,7 @@ impl App {
         self.engine.poll_gh_probe_schedule();
         self.tick_count = self.tick_count.wrapping_add(1);
         self.reconcile_scroll_mode();
+        self.announce_slow_changed_files_read(Instant::now());
         self.status.tick(Instant::now(), BUSY_TIMEOUT);
     }
 
@@ -5601,6 +5631,15 @@ impl App {
         project
     }
 
+    /// Point the changed-files panel at the selected agent and ask for a read.
+    ///
+    /// The git read goes to a WORKER. It used to run inline here, on the
+    /// interface thread, as a deliberate exception: the TUI is single-user, so
+    /// the read refilled the lists within this same call and nothing flickered.
+    /// What that traded away was the whole interface for the length of one
+    /// `git status` sweep, on every selection move, and a worktree with
+    /// thousands of changed files made that a freeze rather than a pause. The
+    /// flicker is the cheaper cost, and only a focus change pays it.
     pub(crate) fn reload_changed_files(&mut self) {
         let session_id = self.selected_session().map(|s| s.id.clone());
         // Capture the previously-watched session BEFORE set_watched_session
@@ -5608,17 +5647,46 @@ impl App {
         // reload of the already-selected session (commit, stage/discard, a
         // file-watcher refresh, etc. all call this helper).
         let previously_watched = self.engine.watched_session_id.clone();
+        let focus_change = previously_watched.as_deref() != session_id.as_deref();
+        // An incidental reload of the SAME session carries the lists across the
+        // read: `set_watched_session` always empties them, and blanking a list
+        // the user is looking at (right after staging a file, say) for the width
+        // of a git read is a flicker the inline read never had. A focus change
+        // keeps the clear, because the previous agent's files rendered against
+        // the new selection would be a lie rather than a stale truth.
+        let carried = (!focus_change && session_id.is_some()).then(|| {
+            (
+                std::mem::take(&mut self.engine.staged_files),
+                std::mem::take(&mut self.engine.unstaged_files),
+            )
+        });
         // The engine sets the watch (cheap, no git) and returns the worktree to
-        // compute changed files for. The web computes this off-thread (the actor
-        // thread serves every client), but the TUI is single-user on its own App
-        // thread, so it computes inline: `set_watched_session` empties the lists,
-        // then the inline read refills them within this same synchronous call —
-        // no visible flicker.
+        // compute changed files for.
         let worktree = self.engine.set_watched_session(session_id.as_deref());
-        if let Some(path) = worktree {
-            let (staged, unstaged) = git::changed_files(&path).unwrap_or_default();
+        if let Some((staged, unstaged)) = carried {
             self.engine.staged_files = staged;
             self.engine.unstaged_files = unstaged;
+        }
+        if let Some(path) = worktree {
+            if focus_change {
+                // The pane is empty until the answer lands, so say what it is
+                // waiting for. `apply_changed_files_refresh_outcome` retires
+                // this busy when the read comes back.
+                let label = session_id
+                    .as_deref()
+                    .and_then(|id| self.engine.sessions.iter().find(|s| s.id == id))
+                    .map(|s| self.session_label(s))
+                    .unwrap_or_else(|| "this agent".to_string());
+                let key = format!("refresh-changes:{}", session_id.as_deref().unwrap_or(""));
+                self.begin_changed_files_refresh(
+                    key,
+                    label,
+                    path,
+                    ChangedFilesReadVoice::QuietUnlessSlow,
+                );
+            } else {
+                self.engine.spawn_changed_files_refresh(path);
+            }
         }
         self.clamp_files_cursor();
         if let Some(sid) = session_id {
@@ -5679,24 +5747,75 @@ impl App {
             return Ok(());
         };
         self.clamp_files_cursor();
-        self.status.set(
-            Instant::now(),
-            Some(key.clone()),
-            StatusTone::Busy,
-            format!("Reading changed files for \"{name}\"\u{2026}"),
-        );
-        self.pending_changed_files_refresh = Some(PendingChangedFilesRefresh {
-            key,
-            label: name,
-            worktree: worktree.clone(),
-        });
-        self.engine.spawn_changed_files_refresh(worktree);
+        self.begin_changed_files_refresh(key, name, worktree, ChangedFilesReadVoice::Spoken);
         // The pull-request state is refreshed on its normal background spacing,
         // exactly as an incidental `reload_changed_files` would, so asking for
         // changed files does not over-poll `gh`.
         self.engine
             .spawn_pr_check_for_session(&session_id, dux_core::engine::PR_CHECK_MIN_INTERVAL);
         Ok(())
+    }
+
+    /// Show a keyed busy for a changed-files read and hand the read to a
+    /// worker. The one pending slot is what
+    /// [`Self::apply_changed_files_refresh_outcome`] resolves against, so a new
+    /// read that displaces an older one for a DIFFERENT key retires that key
+    /// here: nothing else will, and an abandoned busy expires to a warning
+    /// about work that was superseded rather than lost.
+    ///
+    /// [`ChangedFilesReadVoice`] separates the two callers.
+    fn begin_changed_files_refresh(
+        &mut self,
+        key: String,
+        label: String,
+        worktree: PathBuf,
+        voice: ChangedFilesReadVoice,
+    ) {
+        if let Some(previous) = self.pending_changed_files_refresh.take()
+            && previous.key != key
+        {
+            self.status.clear(&previous.key, None);
+        }
+        let now = Instant::now();
+        let announce_at = match voice {
+            ChangedFilesReadVoice::Spoken => None,
+            ChangedFilesReadVoice::QuietUnlessSlow => Some(now + SLOW_CHANGED_FILES_READ),
+        };
+        if announce_at.is_none() {
+            self.status.set(
+                now,
+                Some(key.clone()),
+                StatusTone::Busy,
+                changed_files_read_busy(&label),
+            );
+        }
+        self.pending_changed_files_refresh = Some(PendingChangedFilesRefresh {
+            key,
+            label,
+            worktree: worktree.clone(),
+            voice,
+            announce_at,
+        });
+        self.engine.spawn_changed_files_refresh(worktree);
+    }
+
+    /// Explain an empty Changes pane once a selection-driven read has gone on
+    /// long enough to be a wait. Called once per run-loop tick; a read that
+    /// lands first takes its pending record with it and never gets here.
+    pub(crate) fn announce_slow_changed_files_read(&mut self, now: Instant) {
+        let Some(pending) = self.pending_changed_files_refresh.as_mut() else {
+            return;
+        };
+        let Some(announce_at) = pending.announce_at else {
+            return;
+        };
+        if now < announce_at {
+            return;
+        }
+        pending.announce_at = None;
+        let key = pending.key.clone();
+        let message = changed_files_read_busy(&pending.label);
+        self.status.set(now, Some(key), StatusTone::Busy, message);
     }
 
     /// Resolve the `refresh-changes` command's keyed busy from the worker's
@@ -5753,6 +5872,12 @@ impl App {
                     err.trim().trim_end_matches('.')
                     ),
                 );
+            }
+            None if matches!(pending.voice, ChangedFilesReadVoice::QuietUnlessSlow) => {
+                // The pane now shows the answer. Retire the spinner (a no-op
+                // when the read landed before one was ever raised) without
+                // writing over whatever else the status line is saying.
+                self.status.clear(&pending.key, None);
             }
             None => {
                 let staged = self.engine.staged_files.len();

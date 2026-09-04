@@ -5813,6 +5813,120 @@ mod tests {
         }
     }
 
+    /// Selecting a different agent hands the git read to a worker and shows the
+    /// pane's empty state until the answer lands. Rendering the previous
+    /// agent's files against the new selection would be a lie, so the clear
+    /// stays; what goes is the inline read that froze the interface for the
+    /// length of a `git status` sweep on every selection move.
+    #[test]
+    fn selecting_an_agent_reads_its_changed_files_off_the_interface_thread() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let mut app = test_app_with_sessions(vec![session], vec![make_project("p1", "claude")]);
+        app.selected_left = 1;
+        assert_eq!(
+            app.selected_session().map(|s| s.id.as_str()),
+            Some("s1"),
+            "the agent row is the selection"
+        );
+        app.engine.watched_session_id = Some("other".to_string());
+        app.engine.staged_files = vec![dummy_changed_file("previous-agent.rs")];
+        app.engine.unstaged_files = vec![dummy_changed_file("previous-agent-2.rs")];
+
+        app.reload_changed_files();
+
+        assert!(
+            app.engine.staged_files.is_empty() && app.engine.unstaged_files.is_empty(),
+            "another agent's files must never render under the new selection"
+        );
+        let pending = app
+            .pending_changed_files_refresh
+            .as_ref()
+            .expect("the read is pending in a worker, not done inline");
+        assert_eq!(pending.worktree, PathBuf::from("/tmp/wt/a"));
+        assert!(
+            pending.announce_at.is_some(),
+            "a selection move owes the status line nothing until the read drags on"
+        );
+        assert!(
+            app.status.most_recent_tui().is_none(),
+            "navigation must not write over the status line"
+        );
+    }
+
+    /// An incidental reload of the agent that is already selected (after
+    /// staging a file, say) keeps the list on screen while the worker re-reads
+    /// it. The lists belong to that same agent, so a stale row for a few
+    /// milliseconds is honest, and blanking the pane on every file operation is
+    /// a flicker the inline read never had.
+    #[test]
+    fn re_reading_the_selected_agent_keeps_its_files_on_screen() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let mut app = test_app_with_sessions(vec![session], vec![make_project("p1", "claude")]);
+        app.selected_left = 1;
+        assert_eq!(
+            app.selected_session().map(|s| s.id.as_str()),
+            Some("s1"),
+            "the agent row is the selection"
+        );
+        app.engine.watched_session_id = Some("s1".to_string());
+        app.engine.staged_files = vec![dummy_changed_file("staged.rs")];
+        app.engine.unstaged_files = vec![dummy_changed_file("a.rs")];
+
+        app.reload_changed_files();
+
+        assert_eq!(app.engine.staged_files.len(), 1, "no blank flash");
+        assert_eq!(app.engine.unstaged_files.len(), 1, "no blank flash");
+        assert!(
+            app.pending_changed_files_refresh.is_none(),
+            "an incidental re-read has no busy to resolve"
+        );
+    }
+
+    /// A read that drags on gets a spinner, and one that lands first never
+    /// raises one.
+    #[test]
+    fn a_slow_selection_read_explains_the_empty_pane() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let mut app = test_app_with_sessions(vec![session], vec![make_project("p1", "claude")]);
+        app.selected_left = 1;
+        assert_eq!(
+            app.selected_session().map(|s| s.id.as_str()),
+            Some("s1"),
+            "the agent row is the selection"
+        );
+        app.engine.watched_session_id = Some("other".to_string());
+        app.reload_changed_files();
+        let started = app
+            .pending_changed_files_refresh
+            .as_ref()
+            .expect("pending read")
+            .announce_at
+            .expect("a selection read owes a late spinner")
+            - crate::app::SLOW_CHANGED_FILES_READ;
+
+        app.announce_slow_changed_files_read(started + Duration::from_millis(100));
+        assert!(
+            app.status.most_recent_tui().is_none(),
+            "a read that is about to land needs no narration"
+        );
+
+        app.announce_slow_changed_files_read(started + Duration::from_secs(1));
+        let (tone, message) = app.status.most_recent_tui().expect("the wait is explained");
+        assert_eq!(tone, dux_core::statusline::StatusTone::Busy);
+        assert!(
+            message.contains("Reading changed files"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            app.pending_changed_files_refresh
+                .as_ref()
+                .expect("still pending")
+                .announce_at
+                .is_none(),
+            "the spinner is owed once, not once per tick"
+        );
+    }
+
     /// Adding a new (agent-less) project selects it; the right-pane changed-files
     /// lists must be cleared so the previously selected project's modified files
     /// don't appear to belong to the brand-new project.

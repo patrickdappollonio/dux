@@ -2389,12 +2389,13 @@ impl Engine {
     /// set it for the web, which is why the web changed-files pane stayed empty).
     ///
     /// IMPORTANT: the actual changed-files compute (`git::changed_files`) must NOT
-    /// be done on the engine actor thread — it shells out to several git
-    /// subprocesses and would freeze every web client on a slow repo / git-lock
-    /// stall. The web path follows this call with `spawn_changed_files_refresh`
-    /// (off-thread), and so does the TUI's `refresh-changes` command, which a
-    /// locked repository would otherwise freeze; the TUI's selection-driven
-    /// `reload_changed_files` still computes inline on its own App thread.
+    /// be done on the calling thread — it shells out to several git subprocesses
+    /// and would freeze every web client on a slow repo / git-lock stall, and
+    /// the whole terminal UI on the TUI's own thread. Every caller on both
+    /// surfaces follows this call with `spawn_changed_files_refresh`. The TUI's
+    /// selection-driven read used to be the one exception, computing inline to
+    /// avoid a flicker; a worktree with thousands of changed files made that
+    /// trade a freeze on every selection move, so there is no exception left.
     ///
     /// - `None` (or an UNKNOWN id) → clear the watch and the lists, return `None`.
     /// - `Some(id)` for a known session → watch its worktree, record the id, empty
