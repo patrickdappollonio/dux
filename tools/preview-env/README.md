@@ -72,6 +72,24 @@ Playwright build, then common system binaries).
 ./shot.sh '/#/agent/<sid>' agent.png  # a deep-linked position
 ```
 
+Captures render at 2×: the desktop preset writes 2560×1800 and the phone preset
+780×1688.
+
+The scale is asked of the browser (`--force-device-scale-factor=2`) rather than
+of the viewport, and SwiftShader is requested by name. Both matter for the
+terminal: it paints through xterm's webgl renderer, and a webgl canvas captured
+under an emulated device scale factor above 1 comes back **black** in headless
+Chromium, while the old `--disable-gpu` quietly left every capture on the DOM
+renderer instead. If a canvas still comes back black on some host, capture the
+whole page (`fullPage: true`, or a `clip` with `captureBeyondViewport`) and crop
+the PNG afterwards; that path renders the canvas rather than reading back the
+compositor's surface.
+
+A capture opens a real connection to the PTY, so it can arrive as a watcher and
+come back with the full-pane take-over card over the terminal instead of the
+terminal itself. When that happens, press **Take over** in a journey script
+before capturing.
+
 For interactions (clicking through a flow before screenshotting), write a
 throwaway `puppeteer-core` script for the journey at hand and delete it after:
 `shot.js` shows the connection boilerplate (launch args, viewport, the
