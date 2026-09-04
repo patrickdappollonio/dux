@@ -15,6 +15,10 @@ import {
 
 let mockState: DuxState
 const exitTheaterMock = vi.fn()
+// The pill's own way out is the cluster's theater TOGGLE, which is the one
+// control the flap and the pill share; the menu's way out is still the shared
+// exit item. Both are mocked so a test can say which of the two it pressed.
+const toggleTheaterMock = vi.fn()
 const selectTabMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
@@ -22,6 +26,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     ...actual,
     useDux: () => mockState,
     exitTheater: (...a: unknown[]) => exitTheaterMock(...a),
+    toggleTheater: (...a: unknown[]) => toggleTheaterMock(...a),
     selectTab: (...a: unknown[]) => selectTabMock(...a),
   }
 })
@@ -185,6 +190,7 @@ function stubRects() {
 beforeEach(() => {
   installBootStubs()
   exitTheaterMock.mockReset()
+  toggleTheaterMock.mockReset()
   selectTabMock.mockReset()
   notifyInfoMock.mockReset()
   surfaceBox = { left: 0, top: 0, width: 800, height: 600 }
@@ -287,10 +293,17 @@ describe("the app menu the pill carries", () => {
 })
 
 describe("the floating theater pill", () => {
-  it("always carries the way out", () => {
+  it("always carries the way out, as the cluster's own theater toggle", () => {
+    // ONE CONTROL, NOT TWO. The computer's pill used to carry a dedicated exit
+    // button beside the toggle-less cluster it did not have; the unified pill
+    // has the toggle at its head, and because the pill only exists while the
+    // mode is on, that toggle IS the exit and says so.
     render(<TheaterPill target={terminalTarget} session={undefined} />)
-    fireEvent.click(screen.getByRole("button", { name: "Leave theater mode" }))
-    expect(exitTheaterMock).toHaveBeenCalledTimes(1)
+    const exit = screen.getByTestId("pane-theater-toggle")
+    expect(exit.getAttribute("aria-label")).toBe("Leave theater mode")
+    expect(exit.getAttribute("aria-pressed")).toBe("true")
+    fireEvent.click(exit)
+    expect(toggleTheaterMock).toHaveBeenCalledTimes(1)
   })
 
   it("carries a macros trigger beside it", () => {
@@ -333,6 +346,127 @@ describe("the floating theater pill", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     expect(document.activeElement).toBe(field)
     field.remove()
+  })
+
+  it("paints the grip as a grab indicator, not as a button", () => {
+    // IT IS A HANDLE, NOT AN ACTION. A tap on it does nothing by design, so a
+    // hover fill and a press nudge were promising something it does not have.
+    // What survives is the focus ring (the keyboard user's only sight of where
+    // the arrow keys are pointed) and the grab/grabbing cursor pair.
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    const cls = grip().className
+    expect(cls).toContain("cursor-grab")
+    expect(cls).toContain("active:cursor-grabbing")
+    expect(cls).toContain("hover:bg-transparent")
+    expect(cls).not.toContain("hover:bg-muted")
+    expect(cls).not.toContain("hover:text-foreground")
+    expect(cls).not.toContain("translate-y-px")
+    // Still a real, focusable, keyboard-operable control: the nudge keys have
+    // to have somewhere to land, and the label names the gesture out loud
+    // because no ARIA role describes a two-axis move handle.
+    expect(grip().tagName).toBe("BUTTON")
+    expect(grip().getAttribute("aria-label")).toContain("arrow keys")
+  })
+})
+
+// ONE PILL, ONE LOOK. The computer's pill and the phone's were two different
+// arrangements of the same idea for historical reasons: the computer's predates
+// the docked flap entirely. There is one component now and no variant prop, so
+// what these pin is that the SUBJECT decides the control set and the surface
+// decides nothing at all about how any of it is drawn.
+describe("one pill on both form factors", () => {
+  const surfaces: Array<["resting" | "flying", FlightPhase | null]> = [
+    // A computer mounts it resting: there is no docked flap on that surface to
+    // leave from or land on, so no stage ever runs.
+    ["resting", null],
+    // A phone arrives here at the end of a flight.
+    ["flying", "floating"],
+  ]
+
+  function names(): string[] {
+    return screen
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label") ?? "")
+  }
+
+  it.each(surfaces)(
+    "carries the same controls for an agent, %s",
+    (_kind, flight) => {
+      mockState = {
+        bootstrap: null,
+        theater: true,
+        changes: {
+          sessionId: "s1",
+          phase: "loaded",
+          staged: [],
+          unstaged: [{ path: "a" }, { path: "b" }],
+        },
+      } as unknown as DuxState
+      render(
+        <TheaterPill
+          target={agentTarget}
+          session={session([tab({ id: "s1" })])}
+          flight={flight}
+        />,
+      )
+      expect(names()).toEqual([
+        "Drag handle: drag, or use the arrow keys, to move the pill",
+        "Leave theater mode",
+        "Run a macro",
+        "2 changed files",
+        "Session actions",
+      ])
+    },
+  )
+
+  it.each(surfaces)(
+    "drops the changed-file count for a terminal, %s",
+    (_kind, flight) => {
+      // The one thing that legitimately differs is WHAT IS IN IT, and it is the
+      // pane's subject that decides: a terminal has no changed-file summary, on
+      // a computer exactly as on a phone. Same rule, same code.
+      render(
+        <TheaterPill
+          target={terminalTarget}
+          session={undefined}
+          flight={flight}
+        />,
+      )
+      expect(names()).toEqual([
+        "Drag handle: drag, or use the arrow keys, to move the pill",
+        "Leave theater mode",
+        "Run a macro",
+        "Terminal actions",
+      ])
+    },
+  )
+
+  it.each(surfaces)("wears the same capsule and tokens, %s", (_kind, flight) => {
+    render(
+      <TheaterPill target={terminalTarget} session={undefined} flight={flight} />,
+    )
+    const box = pill()
+    // The capsule itself: one radius, one gap, one padding, the band's opaque
+    // fill rather than a glass panel.
+    for (const token of [
+      "rounded-full",
+      `gap-${THEATER_PILL_ROW_GAP_PX / 4}`,
+      "p-1",
+      "dux-pill-surface",
+      "shadow-lg",
+    ]) {
+      expect(box.className).toContain(token)
+    }
+    expect(box.className).not.toContain("backdrop-blur")
+    expect(box.className).not.toContain("bg-card")
+    // And the grip, which is the one control whose width is arithmetic the
+    // flight depends on.
+    expect(grip().className).toContain(`w-[${THEATER_PILL_GRIP_W_PX}px]`)
+    // Every other control is the shared 40px circle; the count is the one that
+    // is wider than it is tall, because a number is data.
+    expect(
+      screen.getByTestId("pane-theater-toggle").className,
+    ).toContain("size-10")
   })
 })
 
@@ -402,7 +536,12 @@ describe("moving the theater pill", () => {
 
   it("carries a grip that says what it is for", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
-    expect(grip().getAttribute("aria-label")).toMatch(/drag to move/i)
+    // It names BOTH gestures, because no ARIA role describes a two-axis move
+    // handle and the arrow keys are a keyboard user's only way to clear an
+    // occluded corner.
+    expect(grip().getAttribute("aria-label")).toMatch(/drag/i)
+    expect(grip().getAttribute("aria-label")).toMatch(/arrow keys/i)
+    expect(grip().getAttribute("aria-label")).toMatch(/move the pill/i)
   })
 
   it("moves with a mouse drag and remembers where it landed", () => {
@@ -599,7 +738,7 @@ describe("moving the theater pill", () => {
   it("still leaves theater on a tap of the way out", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     fireEvent.click(screen.getByRole("button", { name: "Leave theater mode" }))
-    expect(exitTheaterMock).toHaveBeenCalledTimes(1)
+    expect(toggleTheaterMock).toHaveBeenCalledTimes(1)
     expect(pill().style.left).toBe(CORNER.left)
   })
 
@@ -880,7 +1019,6 @@ describe("the phone flight, with real boxes to measure", () => {
       <TheaterPill
         target={mobileTarget}
         session={session([tab({ id: "s1" })])}
-        variant="mobile"
         flight={flight}
       />
     )
@@ -1117,7 +1255,6 @@ describe("the phone flight, with real boxes to measure", () => {
           key="remounted"
           target={mobileTarget}
           session={session([tab({ id: "s1" })])}
-          variant="mobile"
           flight="returning"
         />,
       ),
@@ -1143,14 +1280,29 @@ describe("the phone flight, with real boxes to measure", () => {
     expect(pill().style.getPropertyValue(FLAP_FILL_VAR)).toBe(
       "var(--background)",
     )
-    expect(pill().style.backgroundColor).toBe(`var(${FLAP_FILL_VAR})`)
+    // Nothing writes an inline background any more: the pill's own surface
+    // class paints the published fill, so the two ends of the journey are the
+    // same value and there is no colour morph left to get wrong.
+    expect(pill().style.backgroundColor).toBe("")
+    expect(pill().className).toContain("dux-pill-surface")
   })
 
-  it("gives the colour back with everything else the flight wrote", () => {
+  it("keeps the band's colour once it has settled, with the flap gone", () => {
+    // THE SETTLED PILL WEARS THE BAND'S COLOUR TOO. The resting stage used to
+    // drop the property with everything else the flight wrote, which repainted
+    // a plain-band pill in the strip's tone one commit after it landed; and the
+    // flap is unmounted for the whole floating stage, so the value has to
+    // survive its unmount rather than be re-read from a dock that is gone.
+    retireDock()
+    retireDock = mountDock("var(--background)")
     flapBox = { left: 300, top: 0, width: 200, height: 48 }
     const view = render(flying("detaching"))
+    retireDock()
+    retireDock = () => {}
     act(() => view.rerender(flying("floating")))
-    expect(pill().style.getPropertyValue(FLAP_FILL_VAR)).toBe("")
+    expect(pill().style.getPropertyValue(FLAP_FILL_VAR)).toBe(
+      "var(--background)",
+    )
   })
 
   it("lets go of a flight whose pill is unmounted under it", () => {

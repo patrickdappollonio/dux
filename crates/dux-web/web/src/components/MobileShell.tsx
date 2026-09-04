@@ -204,7 +204,6 @@ function AgentlessTerminalScreen({
                   <TheaterPill
                     target={target}
                     session={undefined}
-                    variant="mobile"
                     flight={flight}
                   />
                 ) : null
@@ -550,7 +549,6 @@ function AgentTerminalScreen({
               <TheaterPill
                 target={selectedTarget}
                 session={session}
-                variant="mobile"
                 flight={flight}
               />
             ) : null

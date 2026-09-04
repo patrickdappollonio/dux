@@ -416,7 +416,7 @@ describe("MobileShell standalone terminals", () => {
     }
     // NO COUNT AND NO PR CHIP: a terminal has neither a changed-file summary
     // nor a pull request, so the cluster is one control shorter here.
-    expect(screen.queryByTestId("mobile-changes-count")).toBeNull()
+    expect(screen.queryByTestId("pane-changes-count")).toBeNull()
     // The header keeps what a phone header is for.
     expect(screen.getByLabelText("Back")).toBeTruthy()
   })

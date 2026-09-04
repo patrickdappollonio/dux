@@ -145,7 +145,7 @@ describe("the docked action flap", () => {
 
   it("prints the BARE count beside the diff glyph, which already draws the ±", () => {
     render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
-    const count = screen.getByTestId("mobile-changes-count")
+    const count = screen.getByTestId("pane-changes-count")
     expect(count.textContent).toBe("3")
     expect(count.textContent).not.toContain("±")
   })
@@ -156,13 +156,13 @@ describe("the docked action flap", () => {
       expect(screen.getByLabelText(label).className).toContain("size-10")
     }
     // The count is the one control wider than it is tall, because it is data.
-    expect(screen.getByTestId("mobile-changes-count").className).toContain("h-10")
-    expect(screen.getByTestId("mobile-changes-count").className).toContain("w-auto")
+    expect(screen.getByTestId("pane-changes-count").className).toContain("h-10")
+    expect(screen.getByTestId("pane-changes-count").className).toContain("w-auto")
   })
 
   it("opens the changes screen from the count", () => {
     render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
-    fireEvent.click(screen.getByTestId("mobile-changes-count"))
+    fireEvent.click(screen.getByTestId("pane-changes-count"))
     expect(openChangesScreenMock).toHaveBeenCalled()
   })
 
@@ -273,7 +273,7 @@ describe("the docked action flap over a terminal", () => {
     expect(screen.getByLabelText("Theater mode")).toBeTruthy()
     expect(screen.getByLabelText("Run a macro")).toBeTruthy()
     expect(screen.getByLabelText("Terminal actions")).toBeTruthy()
-    expect(screen.queryByTestId("mobile-changes-count")).toBeNull()
+    expect(screen.queryByTestId("pane-changes-count")).toBeNull()
   })
 
   it("keeps every control on the 40px touch floor", () => {

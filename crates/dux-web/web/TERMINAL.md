@@ -1845,6 +1845,57 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `components/FlatAgentList.test.tsx` "opens the same merged pane menu the pane header
     opens".
 
+29. **ONE floating pill, one look, both form factors; the subject decides the control
+    set and the surface decides nothing about how any of it is drawn.** `TheaterPill`
+    has no `variant` prop any more: it is the grip plus `PaneActionCluster`
+    (`src/components/PaneActionCluster.tsx`, renamed from `MobileActionCluster` because
+    it is no longer the phone's), which is the same component the phone's docked flap
+    renders. What the computer's pill used to be, and lost: a 40px grip, a `MacroPopover`,
+    the pane `⋯`, a 1px rule, and a SEPARATE `Minimize2` exit button, with no changed-file
+    count. That arrangement predated the flap entirely; it was two designs for one control
+    and a place for the two to drift. What replaced each piece: the cluster's theater
+    toggle IS the exit (the pill only exists while the mode is on, so it renders
+    `aria-pressed`, labelled and tooltipped "Leave theater mode"), the grip is 18px on
+    every surface, and the count arrives on the computer under the same rule the phone
+    uses (present when the pane's subject is an agent, absent for a terminal, decided by
+    `changesSummary` inside the cluster rather than by a call site). The count's press is
+    ONE call on both: on a phone it opens the changes screen, on a computer the same call
+    gives the chrome back, which is where the Changes pane theater unmounted lives.
+    A computer keeps `flight={null}`: there is no dock on that surface to leave from, so
+    no stage runs, the flap fillets are not rendered at all, and the pill mounts resting.
+    NO FLIGHT INPUT MOVED. The grip slot (`THEATER_PILL_GRIP_W_PX` 18 + the 2px row gap),
+    `PILL_GRIPLESS_CLASS`, `capsuleRadiusPx`, `parentPoint`, `positionSnaps` and the
+    stored-position key are all untouched, because the surface that already had a dock is
+    the one both now wear.
+    THE PILL WEARS THE BAND'S COLOUR, OPAQUE. It was `bg-card/90` behind a
+    `backdrop-blur-md`, which is a different hue from the flap: the phone's handoff
+    visibly changed colour halfway through a flight that is supposed to be one object
+    moving, and on a computer the pill read as a different material from the rest of
+    dux's chrome. `.dux-pill-surface` (index.css) paints `var(--dux-flap-fill,
+    var(--dux-flap-bg))`, so both ends of the flight are the same value; the background
+    morph collapsed to a constant and its two `background-color` writes and both
+    transition entries came out of `runDetach`/`runAttach` with it. Two consequences that
+    are easy to get wrong: the resting stage now RE-STATES `--dux-flap-fill` instead of
+    removing it (a cleared property repainted a plain-band pill in the strip's tone one
+    commit after it landed), and `peekFlapFill` remembers the last published value,
+    because the flap is unmounted for the whole floating stage and the settled pill still
+    has to wear its colour.
+    THE GRIP IS A HANDLE, NOT A BUTTON, and it stops painting like one: the ghost
+    variant's hover fill, its hover text colour and the base variant's `active` nudge are
+    all overridden off, leaving the focus ring and the grab/grabbing cursor pair. It stays
+    a native `<button>` deliberately: no ARIA role describes a handle that moves an object
+    freely in two axes (`slider` is one axis and wants a value, `separator` is a splitter),
+    and a real button is what dnd-kit and the APG's drag-handle guidance both reach for,
+    so focusability, keyboard delivery and an announced control come free. Stated cost: a
+    screen reader says "button" and Enter or Space does nothing, because a tap on the grip
+    is inert by design; the label answers that by naming both gestures ("drag, or use the
+    arrow keys, to move the pill").
+    Pinned: `components/TheaterPill.test.tsx` "one pill on both form factors" suite (the
+    parameterized resting/flying control-set and token tests), "paints the grip as a grab
+    indicator, not as a button", "keeps the band's colour once it has settled, with the
+    flap gone", and the whole rect-mocked "the phone flight, with real boxes to measure"
+    block, which is unchanged apart from the dropped `variant` prop.
+
 ## I. Viewer suppression and notifications
 
 1. **The browser xterm is a VIEWER; dux-core's alacritty_terminal is the authoritative

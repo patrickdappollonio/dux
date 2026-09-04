@@ -292,7 +292,18 @@ export const FLAP_FILL_VAR = "--dux-flap-fill"
 /// tone for a frame at both ends of the journey. The flap publishes its own
 /// answer on the element the flight already measures, so the two cannot
 /// disagree; the strip's tone is the fallback for a flight with no flap to ask.
+/// THE LAST COLOUR A FLAP PUBLISHED, remembered past its unmount.
+///
+/// The flap is unmounted for the whole of the floating stage, and the pill's
+/// SETTLED background is that same colour: without this the pill would fly out
+/// of a plain-band flap and then, one commit later, repaint itself in the
+/// strip's tone the moment the resting stage cleared the flight's writes. It is
+/// page-global, like the registration it shadows, which is honest for a phone
+/// showing one pane at a time.
+let lastFlapFill = ""
+
 export function peekFlapFill(): string {
   const published = flapElement?.style.getPropertyValue(FLAP_FILL_VAR).trim()
-  return published ? published : "var(--dux-flap-bg)"
+  if (published) lastFlapFill = published
+  return lastFlapFill || "var(--dux-flap-bg)"
 }

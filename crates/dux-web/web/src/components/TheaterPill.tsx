@@ -1,13 +1,12 @@
-import { Ellipsis, GripVertical, Minimize2 } from "lucide-react"
+import { Ellipsis, GripVertical } from "lucide-react"
 import type * as React from "react"
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 
 import { AppMenuBody } from "@/components/AppMenu"
 import { InputMenuItems } from "@/components/InputMenuItems"
-import { MobileActionCluster } from "@/components/MobileActionCluster"
+import { PaneActionCluster } from "@/components/PaneActionCluster"
 import { PaneMenu, type PaneMenuSubject } from "@/components/PaneMenu"
 import { PaneInputGroup } from "@/components/PaneInputGroup"
-import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import {
@@ -18,10 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
-import {
-  armTheaterToggleFocus,
-  useTheaterPillFocus,
-} from "@/hooks/use-theater"
+import { useTheaterPillFocus } from "@/hooks/use-theater"
 import { FLAP_FILLET_BOX, filletShape } from "@/lib/flapShape"
 import {
   FLIGHT_ATTACH_MS,
@@ -39,7 +35,7 @@ import {
   type FlightPhase,
 } from "@/lib/theaterFlight"
 import { notifyInfo } from "@/lib/notify"
-import { exitTheater, type SelectedTarget } from "@/lib/store"
+import type { SelectedTarget } from "@/lib/store"
 import {
   classifyPillGesture,
   clampPillPosition,
@@ -59,12 +55,21 @@ import { cn } from "@/lib/utils"
 
 // THE FLOATING PILL: the only chrome theater mode leaves on screen.
 //
-// It carries controls that ACT, and nothing that merely reports. On a computer
-// that is the macros trigger, the pane's own menu and the way out; on a phone it
-// is the docked flap's own four, in the flap's order, because the pill IS the
-// flap in the air. The `⋯` is the same merged menu on both, so theater is not
-// the state in which a computer loses the agent's actions along with the
-// sidebar that used to be the only other place to reach them.
+// It carries controls that ACT, and nothing that merely reports: the way out,
+// the macros trigger, the changed-file count where the pane's subject has one,
+// and the pane's own `⋯`. ONE CLUSTER, ONE LOOK, BOTH FORM FACTORS. The
+// computer's pill used to be its own arrangement (a 40px grip, macros, the
+// menu, a rule, and a separate exit button) purely because it was written
+// before the phone grew a docked flap; two designs for one control is a place
+// for the two to drift, and the phone's is the one with a dock to match, so
+// that is the one both wear. The `⋯` is the same merged menu on both, so
+// theater is not the state in which a computer loses the agent's actions along
+// with the sidebar that used to be the only other place to reach them.
+//
+// WHAT MAY STILL DIFFER IS WHAT IS IN IT, never how it looks: the count is
+// absent for a pane with no agent behind it, on a computer exactly as on a
+// phone, and that is the cluster's own rule rather than a variant of this
+// component (see `PaneActionCluster`).
 //
 // IT CARRIES NO TAB STATUS. It used to grow a status half that bobbed while a
 // hidden tab worked, wore an attention dot, and folded out a mini strip of tab
@@ -85,23 +90,23 @@ import { cn } from "@/lib/utils"
 export function TheaterPill({
   target,
   session,
-  variant = "desktop",
   flight = null,
 }: {
   target: SelectedTarget
   /// The focused pane's owning session, when it has one. A terminal pane passes
-  /// `undefined` and gets the collapsed pill.
+  /// `undefined`, which is what drops the changed-file count.
   session: SessionView | undefined
-  /// WHICH CLUSTER THIS IS. On a computer the pill is a way BACK: theater is
-  /// entered from the header, so the pill carries what the mode took away plus
-  /// the exit. On a phone the pill IS the docked flap, in the air: the same
-  /// four controls in the same order, so the flight between them reads as one
-  /// object moving rather than two clusters swapping.
-  variant?: "desktop" | "mobile"
-  /// The phone's flight stage, or `null` on a surface that does not fly.
+  /// The flight stage, or `null` on a surface that does not fly. A computer's
+  /// pill mounts resting and never flies: there is no docked flap on that
+  /// surface to leave from or land on, so the stages have no dock to measure
+  /// and the cluster simply appears, which is also the reduced-motion answer.
   flight?: FlightPhase | null
 }) {
   const boxRef = useRef<HTMLDivElement | null>(null)
+  // THE WAY OUT IS THE CLUSTER'S THEATER TOGGLE, which is the control focus is
+  // handed to when the press that brought this pill on screen destroyed the one
+  // the user was on. The pill only exists while the mode is on, so the toggle is
+  // always painted, labelled and announced as "Leave theater mode" here.
   const exitRef = useRef<HTMLButtonElement | null>(null)
   useTheaterPillFocus(exitRef)
   const coarse = useIsCoarsePointer()
@@ -124,7 +129,11 @@ export function TheaterPill({
     : target.kind === "terminal"
       ? { kind: "terminal", terminalId: target.terminalId, owner: target.owner }
       : null
-  const mobile = variant === "mobile"
+  // The fillets belong to the FLIGHT, not to a form factor: they are the arcs
+  // the capsule wears for the two stages that are the flap's shape, and a
+  // surface with no dock never enters one. They are `display: none` outside
+  // those stages either way, so this decides DOM weight rather than looks.
+  const flies = flight !== null
   const gripless = useFlightChoreography(boxRef, flight, drag.position)
   // WHILE IT IS FLYING HOME the flight owns the box's coordinates outright: it
   // pins the pill at the ones it is leaving and parks it on the flap's, neither
@@ -146,7 +155,17 @@ export function TheaterPill({
       data-testid="theater-pill"
       className={cn(
         "absolute z-30 flex items-center gap-0.5 rounded-full border p-1",
-        "bg-card/90 shadow-lg backdrop-blur-md",
+        // THE BAND'S OWN COLOUR, OPAQUE, and not a glass panel. It used to be
+        // `bg-card/90` behind a backdrop blur, which is a different hue from the
+        // band the cluster docks on: the phone's handoff therefore changed
+        // colour halfway through a flight that is supposed to be one object
+        // moving, and on a computer the same pill read as a different material
+        // from every other piece of dux's chrome. `dux-pill-surface` paints the
+        // flap's published fill (see `FLAP_FILL_VAR`), so docked and floating
+        // are the same pixel colour and the flight has nothing left to morph
+        // there. The blur went with it, which is the point: a translucent
+        // surface over a terminal is exactly where a band colour cannot hold.
+        "dux-pill-surface shadow-lg",
         // The corner it starts in, until a measurement gives it real
         // coordinates. Keeping the CSS default for that frame is what stops the
         // pill flashing at the origin on a pane that has not been laid out yet.
@@ -178,7 +197,7 @@ export function TheaterPill({
           : { left: drag.position.x, top: drag.position.y }
       }
     >
-      {mobile ? <FlapFillets /> : null}
+      {flies ? <FlapFillets /> : null}
       <SimpleTooltip content={coarse ? "" : "Drag to move"}>
         <Button
           variant="ghost"
@@ -186,10 +205,29 @@ export function TheaterPill({
           data-testid="theater-pill-grip"
           // The pill floats over the newest lines of output, so the answer to
           // it covering something is to move it. The grip is where that gesture
-          // lives, and it is a real 40px control rather than the pill's whole
+          // lives, and it is a dedicated control rather than the pill's whole
           // body precisely because the body is buttons: a gesture that could
           // start anywhere would make every tap ambiguous.
-          aria-label="Drag handle: drag to move the pill"
+          //
+          // IT IS STILL A NATIVE BUTTON, and that is a decision rather than an
+          // oversight. No ARIA role describes a handle that moves an object
+          // freely in two axes (`slider` is one axis and wants a value,
+          // `separator` is a splitter), and dnd-kit and the APG's own
+          // drag-handle guidance both reach for a real button because
+          // focusability, keyboard delivery and an announced control come free
+          // with it. The consequence, stated: a screen reader says "button" and
+          // Enter or Space does nothing, because a press on the grip is a tap
+          // and a tap on the grip is deliberately inert. The label names the
+          // gesture and the keys that stand in for it, so the affordance is
+          // spoken rather than left to the glyph.
+          //
+          // IT DOES NOT PAINT LIKE A BUTTON. A grab indicator that lights up on
+          // hover and sinks on press is promising an action it does not have,
+          // so the ghost variant's hover fill, its hover text colour and the
+          // base variant's active nudge are all turned off below. What stays is
+          // the focus ring, which is the keyboard user's only way to see where
+          // the arrow keys are pointed, and the grab/grabbing cursor pair.
+          aria-label="Drag handle: drag, or use the arrow keys, to move the pill"
           // `touch-none` is load-bearing twice over: it stops the browser
           // scrolling or long-pressing the page out from under the drag, and it
           // is what keeps the terminal's own long-press selection from starting
@@ -199,16 +237,20 @@ export function TheaterPill({
           // no grip and reserves no blank space for one, so this width is what
           // the cluster GAINS on the way out and gives back on the way home.
           //
-          // On the phone the slot is 18px wide, a deliberate per-axis
+          // The slot is 18px wide on every surface, a deliberate per-axis
           // relaxation of the 40px floor. It keeps the full 40px HEIGHT; its
           // horizontal neighbours are the pill's own padding edge on one side
           // and the theater toggle on the other, and the pill has to be the
-          // flap's width plus exactly this slot for the handoff to be a pure
-          // translation. A stray tap costs a mode toggle with a visible way
-          // back, the cheapest of the four to hit by mistake.
+          // flap's width plus exactly this slot for the phone's handoff to be a
+          // pure translation. A stray tap on it does nothing at all, which is
+          // the cheapest miss in the cluster. The computer's grip was 40px only
+          // because it was written before the flap existed; matching it here is
+          // what makes one pill wear one silhouette everywhere.
           className={cn(
-            "dux-pill-grip h-10 shrink-0 cursor-grab touch-none rounded-full text-muted-foreground select-none active:cursor-grabbing",
-            mobile ? "w-[18px] px-0" : "w-10",
+            "dux-pill-grip h-10 w-[18px] shrink-0 cursor-grab touch-none rounded-full px-0 text-muted-foreground select-none active:cursor-grabbing",
+            // INERT PAINT: it indicates a grab, it does not offer a press.
+            "hover:bg-transparent hover:text-muted-foreground dark:hover:bg-transparent",
+            "active:not-aria-[haspopup]:translate-y-0",
           )}
           onPointerDown={drag.onPointerDown}
           onPointerMove={drag.onPointerMove}
@@ -224,68 +266,34 @@ export function TheaterPill({
         </Button>
       </SimpleTooltip>
 
-      {mobile ? (
-        // THE FLAP'S OWN CLUSTER, in the air. Same component, same order, same
-        // offsets: the detach overlays the two exactly and then translates, so
-        // anything that differed here would tear at the handoff. The way out is
-        // the theater toggle at its head rather than a separate exit, which is
-        // also what makes the toggle one control changing state rather than two
-        // buttons trading places.
-        <MobileActionCluster
-          target={target}
-          sessionId={sessionId}
-          theaterRef={exitRef}
-          // THE SAME `⋯` THE FLAP CARRIES, by the same name: the cluster flew
-          // here as one object, and a button that changed what it opens on
-          // arrival would make the animation a lie. It is also the only way to
-          // the pane's own actions while the mode is on, for a terminal exactly
-          // as for an agent. The app-menu fallback is for a pane that is
-          // neither, which the types say cannot happen and the surface should
-          // survive anyway.
-          ellipsis={
-            paneSubject ? (
-              <PaneMenu subject={paneSubject} pane={target} side="top" />
-            ) : (
-              <TheaterAppMenu paneId={paneId} />
-            )
-          }
-        />
-      ) : (
-        <>
-          <MacroPopover variant="pill" target={target} />
-
-          {/* THE SAME MENU THE PANE HEADER OPENS, for the same reason the phone
-              pill carries the flap's: theater unmounts the header and the
-              sidebar together, so a computer in this mode had no route to the
-              agent's own actions at all. The app menu rides along inside it as
-              the Settings drill, which is what it used to be the whole of. */}
-          {paneSubject ? (
+      {/* THE FLAP'S OWN CLUSTER, in the air, on every surface. Same component,
+          same order, same offsets: on a phone the detach overlays the two
+          exactly and then translates, so anything that differed here would tear
+          at the handoff, and a computer that arranged the same controls
+          differently would be a second design for one control. The way out is
+          the theater toggle at its head rather than a separate exit, which is
+          what makes the toggle one control changing state rather than two
+          buttons trading places. */}
+      <PaneActionCluster
+        target={target}
+        sessionId={sessionId}
+        theaterRef={exitRef}
+        // THE SAME `⋯` THE FLAP CARRIES, by the same name: the cluster flew
+        // here as one object, and a button that changed what it opens on
+        // arrival would make the animation a lie. It is also the only way to
+        // the pane's own actions while the mode is on, for a terminal exactly
+        // as for an agent, and on a computer it is what theater took the
+        // sidebar and the header away from. The app-menu fallback is for a pane
+        // that is neither an agent nor a terminal, which the types say cannot
+        // happen and the surface should survive anyway.
+        ellipsis={
+          paneSubject ? (
             <PaneMenu subject={paneSubject} pane={target} side="top" />
           ) : (
             <TheaterAppMenu paneId={paneId} />
-          )}
-
-          <span aria-hidden className="mx-0.5 h-5.5 w-px shrink-0 bg-border" />
-
-          <SimpleTooltip content="Leave theater mode">
-            <Button
-              ref={exitRef}
-              variant="ghost"
-              size="icon"
-              className="size-10 shrink-0 rounded-full text-foreground"
-              aria-label="Leave theater mode"
-              onClick={() => {
-                // This button is about to be unmounted, so hand focus on to the
-                // header control that replaces it rather than to the body.
-                armTheaterToggleFocus()
-                exitTheater()
-              }}
-            >
-              <Minimize2 />
-            </Button>
-          </SimpleTooltip>
-        </>
-      )}
+          )
+        }
+      />
     </div>
   )
 }
@@ -440,13 +448,17 @@ function clearFlightStyles(
   style.transform = ""
   style.transformOrigin = ""
   style.borderRadius = ""
-  style.backgroundColor = ""
   style.boxShadow = ""
   style.borderTopColor = ""
   style.willChange = ""
   style.right = ""
   style.bottom = ""
-  style.removeProperty(FLAP_FILL_VAR)
+  // THE FILL IS NOT A FLIGHT STYLE ANY MORE. The settled pill wears the band's
+  // colour too, so the resting stage re-states it rather than dropping it: the
+  // flap is unmounted for the whole floating stage, and a cleared property
+  // would repaint a plain-band pill in the strip's tone one commit after it
+  // landed.
+  style.setProperty(FLAP_FILL_VAR, peekFlapFill())
   if (position) return
   style.left = ""
   style.top = ""
@@ -508,11 +520,13 @@ function runDetach(
   box.style.willChange = "transform"
   box.style.transformOrigin = "top left"
   box.style.transform = `translate(${move.x}px, ${move.y}px)`
-  // The shape it is leaving: the flap's square top and hanging corners, its
-  // body colour, no shadow, and no top edge at all.
+  // The shape it is leaving: the flap's square top and hanging corners, no
+  // shadow, and no top edge at all. THE BODY COLOUR IS NOT IN THIS LIST any
+  // more: the settled pill wears the band's fill too, so the two ends of the
+  // morph are the same value and the only thing left to say is which band's
+  // fill it is.
   box.style.borderRadius = `0 0 ${FLIGHT_TAB_RADIUS_PX}px ${FLIGHT_TAB_RADIUS_PX}px`
   box.style.setProperty(FLAP_FILL_VAR, peekFlapFill())
-  box.style.backgroundColor = `var(${FLAP_FILL_VAR})`
   box.style.borderTopColor = "transparent"
   if (shadow) box.style.boxShadow = shadow
   // Force the browser to take all of that before the end values land, or the
@@ -522,14 +536,12 @@ function runDetach(
   box.style.transition = [
     `transform ${FLIGHT_TRAVEL_MS}ms ${FLIGHT_EASE}`,
     `border-radius ${FLIGHT_SHAPE_MS}ms ${FLIGHT_EASE}`,
-    `background-color ${FLIGHT_SHAPE_MS}ms ease`,
     `border-top-color ${FLIGHT_SHAPE_MS}ms ease`,
     // The shadow rides the WHOLE travel: it belongs to the floating pill, so it
     // arrives with it rather than appearing at pull-off.
     `box-shadow ${FLIGHT_TRAVEL_MS}ms ease`,
   ].join(", ")
   box.style.transform = ""
-  box.style.backgroundColor = ""
   box.style.borderTopColor = ""
   box.style.boxShadow = ""
   box.style.borderRadius = capsuleRadiusPx(box)
@@ -606,11 +618,9 @@ function runAttach(box: HTMLElement, dock: DOMRect): void {
 
   box.style.transition = [
     `border-radius ${FLIGHT_ATTACH_MS}ms ${FLIGHT_EASE}`,
-    `background-color ${FLIGHT_ATTACH_MS}ms ease`,
     `border-top-color ${FLIGHT_ATTACH_MS}ms ease`,
   ].join(", ")
   box.style.borderRadius = `0 0 ${FLIGHT_TAB_RADIUS_PX}px ${FLIGHT_TAB_RADIUS_PX}px`
-  box.style.backgroundColor = `var(${FLAP_FILL_VAR})`
   // The flap is flush with the band, so it has no top edge to draw.
   box.style.borderTopColor = "transparent"
 }

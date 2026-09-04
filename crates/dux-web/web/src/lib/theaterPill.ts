@@ -27,10 +27,10 @@ export const THEATER_PILL_HINT_KEY = "dux:theater-pill-hint"
 /// the inset the pill was pinned at before it could move.
 export const THEATER_PILL_MARGIN = 14
 
-/// The phone grip's own width, a per-axis relaxation of the 40px floor argued
-/// at the button itself. It is written here as well as in the button's class
-/// because the resting corner is arithmetic about it; a test pins the two
-/// together.
+/// The grip's own width, on every surface: a per-axis relaxation of the 40px
+/// floor argued at the button itself. It is written here as well as in the
+/// button's class because the resting corner is arithmetic about it; a test
+/// pins the two together.
 export const THEATER_PILL_GRIP_W_PX = 18
 
 /// The gap between the pill's controls, Tailwind's `gap-0.5`.

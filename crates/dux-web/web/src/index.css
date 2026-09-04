@@ -534,6 +534,17 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
   }
 }
 
+/* THE FLOATING PILL WEARS THE BAND'S COLOUR, opaque, docked and floating
+   alike. The fill is whatever the flap published for the band it hangs from
+   (the tab strip's composited tone, or the plain app background), which the
+   flight writes onto the pill as `--dux-flap-fill`; a computer has no flap, so
+   the fallback is the strip's tone, which is the band its pane header wears.
+   Declaring it here rather than as an inline style is what lets the flight's
+   own imperative writes clear back to it. */
+.dux-pill-surface {
+  background-color: var(--dux-flap-fill, var(--dux-flap-bg));
+}
+
 /* THE GRIP SLOT IS THE WIDTH THE CLUSTER GAINS IN FLIGHT. The docked flap has
    no grip and reserves no blank space for one, so the pill starts the detach
    gripless (its box then equals the flap's exactly, which is what makes the

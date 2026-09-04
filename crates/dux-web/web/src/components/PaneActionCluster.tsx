@@ -11,14 +11,20 @@ import { openChangesScreen, toggleTheater, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
-// THE PHONE'S ONE ACTION CLUSTER, in the two places it is ever painted.
+// THE PANE'S ONE ACTION CLUSTER, in every place it is ever painted.
 //
-// It is the same controls whether it is docked in the flap or floating in
-// theater's pill: the theater toggle, Macros, the changed-file count where
-// there is an agent to have one, and the surface `⋯`. Both surfaces render
-// THIS component, because the two are not merely similar: the detach animation
-// flies one into the other as a single object, and a button that sat at a
-// different offset in the two would tear visibly at the handoff.
+// It is the same controls at every dock: the theater toggle, Macros, the
+// changed-file count where there is an agent to have one, and the surface `⋯`.
+// The phone's docked flap renders it, and so does the floating theater pill on
+// BOTH form factors, because the two are not merely similar: the phone's detach
+// animation flies one into the other as a single object, and a computer whose
+// pill looked like something else was a second design for one control.
+//
+// WHICH CONTROLS RENDER IS A PARAMETER, never a form factor. A pane with no
+// agent behind it carries no count, on a phone and on a computer alike; the
+// `⋯` is handed in because only the surface knows which pane it is over. What
+// is NOT a parameter is how any of them look: every control that appears here
+// wears the same treatment wherever the cluster is painted.
 //
 // The geometry is therefore load-bearing, not decorative. Every control is
 // 40px tall (the touch-target floor), the row's gap is 2px, and the count is
@@ -30,7 +36,7 @@ import { cn } from "@/lib/utils"
 /// are each ONE surface, and a bordered button inside either reads as two.
 const CLUSTER_BUTTON = "size-10 shrink-0 rounded-full"
 
-export function MobileActionCluster({
+export function PaneActionCluster({
   target,
   sessionId,
   theaterRef,
@@ -38,7 +44,8 @@ export function MobileActionCluster({
 }: {
   target: SelectedTarget
   /// The agent whose changed files the count is about, or `undefined` for a
-  /// pane with no agent behind it, which carries no count at all.
+  /// pane with no agent behind it, which carries no count at all. Same rule at
+  /// every dock: a terminal has no changed-file summary to show.
   sessionId: string | undefined
   /// The theater toggle's node, so the surface around it can hand focus back
   /// when the OTHER surface's press brought it on screen.
@@ -68,6 +75,12 @@ export function MobileActionCluster({
 // `{on ? <Minimize2/> : <Maximize2/>}` has nothing to animate between: the old
 // node is gone in the same frame the new one appears, and the control reads as
 // two different buttons rather than one changing state.
+//
+// IT IS ALSO THE WAY OUT, wherever the cluster is floating: the pill only
+// exists while theater is on, so this toggle is always painted, labelled and
+// announced as "Leave theater mode" there. The computer's pill used to carry a
+// separate exit button beside it, which made the mode's one control two
+// different-looking things depending on which machine you were sitting at.
 function TheaterMorphButton({
   buttonRef,
 }: {
@@ -81,7 +94,7 @@ function TheaterMorphButton({
         ref={buttonRef}
         variant="ghost"
         size="icon"
-        data-testid="mobile-theater-toggle"
+        data-testid="pane-theater-toggle"
         className={cn(CLUSTER_BUTTON, theater && "text-foreground")}
         aria-label={label}
         aria-pressed={theater}
@@ -107,6 +120,12 @@ function TheaterMorphButton({
 // count: printing "±3" next to a plus-minus icon says the same thing twice.
 // Content-sized on the shared 40px height, the one control in the cluster that
 // is wider than it is tall, because the number is data.
+//
+// It ACTS rather than reports: it opens the changed files. On a phone that is
+// the changes screen; on a computer the same call gives the chrome back, which
+// is where the Changes pane theater unmounted lives, and pushes a history entry
+// so Back returns. One call, because "show me the changed files" is one intent
+// and a second implementation is a second thing to keep in step.
 function ChangesCountButton({ sessionId }: { sessionId: string | undefined }) {
   const { changes } = useDux()
   const summary = changesSummary(changes, sessionId)
@@ -116,7 +135,7 @@ function ChangesCountButton({ sessionId }: { sessionId: string | undefined }) {
       <Button
         variant="ghost"
         size="icon"
-        data-testid="mobile-changes-count"
+        data-testid="pane-changes-count"
         className="h-10 w-auto shrink-0 gap-1.5 rounded-full px-3"
         aria-label={summary.countLabel}
         onClick={() => openChangesScreen()}

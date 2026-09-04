@@ -1,7 +1,7 @@
 import type * as React from "react"
 import { useLayoutEffect, useRef, useState } from "react"
 
-import { MobileActionCluster } from "@/components/MobileActionCluster"
+import { PaneActionCluster } from "@/components/PaneActionCluster"
 import { PaneMenu, type PaneMenuSubject } from "@/components/PaneMenu"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import { buildFlapShape } from "@/lib/flapShape"
@@ -128,7 +128,7 @@ export function MobileActionFlap({
         </svg>
       ) : null}
 
-      <MobileActionCluster
+      <PaneActionCluster
         target={target}
         sessionId={subject.kind === "agent" ? subject.session.id : undefined}
         theaterRef={theaterRef}
