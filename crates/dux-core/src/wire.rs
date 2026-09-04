@@ -1002,6 +1002,17 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Mark `status` quiet only on the arms where the outcome is already on screen.
+///
+/// A preference flip is usually two sentences that are not symmetric: the arm
+/// that puts something on screen needs no toast, while the arm that takes
+/// something away is often the only place the way back is named. Written as one
+/// helper so a flip's two arms are decided together at the site rather than by
+/// remembering to append `.quiet()` to one branch of an `if`.
+fn quiet_when(status: WireStatus, quiet: bool) -> WireStatus {
+    if quiet { status.quiet() } else { status }
+}
+
 impl WireStatus {
     /// Construct a wire status directly (for non-reaction sources like PTY-exit notices).
     pub fn new(tone: impl Into<String>, message: impl Into<String>) -> Self {
@@ -1724,7 +1735,10 @@ impl Engine {
                 // the hide itself.
                 "Changes pane is already hidden. Reopen it from the show button in the header, or set it permanently in Preferences."
             };
-            return WireStatus::new("info", message.to_string());
+            // Quiet only when the pane is (or already was) SHOWN: the pane is
+            // right there. Both hidden answers stay loud, because they name the
+            // way back to something that has just left the screen.
+            return quiet_when(WireStatus::new("info", message.to_string()), visible);
         }
         self.config.ui.show_changes_pane = visible;
         self.config_writer.save_lazy(self.config.clone());
@@ -1733,7 +1747,7 @@ impl Engine {
         } else {
             "Changes pane hidden. Reopen it from the show button in the header, or set it permanently in Preferences."
         };
-        WireStatus::new("info", message.to_string())
+        quiet_when(WireStatus::new("info", message.to_string()), visible)
     }
 
     /// Persist this dux instance's identity — the browser tab title
@@ -1757,7 +1771,7 @@ impl Engine {
     ) -> anyhow::Result<WireStatus> {
         // Empty body: nothing to touch. Skip the disk write and the fan-out.
         if title.is_none() && favicon.is_none() {
-            return Ok(WireStatus::new("info", "Nothing to update."));
+            return Ok(WireStatus::new("info", "Nothing to update.").quiet());
         }
         let mut candidate = self.config.clone();
         if let Some(raw) = title {
@@ -1771,7 +1785,7 @@ impl Engine {
         if candidate.server.title == self.config.server.title
             && candidate.server.favicon == self.config.server.favicon
         {
-            return Ok(WireStatus::new("info", "Instance identity unchanged."));
+            return Ok(WireStatus::new("info", "Instance identity unchanged.").quiet());
         }
         // Persist eagerly so a disk failure is surfaced before the endpoint
         // replies; only commit to the running config once the write succeeds.
@@ -1780,10 +1794,8 @@ impl Engine {
             .map_err(|err| anyhow::anyhow!("saving to config failed: {err}"))?;
         self.config.server.title = candidate.server.title;
         self.config.server.favicon = candidate.server.favicon;
-        Ok(WireStatus::new(
-            "info",
-            "Instance name and favicon updated.",
-        ))
+        // The tab title and the favicon are what the user is looking at.
+        Ok(WireStatus::new("info", "Instance name and favicon updated.").quiet())
     }
 
     /// Persist an explicit set of `[ui]`/`[capabilities]` settings-modal fields
@@ -1911,11 +1923,16 @@ impl Engine {
             .save_eager(candidate.clone())
             .map_err(|err| anyhow::anyhow!("saving to config failed: {err}"))?;
         self.config = candidate;
-        Ok(info(WireStatus::new(
-            "info",
-            "Settings updated. Every connected browser picks up the change now; a \
-             running dux TUI applies it after its next config reload or restart.",
-        )))
+        // The Preferences dialog the patch came from shows every value it just
+        // wrote, so the answer is kept for the caller and raises no toast.
+        Ok(info(
+            WireStatus::new(
+                "info",
+                "Settings updated. Every connected browser picks up the change now; a \
+                 running dux TUI applies it after its next config reload or restart.",
+            )
+            .quiet(),
+        ))
     }
 
     /// Flip `defaults.enable_randomized_pet_name_by_default` and persist it,
@@ -1946,10 +1963,12 @@ impl Engine {
         };
         self.config.ui.pr_banner_position = next.to_string();
         self.config_writer.save_lazy(self.config.clone());
+        // The banner visibly moves.
         WireStatus::new(
             "info",
             format!("PR banner moved to the {next} of the agent pane."),
         )
+        .quiet()
     }
 
     /// Set `ui.agent_sort` to an explicit, validated mode and persist it. Rejects
@@ -1981,11 +2000,12 @@ impl Engine {
             );
         }
         if self.config.ui.agent_sort == sort {
-            return WireStatus::new("info", format!("Agent sort is already \"{sort}\"."));
+            return WireStatus::new("info", format!("Agent sort is already \"{sort}\".")).quiet();
         }
         self.config.ui.agent_sort = sort.to_string();
         self.config_writer.save_lazy(self.config.clone());
-        WireStatus::new("info", format!("Agent list now sorted by \"{sort}\"."))
+        // The list reorders under the cursor.
+        WireStatus::new("info", format!("Agent list now sorted by \"{sort}\".")).quiet()
     }
 
     /// Save `[server] tailscale` as `mode`, refusing anything outside the
@@ -2020,7 +2040,10 @@ impl Engine {
         } else {
             "Copy-on-select disabled. Use Ctrl-Shift-c, the right-click menu, or Ctrl-Insert to copy."
         };
-        WireStatus::new("info", message.to_string())
+        // Turning it OFF takes a behavior away with nothing on screen to show
+        // for it, and the sentence is where the other three ways to copy are
+        // named, so that arm stays loud.
+        quiet_when(WireStatus::new("info", message.to_string()), next)
     }
 
     /// Flip `ui.always_show_tab_strip` and persist it, mirroring the TUI's
@@ -2034,7 +2057,9 @@ impl Engine {
         } else {
             "Agent tab strip now shows only once an agent has two or more tabs. Change it back in Preferences."
         };
-        WireStatus::new("info", message.to_string())
+        // Turning it on puts the strip on screen. Turning it off can make the
+        // strip vanish, so that arm keeps the sentence that explains why.
+        quiet_when(WireStatus::new("info", message.to_string()), next)
     }
 
     /// Flip `ui.tab_reaches_agent` and persist it, mirroring the TUI's
@@ -2131,7 +2156,8 @@ impl Engine {
                 WireStatus::new(
                     "info",
                     format!("Agent \"{}\" is not running.", session.display_label()),
-                ),
+                )
+                .quiet(),
                 detached,
             ));
         }
@@ -2189,7 +2215,8 @@ impl Engine {
             return Ok(WireStatus::new(
                 "info",
                 format!("Agent \"{}\" is not running.", session.display_label()),
-            ));
+            )
+            .quiet());
         }
         self.mark_session_status(&session.id, crate::model::SessionStatus::Detached);
         self.mark_session_desired_running(&session.id, false);
@@ -2273,7 +2300,13 @@ impl Engine {
                 }
             }
         };
-        Ok(WireStatus::new("info", message))
+        // A renamed agent's row shows its new name. Clearing the name falls
+        // back to a branch or a folder the user did not choose, so those arms
+        // stay loud and say which one it landed on.
+        Ok(quiet_when(
+            WireStatus::new("info", message),
+            new_title.is_some(),
+        ))
     }
 
     /// Swap which provider a session uses, mirroring the TUI's
@@ -2320,7 +2353,8 @@ impl Engine {
                     label,
                     provider.as_str(),
                 ),
-            ));
+            )
+            .quiet());
         }
 
         let outcome = self.change_agent_provider(session_id, provider.clone())?;
@@ -5899,6 +5933,99 @@ mod tests {
         assert_eq!(engine.config.ui.agent_sort, "name_desc");
     }
 
+    /// A preference the user is looking straight at answers its caller and
+    /// raises nothing. The arm that takes something OFF the screen keeps its
+    /// sentence, because that sentence is where the way back is named.
+    #[test]
+    fn a_visibly_confirmed_preference_answers_without_raising_anything() {
+        let (mut engine, _tmp) = test_engine();
+
+        let quiet_of = |engine: &mut Engine, cmd: WireCommand| -> (bool, String) {
+            let status = engine
+                .apply_wire(cmd)
+                .expect("apply")
+                .status
+                .expect("the answer is kept for the caller");
+            assert_eq!(status.tone, "info");
+            (status.quiet, status.message)
+        };
+
+        // Sort: the list reorders under the cursor, and so does the no-op.
+        assert!(
+            quiet_of(
+                &mut engine,
+                WireCommand::SetAgentSort {
+                    sort: "manual".to_string(),
+                },
+            )
+            .0
+        );
+        assert!(
+            quiet_of(
+                &mut engine,
+                WireCommand::SetAgentSort {
+                    sort: "manual".to_string(),
+                },
+            )
+            .0
+        );
+
+        // The PR banner visibly moves.
+        assert!(quiet_of(&mut engine, WireCommand::TogglePrBannerPosition {}).0);
+
+        // The instance identity trio: an empty body, an unchanged write, and a
+        // real one all land in the tab title the user can see.
+        assert!(
+            quiet_of(
+                &mut engine,
+                WireCommand::SetInstanceIdentity {
+                    title: None,
+                    favicon: None,
+                },
+            )
+            .0
+        );
+        assert!(
+            quiet_of(
+                &mut engine,
+                WireCommand::SetInstanceIdentity {
+                    title: Some("Workshop".to_string()),
+                    favicon: None,
+                },
+            )
+            .0
+        );
+
+        // The asymmetric flips. Showing is silent; hiding names the way back.
+        engine.config.ui.show_changes_pane = false;
+        assert!(
+            quiet_of(
+                &mut engine,
+                WireCommand::SetChangesPaneVisible { visible: true },
+            )
+            .0
+        );
+        let (quiet, message) = quiet_of(
+            &mut engine,
+            WireCommand::SetChangesPaneVisible { visible: false },
+        );
+        assert!(!quiet, "the hide is the only place the reopen is named");
+        assert!(message.contains("show button in the header"));
+
+        engine.config.ui.copy_on_select = false;
+        assert!(quiet_of(&mut engine, WireCommand::ToggleCopyOnSelect {}).0);
+        let (quiet, message) = quiet_of(&mut engine, WireCommand::ToggleCopyOnSelect {});
+        assert!(!quiet, "turning copy-on-select off shows nothing for it");
+        assert!(message.contains("Ctrl-Shift-c"));
+
+        engine.config.ui.always_show_tab_strip = false;
+        assert!(quiet_of(&mut engine, WireCommand::ToggleAlwaysShowTabStrip {}).0);
+        assert!(
+            !quiet_of(&mut engine, WireCommand::ToggleAlwaysShowTabStrip {}).0,
+            "turning it off can make the strip vanish"
+        );
+    }
+
     #[test]
     fn apply_wire_toggle_pr_banner_position_swaps_top_and_bottom() {
         let (mut engine, _tmp) = test_engine();
@@ -6327,6 +6454,11 @@ mod tests {
             })
             .expect("apply kill");
         let status = outcome.status.expect("a status");
+        assert!(
+            status.quiet,
+            "the row already says the agent is not running: {}",
+            status.message
+        );
         assert!(
             status.message.contains("is not running"),
             "msg: {}",
@@ -9546,6 +9678,10 @@ mod tests {
             "msg: {}",
             status.message
         );
+        assert!(
+            status.quiet,
+            "the row shows the name the user just typed, so no toast"
+        );
 
         // Persisted: a fresh load from the same SQLite file sees the new title.
         let reloaded = engine
@@ -9577,6 +9713,10 @@ mod tests {
             status.message.contains("feat"),
             "clear message names the branch: {}",
             status.message
+        );
+        assert!(
+            !status.quiet,
+            "the fallback name is one the user did not choose, so say which it is"
         );
 
         let reloaded = engine
@@ -9869,6 +10009,11 @@ mod tests {
             .expect("apply_wire");
         let status = outcome.status.expect("no-op still surfaces a status");
         assert_eq!(status.tone, "info");
+        assert!(
+            status.quiet,
+            "the picker the click came from already shows the current provider: {}",
+            status.message
+        );
         assert!(
             status.message.contains("already uses claude"),
             "msg: {}",
@@ -11149,6 +11294,11 @@ mod tests {
             }))
             .expect("dispatch ok");
         let status = outcome.status.expect("status kept for a mixed patch");
+        assert!(
+            status.quiet,
+            "the Preferences dialog shows every value it just wrote: {}",
+            status.message
+        );
         assert!(
             status.message.starts_with("Settings updated."),
             "{status:?}"
