@@ -924,11 +924,18 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
 
-        assert_eq!(
-            rss, kernel_sum,
-            "the tree total ({rss}) must equal the kernel's sum over its real \
-             processes ({kernel_sum}); if this is a multiple of the truth, thread \
-             entries are being summed as processes again"
+        // The retries usually land on an exact match. When they do not, the
+        // test process's own allocations moved between the two reads, and the
+        // bug this guards against is a several-fold multiple rather than a
+        // few megabytes of drift, so a tight tolerance still catches it.
+        let drift = rss.abs_diff(kernel_sum);
+        let tolerance = kernel_sum / 50;
+        assert!(
+            drift <= tolerance,
+            "the tree total ({rss}) must match the kernel's sum over its real \
+             processes ({kernel_sum}) within {tolerance} bytes, but drifted by \
+             {drift}; if this is a multiple of the truth, thread entries are \
+             being summed as processes again"
         );
     }
 
