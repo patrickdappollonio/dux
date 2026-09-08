@@ -28,7 +28,9 @@ pub struct WelcomeTip {
 }
 
 pub const WELCOME_TIPS: &[WelcomeTip] = &[
-    // --- shared: feature exists on both surfaces ---
+    // --- shared tips, plus the TUI-only ones (`web: None`) whose feature has
+    // no web counterpart at all: a key-driven fullscreen, the help overlay,
+    // pane hopping, the sidebar key, screen redraw, the palette itself ---
     WelcomeTip {
         web: Some(
             "Lost? The `cog` up top opens the app menu. Preferences, config, macros, the lot, no keyboard archaeology required.",
@@ -42,7 +44,7 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
     },
     WelcomeTip {
         web: Some(
-            "Need every keystroke? The `fullscreen` button on a terminal captures even `Ctrl+t`. Focus mode: activated.",
+            "Need more room? `Theater mode` hands the whole screen to the terminal, and a floating pill keeps the way back. Focus mode: activated.",
         ),
         tui: Some(|resolve| {
             format!(
@@ -89,7 +91,9 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "An agent's `⋯` menu carries `Fork agent…`, which clones the whole session into a brand new one. Cloning never felt so good.",
+        ),
         tui: Some(|resolve| {
             format!(
                 "`{}` forks the current agent into a brand new session. Cloning never felt so good.",
@@ -108,7 +112,9 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "`Change agent provider…` in an agent's `⋯` menu swaps the CLI on that worktree. Been here before? dux resumes that provider's last session automatically.",
+        ),
         tui: Some(|resolve| {
             format!(
                 "Open the palette with `{}` and run `change-agent-provider` to swap a worktree's CLI. Been here before? dux resumes that provider's last session automatically.",
@@ -162,7 +168,9 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "Don't need the Changes pane? `Hide Changes pane` in its `⋯` menu tucks it away, and a button in the header brings it back.",
+        ),
         tui: Some(|resolve| {
             format!(
                 "Don't need the git pane? `{}` hides it. Want it gone for good? Check the command palette.",
@@ -186,7 +194,9 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "Worktrees are the secret sauce: an agent in a project gets its own isolated branch. No conflicts, ever.",
+        ),
         tui: Some(|_resolve| {
             "Worktrees are the secret sauce: an agent in a project gets its own isolated branch. No conflicts, ever.".into()
         }),
@@ -201,7 +211,9 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "`Add project…` in the launcher's `⋯` menu browses the server's own disk, so you can adopt a repo from a phone on the sofa.",
+        ),
         tui: Some(|resolve| {
             format!(
                 "`{}` opens the project browser. Add worktrees from anywhere on disk.",
@@ -219,7 +231,9 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "Macros let you save and replay prompts. The floating `Macros…` button drops one into the terminal without sending it, so you still get the last word.",
+        ),
         tui: Some(|resolve| {
             format!(
                 "Macros let you save and replay prompts. Configure them in config.toml, trigger with `{}`.",
@@ -228,33 +242,43 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "Launch 5 agents on 5 worktrees and let them all work in parallel. Conflicts? Let AI sort it out.",
+        ),
         tui: Some(|_resolve| {
             "Launch 5 agents on 5 worktrees and let them all work in parallel. Conflicts? Let AI sort it out.".into()
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "Tired of typing the same prompt to your AI agent over and over? Turn it into a macro. `Edit macros…` sits in the cog menu, under `Configuration`.",
+        ),
         tui: Some(|_resolve| {
             "Tired of typing the same prompt to your AI agent over and over? Turn it into a macro!"
                 .into()
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "Dux runs Claude the way Anthropic intended. No workarounds, no bans. Just vibes.",
+        ),
         tui: Some(|_resolve| {
             "Dux runs Claude the way Anthropic intended. No workarounds, no bans. Just vibes."
                 .into()
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "The config file is also the documentation, and `Edit config file…` in the cog menu's `Configuration` group opens it right here. Every option is configurable and the comments explain it all.",
+        ),
         tui: Some(|_resolve| {
             "The config file is also the documentation. Every option is configurable and the comments explain it all.".into()
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "Curious what you changed in your config? `dux config diff` in a shell on the server spells out exactly what's different from the defaults, and it's safe to paste into a bug report.",
+        ),
         tui: Some(|_resolve| {
             "Curious what you changed in your config? Run `dux config diff` to see exactly what's different from the defaults.".into()
         }),
@@ -269,19 +293,25 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "Leave the branch name blank in `New agent…` and dux names your next chaos gremlin for you.",
+        ),
         tui: Some(|_resolve| {
             "New agent prompt looking too empty? Tick the pet-name checkbox and let dux name your next chaos gremlin.".into()
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "Install the `gh` CLI and your agents can create commits and open pull requests themselves. dux spots the PR and hangs a banner over the terminal.",
+        ),
         tui: Some(|_resolve| {
             "Install the `gh` CLI and your agents can create commits and pull requests. Pair it with macros or skills to match your style.".into()
         }),
     },
     WelcomeTip {
-        web: None,
+        web: Some(
+            "Your MCP servers, tools, and hooks? They all just work. We don't mess with your setup. Promise.",
+        ),
         tui: Some(|_resolve| {
             "Your MCP servers, tools, and hooks? They all just work. We don't mess with your setup. Promise.".into()
         }),
@@ -304,13 +334,112 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
             )
         }),
     },
-    // --- web-only additions (no TUI equivalent) ---
     WelcomeTip {
         web: Some(
-            "Click a changed file to read its diff — syntax highlighting included, no checkout required.",
+            "One agent can run several provider sessions at once on the very same worktree. The `+` on the tab strip adds one, and its dropdown picks a different CLI.",
         ),
-        tui: None,
+        tui: Some(|resolve| {
+            format!(
+                "One agent, several provider sessions, one worktree. `new-agent-tab` in the palette adds a tab and `{}` walks the strip.",
+                resolve(Action::NextTab)
+            )
+        }),
     },
+    WelcomeTip {
+        web: Some(
+            "In theater mode the floating pill is yours to drag, so park the way out wherever your thumb already lives.",
+        ),
+        tui: Some(|resolve| {
+            format!(
+                "Fullscreen (`{}`) doesn't draw the tab strip at all, so hop tabs before you dive in.",
+                resolve(Action::ToggleFullscreen)
+            )
+        }),
+    },
+    WelcomeTip {
+        web: Some(
+            "Only one device types at a time. When somebody else is driving, a card names them and `Take over` hands you the keyboard, with nothing lost.",
+        ),
+        tui: Some(|resolve| {
+            format!(
+                "The terminal UI is just another device in the queue: when a browser is driving, a card says so and `{}` presses its `Take over` button on the focused pane.",
+                resolve(Action::FocusAgent)
+            )
+        }),
+    },
+    WelcomeTip {
+        web: Some(
+            "No worktree, no branch, just a folder you already have: `New standalone agent…` in the launcher's `⋯` menu. dux never creates, moves or removes that folder.",
+        ),
+        tui: Some(|resolve| {
+            format!(
+                "`new-standalone-agent` in the palette (`{}`) starts an agent in a folder you already have, worktree not included. dux never creates, moves or removes that folder.",
+                resolve(Action::OpenPalette)
+            )
+        }),
+    },
+    WelcomeTip {
+        web: Some(
+            "Need a plain shell before you've added a single project? The `+` on the `Terminals` divider opens one in your home directory, owned by nothing at all.",
+        ),
+        tui: Some(|_resolve| {
+            "Need a plain shell before you've added a single project? `new-standalone-terminal` in the palette opens one in your home directory, owned by nothing at all.".into()
+        }),
+    },
+    WelcomeTip {
+        web: Some(
+            "The Changes pane totals the green and red lines for every group and for the pane itself, and a big sum reads in thousands, rounded down so it never oversells.",
+        ),
+        tui: Some(|_resolve| {
+            "The changes pane totals the green and red lines for every group and for the pane itself, and a big sum reads in thousands, rounded down so it never oversells.".into()
+        }),
+    },
+    WelcomeTip {
+        web: Some(
+            "An agent tied to a pull request wears a one-line banner with the PR's number, state and title, color-coded, and clicking it opens the PR in a new tab.",
+        ),
+        tui: Some(|resolve| {
+            format!(
+                "An agent tied to a pull request wears a one-line banner with the PR's number, state and title, and `{}` opens it in your browser.",
+                resolve(Action::OpenCurrentPullRequest)
+            )
+        }),
+    },
+    WelcomeTip {
+        web: Some(
+            "Stage what you want, then `Commit…`, `Push` and `Pull` in the Changes pane's `⋯` menu do the everyday git chores. No shell required.",
+        ),
+        tui: Some(|resolve| {
+            format!(
+                "Stage what you want, `{}` writes the commit and `{}` pushes it. No shell required.",
+                resolve(Action::CommitChanges),
+                resolve(Action::PushToRemote)
+            )
+        }),
+    },
+    WelcomeTip {
+        web: Some(
+            "Upgraded and wondering what landed? The cog menu keeps `What's new…` and `Welcome screen…` around long after you dismissed them.",
+        ),
+        tui: Some(|resolve| {
+            format!(
+                "Upgraded and wondering what landed? `show-release-notes` in the palette (`{}`) reopens the notes, and `show-welcome-screen` brings the duck back.",
+                resolve(Action::OpenPalette)
+            )
+        }),
+    },
+    WelcomeTip {
+        web: Some(
+            "Click a changed file to read its diff, syntax highlighting included, no checkout required.",
+        ),
+        tui: Some(|resolve| {
+            format!(
+                "`{}` opens the selected file's diff, syntax highlighting included, no checkout required.",
+                resolve(Action::OpenDiff)
+            )
+        }),
+    },
+    // --- web-only additions (no TUI equivalent) ---
     WelcomeTip {
         web: Some(
             "Agents keep running when you close this tab. Come back any time; the terminal repaints like you never left.",
@@ -323,6 +452,30 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         ),
         tui: None,
     },
+    // Web-only on purpose: the browser is where dux edits files, and the TUI's
+    // answer is to open the worktree in your own editor instead.
+    WelcomeTip {
+        web: Some(
+            "Faster to fix the typo than to explain it? `Open editor` in the Changes pane header opens a real editor over the worktree, file tree and all.",
+        ),
+        tui: None,
+    },
+    // Web-only on purpose: in the terminal UI, a dropped file is your terminal
+    // emulator's business, not dux's.
+    WelcomeTip {
+        web: Some(
+            "Drag a screenshot onto the terminal and dux saves it on the server and pastes its path into the prompt, ready for you to finish the sentence.",
+        ),
+        tui: None,
+    },
+    // Web-only on purpose: there is no soft keyboard in front of the TUI.
+    WelcomeTip {
+        web: Some(
+            "On a phone the message box under the terminal is where autocorrect, swipe typing and voice input actually work. `Send` delivers the lot and presses Enter for you.",
+        ),
+        tui: None,
+    },
+    // --- shared again: serving dux over the web, from both sides ---
     // The REACH tip: what a second front end BUYS you. Deliberately mechanism-
     // light on both sides, because the tip right below already teaches the how
     // (`start-web-server`), and because naming `dux server` here would be a
@@ -343,7 +496,7 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
     // naming it literally is correct — there is no label to resolve.
     WelcomeTip {
         web: Some(
-            "This whole web UI can be born from the TUI: `start-web-server` in the palette flips dux inside out — agents never notice.",
+            "This whole web UI can be born from the terminal UI: the `start-web-server` command flips dux inside out, and the agents never notice.",
         ),
         tui: Some(|resolve| {
             format!(
@@ -381,6 +534,14 @@ pub fn web_tips() -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn rendered_tui_tips() -> Vec<String> {
+        let resolve = |a: Action| format!("{a:?}");
+        WELCOME_TIPS
+            .iter()
+            .filter_map(|t| t.tui.map(|f| f(&resolve)))
+            .collect()
+    }
+
     #[test]
     fn every_tip_has_at_least_one_variant() {
         for (i, tip) in WELCOME_TIPS.iter().enumerate() {
@@ -416,5 +577,47 @@ mod tests {
     #[test]
     fn web_tips_is_non_empty() {
         assert!(!web_tips().is_empty());
+    }
+
+    /// House style: em-dashes read as machine-written prose, so tip text uses
+    /// commas or full stops instead. Applies to both surfaces.
+    #[test]
+    fn no_tip_text_contains_an_em_dash() {
+        for (i, web) in web_tips().iter().enumerate() {
+            assert!(!web.contains('—'), "web tip {i} contains an em-dash: {web}");
+        }
+        for (i, tui) in rendered_tui_tips().iter().enumerate() {
+            assert!(!tui.contains('—'), "tui tip {i} contains an em-dash: {tui}");
+        }
+    }
+
+    /// The web has no command palette and no keyboard shortcut for its cog
+    /// menu, so a web tip that names a key or a palette is pointing at a
+    /// surface the reader is not on. Name the affordance instead: the cog app
+    /// menu, a `⋯` menu, a button, the Preferences dialog.
+    #[test]
+    fn web_tips_never_name_a_key_or_a_palette() {
+        for (i, web) in web_tips().iter().enumerate() {
+            for banned in ["Ctrl-", "Ctrl+", "palette", "keybind"] {
+                assert!(
+                    !web.contains(banned),
+                    "web tip {i} mentions {banned:?}, which does not exist on the web: {web}"
+                );
+            }
+        }
+    }
+
+    /// A regression guard, NOT a target: these floors exist so a refactor
+    /// cannot quietly strip the web renderings back off the shared tips. Adding
+    /// tips is welcome; dropping below what already shipped is the bug.
+    #[test]
+    fn the_surfaces_keep_the_tips_they_have() {
+        let web = web_tips().len();
+        let shared = WELCOME_TIPS
+            .iter()
+            .filter(|t| t.web.is_some() && t.tui.is_some())
+            .count();
+        assert!(web >= 30, "web tips fell to {web}");
+        assert!(shared >= 30, "shared tips fell to {shared}");
     }
 }
