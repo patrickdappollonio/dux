@@ -322,6 +322,21 @@ mod tests {
             drop(file);
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
                 .expect("make the stand-in executable");
+            // Another test thread forking a child while the write handle above
+            // was open copies that handle into its child until its exec closes
+            // it, and executing the script inside that window fails with
+            // "text file busy", which the probe reports as a missing command.
+            // Wait until the script actually runs before handing it out.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match std::process::Command::new(&path).arg("ip").output() {
+                    Ok(_) => break,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("the stand-in never became runnable: {err}"),
+                }
+            }
             Self { path }
         }
 
