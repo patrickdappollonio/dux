@@ -904,12 +904,27 @@ mod tests {
                 std::thread::sleep(RSS_RACE_RETRY_DELAY);
                 resample_memory(&mut sys);
             }
-            let (_cpu, r, _count, _children) =
+            let (_cpu, r, _count, children) =
                 aggregate_tree(&sys, sysinfo::Pid::from_u32(self_pid));
-            // Ground truth: the kernel's VmRSS for each real process in the
-            // tree, summed independently of sysinfo.
-            let ks = proc_vm_rss_bytes(self_pid).unwrap_or(0)
-                + proc_vm_rss_bytes(child_pid).unwrap_or(0);
+            // Ground truth: the kernel's VmRSS for each real process the walk
+            // visited, summed independently of sysinfo. Summed over the walk's
+            // own process list rather than over self plus the sleep child,
+            // because other tests in this binary spawn short-lived shells
+            // under the same parent without taking this test's lock, and a
+            // walk rooted at self counts them while a fixed pair does not.
+            // Every process the walk found must still be on both sides.
+            assert!(
+                children.iter().any(|c| c.pid == self_pid),
+                "the walk must include its root"
+            );
+            assert!(
+                children.iter().any(|c| c.pid == child_pid),
+                "the walk must include the sleep child"
+            );
+            let ks: u64 = children
+                .iter()
+                .map(|c| proc_vm_rss_bytes(c.pid).unwrap_or(0))
+                .sum();
             rss = r;
             kernel_sum = ks;
             if rss == kernel_sum {
