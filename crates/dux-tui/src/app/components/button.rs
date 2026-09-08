@@ -130,6 +130,9 @@ pub(crate) enum ButtonPressedTarget {
     /// with every other button here is [`button_state_for`], so the pressed look
     /// cannot drift from the rest of the app.
     TakeOverCard,
+    /// The dormant-tab card's single button. Not a modal either, for the same
+    /// reason as the take-over card above, and tracked in its own field.
+    DormantTabCard,
 }
 
 /// In-flight state for a button the user is currently pressing. `target`

@@ -743,6 +743,38 @@ pub struct TerminalView {
     pub input_owner: Option<String>,
 }
 
+/// The wire shape of [`crate::tab_verdict::TabRunVerdict`]: the enum flattened
+/// into a stable kind plus the payload that kind carries, so a browser can word
+/// the sentence without knowing Rust's variants.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TabRunVerdictView {
+    /// One of `launch_failed`, `exited`, `exited_unknown`, `rapid_clean_exit`
+    /// (see [`crate::tab_verdict::TabRunEnding::wire_kind`]). A client that does
+    /// not recognise a kind must fall back to its generic sentence rather than
+    /// printing the kind.
+    pub ending: String,
+    /// The exit status, for `exited` only.
+    pub status: Option<u32>,
+    /// The spawn error, for `launch_failed` only.
+    pub error: Option<String>,
+    pub ended_seconds_ago: u64,
+    /// The last visible non-blank lines of the run, already capped and
+    /// character-truncated by the engine.
+    pub excerpt: Vec<String>,
+}
+
+impl TabRunVerdictView {
+    fn of(verdict: &crate::tab_verdict::TabRunVerdict) -> Self {
+        Self {
+            ending: verdict.ending.wire_kind().to_string(),
+            status: verdict.ending.status(),
+            error: verdict.ending.error().map(str::to_string),
+            ended_seconds_ago: verdict.ended_seconds_ago(),
+            excerpt: verdict.excerpt.clone(),
+        }
+    }
+}
+
 /// One provider tab of an agent, projected for the tab strip. `order == 0` is
 /// the **session-slot tab**, the one named by the session's stored
 /// `SessionView::slot_tab_id` pointer. It is not privileged for CLOSING (closing
@@ -786,7 +818,20 @@ pub struct AgentTabView {
     ///
     /// Uniform across every tab; no slot special-casing lives in the data.
     /// Memory-only, so a restart clears it (see [`crate::engine::Engine::failed_tab_runs`]).
+    ///
+    /// DERIVED from `last_run_verdict`: it is true exactly when a verdict
+    /// exists. Kept as its own field because every gate that reads it asks only
+    /// the yes/no question, and an older client knows nothing about verdicts.
     pub last_run_failed: bool,
+    /// WHY the last run ended badly, when it ended, and the last lines it had on
+    /// screen: what the dormant card prints instead of "something went wrong".
+    /// `None` exactly when `last_run_failed` is false.
+    ///
+    /// `ended_seconds_ago` rather than a timestamp because the age is what the
+    /// sentence says, and the engine's clock is a monotonic `Instant` that has
+    /// no wall-clock spelling. It goes stale between spine refreshes by exactly
+    /// as much as the refresh interval, which a coarse age absorbs.
+    pub last_run_verdict: Option<TabRunVerdictView>,
     /// What this tab's LIVE process launched with, for a file dropped onto its
     /// pane; `None` when no process is live.
     ///
@@ -1289,6 +1334,7 @@ impl Engine {
                 .unwrap_or(false),
             has_live_process: self.providers.contains_key(id),
             last_run_failed: self.tab_last_run_failed(id.as_str()),
+            last_run_verdict: self.tab_run_verdict(id.as_str()).map(TabRunVerdictView::of),
             // Read off the LIVE process's launch, so it appears when the tab
             // launches and disappears when it is torn down. Both halves come out
             // of the one recorded entry; neither is topped up from current
@@ -2854,7 +2900,11 @@ mod tests {
         assert!(!failed(&engine, "s1-slot"));
         assert!(!failed(&engine, "tab-b"));
 
-        engine.mark_tab_run_failed(TabIdRef::new("s1-slot"));
+        engine.mark_tab_run_failed(
+            TabIdRef::new("s1-slot"),
+            crate::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            Vec::new(),
+        );
         assert!(failed(&engine, "s1-slot"));
         assert!(
             !failed(&engine, "tab-b"),
@@ -2863,6 +2913,83 @@ mod tests {
 
         engine.clear_tab_run_failure(TabIdRef::new("s1-slot"));
         assert!(!failed(&engine, "s1-slot"));
+    }
+
+    /// The VERDICT rides out with the flag, and the two can never disagree:
+    /// `last_run_failed` is true exactly when a verdict is published.
+    #[test]
+    fn a_tabs_verdict_is_published_beside_the_flag() {
+        let (mut engine, _tmp) = engine_with_two_tabs();
+        let tab = |engine: &Engine, tab_id: &str| {
+            engine
+                .session_view("s1")
+                .expect("session projects")
+                .tabs
+                .into_iter()
+                .find(|t| t.id == tab_id)
+                .expect("tab projects")
+        };
+
+        let clean = tab(&engine, "s1-slot");
+        assert!(!clean.last_run_failed);
+        assert!(
+            clean.last_run_verdict.is_none(),
+            "no verdict without a failure"
+        );
+
+        engine.mark_tab_run_failed(
+            TabIdRef::new("s1-slot"),
+            crate::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            vec!["thread already has an active writer".to_string()],
+        );
+        let failed = tab(&engine, "s1-slot");
+        assert!(failed.last_run_failed);
+        let verdict = failed.last_run_verdict.expect("the verdict is published");
+        assert_eq!(verdict.ending, "exited");
+        assert_eq!(verdict.status, Some(1));
+        assert_eq!(verdict.error, None);
+        assert_eq!(
+            verdict.excerpt,
+            vec!["thread already has an active writer".to_string()],
+            "the last lines are what turn \"something went wrong\" into a diagnosis"
+        );
+
+        assert!(
+            tab(&engine, "tab-b").last_run_verdict.is_none(),
+            "one tab's verdict says nothing about its siblings"
+        );
+
+        engine.clear_tab_run_failure(TabIdRef::new("s1-slot"));
+        let cleared = tab(&engine, "s1-slot");
+        assert!(!cleared.last_run_failed);
+        assert!(cleared.last_run_verdict.is_none());
+    }
+
+    /// A failed LAUNCH publishes the spawn error rather than a status, and the
+    /// wire kind is the one the browser switches on.
+    #[test]
+    fn a_failed_launchs_verdict_publishes_its_error() {
+        let (mut engine, _tmp) = engine_with_two_tabs();
+        engine.mark_tab_run_failed(
+            TabIdRef::new("s1-slot"),
+            crate::tab_verdict::TabRunEnding::LaunchFailed {
+                error: "no such file or directory".to_string(),
+            },
+            Vec::new(),
+        );
+        let verdict = engine
+            .session_view("s1")
+            .expect("session projects")
+            .tabs
+            .into_iter()
+            .find(|t| t.id == "s1-slot")
+            .expect("tab projects")
+            .last_run_verdict
+            .expect("the verdict is published");
+        assert_eq!(verdict.ending, "launch_failed");
+        assert_eq!(verdict.status, None);
+        assert_eq!(verdict.error.as_deref(), Some("no such file or directory"));
+        assert!(verdict.excerpt.is_empty());
     }
 
     #[test]

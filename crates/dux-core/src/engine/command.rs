@@ -1942,7 +1942,11 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let session = sample_session("s1", "p1", "feat/x");
         engine.sessions.push(session.clone());
-        engine.mark_tab_run_failed(session.slot_tab_id());
+        engine.mark_tab_run_failed(
+            session.slot_tab_id(),
+            crate::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            Vec::new(),
+        );
 
         let request = engine.build_agent_launch_request(
             session.clone(),
@@ -1969,7 +1973,11 @@ mod tests {
         let session = sample_session("s2", "p1", "feat/y");
         engine.sessions.push(session.clone());
         engine.closing_sessions.insert("s2".to_string());
-        engine.mark_tab_run_failed(session.slot_tab_id());
+        engine.mark_tab_run_failed(
+            session.slot_tab_id(),
+            crate::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            Vec::new(),
+        );
         let request = engine.build_agent_launch_request(
             session.clone(),
             false,

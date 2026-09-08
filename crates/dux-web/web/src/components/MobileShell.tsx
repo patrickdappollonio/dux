@@ -9,7 +9,7 @@ import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { ConnDot } from "@/components/ConnDot"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
-import { DormantTabCard } from "@/components/DormantTabCard"
+import { DormantTabSurface } from "@/components/DormantTabSurface"
 import { FlatAgentList } from "@/components/FlatAgentList"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
 import { MobileActionFlap } from "@/components/MobileActionFlap"
@@ -426,11 +426,12 @@ function TerminalViewport({
   if (dormant && focusedTab && target.kind === "agent") {
     return (
       <>
-        <DormantTabCard
+        <DormantTabSurface
           sessionId={target.sessionId}
           tabId={focusedTab.id}
           provider={focusedTab.provider}
           lastRunFailed={focusedTab.last_run_failed === true}
+          lastRunVerdict={focusedTab.last_run_verdict}
         />
         {overlay}
       </>

@@ -1,13 +1,83 @@
+use super::components::pane_card::CardPlan;
 use super::components::{
-    Button, ButtonKind, ButtonPressedTarget, Checkbox, CheckboxState, Hint, Modal,
-    button_state_for, button_width_for, modal_hint_line, render_scroll_marker, shared_button_width,
-    wrap_styled_lines,
+    Button, ButtonKind, ButtonPressedTarget, CardBlockPlan, CardContent, Checkbox, CheckboxState,
+    Hint, Modal, PaneCardBlock, button_state_for, button_width_for, modal_hint_line,
+    plan_pane_card, render_scroll_marker, shared_button_width, wrap_styled_lines,
 };
 use super::pty_ownership::PtyTakeoverCard;
 use super::*;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
 use ratatui::buffer::{CellDiffOption, CellWidth};
 use std::path::Path;
+
+/// The width a pane card's button paints at. One rule, read by the planner (to
+/// refuse a layout too narrow for it) and by the painter (to place it), so the
+/// two can never disagree about whether the label fits.
+///
+/// Sized to the label rather than `button_width_for`'s dialog minimum, for the
+/// take-over card's reason: one column of padding each side plus the borders
+/// leaves an odd inner width around an odd-length label, so it centres exactly
+/// instead of leaning one cell to the left.
+///
+/// Measured in DISPLAY COLUMNS, like every other measurement on the card: a
+/// label with a wide glyph in it occupies more cells than it has characters, and
+/// a width that counted characters would hand the planner a number the painter
+/// cannot honour.
+fn pane_card_button_width(label: &str) -> u16 {
+    let columns: usize = label
+        .chars()
+        .map(super::components::wrap_lines::char_display_width)
+        .sum();
+    u16::try_from(columns).unwrap_or(u16::MAX).saturating_add(6)
+}
+
+/// A pane card block's lines, cut to the rows it was given, marking the cut when
+/// the planner says the block did not fit whole.
+///
+/// The mark replaces the END of the last surviving row rather than being
+/// appended to it, because that row is usually already full. The cut is by
+/// DISPLAY COLUMN, through the same measurement the wrapper uses: counting
+/// characters against a column budget let a row of CJK come back twice as wide
+/// as the card, which pushed the very ellipsis that says "there is more" off the
+/// right edge.
+fn cut_card_lines(
+    lines: &[Line<'static>],
+    rows: u16,
+    width: u16,
+    truncated: bool,
+) -> Vec<Line<'static>> {
+    let rows = rows as usize;
+    let mut cut: Vec<Line<'static>> = lines.iter().take(rows).cloned().collect();
+    if !truncated || lines.len() <= rows {
+        return cut;
+    }
+    if let Some(last) = cut.last_mut() {
+        let style = last
+            .spans
+            .first()
+            .map(|span| span.style)
+            .unwrap_or_default();
+        let text: String = last
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        // One column of the budget belongs to the mark itself.
+        let budget = usize::from(width).saturating_sub(1);
+        let mut kept = String::new();
+        let mut used = 0usize;
+        for c in text.chars() {
+            let cell = super::components::wrap_lines::char_display_width(c);
+            if used + cell > budget {
+                break;
+            }
+            kept.push(c);
+            used += cell;
+        }
+        *last = Line::from(Span::styled(format!("{kept}\u{2026}"), style));
+    }
+    cut
+}
 
 /// What an error dialog's shared message pane laid out: the pane itself, the
 /// rows left below it inside the border ring, and the message's total wrapped
@@ -2635,55 +2705,270 @@ impl App {
         }
     }
 
-    /// Render the ASCII "dux" logo centered in the given area, with an
-    /// optional feature tip displayed below.
-    /// Centered, provider-agnostic message shown when a focused tab has no live
-    /// process (dormant, e.g. after a restart). Launching it picks up that
-    /// provider's most recent conversation in the worktree when this is the sole
-    /// live-or-launching tab of that provider (`Engine::tab_resume_decision`),
-    /// and starts fresh otherwise; the copy states that rule rather than
-    /// promising either outcome.
-    fn render_dormant_extra_tab(&mut self, frame: &mut Frame, area: Rect) {
-        self.welcome_logo_visible = false;
-        if area.height < 5 || area.width < 20 {
-            return;
-        }
-        let title_style = Style::default()
-            .fg(self.theme.title_focused)
-            .add_modifier(Modifier::BOLD);
-        let body_style = Style::default().fg(self.theme.hint_desc_fg);
-        let dim_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-        let key_style = Style::default().fg(self.theme.hint_key_fg);
-        let lines = vec![
-            Line::from(Span::styled("Tab not running", title_style)),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Launching picks up this provider's most recent",
-                body_style,
-            )),
-            Line::from(Span::styled(
-                "conversation, unless another tab of the same provider",
-                dim_style,
-            )),
-            Line::from(Span::styled(
-                "is already running or the provider can't resume.",
-                dim_style,
-            )),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("Press ", body_style),
-                Span::styled("Enter", key_style),
-                Span::styled(" to launch this tab.", body_style),
-            ]),
-        ];
-        let h = lines.len() as u16;
-        let y = area.y + (area.height.saturating_sub(h)) / 2;
-        let card = Rect::new(area.x, y, area.width, h.min(area.height));
-        Paragraph::new(lines)
-            .alignment(ratatui::layout::Alignment::Center)
-            .render(card, frame.buffer_mut());
+    /// Paint a stack of [`PaneCardBlock`]s as a card in `area`, and report where
+    /// the button (if any) landed so the caller can publish its click rect.
+    ///
+    /// Layout is entirely [`plan_pane_card`]'s; this is the styled paint and
+    /// nothing else, which is what keeps the geometry unit-testable without a
+    /// frame. Every colour comes from `theme.rs`.
+    fn render_pane_card(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        preferred_inner: u16,
+        blocks: &[PaneCardBlock],
+    ) -> Option<Rect> {
+        // A button decides the narrowest ring worth drawing: a ring that cannot
+        // hold the way out is chrome in place of the act. Sized to the label
+        // rather than `button_width_for`'s dialog minimum, for the take-over
+        // card's reason: one column of padding each side plus the borders leaves
+        // an odd inner width around an odd-length label, so it centres exactly
+        // instead of leaning one cell to the left.
+        let button_width = blocks.iter().find_map(|block| match &block.content {
+            CardContent::Button { label, .. } => Some(pane_card_button_width(label)),
+            _ => None,
+        });
+
+        // The STYLED but unwrapped source of each block. Built once, because
+        // building it needs the theme; wrapped on demand below, because the
+        // planner asks about more than one candidate width.
+        let sources: Vec<Vec<Line<'static>>> =
+            blocks.iter().map(|block| self.card_source(block)).collect();
+        let measure = |index: usize, width: u16| {
+            u16::try_from(wrap_styled_lines(&sources[index], width as usize).len())
+                .unwrap_or(u16::MAX)
+        };
+
+        // A block whose content is empty is not a block: keeping it would spend
+        // a gap row on an empty stripe. The surviving indices are carried
+        // alongside the plans so the painter can name the original block a
+        // placement belongs to.
+        let kept: Vec<usize> = blocks
+            .iter()
+            .enumerate()
+            .filter(|(index, block)| {
+                matches!(block.content, CardContent::Button { .. }) || !sources[*index].is_empty()
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let plans: Vec<CardBlockPlan> = kept.iter().map(|index| blocks[*index].plan()).collect();
+
+        let plan = plan_pane_card(
+            area,
+            preferred_inner,
+            button_width,
+            &plans,
+            |position, width| measure(kept[position], width),
+        )?;
+        // Wrap for the paint at the width the plan actually settled on: giving
+        // up the ring widens it, and painting at the other measure would put a
+        // line in the wrong place.
+        let wrapped: Vec<Vec<Line<'static>>> = sources
+            .iter()
+            .map(|source| wrap_styled_lines(source, plan.content_width as usize))
+            .collect();
+        self.paint_pane_card(frame, title, &plan, blocks, &wrapped, &kept)
     }
 
+    /// One block's styled lines, before wrapping. Split out because it is the
+    /// only part of the card that needs the theme.
+    fn card_source(&self, block: &PaneCardBlock) -> Vec<Line<'static>> {
+        let desc_style = Style::default().fg(self.theme.hint_desc_fg);
+        let dim_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        match &block.content {
+            CardContent::Prose(text) => vec![Line::from(Span::styled(text.clone(), desc_style))],
+            CardContent::Detail { lines, .. } => lines
+                .iter()
+                .map(|line| Line::from(Span::styled(line.clone(), dim_style)))
+                .collect(),
+            CardContent::KeyHint { before, key, after } => {
+                let mut spans: Vec<Span<'static>> = vec![Span::styled(before.clone(), desc_style)];
+                spans.extend(
+                    self.theme
+                        .dim_key_badge_default(key)
+                        .into_iter()
+                        .map(|span| Span::styled(span.content.into_owned(), span.style)),
+                );
+                spans.push(Span::styled(after.clone(), desc_style));
+                vec![Line::from(spans)]
+            }
+            CardContent::Button { .. } => Vec::new(),
+        }
+    }
+
+    /// The paint half of [`App::render_pane_card`]: styled output only, so every
+    /// geometry decision stays in the component's pure planner.
+    fn paint_pane_card(
+        &mut self,
+        frame: &mut Frame,
+        title: &str,
+        plan: &CardPlan,
+        blocks: &[PaneCardBlock],
+        wrapped: &[Vec<Line<'static>>],
+        kept: &[usize],
+    ) -> Option<Rect> {
+        if let Some(ring) = plan.ring {
+            // Centred title, unlike a dialog's: the card names a state of the
+            // pane rather than the dialog it is not.
+            let block = self
+                .themed_overlay_block(title)
+                .title_alignment(ratatui::layout::Alignment::Center);
+            block.render(ring, frame.buffer_mut());
+        }
+
+        let mut button_rect = None;
+        for placed in &plan.blocks {
+            let Some(index) = kept.get(placed.index).copied() else {
+                continue;
+            };
+            match &blocks[index].content {
+                CardContent::Button { label, state } => {
+                    // The planner drops any button it cannot place whole, so the
+                    // width is used as it is: clamping it here is what painted
+                    // "Start sess" and called it a button.
+                    let width = pane_card_button_width(label);
+                    // Integer centring, which leans LEFT by one cell when the
+                    // spare columns are odd. Deliberately the same expression
+                    // `render_takeover_card` uses for its own button, so the two
+                    // cards' buttons sit identically; a card that corrected the
+                    // lean would be the odd one out.
+                    let rect = Rect::new(
+                        placed.area.x + (placed.area.width - width) / 2,
+                        placed.area.y,
+                        width,
+                        placed.area.height,
+                    );
+                    Button::new(label)
+                        .state(*state)
+                        .kind(ButtonKind::Confirm)
+                        .render(frame, rect, &self.theme);
+                    button_rect = Some(rect);
+                }
+                CardContent::Detail { align, .. } => {
+                    Paragraph::new(cut_card_lines(
+                        &wrapped[index],
+                        placed.area.height,
+                        placed.area.width,
+                        placed.truncated,
+                    ))
+                    .alignment(*align)
+                    .render(placed.area, frame.buffer_mut());
+                }
+                CardContent::Prose(_) | CardContent::KeyHint { .. } => {
+                    Paragraph::new(cut_card_lines(
+                        &wrapped[index],
+                        placed.area.height,
+                        placed.area.width,
+                        placed.truncated,
+                    ))
+                    .alignment(ratatui::layout::Alignment::Center)
+                    .render(placed.area, frame.buffer_mut());
+                }
+            }
+        }
+        button_rect
+    }
+
+    /// The dormant tab's card: why the tab is not running, what its last run did
+    /// when that run ended badly, the rule a launch follows, and the one act that
+    /// launches it.
+    ///
+    /// Launching picks up that provider's most recent conversation in the
+    /// worktree when this is the sole live-or-launching tab of that provider
+    /// (`Engine::tab_resume_decision`), and starts fresh otherwise; the copy
+    /// states that rule rather than promising either outcome.
+    fn render_dormant_extra_tab(&mut self, frame: &mut Frame, area: Rect, tab_id: Option<&str>) {
+        self.welcome_logo_visible = false;
+        self.mouse_layout.dormant_tab_button = None;
+
+        // Read the verdict OFF the engine first and own it: the paint below
+        // borrows `self` mutably, and the words are the engine's, not the
+        // renderer's (`dux_core::tab_verdict` is what both surfaces say them
+        // from, so the browser's card cannot drift from this one).
+        let verdict = tab_id
+            .and_then(|id| self.engine.tab_run_verdict(id))
+            .map(|verdict| {
+                (
+                    dux_core::tab_verdict::ending_sentence(
+                        &verdict.ending,
+                        verdict.ended_seconds_ago(),
+                    ),
+                    verdict.excerpt.clone(),
+                )
+            });
+
+        // RANKS, first to drop last: the standing resume rule is the same on
+        // every dormant card and the user can read it any time, so it is the
+        // first thing a small pane gives up; the run's own last output is the
+        // one thing on this card that could not be learned anywhere else, so it
+        // outlives everything but the sentence that names the ending.
+        const RANK_RESUME_RULE: u16 = 3;
+        const RANK_KEY_HINT: u16 = 2;
+        const RANK_EXCERPT: u16 = 1;
+        const RANK_ENDING: u16 = 0;
+
+        let mut blocks: Vec<PaneCardBlock> = Vec::new();
+        if let Some((sentence, excerpt)) = &verdict {
+            blocks.push(PaneCardBlock::new(
+                RANK_ENDING,
+                CardContent::Prose(sentence.clone()),
+            ));
+            if !excerpt.is_empty() {
+                // "Last output" is part of the block rather than a heading of
+                // its own so the two are dropped together: a title over nothing
+                // is worse than neither.
+                let mut lines = vec!["Last output".to_string()];
+                lines.extend(excerpt.iter().cloned());
+                blocks.push(PaneCardBlock::new(
+                    RANK_EXCERPT,
+                    CardContent::Detail {
+                        lines,
+                        // Terminal output, left aligned: centring a stack trace
+                        // makes it unreadable.
+                        align: ratatui::layout::Alignment::Left,
+                    },
+                ));
+            }
+        }
+        blocks.push(PaneCardBlock::new(
+            RANK_RESUME_RULE,
+            CardContent::Prose(
+                "Launching picks up this provider's most recent conversation, unless another \
+                 tab of the same provider is already running or the provider can't resume."
+                    .to_string(),
+            ),
+        ));
+        // Never a literal key: every binding is rebindable, so the hint asks the
+        // bindings what actually launches a dormant tab.
+        blocks.push(PaneCardBlock::new(
+            RANK_KEY_HINT,
+            CardContent::KeyHint {
+                before: "Press ".to_string(),
+                key: self.bindings.label_for(Action::FocusAgent),
+                after: " to launch this tab.".to_string(),
+            },
+        ));
+        blocks.push(PaneCardBlock::new(
+            RANK_ENDING,
+            CardContent::Button {
+                label: "Start session".to_string(),
+                state: button_state_for(
+                    ButtonPressedTarget::DormantTabCard,
+                    self.dormant_tab_press,
+                    self.focus == FocusPane::Center,
+                    true,
+                ),
+            },
+        ));
+
+        self.mouse_layout.dormant_tab_button =
+            self.render_pane_card(frame, area, " Tab not running ", 46, &blocks);
+    }
+
+    /// Render the ASCII "dux" logo centered in the given area, with an optional
+    /// feature tip displayed below. The idle screen of a workspace with nothing
+    /// running in the pane.
     fn render_ascii_logo(&mut self, frame: &mut Frame, area: Rect) {
         if area.width < ASCII_LOGO_WIDTH || area.height < ASCII_LOGO_HEIGHT {
             return;
@@ -3839,16 +4124,30 @@ impl App {
         term_area: Rect,
         context: &AgentTerminalContext,
     ) {
-        let dormant_extra = match (&context.session_id, &context.focused_tab) {
-            (Some(session_id), Some(tab_id)) => !self
-                .engine
-                .is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id)),
+        // WHICH DORMANT TABS GET THE CARD. An extra tab always has: it has no
+        // other surface of its own. The SLOT tab normally keeps the welcome logo,
+        // because "this agent is not running" is the ordinary resting state of a
+        // workspace and a card saying so on every idle agent would be noise.
+        //
+        // But a slot tab with a recorded VERDICT is not resting, it FAILED, and
+        // it is the single-tab agent that needs the diagnosis most: a lone codex
+        // tab whose resume was refused had nowhere at all to say so, while the
+        // browser showed the whole story for the same tab. So the card is shown
+        // for any dormant tab that has something to report.
+        let show_card = match (&context.session_id, &context.focused_tab) {
+            (Some(session_id), Some(tab_id)) => {
+                !self
+                    .engine
+                    .is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id))
+                    || self.engine.tab_run_verdict(tab_id).is_some()
+            }
             _ => false,
         };
         match context.active_surface {
-            SessionSurface::Agent if dormant_extra => {
+            SessionSurface::Agent if show_card => {
                 self.welcome_logo_visible = false;
-                self.render_dormant_extra_tab(frame, term_area);
+                let tab_id = context.focused_tab.clone();
+                self.render_dormant_extra_tab(frame, term_area, tab_id.as_deref());
             }
             SessionSurface::Agent => self.render_ascii_logo(frame, term_area),
             SessionSurface::Terminal => {
@@ -4211,48 +4510,51 @@ impl App {
         ))
     }
 
-    /// The quiet changes region: the pane's own frame, and the reason centered
-    /// inside it.
-    ///
-    /// Wrapped rather than truncated, because the reason is a sentence that
-    /// tells the user what to do next and a clipped one tells them nothing.
-    /// Centered on both axes with a blank column against each border, matching
-    /// the browser's padded empty state and the terminal placeholder's own
-    /// idiom: an empty state is a card in the middle of its pane, not prose
-    /// pressed into the corner.
-    ///
-    /// Pre-wrapped through [`wrap_styled_lines`] rather than handed to
-    /// `Wrap { trim: false }`, because the vertical centering needs the row
-    /// count a `Paragraph` will not tell it.
-    fn render_quiet_changes(&mut self, frame: &mut Frame, area: Rect, reason: &str) {
-        /// Blank columns kept between the message and each border.
-        const SIDE_PADDING: u16 = 1;
+    /// A comfortable measure for the quiet-changes card, capped by the pane. The
+    /// changes region is the narrow one, so this is tighter than the centre
+    /// pane's cards.
+    const QUIET_CHANGES_CARD_MEASURE: u16 = 40;
 
+    /// The quiet changes region: the pane's own "Changes" frame, and a pane card
+    /// inside it carrying why the region is quiet.
+    ///
+    /// The reason is the card's prose and the folder is its dim detail block, so
+    /// the sentence the user must read is not the same weight as the path it is
+    /// about. Wrapped rather than truncated, because the reason tells the user
+    /// what to do next and a clipped one tells them nothing.
+    ///
+    /// The card is untitled: the pane frame already says "Changes", and a second
+    /// title two rows below the first would be the same word twice.
+    fn render_quiet_changes(&mut self, frame: &mut Frame, area: Rect, reason: &str) {
         let focused = self.focus == FocusPane::Files;
         let block = self.themed_block("Changes", focused);
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
 
-        let text_width = inner.width.saturating_sub(SIDE_PADDING * 2);
-        if text_width > 0 && inner.height > 0 {
-            let lines: Vec<Line> = reason
-                .lines()
-                .map(|line| Line::raw(line.to_owned()))
-                .collect();
-            let wrapped = wrap_styled_lines(&lines, text_width as usize);
-            let text_height = u16::try_from(wrapped.len()).unwrap_or(u16::MAX);
-            let y = inner.y + inner.height.saturating_sub(text_height) / 2;
-            let card = Rect::new(
-                inner.x + SIDE_PADDING,
-                y,
-                text_width,
-                text_height.min(inner.height),
-            );
-            Paragraph::new(wrapped)
-                .alignment(ratatui::layout::Alignment::Center)
-                .style(Style::default().fg(self.theme.hint_desc_fg))
-                .render(card, frame.buffer_mut());
+        // `quiet_changes_reason` builds "sentence\n\nfolder"; the blank line is
+        // the split, so the two halves keep their own tones here.
+        let (sentence, folder) = match reason.split_once("\n\n") {
+            Some((sentence, folder)) => (sentence.trim(), folder.trim()),
+            None => (reason.trim(), ""),
+        };
+        // The folder is the first thing a small pane gives up; the reason is the
+        // last, and is truncated rather than dropped (see `pane_card`'s floor).
+        let mut blocks = vec![PaneCardBlock::new(
+            0,
+            CardContent::Prose(sentence.to_string()),
+        )];
+        if !folder.is_empty() {
+            blocks.push(PaneCardBlock::new(
+                1,
+                CardContent::Detail {
+                    lines: vec![folder.to_string()],
+                    // Centred, unlike an output excerpt: the path is the tail of
+                    // the sentence above it rather than machine output.
+                    align: ratatui::layout::Alignment::Center,
+                },
+            ));
         }
+        self.render_pane_card(frame, inner, "", Self::QUIET_CHANGES_CARD_MEASURE, &blocks);
         // No list and no rows, so nothing here is clickable: clear the click
         // maps rather than leaving the previous agent's rects behind.
         self.mouse_layout.unstaged_list = None;
@@ -12774,8 +13076,12 @@ mod tests {
         buffer_rows(terminal.backend().buffer())
     }
 
-    /// The rows of `rows` that carry message text: everything inside the block's
-    /// border ring that is not blank.
+    /// The rows of `rows` that carry message text: everything inside the CARD's
+    /// border ring (which is itself inside the pane's frame) that is not blank.
+    ///
+    /// Two rings deep now that the quiet region renders a pane card: the pane
+    /// frame titled "Changes", and the card inside it. The assertions below are
+    /// about the card's padding, so both rings are stripped here.
     fn quiet_changes_text_rows(rows: &[String]) -> Vec<(usize, String)> {
         rows.iter()
             .enumerate()
@@ -12783,9 +13089,35 @@ mod tests {
             .take(rows.len().saturating_sub(2))
             .filter_map(|(index, row)| {
                 let chars: Vec<char> = row.chars().collect();
-                let body: String = chars[1..chars.len() - 1].iter().collect();
+                let inside_pane: Vec<char> = chars[1..chars.len() - 1].to_vec();
+                // Skip the card's own top and bottom ring rows.
+                if inside_pane.first() == Some(&'\u{256d}')
+                    || inside_pane.first() == Some(&'\u{2570}')
+                {
+                    return None;
+                }
+                let body: String = if inside_pane.first() == Some(&'\u{2502}')
+                    && inside_pane.last() == Some(&'\u{2502}')
+                {
+                    inside_pane[1..inside_pane.len() - 1].iter().collect()
+                } else {
+                    inside_pane.iter().collect()
+                };
                 (!body.trim().is_empty()).then_some((index, body))
             })
+            .collect()
+    }
+
+    /// The rows carrying the card's border ring, so a test can say the ring is
+    /// there and where it sits.
+    fn quiet_changes_ring_rows(rows: &[String]) -> Vec<usize> {
+        rows.iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                let chars: Vec<char> = row.chars().collect();
+                chars.len() > 2 && (chars[1] == '\u{256d}' || chars[1] == '\u{2570}')
+            })
+            .map(|(index, _)| index)
             .collect()
     }
 
@@ -12834,26 +13166,177 @@ mod tests {
             );
         }
 
-        // Vertically centered too, matching the terminal placeholder's idiom:
-        // there is blank room above the first line of text and below the last.
-        let first = text_rows.first().expect("a first text row").0;
-        let last = text_rows.last().expect("a last text row").0;
+        // Vertically centered too, and it is now the CARD that is centered: the
+        // message sits inside a ring with blank pane above and below it.
+        let ring = quiet_changes_ring_rows(&rows);
+        assert_eq!(
+            ring.len(),
+            2,
+            "the quiet region draws a card, so there is a top and a bottom ring row; got:\n{}",
+            rows.join("\n")
+        );
+        let (top, bottom) = (ring[0], ring[1]);
         assert!(
-            first > 1,
-            "the message must sit below the top of the pane; got:\n{}",
+            top > 1,
+            "the card must sit below the top of the pane; got:\n{}",
             rows.join("\n")
         );
         assert!(
-            last < rows.len() - 2,
+            bottom < rows.len() - 2,
             "and above the bottom of it; got:\n{}",
             rows.join("\n")
         );
-        let above = first - 1;
-        let below = rows.len() - 2 - last;
+        let above = top - 1;
+        let below = rows.len() - 2 - bottom;
         assert!(
             above.abs_diff(below) <= 1,
-            "the message must be vertically centered (above {above}, below {below}); got:\n{}",
+            "the card must be vertically centered (above {above}, below {below}); got:\n{}",
             rows.join("\n")
+        );
+    }
+
+    /// REGRESSION: a 30x10 changes pane painted an EMPTY frame. The card was
+    /// measured at the ring's narrower measure, judged one row too tall for the
+    /// pane it was about to be laid out bare in, and dropped whole. A pane with
+    /// rows must show the sentence, or the user is told nothing at all.
+    #[test]
+    fn the_quiet_changes_message_survives_a_short_pane() {
+        let reason = format!(
+            "{}\n\n/home/someone/notes",
+            dux_core::git::FolderRepoStatus::InsideRepoRootedElsewhere.quiet_reason()
+        );
+        let rows = quiet_changes_rows(&reason, 30, 10);
+        let text_rows = quiet_changes_text_rows(&rows);
+        assert!(
+            !text_rows.is_empty(),
+            "the pane must not paint an empty frame; got:\n{}",
+            rows.join("\n")
+        );
+        let joined = text_rows
+            .iter()
+            .map(|(_, body)| body.trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.starts_with("This folder sits"),
+            "and it must be the FIRST rows of the sentence; got:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    /// The floor, at a pane too small for anything else: the sentence is cut to
+    /// the rows there are and the cut is marked, rather than the frame being
+    /// left blank.
+    #[test]
+    fn the_quiet_changes_message_is_truncated_rather_than_dropped() {
+        let reason = dux_core::git::FolderRepoStatus::InsideRepoRootedElsewhere.quiet_reason();
+        let rows = quiet_changes_rows(reason, 20, 4);
+        let text_rows = quiet_changes_text_rows(&rows);
+        assert!(
+            !text_rows.is_empty(),
+            "even four rows must carry the start of the sentence; got:\n{}",
+            rows.join("\n")
+        );
+        let joined = text_rows
+            .iter()
+            .map(|(_, body)| body.trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.starts_with("This"),
+            "the FIRST words survive, not an arbitrary slice; got:\n{}",
+            rows.join("\n")
+        );
+        assert!(
+            joined.ends_with('\u{2026}'),
+            "and the cut is marked, so nobody reads a half sentence as the whole \
+             answer; got:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    /// The truncation mark must SURVIVE the cut. Counting characters against a
+    /// column budget let a row of double-width glyphs come back twice as wide as
+    /// the card, and the first thing off the right edge was the ellipsis that
+    /// says there is more.
+    #[test]
+    fn a_truncated_wide_glyph_line_still_fits_and_still_says_it_was_cut() {
+        let reason = "\u{65e5}".repeat(10);
+        let rows = quiet_changes_rows(&reason, 20, 4);
+        let text_rows = quiet_changes_text_rows(&rows);
+        assert!(
+            !text_rows.is_empty(),
+            "the pane must still say something; got:\n{}",
+            rows.join("\n")
+        );
+        let last = &text_rows.last().expect("a last row").1;
+        assert!(
+            last.trim_end().ends_with('\u{2026}'),
+            "the cut must be marked; got:\n{}",
+            rows.join("\n")
+        );
+        // And the cut is real: fewer glyphs than were asked for, because they
+        // are two columns each. A character-count cut kept all ten, which then
+        // overflowed the card and took the ellipsis with it off the edge, which
+        // is exactly what the assertion above would catch.
+        let painted = text_rows
+            .iter()
+            .map(|(_, body)| body.matches('\u{65e5}').count())
+            .sum::<usize>();
+        assert!(
+            painted < 10,
+            "a 20-column card cannot hold ten double-width glyphs; got:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    /// The reason and the folder are DIFFERENT weights: the sentence is the
+    /// prose the user must read, the path is secondary detail under it. A pane
+    /// that paints them identically says they matter equally.
+    #[test]
+    fn the_quiet_changes_folder_is_dimmer_than_its_reason() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let reason = format!(
+            "{}\n\n/home/someone/notes",
+            dux_core::git::FolderRepoStatus::NoRepo.quiet_reason()
+        );
+        let mut terminal = Terminal::new(TestBackend::new(46, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                app.render_quiet_changes(frame, area, &reason);
+            })
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+
+        let color_of = |needle: &str| {
+            let rows = buffer_rows(buf);
+            let (row_index, row) = rows
+                .iter()
+                .enumerate()
+                .find(|(_, row)| row.contains(needle))
+                .unwrap_or_else(|| panic!("expected a row carrying {needle:?}; got:\n{rows:#?}"));
+            let column = row.find(needle).expect("the needle's column");
+            let x = u16::try_from(row[..column].chars().count()).expect("column fits");
+            buf[(x, u16::try_from(row_index).expect("row fits"))].fg
+        };
+
+        assert_eq!(
+            color_of("This"),
+            app.theme.hint_desc_fg,
+            "the reason is the card's prose"
+        );
+        assert_eq!(
+            color_of("/home/someone/notes"),
+            app.theme.hint_dim_desc_fg,
+            "and the folder is the dim detail under it"
+        );
+        assert_ne!(
+            app.theme.hint_desc_fg, app.theme.hint_dim_desc_fg,
+            "the two tones must actually differ, or the assertions above say nothing"
         );
     }
 
@@ -14525,6 +15008,49 @@ mod tests {
         );
     }
 
+    /// The dormant card rendered on its own, as rows of text, with an optional
+    /// recorded verdict for the tab it is about.
+    fn dormant_card_rows(
+        app: &mut App,
+        tab_id: Option<&str>,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                app.render_dormant_extra_tab(frame, area, tab_id);
+            })
+            .expect("render frame");
+        buffer_rows(terminal.backend().buffer())
+    }
+
+    /// The card's prose as one continuous string: border glyphs blanked and rows
+    /// joined, so an assertion about a SENTENCE is not defeated by the wrap that
+    /// put half of it on the next row.
+    fn card_prose(rows: &[String]) -> String {
+        let flattened: String = rows
+            .iter()
+            .map(|row| {
+                row.chars()
+                    .map(|c| {
+                        if "\u{2502}\u{256d}\u{256e}\u{2570}\u{256f}\u{2500}".contains(c) {
+                            ' '
+                        } else {
+                            c
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        flattened.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
     /// The dormant-tab card must state the actual resume rule: launching picks
     /// up that provider's most recent conversation unless another tab of the
     /// same provider is already running. The old copy claimed a tab's
@@ -14532,26 +15058,8 @@ mod tests {
     /// tab's launch does.
     #[test]
     fn dormant_tab_card_states_the_per_provider_resume_rule() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let mut app = test_app(default_bindings());
-        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                app.render_dormant_extra_tab(frame, area);
-            })
-            .expect("render frame");
-        let buf = terminal.backend().buffer();
-        let rendered: String = (0..buf.area.height)
-            .map(|y| {
-                (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol().to_string())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let rendered = card_prose(&dormant_card_rows(&mut app, None, 80, 24));
         assert!(
             rendered.contains("most recent"),
             "card should say launching picks up the most recent conversation; got:\n{rendered}"
@@ -14563,6 +15071,252 @@ mod tests {
         assert!(
             !rendered.contains("doesn't restore"),
             "card must not claim a conversation is never restored; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Its last run"),
+            "a tab with no recorded verdict says nothing about one; got:\n{rendered}"
+        );
+    }
+
+    /// It is a CARD, not loose lines in the middle of a pane: a titled border
+    /// ring around it and a real button inside it.
+    #[test]
+    fn dormant_tab_card_is_drawn_as_a_titled_card_with_a_button() {
+        let mut app = test_app(default_bindings());
+        let rows = dormant_card_rows(&mut app, None, 80, 24);
+        let rendered = rows.join("\n");
+        assert!(
+            rows.iter().any(|row| row.contains("Tab not running")),
+            "the card's frame carries its title; got:\n{rendered}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains('\u{256d}') && row.contains('\u{256e}')),
+            "the card is drawn with a rounded border ring; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Start session"),
+            "and carries the button that launches the tab; got:\n{rendered}"
+        );
+        assert!(
+            app.mouse_layout.dormant_tab_button.is_some(),
+            "the button publishes its rect so a click can land on it"
+        );
+    }
+
+    /// A recorded verdict turns the card into the diagnosis surface it exists to
+    /// be: the ending in one sentence, and the run's last lines under it.
+    #[test]
+    fn dormant_tab_card_states_the_ending_and_the_last_output() {
+        let mut app = test_app(default_bindings());
+        app.engine.mark_tab_run_failed(
+            dux_core::ids::TabIdRef::new("tab-x"),
+            dux_core::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            vec!["Error: thread already has an active writer".to_string()],
+        );
+        let rendered = card_prose(&dormant_card_rows(&mut app, Some("tab-x"), 80, 30));
+        assert!(
+            rendered.contains("exited with status 1"),
+            "the card names the status; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("moments ago"),
+            "and how long ago it happened; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Last output"),
+            "the excerpt block is titled; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("active writer"),
+            "and carries the run's own last line, which is the whole point; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("most recent"),
+            "the resume rule is unchanged and still there; got:\n{rendered}"
+        );
+    }
+
+    /// A launch that never came up has no output to show, so the card says the
+    /// spawn error instead.
+    #[test]
+    fn dormant_tab_card_states_a_failed_launchs_error() {
+        let mut app = test_app(default_bindings());
+        app.engine.mark_tab_run_failed(
+            dux_core::ids::TabIdRef::new("tab-x"),
+            dux_core::tab_verdict::TabRunEnding::LaunchFailed {
+                error: "no such file".to_string(),
+            },
+            Vec::new(),
+        );
+        let rendered = card_prose(&dormant_card_rows(&mut app, Some("tab-x"), 80, 30));
+        assert!(
+            rendered.contains("could not be launched"),
+            "the card says the launch failed; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("no such file"),
+            "and what it said; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Last output"),
+            "nothing ran, so there is no output block; got:\n{rendered}"
+        );
+    }
+
+    /// REGRESSION: at 60x16 the card dropped the run's last output and kept the
+    /// standing resume rule. The excerpt is the one thing on this card that
+    /// cannot be learned anywhere else, so it must outlive the paragraph that is
+    /// identical on every dormant card in the app.
+    #[test]
+    fn dormant_tab_card_keeps_the_excerpt_over_the_standing_resume_rule() {
+        let mut app = test_app(default_bindings());
+        app.engine.mark_tab_run_failed(
+            dux_core::ids::TabIdRef::new("tab-x"),
+            dux_core::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            vec!["Error: thread already has an active writer".to_string()],
+        );
+        let rendered = card_prose(&dormant_card_rows(&mut app, Some("tab-x"), 60, 16));
+        assert!(
+            rendered.contains("Last output"),
+            "the diagnosis stays; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("active writer"),
+            "and so does the line it exists for; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("exited with status 1"),
+            "under the sentence that names the ending; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Launching picks up"),
+            "and the standing resume rule is what pays for them; got:\n{rendered}"
+        );
+    }
+
+    /// A CLIPPED BUTTON IS A LIE. `Button::render` does not clip, so a card laid
+    /// out one column too narrow used to paint "Start sess" and publish a click
+    /// rect for it. Below the width that fits the label whole the button is
+    /// GIVEN UP, and the words stay: a narrow pane that painted nothing at all
+    /// was the worse of the two bugs.
+    #[test]
+    fn dormant_tab_card_never_paints_a_clipped_button_and_keeps_the_sentence() {
+        let mut app = test_app(default_bindings());
+        app.engine.mark_tab_run_failed(
+            dux_core::ids::TabIdRef::new("tab-x"),
+            dux_core::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            Vec::new(),
+        );
+        // "Start session" paints at 19 columns (label plus its frame and
+        // padding), and it needs the card's own column of padding either side,
+        // so 21 is the narrowest pane that can carry it honestly.
+        for width in [16u16, 18, 20] {
+            let rows = dormant_card_rows(&mut app, Some("tab-x"), width, 24);
+            let rendered = rows.join("\n");
+            assert!(
+                !rendered.contains("Start sess"),
+                "a {width}-column pane must not paint a partial button label; got:\n{rendered}"
+            );
+            assert!(
+                app.mouse_layout.dormant_tab_button.is_none(),
+                "and it must publish no click rect for a button it did not paint"
+            );
+            assert!(
+                card_prose(&rows).contains("Its last run"),
+                "but the sentence must still be there; got:\n{rendered}"
+            );
+        }
+        for width in [21u16, 24, 40] {
+            let rendered = dormant_card_rows(&mut app, Some("tab-x"), width, 24).join("\n");
+            assert!(
+                rendered.contains("Start session"),
+                "a {width}-column pane paints the whole label; got:\n{rendered}"
+            );
+            assert!(
+                app.mouse_layout.dormant_tab_button.is_some(),
+                "and publishes its click rect"
+            );
+        }
+    }
+
+    /// A dormant SLOT tab is normally the workspace at rest, so it keeps the
+    /// welcome logo. With a recorded verdict it is not at rest, it failed, and
+    /// this is the single-tab agent that needs the diagnosis most: the browser
+    /// showed the whole story while the terminal UI showed a duck.
+    #[test]
+    fn a_dormant_slot_tab_shows_the_card_only_once_it_has_a_verdict() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let render = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(90, 30)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    let context = app.agent_terminal_context();
+                    app.render_terminal_empty_state(frame, area, &context);
+                })
+                .expect("render frame");
+            buffer_rows(terminal.backend().buffer()).join("\n")
+        };
+
+        let mut app = test_app(default_bindings());
+        app.session_surface = SessionSurface::Agent;
+        let session_id = app.engine.sessions[0].id.clone();
+        let slot = app
+            .engine
+            .slot_tab_id_of(SessionIdRef::new(&session_id))
+            .to_owned();
+
+        let healthy = render(&mut app);
+        assert!(
+            !healthy.contains("Tab not running"),
+            "a resting agent keeps the idle screen; got:\n{healthy}"
+        );
+
+        app.engine.mark_tab_run_failed(
+            slot.as_ref_id(),
+            dux_core::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            vec!["Error: already has an active writer".to_string()],
+        );
+        let failed = render(&mut app);
+        assert!(
+            failed.contains("Tab not running"),
+            "a slot tab whose run ended badly gets the card; got:\n{failed}"
+        );
+        assert!(
+            failed.contains("active writer"),
+            "carrying the diagnosis, exactly as the browser shows it; got:\n{failed}"
+        );
+    }
+
+    /// A narrow, short pane degrades rather than panicking, and the button is
+    /// the last thing standing. Multi-byte output is cut by display column, so
+    /// nothing is sliced inside a character.
+    #[test]
+    fn dormant_tab_card_degrades_on_a_narrow_pane_without_panicking() {
+        let mut app = test_app(default_bindings());
+        app.engine.mark_tab_run_failed(
+            dux_core::ids::TabIdRef::new("tab-x"),
+            dux_core::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            vec!["日本語のエラー、ñandú、очень длинная строка".to_string()],
+        );
+        for (width, height) in [(80u16, 30u16), (30, 12), (20, 6), (14, 4), (8, 3), (4, 2)] {
+            let rows = dormant_card_rows(&mut app, Some("tab-x"), width, height);
+            assert_eq!(rows.len(), height as usize);
+        }
+        // At this size the card is down to its button. The excerpt is the LAST
+        // prose the ranks give up, but it does go, and the way out outlives
+        // every word on the card.
+        let tight = card_prose(&dormant_card_rows(&mut app, Some("tab-x"), 30, 6));
+        assert!(
+            !tight.contains("Last output"),
+            "the excerpt block goes first; got:\n{tight}"
+        );
+        assert!(
+            tight.contains("Start session"),
+            "the way out is the last thing standing; got:\n{tight}"
         );
     }
 
@@ -14720,8 +15474,9 @@ mod tests {
     /// The maximized (fullscreen) agent pane must NOT render the tab strip:
     /// tabs cannot be switched there, so the boxes would be dead chrome
     /// eating three rows. Only the windowed center pane shows the strip.
-    /// With the strip gone, the only rounded box in a bare fullscreen render
-    /// is the agent pane itself — exactly one top-left corner glyph.
+    /// With the strip gone, the only rounded boxes in a bare fullscreen render
+    /// are the agent pane itself and, for a dormant tab, its card and that card's
+    /// button: three top-left corner glyphs, and never a fourth from a pill.
     #[test]
     fn fullscreen_agent_renders_no_tab_strip() {
         use ratatui::Terminal;
@@ -14755,13 +15510,21 @@ mod tests {
             .filter(|&(x, y)| buf[(x, y)].symbol() == "╭")
             .count();
         assert_eq!(
-            corner_count, 1,
-            "fullscreen must draw only the agent pane's own box — no tab boxes"
+            corner_count, 3,
+            "fullscreen must draw only the agent pane's own box plus the dormant \
+             card and its button, no tab boxes"
         );
         let painted: String = (0..24)
             .flat_map(|y| (0..80).map(move |x| (x, y)))
             .map(|(x, y)| buf[(x, y)].symbol().to_string())
             .collect();
+        // The direct statement of the same rule, immune to how many boxes the
+        // pane's own empty state happens to draw: a pill is labelled with its
+        // provider, and no pill is painted here.
+        assert!(
+            !painted.contains("claude"),
+            "no tab pill may be painted in fullscreen; got:\n{painted}"
+        );
         assert!(
             !painted.contains(crate::theme::ATTENTION_GLYPH),
             "no strip means no attention dot in fullscreen"
@@ -16293,12 +17056,21 @@ mod tests {
         assert_eq!(app.mouse_layout.agent_term, Some(Rect::new(4, 3, 68, 10)));
         assert!(!app.welcome_logo_visible);
         let rendered = buffer_rows(terminal.backend().buffer()).join("\n");
+        // This tab has no recorded verdict, so the card's ranked content is the
+        // standing resume rule, the key hint and the button. A ten-row pane
+        // sheds the highest rank (the resume rule, which is the same on every
+        // dormant card and readable any time) and keeps the ring around the two
+        // that say what to do right now.
         assert!(
             rendered.contains("Tab not running"),
             "dormant card: {rendered}"
         );
         assert!(
-            rendered.contains("Press Enter to launch this tab."),
+            rendered.contains("to launch this tab"),
+            "dormant key hint: {rendered}"
+        );
+        assert!(
+            rendered.contains("Start session"),
             "dormant action: {rendered}"
         );
     }

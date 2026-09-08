@@ -61,6 +61,22 @@ export interface PrView {
   overridden: boolean
 }
 
+/** How a tab's last run ended, as the server records it at the moment it ended.
+ * `ending` is a stable kind; an unrecognised one must fall back to the generic
+ * sentence rather than being printed. The excerpt is already capped and
+ * character-truncated server-side. */
+export interface TabRunVerdict {
+  ending: string
+  /** The exit status, for `exited` only. Null on every other kind, so a caller
+   * must never print a fallback number: "status 0" for a launch that never ran
+   * is a fact the server did not report. */
+  status?: number | null
+  /** The spawn error, for `launch_failed` only. */
+  error?: string | null
+  ended_seconds_ago: number
+  excerpt: string[]
+}
+
 // One provider tab of an agent, mirroring the Rust `AgentTabView`. Tabs are
 // generic provider sessions in the agent's shared worktree, in creation order.
 // Which one holds the session slot is named by `SessionView.slot_tab_id`; ask
@@ -68,9 +84,9 @@ export interface PrView {
 // is decided dynamically at launch: a tab
 // resumes the worktree's prior conversation only when it is the sole tab coming up
 // (no other tab live/launching); concurrent tabs start fresh. `has_live_process`
-// is false for a tab with no running PTY (a tab reopened dormant after a restart)
-// — the web must render its dormant card WITHOUT opening the PTY socket, because
-// subscribing force-launches the provider server-side.
+// is false for a tab with no running PTY (a tab reopened dormant after a
+// restart), and the web must render its dormant surface WITHOUT opening the PTY
+// socket, because subscribing force-launches the provider server-side.
 export interface AgentTabView {
   id: string
   provider: string
@@ -96,6 +112,13 @@ export interface AgentTabView {
    * clears it. An older server omits it, which reads as "no failure recorded"
    * and therefore as the pre-existing start-on-selection behavior. */
   last_run_failed?: boolean
+  /** WHY the last run ended badly, when it ended, and the last lines it had on
+   * screen: what the dormant card prints instead of "something went wrong".
+   * Present exactly when `last_run_failed` is true. NULL, not absent, on every
+   * healthy tab, because the wire serializes the server's `Option` rather than
+   * omitting the key; an older server omits it entirely, and both read as "no
+   * verdict" and fall back to the generic sentence. */
+  last_run_verdict?: TabRunVerdict | null
   /** What this tab's LIVE process launched with, for a file dropped onto its
    * pane: the paste form and the command that identifies the receiving CLI.
    * Absent when no process is live (a dormant tab), and absent on an older

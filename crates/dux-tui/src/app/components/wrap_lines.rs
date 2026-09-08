@@ -38,8 +38,13 @@ fn display_width(s: &str) -> usize {
     Span::raw(s).width()
 }
 
-/// Display width of one character.
-fn char_width(c: char) -> usize {
+/// Display width of one character, in terminal cells.
+///
+/// Reachable from outside the wrapper because the pane card's truncation must
+/// cut by the same measure the wrapper wraps by: two functions that disagree
+/// about how wide a CJK glyph is produce a line that overflows the box it was
+/// measured for, and the first casualty is the ellipsis at the end of it.
+pub(crate) fn char_display_width(c: char) -> usize {
     let mut buf = [0u8; 4];
     display_width(c.encode_utf8(&mut buf))
 }
@@ -85,7 +90,7 @@ fn wrap_one(line: &Line<'_>, width: usize, out: &mut Vec<Line<'static>>) {
                 }
                 wrapper.push_whitespace(ch, span.style);
             } else {
-                word_width += char_width(ch);
+                word_width += char_display_width(ch);
                 word.push((ch, span.style));
             }
         }
@@ -127,7 +132,7 @@ impl LineWrapper {
     }
 
     fn push_whitespace(&mut self, ch: char, style: Style) {
-        self.space_width += char_width(ch);
+        self.space_width += char_display_width(ch);
         self.space.push((ch, style));
     }
 
@@ -181,7 +186,7 @@ impl LineWrapper {
             self.space_width = 0;
         }
         for (ch, style) in word {
-            let cw = char_width(ch);
+            let cw = char_display_width(ch);
             // `row_width > 0` keeps a single character wider than the whole row
             // from looping forever; it overflows one row instead, as ratatui's
             // renderer would clip it.

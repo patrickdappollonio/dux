@@ -1,6 +1,8 @@
 import { Button } from "@/components/ui/button"
 import { DOCS_AGENT_TABS_RESUME } from "@/lib/docs"
 import { startDormantTab } from "@/lib/store"
+import { endingSentence, genericEndingSentence } from "@/lib/tabVerdict"
+import type { TabRunVerdict } from "@/lib/types"
 
 // The center-pane surface for a dormant tab that is waiting to be asked: an
 // extra tab with no process, or any tab whose last run ended badly. It renders
@@ -10,11 +12,15 @@ import { startDormantTab } from "@/lib/store"
 // here after a plain restart or stop: selecting the agent starts it.
 //
 // Two dormant tabs look identical without a word about WHY a press is needed,
-// so a tab whose last run ended badly gets one extra sentence. It is deliberately
-// neutral about blame: a non-zero exit is often the user quitting the CLI in a way
-// it reports as an error, so the sentence says what dux observed and what dux
-// therefore did not do, and never that anything crashed. Everything else on the
-// card is the same for both, because the way forward is the same.
+// so a tab whose last run ended badly gets one extra sentence, and, when the run
+// left anything on screen, its last lines under it: the case this exists for is
+// a provider that printed the answer on its way out. The words come from
+// `lib/tabVerdict.ts`, a port of `dux_core::tab_verdict`, so the terminal UI's
+// card says the same thing, and it is deliberately neutral about blame: a
+// non-zero exit is often the user quitting the CLI in a way it reports as an
+// error, so the sentence says what dux observed and what dux therefore did not
+// do, and never that anything crashed. Everything else on the card is the same
+// for both, because the way forward is the same.
 //
 // The message is deliberately PROVIDER-AGNOSTIC and states the actual rule:
 // launching resumes the provider's most-recent conversation in this worktree when
@@ -26,12 +32,15 @@ export function DormantTabCard({
   tabId,
   provider,
   lastRunFailed,
+  lastRunVerdict,
 }: {
   sessionId: string
   tabId: string
   provider: string
   lastRunFailed?: boolean
+  lastRunVerdict?: TabRunVerdict | null
 }) {
+  const excerpt = lastRunVerdict?.excerpt ?? []
   return (
     <div className="flex h-full w-full select-none flex-col items-center justify-center gap-4 overflow-hidden px-6 text-center">
       <img
@@ -46,9 +55,20 @@ export function DormantTabCard({
         </p>
         {lastRunFailed ? (
           <p className="text-sm text-muted-foreground">
-            Its last run ended with an error or a non-zero exit, so dux
-            didn&rsquo;t start it again on its own.
+            {lastRunVerdict
+              ? endingSentence(lastRunVerdict)
+              : genericEndingSentence()}
           </p>
+        ) : null}
+        {lastRunFailed && excerpt.length > 0 ? (
+          <div className="space-y-1 text-left">
+            <p className="text-xs font-medium text-muted-foreground">
+              Last output
+            </p>
+            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/60 bg-muted/40 px-2 py-1.5 text-left font-mono text-xs text-muted-foreground/80">
+              {excerpt.join("\n")}
+            </pre>
+          </div>
         ) : null}
         <p className="text-sm text-muted-foreground">
           Starting it picks up this provider&rsquo;s most recent conversation in
@@ -61,11 +81,18 @@ export function DormantTabCard({
             rel="noopener noreferrer"
             className="text-primary underline underline-offset-2"
           >
-            How resume works →
+            How resume works&nbsp;→
           </a>
         </p>
       </div>
-      <Button onClick={() => startDormantTab(sessionId, tabId)}>
+      {/* The touch floor, the take-over card's own height idiom: that card is
+          the nearest analogue on this surface (a full-pane card with one
+          primary act), and matching it keeps the two the same size under a
+          finger. No per-axis exemption: nothing here is a cramped row. */}
+      <Button
+        onClick={() => startDormantTab(sessionId, tabId)}
+        className="max-md:min-h-11"
+      >
         Start session
       </Button>
     </div>

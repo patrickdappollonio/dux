@@ -3,7 +3,7 @@ import { Suspense, type ReactNode } from "react"
 import { AgentNotFound } from "@/components/AgentNotFound"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
-import { DormantTabCard } from "@/components/DormantTabCard"
+import { DormantTabSurface } from "@/components/DormantTabSurface"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { PrBanner } from "@/components/PrBanner"
 import { TheaterChrome } from "@/components/TheaterChrome"
@@ -118,11 +118,12 @@ function TerminalSurface({
   if (dormant && focusedTab && target.kind === "agent") {
     return (
       <>
-        <DormantTabCard
+        <DormantTabSurface
           sessionId={target.sessionId}
           tabId={focusedTab.id}
           provider={focusedTab.provider}
           lastRunFailed={focusedTab.last_run_failed === true}
+          lastRunVerdict={focusedTab.last_run_verdict}
         />
         {overlay}
       </>

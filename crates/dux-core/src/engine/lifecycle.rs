@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use crate::ids::{SessionIdRef, TabId, TabIdRef};
 use crate::model::{AgentSession, SessionStatus, TerminalOwner};
 use crate::pty::PtyClient;
+use crate::tab_verdict::TabRunEnding;
 
 use super::Engine;
 
@@ -270,8 +271,17 @@ pub struct PrunedPty {
 struct ExitedAgentPty {
     tab_id: TabId,
     exit_success: Option<bool>,
+    /// The reaped child's exit CODE, when there was a status to read. Captured
+    /// alongside `exit_success` off the same once-only `try_wait`, because the
+    /// tab's verdict says the number out loud and "non-zero" is not a number.
+    exit_code: Option<u32>,
     is_minimal: bool,
     output_excerpt: String,
+    /// The verdict's own excerpt: the LAST few visible lines, captured at this
+    /// same moment for the same once-only reason and never re-read afterwards.
+    /// Separate from `output_excerpt`, which is the TUI's whole-screen
+    /// minimal-output text and exists only when `is_minimal`.
+    verdict_excerpt: Vec<String>,
     run_duration: Option<Duration>,
     read_error: Option<String>,
 }
@@ -457,23 +467,30 @@ impl Engine {
                 // Poll for the status FIRST on every pass, so a status that
                 // arrives during the deferral is picked up by the same pass that
                 // acts on it.
-                let exit_success = client.try_wait().map(|status| status.success());
+                let status = client.try_wait();
+                let exit_success = status.as_ref().map(portable_pty::ExitStatus::success);
+                let exit_code = status.as_ref().map(portable_pty::ExitStatus::exit_code);
                 if agent_pty_ready_to_prune(
                     exit_success.is_some(),
                     client.exited_at().map(|at| at.elapsed()),
                     client.reaped_at().map(|at| at.elapsed()),
                 ) {
                     let is_minimal = client.has_minimal_output(5);
-                    let output_excerpt = if is_minimal {
-                        client.visible_text_excerpt(usize::MAX)
-                    } else {
-                        String::new()
-                    };
+                    // ONE read of the dying screen, shared by both consumers: the
+                    // TUI's minimal-output message wants the whole thing and only
+                    // when the screen was minimal, the tab's verdict wants the
+                    // tail whatever the screen held. Reading twice would be two
+                    // locks for one truth.
+                    let visible = client.visible_text_excerpt(usize::MAX);
+                    let verdict_excerpt = crate::tab_verdict::verdict_excerpt(&visible);
+                    let output_excerpt = if is_minimal { visible } else { String::new() };
                     Some(ExitedAgentPty {
                         tab_id: id.clone(),
                         exit_success,
+                        exit_code,
                         is_minimal,
                         output_excerpt,
+                        verdict_excerpt,
                         run_duration: client.run_duration(),
                         read_error: client.read_error().map(str::to_string),
                     })
@@ -485,8 +502,10 @@ impl Engine {
         for ExitedAgentPty {
             tab_id,
             exit_success,
+            exit_code,
             is_minimal,
             output_excerpt,
+            verdict_excerpt,
             run_duration,
             read_error,
         } in exited_agents
@@ -600,7 +619,20 @@ impl Engine {
             let ended_badly = exit_success == Some(false)
                 || rapid_exit_ends_run_badly(run_duration, was_typed_into);
             if ended_badly && owning.is_some() {
-                self.mark_tab_run_failed(&tab_id);
+                // WHICH ending, in priority order. A non-zero status is the most
+                // informative answer there is, so it wins even when the run was
+                // also over in a blink; the rapid-exit kind is reserved for the
+                // case whose whole point is that the status said nothing was
+                // wrong. An unknown status is its own answer rather than a
+                // stand-in number: dux never saw one.
+                let ending = match (exit_success, exit_code) {
+                    (Some(false), Some(status)) => TabRunEnding::ExitedWithStatus { status },
+                    (Some(true), _) => TabRunEnding::RapidCleanExit,
+                    // A reaped child always yields a code with its status, so the
+                    // remaining arms are the unreaped ones: EOF with no status.
+                    (Some(false), None) | (None, _) => TabRunEnding::ExitedUnknownStatus,
+                };
+                self.mark_tab_run_failed(&tab_id, ending, verdict_excerpt);
             }
             // Say out loud that this tab did not end the ordinary way. Nothing
             // downstream can work it out: the read error left no exit status, so
@@ -1115,6 +1147,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use crate::ids::{TabId, TabIdRef};
+    use crate::tab_verdict::TabRunEnding;
     use std::path::Path;
     use std::thread::sleep;
     use std::time::{Duration, Instant};
@@ -1312,6 +1345,59 @@ mod tests {
             "and the verdict must survive with it, or selecting the tab starts the \
              same doomed run again"
         );
+        assert_eq!(
+            engine
+                .tab_run_verdict(tab.as_str())
+                .map(|verdict| verdict.ending.clone()),
+            Some(TabRunEnding::RapidCleanExit),
+            "the status said nothing was wrong, so the BRIEFNESS is the whole \
+             diagnosis and the card must be able to say so"
+        );
+    }
+
+    /// A run that was BOTH over in a blink and non-zero records the STATUS, not
+    /// the rapid-exit kind. The status is the more informative of the two
+    /// answers, and the rapid kind exists only for the case whose whole point is
+    /// that the status said nothing was wrong.
+    #[test]
+    fn a_rapid_non_zero_exit_records_the_status_rather_than_the_blink() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine
+            .session_store
+            .create_session(&session)
+            .expect("persist the agent and its first tab");
+        engine.sessions.push(session);
+        let tab = TabId::new("tab-instant-crash");
+        engine.agent_tabs.insert(
+            tab.clone(),
+            sample_tab("tab-instant-crash", "s1", "claude", 1),
+        );
+        // Exits immediately AND non-zero, so both rules fire at once.
+        engine
+            .providers
+            .insert(tab.clone(), spawn_exit(worktree.path(), "9"));
+
+        wait_for_exit(&mut engine, &tab);
+        let _ = engine.prune_exited_ptys();
+
+        assert_eq!(
+            engine
+                .tab_run_verdict(tab.as_str())
+                .map(|verdict| verdict.ending.clone()),
+            Some(TabRunEnding::ExitedWithStatus { status: 9 }),
+            "the number the provider exited with beats \"it was quick\""
+        );
     }
 
     /// An explicit stop clears the recorded failure, so the next selection starts
@@ -1321,7 +1407,11 @@ mod tests {
     #[test]
     fn a_deliberate_teardown_clears_a_recorded_failure() {
         let (mut engine, _tmp) = test_engine();
-        engine.mark_tab_run_failed(TabIdRef::new("s1-slot"));
+        engine.mark_tab_run_failed(
+            TabIdRef::new("s1-slot"),
+            crate::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            Vec::new(),
+        );
         assert!(engine.tab_last_run_failed("s1-slot"));
         engine.clear_tab_runtime(TabIdRef::new("s1-slot"));
         assert!(
@@ -1700,6 +1790,28 @@ mod tests {
             agent.output_excerpt.contains("boom"),
             "the captured excerpt must carry the agent's final output, got {:?}",
             agent.output_excerpt
+        );
+
+        // And the same prune moment records the tab's VERDICT: the status the
+        // card prints, and the tail of the screen the provider left behind. The
+        // excerpt can only be read while the client is alive, so if it is not
+        // taken here it can never be taken at all.
+        let verdict = engine
+            .tab_run_verdict("s1-slot")
+            .expect("a non-zero exit records a verdict");
+        assert_eq!(
+            verdict.ending,
+            TabRunEnding::ExitedWithStatus { status: 3 },
+            "the card says the number, and \"non-zero\" is not a number"
+        );
+        assert!(
+            verdict.excerpt.iter().any(|line| line.contains("boom")),
+            "the verdict carries the run's last visible lines, got {:?}",
+            verdict.excerpt
+        );
+        assert!(
+            verdict.excerpt.len() <= crate::tab_verdict::VERDICT_EXCERPT_MAX_LINES,
+            "the excerpt is capped"
         );
     }
 

@@ -2090,6 +2090,10 @@ impl Engine {
         data: AgentLaunchFailedData,
     ) -> (AgentLaunchFailedOutcome, Option<ResolvedFinal>) {
         let AgentLaunchFailedData { request, message } = data;
+        // The spawn error is the whole diagnosis for a launch that never came
+        // up, and every arm below consumes `message` into its own outcome, so
+        // the tab's verdict takes its copy before the match.
+        let launch_error = message.clone();
         // Clear the tab-keyed in-flight lock (the slot tab id for the session-slot tab),
         // mirroring the success path in `process_agent_launch_ready`.
         let tab_id = request.tab_id.clone();
@@ -2226,7 +2230,15 @@ impl Engine {
         // above have just deleted the row, and an entry for a tab nothing can
         // ever ask about again is a leak.
         if self.owning_session_for_tab(tab_id.as_str()).is_some() {
-            self.mark_tab_run_failed(&tab_id);
+            // No excerpt: nothing ran, so there is no screen to read. The error
+            // IS the output here, and it rides the ending itself.
+            self.mark_tab_run_failed(
+                &tab_id,
+                crate::tab_verdict::TabRunEnding::LaunchFailed {
+                    error: launch_error,
+                },
+                Vec::new(),
+            );
         }
         outcome
     }
@@ -6275,6 +6287,20 @@ mod tests {
         assert!(
             engine.tab_last_run_failed("s1-slot"),
             "a failed launch is the tab's last run ending badly"
+        );
+        let verdict = engine
+            .tab_run_verdict("s1-slot")
+            .expect("the verdict rides with the flag");
+        assert_eq!(
+            verdict.ending,
+            crate::tab_verdict::TabRunEnding::LaunchFailed {
+                error: "boom".to_string()
+            },
+            "the spawn error IS the diagnosis for a launch that never came up"
+        );
+        assert!(
+            verdict.excerpt.is_empty(),
+            "nothing ran, so there is no screen to excerpt"
         );
     }
 

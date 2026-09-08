@@ -492,6 +492,11 @@ pub struct App {
     /// wiped on every non-prompt mouse event (a watchdog for a dialog closed by
     /// some other path), and the card's button lives on exactly such events.
     pub(crate) takeover_press: Option<components::PressedButton>,
+    /// The dormant-tab card's own in-flight press, kept apart from
+    /// `pressed_button` for the same reason as `takeover_press`: the card is a
+    /// state of the pane rather than a modal, so its button lives on exactly the
+    /// mouse events the modal press machinery wipes.
+    pub(crate) dormant_tab_press: Option<components::PressedButton>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
     pub(crate) raw_input_parser: crate::raw_input::RawInputParser,
     pub(crate) raw_input_buf: Vec<u8>,
@@ -2960,6 +2965,10 @@ pub(crate) struct MouseLayoutState {
     /// and goes with the live ownership verdict, without anything on this
     /// surface happening at all.
     pub(crate) takeover_button: Option<Rect>,
+    /// The dormant-tab card's "Start session" button, when that card is on
+    /// screen. Published and cleared per frame exactly as the take-over
+    /// button's rect is, so a click can only land on a button being drawn.
+    pub(crate) dormant_tab_button: Option<Rect>,
     /// The pull-request banner's painted band, when one is on screen. The
     /// banner fills its whole lane cap to cap, so the published rect IS what
     /// the user sees, and a press anywhere inside it opens the pull request.
@@ -2987,6 +2996,7 @@ impl MouseLayoutState {
         self.terminal_row_to_item.clear();
         self.agent_term = None;
         self.takeover_button = None;
+        self.dormant_tab_button = None;
         self.pr_banner = None;
         self.unstaged_list = None;
         self.staged_list = None;
@@ -3738,7 +3748,7 @@ impl App {
             pty_input: HashMap::new(),
             pty_pointer: HashMap::new(),
             needs_attention: HashSet::new(),
-            failed_tab_runs: HashSet::new(),
+            failed_tab_runs: HashMap::new(),
             pty_progress: HashMap::new(),
             agent_viewed: HashMap::new(),
             last_foreground_refresh: None,
@@ -3868,6 +3878,7 @@ impl App {
             last_mouse_click: None,
             pressed_button: None,
             takeover_press: None,
+            dormant_tab_press: None,
             interactive_patterns,
             raw_input_parser: crate::raw_input::RawInputParser::default(),
             raw_input_buf: Vec::new(),

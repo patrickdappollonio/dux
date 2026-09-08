@@ -175,3 +175,12 @@ a tab that cannot come up would try again every single time you selected the age
 there would be no way to look at the agent without restarting the thing that keeps
 failing. Once a run succeeds, or you stop the tab yourself, or you restart dux, the tab is
 back to starting on selection.
+
+So a dormant tab shows one of two things, and it is the same on both the terminal UI and
+the web UI. A tab that is simply not running shows the dux idle screen, logo and rotating
+tip and all, with a *Start session* button under it. A tab whose last run ended badly shows
+a card instead: how the run ended and how long ago (a failed launch and the error it gave,
+an exit status, or a run that was over in under five seconds), and, under *Last output*, the
+last few lines the run had on screen. That is usually where the answer is: a provider
+refusing to resume a conversation that is already open somewhere else says so on its way
+out.

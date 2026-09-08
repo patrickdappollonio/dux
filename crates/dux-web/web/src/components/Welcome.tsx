@@ -1,4 +1,5 @@
 import { useState } from "react"
+import type { ReactNode } from "react"
 
 import { useDux } from "@/lib/store"
 
@@ -43,7 +44,20 @@ function TipText({ tip }: { tip: string }) {
   )
 }
 
-export function Welcome() {
+// `action` is an optional slot under the tip, for the surfaces where the idle
+// screen is not merely idle: a dormant tab shows this same screen and needs the
+// one act that starts it. A slot rather than a second component, because the
+// logo, the wordmark and the tip rotation are the thing that must not be copied.
+//
+// WITH an action the pane SCROLLS instead of clipping. The idle screen alone is
+// decoration and a short viewport may crop it harmlessly, but an action is
+// something the user has to reach, and on a phone in landscape (or with the
+// keyboard up) the logo, wordmark, tip and button together are taller than the
+// pane. `my-auto` inside a scrolling column is what gives both behaviours from
+// one rule: content that fits is centred, content that does not scrolls from the
+// top with the button reachable at the bottom. The no-action screen keeps its
+// original clipping look exactly.
+export function Welcome({ action }: { action?: ReactNode } = {}) {
   const tips = useDux().bootstrap?.welcome_tips ?? []
   // Pick a stable random fraction once per visit to the welcome screen (the
   // component remounts whenever the center pane returns to the idle state).
@@ -56,24 +70,39 @@ export function Welcome() {
       : null
 
   return (
-    <div className="flex h-full w-full select-none flex-col items-center justify-center gap-3 overflow-hidden">
-      <img
-        src="/dux-logo.png"
-        alt=""
-        aria-hidden
-        className="size-28 object-contain"
-      />
-      <pre
-        aria-label="dux"
-        className="font-blocks text-[11px] leading-[1.15] text-muted-foreground"
+    <div
+      className={
+        action
+          ? "flex h-full min-h-0 w-full select-none flex-col overflow-y-auto"
+          : "flex h-full w-full select-none flex-col items-center justify-center overflow-hidden"
+      }
+    >
+      <div
+        className={
+          action
+            ? "my-auto flex flex-col items-center gap-3 px-4 py-6"
+            : "flex flex-col items-center gap-3"
+        }
       >
-        {TEXT_LOGO}
-      </pre>
-      {tip && (
-        <p className="mt-6 max-w-md px-6 text-center text-sm text-muted-foreground">
-          <TipText tip={tip} />
-        </p>
-      )}
+        <img
+          src="/dux-logo.png"
+          alt=""
+          aria-hidden
+          className="size-28 object-contain"
+        />
+        <pre
+          aria-label="dux"
+          className="font-blocks text-[11px] leading-[1.15] text-muted-foreground"
+        >
+          {TEXT_LOGO}
+        </pre>
+        {tip && (
+          <p className="mt-6 max-w-md px-6 text-center text-sm text-muted-foreground">
+            <TipText tip={tip} />
+          </p>
+        )}
+        {action}
+      </div>
     </div>
   )
 }

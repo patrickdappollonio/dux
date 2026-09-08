@@ -3328,7 +3328,7 @@ impl App {
         dispatch: &mut RawInputDispatch,
     ) -> RawInputFlow {
         dispatch.flush(self.selected_terminal_surface_client());
-        if self.handle_takeover_card_mouse(&mouse) {
+        if self.handle_takeover_card_mouse(&mouse) || self.handle_dormant_card_mouse(&mouse) {
             return RawInputFlow::Continue;
         }
 
@@ -8837,7 +8837,11 @@ impl App {
             // The take-over card is not a modal and never rides
             // `App::pressed_button`, so this dispatch cannot be reached for it;
             // its own press field and handler own that gesture end to end.
-            ButtonPressedTarget::TakeOverCard => false,
+            // Neither of these is a modal, so neither ever rides
+            // `App::pressed_button` and this dispatch cannot be reached for
+            // them; each has its own press field and handler owning the gesture
+            // end to end.
+            ButtonPressedTarget::TakeOverCard | ButtonPressedTarget::DormantTabCard => false,
             ButtonPressedTarget::PullRequestChooseProject => {
                 if let Err(e) = self.open_pull_request_project_picker() {
                     self.set_error(format!("{e:#}"));
@@ -9983,7 +9987,7 @@ impl App {
     fn intercept_mouse_before_targets(&mut self, mouse: &MouseEvent) -> bool {
         if matches!(self.center_mode, CenterMode::Agent)
             && !matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog)
-            && self.handle_takeover_card_mouse(mouse)
+            && (self.handle_takeover_card_mouse(mouse) || self.handle_dormant_card_mouse(mouse))
         {
             return true;
         }
@@ -10426,7 +10430,68 @@ impl App {
         Some(TermGridPos { row, col })
     }
 
-    /// Handle a mouse event for terminal text selection (click, drag, release).
+    /// THE DORMANT-TAB CARD's "Start session" button, pressed with a mouse.
+    /// Returns whether the card consumed the event.
+    ///
+    /// Deliberately narrower than the take-over card's handler below: that card
+    /// COVERS a live grid, so it swallows every event over it; this one is drawn
+    /// where there is no process at all, so only the button's own gesture is
+    /// consumed and everything else still reaches the pane. The press/drag/release
+    /// convention is the same one every button in dux follows: a drag off the
+    /// button before release cancels it.
+    pub(crate) fn handle_dormant_card_mouse(&mut self, mouse: &MouseEvent) -> bool {
+        let Some(button) = self.mouse_layout.dormant_tab_button else {
+            // The card can vanish under the pointer: the tab launched, or the
+            // selection moved. An in-flight press dies with its button rather
+            // than firing at whatever is there now.
+            self.dormant_tab_press = None;
+            return false;
+        };
+        let on_button = |mouse: &MouseEvent| {
+            crate::app::modal::click_target(&[(button, ())], mouse.column, mouse.row).is_some()
+        };
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) if on_button(mouse) => {
+                self.focus = FocusPane::Center;
+                self.dormant_tab_press = Some(components::PressedButton {
+                    target: ButtonPressedTarget::DormantTabCard,
+                    inside: true,
+                });
+                true
+            }
+            MouseEventKind::Drag(_) if self.dormant_tab_press.is_some() => {
+                let inside = on_button(mouse);
+                if let Some(press) = self.dormant_tab_press.as_mut() {
+                    press.inside = inside;
+                }
+                true
+            }
+            MouseEventKind::Up(_) if self.dormant_tab_press.is_some() => {
+                let held = self
+                    .dormant_tab_press
+                    .take()
+                    .is_some_and(|press| press.inside);
+                if held && on_button(mouse) {
+                    self.start_focused_dormant_tab();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Launch whatever dormant tab the card is currently about. The same act the
+    /// focus-agent binding performs, so the button and the key cannot diverge.
+    fn start_focused_dormant_tab(&mut self) {
+        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+            return;
+        };
+        let tab_id = self.focused_tab_id(&session_id);
+        if let Err(err) = self.launch_focused_extra_tab(&session_id, &tab_id, false) {
+            self.set_error(format!("{err:#}"));
+        }
+    }
+
     /// THE TAKE-OVER CARD's answer to one mouse event. Returns whether the card
     /// consumed it.
     ///
@@ -11107,6 +11172,7 @@ mod tests {
             terminal_row_to_item: Vec::new(),
             agent_term: Some(Rect::new(21, 1, 55, 16)),
             takeover_button: None,
+            dormant_tab_button: None,
             pr_banner: None,
             unstaged_list: Some(Rect::new(78, 1, 21, 8)),
             staged_list: Some(Rect::new(78, 9, 21, 5)),

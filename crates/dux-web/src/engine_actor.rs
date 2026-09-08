@@ -4424,7 +4424,11 @@ mod tests {
         let slot = engine
             .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
             .to_owned();
-        engine.mark_tab_run_failed(&slot);
+        engine.mark_tab_run_failed(
+            &slot,
+            dux_core::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            Vec::new(),
+        );
 
         let mut pending = Vec::new();
         let mut last_pr = None;
@@ -4532,7 +4536,11 @@ mod tests {
     fn subscribing_a_promoted_slot_whose_last_run_failed_is_refused() {
         let (_tmp, paths) = temp_paths();
         let mut engine = engine_with_a_promoted_codex_slot(&paths);
-        engine.mark_tab_run_failed(dux_core::ids::TabIdRef::new("t2"));
+        engine.mark_tab_run_failed(
+            dux_core::ids::TabIdRef::new("t2"),
+            dux_core::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            Vec::new(),
+        );
 
         let mut pending = Vec::new();
         let mut last_pr = None;

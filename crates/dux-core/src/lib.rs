@@ -53,6 +53,7 @@ pub mod sidebar;
 pub mod startup;
 pub mod statusline;
 pub mod storage;
+pub mod tab_verdict;
 pub mod tailscale;
 pub mod term_identity;
 pub mod terminal_title;

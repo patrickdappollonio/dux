@@ -32,8 +32,9 @@ pub use in_flight::{
     RenameExpectation,
 };
 pub use lifecycle::{
-    DeferredWorktreeRemoval, GroupWorktreeRemoval, PrunedPty, PrunedPtyKind, ShutdownReport,
-    TerminatingPty, clean_exit_closes_tab_row, format_shutdown_result, format_shutdown_start,
+    DeferredWorktreeRemoval, GroupWorktreeRemoval, PrunedPty, PrunedPtyKind, RAPID_EXIT_WINDOW,
+    ShutdownReport, TerminatingPty, clean_exit_closes_tab_row, format_shutdown_result,
+    format_shutdown_start,
 };
 pub use pr_sync_control::PrSyncControl;
 pub use resume_fallback::ResumeFallbackOutcome;
@@ -552,24 +553,34 @@ pub struct Engine {
     /// tears down the tab. The sidebar rolls this up across an agent's tabs.
     pub needs_attention: HashSet<TabId>,
     /// Tabs (keyed by tab id) whose LAST run ended badly: a launch that failed
-    /// outright, or a process that exited non-zero. Published per tab as
-    /// [`crate::viewmodel::AgentTabView::last_run_failed`], where it is what
+    /// outright, or a process that exited non-zero. The VALUE is the verdict
+    /// (see [`crate::tab_verdict::TabRunVerdict`]): how the run ended, when, and
+    /// the last lines it had on screen, captured once at the moment it ended.
+    /// A boolean could only ever produce "something went wrong"; the card the
+    /// entry exists for is a diagnosis surface, so it carries the diagnosis.
+    /// Published per tab as
+    /// [`crate::viewmodel::AgentTabView::last_run_failed`] (whose truth is
+    /// simply "an entry exists") and
+    /// [`crate::viewmodel::AgentTabView::last_run_verdict`], where it is what
     /// stops a surface from launching a dormant tab on selection alone: a tab
     /// that keeps failing (a resume against a conversation that isn't there, a
     /// provider that is no longer on PATH) would otherwise relaunch every time
     /// the user looks at it, with no way out but to look somewhere else.
     ///
-    /// Deliberately NOT part of [`Engine::clear_tab_runtime`]: every other
-    /// tab-keyed map describes a LIVE process and dies with it, while this one
-    /// exists precisely to outlive the process it describes. It is cleared when
-    /// a launch is actually dispatched for the tab (any launch is somebody
-    /// asking for one, so the next failure is a fresh verdict) and forgotten
-    /// when the tab's row goes away.
+    /// Unlike every other tab-keyed map, this one is not about a LIVE process:
+    /// it exists precisely to outlive the process it describes. It is cleared
+    /// when a launch is dispatched for the tab (any launch is somebody asking
+    /// for one, so the next failure is a fresh verdict) and forgotten when the
+    /// tab's row goes away. [`Engine::clear_tab_runtime`] clears it as well,
+    /// because that is where every DELIBERATE end funnels and a tab the user
+    /// already dealt with deserves a clean slate; the exit prune is the one
+    /// caller that must not lose the verdict, and it records it AFTER calling
+    /// that teardown.
     ///
     /// Memory-only, like `needs_attention`: after a restart every tab comes back
     /// dormant with a clean slate, which is what makes a restart a way out of a
     /// tab that was failing before it.
-    pub failed_tab_runs: HashSet<TabId>,
+    pub failed_tab_runs: HashMap<TabId, crate::tab_verdict::TabRunVerdict>,
     /// The most recent `OSC 9;4` progress report per tab (keyed by tab id), with
     /// the moment the engine observed it. [`Engine::is_agent_streaming`] treats a
     /// fresh report as authoritative for the "working" indicator, overriding the
@@ -1707,13 +1718,30 @@ impl Engine {
     /// Whether this tab's LAST run ended badly (a failed launch, or a non-zero
     /// exit). See [`Engine::failed_tab_runs`] for what the answer is for.
     pub fn tab_last_run_failed(&self, tab_id: &str) -> bool {
-        self.failed_tab_runs.contains(TabIdRef::new(tab_id))
+        self.failed_tab_runs.contains_key(TabIdRef::new(tab_id))
     }
 
-    /// Record that this tab's last run ended badly. Called wherever a bad ending
-    /// is observed: the launch-failed event and the non-zero-exit prune.
-    pub fn mark_tab_run_failed(&mut self, tab_id: &TabIdRef) {
-        self.failed_tab_runs.insert(tab_id.to_owned());
+    /// This tab's recorded verdict, when its last run ended badly. The card is a
+    /// diagnosis surface, so the surfaces read the whole record rather than the
+    /// existence of one.
+    pub fn tab_run_verdict(&self, tab_id: &str) -> Option<&crate::tab_verdict::TabRunVerdict> {
+        self.failed_tab_runs.get(TabIdRef::new(tab_id))
+    }
+
+    /// Record that this tab's last run ended badly, and HOW. Called wherever a
+    /// bad ending is observed: the launch-failed event and the non-zero-exit
+    /// prune. The excerpt is captured by the caller at the one moment the dying
+    /// client can still be read; nothing tops it up afterwards.
+    pub fn mark_tab_run_failed(
+        &mut self,
+        tab_id: &TabIdRef,
+        ending: crate::tab_verdict::TabRunEnding,
+        excerpt: Vec<String>,
+    ) {
+        self.failed_tab_runs.insert(
+            tab_id.to_owned(),
+            crate::tab_verdict::TabRunVerdict::new(ending, excerpt),
+        );
     }
 
     /// Forget a tab's recorded failure: a launch has been dispatched for it, so
@@ -10007,7 +10035,9 @@ mod tab_ops_tests {
 
         assert!(matches!(outcome, AgentLaunchFailedOutcome::Silent));
         assert!(
-            !engine.failed_tab_runs.contains(TabIdRef::new("s1-slot")),
+            !engine
+                .failed_tab_runs
+                .contains_key(TabIdRef::new("s1-slot")),
             "a tab nothing can ask about again must not leave a verdict behind"
         );
     }
