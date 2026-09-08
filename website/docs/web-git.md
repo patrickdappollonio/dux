@@ -29,7 +29,9 @@ their status; they simply carry no line counts and are left out of the sums, the
 an empty file already looks.
 
 Click any row to open its diff in the [code editor](/docs/web-editor), read-only and
-syntax-highlighted, HEAD against the working copy.
+syntax-highlighted, HEAD against the working copy. The browser has a ceiling of its own
+rather than the terminal UI's: a version over **5 MiB** on either side is refused, and the
+editor says so instead of showing a diff.
 
 Status icons are the same ones the editor's file tree uses, each with a tooltip spelling it
 out: **M** modified, **A** added, **D** deleted, **R** renamed, **C** copied, **U**

@@ -10,6 +10,10 @@ tell what terminal it is really in, and anything it emits (a desktop notificatio
 clipboard write, a clickable link) stops at dux. The `[capabilities]` section opens both
 directions.
 
+That same embedded terminal draws the diff view, which is why a very large file is diffed
+without syntax highlighting and an enormous one is not diffed at all; see
+[very large diffs in the terminal UI](/docs/introduction#very-large-diffs-in-the-terminal-ui).
+
 ## Terminal identity
 
 Agents decide whether to send desktop notifications by sniffing environment variables to

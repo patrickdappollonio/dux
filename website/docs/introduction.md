@@ -98,6 +98,25 @@ list. In the browser the same three panes are click-driven, with a collapsible s
 and a resizable Changes split; see
 [The workspace in the browser](/docs/web-workspace).
 
+### Very large diffs in the terminal UI
+
+The terminal UI draws its diffs itself, and a large enough file makes that slow. There are
+two ceilings, both measured on the two versions together: the last committed one and the
+one on disk.
+
+- Over **1 MiB, or 20,000 lines**, the diff is still drawn, without syntax highlighting.
+  Added and removed lines keep their green and red; only the token colors inside them go.
+- Over **16 MiB, or 200,000 lines**, dux does not diff the file at all. The pane says
+  "File too large to diff.", prints the size of each version, and says what to do instead.
+
+> [!IMPORTANT]
+> Comparing versions that large would hold dux up for minutes, so it does not start.
+> Open the file in your editor, or diff it with git directly and narrow the comparison to
+> the part you care about.
+
+The browser's diffs are the editor's, and they have a limit of their own; see
+[Git without leaving the browser](/docs/web-git).
+
 ## Where dux keeps its files
 
 dux stores everything in one directory:
