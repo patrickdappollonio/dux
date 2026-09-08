@@ -4084,7 +4084,7 @@ impl App {
             self.refresh_path_editor_completions();
         }
         if let Some(path) = add_path {
-            self.add_project_from_browser_path(path);
+            self.commit_browser_path(path);
         }
     }
 
@@ -4150,13 +4150,16 @@ impl App {
         self.refresh_path_editor_completions();
     }
 
-    fn add_project_browser_current_directory(&mut self) {
-        let Some((purpose, path)) = (match &self.prompt {
-            PromptState::BrowseProjects {
-                purpose,
-                current_dir,
-                ..
-            } => Some((*purpose, current_dir.to_string_lossy().to_string())),
+    /// THE ONE PLACE the browse purpose is consulted: a folder has been chosen,
+    /// and what happens to it depends on what the browser was opened for.
+    ///
+    /// Both ways of choosing a folder end here (the current-directory key and
+    /// the typed-path editor's confirm), because a second copy of this branch
+    /// is exactly how the typed path ended up adding a project in a browser
+    /// opened to run a standalone agent.
+    fn commit_browser_path(&mut self, path: String) {
+        let Some(purpose) = (match &self.prompt {
+            PromptState::BrowseProjects { purpose, .. } => Some(*purpose),
             _ => None,
         }) else {
             return;
@@ -4165,6 +4168,18 @@ impl App {
             BrowsePurpose::AddProject => self.add_project_from_browser_path(path),
             BrowsePurpose::StandaloneAgent => self.open_standalone_agent_name_prompt(path),
         }
+    }
+
+    fn add_project_browser_current_directory(&mut self) {
+        let Some(path) = (match &self.prompt {
+            PromptState::BrowseProjects { current_dir, .. } => {
+                Some(current_dir.to_string_lossy().to_string())
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        self.commit_browser_path(path);
     }
 
     fn handle_project_browser_search_key(&mut self, key: KeyEvent) {
@@ -25399,6 +25414,101 @@ cyan = "#00ffff"
             other => panic!("expected the folder browser, got {other:?}"),
         }
         app.add_project_browser_current_directory();
+    }
+
+    /// Open the already-open browser's typed-path editor, put `folder` in it,
+    /// and confirm. The other way to choose a folder: the user types an
+    /// absolute path instead of navigating to it.
+    fn type_path_and_confirm(app: &mut App, folder: &std::path::Path) {
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+            .expect("the path editor must open");
+        match &mut app.prompt {
+            PromptState::BrowseProjects {
+                editing_path,
+                path_input,
+                ..
+            } => {
+                assert!(*editing_path, "the path editor must be engaged");
+                path_input.set_text(folder.to_string_lossy().to_string());
+            }
+            other => panic!("expected the folder browser, got {other:?}"),
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the confirm key must be handled");
+    }
+
+    /// A typed path is the same choice as a navigated one: in a browser opened
+    /// to run a standalone agent it asks for the agent's name, and never adds
+    /// the folder as a project (whose validator would refuse a plain folder
+    /// anyway, which is the ordinary case here).
+    #[test]
+    fn typing_a_path_for_a_standalone_agent_asks_for_a_name() {
+        let mut app = test_app(default_bindings());
+        let folder = tempfile::tempdir().expect("folder");
+
+        app.open_standalone_agent_browser()
+            .expect("the folder browser must open");
+        type_path_and_confirm(&mut app, folder.path());
+
+        match &app.prompt {
+            PromptState::NameStandaloneAgent { folder: picked, .. } => {
+                assert_eq!(*picked, folder.path().to_string_lossy().to_string());
+            }
+            other => panic!("expected the standalone name prompt, got {other:?}"),
+        }
+    }
+
+    /// The typed path reaches the same engine plan the navigated one does, so
+    /// the shared refusals (an occupied folder here) answer both identically.
+    #[test]
+    fn a_typed_standalone_path_goes_through_the_shared_refusals() {
+        let mut app = test_app(default_bindings());
+        let folder = tempfile::tempdir().expect("folder");
+        app.engine.sessions[0].workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: folder.path().to_string_lossy().to_string(),
+            });
+
+        app.open_standalone_agent_browser()
+            .expect("the folder browser must open");
+        type_path_and_confirm(&mut app, folder.path());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("the confirm key must be handled");
+
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Error,
+            "the shared refusal must be reported: {}",
+            app.status.text()
+        );
+        assert!(
+            app.status.text().contains("already working in"),
+            "the refusal must be the shared occupied-folder one, got: {}",
+            app.status.text()
+        );
+        assert!(
+            !app.engine.is_in_flight(&InFlightKey::CreateAgent),
+            "a refused create must not have dispatched anything"
+        );
+    }
+
+    /// The sibling half: a typed path in a browser opened to ADD A PROJECT
+    /// still goes to the add-project flow, which offers to initialize a plain
+    /// folder rather than running an agent in it.
+    #[test]
+    fn typing_a_path_for_a_project_still_adds_a_project() {
+        let mut app = test_app(default_bindings());
+        let folder = tempfile::tempdir().expect("folder");
+
+        app.open_project_browser()
+            .expect("the folder browser must open");
+        type_path_and_confirm(&mut app, folder.path());
+
+        assert!(
+            matches!(app.prompt, PromptState::ConfirmInitRepo { .. }),
+            "expected the add-project flow's adopt-a-folder prompt, got {:?}",
+            app.prompt
+        );
     }
 
     /// The title the open name prompt would create, or a panic naming what is
