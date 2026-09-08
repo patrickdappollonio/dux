@@ -2694,7 +2694,17 @@ impl Engine {
                 available: now_available,
             });
         }
-        if changed || asked_for {
+        // The check is silent on success. A status is posted when the user
+        // asked for it (whatever the answer), or when availability was LOST;
+        // a gain says nothing, because "gh is installed and logged in" is the
+        // expected state and only a failure is news. It also has to be silent:
+        // the boot probe starts from Unknown, so the ordinary happy outcome
+        // used to post an Info line that landed after, and covered, the
+        // warning about a background web server that was already serving on
+        // the TUI's single most-recent-wins status line. The
+        // `GhAvailabilityChanged` reaction still fires on a gain, and the
+        // GitHub controls lighting up is the visible signal.
+        if asked_for || (changed && !now_available) {
             reactions.push(EventReaction::Status(
                 self.gh_availability_status(unreachable_reason.as_deref()),
             ));
@@ -5222,6 +5232,106 @@ mod tests {
         assert_eq!(
             engine.github_host_policy(),
             crate::gh::GithubHostPolicy::DenyAll
+        );
+    }
+
+    /// The boot probe's happy answer must not push a line onto the TUI's
+    /// single status line: it would land after, and cover, whatever startup
+    /// already had to say.
+    #[test]
+    fn gh_status_checked_gaining_availability_at_boot_is_silent() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Unknown;
+
+        let reaction = engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: crate::gh::GhProbe::Decided {
+                available: true,
+                policy: crate::gh::GithubHostPolicy::LegacyNameRule,
+            },
+        });
+
+        assert!(matches!(
+            reaction,
+            EventReaction::GhAvailabilityChanged { available: true }
+        ));
+        assert_eq!(engine.gh_status, GhStatus::Available);
+    }
+
+    #[test]
+    fn gh_status_checked_recovering_after_an_outage_is_silent() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::NotAuthenticated;
+
+        let reaction = engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: crate::gh::GhProbe::Decided {
+                available: true,
+                policy: crate::gh::GithubHostPolicy::LegacyNameRule,
+            },
+        });
+
+        assert!(matches!(
+            reaction,
+            EventReaction::GhAvailabilityChanged { available: true }
+        ));
+    }
+
+    #[test]
+    fn gh_status_checked_losing_availability_says_so() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Available;
+
+        let reaction = engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: crate::gh::GhProbe::Decided {
+                available: false,
+                policy: crate::gh::GithubHostPolicy::DenyAll,
+            },
+        });
+
+        let EventReaction::Multi(reactions) = reaction else {
+            panic!("expected losing gh to be both published and explained");
+        };
+        assert!(
+            reactions
+                .iter()
+                .any(|r| matches!(r, EventReaction::GhAvailabilityChanged { available: false }))
+        );
+        assert!(
+            reactions
+                .iter()
+                .any(|r| matches!(r, EventReaction::Status(_)))
+        );
+    }
+
+    /// An on-demand re-check is a question, so it is answered even when the
+    /// answer is the good one.
+    #[test]
+    fn gh_status_checked_on_demand_reports_success_too() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Unknown;
+        engine.gh_probe.announce_outcome = true;
+
+        let reaction = engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: crate::gh::GhProbe::Decided {
+                available: true,
+                policy: crate::gh::GithubHostPolicy::LegacyNameRule,
+            },
+        });
+
+        let EventReaction::Multi(reactions) = reaction else {
+            panic!("expected an asked-for check to answer the question");
+        };
+        assert!(
+            reactions
+                .iter()
+                .any(|r| matches!(r, EventReaction::Status(_)))
         );
     }
 

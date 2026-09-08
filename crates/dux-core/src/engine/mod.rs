@@ -7356,7 +7356,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_transition_publishes_and_says_so() {
+    fn a_gain_publishes_without_saying_anything() {
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         engine.gh_status = GhStatus::Unreachable;
@@ -7374,21 +7374,11 @@ mod tests {
                 .any(|r| matches!(r, EventReaction::GhAvailabilityChanged { available: true })),
             "the browser is told to refetch the document carrying gh_available",
         );
-        let status = reactions
-            .iter()
-            .find_map(|r| match r {
-                EventReaction::Status(status) => Some(status),
-                _ => None,
-            })
-            .expect("the user is told GitHub features came back");
-        assert_eq!(
-            status.key.as_deref(),
-            Some(crate::engine::events::GH_AVAILABILITY_STATUS_KEY),
-        );
         assert!(
-            status.message.contains("available"),
-            "got {}",
-            status.message,
+            !reactions
+                .iter()
+                .any(|r| matches!(r, EventReaction::Status(_))),
+            "gh working is the expected state; the controls coming back are the signal",
         );
 
         // A second probe that answers the same way is not a transition, so it
