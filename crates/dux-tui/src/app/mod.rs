@@ -3537,7 +3537,7 @@ pub(crate) fn build_left_items(
 }
 
 mod background_server;
-pub(crate) use background_server::CompanionRouting;
+pub(crate) use background_server::{BackgroundServerStart, CompanionRouting};
 mod components;
 mod first_load;
 mod input;
@@ -4033,9 +4033,7 @@ impl App {
         self.engine.spawn_project_branch_status_checks();
         self.engine.spawn_gh_status_check();
         // The background server assumes these process-wide workers are already running.
-        if self.engine.config.server.serve_while_tui && !self.background_server_is_serving() {
-            self.start_background_server();
-        }
+        self.start_background_server_from_config();
     }
 
     fn run_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> RunExit {
@@ -4861,7 +4859,7 @@ impl App {
                 Ok(())
             }
             "start-background-server" => {
-                self.start_background_server();
+                self.start_background_server(BackgroundServerStart::UserRequest);
                 Ok(())
             }
             "stop-background-server" => {

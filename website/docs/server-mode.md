@@ -112,7 +112,9 @@ serve_while_tui = true
 
 Off by default. The palette commands **start-background-server** and
 **stop-background-server** turn it on and off while dux runs, and save your choice back
-to config.
+to config. When a run starts with this already on, the TUI's status line says so in the
+warning color and holds the message longer than an ordinary note, so a listener that
+came up before you sat down is not something you have to notice for yourself.
 
 Starting binds before anything else happens, so a busy port is a message on the status
 line and your TUI is untouched. Stopping leaves every agent and terminal running: only

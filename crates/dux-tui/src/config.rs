@@ -967,6 +967,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # and can scroll and copy it; on both the terminal and the browser a\n\
                  # card covers the terminal, names the device that has it, and offers a\n\
                  # Take over button that moves it to this device.\n\
+                 # With this on, the terminal UI's status line calls out the listener\n\
+                 # that came up at startup in the warning color, and holds it longer\n\
+                 # than an ordinary note, so you are told rather than left to notice.\n\
                  # You do not need to edit this file to change your mind: the palette\n\
                  # commands start-background-server and stop-background-server turn it\n\
                  # on and off while dux runs, and they save the choice back here.",

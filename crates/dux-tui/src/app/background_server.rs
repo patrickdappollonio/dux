@@ -183,14 +183,27 @@ impl App {
         }
     }
 
-    /// Palette action: start serving the web UI in the background of this TUI.
+    /// Start serving the web UI in the background of this TUI.
     ///
     /// The pre-flight (Tailscale detection, then an actual `TcpListener::bind` of
     /// each address) runs on a worker thread, exactly as the flip's does and for
     /// the same reason: `tailscale ip` is a subprocess call and must not block the
     /// run loop. Binding BEFORE anything starts is what keeps a port collision to
     /// a status line with the TUI untouched.
-    pub(crate) fn start_background_server(&mut self) {
+    ///
+    /// `trigger` decides the tone of the SUCCESS outcome only: see
+    /// [`BackgroundServerStart`].
+    /// The boot-time start `[server] serve_while_tui` asks for. It is the one
+    /// start nobody on this keyboard performed, so it is the one that reports as
+    /// a start the config made; keeping the decision here, with the condition,
+    /// is what lets a test pin that the boot path really passes that trigger.
+    pub(crate) fn start_background_server_from_config(&mut self) {
+        if self.engine.config.server.serve_while_tui && !self.background_server_is_serving() {
+            self.start_background_server(BackgroundServerStart::ConfigAtStartup);
+        }
+    }
+
+    pub(crate) fn start_background_server(&mut self, trigger: BackgroundServerStart) {
         if self.companion.is_none() {
             self.set_error(
                 "This build of dux cannot serve the web UI in the background. Run `dux server` \
@@ -232,19 +245,40 @@ impl App {
         let op = dux_core::engine::status_op(
             "Starting the web server in the background; the TUI stays right here.".to_string(),
         )
-        .resolve_in_handler(|o: &BackgroundServerOutcome| match o {
+        .resolve_in_handler(move |o: &BackgroundServerOutcome| match o {
             BackgroundServerOutcome::Serving { urls, warning } => {
                 let where_at = join_urls(urls);
-                match warning {
-                    Some(warning) => dux_core::engine::Final::warning(format!(
-                        "The web UI is serving in the background on {where_at}, and your agents \
-                         keep running here. {warning} Use stop-background-server to stop serving."
-                    )),
-                    None => dux_core::engine::Final::info(format!(
-                        "The web UI is serving in the background on {where_at}, and your agents \
-                         keep running here. There is no login, so keep it on a network you \
-                         trust. Use stop-background-server to stop serving."
-                    )),
+                match trigger {
+                    // Nobody asked for this one: the config did, before the user
+                    // sat down. Lead with the fact and the address, and take the
+                    // warning tone so the line survives the three windows a
+                    // warning gets instead of the one an info does. On a single
+                    // most-recent-wins line, an info here is a message the user
+                    // never sees.
+                    BackgroundServerStart::ConfigAtStartup => {
+                        let trust = match warning {
+                            Some(warning) => warning.clone(),
+                            None => {
+                                "There is no login, so keep it on a network you trust.".to_string()
+                            }
+                        };
+                        dux_core::engine::Final::warning(format!(
+                            "The background web server was already on and is listening on \
+                             {where_at}. {trust} Use stop-background-server to stop it."
+                        ))
+                    }
+                    BackgroundServerStart::UserRequest => match warning {
+                        Some(warning) => dux_core::engine::Final::warning(format!(
+                            "The web UI is serving in the background on {where_at}, and your \
+                             agents keep running here. {warning} Use stop-background-server to \
+                             stop serving."
+                        )),
+                        None => dux_core::engine::Final::info(format!(
+                            "The web UI is serving in the background on {where_at}, and your \
+                             agents keep running here. There is no login, so keep it on a \
+                             network you trust. Use stop-background-server to stop serving."
+                        )),
+                    },
                 }
             }
             BackgroundServerOutcome::Failed(message) => dux_core::engine::Final::error(format!(
@@ -592,13 +626,37 @@ impl App {
         // pre-flight lands afterwards and starts serving anyway.
         let on = self.background_server_is_serving() || self.background_server_preflight_pending;
         match (on, wanted) {
-            (false, true) => self.start_background_server(),
+            // A reload that turned it on is a live act the user just took, so it
+            // reports like the palette command rather than like the startup
+            // autostart.
+            (false, true) => self.start_background_server(BackgroundServerStart::UserRequest),
             (true, false) => self.stop_background_server(),
             // Already where the config asks for. Nothing to say: a reload that
             // did not change this should not report on it.
             (true, true) | (false, false) => {}
         }
     }
+}
+
+/// What asked for the background server to start.
+///
+/// This decides the TONE of the success outcome and nothing else: a failure or a
+/// cancellation reads the same whoever asked. The startup autostart is the one
+/// start nobody performed, so its outcome takes the warning tone and stays on the
+/// most-recent-wins status line for the three windows a warning gets. An info
+/// there clears after one window, which at boot means the user is never told a
+/// listener was already up before they sat down.
+///
+/// A reload that flips the setting to true is a `UserRequest`: editing the file is
+/// an act the user has just taken, and they are looking at the screen when it
+/// lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackgroundServerStart {
+    /// `[server] serve_while_tui = true` at startup, before anybody touched
+    /// anything.
+    ConfigAtStartup,
+    /// The palette command, or a config reload that turned the setting on.
+    UserRequest,
 }
 
 /// The verdict source for one drained batch's origin routing.
@@ -1280,7 +1338,7 @@ pub(crate) mod tests {
         let window = std::time::Duration::from_secs(6);
         app.status.set_clear_after(window);
 
-        app.start_background_server();
+        app.start_background_server(BackgroundServerStart::UserRequest);
         let message = app
             .status
             .most_recent_tui()
@@ -1376,7 +1434,7 @@ pub(crate) mod tests {
         let (companion, _recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
 
-        app.start_background_server();
+        app.start_background_server(BackgroundServerStart::UserRequest);
 
         let message = app
             .status
@@ -1390,6 +1448,192 @@ pub(crate) mod tests {
         assert!(
             !app.background_server_preflight_pending,
             "no second pre-flight may be dispatched"
+        );
+    }
+
+    /// Bring a start all the way to its success outcome without binding anything
+    /// real: the fake companion ignores the listeners it is handed and reports its
+    /// own address back.
+    fn finish_a_start(app: &mut App, warning: Option<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral bind");
+        app.apply_background_server_preflight(
+            Ok((vec![listener], vec!["http://127.0.0.1:8080".to_string()])),
+            warning,
+        );
+    }
+
+    fn status_now(app: &App) -> (StatusTone, String) {
+        app.status
+            .most_recent_tui()
+            .expect("the keyed busy must have resolved to a final")
+    }
+
+    /// The boot path decides the trigger itself, so a test drives the same
+    /// condition the run loop does rather than handing the enum in by hand.
+    #[test]
+    fn the_config_autostart_path_reports_as_a_start_the_config_made() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.stop_background_server_quietly();
+        app.engine.config.server.serve_while_tui = true;
+
+        app.start_background_server_from_config();
+        finish_a_start(&mut app, None);
+
+        let (tone, message) = status_now(&app);
+        assert_eq!(tone, StatusTone::Warning, "{message}");
+        assert!(
+            message.starts_with("The background web server was already on"),
+            "{message}"
+        );
+    }
+
+    /// With the setting off, the boot path starts nothing and says nothing.
+    #[test]
+    fn the_config_autostart_path_is_inert_when_the_setting_is_off() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.stop_background_server_quietly();
+        app.engine.config.server.serve_while_tui = false;
+
+        app.start_background_server_from_config();
+
+        assert!(!app.background_server_preflight_pending);
+        assert!(app.status.most_recent_tui().is_none());
+    }
+
+    /// The listener the config brought up at boot is the one start nobody on this
+    /// keyboard performed, so its outcome leads with the fact and the address and
+    /// takes the warning tone. On a single most-recent-wins line an info clears
+    /// after one window, which at startup means the user is never told that a
+    /// listener was already up before they sat down.
+    #[test]
+    fn the_startup_autostart_warns_that_the_server_was_already_on() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.stop_background_server_quietly();
+
+        app.start_background_server(BackgroundServerStart::ConfigAtStartup);
+        finish_a_start(&mut app, None);
+
+        let (tone, message) = status_now(&app);
+        assert_eq!(
+            tone,
+            StatusTone::Warning,
+            "an info at boot clears after one window and nobody sees it: {message}"
+        );
+        assert_eq!(
+            message,
+            "The background web server was already on and is listening on \
+             http://127.0.0.1:8080. There is no login, so keep it on a network you trust. Use \
+             stop-background-server to stop it.",
+        );
+
+        // And it really does outlast the plain info window, which is the whole
+        // reason for the tone.
+        let window = std::time::Duration::from_secs(6);
+        app.status.set_clear_after(window);
+        let now = std::time::Instant::now();
+        let _ = app
+            .status
+            .tick(now + window * 2, dux_core::statusline::BUSY_TIMEOUT);
+        assert!(
+            app.status.most_recent_tui().is_some(),
+            "a warning outlasts the plain info window"
+        );
+    }
+
+    /// The bind's own warning replaces the trust sentence rather than joining it:
+    /// the line is already the longest one this surface writes.
+    #[test]
+    fn the_startup_autostart_folds_in_a_bind_warning() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.stop_background_server_quietly();
+
+        app.start_background_server(BackgroundServerStart::ConfigAtStartup);
+        finish_a_start(
+            &mut app,
+            Some("Tailscale was not detected, so this is loopback only.".to_string()),
+        );
+
+        let (tone, message) = status_now(&app);
+        assert_eq!(tone, StatusTone::Warning);
+        assert_eq!(
+            message,
+            "The background web server was already on and is listening on \
+             http://127.0.0.1:8080. Tailscale was not detected, so this is loopback only. Use \
+             stop-background-server to stop it.",
+        );
+    }
+
+    /// PINNED. The palette command is a start the user just performed and reads
+    /// exactly as it always has, in both tones. Only the startup autostart changed.
+    #[test]
+    fn the_manual_start_reports_exactly_what_it_always_did() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.stop_background_server_quietly();
+
+        app.start_background_server(BackgroundServerStart::UserRequest);
+        finish_a_start(&mut app, None);
+
+        let (tone, message) = status_now(&app);
+        assert_eq!(tone, StatusTone::Info);
+        assert_eq!(
+            message,
+            "The web UI is serving in the background on http://127.0.0.1:8080, and your agents \
+             keep running here. There is no login, so keep it on a network you trust. Use \
+             stop-background-server to stop serving.",
+        );
+
+        app.stop_background_server_quietly();
+        app.start_background_server(BackgroundServerStart::UserRequest);
+        finish_a_start(
+            &mut app,
+            Some("Tailscale was not detected, so this is loopback only.".to_string()),
+        );
+
+        let (tone, message) = status_now(&app);
+        assert_eq!(tone, StatusTone::Warning);
+        assert_eq!(
+            message,
+            "The web UI is serving in the background on http://127.0.0.1:8080, and your agents \
+             keep running here. Tailscale was not detected, so this is loopback only. Use \
+             stop-background-server to stop serving.",
+        );
+    }
+
+    /// A reload that turned the setting on is a live act the user just took and
+    /// they are looking at the screen when it lands, so it reports like the
+    /// palette command rather than like the startup autostart.
+    #[test]
+    fn a_reload_that_turns_it_on_reports_like_the_manual_start() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.stop_background_server_quietly();
+
+        app.apply_serve_while_tui_setting(true);
+        assert!(app.background_server_preflight_pending);
+        finish_a_start(&mut app, None);
+
+        let (tone, message) = status_now(&app);
+        assert_eq!(
+            tone,
+            StatusTone::Info,
+            "not the startup autostart: {message}"
+        );
+        assert_eq!(
+            message,
+            "The web UI is serving in the background on http://127.0.0.1:8080, and your agents \
+             keep running here. There is no login, so keep it on a network you trust. Use \
+             stop-background-server to stop serving.",
         );
     }
 
@@ -1619,7 +1863,7 @@ pub(crate) mod tests {
         app.companion = Some(companion);
         app.stop_background_server_quietly();
         app.engine.config.server.serve_while_tui = false;
-        app.start_background_server();
+        app.start_background_server(BackgroundServerStart::UserRequest);
         assert!(app.background_server_preflight_pending);
 
         app.stop_background_server();
@@ -1660,7 +1904,7 @@ pub(crate) mod tests {
         app.companion = Some(companion);
         app.stop_background_server_quietly();
         app.engine.config.server.serve_while_tui = false;
-        app.start_background_server();
+        app.start_background_server(BackgroundServerStart::UserRequest);
         assert!(app.background_server_preflight_pending);
 
         app.apply_serve_while_tui_setting(false);
