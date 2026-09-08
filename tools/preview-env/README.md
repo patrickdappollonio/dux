@@ -136,7 +136,11 @@ down the middle. Crops are flush to their cells and never exceed 1.5:1.
 Each run writes four artifacts beside the requested PNG: the image, styled ANSI
 cells, a plain-text grid, and JSON capture details. The example journey does not use
 the network. Their repositories, commit dates, project names, provider output,
-theme, and terminal size are controlled by the harness.
+theme, and terminal size are controlled by the harness. The script's default
+theme is `catppuccin-mocha`; the screenshots committed under
+`website/public/screens/` are taken with `--theme dux_dark`, so pass that when
+reshooting one or the new image lands on a different palette from its
+neighbours.
 
 `tui-journey.example.js` shows the journey contract. For a special capture,
 copy it to a throwaway `*.tmp.js` file and use the supplied `createAgent`,
