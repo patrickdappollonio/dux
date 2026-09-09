@@ -4596,11 +4596,6 @@ export function inspectProjectPath(path: string): void {
     })
 }
 
-// Drop any pending/resolved inspection (e.g. the user deselected the repo).
-export function clearProjectInspection(): void {
-  setState({ projectPathInspection: null })
-}
-
 export function addProject(path: string, name: string): void {
   projectsApi
     .create({ path, name })
