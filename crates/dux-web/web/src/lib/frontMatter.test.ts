@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   formatFrontMatterValue,
+  splitFlowItems,
   splitFrontMatter,
   type FrontMatterRow,
 } from "./frontMatter"
@@ -261,5 +262,28 @@ describe("front matter display fidelity", () => {
       ["editor", ""],
       ["author", ""],
     ])
+  })
+})
+
+describe("splitFlowItems", () => {
+  it("splits on the top-level commas", () => {
+    expect(splitFlowItems("a, b, c")).toEqual(["a", " b", " c"])
+  })
+
+  it("keeps a quoted comma inside its item", () => {
+    expect(splitFlowItems('a, "b, c"')).toEqual(["a", ' "b, c"'])
+  })
+
+  it("keeps a single item with no comma in it", () => {
+    expect(splitFlowItems("only")).toEqual(["only"])
+  })
+
+  it("refuses an unterminated quote", () => {
+    expect(splitFlowItems('a, "b')).toBeNull()
+  })
+
+  it("refuses a nested list or map, whose commas it would split on", () => {
+    expect(splitFlowItems("a, [b, c]")).toBeNull()
+    expect(splitFlowItems("a, {b: c}")).toBeNull()
   })
 })

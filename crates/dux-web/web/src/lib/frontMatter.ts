@@ -218,6 +218,14 @@ function parseFlowList(text: string): FrontMatterScalar[] | null {
   if (!text.startsWith("[") || !text.endsWith("]")) return null
   const inner = text.slice(1, -1).trim()
   if (inner === "") return []
+  const items = splitFlowItems(inner)
+  return items === null ? null : items.map((item) => parseScalar(item.trim()))
+}
+
+// The comma-separated items inside a flow list's brackets, quoted commas kept
+// whole. Null when the text is not a flat list of scalars: an unterminated
+// quote, or a nested list or map, whose own commas this would split on.
+export function splitFlowItems(inner: string): string[] | null {
   const items: string[] = []
   let current = ""
   let quote: string | null = null
@@ -227,12 +235,12 @@ function parseFlowList(text: string): FrontMatterScalar[] | null {
       if (ch === quote) quote = null
       continue
     }
-    if (ch === '"' || ch === "'") {
+    if (isQuoteMark(ch)) {
       quote = ch
       current += ch
       continue
     }
-    if (ch === "[" || ch === "]" || ch === "{" || ch === "}") return null
+    if (isFlowBracket(ch)) return null
     if (ch === ",") {
       items.push(current)
       current = ""
@@ -242,7 +250,15 @@ function parseFlowList(text: string): FrontMatterScalar[] | null {
   }
   if (quote !== null) return null
   items.push(current)
-  return items.map((item) => parseScalar(item.trim()))
+  return items
+}
+
+function isQuoteMark(ch: string): boolean {
+  return ch === '"' || ch === "'"
+}
+
+function isFlowBracket(ch: string): boolean {
+  return ch === "[" || ch === "]" || ch === "{" || ch === "}"
 }
 
 // A single YAML scalar. Anything this does not recognize is its own text, which
