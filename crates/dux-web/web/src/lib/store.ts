@@ -237,16 +237,6 @@ export interface DiscardTarget {
   untracked: boolean
 }
 
-// An optimistic session-order overlay for one project: while a drag-and-drop
-// reorder is in flight, the UI renders `ids` (the new complete order of that
-// project's sessions) instead of the server's order, so the row doesn't snap
-// back during the ≤50ms round-trip. Cleared when a ViewModel arrives whose order
-// already matches, or on any error status.
-export interface PendingSessionOrder {
-  projectId: string
-  ids: string[]
-}
-
 // Where the agent this client is creating will land, which is what makes a new
 // session in the next spine recognizable as ours (see `armCreateFocus`).
 //
@@ -573,12 +563,6 @@ export interface DuxState {
   // deleted. The surfaces render `AgentNotFound` for it rather than quietly
   // pretending the link said nothing. Null whenever the route resolves.
   routeNotFound: RouteNotFound | null
-  // Optimistic drag-and-drop ordering overlays (see `applyPendingOrders`). Each
-  // is set the moment a drag ends and cleared once the server's next spine
-  // confirms the new order (or an error status arrives). Null when no reorder is
-  // in flight, which is the overwhelmingly common case.
-  pendingSessionOrder: PendingSessionOrder | null
-  pendingProjectOrder: string[] | null
   // Optimistic overlay for the flat model's GLOBAL agent order: the complete list
   // of session ids in the just-dragged order, cleared once the spine confirms it.
   pendingAgentOrder: string[] | null
@@ -975,8 +959,6 @@ let state: DuxState = {
   macrosDraft: [],
   mobileScreen: "home",
   routeNotFound: null,
-  pendingSessionOrder: null,
-  pendingProjectOrder: null,
   pendingAgentOrder: null,
   pendingTerminalOrder: null,
   pendingSlotTab: {},
@@ -1601,8 +1583,6 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
     // and no way back to one, so its unsent text is unreachable rather than
     // preserved.
     composeDrafts: pruneComposeDrafts(state.composeDrafts, spine),
-    pendingSessionOrder: reconcilePendingSessionOrder(spine, state.pendingSessionOrder),
-    pendingProjectOrder: reconcilePendingProjectOrder(spine, state.pendingProjectOrder),
     pendingAgentOrder: reconcilePendingAgentOrder(spine, state.pendingAgentOrder),
     pendingTerminalOrder: reconcilePendingTerminalOrder(spine, state.pendingTerminalOrder),
     pendingSlotTab: reconcilePendingSlotTab(spine, state.pendingSlotTab),
@@ -1690,30 +1670,6 @@ function pruneDeadEditorTabs(live: Set<string>, heldKey: string | null): void {
     if (key === heldKey) continue
     if (!live.has(key)) clearEditorTabsForKey(key)
   }
-}
-
-// Drop the pending session-order overlay once the incoming spine's session
-// order for that project already equals the overlay; otherwise keep it.
-function reconcilePendingSessionOrder(
-  spine: Spine,
-  pending: PendingSessionOrder | null,
-): PendingSessionOrder | null {
-  if (!pending) return null
-  const serverIds = spine.sessions
-    .filter((s) => workspaceProjectId(s.workspace) === pending.projectId)
-    .map((s) => s.id)
-  return ordersMatch(serverIds, pending.ids) ? null : pending
-}
-
-// Drop the pending project-order overlay once the incoming spine's project
-// order already equals the overlay; otherwise keep it.
-function reconcilePendingProjectOrder(
-  spine: Spine,
-  pending: string[] | null,
-): string[] | null {
-  if (!pending) return null
-  const serverIds = spine.projects.map((p) => p.id)
-  return ordersMatch(serverIds, pending) ? null : pending
 }
 
 // Drop the global agent-order overlay once the server's session order (spine is
@@ -2005,13 +1961,11 @@ eventsSocket.onConn = (conn) => {
 // as `status`/`status_cleared` events over `/ws/events` (see
 // `eventsSocket.onEvent`).
 
-// Reset both optimistic order overlays. Returned as a patch so callers can fold
-// it into a single `setState`. Used on every error path so a rejected reorder
-// snaps the UI back to the server's authoritative order.
+// Reset the optimistic agent-order overlay. Returned as a patch so callers can
+// fold it into a single `setState`. Used on every error path so a rejected
+// reorder snaps the UI back to the server's authoritative order.
 function clearPendingOrders(): Partial<DuxState> {
   return {
-    pendingSessionOrder: null,
-    pendingProjectOrder: null,
     pendingAgentOrder: null,
   }
 }
@@ -5354,30 +5308,12 @@ export function reorderTerminals(orderedIds: string[]): void {
   })
 }
 
-export function reorderSessions(projectId: string, orderedIds: string[]): void {
-  setState({ pendingSessionOrder: { projectId, ids: orderedIds } })
-  sessionsApi
-    .reorder(projectId, orderedIds)
-    .catch((e) => {
-      // A rejected reorder will never be reconciled by a spine (the server never
-      // persisted this order), so the optimistic overlay would otherwise linger
-      // forever — leaving the sidebar showing an order the server doesn't have and
-      // compounding on the next drag. Clear the order overlays so the UI snaps back
-      // to the authoritative spine order, then surface the failure.
-      setState(clearPendingOrders())
-      notifyError(
-        e instanceof Error ? e.message : "Could not reorder the sessions.",
-      )
-    })
-}
-
 // One-shot reorder of every project's sessions, distinct from `setAgentSort`,
 // which sets the shared display mode. It persists through `reorder_sessions`,
 // so the manual order the terminal UI shows stays in step by construction.
 //
-// No optimistic `pendingSessionOrder` overlay: that overlay holds one project
-// and a sort touches many, so it could only cover one and would leave the rest
-// snapping anyway.
+// No optimistic overlay: a sort touches every project's sessions at once, so
+// nothing local could cover them all and the rows snap on the next spine.
 export function sortAgents(by: SortKey): void {
   const sessions = state.spine?.sessions ?? []
   const projects = state.spine?.projects ?? []
@@ -5399,25 +5335,6 @@ export function sortAgents(by: SortKey): void {
         ),
       )
   }
-}
-
-// Optimistically reorder the projects, then tell the server. `orderedIds` MUST
-// be the complete ordered set of ALL project ids (both with and without agents);
-// the server validates it as a strict permutation. The overlay clears when the
-// next spine confirms the order (or on error).
-export function reorderProjects(orderedIds: string[]): void {
-  setState({ pendingProjectOrder: orderedIds })
-  projectsApi
-    .reorder(orderedIds)
-    .catch((e) => {
-      // As with sessions: a rejected reorder is never reconciled by a spine, so
-      // the optimistic overlay would persist indefinitely. Clear it back to the
-      // authoritative order before surfacing the error.
-      setState(clearPendingOrders())
-      notifyError(
-        e instanceof Error ? e.message : "Could not reorder the projects.",
-      )
-    })
 }
 
 

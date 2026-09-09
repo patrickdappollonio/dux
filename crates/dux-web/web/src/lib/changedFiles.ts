@@ -116,17 +116,6 @@ export function mergeChangedFilesRecaps(
   }
 }
 
-// The changed-files broadcast is global but selection is per client, so a client trusts
-// the lists only while `watched_session_id` matches its own selection; otherwise it would
-// briefly show another tab's files. False while nothing is selected, or while the server
-// has not caught up to this client's latest selection.
-export function shouldShowChangedFiles(
-  watchedSessionId: string | null,
-  selectedSessionId: string | null,
-): boolean {
-  return selectedSessionId !== null && watchedSessionId === selectedSessionId
-}
-
 // One section's worth of checked paths each. Staged and unstaged are kept apart
 // because the two sections carry opposite verbs.
 export interface ChangedFileSelection {

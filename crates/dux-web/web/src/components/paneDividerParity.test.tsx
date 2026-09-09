@@ -71,8 +71,6 @@ const mockState = {
   spine: null,
   bootstrap: { title: "dux", dux_version: "v0" },
   selectedTarget: null,
-  pendingSessionOrder: null,
-  pendingProjectOrder: null,
   sidebarWidth: "18rem",
 } as unknown as DuxState
 

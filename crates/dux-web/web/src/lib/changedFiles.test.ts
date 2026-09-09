@@ -6,7 +6,6 @@ import {
   formatRecapCount,
   mergeChangedFilesRecaps,
   reconcileSelection,
-  shouldShowChangedFiles,
   summarizeChangedFiles,
 } from "./changedFiles"
 import type { ChangedFileView } from "./types"
@@ -45,25 +44,6 @@ describe("filterChangedFiles", () => {
 
   it("passes everything through for a whitespace-only query", () => {
     expect(filterChangedFiles(files, "   ")).toEqual(files)
-  })
-})
-
-describe("shouldShowChangedFiles", () => {
-  it("shows when the watched session matches the selection", () => {
-    expect(shouldShowChangedFiles("s1", "s1")).toBe(true)
-  })
-
-  it("hides when the watch belongs to a different session", () => {
-    expect(shouldShowChangedFiles("s2", "s1")).toBe(false)
-  })
-
-  it("hides while the server hasn't started watching yet", () => {
-    expect(shouldShowChangedFiles(null, "s1")).toBe(false)
-  })
-
-  it("hides when nothing is selected", () => {
-    expect(shouldShowChangedFiles("s1", null)).toBe(false)
-    expect(shouldShowChangedFiles(null, null)).toBe(false)
   })
 })
 

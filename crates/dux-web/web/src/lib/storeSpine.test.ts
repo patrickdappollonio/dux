@@ -390,46 +390,6 @@ describe("spine slice", () => {
     expect(mod.getSnapshot().selectedTarget).toBeNull()
   })
 
-  it("retires an optimistic session-order overlay once the spine matches", async () => {
-    const mod = await loadStore()
-    await pushSpine(
-      mod,
-      makeSpine({ sessions: [session("s1", "p1"), session("s2", "p1")] }),
-    )
-    // Optimistically reorder p1's sessions; the overlay holds until confirmed.
-    mod.reorderSessions("p1", ["s2", "s1"])
-    expect(mod.getSnapshot().pendingSessionOrder).not.toBeNull()
-    // A spine whose order does NOT match keeps the overlay.
-    await pushSpine(
-      mod,
-      makeSpine({ sessions: [session("s1", "p1"), session("s2", "p1")] }),
-    )
-    expect(mod.getSnapshot().pendingSessionOrder).not.toBeNull()
-    // A spine confirming the new order retires it.
-    await pushSpine(
-      mod,
-      makeSpine({ sessions: [session("s2", "p1"), session("s1", "p1")] }),
-    )
-    expect(mod.getSnapshot().pendingSessionOrder).toBeNull()
-  })
-
-  it("retires an optimistic project-order overlay once the spine matches", async () => {
-    const mod = await loadStore()
-    await pushSpine(
-      mod,
-      makeSpine({ projects: [project("p1"), project("p2")] }),
-      "projects.changed",
-    )
-    mod.reorderProjects(["p2", "p1"])
-    expect(mod.getSnapshot().pendingProjectOrder).not.toBeNull()
-    await pushSpine(
-      mod,
-      makeSpine({ projects: [project("p2"), project("p1")] }),
-      "projects.changed",
-    )
-    expect(mod.getSnapshot().pendingProjectOrder).toBeNull()
-  })
-
   it("retries a failed first spine load on a reconnect onOpen", async () => {
     // The very first load (driven by boot()) fails, so the slice stays null.
     spineShouldFail = true

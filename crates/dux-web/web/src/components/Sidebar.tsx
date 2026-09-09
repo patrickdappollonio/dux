@@ -48,7 +48,6 @@ import {
   sidebarResizeRelease,
   sidebarWidthToPx,
 } from "@/lib/sidebarResize"
-import { applyPendingOrders } from "@/lib/reorder"
 import {
   openNewAgentPicker,
   selectSession,
@@ -414,22 +413,9 @@ function SidebarDragEdge({
 }
 
 export function AppSidebar() {
-  const {
-    spine,
-    bootstrap,
-    selectedTarget,
-    pendingSessionOrder,
-    pendingProjectOrder,
-    changes,
-  } = useDux()
-  const rawSessions = spine?.sessions ?? []
-  const rawProjects = spine?.projects ?? []
-  const { projects, sessions } = applyPendingOrders(
-    rawProjects,
-    rawSessions,
-    pendingSessionOrder,
-    pendingProjectOrder,
-  )
+  const { spine, bootstrap, selectedTarget, changes } = useDux()
+  const sessions = spine?.sessions ?? []
+  const projects = spine?.projects ?? []
   const { grouped, withAgents, projectName } = partitionProjects(
     spine?.sidebar,
     projects,

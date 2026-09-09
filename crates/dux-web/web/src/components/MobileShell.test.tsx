@@ -111,8 +111,6 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
     spine: null,
     bootstrap: { title: "dux #1", dux_version: "v9.9.9" },
     selectedTarget: null,
-    pendingSessionOrder: null,
-    pendingProjectOrder: null,
     createTabInFlight: [],
     mobileScreen: "home",
     ...overrides,

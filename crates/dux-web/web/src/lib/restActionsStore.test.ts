@@ -367,38 +367,6 @@ describe("store write actions surface REST errors as a toast", () => {
     expect(toast.error).not.toHaveBeenCalled()
   })
 
-  it("reorderProjects clears its optimistic overlay and toasts on error", async () => {
-    const mod = await loadStore()
-    actionFails = true
-    mod.reorderProjects(["p2", "p1"])
-    // The overlay is applied synchronously, before the REST call resolves.
-    expect(mod.getSnapshot().pendingProjectOrder).toEqual(["p2", "p1"])
-    await vi.waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("the server said no", {
-        duration: ERROR_DURATION,
-      }),
-    )
-    // A rejected reorder is never reconciled by a spine, so the overlay must be
-    // cleared back to the authoritative order rather than lingering forever.
-    expect(mod.getSnapshot().pendingProjectOrder).toBeNull()
-  })
-
-  it("reorderSessions clears its optimistic overlay and toasts on error", async () => {
-    const mod = await loadStore()
-    actionFails = true
-    mod.reorderSessions("p1", ["s2", "s1"])
-    expect(mod.getSnapshot().pendingSessionOrder).toEqual({
-      projectId: "p1",
-      ids: ["s2", "s1"],
-    })
-    await vi.waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("the server said no", {
-        duration: ERROR_DURATION,
-      }),
-    )
-    expect(mod.getSnapshot().pendingSessionOrder).toBeNull()
-  })
-
   it("createAgent does NOT toast a 409 (already surfaced via the /ws status stream)", async () => {
     const mod = await loadStore()
     actionFails = true
