@@ -734,6 +734,26 @@ const RESOURCE_MONITOR_NAME_MIN_WIDTH: u16 = 16;
 /// ratatui's `Table` default `column_spacing` between adjacent columns.
 const RESOURCE_MONITOR_COLUMN_SPACING: u16 = 1;
 
+/// The expand affordance a resource-monitor row carries: ▼ while expanded,
+/// ▶ while collapsed, and blank where there is nothing to reveal.
+///
+/// Gated on `has_breakdown()`, core's rule, NOT on `children` being non-empty:
+/// `children` always contains the root itself, so an is-empty test marks every
+/// row expandable and expanding a leaf reveals a duplicate of the row above.
+fn resource_row_expand_indicator(
+    stat: &ResourceStats,
+    expanded: &std::collections::HashSet<u32>,
+) -> &'static str {
+    let Some(pid) = stat.pid.filter(|_| stat.has_breakdown()) else {
+        return "  ";
+    };
+    if expanded.contains(&pid) {
+        "▼ "
+    } else {
+        "▶ "
+    }
+}
+
 fn resource_monitor_columns(inner_width: u16) -> ResourceMonitorColumns {
     let try_plan = |show_pid: bool, show_procs: bool| -> Option<ResourceMonitorColumns> {
         let mut fixed = RESOURCE_MONITOR_CPU_W + RESOURCE_MONITOR_RSS_W;
@@ -11547,26 +11567,7 @@ impl App {
                         Style::default()
                     };
 
-                    // Expand indicator: ▶/▼ for expandable rows, space for
-                    // others. Gated on `has_breakdown()` (core's rule), NOT on
-                    // `children` being non-empty: `children` always contains
-                    // the root itself, so a leaf process has exactly one entry
-                    // and an is-empty test marks every row expandable. Expanding
-                    // one then reveals a single child that is a duplicate of the
-                    // row just expanded.
-                    let indicator = if stat.has_breakdown() {
-                        if let Some(pid) = stat.pid {
-                            if expanded.contains(&pid) {
-                                "▼ "
-                            } else {
-                                "▶ "
-                            }
-                        } else {
-                            "  "
-                        }
-                    } else {
-                        "  "
-                    };
+                    let indicator = resource_row_expand_indicator(stat, expanded);
                     let label = truncate_status_text(&format!("{indicator}{}", stat.label), name_w);
 
                     let mut cells = vec![Cell::from(label)];
@@ -19027,6 +19028,51 @@ mod tests {
     }
 
     // --- resource_monitor_columns (pure column-budget helper) ---
+
+    #[test]
+    fn the_expand_indicator_is_blank_without_a_breakdown_or_a_pid() {
+        use dux_core::worker::{ProcessInfo, ResourceKind, ResourceStats};
+
+        let process = |pid: u32, is_root: bool| ProcessInfo {
+            pid,
+            name: "p".to_string(),
+            cpu_percent: 0.0,
+            rss_bytes: 0,
+            is_root,
+        };
+        let stat = |pid: Option<u32>, children: Vec<ProcessInfo>| ResourceStats {
+            id: None,
+            kind: ResourceKind::Agent,
+            label: "row".to_string(),
+            pid,
+            cpu_percent: 0.0,
+            rss_bytes: 0,
+            process_count: children.len(),
+            children,
+        };
+        let mut expanded = std::collections::HashSet::new();
+        expanded.insert(22);
+
+        let leaf = stat(Some(11), vec![process(11, true)]);
+        let tree = stat(Some(22), vec![process(22, true), process(23, false)]);
+        let collapsed = stat(Some(33), vec![process(33, true), process(34, false)]);
+        // The totals row aggregates every target and belongs to no process.
+        let pidless = stat(None, vec![process(44, true), process(45, false)]);
+
+        assert_eq!(super::resource_row_expand_indicator(&leaf, &expanded), "  ");
+        assert_eq!(
+            super::resource_row_expand_indicator(&tree, &expanded),
+            "\u{25bc} "
+        );
+        assert_eq!(
+            super::resource_row_expand_indicator(&collapsed, &expanded),
+            "\u{25b6} "
+        );
+        assert_eq!(
+            super::resource_row_expand_indicator(&pidless, &expanded),
+            "  "
+        );
+    }
 
     #[test]
     fn resource_monitor_columns_wide_terminal_keeps_all_columns() {
