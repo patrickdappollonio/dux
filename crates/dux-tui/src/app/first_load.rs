@@ -158,7 +158,7 @@ pub(crate) struct FirstLoadPrompt {
     /// Whether DISMISSING this screen should record the running version as seen.
     ///
     /// Carried from [`dux_core::first_load::FirstLoadPlan::mark_seen`] and acted
-    /// on at dismissal, never when the plan was computed — that timing is the
+    /// on at dismissal, never when the plan was computed: that timing is the
     /// core module's binding contract, and it is what lets the same shared SQLite
     /// row serve a long-lived web server too. A screen the user opened
     /// deliberately (a palette command) carries `false`: an explicit look must
@@ -318,7 +318,7 @@ pub(crate) fn welcome_lines(
     let w = width.saturating_sub(1) as usize;
     // The tagline WRAPS. The gallery renders it as one unwrapped span, which
     // silently clips it at the prose column's edge (the tagline is 71 columns and
-    // the prose column at the 90-column target is 50) — the approved intent is a
+    // the prose column at the 90-column target is 50). The approved intent is a
     // headline the reader can actually read, so it is wrapped here.
     let mut lines: Vec<Line<'static>> = wrap(screen.tagline, w)
         .into_iter()
@@ -784,7 +784,7 @@ impl App {
         }
     }
 
-    /// STEP 1 of the gate, at startup. Runs on a cold boot only — the caller
+    /// STEP 1 of the gate, at startup. Runs on a cold boot only: the caller
     /// gates on [`SessionRestore`], so a web-server→TUI flip never re-shows
     /// either screen.
     pub(crate) fn begin_first_load(&mut self) {
@@ -856,7 +856,7 @@ impl App {
             let outcome = dux_core::release_notes::outcome_of(&result);
             if let Err(err) = &result {
                 // The automatic path is deliberately silent on screen, so this
-                // log line is the operator's only signal — which means the warn
+                // log line is the operator's only signal, which means the warn
                 // stream must stay actionable. A definitive `NoSuchRelease` is
                 // routine (a dev, local, or CI-tagged build simply has no
                 // published release) and nothing can be done about it.
@@ -940,7 +940,7 @@ impl App {
                 // PEEK, do not take: a modal the user opened during the fetch
                 // window owns the single `PromptState` slot, and replacing it
                 // would throw away in-progress input. Park the notes with the
-                // plan still pending and stamp NOTHING — the stamp belongs to a
+                // plan still pending and stamp NOTHING: the stamp belongs to a
                 // dismissal of a screen that was actually shown, and stamping a
                 // never-shown screen would discard this version's notes forever.
                 if !matches!(self.prompt, PromptState::None)
@@ -980,7 +980,7 @@ impl App {
             NotesFetchPurpose::Explicit => {
                 // An explicitly opened screen never stamps (`mark_seen: false`):
                 // the user asked to LOOK, which must not consume a pending
-                // upgrade's notes. On a failure there is nothing to do here — the
+                // upgrade's notes. On a failure there is nothing to do here: the
                 // worker's keyed final already carries the reason.
                 if let Ok(notes) = fetched.result {
                     self.prompt = PromptState::FirstLoad(FirstLoadPrompt::whats_new(notes, false));

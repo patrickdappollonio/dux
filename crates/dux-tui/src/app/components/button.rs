@@ -157,11 +157,11 @@ pub(crate) fn button_state_for(
 /// (red for destructive, cyan for safe).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ButtonKind {
-    /// Safe action — dismissals, applies, navigations. Cyan when focused.
+    /// Safe action: dismissals, applies, navigations. Cyan when focused.
     /// Use for "Cancel", "Apply", "Use Existing", and any other button
     /// whose outcome is non-destructive.
     Confirm,
-    /// Destructive action — deletes, quits, anything that loses data or
+    /// Destructive action: deletes, quits, anything that loses data or
     /// skips a safety check. Red when focused. Use for "Delete", "Quit",
     /// "Discard", "Add Anyway", "Check Out & Add", etc.
     Danger,
@@ -208,8 +208,8 @@ impl<'a> Button<'a> {
             ButtonState::Normal => (theme.border_normal, theme.hint_desc_fg),
             ButtonState::Disabled => (theme.border_normal, theme.hint_dim_desc_fg),
         };
-        // Disabled buttons drop the BOLD modifier so they visually fade —
-        // active and idle buttons stay bold to keep the row legible.
+        // Disabled buttons drop the BOLD modifier so they visually fade.
+        // Active and idle buttons stay bold to keep the row legible.
         let mut label_style = Style::default().fg(fg);
         if self.state != ButtonState::Disabled {
             label_style = label_style.add_modifier(Modifier::BOLD);
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn button_state_for_disabled_overrides_press_and_focus() {
-        // Disabled wins over both press and keyboard focus — a button that
+        // Disabled wins over both press and keyboard focus: a button that
         // becomes unactivatable mid-drag must not pretend it is armed.
         assert_eq!(
             button_state_for(

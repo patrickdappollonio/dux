@@ -301,7 +301,7 @@ impl TextInput {
         }
         let width = self.wrap_width();
         let (vrow, _) = cursor_visual_pos(&self.text, self.cursor, width);
-        // Move to a very large column — byte_offset_at_visual clamps to line end.
+        // Move to a very large column: byte_offset_at_visual clamps to line end.
         self.cursor = byte_offset_at_visual(&self.text, vrow, usize::MAX, width);
     }
 
@@ -566,7 +566,7 @@ fn is_word_char(c: char) -> bool {
 }
 
 /// Scan backward from `index` to find the previous word boundary.
-/// Skips non-word chars, then skips word chars — standard terminal behaviour.
+/// Skips non-word chars, then skips word chars, standard terminal behaviour.
 fn prev_word_boundary(text: &str, index: usize) -> usize {
     let index = index.min(text.len());
     let before = &text[..index];
@@ -593,7 +593,7 @@ fn prev_word_boundary(text: &str, index: usize) -> usize {
 }
 
 /// Scan forward from `index` to find the next word boundary.
-/// Skips non-word chars, then skips word chars — standard terminal behaviour.
+/// Skips non-word chars, then skips word chars, standard terminal behaviour.
 fn next_word_boundary(text: &str, index: usize) -> usize {
     let index = index.min(text.len());
     let after = &text[index..];
@@ -641,7 +641,7 @@ fn wrap_logical_line(chars: &[char], width: usize) -> Vec<(usize, usize)> {
         let mut break_at = None;
         for i in (pos..window_end).rev() {
             if chars[i] == ' ' {
-                // Break after the space — the space stays on this line.
+                // Break after the space: the space stays on this line.
                 break_at = Some(i + 1);
                 break;
             }
@@ -652,7 +652,7 @@ fn wrap_logical_line(chars: &[char], width: usize) -> Vec<(usize, usize)> {
                 pos = bp;
             }
             _ => {
-                // No space found — hard break at width.
+                // No space found, so hard break at width.
                 rows.push((pos, window_end));
                 pos = window_end;
             }
@@ -1240,10 +1240,10 @@ mod tests {
         ti.move_down();
         assert_eq!(ti.scroll_offset(), 0);
 
-        ti.move_down(); // row 3 — scrolls
+        ti.move_down(); // row 3, scrolls
         assert_eq!(ti.scroll_offset(), 1);
 
-        ti.move_down(); // row 4 — scrolls more
+        ti.move_down(); // row 4, scrolls more
         assert_eq!(ti.scroll_offset(), 2);
     }
 
@@ -1259,7 +1259,7 @@ mod tests {
         ti.move_up(); // row 2
         assert_eq!(ti.scroll_offset(), 2);
 
-        ti.move_up(); // row 1 — scrolls
+        ti.move_up(); // row 1, scrolls
         assert_eq!(ti.scroll_offset(), 1);
 
         ti.move_up(); // row 0
@@ -1453,14 +1453,14 @@ mod tests {
         let mut ti = multiline_input("abcdefgh\nxy", 3);
         ti.set_display_width(Some(3));
         ti.cursor = 0;
-        // Visual lines: "abc", "def", "gh", "xy" — show first 3
+        // Visual lines: "abc", "def", "gh", "xy"; show first 3
         assert_eq!(ti.visible_lines(), vec!["abc", "def", "gh"]);
     }
 
     #[test]
     fn scroll_with_wrapped_lines() {
         // "abcdef\ng" with width 3
-        // Visual lines: ["abc", "def", "g"] — 3 visual lines
+        // Visual lines: ["abc", "def", "g"], so 3 visual lines
         let mut ti = multiline_input("abcdef\ng", 2);
         ti.set_display_width(Some(3));
         ti.cursor = 0;
@@ -1469,7 +1469,7 @@ mod tests {
         ti.move_down(); // row 1
         assert_eq!(ti.scroll_offset(), 0);
 
-        ti.move_down(); // row 2 — scrolls
+        ti.move_down(); // row 2, scrolls
         assert_eq!(ti.scroll_offset(), 1);
         assert_eq!(ti.visible_lines(), vec!["def", "g"]);
     }
@@ -1636,7 +1636,7 @@ mod tests {
 
     #[test]
     fn wordwrap_long_path_no_spaces() {
-        // A long path with no spaces — hard breaks at width
+        // A long path with no spaces, so hard breaks at width
         let path = "/var/home/user/.config/dux/worktrees/project";
         assert_eq!(
             wordwrap_visual_lines(path, Some(10)),
@@ -1750,7 +1750,7 @@ mod tests {
 
     #[test]
     fn cursor_at_end_of_exact_width_text() {
-        // Text fills width exactly — cursor at end should be on the same row
+        // Text fills width exactly: cursor at end should be on the same row
         // at the column equal to the width, not overflow to a new row.
         let mut ti = multiline_input("abcde", 10);
         ti.set_display_width(Some(5));

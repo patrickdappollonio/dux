@@ -602,7 +602,7 @@ pub struct App {
     /// would both spawn workers and the second would hit a confusing EADDRINUSE.
     /// Set true when a worker is dispatched, cleared when its
     /// `ServerFlipPreflightReady` event lands (BOTH the Ok and Err arms). While
-    /// set — or while `pending_server_flip` is already stashed — a repeat
+    /// set, or while `pending_server_flip` is already stashed, a repeat
     /// invocation is refused with an actionable status instead of spawning a
     /// second worker.
     pub(crate) server_flip_preflight_pending: bool,
@@ -681,7 +681,7 @@ pub struct App {
     /// the op to a [`dux_core::engine::Final::Clear`] in `drain_events` when the
     /// `PullRequestResolved` event returns (keyed off the id it carries back):
     /// the SUCCESS path then opens the name prompt and shows its own `set_info`,
-    /// and the FAILURE path lets the engine's error `Status` show — so the op
+    /// and the FAILURE path lets the engine's error `Status` show, so the op
     /// only needs to DISMISS its keyed busy, never author a message. The opaque
     /// correlation guarantees the spinner is replaced instead of stranding to the
     /// busy timeout, even though the visible final comes from elsewhere.
@@ -722,14 +722,14 @@ pub struct App {
     /// agent …" busy). When `begin_delete_session` takes the async path the TUI
     /// mints a [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows
     /// its pending busy, and stashes it here keyed by the **session id** (not the
-    /// op id — the completion event carries `session_id`, so that is the natural
+    /// op id: the completion event carries `session_id`, so that is the natural
     /// correlation handle). The matching
     /// [`dux_core::engine::EventReaction::WorktreeRemoveSucceeded`] /
     /// [`WorktreeRemoveFailed`] pops the op and resolves it against the
     /// handler-computed [`TuiDeleteOutcome`]. The resolver, declared at dispatch,
     /// captures the provider / project name / branch name / display name then in
-    /// scope (the session is still present at dispatch — cleanup is deferred until
-    /// git succeeds) and reproduces the surface's exact wording.
+    /// scope (the session is still present at dispatch, because cleanup is deferred
+    /// until git succeeds) and reproduces the surface's exact wording.
     pub(crate) pending_delete_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<TuiDeleteOutcome>>,
     /// In-flight reconnect / fresh-restart status ops, keyed by session id: the
@@ -766,12 +766,12 @@ pub struct App {
     /// overwritten by the newer busy on the same key.
     pub(crate) pending_changed_files_refresh: Option<PendingChangedFilesRefresh>,
     /// In-flight server-flip status op (the "Starting the web server …" busy). A
-    /// flip is terminal — guarded so only one can be in flight — so a single
+    /// flip is terminal, guarded so only one can be in flight, so a single
     /// `Option` is the natural home rather than a map. `start_web_server` mints a
     /// [`dux_core::engine::HandlerStatusOp`], shows its keyed busy, and stashes it
     /// here. When `ServerFlipPreflightReady` lands: the plain-success arm re-emits
     /// the busy text (now carrying the serve URLs) via [`progress`] on the SAME id
-    /// and LEAVES the op stashed — there is no success final, the spinner simply
+    /// and LEAVES the op stashed. There is no success final, the spinner simply
     /// shows until the run loop tears the TUI down for the flip; the
     /// success-with-warning arm resolves the op to a warning final; the error arm
     /// resolves it to an error final.
@@ -787,7 +787,7 @@ pub struct App {
     /// (failure) handler pops the op and resolves it against the handler-computed
     /// [`TuiConfigReloadOutcome`], REPLACING the legacy `set_info`/`set_error`.
     /// The shared engine `ConfigReloadReady`/`ApplyReloadedConfig` logic (which
-    /// also drives the web and replays deferred commands) is untouched — only the
+    /// also drives the web and replays deferred commands) is untouched: only the
     /// TUI's view-handler final is routed through the op.
     pub(crate) pending_config_reload_op:
         Option<dux_core::engine::HandlerStatusOp<TuiConfigReloadOutcome>>,
@@ -953,7 +953,7 @@ fn diff_read_busy(label: &str) -> String {
 /// to the final user message.
 pub enum TuiDeleteOutcome {
     /// Git removal succeeded and the session record is still present (the normal
-    /// case — cleanup runs now). `branches` selects the message, and carries
+    /// case, where cleanup runs now). `branches` selects the message, and carries
     /// the birth branch's fate as well when the agent had drifted.
     SucceededPresent {
         branches: dux_core::engine::RemovedBranches,
@@ -2005,7 +2005,7 @@ pub(crate) enum DeleteAgentFocus {
 }
 
 /// Which selectable element has focus in the Non-Default Branch confirmation
-/// modal. `Checkbox` is only reachable when `BranchWarningKind::Known` — the
+/// modal. `Checkbox` is only reachable when `BranchWarningKind::Known`: the
 /// heuristic path has no checkbox to focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConfirmNonDefaultBranchFocus {
@@ -2126,7 +2126,7 @@ pub(crate) enum PromptState {
     /// One of the two first-load screens (first-run welcome, or what's-new after
     /// a version change). They share one modal frame; see
     /// [`crate::app::first_load`]. Routed through `PromptState` so `Esc` and the
-    /// generic overlay dismissal keep working uniformly — the one addition is
+    /// generic overlay dismissal keep working uniformly. The one addition is
     /// that dismissal stamps the running version as seen when the plan says to.
     FirstLoad(FirstLoadPrompt),
     ChangeDefaultProvider(ChangeDefaultProviderPrompt),
@@ -3825,8 +3825,8 @@ impl App {
             project_chooser_context: None,
             agent_filter: None,
         };
-        // First boot relaunches prior sessions; a resume must not — the engine
-        // handed back from the web server already owns the live providers, and
+        // First boot relaunches prior sessions; a resume must not, because the
+        // engine handed back from the web server already owns the live providers, and
         // any session the user closed in the web UI must stay closed.
         if matches!(restore, SessionRestore::Restore) {
             app.restore_sessions();
@@ -4289,7 +4289,7 @@ impl App {
         }
         // The NON-interactive agent fullscreen (e.g. the dormant-tab relaunch
         // screen left up after a tab's CLI exited) dismisses like any other
-        // overlay. Interactive mode never reaches this path — its keys go
+        // overlay. Interactive mode never reaches this path: its keys go
         // through the raw-input passthrough, which has its own exit handling.
         if matches!(self.fullscreen_overlay, FullscreenOverlay::Agent) {
             // Same live-edge snap as `exit_interactive_mode`: the minimized
@@ -5071,7 +5071,7 @@ impl App {
         let reaction = self.engine.apply(Command::ReloadConfig)?;
         // Only show the "Reloading…" busy when a reload worker was actually
         // spawned (the engine returns `Nothing` on that path). The early-return
-        // cases — a reentrant reload or a busy config writer — return a `Status`
+        // cases, a reentrant reload or a busy config writer, return a `Status`
         // that already explains the situation; setting the busy here would both
         // clobber that message and strand a spinner that no worker will clear.
         let spawned = matches!(reaction, dux_core::engine::EventReaction::Nothing);
@@ -5619,7 +5619,7 @@ impl App {
     /// one-and-done `manage-projects` target. This clones the project that
     /// `selected_project()` resolves (chooser context first, else the selected
     /// agent's project) and then clears `project_chooser_context` so the picked
-    /// target applies to exactly ONE action — a second project action falls
+    /// target applies to exactly ONE action: a second project action falls
     /// back to the selected agent's project. Do NOT use this in display paths;
     /// use `selected_project()` there so rendering never clears the target.
     pub(crate) fn take_selected_project(&mut self) -> Option<Project> {
@@ -6146,7 +6146,7 @@ impl App {
         // Clones for the panic path: if the worker thread panics, the
         // synthesised `BranchRenameCompleted` still runs the handler, which
         // reverts the title AND clears both the in-flight marker and
-        // `rename_expected` — so a panic can never permanently freeze drift
+        // `rename_expected`, so a panic can never permanently freeze drift
         // detection for this session.
         let panic_sid = sid.clone();
         let panic_new_branch = new_branch.clone();
@@ -6197,7 +6197,7 @@ impl App {
         // Only apply the pending Busy if the worker actually started. On a
         // synchronous spawn failure no `BranchRenameCompleted` will ever
         // fire, so the Busy would hang forever and the optimistic title +
-        // `rename_expected` would be orphaned — unwind them and surface an
+        // `rename_expected` would be orphaned. Unwind them and surface an
         // error instead.
         match outcome {
             dux_core::engine::BackgroundSpawn::Spawned => {
@@ -6676,7 +6676,7 @@ impl App {
         self.last_snapshot_id = None;
         self.last_pty_size = (0, 0);
         self.terminal_selection = None;
-        // Switching tabs foregrounds the owning agent — refresh its PR status.
+        // Switching tabs foregrounds the owning agent, so refresh its PR status.
         self.engine.spawn_foreground_pr_check(session_id);
     }
 
@@ -7338,7 +7338,7 @@ mod tests {
         // The whole 127.0.0.0/8 range is loopback on Linux, so a SECOND loopback
         // address (127.0.0.2) stands in for the Tailscale IP: hold 127.0.0.2:P,
         // leave 127.0.0.1:P free. local_addrs builds required(127.0.0.1:P) +
-        // best_effort(127.0.0.2:P) — distinct addresses (no dedupe), so the bind
+        // best_effort(127.0.0.2:P): distinct addresses (no dedupe), so the bind
         // path is exercised exactly as production would hit it.
         let held = std::net::TcpListener::bind("127.0.0.2:0").expect("hold a second-loopback port");
         let held_addr = held.local_addr().expect("held addr");
@@ -7647,7 +7647,7 @@ mod tests {
                 LeftItem::Session(1), // alpha (active, name-sorted)
                 LeftItem::Session(0), // charlie
                 LeftItem::InactiveToggle,
-                LeftItem::Session(2), // zeta   (inactive, verbatim — NOT sorted)
+                LeftItem::Session(2), // zeta   (inactive, verbatim, NOT sorted)
                 LeftItem::Session(3), // aardvark
             ],
             "active bucket name-sorted, inactive tail left in incoming order",
@@ -8359,7 +8359,7 @@ leading_branch = "main"
 
     #[test]
     fn terminal_selection_contains_reverse_anchor() {
-        // Anchor after end — should still work via ordered().
+        // Anchor after end: should still work via ordered().
         let sel = TerminalSelection {
             anchor: TermGridPos { row: 4, col: 5 },
             end: TermGridPos { row: 2, col: 10 },
@@ -8743,7 +8743,7 @@ leading_branch = "main"
 
     /// A reentrant config reload (one already in flight) returns an Info status
     /// and spawns no worker, so `reload_config_from_disk` must NOT set the
-    /// "Reloading…" busy — doing so would clobber the Info and strand a spinner
+    /// "Reloading…" busy. Doing so would clobber the Info and strand a spinner
     /// that nothing would ever clear.
     #[test]
     fn reentrant_reload_does_not_strand_a_busy() {

@@ -68,7 +68,7 @@ pub(super) fn refusal_blink_is_running(elapsed_ms: u128) -> bool {
 ///   button"), so `Up`/`Drag` must not dismiss;
 /// * a stray right-click is not a dismissal either.
 ///
-/// `None` (no modal painted this frame) is not outside anything — see the
+/// `None` (no modal painted this frame) is not outside anything; see the
 /// fail-closed contract on [`OverlayMouseLayoutState::frame`].
 pub(super) fn click_outside_frame(frame: Option<Rect>, mouse: &MouseEvent) -> bool {
     let Some(rect) = frame else {
@@ -148,7 +148,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         // it away. It does not swallow the click either: the modal blinks its
         // frame so the user can see the click landed and was refused, rather
         // than learning nothing and clicking again harder. Do not "simplify"
-        // these to `Cancel` — the answer to an outside click here is a cue, not
+        // these to `Cancel`: the answer to an outside click here is a cue, not
         // a close.
         PromptState::EditMacros { .. }
         | PromptState::BrowseProjects { .. }
@@ -165,7 +165,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
 }
 
 impl App {
-    /// Arm — or RE-arm — the refusal cue on the modal that is open right now.
+    /// Arm, or RE-arm, the refusal cue on the modal that is open right now.
     ///
     /// Unconditionally overwrites any cue already running, so a user who clicks
     /// outside twice sees the cue twice instead of the second click being
@@ -194,8 +194,8 @@ impl App {
             .is_some_and(refusal_blink_is_running)
     }
 
-    /// Whether the cue is in a highlight phase right now — the one thing the
-    /// renderer asks. False both between the two flashes and forever after the
+    /// Whether the cue is in a highlight phase right now, which is the one thing
+    /// the renderer asks. False both between the two flashes and forever after the
     /// cue ends, which is what makes the settled modal byte-identical to one
     /// that never blinked.
     pub(crate) fn refusal_blink_highlight(&self) -> bool {
@@ -259,7 +259,7 @@ impl App {
             // previewed theme applied.
             PromptState::ChangeTheme(_) => self.cancel_change_theme(),
 
-            // Restores `return_prompt` — the project browser plus the path the
+            // Restores `return_prompt`: the project browser plus the path the
             // user typed. A bare close destroys both.
             PromptState::AddProjectFailed { .. } => {
                 self.resolve_add_project_failed();
@@ -359,7 +359,7 @@ impl App {
     }
 
     /// The mouse-side entry point: answer an outside click the way the open
-    /// prompt's policy says to — dismiss it, or refuse it visibly — and report
+    /// prompt's policy says to (dismiss it, or refuse it visibly) and report
     /// whether anything was dismissed.
     ///
     /// Called from the ONE place in `handle_prompt_mouse` where the hit-test
@@ -1131,7 +1131,7 @@ mod tests {
         render(&mut app);
         let rect = frame_rect(&app);
 
-        // Inside the border, on no target at all — including the blank
+        // Inside the border, on no target at all, including the blank
         // misclick-safe spacer rows a dialog deliberately keeps.
         for row in rect.y..rect.y + rect.height {
             app.handle_mouse(left_down(rect.x + 1, row));
@@ -1315,7 +1315,7 @@ mod tests {
 
     // ────────────────────────── the help overlay ──────────────────────────
     //
-    // Help is NOT a `PromptState` variant — it lives in `help_scroll` and is
+    // Help is NOT a `PromptState` variant: it lives in `help_scroll` and is
     // handled in `handle_mouse` rather than the prompt mouse path, so
     // `outside_click_policy` (which takes a `&PromptState`) structurally cannot
     // reach it. It still dismisses on an outside click, reusing this module's
@@ -1417,7 +1417,7 @@ mod tests {
     #[test]
     fn the_help_mouse_route_lands_where_the_keyboard_route_lands() {
         // Same scenario, two devices. Everything but the announcement must
-        // match — including the scroll offset, which neither route may leave
+        // match, including the scroll offset, which neither route may leave
         // behind for the next open.
         let by_key = {
             let mut app = test_app(default_bindings());
@@ -1491,7 +1491,7 @@ mod tests {
 
         // Pre-existing, and unchanged here: while help is open the help branch
         // in `handle_key` consumes every key, so the toggle key does not close
-        // it — the close-overlay key does, via `close_top_overlay`, which
+        // it. The close-overlay key does, via `close_top_overlay`, which
         // `handle_key` reaches before that branch.
         toggle_help_key(&mut app);
         assert_eq!(app.help_scroll, Some(0));
@@ -1504,8 +1504,8 @@ mod tests {
 
     // ───────────────── Esc / outside-click parity (the point) ─────────────────
     //
-    // Each of these runs the SAME scenario twice on two fresh apps — cancelled
-    // by Esc, cancelled by an outside click — and compares the state the two
+    // Each of these runs the SAME scenario twice on two fresh apps (cancelled
+    // by Esc, cancelled by an outside click) and compares the state the two
     // routes leave behind. A second "close" path that merely agrees today would
     // pass the dismissal tests above and fail these.
 
@@ -1551,7 +1551,7 @@ mod tests {
     }
 
     /// Open the theme picker and move the cursor off the current theme so a
-    /// live preview is actually applied — otherwise "cancel reverts the
+    /// live preview is actually applied. Otherwise "cancel reverts the
     /// preview" has nothing to revert and the test would pass vacuously.
     fn open_theme_picker_with_live_preview(app: &mut App) {
         app.open_change_theme_prompt().expect("open theme picker");

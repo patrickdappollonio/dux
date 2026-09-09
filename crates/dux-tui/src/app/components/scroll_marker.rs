@@ -58,7 +58,7 @@ pub(crate) fn scroll_marker_rect(area: Rect, content: Rect) -> Rect {
 /// Draw the marker for `content` inside `area`, if there is anything to
 /// indicate.
 ///
-/// `offset`, `viewport`, and `total` must share one unit — see the module docs.
+/// `offset`, `viewport`, and `total` must share one unit; see the module docs.
 /// Nothing is drawn when the content fits, when the pane has no room, or when
 /// the cell would fall outside the frame.
 pub(crate) fn render_scroll_marker(

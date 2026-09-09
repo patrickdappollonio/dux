@@ -162,7 +162,7 @@ impl LineWrapper {
         }
         // What is left is a word wider than the room it can ever get: hard-break
         // it at the row edge, keeping the line's leading indent if that fits.
-        // ratatui does the same — there is no break point to prefer.
+        // ratatui does the same, because there is no break point to prefer.
         if self.row_width + self.space_width <= self.width {
             self.take_space();
         } else {

@@ -253,7 +253,7 @@ impl App {
         // The add is INLINE now: the reaction already carries the FINAL status
         // (the success info from the `Added` arm, or the rollback error). A
         // trailing `set_busy` here would run last and never resolve, leaving a
-        // stuck spinner — so apply the reaction and stop.
+        // stuck spinner, so apply the reaction and stop.
         self.apply_reaction(reaction);
         Ok(())
     }
@@ -776,8 +776,8 @@ impl App {
         // terminal outcomes resolve to a CLEAR in `drain_events` when the
         // `PullRequestResolved` event returns carrying this id. The visible final
         // comes from elsewhere (the name prompt's `set_info` on success, the
-        // engine's error `Status` on failure), so the op only DISMISSES its busy
-        // — but keying it guarantees the spinner is replaced rather than stranding
+        // engine's error `Status` on failure), so the op only DISMISSES its busy,
+        // but keying it guarantees the spinner is replaced rather than stranding
         // to the busy timeout. The id rides through the lookup worker and back.
         let op = dux_core::engine::status_op(format!(
             "Resolving PR for project \"{}\"...",
@@ -3394,7 +3394,7 @@ impl App {
             self.set_error(format!(
                 "Couldn't persist the theme change: {err}. The new theme is loaded for this session only."
             ));
-            // Still apply to the running session — the user explicitly asked
+            // Still apply to the running session: the user explicitly asked
             // for it and we'd rather flash a wrong-color UI than silently
             // ignore the request.
             self.theme = theme;
@@ -3411,7 +3411,7 @@ impl App {
     pub(crate) fn remove_selected_project(&mut self) -> Result<()> {
         if let Some(project) = self.take_selected_project() {
             // Real project: keep the guard. Removing one that still has agents
-            // here would orphan them — use "delete project" to remove agents too.
+            // here would orphan them. Use "delete project" to remove agents too.
             let has_sessions = self
                 .engine
                 .sessions
@@ -4752,7 +4752,7 @@ mod tests {
         let single_instance_lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)
             .expect("single-instance lock for test engine");
         let (worker_tx, worker_rx) = mpsc::channel();
-        // auto_reopen on so bootstrap WOULD relaunch — proving resume's skip.
+        // auto_reopen on so bootstrap WOULD relaunch, proving resume's skip.
         let mut config = Config::default();
         config.ui.auto_reopen_agents = true;
         let config_writer =
@@ -4966,7 +4966,7 @@ mod tests {
     fn start_web_server_double_trigger_is_guarded() {
         // First trigger arms the in-flight guard and shows Busy. A second trigger
         // while the worker is still pending must be REFUSED (no second worker) with
-        // the "already in progress" status — otherwise two workers race to bind the
+        // the "already in progress" status. Otherwise two workers race to bind the
         // same LOCAL MODE ports and the loser surfaces a confusing EADDRINUSE.
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
         app.start_web_server();
@@ -5016,7 +5016,7 @@ mod tests {
     }
 
     /// Mint and stash a server-flip op exactly as `start_web_server` does (without
-    /// spawning the real pre-flight worker), returning nothing — the op lives in
+    /// spawning the real pre-flight worker), returning nothing: the op lives in
     /// `app.pending_server_flip_op`. The keyed busy is shown so the
     /// `ServerFlipPreflightReady` handler under test has a stashed op to advance.
     fn stash_server_flip_op(app: &mut App) {
@@ -5040,7 +5040,7 @@ mod tests {
     fn server_flip_preflight_ready_ok_progresses_busy_and_stashes_flip() {
         // The worker's plain-success path: a constructed event carrying bound
         // listeners and URLs stashes the flip and ADVANCES the keyed busy (via
-        // `progress`) to the URL-bearing line — still a Busy spinner, same op,
+        // `progress`) to the URL-bearing line, still a Busy spinner, same op,
         // which rides until the run loop flips. The op stays stashed (no success
         // final), byte-identical to today.
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
@@ -5282,7 +5282,7 @@ mod tests {
     #[test]
     fn unborn_repo_on_nonstandard_branch_prompts_for_commit_not_branch_warning() {
         // A fresh `git init -b trunk` is unborn, so the no-commits prompt takes
-        // precedence over the non-default-branch heuristic warning — the user
+        // precedence over the non-default-branch heuristic warning: the user
         // just created this branch; warning "that's not main" would be noise.
         fn run_git(cwd: &Path, args: &[&str]) {
             let out = std::process::Command::new("git")
@@ -5418,7 +5418,7 @@ mod tests {
     /// Site 3 Known case CHAINS into worker 2: the op must SURVIVE the inspection
     /// completion (the `DispatchProjectDefaultBranchCheckout` reaction keeps it
     /// alive), with its busy text re-emitted as worker 2's "Checking out…" line on
-    /// the SAME id — one continuous spinner, changing text. Then worker 2's real
+    /// the SAME id, one continuous spinner with changing text. Then worker 2's real
     /// `git switch` completion clears it. Uses a real repo so worker 2 is
     /// deterministic (no synthetic event racing the spawned worker).
     #[test]
@@ -5610,7 +5610,7 @@ mod tests {
         // Regression: the engine handler already writes config.toml through the
         // eager queue (authoritative, with SQLite rollback). The `Added` reaction
         // arm must NOT also write it off-queue via
-        // `persist_config_projects_from_runtime` — that was a DOUBLE write.
+        // `persist_config_projects_from_runtime`, which was a DOUBLE write.
         //
         // The two writes leave byte-identical content, so the only observable that
         // distinguishes one write from two is the WRITE COUNT. We isolate the
@@ -5692,7 +5692,7 @@ mod tests {
     #[test]
     fn combine_flip_warnings_bind_only() {
         // When Tailscale WAS detected but the bind to it failed, there is no
-        // detection warning — only the bind-failure warning surfaces.
+        // detection warning: only the bind-failure warning surfaces.
         let binds = vec!["the Tailscale port is busy.".to_string()];
         let combined = combine_flip_warnings(None, binds).expect("warning present");
         assert_eq!(combined, "the Tailscale port is busy.");
@@ -5703,7 +5703,7 @@ mod tests {
         // A live session arrives from the web server already Running with
         // desired_running set. bootstrap's restore_sessions would flip its
         // status (worktree missing → Exited) and possibly relaunch it; resume
-        // must touch neither — the provider is already alive.
+        // must touch neither, because the provider is already alive.
         let mut session = make_session("agent-1", "codex", "/tmp/nonexistent-worktree");
         session.status = SessionStatus::Active;
         session.desired_running = true;
@@ -5741,7 +5741,7 @@ mod tests {
 
         // The first-load gate is pinned INSIDE the `SessionRestore::Restore`
         // guard. `test_engine_with_sessions` opens a brand-new store, so this
-        // engine has NO `last_seen_version` — the fresh-install shape that would
+        // engine has NO `last_seen_version`, the fresh-install shape that would
         // otherwise show the welcome screen (and, on an upgrade, dispatch the
         // release-notes fetch). A web-server→TUI flip must show neither, and must
         // not stamp the version: the user may still be looking at that screen in
@@ -6414,7 +6414,7 @@ mod tests {
 
     /// With `delete_worktree = false`, the session record is removed but the
     /// worktree on disk is left alone and git is never invoked. The project
-    /// path here is not a git repo — if the code accidentally invoked git it
+    /// path here is not a git repo, so if the code accidentally invoked git it
     /// would return `Err` and this test would catch it.
     #[test]
     fn do_delete_session_preserves_worktree_when_flag_off() {
@@ -6510,7 +6510,7 @@ mod tests {
     }
 
     /// When another session shares the worktree, the worktree must be
-    /// preserved even if the user checked "also delete the worktree" — other
+    /// preserved even if the user checked "also delete the worktree": other
     /// sessions still depend on it. Git must not be invoked.
     #[test]
     fn do_delete_session_keeps_shared_worktree_even_when_flag_on() {
@@ -6548,14 +6548,14 @@ mod tests {
         );
     }
 
-    /// If git fails to remove the worktree, the session record must remain —
-    /// otherwise the user loses their agent with no way to retry. We force
+    /// If git fails to remove the worktree, the session record must remain.
+    /// Otherwise the user loses their agent with no way to retry. We force
     /// the git call to fail by pointing the project path at a directory that
     /// is not a git repository.
     #[test]
     fn do_delete_session_preserves_session_when_git_fails() {
         let project_dir = tempdir().expect("project tempdir");
-        // Intentionally NOT a git repo — `git worktree remove` will exit
+        // Intentionally NOT a git repo, so `git worktree remove` will exit
         // non-zero, which bubbles up as Err from git::remove_worktree.
         let worktree_dir = tempdir().expect("worktree tempdir");
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
@@ -6878,7 +6878,7 @@ mod tests {
 
     /// When the session is already gone AND the status line shows a Busy
     /// message from an *unrelated* operation (push, pull, etc.), the worker
-    /// completion should not clobber it — the message text doesn't match
+    /// completion should not clobber it: the message text doesn't match
     /// ours, even though the tone is also Busy.
     #[test]
     fn worktree_remove_completed_does_not_clobber_unrelated_busy() {
@@ -6958,7 +6958,7 @@ mod tests {
         app.delete_selected_project()
             .expect("should return Ok (error reported via status line)");
 
-        // Session must still be present — deletion was refused.
+        // Session must still be present, because deletion was refused.
         assert!(
             app.engine.sessions.iter().any(|s| s.id == "s1"),
             "session must not be removed when deletion is blocked",

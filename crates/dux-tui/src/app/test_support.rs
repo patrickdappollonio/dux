@@ -382,7 +382,7 @@ pub(crate) fn enter_scroll_mode(app: &mut App, lines: usize) {
 /// Deterministically wait until the PTY child for the active terminal surface
 /// has parked its cursor at the given (row, col), polling the live snapshot
 /// instead of guessing a fixed sleep. The caller must have set up the surface
-/// so `refresh_snapshot_buf` resolves a provider — either `session_surface ==
+/// so `refresh_snapshot_buf` resolves a provider: either `session_surface ==
 /// Agent` with the session's provider in `app.engine.providers`, or
 /// `session_surface == Terminal` with `active_terminal_id` pointing at an
 /// `app.engine.companion_terminals` entry. Panics with the observed cursor if

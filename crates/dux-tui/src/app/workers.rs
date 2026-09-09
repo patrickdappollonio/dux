@@ -2016,7 +2016,7 @@ mod tests {
 
     /// A CLEAN exit (code 0) of the focused extra tab closes the tab itself:
     /// the user deliberately ended that conversation (e.g. /exit), so the row
-    /// is deleted and — with no live sibling left — the pane minimizes and
+    /// is deleted and, with no live sibling left, the pane minimizes and
     /// focus lands in the list, exactly like a single agent's clean exit.
     #[test]
     fn focused_extra_tab_clean_exit_closes_the_tab_and_minimizes() {
@@ -2040,7 +2040,7 @@ mod tests {
 
     /// A CRASH (non-zero exit) of the focused extra tab keeps the tab: the
     /// dormant relaunch screen is the crash-diagnosis surface, so the row
-    /// survives and the fullscreen overlay stays up — but interactive input
+    /// survives and the fullscreen overlay stays up, but interactive input
     /// still drops immediately so every escape hatch works.
     #[test]
     fn focused_extra_tab_crash_keeps_the_dormant_tab() {
@@ -2208,7 +2208,7 @@ mod tests {
     }
 
     /// Creating an agent moves the cursor onto the new agent, so a lingering
-    /// `manage-projects` target must be cleared — otherwise a follow-up project
+    /// `manage-projects` target must be cleared. Otherwise a follow-up project
     /// action would resolve the stale pick instead of the new agent's project.
     #[test]
     fn create_committed_view_clears_manage_projects_target() {
