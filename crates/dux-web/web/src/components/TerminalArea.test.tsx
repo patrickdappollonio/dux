@@ -86,6 +86,7 @@ installBootStubs()
 // which eagerly imports the multi-MB Monaco bundle; Monaco cannot initialize
 // under vitest (see the note in `lib/pathExt.ts`).
 const { TerminalArea } = await import("./TerminalArea")
+const { terminalAreaModel } = await import("./terminalAreaModel")
 
 function makeState(overrides: Partial<DuxState> = {}): DuxState {
   return {
@@ -403,5 +404,74 @@ describe("TerminalArea project terminals", () => {
       id: "pt-1",
       owner: { kind: "project", projectId: "p1" },
     })
+  })
+})
+
+// The model is what the center pane is decided from; the render below it is a
+// layout. These cover the ids and the lanes directly, where the rendered tests
+// above cover the dormant-card rule through the real surface.
+describe("terminalAreaModel", () => {
+  const model = (over: Record<string, unknown> = {}) =>
+    terminalAreaModel({
+      target: { kind: "agent", sessionId: "s1", tabId: "b2" },
+      spine: dormantSpine(),
+      bootstrap: null,
+      selectedSessionId: "s1",
+      terminalEpoch: 0,
+      startedDormantTabs: [],
+      pendingSlotTab: {},
+      ...over,
+    } as never)
+
+  it("keys an agent pane by the focused TAB and the reconnect epoch", () => {
+    expect(model().targetId).toBe("b2")
+    expect(model().paneKey).toBe("b2:0")
+    expect(model({ terminalEpoch: 4 }).paneKey).toBe("b2:4")
+  })
+
+  it("keys a terminal pane by the terminal id, epoch-free", () => {
+    const terminal = model({
+      target: {
+        kind: "terminal",
+        terminalId: "pt-1",
+        owner: { kind: "project", projectId: "p1" },
+      },
+      terminalEpoch: 7,
+    })
+    expect(terminal.targetId).toBe("pt-1")
+    expect(terminal.paneKey).toBe("pt-1")
+    expect(terminal.focusedTab).toBeUndefined()
+    expect(terminal.session).toBeUndefined()
+    expect(terminal.tabs).toEqual([])
+  })
+
+  it("resolves the owning session and the focused tab for an agent", () => {
+    const m = model()
+    expect(m.session?.id).toBe("s1")
+    expect(m.tabs.map((t) => t.id)).toEqual(["s1", "b2"])
+    expect(m.focusedTab?.id).toBe("b2")
+    expect(m.slotTabId).toBe("s1")
+  })
+
+  it("puts the pull-request lane below the terminal only on the bottom setting", () => {
+    expect(model().bannerAtBottom).toBe(false)
+    expect(
+      model({ bootstrap: { pr_banner_position: "bottom" } }).bannerAtBottom,
+    ).toBe(true)
+    expect(
+      model({ bootstrap: { pr_banner_position: "top" } }).bannerAtBottom,
+    ).toBe(false)
+  })
+
+  it("has no pull request when the selected session names none", () => {
+    expect(model().pr).toBeNull()
+    expect(model({ selectedSessionId: null }).pr).toBeNull()
+  })
+
+  it("cards a dormant extra tab and leaves the live slot tab alone", () => {
+    expect(model().dormant).toBe(true)
+    expect(
+      model({ target: { kind: "agent", sessionId: "s1", tabId: "s1" } }).dormant,
+    ).toBe(false)
   })
 })

@@ -9,18 +9,12 @@ import { PrBanner } from "@/components/PrBanner"
 import { TheaterChrome } from "@/components/TheaterChrome"
 import { TheaterPill } from "@/components/TheaterPill"
 import { Welcome } from "@/components/Welcome"
-import {
-  dormantTabNeedsCard,
-  shouldShowTabStrip,
-  slotTabIdOf,
-} from "@/lib/agentTabs"
+import { shouldShowTabStrip } from "@/lib/agentTabs"
 import { useDux } from "@/lib/store"
-import type { DuxState } from "@/lib/store"
-import { ownerSessionId as terminalOwnerSessionId } from "@/lib/terminalOwner"
 import type { Bootstrap } from "@/lib/bootstrapApi"
 import type { AgentTabView, PrView, SessionView } from "@/lib/types"
 
-type SelectedTarget = NonNullable<DuxState["selectedTarget"]>
+import { terminalAreaModel, type SelectedTarget } from "./terminalAreaModel"
 
 function PrLane({
   pr,
@@ -175,51 +169,25 @@ export function TerminalArea() {
     return <Welcome />
   }
 
-  // The PR belongs to the owning session, so it shows whether the agent or one of
-  // its companion terminals is focused, as in the TUI. Placement honours the same
-  // config: "bottom" puts the lane below the terminal, anything else above.
-  const pr =
-    spine?.sessions.find((s) => s.id === selectedSessionId)?.pr ?? null
-  const bannerAtBottom = bootstrap?.pr_banner_position === "bottom"
-
-  // For an agent the streamed id is the FOCUSED TAB id; for a terminal it is
-  // the terminal id. Key by that id so switching tabs/terminals remounts the
-  // pane cleanly.
-  const targetId =
-    selectedTarget.kind === "terminal"
-      ? selectedTarget.terminalId
-      : selectedTarget.tabId
-  // A reconnect bumps `terminalEpoch` so an already-focused agent pane remounts
-  // and re-subscribes to the freshly launched provider. Terminals don't
-  // reconnect, so the epoch only affects the agent key.
-  const paneKey =
-    selectedTarget.kind === "agent" ? `${targetId}:${terminalEpoch}` : targetId
-
-  // The owning session, and for an agent the focused tab, which is what the tab
-  // strip and the dormant-card gate need. A project terminal has none, and every
-  // session-scoped branch below is agent-only or tolerates `undefined`, so the
-  // lossy `ownerSessionId` answers exactly the question asked.
-  const ownerSessionId =
-    selectedTarget.kind === "agent"
-      ? selectedTarget.sessionId
-      : terminalOwnerSessionId(selectedTarget.owner)
-  const session = spine?.sessions.find((s) => s.id === ownerSessionId)
-  const tabs = session?.tabs ?? []
-  const focusedTab =
-    selectedTarget.kind === "agent"
-      ? tabs.find((t) => t.id === selectedTarget.tabId)
-      : undefined
-  const slotTabId = slotTabIdOf(ownerSessionId ?? "", session, pendingSlotTab)
-  // Whether this tab gets the "Start session" card instead of the pane. The
-  // helper owns the whole rule (a dormant extra tab waits; the agent's first tab
-  // starts on selection unless its last run failed); see `dormantTabNeedsCard`.
-  const dormant = dormantTabNeedsCard(
-    selectedTarget,
+  const {
+    pr,
+    bannerAtBottom,
+    targetId,
+    paneKey,
     session,
+    tabs,
     focusedTab,
-    startedDormantTabs,
     slotTabId,
-  )
+    dormant,
+  } = terminalAreaModel({
+    target: selectedTarget,
+    spine,
+    bootstrap,
+    selectedSessionId,
+    terminalEpoch,
+    startedDormantTabs,
+    pendingSlotTab,
+  })
 
   // The Suspense fallback is null because TerminalPane shows its own readiness
   // spinner on mount, and ChunkBoundary wraps Suspense rather than sitting inside
