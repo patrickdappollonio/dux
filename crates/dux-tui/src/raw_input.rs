@@ -103,6 +103,21 @@ pub fn is_sgr_mouse(seq: &[u8]) -> bool {
         && matches!(seq.last(), Some(b'M' | b'm'))
 }
 
+/// Decode the modifier keys an SGR button byte reports in bits 2, 3 and 4.
+fn sgr_modifiers(cb: u16) -> KeyModifiers {
+    let mut modifiers = KeyModifiers::empty();
+    if cb & 4 != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if cb & 8 != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if cb & 16 != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    modifiers
+}
+
 /// Decode the button an SGR button byte names, or `None` for the bit pattern
 /// that names no button (a motion report with nothing held).
 fn sgr_button(button_bits: u16) -> Option<MouseButton> {
@@ -142,17 +157,7 @@ pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
     let is_motion = cb & 32 != 0;
     let button_bits = cb & 0b11000011; // mask out motion bit (bit 5) and modifier bits (4,3)
 
-    // Extract modifier keys from SGR button byte (bits 2, 3, 4).
-    let mut modifiers = KeyModifiers::empty();
-    if cb & 4 != 0 {
-        modifiers |= KeyModifiers::SHIFT;
-    }
-    if cb & 8 != 0 {
-        modifiers |= KeyModifiers::ALT;
-    }
-    if cb & 16 != 0 {
-        modifiers |= KeyModifiers::CONTROL;
-    }
+    let modifiers = sgr_modifiers(cb);
 
     let kind = if cb & 64 != 0 {
         // Scroll events.
@@ -964,6 +969,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_sgr_mouse_alt_modifier() {
+        // Alt+left click: cb = 0 | 8 = 8
+        let ev = parse_sgr_mouse(b"\x1b[<8;10;5M").unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Down(MouseButton::Left));
+        assert_eq!(ev.modifiers, KeyModifiers::ALT);
+    }
+
+    #[test]
     fn parse_sgr_mouse_shift_drag() {
         // Shift+left drag: cb = 32 (motion) | 4 (shift) = 36
         let seq = b"\x1b[<36;20;10M";
@@ -979,6 +992,20 @@ mod tests {
         let ev = parse_sgr_mouse(seq).unwrap();
         assert_eq!(ev.kind, MouseEventKind::Up(MouseButton::Left));
         assert!(ev.modifiers.contains(KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn sgr_modifiers_decodes_each_bit_and_their_combinations() {
+        assert_eq!(sgr_modifiers(0), KeyModifiers::empty());
+        assert_eq!(sgr_modifiers(4), KeyModifiers::SHIFT);
+        assert_eq!(sgr_modifiers(8), KeyModifiers::ALT);
+        assert_eq!(sgr_modifiers(16), KeyModifiers::CONTROL);
+        assert_eq!(
+            sgr_modifiers(28),
+            KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL
+        );
+        // The button and motion bits are not modifiers.
+        assert_eq!(sgr_modifiers(0b0110_0011), KeyModifiers::empty());
     }
 
     #[test]
