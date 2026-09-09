@@ -360,6 +360,31 @@ function inspectionBranch(
   return branchWarningCopy(inspection.warning, inspection.currentBranch)
 }
 
+// The explanatory panel under the picker, one field per panel and at most one of
+// them set. Each waits for the inspection to resolve, so a folder mid-inspection
+// explains nothing rather than explaining the last folder.
+function inspectionPanels(
+  inspection: ProjectInspection | null,
+  primaryAction: string,
+  needsInitialCommit: boolean,
+) {
+  const noCommits = needsInitialCommit ? noCommitsCopy() : null
+  if (!inspection || inspection.loading) {
+    return { init: null, blocked: null, noCommits }
+  }
+  return {
+    init:
+      primaryAction === "init-repo"
+        ? initRepoCopy(inspection.gitignoreCandidates ?? [])
+        : null,
+    blocked:
+      primaryAction === "blocked"
+        ? insideRepoCopy(inspection.repoRoot ?? null)
+        : null,
+    noCommits,
+  }
+}
+
 function inspectionState(
   selected: string | null,
   candidate: DuxState["projectPathInspection"],
@@ -376,22 +401,12 @@ function inspectionState(
     willCheckout,
     hasBranchWarning: Boolean(branch),
   })
-  const resolved = Boolean(inspection && !inspection.loading)
-
   return {
     inspection,
     inspecting: inspection?.loading ?? false,
     primary,
     branch,
-    init:
-      resolved && primary.action === "init-repo"
-        ? initRepoCopy(inspection?.gitignoreCandidates ?? [])
-        : null,
-    blocked:
-      resolved && primary.action === "blocked"
-        ? insideRepoCopy(inspection?.repoRoot ?? null)
-        : null,
-    noCommits: needsInitialCommit ? noCommitsCopy() : null,
+    ...inspectionPanels(inspection, primary.action, needsInitialCommit),
   }
 }
 
