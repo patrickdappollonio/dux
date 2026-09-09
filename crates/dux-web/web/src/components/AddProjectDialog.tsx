@@ -414,7 +414,7 @@ function inspectionState(
 // "Use this folder" row and the "Up to <folder>" parent row so the two folder
 // names render identically and cannot drift.
 // The browser body is mounted only while the dialog is open so its local
-// `selected`/`name` state resets on each open — no set-state-in-effect needed.
+// `selected`/`name` state resets on each open, so no set-state-in-effect is needed.
 function AddProjectBrowser() {
   const {
     browsePath,

@@ -299,7 +299,7 @@ function FileRow({
             {busy ? <Loader2 className="motion-safe:animate-spin" /> : <Ellipsis />}
           </DropdownMenuTrigger>
           <DropdownMenuContent side="bottom" align="end">
-            {/* Open in editor — desktop only (Monaco is poor on touch). Skipped
+            {/* Open in editor, desktop only (Monaco is poor on touch). Skipped
                 for deleted files (nothing on disk to edit). */}
             {kind !== "deleted" && (
               <DropdownMenuItem

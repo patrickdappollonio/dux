@@ -529,7 +529,7 @@
 }
   /* Image layout helpers for prose. The classes are applied from Markdown via
      a URL-hash convention (`![alt](/img.png#right)`) handled by the
-     rehype-prose-images plugin — never hand-written HTML. `full-width` fills
+     rehype-prose-images plugin, never hand-written HTML. `full-width` fills
      the column; `align-left`/`align-right` float the image so text wraps beside
      it; `align-center` centers a block. On narrow screens the floats drop to
      full width so they're never squeezed into an unreadable sliver. */

@@ -22,7 +22,7 @@ export const SHEET_POSITIONER_STYLE: React.CSSProperties = {
 
 // The sheet caps at 85dvh and scrolls internally, which leaves an uncovered
 // gap at the top of the screen; the backdrop underneath covers that gap, so a
-// tap there is an outside press and dismisses (base-ui's own dismissal — the
+// tap there is an outside press and dismisses (base-ui's own dismissal, so the
 // backdrop needs no click handler). Styled after SheetOverlay in sheet.tsx.
 export const SHEET_BACKDROP_CLASS =
   "fixed inset-0 z-50 bg-black/10 supports-backdrop-filter:backdrop-blur-sm transition-opacity duration-150 data-starting-style:opacity-0 data-ending-style:opacity-0 motion-reduce:transition-none"

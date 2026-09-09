@@ -113,7 +113,7 @@ export function mapResult(data: PagefindData, maxSub = 3): SearchResult {
 export function nextIndex(current: number, delta: number, length: number): number {
   if (length <= 0) return -1;
   // From "nothing selected", ArrowDown picks the first item and ArrowUp the
-  // last — the conventional command-palette behavior.
+  // last, the conventional command-palette behavior.
   if (current < 0) return delta > 0 ? 0 : length - 1;
   return (current + delta + length) % length;
 }

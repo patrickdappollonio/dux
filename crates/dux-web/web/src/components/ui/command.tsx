@@ -79,7 +79,7 @@ function CommandInput({
         <CommandPrimitive.Input
           data-slot="command-input"
           // text-base on phones (md:text-sm on desktop) so iOS Safari doesn't
-          // zoom the page when the search field focuses — matches the Input /
+          // zoom the page when the search field focuses. Matches the Input /
           // Textarea primitives' anti-zoom convention.
           className={cn(
             "w-full text-base outline-hidden disabled:cursor-not-allowed disabled:opacity-50 md:text-sm",

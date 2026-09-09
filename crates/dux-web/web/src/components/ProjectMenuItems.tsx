@@ -107,7 +107,7 @@ export function ProjectMenuItems({ id }: { id: string }) {
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           {/* The destructive cascade (also deletes agents' worktrees on disk).
-              Only for a real project — the DeleteProject command 404s on an
+              Only for a real project: the DeleteProject command 404s on an
               orphaned ghost, and there is nothing on disk to cascade. Neutral
               color; the trailing "…" plus the confirm dialog are the danger
               signal. */}

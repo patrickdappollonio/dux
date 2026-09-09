@@ -22,7 +22,7 @@ const docs = defineCollection({
 
 // Blog posts are plain Markdown files in `website/blog/`. Drop a new `.md` file
 // in there, give it frontmatter, and it becomes a post at `/blog/<filename>`
-// automatically — listed on the blog index, in the RSS feed, in search, and in
+// automatically: listed on the blog index, in the RSS feed, in search, and in
 // the homepage teaser. Posts are a flat reverse-chronological feed (no tags or
 // categories); ordering comes from `pubDate`.
 const blog = defineCollection({

@@ -117,7 +117,7 @@ export function ConfigEditorDialog() {
           </p>
         ) : configEditorError && !configEditorContent ? (
           // Load failed (no content). Never render an editable, Save-enabled
-          // editor here — saving its blank content would overwrite the real
+          // editor here: saving its blank content would overwrite the real
           // config.toml. Show the error and a Retry instead.
           <div className="flex flex-col gap-4 py-8">
             <p className="text-center text-sm text-destructive">

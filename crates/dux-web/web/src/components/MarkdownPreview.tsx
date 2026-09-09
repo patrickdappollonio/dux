@@ -12,7 +12,7 @@ interface MarkdownPreviewProps {
   content: string
   // The session whose worktree backs the relative-image proxy.
   root: EditorRoot
-  // The markdown file's worktree path — relative image `src`s resolve against its
+  // The markdown file's worktree path: relative image `src`s resolve against its
   // directory. Null when no file is open (relative images then aren't rewritten).
   path: string | null
 }

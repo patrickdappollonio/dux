@@ -35,7 +35,7 @@ import {
 import type { ProjectWorktreeEntryView } from "@/lib/types"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
-// The last path segment (the worktree directory's name) — what the TUI shows
+// The last path segment (the worktree directory's name) is what the TUI shows
 // as the entry label. Falls back to the full path for a root-level path.
 function pathTail(path: string): string {
   const parts = path.split("/").filter(Boolean)
@@ -222,7 +222,7 @@ function ConfirmDeleteWorktree() {
 }
 
 // Mounted only while the dialog is open so its local select/name state resets on
-// each open — no set-state-in-effect needed (matching AddProjectDialog).
+// each open, with no set-state-in-effect needed (matching AddProjectDialog).
 function WorktreesBody({ projectId }: { projectId: string }) {
   const {
     attachWorktreeEntries,

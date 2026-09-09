@@ -11,7 +11,7 @@
 //      fallback, so the browser picks the smaller format. SVGs (already
 //      vector) and remote images are left as a plain <img>. The .webp siblings
 //      are produced at build time by scripts/generate-webp.mjs, which scans the
-//      same public rasters — so a <source> this plugin emits always resolves.
+//      same public rasters, so a <source> this plugin emits always resolves.
 //
 // Written as a small manual hast walk to avoid a unist-util-visit dependency.
 

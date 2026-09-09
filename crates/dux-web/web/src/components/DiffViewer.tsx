@@ -7,7 +7,7 @@ import { monacoLanguageForPath } from "@/lib/monacoSetup"
 import { allDeleteDiffOptions } from "@/lib/diffPresentation"
 
 interface DiffViewerProps {
-  // Worktree-relative path — used only to pick the syntax language for both sides.
+  // Worktree-relative path, used only to pick the syntax language for both sides.
   path: string
   // The user's per-file language override, from the header's language picker.
   // When set it wins over the path-derived guess, for both sides of the diff:
@@ -98,7 +98,7 @@ export default function DiffViewer({
         // The original side is always read-only; be explicit so a future Monaco
         // default change can't make it editable.
         originalEditable: false,
-        // Interleaved (unified) rather than two side-by-side panes — keeps the
+        // Interleaved (unified) rather than two side-by-side panes: keeps the
         // file tree's space and matches the old diff's single-column layout.
         renderSideBySide: false,
         fontSize: 14,
@@ -111,9 +111,9 @@ export default function DiffViewer({
         minimap: { enabled: false },
         scrollBeyondLastLine: false,
         automaticLayout: true,
-        // Hide the inline change-accept arrows — this is a viewer, not a merge UI.
+        // Hide the inline change-accept arrows: this is a viewer, not a merge UI.
         renderMarginRevertIcon: false,
-        // All-delete diffs drop the overview ruler (canvas — CSS can't blank
+        // All-delete diffs drop the overview ruler (a canvas, so CSS can't blank
         // its phantom green speck) and the current-line highlight (it borders
         // the phantom empty row). See allDeleteDiffOptions for the reasoning.
         ...allDeleteDiffOptions(allDelete),

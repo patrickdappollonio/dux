@@ -24,7 +24,7 @@ import type { EditorRoot } from "@/lib/editorRoot"
 
 const noop = () => {}
 
-const ROW_HEIGHT = 28 // px — must match the py-1 + text-sm row height
+const ROW_HEIGHT = 28 // px, must match the py-1 + text-sm row height
 const OVERSCAN = 10 // rows to render above/below the viewport
 
 interface FileTreeProps {

@@ -8,7 +8,7 @@ export async function copyToClipboard(text: string): Promise<boolean> {
       return true
     }
   } catch {
-    // Permission denied / not focused / insecure context — try the legacy path.
+    // Permission denied / not focused / insecure context: try the legacy path.
   }
   return legacyCopy(text)
 }

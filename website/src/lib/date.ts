@@ -6,7 +6,7 @@
 //
 // Frontmatter dates written as a bare `2026-06-08` are parsed as UTC midnight.
 // Formatting in UTC keeps the displayed day stable regardless of the build
-// machine's timezone — otherwise a build west of UTC would render the previous
+// machine's timezone. Otherwise a build west of UTC would render the previous
 // day.
 export function formatDate(date: Date): string {
   return date.toLocaleDateString("en-US", {

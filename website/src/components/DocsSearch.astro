@@ -119,7 +119,7 @@
     const isOpen = () => !overlay.hasAttribute("hidden");
 
     // Lazy-load the Pagefind runtime on first open. The specifier is built from
-    // BASE_URL so the import is non-static — Vite leaves it alone and the file
+    // BASE_URL so the import is non-static: Vite leaves it alone and the file
     // (generated into /pagefind/ at build time) resolves at runtime.
     function loadPagefind(): Promise<PagefindModule | null> {
       if (pagefind) return Promise.resolve(pagefind);

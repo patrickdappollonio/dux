@@ -19,10 +19,10 @@ const TEXT_LOGO = [
   " ░█████░██  ░█████░██ ░██    ░██ ",
 ].join("\n")
 
-// Tips come from the server's ViewModel — the single source of truth is crates/dux-core/src/welcome.rs (WELCOME_TIPS). Add new tips THERE, with both surface variants.
+// Tips come from the server's ViewModel. The single source of truth is crates/dux-core/src/welcome.rs (WELCOME_TIPS). Add new tips THERE, with both surface variants.
 
 // Render a tip, highlighting `backticked` spans in the foreground accent
-// (the backticks themselves are not shown) — same convention as the TUI.
+// (the backticks themselves are not shown), the same convention as the TUI.
 function TipText({ tip }: { tip: string }) {
   // No platform localization pass here: the web has no command palette and no
   // keyboard shortcuts of its own, so web tips name affordances (the cog menu,
@@ -58,7 +58,7 @@ export function Welcome({ action }: { action?: ReactNode } = {}) {
   const tips = useDux().bootstrap?.welcome_tips ?? []
   // Pick a stable random fraction once per visit to the welcome screen (the
   // component remounts whenever the center pane returns to the idle state).
-  // Storing the fraction — not an index — keeps the choice stable across
+  // Storing the fraction (not an index) keeps the choice stable across
   // ViewModel re-renders while still working when tips arrive AFTER mount.
   const [tipFraction] = useState(() => Math.random())
   const tip =

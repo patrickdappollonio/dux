@@ -45,7 +45,7 @@ const DEFAULT_TINT = FAVICON_COLORS.violet
 
 const HEX_RE = /^#[0-9a-f]{6}$/
 
-// The set of valid hex fills (the curated values) — nothing else is ever
+// The set of valid hex fills (the curated values). Nothing else is ever
 // interpolated into the generated SVG.
 const VALID_FILLS = new Set(Object.values(FAVICON_COLORS))
 

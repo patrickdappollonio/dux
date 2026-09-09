@@ -94,8 +94,8 @@ function ChangeProviderForm({
 }
 
 // Swap which CLI an agent session uses, mirroring the TUI's
-// `change-agent-provider`. The swap is persisted for the NEXT launch — it never
-// kills or relaunches a running agent — so the copy says so. Provider names come
+// `change-agent-provider`. The swap is persisted for the NEXT launch and never
+// kills or relaunches a running agent, so the copy says so. Provider names come
 // from the bootstrap document's `available_providers` (the server's configured list), and
 // the server re-validates the choice.
 export function ChangeProviderDialog() {

@@ -12,7 +12,7 @@ import { autoRevertLanguageId } from "@/lib/editorLanguage"
 export type MonacoInstance = typeof monaco
 
 interface CodeEditorProps {
-  // The worktree-relative path — Monaco infers the language from its extension.
+  // The worktree-relative path: Monaco infers the language from its extension.
   path: string
   // The user's per-file language override. `undefined` means none, and Monaco's
   // own URI inference decides. Changing it re-languages the live model, so a pick

@@ -70,12 +70,12 @@ const SURFACE_LABEL: Record<MacroSurface, string> = {
 }
 
 // The form body mounts only while the dialog is open and seeds its working copy
-// from the store draft via a lazy initializer — no set-state-in-effect. The
+// from the store draft via a lazy initializer, so no set-state-in-effect. The
 // whole list is edited locally; Save sends it wholesale via `update_macros`.
 function MacrosEditor({ initial }: { initial: MacroView[] }) {
   // The bootstrap document holds the authoritative macro list. Until it loads,
   // the draft was seeded empty, so a wholesale save would wipe the server's
-  // macros — disable Save in that window (the store also refuses it defensively).
+  // macros: disable Save in that window (the store also refuses it defensively).
   const { bootstrap } = useDux()
   const [macros, setMacros] = useState<MacroView[]>(() =>
     initial.map((m) => ({ ...m })),
@@ -109,7 +109,7 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
     if (bootstrap === null || validateMacros(next) !== null) return
     void persistMacroOrder(next).then((ok) => {
       if (ok) return
-      // Snap back — but only if nothing else edited the draft while the save
+      // Snap back, but only if nothing else edited the draft while the save
       // was in flight; a functional update makes the check race-free.
       setMacros((current) => (current === next ? prev : current))
     })

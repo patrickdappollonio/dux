@@ -5,12 +5,12 @@
 
 /* "Dux Blocks": a tiny (~6.4KB) subset of DejaVu Sans Mono covering Basic Latin
    plus the full Block Elements range (U+2580-259F), bundled so the block-glyph
-   dux wordmark (U+2591/U+2588 art) renders every glyph — blocks, ASCII, and
-   spaces — from ONE font with ONE advance width. Many system monospace fonts
+   dux wordmark (U+2591/U+2588 art) renders every glyph (blocks, ASCII, and
+   spaces) from ONE font with ONE advance width. Many system monospace fonts
    lack Block Elements, so the browser substitutes those glyphs from a different
    fallback font with a different advance and the art shears device-dependently
    (seen on Android). See src/assets/fonts/dux-blocks.LICENSE for provenance.
-   font-display: block — briefly showing nothing beats flashing sheared art. */
+   font-display: block, because briefly showing nothing beats flashing sheared art. */
 @font-face {
     font-family: "Dux Blocks";
     src: url("./assets/fonts/dux-blocks.woff2") format("woff2");
@@ -102,7 +102,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --font-sans: 'Geist Variable', sans-serif;
     /* The block-art wordmark's font stack (`font-blocks`): the bundled
        "Dux Blocks" subset first (see the @font-face above), system mono only
-       as a fallback. Scoped to the art on purpose — the app-wide --font-mono
+       as a fallback. Scoped to the art on purpose: the app-wide --font-mono
        is deliberately untouched. */
     --font-blocks: "Dux Blocks", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     --color-sidebar-ring: var(--sidebar-ring);
@@ -446,7 +446,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
    option (TerminalPane reads this same var for it), so the visible bar matches
    --xterm-scrollbar-width; the terminal-pane button overlay reserves exactly
    this width so the buttons never sit on top of the scrollbar. The ::-webkit /
-   scrollbar-width rules below slim the native viewport scrollbar defensively —
+   scrollbar-width rules below slim the native viewport scrollbar defensively:
    xterm 6 virtualizes the viewport so it usually shows no thumb, but they cost
    nothing and guard against a fat native bar if a browser ever surfaces one. */
 :root {
@@ -468,7 +468,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 /* Sizing the scrollbar via overviewRuler.width also instantiates an overview-
    ruler canvas; dux registers no decorations, so it's always empty. xterm sets
    this canvas's `display` INLINE on every buffer switch (block on the normal
-   buffer), so !important is required — without it the canvas reappears as an
+   buffer), so !important is required. Without it the canvas reappears as an
    empty foreground-colored streak in the gutter every time an agent exits an
    alt-screen TUI (vim, a pager, a full-screen provider UI) back to the shell. */
 .xterm .xterm-decoration-overview-ruler {
@@ -689,7 +689,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 }
 /* ALL-DELETE diff (a deleted or truncated-to-empty file): hide Monaco's
    phantom trailing "1 +" inserted line. An empty modified TextModel still has
-   one line — Monaco models cannot have zero — so the diff computer reports a
+   one line (Monaco models cannot have zero), so the diff computer reports a
    real insertion for it (measured on monaco 0.55.1: original [1,N) →
    modified [1,2) for every original shape), and git reports zero added lines
    for the same change, so the green row is false content. The marker class is
@@ -699,12 +699,12 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
    These four rules blank the insertion DECORATIONS: line background, margin
    background, char overlay (the empty-range marker rides it), and the +
    sign. The sign needs the `.monaco-editor` prefix because Monaco ships its
-   own `.monaco-editor .insert-sign { display: flex !important }` — a bare
+   own `.monaco-editor .insert-sign { display: flex !important }`, and a bare
    class rule loses that !important tie on specificity; this form matches it
    and wins as the later sheet. The final rule hides the phantom row's line
    number. It MUST scope to `.editor.modified`: the deleted rows' numbers are
    ORDINARY `.line-numbers` elements too, in the sibling `.editor.original`'s
-   margin (they are not view-zone content — that was measured wrong once and
+   margin (they are not view-zone content: that was measured wrong once and
    hid them), so an unscoped rule always matches all of them. The modified
    editor's sole line number in an all-delete diff is the phantom row's. */
 .dux-diff-all-delete .line-insert {
@@ -720,7 +720,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
   display: none !important;
 }
 /* The `.editor.modified` scope does double duty. It picks WHICH line numbers
-   to hide (only the modified editor's — the deleted rows' numbers live in the
+   to hide (only the modified editor's, since the deleted rows' numbers live in the
    sibling `.editor.original` and must survive), and it is also the LOAD-ORDER
    guard: Monaco's own `.monaco-editor .margin-view-overlays .line-numbers`
    rule (display: inline-block, no !important) ships inside the lazy

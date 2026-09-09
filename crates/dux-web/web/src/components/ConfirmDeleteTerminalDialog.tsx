@@ -37,7 +37,7 @@ export function ConfirmDeleteTerminalDialog() {
     closeDeleteTerminal,
   )
   // The title names the STATIC label like the TUI's prompt does ("delete
-  // Terminal 1?"); the running command appears in the warning body instead —
+  // Terminal 1?"); the running command appears in the warning body instead,
   // avoiding the redundant "Close vim?" + "vim is running…" phrasing.
   const title = terminal?.label ?? ""
   const foreground = terminal ? terminalForeground(terminal) : null

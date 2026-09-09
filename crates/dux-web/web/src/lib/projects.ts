@@ -6,14 +6,14 @@ export interface PartitionedProjects {
   // Sessions grouped under their owning project id, in display order.
   grouped: Map<string, SessionView[]>
   // Project ids that have at least one agent (active projects first, with any
-  // orphaned project ids — a session whose project is absent — appended so a
+  // orphaned project ids (a session whose project is absent) appended so a
   // session is never dropped).
   withAgents: string[]
   // Project ids with no agents, sunk below under their own heading.
   withoutAgents: string[]
   // The drag-reorder payload the server expects: every REAL project id in
   // display order (agent-bearing first, then agent-less), with orphan ids
-  // excluded — the server has no project record to reorder for a ghost id.
+  // excluded: the server has no project record to reorder for a ghost id.
   realOrder: string[]
   // Resolve a project id to its display name, falling back to a short id slice.
   projectName: (id: string) => string

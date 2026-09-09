@@ -198,7 +198,7 @@ export interface ReleaseNotesView {
   headline: string
   paragraphs: string[]
   sections: string[]
-  /** The release's own web page — where "Open full notes" goes. */
+  /** The release's own web page, where "Open full notes" goes. */
   html_url: string
 }
 

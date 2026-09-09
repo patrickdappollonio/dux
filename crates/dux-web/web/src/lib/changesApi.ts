@@ -19,7 +19,7 @@ export interface SessionChangesResponse {
 export class ChangesFetchError extends Error {
   readonly status: number
   // The parsed `Retry-After` (seconds) on a 409 git-lock/rebase response, when
-  // present. Advisory — the poller self-heals via events regardless.
+  // present. Advisory: the poller self-heals via events regardless.
   readonly retryAfter: number | null
 
   constructor(message: string, status: number, retryAfter: number | null = null) {

@@ -158,7 +158,7 @@ import {
 // (lib/monacoSetup), so the heavy monaco chunk is loaded once for both.
 const CodeEditor = lazy(() => import("./CodeEditor"))
 const DiffViewer = lazy(() => import("./DiffViewer"))
-// react-markdown is only needed when previewing a markdown file — lazy-load it
+// react-markdown is only needed when previewing a markdown file, so lazy-load it
 // into its own chunk so it never weighs on the main bundle or the editor open.
 const MarkdownPreview = lazy(() => import("./MarkdownPreview"))
 
@@ -356,7 +356,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   }
   // The flat file list backing the "Search files…" box (fetched from the
   // editor's session directly, independent of the changed-files watch). The
-  // TREE does not consume this — it browses lazily via fileApi.tree.
+  // TREE does not consume this: it browses lazily via fileApi.tree.
   const [searchIndex, setSearchIndex] = useState<string[]>([])
   const [searchLoading, setSearchLoading] = useState(true)
   // True when the server capped the search index before sending all paths.

@@ -18,7 +18,7 @@ export class EventsSocket extends ReconnectingSocket {
   onEvent: (ev: EventsServerMessage) => void = () => {}
 
   // The current interest set (sorted for deterministic test assertions). Read
-  // only — mutate via subscribe/unsubscribe.
+  // only. Mutate via subscribe/unsubscribe.
   get topics(): string[] {
     return [...this.subscriptions].sort()
   }

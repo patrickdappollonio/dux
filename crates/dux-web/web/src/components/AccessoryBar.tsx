@@ -18,7 +18,7 @@ interface AccessoryBarProps {
   // applying any latched Alt prefix and consulting cursor-key mode for arrows.
   onEsc: () => void
   onTab: () => void
-  // Insert a soft newline (LF / Ctrl-j) — the touch equivalent of Shift-Enter,
+  // Insert a soft newline (LF / Ctrl-j): the touch equivalent of Shift-Enter,
   // which no soft keyboard can produce.
   onNewline: () => void
   onArrow: (dir: "up" | "down" | "left" | "right") => void
@@ -106,7 +106,7 @@ function KeyButton({
       className={cn(
         "h-10 min-w-0 flex-1",
         // Latched modifiers get an accent fill so the active state is
-        // unmistakable on a glance — accent tokens, never raw colors.
+        // unmistakable on a glance. Accent tokens, never raw colors.
         pressed && "bg-primary text-primary-foreground hover:bg-primary/80",
       )}
     >
@@ -131,7 +131,7 @@ export function AccessoryBar({
   // Safe-area insets are NOT applied here: the mobile root pads its own bottom.
   return (
     <div className="flex shrink-0 flex-col gap-1.5 border-t bg-background px-1 py-1">
-      {/* Row one — modifier / special keys sent to the program. */}
+      {/* Row one: modifier / special keys sent to the program. */}
       <div className="flex items-center gap-1">
         <KeyButton label="Esc" onActivate={onEsc} />
         <KeyButton label="Tab" onActivate={onTab} />
@@ -173,10 +173,10 @@ export function AccessoryBar({
           </>
         ) : null}
       </div>
-      {/* Row two — navigation. The four cursor arrows (sent to the program, keep
+      {/* Row two: navigation. The four cursor arrows (sent to the program, keep
           focus) and PgUp/PgDn (scroll the xterm viewport, blur to dismiss the
           keyboard; see onScroll) do OPPOSITE things to focus, so a divider with
-          breathing room separates the two clusters — a mistap on PgUp while
+          breathing room separates the two clusters: a mistap on PgUp while
           aiming for → would otherwise yank the keyboard away (misclick-safe
           spacing, per the CLAUDE.md tenet). */}
       <div className="flex items-center gap-1">

@@ -123,8 +123,8 @@ function TabPill({
             onClose()
           }}
           // max-md:size-8 keeps a larger-than-visual tap area (32px against
-          // the icon's 14px glyph) without adding to the pill's 34px height
-          // — the cheap tap forgiveness the reduced pill still affords.
+          // the icon's 14px glyph) without adding to the pill's 34px height:
+          // the cheap tap forgiveness the reduced pill still affords.
           className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground max-md:size-8"
         >
           <X className="size-3.5" />

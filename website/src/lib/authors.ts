@@ -1,5 +1,5 @@
 // Known blog authors and their personal links. Add a contributor here once and
-// every post with `author: "<their name>"` gets their byline auto-linked — posts
+// every post with `author: "<their name>"` gets their byline auto-linked, so posts
 // never repeat the URL. An author not listed here renders as plain text (no
 // link), so a one-off guest writer still works without an entry.
 

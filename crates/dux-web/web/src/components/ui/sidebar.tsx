@@ -551,7 +551,7 @@ function SidebarMenuAction({
           // opacity transition) instead of popping in instantly. It also stays
           // revealed while its menu is open: Base UI marks the open trigger with
           // `data-popup-open` (NOT `aria-expanded=true`), so the pin keys off
-          // that — otherwise the action un-reveals the moment the cursor leaves
+          // that. Otherwise the action un-reveals the moment the cursor leaves
           // the row, dragging the anchored popover with it.
           showOnHover &&
             "group-focus-within/menu-item:translate-x-0 group-focus-within/menu-item:opacity-100 group-hover/menu-item:translate-x-0 group-hover/menu-item:opacity-100 peer-data-active/menu-button:text-sidebar-accent-foreground data-[popup-open]:translate-x-0 data-[popup-open]:opacity-100 md:translate-x-1 md:opacity-0",

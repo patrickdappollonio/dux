@@ -42,7 +42,7 @@ export function MacroPopover({
   // cursor returns to the terminal rather than the "Macros…" trigger button.
   // That is the whole point of the feature: running a macro pastes its text into
   // the agent's input WITHOUT submitting, so focus must be on the terminal for
-  // the user to review and press Enter to submit — with the default
+  // the user to review and press Enter to submit. With the default
   // trigger-return, Enter would just re-press this trigger and re-open the menu.
   // This intentionally overrides the usual "return focus to the trigger" popover
   // convention because the trigger floats over a live terminal the user drives.
