@@ -2529,37 +2529,7 @@ impl Engine {
         // status: a probe that moves NotInstalled to Unreachable changes
         // nothing anybody can see.
         let was_available = self.pr_agent_command_available();
-        let mut unreachable_reason: Option<String> = None;
-        let status = match outcome {
-            crate::gh::GhProbe::NotInstalled => {
-                self.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
-                GhStatus::NotInstalled
-            }
-            crate::gh::GhProbe::Transient(reason) => {
-                logger::info(&format!(
-                    "[gh-integration] gh host probe did not decide ({reason}); \
-                     keeping the last known host policy, and dux will retry",
-                ));
-                // A transient answer never overwrites a decision dux already
-                // holds. It only names the state dux is genuinely in when it
-                // has never had one: unreachable, not logged out. Recording it
-                // as NotAuthenticated is the bug this variant exists for.
-                unreachable_reason = Some(reason);
-                if matches!(self.gh_status, GhStatus::Unknown) {
-                    GhStatus::Unreachable
-                } else {
-                    self.gh_status
-                }
-            }
-            crate::gh::GhProbe::Decided { available, policy } => {
-                self.set_github_host_policy(policy);
-                if available {
-                    GhStatus::Available
-                } else {
-                    GhStatus::NotAuthenticated
-                }
-            }
-        };
+        let (status, unreachable_reason) = self.adopt_gh_probe(outcome);
         self.gh_status = status;
         if matches!(status, GhStatus::Available) && self.github_integration_enabled {
             logger::info(&format!(
@@ -2572,24 +2542,7 @@ impl Engine {
             self.spawn_pr_sync_worker();
             self.spawn_initial_pr_refresh();
         } else {
-            // Names the probe result honestly and, when dux has not given up on
-            // it, says so: a reader of `dux.log` should never have to guess
-            // whether a bad answer is permanent.
-            let retry = if self.github_integration_enabled {
-                let interval = self.github_probe_interval();
-                if interval.is_zero() {
-                    "; the periodic re-check is disabled, so re-check on demand \
-                     from the command palette or the web app menu"
-                        .to_string()
-                } else {
-                    format!(
-                        "; dux will retry every {}s until GitHub features work again",
-                        interval.as_secs(),
-                    )
-                }
-            } else {
-                String::new()
-            };
+            let retry = self.gh_probe_log_retry_clause();
             logger::info(&format!(
                 "[gh-integration] gh status: {:?}, integration enabled: {}{retry}",
                 status, self.github_integration_enabled,
@@ -2626,6 +2579,61 @@ impl Engine {
             1 => reactions.pop().expect("one reaction"),
             _ => EventReaction::Multi(reactions),
         }
+    }
+
+    /// The status a probe result puts dux in, and the reason a transient
+    /// failure gave, adopting the host policy a decisive answer carries.
+    fn adopt_gh_probe(&mut self, outcome: crate::gh::GhProbe) -> (GhStatus, Option<String>) {
+        match outcome {
+            crate::gh::GhProbe::NotInstalled => {
+                self.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
+                (GhStatus::NotInstalled, None)
+            }
+            crate::gh::GhProbe::Transient(reason) => {
+                logger::info(&format!(
+                    "[gh-integration] gh host probe did not decide ({reason}); \
+                     keeping the last known host policy, and dux will retry",
+                ));
+                // A transient answer never overwrites a decision dux already
+                // holds. It only names the state dux is genuinely in when it
+                // has never had one: unreachable, not logged out. Recording it
+                // as NotAuthenticated is the bug this variant exists for.
+                let status = if matches!(self.gh_status, GhStatus::Unknown) {
+                    GhStatus::Unreachable
+                } else {
+                    self.gh_status
+                };
+                (status, Some(reason))
+            }
+            crate::gh::GhProbe::Decided { available, policy } => {
+                self.set_github_host_policy(policy);
+                let status = if available {
+                    GhStatus::Available
+                } else {
+                    GhStatus::NotAuthenticated
+                };
+                (status, None)
+            }
+        }
+    }
+
+    /// The clause `dux.log` gets about whether dux will ask `gh` again, so a
+    /// reader never has to guess whether a bad answer is permanent. Empty when
+    /// the integration is off, which is not a failure to retry.
+    fn gh_probe_log_retry_clause(&self) -> String {
+        if !self.github_integration_enabled {
+            return String::new();
+        }
+        let interval = self.github_probe_interval();
+        if interval.is_zero() {
+            return "; the periodic re-check is disabled, so re-check on demand \
+                 from the command palette or the web app menu"
+                .to_string();
+        }
+        format!(
+            "; dux will retry every {}s until GitHub features work again",
+            interval.as_secs(),
+        )
     }
 
     /// The user-facing sentence for the state GitHub integration is in now,
@@ -5145,6 +5153,78 @@ mod tests {
             engine.github_host_policy(),
             crate::gh::GithubHostPolicy::DenyAll
         );
+    }
+
+    #[test]
+    fn adopt_gh_probe_answers_each_probe_result() {
+        let (mut engine, _tmp) = test_engine();
+
+        engine.gh_status = GhStatus::Available;
+        let (status, reason) = engine.adopt_gh_probe(crate::gh::GhProbe::NotInstalled);
+        assert_eq!(status, GhStatus::NotInstalled);
+        assert_eq!(reason, None);
+        assert_eq!(
+            engine.github_host_policy(),
+            crate::gh::GithubHostPolicy::DenyAll
+        );
+
+        engine.gh_status = GhStatus::Unknown;
+        let (status, reason) =
+            engine.adopt_gh_probe(crate::gh::GhProbe::Transient("timed out".to_string()));
+        assert_eq!(
+            status,
+            GhStatus::Unreachable,
+            "with no earlier verdict, a transient failure names unreachable"
+        );
+        assert_eq!(reason.as_deref(), Some("timed out"));
+
+        engine.gh_status = GhStatus::NotAuthenticated;
+        let (status, _) = engine.adopt_gh_probe(crate::gh::GhProbe::Transient("busy".to_string()));
+        assert_eq!(
+            status,
+            GhStatus::NotAuthenticated,
+            "a transient failure never overwrites a verdict dux already holds"
+        );
+
+        let (status, reason) = engine.adopt_gh_probe(crate::gh::GhProbe::Decided {
+            available: true,
+            policy: crate::gh::GithubHostPolicy::LegacyNameRule,
+        });
+        assert_eq!(status, GhStatus::Available);
+        assert_eq!(reason, None);
+        assert_eq!(
+            engine.github_host_policy(),
+            crate::gh::GithubHostPolicy::LegacyNameRule
+        );
+
+        let (status, _) = engine.adopt_gh_probe(crate::gh::GhProbe::Decided {
+            available: false,
+            policy: crate::gh::GithubHostPolicy::LegacyNameRule,
+        });
+        assert_eq!(status, GhStatus::NotAuthenticated);
+    }
+
+    #[test]
+    fn gh_probe_log_retry_clause_says_whether_dux_will_ask_again() {
+        let (mut engine, _tmp) = test_engine();
+
+        engine.github_integration_enabled = false;
+        assert_eq!(
+            engine.gh_probe_log_retry_clause(),
+            "",
+            "an integration that is off is not a failure to retry"
+        );
+
+        engine.github_integration_enabled = true;
+        engine.config.ui.github_probe_interval_secs = 0;
+        assert!(
+            engine
+                .gh_probe_log_retry_clause()
+                .contains("periodic re-check is disabled"),
+        );
+
+        engine.config.ui.github_probe_interval_secs = 60;
+        assert!(engine.gh_probe_log_retry_clause().contains("every 60s"));
     }
 
     /// The boot probe's happy answer must not push a line onto the TUI's
