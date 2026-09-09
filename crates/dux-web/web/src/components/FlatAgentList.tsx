@@ -853,6 +853,23 @@ function SortControl() {
   )
 }
 
+// The sessions a search query leaves on screen. Each is matched against its own
+// searchable location, so typing part of a project name or a standalone agent's
+// folder finds it.
+function matchingSessions(
+  sessions: SessionView[],
+  projectName: (id: string) => string,
+  query: string,
+): SessionView[] {
+  return sessions.filter((session) =>
+    matchesSessionQuery(
+      session,
+      agentSearchLocation(session, projectName),
+      query,
+    ),
+  )
+}
+
 function flatAgentListModel(dux: DuxState) {
   const {
     spine,
@@ -878,20 +895,8 @@ function flatAgentListModel(dux: DuxState) {
   const sortedMain = sortMainSessions(main, agentSort)
   const sortedQuiet = sortQuietTail(quiet, agentSort)
   const query = agentSearch
-  const visibleMain = sortedMain.filter((session) =>
-    matchesSessionQuery(
-      session,
-      agentSearchLocation(session, projectName),
-      query,
-    ),
-  )
-  const visibleQuiet = sortedQuiet.filter((session) =>
-    matchesSessionQuery(
-      session,
-      agentSearchLocation(session, projectName),
-      query,
-    ),
-  )
+  const visibleMain = matchingSessions(sortedMain, projectName, query)
+  const visibleQuiet = matchingSessions(sortedQuiet, projectName, query)
   const orderedProjects = [...withAgents, ...withoutAgents]
     .map((id) => rawProjects.find((project) => project.id === id))
     .filter((project): project is (typeof rawProjects)[number] =>
