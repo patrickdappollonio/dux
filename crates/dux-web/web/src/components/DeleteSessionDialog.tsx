@@ -35,13 +35,43 @@ function branchCheckboxLabel(branches: string[]): string {
   return `Also delete the branches ${branches.join(" and ")}`
 }
 
+type UnpushedCount = { count: number; has_remote_refs: boolean } | null
+
+// How much work the tick would destroy, or `null` when there is nothing to say:
+// no count yet, or none unpushed. `drifted` puts the sentence in the plural,
+// because the tick then takes both branches.
+function unpushedSentence(
+  unpushed: UnpushedCount,
+  drifted: boolean,
+): string | null {
+  if (unpushed === null || unpushed.count === 0) return null
+  const count = unpushed.count
+  const plural = count === 1 ? "commit" : "commits"
+  if (unpushed.has_remote_refs) {
+    return drifted
+      ? `They have ${count} ${plural} not pushed anywhere between them.`
+      : `It has ${count} ${plural} not pushed anywhere.`
+  }
+  // With no remote-tracking refs the count is the whole history rather than work
+  // held back, so the sentence must not read as an accusation.
+  const subject = drifted ? "them" : "it"
+  const possessive = drifted ? "their" : "its"
+  // A single commit gets its own clause: "all 1 of its commits" is the sentence
+  // admitting it was assembled rather than written.
+  const existence =
+    count === 1
+      ? `${possessive} only commit exists`
+      : `all ${count} of ${possessive} commits exist`
+  return `Nothing on ${subject} has been pushed anywhere: ${existence} only on this machine.`
+}
+
 // The warning under the branch box, or `null`: either the branch predates the
 // agent, or drift means the tick takes a second branch. A null `unpushed` count
 // (in flight, or unanswerable) drops the count sentence.
 function branchWarning(
   provenance: string,
   branches: string[],
-  unpushed: { count: number; has_remote_refs: boolean } | null,
+  unpushed: UnpushedCount,
 ): string | null {
   const drifted = branches.length > 1
   const predates = provenance !== "created"
@@ -57,31 +87,8 @@ function branchWarning(
       existedBeforeSentence(provenance, drifted ? branches[1] : "This branch"),
     )
   }
-  if (unpushed !== null && unpushed.count > 0) {
-    const count = unpushed.count
-    const plural = count === 1 ? "commit" : "commits"
-    // With no remote-tracking refs the count is the whole history rather than work
-    // held back, so the sentence must not read as an accusation.
-    if (unpushed.has_remote_refs) {
-      parts.push(
-        drifted
-          ? `They have ${count} ${plural} not pushed anywhere between them.`
-          : `It has ${count} ${plural} not pushed anywhere.`,
-      )
-    } else {
-      const subject = drifted ? "them" : "it"
-      const possessive = drifted ? "their" : "its"
-      // A single commit gets its own clause: "all 1 of its commits" is the
-      // sentence admitting it was assembled rather than written.
-      const existence =
-        count === 1
-          ? `${possessive} only commit exists`
-          : `all ${count} of ${possessive} commits exist`
-      parts.push(
-        `Nothing on ${subject} has been pushed anywhere: ${existence} only on this machine.`,
-      )
-    }
-  }
+  const unpushedText = unpushedSentence(unpushed, drifted)
+  if (unpushedText !== null) parts.push(unpushedText)
   return parts.join(" ")
 }
 
