@@ -1,17 +1,15 @@
 //! Tailscale address detection for LOCAL MODE serving.
 //!
 //! Unless `[server] tailscale` is `"no"`, local mode also binds the machine's
-//! Tailscale address so tailnet devices can reach dux over WireGuard-encrypted
-//! transit. Detection shells out to the `tailscale ip` CLI, following the same
-//! tolerant pattern the `gh` integration uses: a missing CLI, a down daemon, or
-//! garbage output degrades to `None` (with a reason for the warning message), never an
+//! Tailscale address so tailnet devices can reach dux. Detection shells out to
+//! the `tailscale ip` CLI and is tolerant: a missing CLI, a down daemon or
+//! garbage output degrades to `None` with a reason for the warning, never an
 //! error that blocks loopback serving.
 //!
-//! On `"auto"` this detection is not a one-shot at startup: the serve path polls
-//! it for the whole run so the Tailscale listener can come and go with the
-//! interface. That is why the call is BOUNDED (see [`detect_ip`]): a wedged
-//! `tailscaled` is exactly the situation the watcher exists to survive, so it
-//! must not be able to park the watcher forever.
+//! On `"auto"` the serve path polls this for the whole run, so the listener can
+//! come and go with the interface. That is why the call is BOUNDED (see
+//! [`detect_ip`]): a wedged `tailscaled` is the situation the watcher exists to
+//! survive, so it must not park the watcher forever.
 
 use std::net::IpAddr;
 
@@ -47,15 +45,11 @@ impl TailscaleUnavailable {
 /// "the configured host" for `dux server`), so both entry points read the same
 /// sentence from one place.
 ///
-/// The two modes end differently and the message has to say which one the reader
-/// is in: on [`TailscaleMode::Auto`] this is a "not yet" and dux keeps looking,
-/// on [`TailscaleMode::Yes`] nothing looks again until the mode is changed.
-/// Telling an `auto` user their tailnet is unavailable, when dux is about to
-/// bind it the moment tailscaled connects, is the kind of stale warning people
-/// learn to ignore.
-///
-/// [`TailscaleMode::No`] never reaches here (nothing is detected), and the
-/// function stays exhaustive over the enum so a fourth mode is a compile error.
+/// The message has to say which mode the reader is in: on
+/// [`TailscaleMode::Auto`] this is a "not yet" and dux keeps looking, while on
+/// [`TailscaleMode::Yes`] nothing looks again until the mode changes.
+/// [`TailscaleMode::No`] never reaches here, and the function stays exhaustive
+/// over the enum so a fourth mode is a compile error.
 pub fn undetected_warning(
     mode: crate::config::TailscaleMode,
     reason: TailscaleUnavailable,
@@ -108,13 +102,11 @@ pub const DETECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 
 /// [`detect_ip`] with the program and the cap named, so the bounded behavior can
 /// be exercised against a stand-in binary without touching the test process's
-/// `PATH` (which is shared, and unsafe to mutate under a test runner). This is
-/// the `gh` host-probe precedent.
+/// `PATH`, which is shared and unsafe to mutate under a test runner.
 ///
 /// A TIMEOUT maps to [`TailscaleUnavailable::CommandFailed`] rather than to a
-/// variant of its own: from the caller's point of view a daemon that does not
-/// answer and a daemon that answers with an error are the same situation, and
-/// `CommandFailed`'s reason already asks the right question.
+/// variant of its own: to the caller, a daemon that does not answer and one that
+/// answers with an error are the same situation.
 pub fn detect_ip_with(
     program: &str,
     timeout: std::time::Duration,
@@ -191,14 +183,13 @@ pub fn is_tailscale_cgnat(addr: std::net::Ipv4Addr) -> bool {
 
 /// Whether `addr` is in Tailscale's IPv6 ULA range `fd7a:115c:a1e0::/48`.
 ///
-/// This is the EXACT block Tailscale assigns (the IPv6 mirror of the 100.64/10
-/// CGNAT v4 leg), not "any global/ULA v6" — so a plain ULA (`fc00::1`), a
-/// documentation address (`2001:db8::`), or a real global (`2606:…`) is rejected.
-/// A /48 means the first three 16-bit segments must equal `fd7a:115c:a1e0`.
+/// The EXACT block Tailscale assigns (the IPv6 mirror of the 100.64/10 CGNAT v4
+/// leg), not "any global or ULA v6", so a plain ULA (`fc00::1`), a documentation
+/// address (`2001:db8::`) or a real global is rejected. A /48 means the first
+/// three 16-bit segments must equal `fd7a:115c:a1e0`.
 ///
-/// In practice this leg is effectively unreachable: the IPv4 CGNAT line is
-/// preferred and is present on every normal tailnet, so [`parse_tailscale_ip`]
-/// only consults this fallback on an IPv6-only tailnet.
+/// [`parse_tailscale_ip`] only consults this fallback on an IPv6-only tailnet,
+/// since the IPv4 CGNAT line is preferred and present on every normal tailnet.
 pub fn is_tailscale_ipv6(addr: std::net::Ipv6Addr) -> bool {
     let [a, b, c, ..] = addr.segments();
     a == 0xfd7a && b == 0x115c && c == 0xa1e0

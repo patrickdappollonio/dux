@@ -1,39 +1,14 @@
 //! The per-PTY input-ownership registry: who currently holds the right to type
 //! into a PTY and to decide its grid.
 //!
-//! ## Why this is in `dux-core` and not in the web layer
-//!
-//! Ownership started as a WEB-layer concept, arbitrated between the per-PTY
-//! websockets, and lived in `dux-web`. It is not one any more: while the
-//! background web server runs behind a live terminal UI, the terminal UI is a
-//! registered participant too, so both surfaces have to ask the same table the
-//! same questions and get answers that agree. A rule that both surfaces obey
-//! belongs in the crate both surfaces can see, and this type is pure `std`
-//! (a mutex, two maps and some counters), so moving it costs the core crate no
-//! dependency at all.
-//!
-//! `dux-web` re-exports it, so every socket handler, route and test there keeps
-//! the path it always used.
-//!
-//! ## Who reads it
-//!
-//! The per-PTY socket handlers gate stdin and resizes through it. Two web-side
-//! consumers read it outside those handlers, and both are deliberately narrow:
-//! the file-drop route's courtesy check, and the engine actor's spine overlay
-//! ([`Self::input_owners_snapshot`] plus [`Self::ownership_generation`]), which
-//! publishes the owning connection id on the shared spine so every client,
-//! including one with no PTY socket attached, can tell that another connection
-//! is driving an agent. The terminal UI reads it through the background-serve
-//! seam, holding a connection id of its own.
+//! It lives in core because both surfaces arbitrate through it: while the
+//! background server serves behind the terminal UI, that terminal UI is a
+//! registered participant too. `dux-web` re-exports it.
 
 /// One recorded owner: the connection id that drives the pty, plus the raw
-/// `User-Agent` that connection presented at its upgrade. The device rides in
-/// the SAME map entry as the id, written at claim time and removed with the
-/// entry on release, so [`PtySizeOwners::current_owner`] can hand the handshake
-/// the owner's device label under the same lock acquisition as the id and the
-/// epoch. Without it the label existed only as a local in the claiming socket's
-/// task, so only the `pty.owner` broadcast could name the device, and a watcher
-/// that merely attached (which broadcasts nothing) could not.
+/// `User-Agent` it presented. The device rides in the same map entry as the id
+/// so [`PtySizeOwners::current_owner`] can hand the handshake a device label
+/// under one lock acquisition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerRecord {
     pub conn_id: u64,
@@ -42,54 +17,28 @@ pub struct OwnerRecord {
     pub device: Option<String>,
 }
 
-/// The owner map plus the monotonic ownership epoch, guarded together by ONE std
-/// Mutex so a fresh epoch is assigned in the SAME critical section that records a
-/// new owner. Bumping the epoch under the lock that serializes every owner write
-/// makes epochs monotonic in TRUE claim order even when two connections claim
-/// concurrently, so the `pty.owner` broadcast (emitted after the lock releases, and
-/// therefore freely reorderable by the runtime) can be deduped by epoch on the
-/// client without confusing which claim actually won (see `ptyOwnership.ts`).
+/// The owner map plus the monotonic ownership epoch, guarded by ONE mutex so an
+/// epoch is assigned in the same critical section that records a new owner:
+/// epochs then follow true claim order even when two connections claim at once.
 #[derive(Default)]
 pub struct OwnersState {
     /// pty id -> the connection that currently owns sizing+input.
     pub map: std::collections::HashMap<String, OwnerRecord>,
-    /// Bumped on every ownership CHANGE, a release included; the value handed to
-    /// the caller and stamped onto the emitted `pty.owner` so clients converge on
-    /// the latest claim regardless of broadcast arrival order. Never decreases
-    /// within a process.
+    /// Bumped on every ownership change, a release included, and stamped onto
+    /// the emitted `pty.owner` so clients order arrivals by it. Never decreases.
     pub epoch: u64,
-    /// Bumped on every MUTATION of `map` — a claim handover, a first-writer
-    /// claim, and a release that actually removed an entry. Distinct from
-    /// `epoch` in what it FEEDS rather than in when it moves: this is the spine
-    /// check's cheap "did ownership change" gate, read by
-    /// [`PtySizeOwners::ownership_generation`], while the epoch travels on the
-    /// wire to order client-side arrivals. The fingerprint compare downstream
-    /// remains the precise emit gate.
+    /// Bumped on every mutation of `map`. Feeds the spine check's cheap "did
+    /// ownership change" gate ([`PtySizeOwners::ownership_generation`]), while
+    /// `epoch` travels on the wire to order client-side arrivals.
     pub generation: u64,
-    /// Per-pty grid sequence, bumped on every resize that APPLIES, inside the
-    /// same critical section that enqueues the resize to the engine actor. The
-    /// applies come out of the actor in claim order (see
-    /// [`PtySizeOwners::claim_for_resize`]), but each socket task publishes its
-    /// grid broadcast AFTER this lock releases, so two sockets' announcements
-    /// of two ordered applies can reach the bus inverted (A applies G2, B takes
-    /// over and applies G3, B's publish lands first, A's stale G2 becomes every
-    /// viewer's last word). Stamping the seq under the lock gives every
-    /// receiver a total order to drop stale announcements by, exactly as
-    /// `epoch` does for `pty.owner`. Keyed per pty because the broadcasts are
-    /// filtered per pty; never decreases within a process.
+    /// Per-pty resize sequence, stamped under this lock on every applying resize
+    /// so receivers can drop a grid broadcast the runtime published out of order
+    /// after the lock released. Never decreases within a process.
     pub grid_seq: std::collections::HashMap<String, u64>,
-    /// Per-pty high-water mark of the resize that actually REACHED the child, the
-    /// other half of [`PtySizeOwners::accept_grid_apply`]. Distinct from
-    /// `grid_seq`, which counts what was stamped: the two differ for exactly as
-    /// long as a stamped resize is still queued somewhere, and that window is
-    /// where the inversion lives.
-    ///
-    /// The GEOMETRY is kept beside the seq, not just the seq, because an apply
-    /// site that has been overtaken has to be able to ask what overtook it: the
-    /// accept and the `TIOCSWINSZ` are not one critical section (see
-    /// [`PtySizeOwners::accept_grid_apply`]), so the loser of that small race
-    /// re-applies the winner's geometry rather than leaving the child sized for
-    /// itself.
+    /// Per-pty high-water mark of the resize that actually REACHED the child,
+    /// with the geometry it carried. The accept and the `TIOCSWINSZ` are not one
+    /// critical section (see [`PtySizeOwners::accept_grid_apply`]), so an
+    /// overtaken apply site re-applies the winner's geometry from here.
     pub applied: std::collections::HashMap<String, AppliedGrid>,
 }
 
@@ -118,23 +67,15 @@ pub enum GridApplyOutcome<T> {
     },
 }
 
-/// Tracks which connection currently owns sizing+input for each PTY, keyed by
-/// pty id: the tab id for an agent PTY, which for an agent's first tab is
-/// whatever `AgentSession::slot_tab_id` points at, and the terminal id for a
-/// companion. Shared between every
-/// per-PTY socket, the engine actor loop and, while a background server runs
-/// behind the terminal UI, that terminal UI. The web layer's
-/// `build_actor_channels` is what constructs one, once per serve.
+/// Tracks which connection owns sizing and input for each PTY, keyed by pty id:
+/// the tab id for an agent PTY (`AgentSession::slot_tab_id` for its first tab),
+/// the terminal id for a companion. Built once per serve.
 ///
-/// ATTACHING NEVER STEALS. A plain resize claims only an UNOWNED pty; against a
-/// pty another connection already owns it is REFUSED whole, resize included (see
-/// [`Self::claim_for_resize`]). Only a resize frame that explicitly carries the
-/// take-over flag transfers ownership, and only a deliberate press of Take over
-/// sends one. That is the difference between this and the shape it had before:
-/// a resize used to claim unconditionally, so every foregrounded attach silently
-/// wrested control from whichever device was actually being typed on, and the
-/// two devices then ping-ponged the pty's size at each other. A non-owner's
-/// stdin is dropped by [`Self::may_write`], which never steals either.
+/// Attaching never steals. A plain resize claims only an UNOWNED pty; against
+/// one another connection holds it is refused whole, resize included (see
+/// [`Self::claim_for_resize`]). Only a resize carrying the take-over flag
+/// transfers ownership, and a non-owner's stdin is dropped by
+/// [`Self::may_write`].
 #[derive(Default)]
 pub struct PtySizeOwners {
     pub owners: std::sync::Mutex<OwnersState>,
@@ -142,22 +83,15 @@ pub struct PtySizeOwners {
 
 /// The source of every connection id in the process.
 ///
-/// PROCESS-global, not registry-global, and that distinction is the whole point.
-/// A registry is built once per serve (`build_actor_channels` constructs it), and
-/// the background-server toggle can build several of them in one run. A
-/// per-registry counter therefore started again at zero on every cycle, and the
-/// ghost self-succession rule (a returning owner recognising "this pane's
-/// previous, dead connection id was mine") compares raw ids: a second cycle's
-/// connection 0 would answer to a first cycle's connection 0 and take a pty away
-/// from whichever device is actually driving it. Ids never repeat while the
-/// process lives, so nothing can be mistaken for a stale self.
+/// Process-global, not per-registry: the background-server toggle can build
+/// several registries in one run, and the ghost self-succession rule compares
+/// raw ids, so an id must never repeat while the process lives.
 static NEXT_CONN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Outcome of [`PtySizeOwners::may_write`]: whether the connection may forward its
-/// stdin to the PTY (`allowed`), whether the check itself NEWLY claimed an unowned
-/// PTY (`claimed_new`) so the caller emits exactly one `pty.owner` handover for that
-/// uncontested first write, and the ownership `epoch` assigned for that new claim
-/// (`Some` iff `claimed_new`) so the emitted handover carries it.
+/// Outcome of [`PtySizeOwners::may_write`]: whether the stdin may be forwarded,
+/// whether the check itself newly claimed an unowned PTY (so the caller emits
+/// one `pty.owner` handover), and the epoch for that claim (`Some` iff
+/// `claimed_new`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteClaim {
     pub allowed: bool,
@@ -166,20 +100,12 @@ pub struct WriteClaim {
 }
 
 /// The outcome of [`PtySizeOwners::claim_for_resize`], decided in ONE critical
-/// section: whether the resize was applied to the PTY (`apply`) and, when the
-/// call also transferred ownership, the epoch stamped onto the `pty.owner`
-/// broadcast the caller then emits (`epoch`).
+/// section.
 ///
-/// `apply` and `epoch` are deliberately independent. The current owner resizing
-/// its own PTY applies without any handover (`apply: true`, `epoch: None`); a
-/// non-owner's plain resize is refused whole (`apply: false`, `epoch: None`);
-/// an unowned pty and an explicit take-over both apply AND hand over
-/// (`apply: true`, `epoch: Some`).
-///
-/// `seq` is `Some` exactly when `apply` is: the per-pty grid sequence stamped
-/// in the SAME critical section that enqueued the resize, carried onto the
-/// grid broadcast so receivers can drop a stale announcement that the runtime
-/// reordered after the lock released (see [`OwnersState::grid_seq`]).
+/// `apply` and `epoch` are independent: an owner resizing its own PTY applies
+/// with no handover, a non-owner's plain resize is refused whole, and an unowned
+/// pty or an explicit take-over both applies and hands over. `seq` is `Some`
+/// exactly when `apply` is (see [`OwnersState::grid_seq`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResizeClaim {
     pub apply: bool,
@@ -188,35 +114,20 @@ pub struct ResizeClaim {
 }
 
 impl PtySizeOwners {
-    /// Allocate a process-unique id for a freshly attached PTY socket, used to
-    /// compare against the recorded owner. Drawn from [`NEXT_CONN_ID`], so ids
-    /// stay unique across serve cycles rather than only within one registry.
+    /// Allocate a process-unique id for a freshly attached PTY socket. Drawn
+    /// from [`NEXT_CONN_ID`], so ids stay unique across serve cycles.
     pub fn next_conn_id(&self) -> u64 {
         NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Who owns `pty_id` right now, if anyone, PLUS the ownership epoch as of
-    /// that same instant. Read once per PTY socket, at the handshake, so the
-    /// `connected` frame can tell the arriving client whether it is joining as
-    /// the driver or as a watcher. Without it a refused claim (which emits
-    /// nothing at all, by design) would leave a client that guessed "I am
-    /// foregrounded, so I must be the owner" wedged as a phantom owner: typing
-    /// surfaces up, every keystroke dropped server-side, and no card ever
-    /// shown. Post-handshake changes reach the client through `pty.owner`.
+    /// Who owns `pty_id` right now, if anyone, plus the ownership epoch and the
+    /// owner's device label, all read under one lock acquisition.
     ///
-    /// The epoch travels with the owner under ONE lock acquisition, because the
-    /// handshake and the `pty.owner` broadcasts ride two different TCP
-    /// connections with no ordering between them. A client that has already
-    /// applied a `pty.owner` stamped with a HIGHER epoch knows this snapshot is
-    /// stale and keeps the newer verdict; without the epoch, a fresh
-    /// `pty.owner{owner:B}` followed by a slow `connected{owner:null}` would
-    /// re-seed the client as a phantom owner, and nothing would ever correct it
-    /// (the stale-null direction emits no further event).
-    ///
-    /// The owner's DEVICE label (its captured `User-Agent`) travels in the same
-    /// snapshot, for the same reason the epoch does: it is what lets the
-    /// take-over card of a client that merely attached name the driving device,
-    /// because a mere attach emits no `pty.owner` for that client to hear.
+    /// The PTY handshake is the only way a client that merely attached learns it
+    /// is a watcher and which device is driving, because a refused claim emits
+    /// nothing. The epoch lets a client that already applied a higher-stamped
+    /// `pty.owner` keep the newer verdict, since the handshake and the
+    /// broadcasts ride different connections with no ordering between them.
     pub fn current_owner(&self, pty_id: &str) -> (Option<u64>, u64, Option<String>) {
         let owners = self.owners.lock().unwrap();
         let record = owners.map.get(pty_id);
@@ -227,76 +138,31 @@ impl PtySizeOwners {
         )
     }
 
-    /// THE ONE ATOMIC DECISION behind every resize frame: may `conn_id` resize
-    /// `pty_id`, and does doing so hand it ownership?
+    /// May `conn_id` resize `pty_id`, and does doing so hand it ownership?
     ///
     ///   - unowned              -> claims it, resize applies
     ///   - owned by `conn_id`   -> resize applies, no handover
     ///   - owned by another AND `takeover` -> ownership transfers, resize applies
-    ///   - owned by another, plain resize  -> REFUSED: nothing is applied and
-    ///     nothing is broadcast (the caller logs it at debug, like a dropped
-    ///     non-owner keystroke)
-    ///   - `takeover` AND `expected_owner` names somebody other than the
-    ///     current owner (an unowned pty included) -> REFUSED exactly as a
-    ///     non-owner's plain resize is: nothing applied, no epoch, no seq,
-    ///     nothing broadcast
+    ///   - owned by another, plain resize  -> REFUSED: nothing applied, nothing
+    ///     broadcast
+    ///   - `takeover` AND `expected_owner` names anyone but the current owner
+    ///     (an unowned pty included) -> REFUSED exactly as a plain resize is
     ///
-    /// ## `expected_owner`, the compare-and-swap on a flagged claim
+    /// `expected_owner` is a compare-and-swap on a flagged claim, ignored
+    /// entirely when `takeover` is false. `None` takes from whoever holds it,
+    /// which is what a pressed Take over sends; `Some(id)` narrows the claim to
+    /// one predecessor, for the press-less re-claim of a returning owner
+    /// succeeding its own ghost. The comparison runs in the same critical
+    /// section as the claim, so a frame delayed on a mobile radio cannot steal a
+    /// pty somebody legitimately claimed in the gap.
     ///
-    /// `None` means "take from whoever holds it", which is what a PRESSED Take
-    /// over sends and what every non-takeover call passes. `Some(id)` narrows a
-    /// flagged claim to one specific predecessor, and it exists for the single
-    /// press-less re-claim the design keeps: a returning owner recognising the
-    /// pane's previous, dead connection id as its own ghost and succeeding it.
+    /// `apply_resize` runs under the owners lock, exactly when the answer is
+    /// "apply", so the recorded owner and the geometry the child was last told
+    /// cannot serialize in opposite orders. It is handed the seq stamped for this
+    /// resize, to offer to [`Self::accept_grid_apply`] at the apply site.
     ///
-    /// That gesture needs a check, because the frame carrying it can be
-    /// arbitrarily delayed on a mobile radio. Without one, a phone whose flagged
-    /// resize arrives seconds late takes the pty away from a device that
-    /// legitimately claimed it in the gap, with nobody pressing anything, which
-    /// is precisely what "attaching never steals" forbids. The comparison
-    /// happens in the SAME critical section as the claim and the resize enqueue,
-    /// so no claim can slip between reading the owner and acting on it.
-    ///
-    /// An UNOWNED pty is a MISMATCH rather than a free claim. The client's
-    /// premise ("I am succeeding connection N") is false once N is gone, and
-    /// refusing costs it nothing: the ordinary plain attach claims the free pty
-    /// a moment later with no flag at all, which is the owner's rule working as
-    /// intended. Pinned by
-    /// `an_unowned_pty_is_a_mismatch_for_a_named_expected_owner`.
-    ///
-    /// `expected_owner` is ignored entirely when `takeover` is false, so a
-    /// client that attaches the field to every resize frame cannot change how
-    /// its own steady-state resizes or its first attach are decided.
-    ///
-    /// `apply_resize` is invoked, under the owners lock, exactly when the answer
-    /// is "apply". Passing the effect in rather than letting the caller act on
-    /// the returned verdict is not decoration: the recorded owner and the
-    /// geometry the child was last told must agree. If two connections raced
-    /// with the decision and the apply split apart, claim A / claim B could
-    /// serialize as A-then-B in the owner map while the resizes landed as
-    /// B-then-A, leaving the pty sized for A with B recorded as its driver, and
-    /// nothing would ever correct it (B believes it already told the child its
-    /// size). That race is real, not theoretical: every PTY socket is its own
-    /// tokio task, claims serialize on this mutex, and
-    /// the web layer's `EngineHandle::resize_pty` is a separate `try_send`
-    /// into the engine actor's queue with nothing binding the two orders.
-    /// Enqueuing the resize INSIDE this critical section binds them: `try_send`
-    /// never blocks and the actor drains its queue in order, so the resizes come
-    /// out in claim order and the epoch winner's geometry is the one that lands
-    /// last, always. The lock is therefore held for a fixed, tiny window and
-    /// never across an await. This mirrors the precedent set by
-    /// [`Self::may_write`], which likewise resolves the stdin gate under the lock
-    /// rather than checking and then writing.
-    ///
-    /// `device` is the claiming connection's captured `User-Agent`, recorded
-    /// with the owner id on a claim so [`Self::current_owner`] can name the
-    /// device on later handshakes; it is ignored on every non-claiming outcome.
-    ///
-    /// `apply_resize` is handed the seq stamped for this resize, because a caller
-    /// that merely ENQUEUES the resize has to carry it to wherever the resize is
-    /// finally applied: that apply site offers the seq to
-    /// [`Self::accept_grid_apply`] and drops the resize if a later claim's
-    /// geometry has already reached the child.
+    /// `device` is the claiming connection's captured `User-Agent`, recorded on
+    /// a claim and ignored on every other outcome.
     pub fn claim_for_resize(
         &self,
         pty_id: &str,
@@ -319,10 +185,9 @@ impl PtySizeOwners {
                 seq: None,
             },
             Some(_) if !takeover => refused,
-            // A flagged claim that named a predecessor must find exactly that
-            // predecessor still recorded. Anything else, an unowned pty
-            // included, means the premise the client acted on has already been
-            // overtaken, so the frame is refused whole.
+            // A flagged claim naming a predecessor must find exactly that
+            // predecessor recorded; anything else, an unowned pty included,
+            // means the client's premise was already overtaken.
             current
                 if takeover
                     && expected_owner
@@ -348,11 +213,8 @@ impl PtySizeOwners {
             }
         };
         if outcome.apply {
-            // Stamp the grid sequence in the SAME critical section that
-            // enqueues the resize, so the seq order IS the apply order. The
-            // caller's grid broadcast happens after this lock releases and is
-            // freely reorderable by the runtime; the seq is what lets every
-            // receiver drop an announcement that arrives behind a newer one.
+            // Stamp the seq in the SAME critical section that enqueues the
+            // resize, so seq order is apply order.
             let seq = owners.grid_seq.entry(pty_id.to_string()).or_insert(0);
             *seq += 1;
             let seq = *seq;
@@ -362,36 +224,21 @@ impl PtySizeOwners {
         outcome
     }
 
-    /// Hand `pty_id` to `conn_id` unconditionally, the way an explicit take-over
-    /// does, and report the handover epoch (`None` when it already owned it).
-    /// A thin spelling of [`Self::claim_for_resize`] with `takeover: true`, no
-    /// `expected_owner` (unconditional is the whole point) and no
-    /// resize to apply, so there is exactly one implementation of "record a new
-    /// owner". Used by the test fixture that gives the file-drop courtesy check
-    /// something to say, and by the claim-table tests.
-    ///
-    /// Not `#[cfg(test)]`, unlike the shape it had while this type lived in the
-    /// web crate: the tests that need it are now in three crates, and a cfg that
-    /// only sees this one's test build would hide it from all of them.
+    /// Hand `pty_id` to `conn_id` unconditionally and report the handover epoch
+    /// (`None` when it already owned it). A thin spelling of
+    /// [`Self::claim_for_resize`] with `takeover: true` and nothing to resize, so
+    /// there is one implementation of "record a new owner". Deliberately not
+    /// `#[cfg(test)]`: its callers live in more than one crate.
     pub fn claim(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
         self.claim_for_resize(pty_id, conn_id, true, None, None, |_| {})
             .epoch
     }
 
-    /// Whether `conn_id` is the current owner of `pty_id`. Unlike [`claim`] this
-    /// never mutates: an unowned PTY (no client has sent a size yet) returns false.
-    /// A read-only ownership probe used by tests to assert the post-conditions of
-    /// [`claim_for_resize`], [`may_write`], and [`release`]; the live handler
-    /// gates stdin through [`may_write`] (atomic) and resize through
-    /// [`claim_for_resize`] (atomic), so production never needs a separate
-    /// non-mutating check. The handshake's read is
-    /// [`current_owner`], which answers a different question ("who", not "is it
-    /// me").
-    ///
-    /// [`claim_for_resize`]: PtySizeOwners::claim_for_resize
-    /// [`may_write`]: PtySizeOwners::may_write
-    /// [`release`]: PtySizeOwners::release
-    /// [`current_owner`]: PtySizeOwners::current_owner
+    /// Whether `conn_id` is the current owner of `pty_id`; an unowned PTY is
+    /// false. Read-only, unlike [`Self::claim`]. Never use it to gate a write or
+    /// a resize: those go through [`Self::may_write`] and
+    /// [`Self::claim_for_resize`], which decide and act under one lock, and a
+    /// check here followed by an action leaves a TOCTOU window open.
     pub fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
         self.owners
             .lock()
@@ -401,31 +248,20 @@ impl PtySizeOwners {
             .is_some_and(|record| record.conn_id == conn_id)
     }
 
-    /// Decide whether `conn_id` may write stdin to `pty_id`, resolving the gate
-    /// ATOMICALLY under the owners lock so no concurrent [`claim`] can slip between
-    /// the decision and the write (the TOCTOU window a separate `is_owner`-then-write
-    /// left open: a just-demoted connection's keystroke could still reach the PTY).
-    /// Semantics:
-    ///   - no current owner -> `conn_id` becomes the owner (an uncontested first
-    ///     writer claims, mirroring how a size frame auto-claims an unowned PTY),
-    ///     reported via `claimed_new` so the caller emits exactly one `pty.owner`
-    ///     handover. This restores input for a solo/out-of-band client whose stdin
-    ///     arrives before any size frame (previously silently dropped).
-    ///   - owner == conn_id -> allowed, no handover.
-    ///   - a different owner -> denied; the non-owner's stdin is dropped so a
-    ///     read-only secondary viewer can never disrupt the active device's typing.
+    /// May `conn_id` write stdin to `pty_id`? Resolved ATOMICALLY under the
+    /// owners lock, so no concurrent claim can slip between the decision and the
+    /// write and let a just-demoted connection's keystroke through.
     ///
-    /// Writing never steals control from another owner: typing must not silently
-    /// wrest the prompt away from the active device. Neither does a plain resize
-    /// (see [`claim_for_resize`]); the ONE frame that transfers ownership is a
-    /// resize explicitly flagged as a take-over.
+    ///   - no current owner -> `conn_id` claims it, as an uncontested first
+    ///     writer, reported via `claimed_new` so the caller emits exactly one
+    ///     `pty.owner` handover
+    ///   - owner == conn_id -> allowed, no handover
+    ///   - a different owner -> denied, the stdin is dropped
     ///
-    /// [`claim_for_resize`]: PtySizeOwners::claim_for_resize
-    ///
-    /// `device` is the writing connection's captured `User-Agent`, recorded with
-    /// the owner id when the write newly claims an unowned pty (so later
-    /// handshakes can name the device, exactly as a resize claim records it);
-    /// it is ignored on every other outcome.
+    /// Writing never steals from another owner, and neither does a plain resize:
+    /// the one frame that transfers ownership is a resize flagged as a take-over
+    /// (see [`Self::claim_for_resize`]). `device` is the writing connection's
+    /// captured `User-Agent`, recorded only on the claim.
     pub fn may_write(&self, pty_id: &str, conn_id: u64, device: Option<&str>) -> WriteClaim {
         let mut owners = self.owners.lock().unwrap();
         match owners.map.get(pty_id) {
@@ -462,15 +298,11 @@ impl PtySizeOwners {
     /// connection disconnects). A no-op if another connection has since claimed it,
     /// so a later attach is never clobbered.
     ///
-    /// Returns `Some(epoch)` when an owner really was cleared, so the caller
-    /// broadcasts an owner-cleared `pty.owner`. That broadcast is not optional
-    /// bookkeeping: now that ownership no longer follows focus, a viewer told
-    /// "another device is driving this" has no other way to learn that the other
-    /// device has gone, and the card would be a permanent lie. The release takes
-    /// an EPOCH as well as a generation bump, unlike the shape it had before,
-    /// because the client orders `pty.owner` arrivals by epoch: an owner-cleared
-    /// event stamped with a stale epoch would be discarded as an out-of-order
-    /// duplicate and the lie would survive anyway.
+    /// `Some(epoch)` means an owner really was cleared and the caller must
+    /// broadcast an owner-cleared `pty.owner`: it is a viewer's only way to
+    /// learn the driving device has gone, so without it the take-over card is a
+    /// permanent lie. The release takes an epoch because a client discards a
+    /// `pty.owner` that is not newer than what it has applied.
     pub fn release(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
         let mut owners = self.owners.lock().unwrap();
         if owners
@@ -486,20 +318,14 @@ impl PtySizeOwners {
         Some(owners.epoch)
     }
 
-    /// Release every pty `conn_id` still owns, and report each one with the epoch
-    /// its release was stamped with, so the caller can announce them all.
+    /// Release every pty `conn_id` still owns, each paired with the epoch its
+    /// release was stamped with, in the order the announcements must be
+    /// published in.
     ///
-    /// A browser connection owns at most the one pty its socket is attached to, so
-    /// it never needed this. The terminal UI is a single participant that can end
-    /// up driving several ptys at once (it types into one agent, then another),
-    /// and it lets go of all of them at the same moment: the background server
-    /// stops, the terminal is handed to the flip, or dux quits. Doing that in one
-    /// critical section rather than a loop of `release` calls keeps the epochs
-    /// consecutive and means no browser can claim one of them halfway through the
-    /// sweep and have its claim silently released underneath it.
-    ///
-    /// The order of the returned pairs follows the epochs, which is the order the
-    /// announcements have to be published in.
+    /// The terminal UI can be driving several ptys at once and lets go of all of
+    /// them at one moment. One critical section rather than a loop of
+    /// [`Self::release`] calls keeps the epochs consecutive and stops a browser
+    /// claiming one mid-sweep only to have that claim released underneath it.
     pub fn release_all(&self, conn_id: u64) -> Vec<(String, u64)> {
         let mut owners = self.owners.lock().unwrap();
         let held: Vec<String> = owners
@@ -518,53 +344,21 @@ impl PtySizeOwners {
         released
     }
 
-    /// THE ONE APPLY ORDER: may a resize stamped with `seq` still reach the
-    /// child of `pty_id`?
+    /// May a resize stamped with `seq` still reach the child of `pty_id`?
     ///
-    /// Every surface stamps its resize under this lock, in true claim order, but
-    /// the surfaces do not APPLY at the same moment. A browser's resize is
-    /// enqueued to the engine actor and lands whenever that queue is drained; the
-    /// terminal UI holds the engine and applies at once. So a resize stamped
-    /// FIRST can reach the child LAST, leaving the pty sized for a connection
-    /// that no longer owns it while the owner believes the child already knows
-    /// its geometry. Nothing corrects that afterwards: the owner has no reason to
-    /// resend a size it never changed.
+    /// Every surface stamps under this lock in claim order, but they do not apply
+    /// at the same moment: a browser's resize is enqueued to the engine actor
+    /// while the terminal UI applies at once, so a resize stamped first can reach
+    /// the child last and nothing afterwards would correct the geometry. A seq
+    /// not strictly newer than the last one that landed is therefore dropped,
+    /// which loses nothing: it is superseded by definition, and the handshake and
+    /// grid broadcast both report what the child was actually told.
     ///
-    /// So [`Self::apply_grid_in_order`] offers each seq here immediately before
-    /// touching the child, and a seq that is not strictly newer than the last one
-    /// that landed is dropped. Two apply sites, one order, decided in one place.
-    ///
-    /// Dropping is the right answer rather than a loss: a dropped resize is by
-    /// definition superseded by one that already landed, and the viewer whose
-    /// resize was dropped learns the real grid from the handshake and the grid
-    /// broadcast, both of which report what the child was actually told.
-    ///
-    /// In a web-only process this never refuses anything, because there is one
-    /// apply site and the actor drains its queue in order. It earns its keep only
-    /// while the terminal UI is a participant too.
-    ///
-    /// ## The window this does NOT close, and what closes it instead
-    ///
-    /// The accept and the resize of the child are two critical sections, not one.
-    /// The precedent from [`Self::claim_for_resize`] would say to pass the effect
-    /// in and run it under this lock, and that was measured and rejected:
-    /// `PtyClient::resize` takes the child's TERMINAL lock, which the reader
-    /// thread holds while it parses output and a reconnect replay build can hold
-    /// for tens of milliseconds (the reason `resize` takes that lock first is
-    /// documented on it). Holding this lock behind that one would stall every
-    /// keystroke gate on every socket for as long, and it would nest the owners
-    /// lock inside a lock the emulator owns.
-    ///
-    /// So the interleaving is real: A accepts seq 2, B accepts seq 3 and resizes
-    /// the child first, then A's `TIOCSWINSZ` lands and the child is left at A's
-    /// geometry with B recorded as the newest apply. The geometry recorded beside
-    /// the seq is what closes it. [`Self::apply_grid_in_order`] asks
-    /// [`Self::superseding_grid`] straight after resizing, and a site that was
-    /// overtaken re-applies the WINNER's geometry, which converges: the winner's
-    /// own re-check finds itself newest and stops.
-    ///
-    /// `rows` and `cols` are the geometry this apply is about to put on the
-    /// child, recorded here so a later loser can find it.
+    /// The accept and the child's resize are deliberately two critical sections:
+    /// `PtyClient::resize` takes the terminal lock, which a replay build can hold
+    /// for tens of milliseconds, so holding this lock behind it would stall every
+    /// keystroke gate. [`Self::superseding_grid`] closes the window that leaves,
+    /// which is why `rows` and `cols` are recorded here.
     pub fn accept_grid_apply(&self, pty_id: &str, seq: u64, rows: u16, cols: u16) -> bool {
         let mut owners = self.owners.lock().unwrap();
         let landed = owners.applied.entry(pty_id.to_string()).or_default();
@@ -578,12 +372,10 @@ impl PtySizeOwners {
     /// The geometry of an apply that overtook `seq`, or `None` when `seq` is
     /// still the newest one accepted for `pty_id`.
     ///
-    /// Asked by an apply site immediately AFTER it resized the child, to close
-    /// the window described on [`Self::accept_grid_apply`]: `Some` means another
-    /// surface's newer geometry was accepted while this one was inside
-    /// `TIOCSWINSZ`, and the child is now sized for the loser. Re-applying the
-    /// returned geometry is the fix, and it terminates: the winner's own check
-    /// finds its own seq newest and returns `None`.
+    /// Asked immediately AFTER resizing the child: `Some` means another surface's
+    /// grid was accepted mid-`TIOCSWINSZ` and the child is sized for the loser,
+    /// so re-applying the returned geometry is the fix. It terminates, because
+    /// the winner's own check returns `None`.
     pub fn superseding_grid(&self, pty_id: &str, seq: u64) -> Option<(u16, u16)> {
         let owners = self.owners.lock().unwrap();
         let landed = owners.applied.get(pty_id)?;
@@ -592,11 +384,9 @@ impl PtySizeOwners {
 
     /// Apply a stamped grid in the one order shared by every surface.
     ///
-    /// The callback runs without the ownership lock held. If another surface
-    /// accepts a newer grid while the callback is applying this one, the
-    /// `before_heal` runs first (for caller-specific diagnostics), then the
-    /// apply callback is invoked once more with the winner's geometry so the
-    /// child converges on the newest accepted grid.
+    /// The callback runs without the ownership lock held. If a newer grid is
+    /// accepted meanwhile, `before_heal` runs and the callback is invoked once
+    /// more with the winner's geometry so the child converges on it.
     pub fn apply_grid_in_order<T>(
         &self,
         pty_id: &str,
@@ -623,14 +413,11 @@ impl PtySizeOwners {
         }
     }
 
-    /// The per-pty STAMPED grid sequence as of now: the seq the last granted
-    /// claim was stamped with, or 0 before any.
-    ///
-    /// Deliberately not the last APPLIED seq, which is
-    /// [`Self::applied_grid_seq`]. The two differ for exactly as long as a
-    /// stamped resize is still sitting in the engine actor's queue, and reading
-    /// the wrong one seeds a handshake's drop filter above a broadcast that has
-    /// not been published yet, which then gets dropped forever.
+    /// The per-pty STAMPED grid sequence: the seq of the last granted claim, or
+    /// 0 before any. Deliberately not the last applied seq
+    /// ([`Self::applied_grid_seq`]): the two differ while a stamped resize is
+    /// still queued, and seeding a handshake's drop filter from this one drops
+    /// the not-yet-published broadcast forever.
     pub fn grid_seq(&self, pty_id: &str) -> u64 {
         self.owners
             .lock()
@@ -644,14 +431,10 @@ impl PtySizeOwners {
     /// The seq of the last resize that actually REACHED the child, or 0 before
     /// any.
     ///
-    /// This is what a PTY-socket handshake seeds its grid-drop filter from, and
-    /// it is a valid lower bound for the grid the handshake also carries: the
-    /// grid read is enqueued behind every resize already accepted, and the actor
-    /// drains in order. The STAMPED seq is not a valid bound, because a resize
-    /// stamped by the terminal UI (which stamps and applies in two steps) or
-    /// still queued for the actor has not reached the child yet: seeding the
-    /// filter at that value makes the socket, and the client, drop the very
-    /// broadcast that announces the apply, permanently.
+    /// The valid seed for a PTY-socket handshake's grid-drop filter, and a valid
+    /// lower bound for the grid that handshake carries. The stamped seq is not:
+    /// a resize that has not reached the child yet would make the client drop
+    /// the very broadcast announcing its apply, permanently.
     pub fn applied_grid_seq(&self, pty_id: &str) -> u64 {
         self.owners
             .lock()
@@ -662,19 +445,16 @@ impl PtySizeOwners {
             .unwrap_or(0)
     }
 
-    /// The mutation counter for the owner map, read by the engine actor's spine
-    /// check as its cheap "ownership might have changed" gate signal, exactly
-    /// like `mutation_version` and `streaming_version`. See
+    /// The owner-map mutation counter, read by the engine actor's spine check as
+    /// its cheap "ownership might have changed" gate. See
     /// [`OwnersState::generation`] for why this is not `epoch`.
     pub fn ownership_generation(&self) -> u64 {
         self.owners.lock().unwrap().generation
     }
 
     /// A point-in-time copy of the owner map (pty id -> owning connection id),
-    /// taken by the spine check when it actually runs a fingerprint compare so
-    /// the overlay stamps a CONSISTENT set of owners onto one spine build. A
-    /// clone rather than a borrow: the map is small (one entry per driven PTY)
-    /// and the lock must not be held across the spine projection.
+    /// so the overlay stamps a consistent set of owners onto one spine build.
+    /// Cloned because the lock must not be held across the spine projection.
     pub fn input_owners_snapshot(&self) -> std::collections::HashMap<String, u64> {
         self.owners
             .lock()

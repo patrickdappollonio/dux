@@ -19,15 +19,6 @@ pub mod status_keys {
     /// Worktree-list failure key. Parameterised by project id at call sites:
     /// `format!("{WORKTREE_LIST_PREFIX}:{project_id}")`.
     pub const WORKTREE_LIST_PREFIX: &str = "worktree-list";
-    // The checkout-default, add-project-checkout, pr-lookup, async worktree-delete,
-    // create-agent, and reconnect/force-restart launch operations no longer use
-    // hand-authored key prefixes: their busies carry the opaque id of a
-    // `HandlerStatusOp` (see `Engine::pending_web_*_ops`,
-    // `Engine::pending_delete_ops_web`, `Engine::pending_create_ops`, and
-    // `Engine::pending_web_launch_ops`) so the busy and its final correlate without
-    // a shared string. The clear-workarounds they needed
-    // (`web_completed_busy_key_to_clear`, `web_launch_ready_keys_to_clear`) were
-    // removed with them.
     /// Push key prefix. Parameterised by worktree path at call sites:
     /// `format!("{PUSH_PREFIX}:{worktree_path}")`.
     pub const PUSH_PREFIX: &str = "push";
@@ -144,11 +135,10 @@ pub enum WireCommand {
     },
     /// Re-read `config.toml` from disk and apply it to the running engine.
     ///
-    /// Modeled as an empty struct variant (not a unit variant) so it deserializes
+    /// Modeled as an empty struct variant, not a unit variant, so it deserializes
     /// from both `{"command":"reload_config"}` and `{"command":"reload_config",
-    /// "args":{}}`. The frontend's generic command envelope always carries an
-    /// `args` object, and serde's `content="args"` tagging rejects a map for a
-    /// true unit variant — an empty struct variant accepts both forms.
+    /// "args":{}}`: the frontend's envelope always carries an `args` object, and
+    /// serde's `content="args"` tagging rejects a map for a true unit variant.
     ReloadConfig {},
     /// Overwrite `config.toml` from the current in-memory config. Empty struct
     /// variant for the same reason as [`WireCommand::ReloadConfig`].
@@ -162,15 +152,14 @@ pub enum WireCommand {
     },
     /// Persist this dux instance's identity to `config.toml`: the browser tab
     /// `<title>` (`config.server.title`) and the favicon color
-    /// (`config.server.favicon`). Sent by the web's customize-webapp dialog. Each
-    /// field is optional so a single-field body (just a title, or just a color)
-    /// only touches that field; an empty body (both `None`) is a no-op (no write,
-    /// no `config.changed`). The title is normalized (control + bidi/format chars
-    /// neutralized, whitespace collapsed, capped, empty resets to "dux"); the
-    /// favicon must be a curated color name (or empty to reset) or the command is
-    /// rejected. The write is eager so the endpoint can report a synchronous
-    /// success/failure, and a non-empty body mutates config-static state so the web
-    /// fires `config.changed` and every tab refetches its title + favicon.
+    /// (`config.server.favicon`). Each field is optional, so a single-field body
+    /// touches only that field and an empty body is a no-op. The title is
+    /// normalized (control and bidi/format characters neutralized, whitespace
+    /// collapsed, capped, empty resetting to "dux"); the favicon must be a
+    /// curated color name, or empty to reset, or the command is rejected. The
+    /// write is eager so the endpoint can report a synchronous success or
+    /// failure, and a non-empty body mutates config-static state, so the web
+    /// fires `config.changed`.
     SetInstanceIdentity {
         title: Option<String>,
         favicon: Option<String>,
@@ -264,38 +253,21 @@ pub enum WireCommand {
     SetTailscaleMode {
         mode: String,
     },
-    /// Set explicit values for the "Settings" modal's `[ui]`/`[capabilities]`
-    /// knobs in one request, mirroring `SetInstanceIdentity`'s all-optional
-    /// present-field pattern but for the generic settings surface (the
-    /// Preferences dialog, opened from the app menu's cog, see
-    /// `crates/dux-web/web/src/lib/settingsDescriptors.ts` for the exact
-    /// field set and descriptions). Every field is optional; an
-    /// absent field is left untouched, and a body with every field absent is a
-    /// no-op (no write, no `config.changed`). Numeric fields are clamped to a
-    /// sane documented ceiling (0 stays 0 where the config documents a zero
-    /// meaning); `pr_banner_position` is validated against a fixed set of
-    /// accepted values and the whole command is REJECTED (no partial apply)
-    /// if it is present and unrecognized. `server.title` and
-    /// `server.favicon` are deliberately NOT here, they stay on
-    /// `SetInstanceIdentity`. The write is eager so the endpoint can report a
-    /// synchronous success/failure, and a non-empty patch mutates config-static
-    /// state so the web fires `config.changed` and every tab refetches its
-    /// settings.
-    /// The field list lives on [`SettingsPatch`], which carries the
-    /// field-by-field semantics. The wire format is unaffected by the newtype:
-    /// under this enum's adjacent tagging a newtype variant flattens its inner
-    /// struct straight into `args`, so `{"command":"set_settings","args":{...}}`
-    /// serializes and parses byte-identically to the inline-field form this
-    /// replaced (pinned by `set_settings_wire_json_round_trips_through_args`).
+    /// Set explicit values for the Preferences dialog's `[ui]`/`[capabilities]`
+    /// knobs in one request. The payload and the field-by-field semantics live on
+    /// [`SettingsPatch`]; `server.title` and `server.favicon` are deliberately
+    /// not among them and stay on `SetInstanceIdentity`.
+    ///
+    /// The newtype does not change the wire format: under this enum's adjacent
+    /// tagging a newtype variant flattens its inner struct straight into `args`,
+    /// so `{"command":"set_settings","args":{...}}` parses as it always did.
     SetSettings(SettingsPatch),
     /// Force-kill a running agent's PTY WITHOUT deleting its session or
-    /// worktree, the web counterpart to the TUI's kill-running modal (for one
-    /// agent). Mirrors the force-reconnect teardown block but stops there (no
-    /// relaunch): the provider is dropped (SIGKILL on Drop), resume state is
-    /// cleared, and the session is marked Detached so it can be reconnected
-    /// later. Companion terminals are killed through the existing
-    /// `DeleteTerminal`. Unknown session is an `Err`; killing an agent that is
-    /// not running is an idempotent no-op.
+    /// worktree, the web counterpart to the TUI's kill-running modal for one
+    /// agent: the provider is dropped (SIGKILL on Drop), resume state is cleared,
+    /// and the session is marked Detached so it can be reconnected later.
+    /// Companion terminals are killed through `DeleteTerminal`. Unknown session
+    /// is an `Err`; killing an agent that is not running is an idempotent no-op.
     KillSessionPty {
         session_id: String,
     },
@@ -316,21 +288,16 @@ pub enum WireCommand {
         name: String,
     },
     /// Check the repo's default branch out FIRST, then register it as a project,
-    /// mirroring the TUI's "Check Out & Add" button in the
-    /// `ConfirmNonDefaultBranch` dialog (the default action for the confident
-    /// "Known" warning). Only valid when the repo's `origin/HEAD` resolves to a
-    /// known default that differs from the current branch — the wire layer
-    /// re-runs `branch_warning_kind` server-side and rejects the command
-    /// otherwise (defense against a stale/forged path; the heuristic path never
-    /// offers this option, matching the TUI).
+    /// mirroring the TUI's "Check Out & Add" button. Only valid when the repo's
+    /// `origin/HEAD` resolves to a known default that differs from the current
+    /// branch: the wire layer re-runs `branch_warning_kind` server-side and
+    /// rejects the command otherwise, so a stale or forged path cannot get in.
     ///
-    /// `git switch` rewrites the working tree, so this follows the L4 worker
-    /// chain rather than running inline (CLAUDE.md workers tenet): it spawns
-    /// `run_add_project_checkout_job` and returns a busy status. Worker
-    /// completion posts `NonDefaultBranchCheckoutCompleted`, whose
-    /// `AddProjectAfterBranchCheckout` reaction is driven to the actual project
-    /// add by the web actor's `drive_add_project_followup` (the TUI drives the
-    /// identical reaction from its `workers.rs` drain).
+    /// `git switch` rewrites the working tree, so this follows the worker chain
+    /// rather than running inline: it spawns `run_add_project_checkout_job` and
+    /// returns a busy status, whose completion posts
+    /// `NonDefaultBranchCheckoutCompleted` for `drive_add_project_followup` on
+    /// the web, or the TUI's own drain, to finish the add.
     AddProjectCheckoutDefault {
         path: String,
         name: String,
@@ -469,14 +436,12 @@ pub enum WireCommand {
     },
     /// Swap which CLI a session uses, mirroring the TUI palette's
     /// `change-agent-provider`. `provider` is validated server-side against the
-    /// engine's configured provider list (the same source as the ViewModel's
-    /// `available_providers`) — the client's choice is never trusted.
+    /// engine's configured provider list; the client's choice is never trusted.
     ///
     /// Like the TUI, this does NOT kill or relaunch a running agent: it persists
-    /// the new provider for the NEXT launch and, when a provider is still
-    /// running on the session's PTY, pins the previously-running one so labels
-    /// stay truthful until the user reconnects. Selecting the current provider
-    /// is a no-op.
+    /// the new provider for the NEXT launch and, while a provider still runs on
+    /// the session's PTY, pins the previously-running one so labels stay truthful
+    /// until the user reconnects. Selecting the current provider is a no-op.
     ChangeAgentProvider {
         session_id: String,
         provider: String,
@@ -509,109 +474,85 @@ pub enum WireCommand {
         tab_id: Option<String>,
     },
     /// Switch a project's SOURCE checkout back to its default branch, mirroring
-    /// the TUI's `checkout-project-default-branch`.
+    /// the TUI's `checkout-project-default-branch` and its four inspection
+    /// outcomes byte-for-byte:
+    ///   - default branch known and differs -> `git switch`, then info.
+    ///   - heuristic (origin/HEAD missing, on a non-main/master branch) -> error.
+    ///   - already on the leading branch -> info, no checkout.
+    ///   - inspection failed -> error.
     ///
-    /// The TUI runs this in two worker hops (an inspection job, then — only for
-    /// the `Known` default-branch case — a `git switch` job), chained by an
-    /// engine reaction the web loop does not act on. So the web does the
-    /// inspection AND the checkout SYNCHRONOUSLY here (the engine loop already
-    /// shells out to git synchronously for `PullProject`/discard), reproducing
-    /// the TUI's four inspection outcomes byte-for-byte:
-    ///   - default branch known and differs → `git switch`, then info.
-    ///   - heuristic (origin/HEAD missing, on a non-main/master branch) → error.
-    ///   - already on the leading branch → info, no checkout.
-    ///   - inspection failed → error.
-    ///
-    /// The TUI does not confirm (it is a deliberate palette/keybinding action);
-    /// the web confirms in the frontend dialog before sending this, since a ⋯
-    /// menu click is a lighter gesture and the checkout moves HEAD.
+    /// The TUI does not confirm, since it is a deliberate palette action; the web
+    /// confirms in the frontend dialog before sending this, because a menu click
+    /// is a lighter gesture and the checkout moves HEAD.
     CheckoutProjectDefaultBranch {
         project_id: String,
     },
     /// Adopt an orphaned managed worktree (created by dux, no live session) as a
-    /// new agent, mirroring the TUI's `new-agent-from-worktree`
-    /// (`CreateAgentRequest::ExistingManagedWorktree`). `worktree_path` is the
-    /// canonical path the listing returned; `name` is a DISPLAY name (the branch
-    /// already exists, so this never becomes a branch — see the TUI's
-    /// display-name prompt variant).
+    /// new agent, mirroring the TUI's `new-agent-from-worktree`. `worktree_path`
+    /// is the canonical path the listing returned; `name` is a DISPLAY name,
+    /// because the branch already exists and this never becomes one.
     ///
-    /// The path is NEVER trusted from the client: `wire_to_command` re-runs the
-    /// `classify_project_worktrees` classification for the project and rejects a
-    /// path that isn't a currently-adoptable managed worktree (stale, foreign, or
-    /// already attached). Classification is a `git worktree list` + branch lookups
-    /// — bounded plumbing reads with no working-tree writes — so it runs inline in
-    /// `wire_to_command` like `AddProject`'s `current_branch`/`leading_branch`
-    /// inspection and `discard_classify`'s `git status` already do. (Contrast
-    /// `CheckoutProjectDefaultBranch`, which `git switch`es the working tree and
-    /// therefore goes through workers per the CLAUDE.md tenet.)
+    /// The path is NEVER trusted from the client: `wire_to_command` re-runs
+    /// `classify_project_worktrees` for the project and rejects a path that is
+    /// not a currently-adoptable managed worktree (stale, foreign, or already
+    /// attached). Classification is a `git worktree list` plus branch lookups,
+    /// bounded plumbing reads with no working-tree writes, so it runs inline
+    /// rather than through a worker.
     CreateAgentFromWorktree {
         project_id: String,
         worktree_path: String,
         name: String,
     },
     /// Create a new agent checked out on a GitHub PR's head branch, mirroring
-    /// the TUI's `new-agent-from-pr` palette command
-    /// (`CreateAgentRequest::PullRequest`). `pr` is the user-typed reference: a
-    /// full PR URL, `#123`, or a bare `123` (parsed server-side by
-    /// `gh::parse_pull_request_lookup` against the project's GitHub remote).
-    /// `name` is the agent/branch name; empty falls back to the PR head branch,
-    /// matching the TUI prompt's default seed.
+    /// the TUI's `new-agent-from-pr` palette command. `pr` is the user-typed
+    /// reference (a full PR URL, `#123`, or a bare `123`), parsed server-side
+    /// against the project's GitHub remote. `name` is the agent and branch name;
+    /// empty falls back to the PR head branch.
     ///
-    /// The lookup shells out to `gh pr view`, so — like the TUI — this does NOT
-    /// run inline: `apply_wire` validates the synchronous guards (gh available,
-    /// known project, parseable input, valid name), spawns
+    /// The lookup shells out to `gh pr view`, so this does NOT run inline:
+    /// `apply_wire` validates the synchronous guards, spawns
     /// `gh::run_pull_request_lookup_job` off-thread, and returns a busy status.
-    /// On success the worker posts `PullRequestResolved`, whose
-    /// `OpenNewAgentPromptForPr` reaction the web actor's `drive_pr_lookup_followup`
-    /// turns into a `CreateAgentRequest::PullRequest` dispatch (where the TUI
-    /// would instead open a name prompt — the web already has the name). A
-    /// lookup failure surfaces on the async status stream.
+    /// On success `drive_pr_lookup_followup` turns the worker's
+    /// `OpenNewAgentPromptForPr` reaction into the create dispatch, where the TUI
+    /// would open a name prompt instead. A lookup failure surfaces on the async
+    /// status stream.
     CreateAgentFromPr {
         project_id: String,
         pr: String,
         name: String,
     },
     /// Run a configured text macro against a live PTY target, mirroring the TUI's
-    /// macro bar (Ctrl-\). `target_id` names EITHER an agent session (an entry in
-    /// `providers`, surface `Agent`) OR a companion terminal (an entry in
-    /// `companion_terminals`, surface `Terminal`); the engine resolves which and
-    /// unifies the write through the same `providers`-then-`companion_terminals`
+    /// macro bar. `target_id` names EITHER an agent session (surface `Agent`) OR
+    /// a companion terminal (surface `Terminal`), resolved through the same
     /// lookup the actor's `pty_for` uses. `name` is the macro's `[macros]` key.
     ///
-    /// The engine resolves the entry by name (unknown → error), checks the
-    /// macro's surface against the resolved target's surface (mismatch → error;
-    /// the TUI bar simply doesn't list mismatches, but an explicit wire error is
-    /// the right shape for a programmatic client), translates the text with the
-    /// shared `dux_core::macros::macro_payload_bytes` (newlines → Alt+Enter), and
-    /// writes it to the target's PTY. Parity with the TUI is by construction: the
-    /// same transform, the same surface gate.
+    /// An unknown name and a macro whose surface does not match the resolved
+    /// target are both errors: the TUI bar simply omits mismatches, but an
+    /// explicit wire error is the right shape for a programmatic client. The text
+    /// is translated by the shared `dux_core::macros::macro_payload_bytes` before
+    /// the write, so parity with the TUI is by construction.
     RunMacro {
         target_id: String,
         name: String,
     },
     /// Wholesale-replace the `[macros]` config, mirroring the TUI macro editor's
-    /// save semantics (the dialog rewrites the whole map). `entries` is an ORDERED
-    /// list of `(name, {text, surface})` — order is preserved into the config
-    /// IndexMap and thus into the ViewModel's `macros`. Persisted through the
-    /// engine's config writer following the global-env precedent
-    /// (`PersistGlobalEnv` → eager save through `Engine::config_writer`), so user
-    /// comments survive the in-place patch. Validation (server-side, the
-    /// client is never trusted): empty names rejected, duplicate names rejected,
-    /// empty text rejected (the TUI editor refuses to save an empty-text macro),
-    /// unknown surface strings rejected.
+    /// save semantics. `entries` is an ORDERED list of `(name, {text, surface})`
+    /// and the order is preserved into the config map and the ViewModel's
+    /// `macros`. Persisted through the engine's config writer, so user comments
+    /// survive the in-place patch. Validated server-side, never trusting the
+    /// client: empty names, duplicate names, empty text and unknown surface
+    /// strings are all rejected.
     UpdateMacros {
         entries: Vec<WireMacroEntry>,
     },
     /// Point the changed-files watch at a session's worktree, mirroring the TUI's
-    /// selection-driven `reload_changed_files`. `session_id` is nullable: a
-    /// `null` (or absent) id clears the watch so the global poller stops reading
-    /// any worktree, while a real id has the server resolve the session and watch
-    /// its worktree. The web sends this on every session selection because the
-    /// global `watched_worktree`/`changed_files` engine state is otherwise never
-    /// set for a browser client (only the TUI set it), leaving the pane empty.
+    /// selection-driven `reload_changed_files`. `session_id` is nullable: `null`
+    /// or absent clears the watch so the global poller reads no worktree, while a
+    /// real id has the server resolve the session and watch its worktree. The web
+    /// sends it on every session selection, because the global engine state is
+    /// otherwise never set for a browser client and the pane stays empty.
     ///
-    /// `#[serde(default)]` so the field accepts the absent form
-    /// (`{"command":"watch_changed_files","args":{}}`) as well as an explicit
+    /// `#[serde(default)]` so the absent form is accepted as well as an explicit
     /// `null`, matching the frontend's clear path.
     WatchChangedFiles {
         #[serde(default)]
@@ -647,12 +588,11 @@ pub fn normalize_instance_favicon(raw: &str) -> Option<String> {
 }
 
 /// True for a character that must not survive into a title: a Unicode control
-/// code (category Cc, via `char::is_control`) OR a bidi/format character (a subset
-/// of category Cf) that can visually reorder or hide text. `char::is_control`
-/// alone misses the Cf class, so a right-to-left override (U+202E) or zero-width
-/// joiner would otherwise pass through and spoof the rendered tab title / wordmark
-/// and the on-disk `config.toml` (a Trojan-Source-style display attack). We
-/// neutralize the specific format characters that matter for spoofing.
+/// code (category Cc, via `char::is_control`) OR one of the bidi/format
+/// characters (a subset of Cf) that can visually reorder or hide text.
+/// `char::is_control` alone misses Cf, so a right-to-left override (U+202E) or
+/// zero-width joiner would pass through and spoof the rendered tab title and the
+/// on-disk `config.toml`, a Trojan-Source-style display attack.
 fn is_unsafe_title_char(ch: char) -> bool {
     ch.is_control()
         || matches!(ch,
@@ -704,15 +644,12 @@ pub fn normalize_instance_title(raw: &str) -> String {
 /// control character and cap the result to 200 characters (counted by `char`,
 /// never bytes, so a multi-byte glyph can't be sliced mid-codepoint).
 ///
-/// This is defense in depth alongside the web's own sanitizing
-/// (`terminalFontFamily` in `crates/dux-web/web/src/lib/terminalFont.ts`),
-/// which strips a wider set of characters because the value there is
-/// concatenated directly into a CSS `font-family: <x>;` declaration and into a
-/// `document.fonts.load` shorthand string. Here the goal is narrower: a stray
-/// control character (in particular a literal newline) must never survive
-/// into `config.toml`, and the field must not grow unbounded. Degrades
-/// quietly rather than rejecting the patch, matching this settings API's
-/// tolerant style elsewhere (e.g. [`normalize_instance_title`]).
+/// Defense in depth alongside the web's own sanitizing, which strips a wider set
+/// because the value there is concatenated into a CSS `font-family` declaration.
+/// The goal here is narrower: no control character, a literal newline above all,
+/// may survive into `config.toml`, and the field must not grow unbounded.
+/// Degrades quietly rather than rejecting the patch, matching this settings
+/// API's tolerant style elsewhere (for example [`normalize_instance_title`]).
 pub fn sanitize_terminal_font_family(raw: &str) -> String {
     raw.chars()
         .filter(|ch| !ch.is_ascii_control())
@@ -730,13 +667,11 @@ fn clamp_nonzero<T: PartialOrd + Copy>(value: T, max: T) -> T {
 }
 
 /// Normalize a `ui.pr_banner_position` value for [`Engine::set_settings`].
-/// Accepts exactly "top" or "bottom" (case-insensitive, trimmed); anything
+/// Accepts exactly "top" or "bottom", case-insensitive and trimmed; anything
 /// else is rejected so the endpoint returns a plain-text 400 rather than
-/// silently coercing an unrecognized value the way the parameterless toggle
-/// does. Kept distinct from `toggle_pr_banner_position`'s "anything other than
-/// bottom becomes top" leniency: that toggle only ever flips between the two
-/// known values it already holds, while this validates a client-supplied
-/// string.
+/// coercing. Deliberately stricter than `toggle_pr_banner_position`, which only
+/// ever flips between two known values it already holds, while this validates a
+/// client-supplied string.
 pub fn normalize_pr_banner_position(raw: &str) -> Option<String> {
     match raw.trim().to_lowercase().as_str() {
         "top" => Some("top".to_string()),
@@ -748,22 +683,16 @@ pub fn normalize_pr_banner_position(raw: &str) -> Option<String> {
 /// The present/absent fields for [`WireCommand::SetSettings`] — the SINGLE
 /// field list for the settings path, and the payload the variant carries.
 ///
-/// Set explicit values for the "Settings" modal's `[ui]`/`[capabilities]`/
-/// `[defaults]` knobs in one request, mirroring `SetInstanceIdentity`'s
-/// all-optional present-field pattern but for the generic settings surface (the
-/// Preferences dialog, opened from the app menu's cog; see
-/// `crates/dux-web/web/src/lib/settingsDescriptors.ts` for the exact field set
-/// and descriptions). Every field is optional; an absent field is left
-/// untouched, and a patch with every field absent is a no-op (no write, no
-/// `config.changed`). Numeric fields are clamped to a sane documented ceiling
-/// (0 stays 0 where the config documents a zero meaning); `pr_banner_position`
-/// and `default_provider` are validated against a fixed accepted set and the
-/// whole command is REJECTED (no partial apply) if a present value is
-/// unrecognized. `server.title` and `server.favicon` are deliberately NOT here,
-/// they stay on `SetInstanceIdentity`. The write is eager so the endpoint can
-/// report a synchronous success/failure, and a non-empty patch mutates
-/// config-static state so the web fires `config.changed` and every tab refetches
-/// its settings.
+/// Every field is optional; an absent field is left untouched, and a patch with
+/// every field absent is a no-op (no write, no `config.changed`). Numeric fields
+/// are clamped to a documented ceiling, with 0 preserved where the config
+/// documents a zero meaning; `pr_banner_position` and `default_provider` are
+/// validated against a fixed accepted set and an unrecognized present value
+/// REJECTS the whole command, with no partial apply. `server.title` and
+/// `server.favicon` are deliberately NOT here; they stay on
+/// `SetInstanceIdentity`. The write is eager so the endpoint can report a
+/// synchronous success or failure, and a non-empty patch mutates config-static
+/// state, so the web fires `config.changed`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SettingsPatch {
     pub copy_on_select: Option<bool>,
@@ -836,13 +765,9 @@ pub struct SettingsPatch {
     pub disable_release_notes: Option<bool>,
     /// `ui.terminal_font_family`: a font name installed on the viewing device,
     /// placed ahead of the bundled web terminal font stack. Sanitized by
-    /// [`crate::wire::sanitize_terminal_font_family`] before being stored:
-    /// ASCII control characters are dropped and the result is capped to 200
-    /// characters, defense in depth alongside the web `terminalFont.ts`
-    /// sanitizing (the value is concatenated into a CSS `font-family`
-    /// declaration client-side). Degrades quietly rather than rejecting the
-    /// patch. Empty string is a valid value (it means "use the bundled stack
-    /// only").
+    /// [`crate::wire::sanitize_terminal_font_family`] before being stored, and
+    /// degrades quietly rather than rejecting the patch. An empty string is a
+    /// valid value and means "use the bundled stack only".
     pub terminal_font_family: Option<String>,
     /// `ui.terminal_font_size`: the web terminal's font size in pixels.
     /// Normalized through [`crate::config::normalized_terminal_font_size`]
@@ -852,13 +777,11 @@ pub struct SettingsPatch {
     /// default rather than clamping to the nearer bound.
     pub terminal_font_size: Option<u16>,
     /// Presentation-only, NOT a settings field: when true, and the patch is
-    /// confined to the accessory-bar field, the engine emits no info status
-    /// for this request. That field gates chrome the user is looking
-    /// straight at, so the bar visibly moving is the whole feedback and a
-    /// "Settings updated." toast on top is noise. The flag is honored per
-    /// request and only for that field (`is_accessory_bar_only`), so it can
-    /// never silence any other settings write; validation and save errors
-    /// still fail the command loudly regardless of the flag.
+    /// confined to the accessory-bar field, the engine emits no info status for
+    /// this request, because that field gates chrome the user is looking straight
+    /// at and the bar visibly moving is the whole feedback. Honored per request
+    /// and only for that field (`is_accessory_bar_only`), so it can never silence
+    /// any other settings write; validation and save errors still fail loudly.
     #[serde(default)]
     pub quiet: bool,
 }
@@ -867,10 +790,9 @@ impl SettingsPatch {
     /// True when the client sent at least one field.
     ///
     /// Every field is an `Option`, so "every field absent" is exactly
-    /// `Self::default()`. That makes this a whole-struct compare rather than a
-    /// per-field list, which means a field added to this struct CANNOT make it
-    /// stale. The field-by-field version of this check is how a patch carrying
-    /// only an unlisted field once read as empty and silently no-opped.
+    /// `Self::default()`. Keep it a whole-struct compare rather than a per-field
+    /// list: a field added to this struct then CANNOT make the check stale and
+    /// silently read a patch carrying only that field as empty.
     pub fn any_present(&self) -> bool {
         // `quiet` is a presentation flag, not a settings field: neutralize it
         // in the compare so a patch carrying only `quiet` still reads as
@@ -899,17 +821,14 @@ impl SettingsPatch {
 
 impl WireCommand {
     /// True for the commands that mutate config-static state surfaced in the
-    /// bootstrap document — the macro set, the workspace-wide env map, the
-    /// Changes-pane visibility flag, and the preference toggles. These
-    /// save to `config.toml` (eager for github-integration, lazy for the
-    /// low-stakes preferences) and adopt the change into the running config in
-    /// place (no disk reload), so the web layer must fire a `config.changed`
-    /// event after one succeeds for connected
-    /// clients to refetch `/api/v1/bootstrap`. Without it the change persists but
-    /// the UI keeps showing — and reseeds dialogs from — a stale snapshot (e.g. a
-    /// just-saved macro appears to vanish). `ReloadConfig` is intentionally NOT
-    /// listed: it re-reads the whole file and already signals through the engine
-    /// actor's reload path.
+    /// bootstrap document: the macro set, the workspace-wide env map, the
+    /// Changes-pane visibility flag, and the preference toggles. They save to
+    /// `config.toml` and adopt the change into the running config in place, with
+    /// no disk reload, so the web layer must fire a `config.changed` event after
+    /// one succeeds; without it the change persists while the UI keeps reseeding
+    /// dialogs from a stale snapshot. `ReloadConfig` is intentionally NOT listed:
+    /// it re-reads the whole file and already signals through the engine actor's
+    /// reload path.
     pub fn mutates_config_static(&self) -> bool {
         // An empty-body `SetInstanceIdentity` (both fields absent) never touches
         // config, so it must NOT trigger a `config.changed` fan-out. A body that
@@ -981,19 +900,15 @@ pub struct WireStatus {
     pub sticky: bool,
     /// Presentation-only: the status is the command's ANSWER but not a
     /// notification. It still rides back to the caller in
-    /// [`WireCommandOutcome::status`], so an API client (and the tests that
-    /// distinguish one no-op from another) keeps the sentence; the web's
-    /// status emitter drops it instead of broadcasting, so no toast is raised.
+    /// [`WireCommandOutcome::status`], so an API client keeps the sentence; the
+    /// web's status emitter drops it instead of broadcasting, so no toast is
+    /// raised. Marking rather than dropping is what keeps the wire answer intact.
     ///
     /// Reserve it for an unkeyed INFO whose outcome the user is already looking
     /// straight at: a preference the dialog visibly flipped, a pane that just
-    /// appeared, a row that just left the screen. A sentence that teaches the
-    /// way BACK from something that has just vanished is not one of these, and
+    /// appeared, a row that just left the screen. A sentence that names the way
+    /// BACK from something that has just vanished is not one of these, and
     /// neither is a warning or an error, which stay loud whatever this says.
-    ///
-    /// This generalizes [`SettingsPatch::quiet`], which asks the same question
-    /// for one field of one command and answers it by returning no status at
-    /// all. Marking rather than dropping is what keeps the wire answer intact.
     #[serde(default, skip_serializing_if = "is_false")]
     pub quiet: bool,
 }
@@ -1229,14 +1144,12 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
     match reaction {
         EventReaction::Status(update) => vec![WireStatus::from_update(update)],
         EventReaction::Multi(items) => items.iter().flat_map(wire_statuses_from_reaction).collect(),
-        // Create-kind launch finals (success / startup-error / persist-fail /
-        // launch-fail) are resolved ENGINE-SIDE against the shared
+        // Create-kind launch finals are resolved ENGINE-SIDE against the shared
         // `Engine::pending_create_ops` op and ride alongside the launch View as a
-        // sibling `Status` in the same `Multi`, surfaced by the `EventReaction::Status`
-        // arm above. Reconnect / force-restart / resume-fallback / startup-auto-reopen
-        // finals are resolved per-surface in `drive_web_launch_followup` against
-        // `Engine::pending_web_launch_ops`. So both launch View reactions emit nothing
-        // here, avoiding a double status.
+        // sibling `Status` in the same `Multi`. Reconnect, force-restart,
+        // resume-fallback and startup-auto-reopen finals are resolved per-surface
+        // in `drive_web_launch_followup`. So both launch View reactions emit
+        // nothing here, avoiding a double status.
         EventReaction::AgentLaunchFailedView(_) | EventReaction::AgentLaunchReadyView(_) => vec![],
         // DeleteTerminal is a one-shot info; no busy precedes it, so it stays
         // unkeyed (anonymous slot). Quiet for the same reason as its sibling in
@@ -1285,15 +1198,12 @@ pub fn delete_session_status_message(
                  the agent wrote there is still there."
             )
         }
-        // The worktree went and the branches stayed, because they were not
-        // dux's to delete. The wording names every kept branch with its own
-        // reason (drift makes them differ) and how to remove one by hand: once
-        // the worktree is gone, no dux surface can reach the branch any more.
-        //
-        // The `unwrap_or_default` on the branch reads below are unreachable
-        // placeholders, not values any sentence renders: a standalone agent has
-        // no branch and takes the `NothingToRemove` arm above, which is the
-        // only arm it can take.
+        // The worktree went and the branches stayed, because they were not dux's
+        // to delete. The wording names every kept branch with its own reason and
+        // how to remove one by hand: once the worktree is gone, no dux surface
+        // can reach the branch any more. The `unwrap_or_default` branch reads
+        // below are unreachable placeholders, since a standalone agent has no
+        // branch and can only take the `NothingToRemove` arm above.
         WorktreeRemoval::Performed {
             branches: crate::engine::RemovedBranches::Kept(reason),
         } => {
@@ -1509,14 +1419,10 @@ impl Engine {
     /// Reconstruct and dispatch a wire command, returning a wire-safe outcome.
     pub fn apply_wire(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
         // Stamp the synchronous command-result status with the current command
-        // origin (set by the engine actor around `ApplyWire`). For the TUI and
-        // every test, `current_origin` is `All`, so the status is unchanged.
-        // Deferred busies/finals stamp themselves at their own mint sites (they
-        // capture `current_origin` before their worker spawns), so they are not
-        // re-stamped here.
-        // Clear the create-op correlation slot before dispatch so the value we
-        // read back reflects only THIS command's create (the engine actor is
-        // single-threaded, so no concurrent command can set it in between).
+        // origin. Deferred busies and finals capture `current_origin` at their
+        // own mint sites, so they are not re-stamped here.
+        // Clear the create-op correlation slot before dispatch, so the value read
+        // back reflects only THIS command's create.
         self.last_created_op_id = None;
         let mut outcome = self.apply_wire_inner(command)?;
         if let Some(status) = outcome.status.as_mut() {
@@ -1750,20 +1656,18 @@ impl Engine {
         quiet_when(WireStatus::new("info", message.to_string()), visible)
     }
 
-    /// Persist this dux instance's identity — the browser tab title
-    /// (`config.server.title`) and favicon color (`config.server.favicon`) — to
-    /// `config.toml`, mirroring `toggle_github_integration`'s "persist a candidate
-    /// first" pattern so the endpoint gets a synchronous success/failure before it
-    /// replies `200`.
+    /// Persist this dux instance's identity, the browser tab title
+    /// (`config.server.title`) and favicon color (`config.server.favicon`), to
+    /// `config.toml`, persisting a candidate first so the endpoint has a
+    /// synchronous success or failure before it replies `200`.
     ///
-    /// Each field is optional. An empty body (both `None`) is a no-op — no write,
-    /// no `config.changed`. A `Some` title is normalized (see
+    /// Each field is optional and an empty body is a no-op, with no write and no
+    /// `config.changed`. A `Some` title is normalized (see
     /// [`normalize_instance_title`]); a `Some` favicon must be a curated color
     /// name or empty (see [`normalize_instance_favicon`]) or the command is
-    /// rejected with an error, which the dispatch layer turns into a plain-text
-    /// `400`. The write is eager and idempotent (unchanged values skip the disk
-    /// write), and the command mutates config-static state so the web fires
-    /// `config.changed` for connected clients to refetch their title + favicon.
+    /// rejected, which the dispatch layer turns into a plain-text `400`. The
+    /// write is eager and idempotent, and mutates config-static state, so the web
+    /// fires `config.changed`.
     fn set_instance_identity(
         &mut self,
         title: Option<String>,
@@ -1799,18 +1703,15 @@ impl Engine {
     }
 
     /// Persist an explicit set of `[ui]`/`[capabilities]` settings-modal fields
-    /// to `config.toml`, mirroring `set_instance_identity`'s "persist a
-    /// candidate first" pattern. Every field in [`SettingsPatch`] is optional; an
-    /// absent field is left untouched. Numeric fields are clamped into a sane
-    /// documented ceiling (0 is preserved where the config documents a zero
-    /// meaning, see each field's config.rs doc comment); `pr_banner_position`
-    /// is validated against a fixed accepted set, and `default_provider`
-    /// against the configured provider list, with the WHOLE command
-    /// rejected (nothing written) if the present value is unrecognized,
-    /// matching `set_instance_identity`'s all-or-nothing favicon validation.
-    /// The write is eager and idempotent (unchanged values skip the
-    /// disk write), and a non-empty patch mutates config-static state so the web
-    /// fires `config.changed` for connected clients to refetch their settings.
+    /// to `config.toml`, persisting a candidate first as `set_instance_identity`
+    /// does. Every field in [`SettingsPatch`] is optional and an absent one is
+    /// left untouched. Numeric fields are clamped into a documented ceiling, with
+    /// 0 preserved where the config documents a zero meaning;
+    /// `pr_banner_position` is validated against a fixed accepted set and
+    /// `default_provider` against the configured provider list, with the WHOLE
+    /// command rejected and nothing written on an unrecognized value. The write
+    /// is eager and idempotent, and a non-empty patch mutates config-static
+    /// state, so the web fires `config.changed`.
     fn set_settings(&mut self, patch: SettingsPatch) -> anyhow::Result<Option<WireStatus>> {
         // Resolve the quiet flag before the destructure moves the patch
         // apart. Quiet drops the INFO statuses only, and only for a patch
@@ -1892,13 +1793,11 @@ impl Engine {
         }
         .apply_to(&mut candidate);
 
-        // Idempotent: skip the write (and the fan-out) when nothing changed
-        // after clamping/normalization. `candidate` is a clone of `self.config`
+        // Idempotent: skip the write, and the fan-out, when nothing changed after
+        // clamping and normalization. `candidate` is a clone of `self.config`
         // with only the patched fields touched, so every other field compares
-        // equal by construction and this whole-struct compare asks exactly the
-        // question the old field-by-field chain asked: did any patched field
-        // actually change? Unlike that chain, it cannot go stale when a field
-        // is added.
+        // equal by construction. Keep it a whole-struct compare: a field-by-field
+        // chain goes stale the moment a field is added.
         if candidate == self.config {
             return Ok(info(WireStatus::new("info", "Settings unchanged.")));
         }
@@ -1906,19 +1805,16 @@ impl Engine {
         // Persist eagerly so a disk failure is surfaced before the endpoint
         // replies; only commit to the running config once the write succeeds.
         //
-        // INVARIANT: `candidate` was cloned from `self.config` above and only
-        // patched fields were mutated in between, so adopting it wholesale is a
-        // no-op for every unpatched field. Keep the clone and this assign
-        // adjacent: a `&mut self` call that mutated `self.config` between them
-        // would be silently discarded here, so do not add one. Adjacency is the
-        // only thing enforcing that, deliberately, since a discarded write
-        // cannot be observed from outside and no test can catch it.
+        // INVARIANT: `candidate` is a clone of `self.config` with only patched
+        // fields mutated, so adopting it wholesale is a no-op for every unpatched
+        // field. Keep the clone and this assign adjacent: a `&mut self` call
+        // mutating `self.config` between them would be silently discarded here,
+        // and adjacency is the only thing enforcing that, since a discarded write
+        // cannot be observed from outside.
         //
-        // The whole-struct assign is also what keeps memory in step with disk.
-        // `save_eager` already persists all of `candidate`, so a field-by-field
-        // copy-back can only make the running config adopt LESS than what was
-        // just written. That asymmetry is how a value once landed on disk while
-        // the engine kept serving the stale one until the next reload.
+        // The whole-struct assign is also what keeps memory in step with disk:
+        // `save_eager` persists all of `candidate`, so a field-by-field copy-back
+        // could only make the running config adopt LESS than what was written.
         self.config_writer
             .save_eager(candidate.clone())
             .map_err(|err| anyhow::anyhow!("saving to config failed: {err}"))?;
@@ -1971,16 +1867,15 @@ impl Engine {
         .quiet()
     }
 
-    /// Set `ui.agent_sort` to an explicit, validated mode and persist it. Rejects
-    /// unknown values (the web control only sends known ones, but the wire is a
-    /// trust boundary). Low-stakes preference, lazy write.
+    /// Set `ui.agent_sort` to an explicit, validated mode and persist it. Unknown
+    /// values are rejected, because the wire is a trust boundary. Low-stakes
+    /// preference, lazy write.
     ///
-    /// The shared value set has six modes: "active" (default), "updated",
-    /// "created", "name" (ascending), "name_desc" (descending), and "manual" (the
-    /// web's drag-reorder order). Each surface OFFERS its own subset in its picker
-    /// but DISPLAYS any value the other set: the TUI cycles the five non-manual
-    /// modes and the web sets active/updated/created/name/manual. This method is
-    /// `pub` so the TUI's `sort-agents` palette command can drive it too.
+    /// The shared value set is "active" (default), "updated", "created", "name"
+    /// (ascending), "name_desc" (descending) and "manual" (the web's drag-reorder
+    /// order). Each surface OFFERS its own subset in its picker but DISPLAYS any
+    /// value the other one sets. `pub` so the TUI's `sort-agents` palette command
+    /// can drive it too.
     pub fn set_agent_sort(&mut self, sort: &str) -> WireStatus {
         const VALID: [&str; 6] = [
             "active",
@@ -2077,14 +1972,12 @@ impl Engine {
     }
 
     /// Flip `ui.github_integration` and persist it, mirroring the TUI's
-    /// `toggle-github-integration` handler. Besides the config flag, this drives
-    /// the engine's PR-sync side effects so the running server actually starts or
-    /// stops polling `gh`. Disabling clears cached PR statuses and disarms the
-    /// sync; ENABLING launches the `gh` host probe and does nothing else, because
-    /// the status it holds right now predates that probe by definition. The
-    /// probe's completion is what arms the work, exactly once. The eager save
-    /// runs FIRST: if it fails nothing is mutated, so the engine never ends up
-    /// half-changed against a config that did not persist.
+    /// `toggle-github-integration` handler. Besides the config flag it drives the
+    /// engine's PR-sync side effects. Disabling clears cached PR statuses and
+    /// disarms the sync; ENABLING launches the `gh` host probe and does nothing
+    /// else, because the status it holds predates that probe by definition and
+    /// the probe's completion is what arms the work, exactly once. The eager save
+    /// runs FIRST, so a failed write leaves nothing mutated.
     fn toggle_github_integration(&mut self) -> WireStatus {
         let next = !self.github_integration_enabled;
         let state = if next { "enabled" } else { "disabled" };
@@ -2103,14 +1996,11 @@ impl Engine {
         self.config.ui.github_integration = next;
         if next {
             // Off-to-on: re-ask `gh` which hosts it can serve, and do NOTHING
-            // else. Without the re-ask the host policy would stay whatever it
-            // was when the server booted, so a user who logs in to their
-            // enterprise host and then enables the integration would get an
-            // empty eligible set and no explanation. And acting on
-            // `self.gh_status` here would be acting on the answer this probe is
-            // about to replace: it launched a refresh immediately, the probe's
-            // completion launched a second one plus another poller, and doing it
-            // twice multiplied the API traffic again.
+            // else. Without the re-ask the host policy stays whatever it was at
+            // boot, so a user who logs in to their enterprise host and then
+            // enables the integration gets an empty eligible set and no
+            // explanation. Acting on `self.gh_status` here would act on the very
+            // answer this probe is about to replace, and doubles the API traffic.
             self.spawn_gh_status_check();
         } else {
             self.pr_statuses.clear();
@@ -2125,15 +2015,11 @@ impl Engine {
     }
 
     /// Force-kill one running agent's PTY without deleting its session or
-    /// worktree. Mirrors the force-reconnect teardown block (drop the provider →
-    /// SIGKILL on Drop, clear resume state) but stops short of relaunching, and
-    /// marks the session Detached so it can be reconnected later. The per-tick
-    /// spine diff notices the status change, rebuilds the workspace document and
-    /// pushes it, so connected clients show the agent as detached. Unknown session
-    /// is an `Err` (the REST handler, `delete_tab`'s session-slot branch, maps
-    /// this method's `Err` to 400 — an unknown session is already caught earlier
-    /// by `resolve_worktree`'s 404); an agent that is not running is an
-    /// idempotent no-op.
+    /// worktree: drop the provider (SIGKILL on Drop), clear resume state, and
+    /// mark the session Detached so it can be reconnected later. The per-tick
+    /// spine diff notices the status change and pushes it, so connected clients
+    /// show the agent as detached. Unknown session is an `Err`, which the REST
+    /// handler maps to 400; an agent that is not running is an idempotent no-op.
     fn kill_session_pty(&mut self, session_id: &str) -> anyhow::Result<(WireStatus, bool)> {
         let session = self
             .sessions
@@ -2234,14 +2120,12 @@ impl Engine {
     /// Rename an agent session's display title, mirroring the title half of the
     /// TUI's `apply_rename_session`. The custom `title` is trimmed; a non-empty
     /// title is validated with the same `is_valid_agent_name` backstop the TUI
-    /// enforces and stored as `Some(title)`; an empty title clears it back to
-    /// `None` so the row reverts to the branch name.
+    /// enforces, and an empty title clears it back to `None` so the row reverts
+    /// to the branch name.
     ///
-    /// Deliberate deviation from the TUI prompt: that prompt also renames the
-    /// git branch by default (a `rename_branch` checkbox) and rejects an empty
-    /// name outright. The web rename is title-only — it never touches the git
-    /// branch — so clearing the title is the only way to revert to the branch
-    /// name, which is why an empty title clears rather than errors here.
+    /// Deliberately unlike the TUI prompt, which also renames the git branch by
+    /// default and rejects an empty name: the web rename is title-only, so
+    /// clearing the title is the only way back to the branch name.
     fn rename_session(&mut self, session_id: &str, title: &str) -> anyhow::Result<WireStatus> {
         let trimmed = title.trim();
         // The refname rules apply only where the name can become a git branch.
@@ -2310,16 +2194,14 @@ impl Engine {
     }
 
     /// Swap which provider a session uses, mirroring the TUI's
-    /// `apply_change_agent_provider`. The engine half (persist + pin) lives in
-    /// [`Engine::change_agent_provider`]; this wire wrapper validates the
-    /// provider against the configured provider list (the ViewModel's
-    /// `available_providers` source — never trusting the client), handles the
-    /// no-op "already uses this provider" case, and formats the status message.
+    /// `apply_change_agent_provider`. The engine half, persist plus pin, is
+    /// [`Engine::change_agent_provider`]; this wrapper validates the provider
+    /// against the configured provider list, never trusting the client, handles
+    /// the "already uses this provider" no-op, and formats the status message.
     ///
-    /// Deliberate substitution: the TUI's messages reference the rebindable
-    /// `reconnect-agent` keybinding label ("press {key} to relaunch"); the web
-    /// has no keybindings, so it points the user at the agent's Reconnect action
-    /// instead, while keeping the rest of the wording byte-identical.
+    /// Deliberate substitution: the TUI's message names the rebindable
+    /// `reconnect-agent` binding, and the web has no keybindings, so it points at
+    /// the agent's Reconnect action while keeping the rest byte-identical.
     fn change_agent_provider_wire(
         &mut self,
         session_id: &str,
@@ -2465,28 +2347,24 @@ impl Engine {
         }
     }
 
-    /// Reconnect (relaunch) an agent session's provider. Mirrors the TUI's
+    /// Reconnect (relaunch) an agent session's provider, mirroring the TUI's
     /// `reconnect_selected_session` (`force == false`) and `force_reconnect_agent`
     /// (`force == true`):
     ///
     /// - Both require the session to exist and its worktree to still be present.
-    /// - Normal reconnect REFUSES while a provider is already connected
-    ///   (matching the TUI's "already connected" early-return); force reconnect
-    ///   first tears down any running provider + pins + activity + resume
-    ///   candidate, then starts fresh with no resume args.
+    /// - Normal reconnect REFUSES while a provider is already connected; force
+    ///   reconnect first tears down any running provider, pins, activity and
+    ///   resume candidate, then starts fresh with no resume args.
     /// - Normal reconnect resumes the prior conversation per
-    ///   `tab_resume_decision` (the same per-provider liveness check every other
-    ///   launch path uses); force never resumes.
+    ///   `tab_resume_decision`, the same per-provider liveness check every other
+    ///   launch path uses; force never resumes.
     ///
-    /// Deliberate substitution: the TUI sources the PTY size from view state
-    /// (`last_pty_size`); the web has no such state, so it uses the same default
-    /// `(24, 80)` the subscribe-launch path already uses (`launch_agent`). The
-    /// focused TerminalPane re-attaches via the existing subscribe machinery
-    /// once the new provider comes up.
+    /// Deliberate substitution: the web sources no PTY size, so it uses the same
+    /// default `(24, 80)` the subscribe-launch path uses, and the focused pane
+    /// re-attaches through the subscribe machinery once the provider comes up.
     ///
-    /// Returns the busy status to surface synchronously (matching the TUI's
-    /// `set_busy` after a successful dispatch), or the launch view's status when
-    /// the dispatch was refused (e.g. a launch already in flight).
+    /// Returns the busy status to surface synchronously, or the launch view's
+    /// status when the dispatch was refused.
     fn reconnect_session(
         &mut self,
         session_id: &str,
@@ -2637,27 +2515,22 @@ impl Engine {
     }
 
     /// Switch a project's source checkout back to its default branch, mirroring
-    /// the TUI's `checkout_selected_project_default_branch` (sessions.rs).
+    /// the TUI's `checkout_selected_project_default_branch`.
     ///
-    /// This kicks off the TUI's two-worker chain rather than doing the work
-    /// inline: `git switch` rewrites the working tree (seconds on large repos,
-    /// blocks indefinitely on a held `index.lock`), and the web engine loop
-    /// thread also drives every ViewModel push and PTY route, so a synchronous
-    /// checkout would freeze every connected browser. The CLAUDE.md workers
-    /// tenet forbids that.
+    /// It kicks off the TUI's two-worker chain rather than working inline:
+    /// `git switch` rewrites the working tree and blocks indefinitely on a held
+    /// `index.lock`, and the web engine loop thread also drives every ViewModel
+    /// push and PTY route, so a synchronous checkout would freeze every connected
+    /// browser.
     ///
-    /// Worker 1 (`run_checkout_project_default_branch_inspection_job`) inspects
-    /// the branch off-thread and posts `CheckoutProjectDefaultBranchInspected`.
-    /// `process_worker_event` turns that into either a `Status` (heuristic /
-    /// already-leading / inspection-error — surfaced by the actor's existing
-    /// `wire_statuses_from_reaction` drain) or a
-    /// `DispatchProjectDefaultBranchCheckout` reaction for the Known case, which
-    /// `drive_checkout_followup` picks up to spawn worker 2 (the actual switch).
+    /// Worker 1 inspects the branch off-thread; `process_worker_event` turns its
+    /// report into either a `Status` (heuristic, already-leading, or inspection
+    /// error) or a `DispatchProjectDefaultBranchCheckout` reaction for the Known
+    /// case, which `drive_checkout_followup` picks up to spawn worker 2.
     ///
-    /// Returns the busy status to surface synchronously (matching the TUI's
-    /// `set_busy`). `Err` is reserved for the cheap project lookup / missing
-    /// path guards (mirroring `PullProject`), so every real outcome comes back
-    /// later as an async status.
+    /// Returns the busy status to surface synchronously. `Err` is reserved for
+    /// the cheap project lookup and missing-path guards, so every real outcome
+    /// comes back later as an async status.
     fn checkout_project_default_branch(&mut self, project_id: &str) -> anyhow::Result<WireStatus> {
         // Mirror the TUI's `checkout_selected_project_default_branch` guards:
         // resolve the project and refuse when its checkout path is missing.
@@ -2753,18 +2626,16 @@ impl Engine {
     }
 
     /// Check out the repo's default branch first, then add it as a project,
-    /// mirroring the TUI's "Check Out & Add" path
-    /// (`dispatch_non_default_branch_checkout` with a `NonDefaultBranchAction::AddProject`).
+    /// mirroring the TUI's "Check Out & Add" path.
     ///
     /// Re-validates server-side rather than trusting the client: the path must be
-    /// a git repo whose `branch_warning_kind` is `Known` (a confidently-resolved
-    /// default branch that differs from the current one). The heuristic case
-    /// never offers this option in the TUI, and an already-on-default repo has no
-    /// warning at all, so both are rejected here.
+    /// a git repo whose `branch_warning_kind` is `Known`, a confidently-resolved
+    /// default branch that differs from the current one. The heuristic case never
+    /// offers this option and an already-on-default repo has no warning at all,
+    /// so both are rejected here.
     ///
-    /// `git switch` rewrites the working tree, so the actual work runs in
-    /// `run_add_project_checkout_job` off-thread (L4 worker chain); this returns
-    /// the busy status synchronously, byte-identical to the TUI's `set_busy`.
+    /// `git switch` rewrites the working tree, so the work runs off-thread in
+    /// `run_add_project_checkout_job`; this returns the busy status.
     fn add_project_checkout_default(
         &mut self,
         path: &str,
@@ -2899,14 +2770,12 @@ impl Engine {
         match crate::git::repo_commit_state(&validated) {
             crate::git::CommitState::Unborn => {}
             crate::git::CommitState::Born => {
-                // Already has commits — nothing to bootstrap. Register it directly
-                // via the normal add path so the client's request still succeeds
-                // (a true no-op on the bootstrap, not a hard failure). Map the
-                // reaction to a status EXACTLY as the plain `AddProject` handler
-                // does: only a confirmed `Added` outcome is "info"; a rolled-back
-                // add relays its error tone; and a deferred (reload-barrier)
-                // `Nothing` yields `None` (no toast) rather than a fabricated
-                // success.
+                // Already has commits, so there is nothing to bootstrap: register
+                // it through the normal add path so the request still succeeds.
+                // Map the reaction to a status EXACTLY as the plain `AddProject`
+                // handler does: only a confirmed `Added` outcome is info, a
+                // rolled-back add relays its error tone, and a deferred `Nothing`
+                // yields no toast rather than a fabricated success.
                 let cmd = self.wire_to_command(WireCommand::AddProject {
                     path: path_str,
                     name,
@@ -3074,20 +2943,17 @@ impl Engine {
     }
 
     /// Resolve a GitHub PR and create an agent on its head branch, mirroring the
-    /// TUI's `open_new_agent_from_pr_prompt` + `dispatch_pull_request_lookup`.
+    /// TUI's `open_new_agent_from_pr_prompt` plus `dispatch_pull_request_lookup`.
     ///
-    /// The TUI does this in two steps: a `gh pr view` lookup worker, then a name
-    /// prompt before dispatching the create. The web sends the name UPFRONT, so
-    /// this validates the synchronous guards here, carries the name through the
-    /// SAME shared lookup worker (`gh::run_pull_request_lookup_job`), and returns
-    /// a busy status. On resolution the worker posts `PullRequestResolved`, whose
-    /// `OpenNewAgentPromptForPr` reaction the actor's `drive_pr_lookup_followup`
-    /// turns into the actual `CreateAgentRequest::PullRequest` dispatch — where
-    /// the TUI would open its name prompt instead.
+    /// The TUI looks the PR up and then prompts for a name; the web sends the
+    /// name UPFRONT, so this validates the synchronous guards, carries the name
+    /// through the SAME shared lookup worker, and returns a busy status. On
+    /// resolution `drive_pr_lookup_followup` turns the worker's
+    /// `OpenNewAgentPromptForPr` reaction into the create dispatch.
     ///
-    /// `git fetch`/`worktree add` (the write) happen later in the create worker,
-    /// so nothing here touches the working tree; the only inline work is cheap
-    /// validation, matching the CLAUDE.md workers tenet.
+    /// The `git fetch` and `worktree add` happen later in the create worker, so
+    /// nothing here touches the working tree; the only inline work is cheap
+    /// validation.
     fn create_agent_from_pr(
         &mut self,
         project_id: &str,
@@ -3199,34 +3065,28 @@ impl Engine {
     }
 
     /// Drive a PR-lookup follow-up to completion, returning user-facing statuses.
-    /// Called from the web engine actor's worker-event drain alongside the other
-    /// `drive_*_followup`s: when `gh::run_pull_request_lookup_job` resolves a PR,
-    /// `process_worker_event` produces `OpenNewAgentPromptForPr` (the TUI opens a
-    /// name prompt for that reaction). The web already has the name (carried
-    /// through the lookup as `ResolvedPullRequest::custom_name`), so this builds
-    /// the `CreateAgentRequest::PullRequest` and dispatches the create directly,
-    /// mirroring the TUI's `OpenNewAgentPromptForPr` arm but without the prompt.
+    /// When `gh::run_pull_request_lookup_job` resolves a PR,
+    /// `process_worker_event` produces `OpenNewAgentPromptForPr`, for which the
+    /// TUI opens a name prompt. The web already has the name, carried through the
+    /// lookup as `ResolvedPullRequest::custom_name`, so this builds the
+    /// `CreateAgentRequest::PullRequest` and dispatches the create directly.
     ///
-    /// `use_existing_branch` is `false`, exactly as the TUI's PR path sets it: the
-    /// create worker (`agent_job.rs`'s `PullRequest` arm) does its own last-mile
+    /// `use_existing_branch` is `false`, exactly as the TUI's PR path sets it:
+    /// the create worker does its own last-mile
     /// `use_existing_branch || branch_exists(...)` check, so a head branch that
-    /// already exists locally is attached rather than re-fetched without any
-    /// pre-computation here. A lookup FAILURE instead produced an error `Status`,
-    /// surfaced by the actor's `wire_statuses_from_reaction` drain. Other
-    /// reactions return `[]`.
+    /// already exists locally is attached rather than re-fetched, with no
+    /// pre-computation here. A lookup FAILURE instead produces an error `Status`;
+    /// other reactions return `[]`.
     pub fn drive_pr_lookup_followup(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
         match reaction {
             EventReaction::OpenNewAgentPromptForPr { pr, status_op_id } => {
                 let pr = pr.as_ref();
                 // Seed the head branch as the name when no custom name was sent,
-                // matching the TUI prompt's default (`Some(head_ref_name)`).
-                // An EXPLICIT name was already validated where the request was
-                // built; the fallback was not, and a head branch is the remote's
-                // string rather than dux's, so it gets the same validator the
-                // TUI applies when the user confirms that seeded prompt. Refuse
-                // rather than sanitise: a name dux invented is one the user
-                // cannot predict and did not ask for, and it would become a
-                // branch and a directory on disk.
+                // matching the TUI prompt's default. An explicit name was already
+                // validated where the request was built; this fallback is the
+                // remote's string, so it gets the same validator. Refuse rather
+                // than sanitise: a name dux invented is one the user cannot
+                // predict, and it becomes a branch and a directory on disk.
                 let custom_name = match &pr.custom_name {
                     Some(name) => Some(name.clone()),
                     None if crate::git::is_valid_agent_name(&pr.head_ref_name) => {
@@ -3323,20 +3183,17 @@ impl Engine {
     }
 
     /// Drive an add-project follow-up to completion, returning user-facing
-    /// statuses. Called from the web engine actor's worker-event drain alongside
-    /// `drive_checkout_followup`: when worker 2's `git switch` for an
-    /// `AddProjectCheckoutDefault` completes successfully,
-    /// `process_worker_event` produces `AddProjectAfterBranchCheckout` (the TUI
-    /// drives the same reaction from `workers.rs`). This applies the project-add
-    /// INLINE (synchronous engine call: SQLite + config.toml write through the
-    /// eager queue, with SQLite rollback on failure), so the new project is in the
-    /// engine's in-memory list by the time this returns and appears in the same
-    /// ViewModel push. On success it returns the combined "Checked out X and added
-    /// project Y" status, mirroring the TUI's `finish_add_project_with_status`
-    /// message; on a rolled-back add it relays the engine's error `Status`. A
-    /// switch FAILURE (before this runs) instead produces an error `Status`
-    /// reaction, surfaced by the actor's `wire_statuses_from_reaction` drain.
-    /// Other reactions return `[]`.
+    /// statuses. When worker 2's `git switch` completes successfully,
+    /// `process_worker_event` produces `AddProjectAfterBranchCheckout` and this
+    /// applies the project-add INLINE (SQLite plus a config.toml write through
+    /// the eager queue, with SQLite rollback on failure), so the new project is
+    /// in the engine's in-memory list by the time this returns and appears in the
+    /// same ViewModel push.
+    ///
+    /// On success it returns the combined "checked out X and added project Y"
+    /// status; on a rolled-back add it relays the engine's error `Status`. A
+    /// switch FAILURE produces an error `Status` reaction instead, and other
+    /// reactions return `[]`.
     pub fn drive_add_project_followup(&mut self, reaction: &EventReaction) -> Vec<WireStatus> {
         match reaction {
             EventReaction::AddProjectAfterBranchCheckout {
@@ -3442,22 +3299,17 @@ impl Engine {
             path_missing: false,
             created_at: Some(chrono::Utc::now()),
         };
-        // The add is INLINE: the handler writes config.toml (with SQLite
-        // rollback on failure) and returns the real outcome NOW. On
-        // success it returns `ProjectPersistenceOutcome(Added)`; on a
-        // config-write/DB failure it returns an error-toned `Status`
-        // (still a Rust `Ok`, but the add was rolled back). Inspect the
-        // reaction so a rolled-back add is reported as the failure it was,
-        // not the optimistic "added project" success.
+        // The add is INLINE: the handler writes config.toml, with SQLite
+        // rollback on failure, and returns the real outcome now. A
+        // config-write or DB failure returns an error-toned `Status` that is
+        // still a Rust `Ok`, so inspect the reaction and report a rolled-back
+        // add as the failure it was rather than an optimistic success.
         //
-        // The user-facing statuses (`statuses`) stay byte-identical to the
-        // pre-StatusOp behavior. When `status_op_id` is Some (always, for
-        // the web), we ALSO resolve the add-project op so its busy is
-        // replaced by the keyed final instead of being separately cleared.
-        // The inline persist can mint a status from `current_origin`;
-        // re-set it to the add-project op's captured scope (reset to `All`
-        // by the worker tick) so any minted status stays scoped to the
-        // originating connection, then restore `All` afterward.
+        // When `status_op_id` is Some, which it always is for the web, the
+        // add-project op is ALSO resolved so its busy is replaced by the keyed
+        // final instead of separately cleared. The inline persist can mint a
+        // status from `current_origin`, so re-set that to the op's captured
+        // scope before dispatch and restore `All` afterward.
         let origin = status_op_id
             .as_ref()
             .and_then(|id| self.pending_web_add_project_ops.get(id))
@@ -3533,15 +3385,13 @@ impl Engine {
     }
 
     /// Drive a checkout-related reaction to completion, returning user-facing
-    /// statuses. Called from the web engine actor's worker-event drain alongside
-    /// `drive_delete_followup`: when worker 1's inspection produces a
-    /// `DispatchProjectDefaultBranchCheckout` (the Known default-branch case),
-    /// spawn worker 2 (`run_add_project_checkout_job`) to run `git switch`
-    /// off-thread, mirroring the TUI's `dispatch_non_default_branch_checkout`.
-    /// Worker 2's completion posts `NonDefaultBranchCheckoutCompleted`, whose
-    /// `process_worker_event` arm returns the success/failure `Status` that the
-    /// actor's existing `wire_statuses_from_reaction` drain broadcasts. Other
-    /// reactions return `[]`.
+    /// statuses. When worker 1's inspection produces a
+    /// `DispatchProjectDefaultBranchCheckout`, spawn worker 2
+    /// (`run_add_project_checkout_job`) to run `git switch` off-thread, mirroring
+    /// the TUI's `dispatch_non_default_branch_checkout`. Worker 2's completion
+    /// posts `NonDefaultBranchCheckoutCompleted`, whose success or failure
+    /// `Status` the actor's existing drain broadcasts. Other reactions return
+    /// `[]`.
     pub fn drive_checkout_followup(&mut self, reaction: &EventReaction) -> Vec<WireStatus> {
         match reaction {
             EventReaction::DispatchProjectDefaultBranchCheckout {
@@ -3637,19 +3487,10 @@ impl Engine {
                         // already SIGTERMed and held for a background reap.
                         //
                         // The engine method, not `Command::FinishDeleteSession`,
-                        // because this path has no removal to report. The
-                        // command carries a `WorktreeRemoval` describing what
-                        // happened to the branches, and here nothing has
-                        // happened to them yet: the real report arrives with
-                        // the deferred removal, which authors the final
-                        // message. Going through the command meant
-                        // manufacturing a `Deleted(RemoveResult::default())`
-                        // that says "the branch was deleted, and no branches
-                        // were deleted", relying on the whole reaction being
-                        // dropped for that never to be read. The command adds
-                        // nothing else here (it wraps this exact call into a
-                        // view for the surfaces), so the honest thing is to
-                        // call it.
+                        // because that command carries a `WorktreeRemoval`
+                        // describing what happened to the branches and nothing
+                        // has happened to them yet; the real report arrives with
+                        // the deferred removal, which authors the final message.
                         let _ = self.finish_delete_session(&view.session_id);
                         vec![pending]
                     }
@@ -3713,25 +3554,23 @@ impl Engine {
     }
 
     /// Drive the web reconnect / force-restart launch follow-up to completion.
-    /// Called from the web engine actor's worker-event drain alongside
-    /// `drive_delete_followup`: when a launch reports back, its
-    /// `AgentLaunchReadyView` / `AgentLaunchFailedView` reaction resolves the web
-    /// launch op (`Engine::pending_web_launch_ops`) stashed by `reconnect_session`,
-    /// replacing the "Launching…" / "Starting fresh…" busy with the same-key final.
+    /// When a launch reports back, its `AgentLaunchReadyView` /
+    /// `AgentLaunchFailedView` reaction resolves the web launch op
+    /// (`Engine::pending_web_launch_ops`) stashed by `reconnect_session`,
+    /// replacing its busy with the same-key final. This is the web counterpart to
+    /// the TUI's `resolve_reconnect_op_or`.
     ///
-    /// This is the web counterpart to the TUI's `resolve_reconnect_op_or`. When no
-    /// op is stashed (a resume-fallback retry or a startup auto-reopen, neither of
-    /// which goes through `reconnect_session`), the same final is emitted UNKEYED —
-    /// byte-identical text, and there is no preceding web busy on those paths to
-    /// dismiss. Create-kind launches are resolved engine-side, never here.
+    /// When no op is stashed (a resume-fallback retry or a startup auto-reopen,
+    /// neither of which goes through `reconnect_session`), the same final is
+    /// emitted UNKEYED, byte-identical, since no web busy precedes those.
+    /// Create-kind launches are resolved engine-side, never here.
     ///
-    /// Slot-ness is read from the outcome's SESSION SNAPSHOT here, deliberately,
-    /// and this is the one place that must not be swept into asking the live
-    /// session. The question being answered is not "which tab is the slot now"
-    /// but "which arm requested this launch", and a `Kind::Tab` launch collapses
-    /// into the `Reconnect` view, so the snapshot's slot-ness is the only proxy
-    /// left for it. A live read would send a tab promoted mid-launch down the
-    /// session-keyed branch and strand its `tab-launch-<id>` busy toast forever.
+    /// Slot-ness is read from the outcome's SESSION SNAPSHOT, deliberately, and
+    /// this is the one place that must not be changed to ask the live session:
+    /// the question is which arm requested this launch, not which tab is the slot
+    /// now, and a `Kind::Tab` launch collapses into the `Reconnect` view. A live
+    /// read would send a tab promoted mid-launch down the session-keyed branch
+    /// and strand its `tab-launch-<id>` busy toast forever.
     pub fn drive_web_launch_followup(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
         match reaction {
             EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
@@ -4416,14 +4255,11 @@ impl Engine {
             WireCommand::PersistGlobalEnv { env } => Command::PersistGlobalEnv { env },
             WireCommand::ReloadConfig {} => Command::ReloadConfig,
             WireCommand::RecoverConfig {} => Command::RecoverConfig,
-            // Rename, Reconnect, CheckoutProjectDefaultBranch, and
+            // Rename, Reconnect, CheckoutProjectDefaultBranch and
             // ChangeAgentProvider are NOT reconstructible into a single
-            // `Command` — all need `&mut self` (rename persists in place;
-            // reconnect tears down provider state and surfaces a launch view's
-            // status synchronously; checkout inspects and switches branches
-            // synchronously; change-provider persists + pins in place).
-            // `apply_wire` intercepts them before this immutable mapping;
-            // reaching here means that interception broke.
+            // `Command`: each needs `&mut self`. `apply_wire` intercepts them
+            // before this immutable mapping, so reaching here means that
+            // interception broke.
             WireCommand::StageFile { .. }
             | WireCommand::UnstageFile { .. }
             | WireCommand::DiscardFile { .. }
@@ -4506,23 +4342,19 @@ impl Engine {
             .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))
     }
 
-    /// The directory a CHANGES-PANEL mutation may run in: a managed worktree,
-    ///
-    /// (This replaced a plain "resolve the session's worktree" helper. Every
-    /// wire command that used it was a git command, and each now goes through
-    /// either this folder-driven gate or the branch-identity one. The PURE
-    /// FILESYSTEM routes never went through the wire at all: they resolve the
-    /// agent's directory in `crate::git_routes::resolve_worktree`, which is
-    /// correct for a plain folder and stays ungated.)
-    /// or a standalone agent's folder when that folder is itself a repository.
+    /// The directory a CHANGES-PANEL mutation may run in: a managed worktree, or
+    /// a standalone agent's folder when that folder is itself a repository.
     ///
     /// Folder-driven, not agent-driven, which is the whole point: a standalone
     /// agent pointed at a repository stages and commits exactly like any other.
     /// When the folder is not a repository the refusal carries the folder's own
-    /// quiet sentence, so the user is told "this folder has no git repository"
-    /// rather than the "the repository is busy" the old error path produced once
-    /// per poll. An unclassified folder fails CLOSED: a mutation on a guess is
-    /// how a directory dux does not understand gets written to.
+    /// quiet sentence, so the user is told the folder has no git repository. An
+    /// unclassified folder fails CLOSED: a mutation on a guess is how a directory
+    /// dux does not understand gets written to.
+    ///
+    /// The pure FILESYSTEM routes do not go through the wire and stay ungated:
+    /// they resolve the agent's directory in `crate::git_routes::resolve_worktree`,
+    /// which is correct for a plain folder.
     fn changes_worktree(&self, session_id: &str) -> anyhow::Result<PathBuf> {
         let access = self
             .session_git_access(session_id)

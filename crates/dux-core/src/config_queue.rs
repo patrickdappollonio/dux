@@ -209,16 +209,15 @@ impl ConfigWriteQueue {
 
 impl Drop for ConfigWriteQueue {
     fn drop(&mut self) {
-        // Spec: flush pending lazy writes on clean process exit.  This fires when
-        // the engine (and thus the queue) is finally dropped at real exit.  It does
-        // NOT fire at the in-process TUI→web flip, which MOVES the engine rather
+        // Flush pending lazy writes on clean process exit. This fires when the
+        // engine, and so the queue, is finally dropped at real exit. It does NOT
+        // fire at the in-process TUI-to-web flip, which MOVES the engine rather
         // than dropping it, so the queue keeps running across the flip.
         //
-        // Step 1 — drain any pending lazy write queued before the current state.
-        // flush() is bounded by FLUSH_TIMEOUT so Drop cannot hang indefinitely.
-        // Note: if a reload barrier is open, lazies that arrived *during* the
-        // barrier were intentionally discarded as stale snapshots (see the paused
-        // loop), so only writes from before the barrier land here.
+        // Step 1: drain any pending lazy write queued before the current state.
+        // flush() is bounded by FLUSH_TIMEOUT so Drop cannot hang. Lazies that
+        // arrived during an open reload barrier were intentionally discarded as
+        // stale snapshots, so only writes from before the barrier land here.
         self.flush();
 
         // Step 2 — tell the writer to exit.  We cannot rely on channel disconnect:
@@ -229,13 +228,12 @@ impl Drop for ConfigWriteQueue {
         // while paused, so shutdown is independent of guard lifetime/drop order.
         let _ = self.tx.send(WriteMsg::Shutdown);
 
-        // Step 3 — join the writer thread with a bounded timeout.  If the writer is
-        // stuck in a stalled disk write, an unconditional join() would hang the
-        // process on exit.  Instead, a short helper thread calls join() and signals
-        // completion on a rendezvous channel.  If FLUSH_TIMEOUT elapses before the
-        // writer exits, we log and abandon both threads — the process is exiting
-        // anyway, so leaking them is safe.  A pending write may be lost on a truly
-        // stalled disk, but the process can still exit cleanly.
+        // Step 3: join the writer thread with a bounded timeout. An unconditional
+        // join() would hang the process on exit if the writer is stuck in a
+        // stalled disk write, so a helper thread joins and signals on a
+        // rendezvous channel; past FLUSH_TIMEOUT both threads are abandoned,
+        // which is safe because the process is exiting. A pending write may be
+        // lost on a truly stalled disk.
         if let Some(handle) = self.writer.take() {
             let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
             thread::spawn(move || {

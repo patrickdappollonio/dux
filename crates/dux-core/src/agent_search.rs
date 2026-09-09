@@ -1,12 +1,11 @@
-//! Pure search matching for the flat agent/terminal list, the core-owned rule the
-//! TUI's pane filter and the web's sidebar/hub search both apply so a query filters
-//! identically on either surface. A filter that silently drops a row is a data-loss
-//! bug, so this is small, pure, and unit-tested.
+//! Pure search matching for the flat agent/terminal list: the core-owned rule
+//! the TUI's pane filter and the web's sidebar and hub search both apply, so a
+//! query filters identically on either surface.
 //!
-//! Mirrors the web's `crates/dux-web/web/src/lib/agentSearch.ts` exactly; the tests
-//! below share vectors with it. A query matches case-insensitively as a substring
-//! against a small set of fields per row kind; an empty/whitespace query matches
-//! everything (the list is shown unfiltered).
+//! Mirrors the web's `crates/dux-web/web/src/lib/agentSearch.ts` exactly, and the
+//! tests below share vectors with it. A query matches case-insensitively as a
+//! substring against a small set of fields per row kind; an empty or whitespace
+//! query matches everything.
 
 /// Normalize a raw query: trimmed and lowercased. An empty result means "match
 /// everything".
@@ -26,15 +25,13 @@ fn haystack_has(query: &str, fields: &[Option<&str>]) -> bool {
 /// Match an agent row against a raw query. Fields: the display name, the
 /// branch, and the LOCATION.
 ///
-/// `branch_name` is `None` for a standalone agent, which has none, and
-/// `location` is whatever the row's second line actually shows: the project
-/// name for a managed agent, the folder label for a standalone one. Typing part
-/// of a path must find a standalone agent, exactly as terminal searching
-/// already works, and the field that appears on the row is the field that
-/// should match.
+/// `branch_name` is `None` for a standalone agent, and `location` is whatever
+/// the row's second line shows: the project name for a managed agent, the folder
+/// label for a standalone one. The field that appears on the row is the field
+/// that should match, so typing part of a path finds a standalone agent.
 ///
-/// Provider names are deliberately NOT searched: "claude"/"codex" are far too
-/// generic as terms, so a provider-only hit would surface almost every agent.
+/// Provider names are deliberately NOT searched: "claude" and "codex" are far
+/// too generic, so a provider-only hit would surface almost every agent.
 pub fn matches_session(
     title: Option<&str>,
     branch_name: Option<&str>,
@@ -48,20 +45,16 @@ pub fn matches_session(
     haystack_has(&q, &[title, branch_name, location])
 }
 
-/// The CHAR range (start inclusive, end exclusive, in char indices, never
-/// bytes) of the first case-insensitive occurrence of `query` in `field`, or
-/// `None` when the query is empty/whitespace or does not occur. The search-hit
-/// highlight uses this to emphasize the matched part of a row's name, so it
-/// applies the exact same normalization the filter itself applies
-/// (`normalize_query` + lowercase contains): what highlights is what matched.
+/// The CHAR range (start inclusive, end exclusive, never bytes) of the first
+/// case-insensitive occurrence of `query` in `field`, or `None` when the query
+/// is empty or whitespace or does not occur. It applies the exact normalization
+/// the filter applies, so what highlights is what matched.
 ///
-/// Char indices, deliberately: user-visible labels carry multi-byte UTF-8
-/// (CJK, emoji, box drawing), and byte-based slicing panics inside a
-/// multi-byte char (the CLAUDE.md truncation rule). Lowercasing can EXPAND a
-/// char (ß becomes ss), so the haystack is lowered char by char while
-/// recording each lowered char's SOURCE char index; the range is then mapped
-/// back through that record, keeping the highlight aligned with the original
-/// string however the case-folding reshaped it.
+/// Char indices, deliberately: user-visible labels carry multi-byte UTF-8, and
+/// byte-based slicing panics inside a multi-byte char. Lowercasing can EXPAND a
+/// char (ß becomes ss), so the haystack is lowered char by char while recording
+/// each lowered char's SOURCE char index, and the range is mapped back through
+/// that record.
 pub fn match_char_range(field: &str, query: &str) -> Option<(usize, usize)> {
     let q: Vec<char> = normalize_query(query).chars().collect();
     if q.is_empty() {

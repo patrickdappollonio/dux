@@ -1,20 +1,13 @@
 //! What a PERSON typed into the pull-request field.
 //!
-//! This is deliberately NOT [`crate::git::parse_remote_address`], and the two
-//! must never be merged. They answer different questions:
+//! Deliberately NOT [`crate::git::parse_remote_address`], and the two must
+//! never be merged. A project's configured address is whatever git put in the
+//! repository, so git's own rule applies there and a trailing path segment is
+//! part of the address it would fetch from. This field is pasted from a browser
+//! bar, so a trailing `/issues` or `/security/dependabot` is a route and is
+//! ignored: those all write down the same repository.
 //!
-//! * A project's configured address is whatever git already put in the
-//!   repository on disk. Nobody types it at dux. So the only sensible rule is
-//!   git's own rule, and a trailing path segment there is part of the address
-//!   git would really fetch from. Ignoring it would name a DIFFERENT
-//!   repository than the one checked out.
-//! * This field is the opposite. A person pastes into it, from a browser bar,
-//!   from a chat message, from memory. A trailing `/issues` or
-//!   `/security/dependabot` is a browser route and ignoring it is helpful,
-//!   because every one of those addresses is a way of writing down the same
-//!   repository.
-//!
-//! The accepted shapes follow `gc-rust`, the maintainer's own clone helper:
+//! The accepted shapes:
 //!
 //! ```text
 //! example/application
@@ -30,53 +23,36 @@
 //! PR URL, `owner/repo#123`, `#123` and a bare `123`.
 //!
 //! Nothing here consults [`crate::gh::GithubHostPolicy`]. Parsing is about what
-//! the text SAYS; whether dux may ask `gh` about the host it says is a separate
+//! the text SAYS; whether dux may ask `gh` about that host is a separate
 //! question, asked by the callers that have a host to ask about.
 //!
-//! # What is deliberately refused as ambiguous
+//! # What is refused as ambiguous
 //!
-//! This field accepts both browser addresses and git addresses, and there are
-//! two shapes where those two worlds read the SAME text as DIFFERENT
-//! repositories, with nothing in the text to settle which was meant. Both are
-//! refused, with a message asking for a spelling that has only one reading.
-//! Neither is an oversight, and neither wants a heuristic:
+//! Two shapes read as DIFFERENT repositories under browser rules and under git
+//! rules, with nothing in the text to settle which was meant. Both are refused,
+//! with a message asking for a spelling that has one reading, and neither wants
+//! a heuristic: a wrong repository is silent, and the pull request number goes
+//! with it. If a new shape turns out to be ambiguous, refuse it too.
 //!
-//! * **Digits after the colon that read as a port and as an owner.**
-//!   `github.com:123/scriptaculous/pull/7` is `github.com:123` /
-//!   `scriptaculous/pull` if the digits are a port, and `github.com` /
-//!   `123/scriptaculous` / pull request 7 if they are an owner. `123` is a real
-//!   GitHub account and it really does own `scriptaculous`, so both readings
-//!   name a repository that exists. See [`read_colon_form`] for the two cases
-//!   the text DOES settle.
-//! * **A missing scheme separator that is also scp shorthand.**
-//!   `https:acme/widget/pull/7` is `acme` / `widget/pull` to a browser, which
-//!   skips however many slashes a special scheme was written with, and
-//!   `acme/widget` / pull request 7 on a host literally named `https` to git,
-//!   which has no `://` to see. Both are right in their own world. See
-//!   [`classify`] for the case the text DOES settle.
-//!
-//! The tempting tie-breakers are all guesses at intent rather than readings of
-//! the text. "It ends in `pull/7`, so it must be the scp one" assumes a person
-//! never types a route onto a port; "prefer the browser reading, this is a
-//! pasted URL field" assumes away the git addresses this field explicitly
-//! accepts. A wrong repository here is worse than a refusal, because it is
-//! silent: the user gets an answer about a repository they did not name, and
-//! the pull request number quietly disappears or is invented. Do not add a
-//! heuristic. If a new shape turns out to be ambiguous, refuse it too.
+//! * Digits after the colon that read as a port and as an owner:
+//!   `github.com:123/scriptaculous/pull/7`, where `123` is a real GitHub account
+//!   that owns `scriptaculous`. See [`read_colon_form`] for what the text does
+//!   settle.
+//! * A missing scheme separator that is also scp shorthand:
+//!   `https:acme/widget/pull/7`, a browser address that lost its slashes and an
+//!   scp address on a host named `https`. See [`classify`].
 
 /// A repository, a pull request number, or both, as named by typed text.
 ///
-/// Every field is optional because the accepted spellings genuinely differ in
-/// what they pin down: `#123` names a number and no repository, `example/app`
-/// names a repository and no number, and `example/app#123` names both but no
-/// host. A value with neither a repository nor a number is never produced.
+/// Every field is optional because the spellings differ in what they pin down:
+/// `#123` names a number, `example/app` a repository, `example/app#123` both but
+/// no host. A value with neither a repository nor a number is never produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedReference {
-    /// Lowercased host, when the text named one. `None` for `owner/repo`,
-    /// `owner/repo#123` and a bare number, which name no host at all. A caller
-    /// must NOT substitute `github.com` for `None`: someone whose only checkout
-    /// of `acme/widget` lives on their company server would be sent to the
-    /// wrong place, silently.
+    /// Lowercased host, when the text named one; `None` for `owner/repo`,
+    /// `owner/repo#123` and a bare number. A caller must NOT substitute
+    /// `github.com` for `None`, or a checkout that lives only on a company
+    /// server is sent to the wrong place, silently.
     pub host: Option<String>,
     /// `owner/repo` with any `.git` suffix removed, in the case it was typed
     /// (compare it case-insensitively; it is kept as written so a message can
@@ -98,15 +74,12 @@ impl TypedReference {
         })
     }
 
-    /// Whether this reference names the repository at `host` / `owner_repo`,
-    /// which is a project's configured address as
-    /// [`crate::git::remote_github_repo`] reports it.
+    /// Whether this reference names the repository at `host` / `owner_repo`, as
+    /// [`crate::git::remote_github_repo`] reports a project's address.
     ///
-    /// The host is compared ONLY when the reference gave one. `owner/repo#123`
-    /// names no host, so it matches that repository on whatever host a project
-    /// keeps it on. Both sides are compared case-insensitively with any `.git`
-    /// suffix removed, because a host is case-insensitive and GitHub treats
-    /// `Example/Application` and `example/application` as one repository.
+    /// The host is compared ONLY when the reference gave one, so `owner/repo#123`
+    /// matches that repository on whatever host a project keeps it on. Both
+    /// sides are compared case-insensitively with any `.git` suffix removed.
     pub fn matches(&self, host: &str, owner_repo: &str) -> bool {
         let Some(mine) = self.owner_repo.as_deref() else {
             return false;
@@ -127,10 +100,9 @@ impl TypedReference {
 const UNPARSEABLE: &str =
     "Enter a pull request URL, owner/repo#123, or a PR number. A repository address works too.";
 
-/// The refusal for digits after a colon that read as a port and as an owner.
-/// It names both readings and both unambiguous spellings, because someone who
-/// typed this needs to know what to type instead, not merely that it was
-/// rejected.
+/// The refusal for digits after a colon that read as a port and as an owner. It
+/// names both readings and both unambiguous spellings, because the person who
+/// typed it needs to know what to type instead.
 const AMBIGUOUS_PORT_OR_OWNER: &str = "The digits after the colon can be read as a port on the host, or as the repository owner, \
      and the two readings name different repositories. Write the full address so only one \
      reading is possible: https://host/owner/repo/pull/1 when the digits are the owner, or \
@@ -261,66 +233,38 @@ enum Form {
     Schemeless,
 }
 
-/// Decide which of the two, refusing a scheme dux does not speak.
+/// Decide which of the two, refusing a scheme dux does not speak: text carrying
+/// a scheme is a claim about a transport, and one dux cannot honour is refused
+/// rather than reinterpreted through git's scp-like rule, which answered
+/// `ftp://github.com/acme/widget` with the host `ftp`.
 ///
-/// The refusal matters. A scheme that fell through to the schemeless rule met
-/// git's scp-like shorthand, whose colon comes before its slash, so
-/// `ftp://github.com/acme/widget` answered with the host `ftp` and the
-/// repository `github.com/acme`: a repository nobody named, on a host nobody
-/// named. Text carrying a scheme is a claim about a transport, and a claim dux
-/// cannot honour is refused rather than reinterpreted.
+/// http and https are SPECIAL schemes, so a browser reads the authority after
+/// however many slashes are written, and `https:/github.com/acme/widget` and
+/// `https:github.com/acme/widget` have their separator recovered here. Every
+/// other scheme takes an authority only after a literal `://`, so `ssh:acme/x`
+/// reports no host and is refused a moment later.
 ///
-/// Two spellings a browser accepts do NOT carry a literal `://`, and both used
-/// to fall into the hand parser and meet that same scp-like rule.
+/// Recovering the separator is only safe when the text cannot ALSO be scp
+/// shorthand, and that is decided by comparing both readings rather than by
+/// counting slashes: measured on git 2.55.0, `https:/acme/widget` reaches ssh as
+/// the host `https` exactly as `https:acme/widget` does. What separates them is
+/// the OWNER each reading produces, and an owner cannot hold a dot (see
+/// [`looks_like_host`]), so only the browser reading names a repository in
+/// `https:/github.com/acme/widget`, while `https:acme/widget/pull/7` is refused.
+/// A literal `://` is exempt, also measured: git invokes no ssh at all for
+/// `https://acme.invalid/widget`, so a dotless intranet host still parses.
 ///
-/// * `https:/github.com/acme/widget` and `https:github.com/acme/widget`. http
-///   and https are SPECIAL schemes, so a browser skips however many slashes are
-///   written (zero, one, three) and reads the authority next. Both address
-///   github.com, and both are what a paste looks like after it loses a
-///   character. Hand-split they answered with the host `https` and the
-///   repository `github.com/acme`. The other schemes here are not special, so
-///   an authority follows only a literal `://` for them; without one the parser
-///   reports no host at all and the text is refused a moment later, which is
-///   the right answer for `ssh:acme/widget`.
-///
-///   **Recovering that separator is only safe when the text cannot ALSO be
-///   scp shorthand**, and whether it can is decided by looking at both readings
-///   rather than by counting slashes. Measured, on git 2.55.0, with an ssh
-///   command that logs the host it is handed: `https:/acme/widget` reaches ssh
-///   as the host `https` with the path `/acme/widget`, exactly as
-///   `https:acme/widget` does, so a slash straight after the colon does NOT
-///   make a text un-scp-like. `host:/absolute/path` is ordinary scp syntax and
-///   git honours it. What separates the two spellings is the OWNER each reading
-///   would produce: in `https:/github.com/acme/widget` the scp reading's owner
-///   would be `github.com`, and an owner cannot hold a dot (see
-///   [`looks_like_host`]), so only the browser reading names a repository and
-///   the recovery is unambiguous. In `https:acme/widget/pull/7` both readings
-///   name one, and it is refused. That also means the same refusal reaches
-///   `https:/acme/widget/pull/7`, which a slash-counting rule would have
-///   answered.
-///
-///   A literal `://` is exempt, and that is measured too: the same probe shows
-///   git invoking no ssh at all for `https://acme.invalid/widget`, because
-///   `scheme://` is a URL to git as much as to a browser. Without the exemption
-///   an ordinary `https://acme/widget/pull/7` (a dotless intranet host) would
-///   be refused for a conflict that does not exist.
-/// * `//github.com/acme/widget`, the scheme-relative form. A browser resolves
-///   it against the page it is on, so it names a host like any other address;
-///   read as a bare path it named the repository `github.com/acme`, folding
-///   the server into the owner. dux supplies `https`, which is the scheme every
-///   host it can ask `gh` about is served over. That choice is visible only for
-///   an address writing out port 443, which https normalises away and http
-///   would keep.
+/// The scheme-relative `//github.com/acme/widget` is given `https`, the scheme
+/// every host dux can ask `gh` about is served over; read as a bare path it
+/// named the repository `github.com/acme`.
 fn classify(input: &str) -> Result<Form, String> {
     if input.starts_with("//") {
         return Ok(Form::Url(SchemeKind::Web, format!("https:{input}")));
     }
-    // The scheme is whatever precedes the FIRST colon, which is how a browser
-    // reads one too. `git@github.com:acme/widget` is unaffected: its leading
-    // run holds an `@`, so it is not a scheme token and the schemeless rules
-    // get their turn. Case-insensitively, because a person may well type
-    // `HTTPS://`; unlike a configured address, which git matches
-    // case-sensitively against its own table, this text is never handed to git.
+    // The scheme is whatever precedes the FIRST colon, as a browser reads one.
+    // `git@github.com:acme/widget` is unaffected: its leading run holds an `@`,
+    // so it is not a scheme token. Matched case-insensitively, because this text
+    // is never handed to git.
     let scheme = input
         .split_once(':')
         .map(|(scheme, _)| scheme)
@@ -342,10 +286,9 @@ fn classify(input: &str) -> Result<Form, String> {
             _ => {}
         }
     }
-    // Everything else. A scheme token dux does not speak is refused, and only
-    // in the `://` spelling: `github.com:acme/widget` reads as a scheme token
-    // too, and it is git's scp-like shorthand rather than a claim about a
-    // transport.
+    // Everything else. A scheme token dux does not speak is refused, and only in
+    // the `://` spelling: `github.com:acme/widget` reads as a scheme token too,
+    // and it is scp shorthand rather than a claim about a transport.
     match input.split_once("://") {
         Some((scheme, _)) if is_scheme_token(scheme) => Err(UNPARSEABLE.to_string()),
         _ => Ok(Form::Schemeless),
@@ -356,11 +299,10 @@ fn classify(input: &str) -> Result<Form, String> {
 /// repository under both of its readings, which is what makes recovering the
 /// separator a guess rather than a repair.
 ///
-/// The browser reading is the one the `url` crate produces, and the scp reading
-/// is the one git produces: the scheme is the host, and everything after the
-/// colon is the path. The scp reading's owner is additionally held to the rule
-/// every other owner here is held to, that it cannot be host-shaped, because a
-/// reading whose owner could not exist is not a reading anyone meant.
+/// The browser reading comes from the `url` crate; the scp reading is git's,
+/// the scheme as the host and the rest as the path. The scp reading's owner is
+/// held to the usual rule that an owner cannot be host-shaped, because a reading
+/// whose owner could not exist is not a reading anyone meant.
 fn both_readings_name_a_repository_without_a_separator(input: &str) -> bool {
     let Some((_, path)) = input.split_once(':') else {
         return false;
@@ -400,12 +342,10 @@ fn is_scheme_token(scheme: &str) -> bool {
 /// A scheme-qualified address, parsed by BROWSER rules rather than by splitting
 /// the text by hand.
 ///
-/// This is the whole point of the `url` crate being here. Hand-splitting reads
-/// `https://github.com/acme/widget/../gadget` as `acme/widget`, and a browser
-/// reads it as `acme/gadget`: two different repositories, one of which the user
-/// very likely has a project for. Taking the crate's normalised host and its
-/// path segments means the repository dux names is the repository the address
-/// names, dot segments and percent escapes and all.
+/// Hand-splitting reads `https://github.com/acme/widget/../gadget` as
+/// `acme/widget` where a browser reads `acme/gadget`: two different, real
+/// repositories. The crate's normalised host and path segments name the
+/// repository the address names, dot segments and percent escapes and all.
 fn parse_url_form(input: &str, kind: SchemeKind) -> Result<Parts, String> {
     refuse_authority_git_reads_differently(input, kind)?;
     // A malformed authority (`https://[::1/...`, a space in the host, an empty
@@ -417,17 +357,15 @@ fn parse_url_form(input: &str, kind: SchemeKind) -> Result<Parts, String> {
     if host.is_empty() {
         return Err(UNPARSEABLE.to_string());
     }
-    // Credentials never survive: `host_str` is the host alone, so a pasted
-    // token cannot reach a log line or a match. The crate lowercases a special
-    // scheme's host for us and leaves an opaque one alone, so lowercase again
-    // rather than depending on which kind this is.
+    // Credentials never survive: `host_str` is the host alone, so a pasted token
+    // cannot reach a log line or a match. The crate lowercases a special
+    // scheme's host and leaves an opaque one alone, so lowercase again rather
+    // than depending on which kind this is.
     let mut host = host.to_ascii_lowercase();
     match kind {
-        // A web port is KEPT, because dropping it would match a project on the
-        // default port, which is a different server, and answering about a
-        // different server is worse than answering about none. `port()` is
-        // already `None` for the scheme's default port, so `https://host:443`
-        // and `https://host` name the same server, as they should.
+        // A web port is KEPT: dropping it would match a project on the default
+        // port, which is a different server. `port()` is already `None` for the
+        // scheme's default, so `https://host:443` and `https://host` agree.
         SchemeKind::Web => {
             if let Some(port) = url.port() {
                 host.push(':');
@@ -471,43 +409,32 @@ fn parse_url_form(input: &str, kind: SchemeKind) -> Result<Parts, String> {
 /// rule this parser otherwise follows, rather than answering for a host the
 /// address does not name.
 ///
-/// The typed field is lenient because a person is typing a BROWSER address into
-/// it, and a browser is the right authority on `https://` and on the shapes it
-/// normalises. It is not the right authority on `ssh://` or on git's native
-/// protocol, which no browser opens and which git parses by its own rule. Where
-/// the two rules disagree, dux cannot faithfully reproduce git's, so it refuses.
-/// That is the same decision, for the same reason, that
-/// [`crate::git::parse_remote_address`] already documents for a configured
-/// address, and both refusals are measured there.
-///
-/// The two disagreements:
+/// A browser is the right authority on `https://`, and not on `ssh://` or git's
+/// native protocol, which no browser opens. Where the rules disagree dux cannot
+/// faithfully reproduce git's, so it refuses: the same decision, measured, that
+/// [`crate::git::parse_remote_address`] documents for a configured address.
 ///
 /// * A PERCENT in an ssh-family or native-git authority. Git decodes the whole
-///   address and separates host from path AFTERWARDS, in that order, so
-///   `ssh://user%2Fx@github.com/acme/widget` reaches ssh as the host `user`
-///   with the path `/x@github.com/acme/widget`, and `git://us%2Fer@host/o/r`
-///   makes git look up the host `us`. The generic URL grammar splits first and
-///   reports the written host, so it answers for a different server. Under
-///   http(s) the same shape moves no boundary (curl splits the authority off
-///   first and decodes each piece after), so a percent is left alone there:
-///   refusing it would refuse an ordinary address whose password holds an
-///   escape.
-/// * An `@` in a NATIVE git authority. Git's own protocol has no user
-///   component, unlike its ssh URL syntax, so `git://user@github.com/o/r` sends
-///   git looking up `user@github.com` on port 9418. The URL grammar discards
-///   the user and answers for `github.com`, a host the address never names.
-///   Under ssh a user is legitimate, and under http(s) it is credentials that
-///   are correctly dropped as credentials.
+///   address and separates host from path AFTERWARDS, so
+///   `ssh://user%2Fx@github.com/acme/widget` reaches ssh as the host `user` and
+///   `git://us%2Fer@host/o/r` looks up the host `us`, while the URL grammar
+///   splits first and answers for a different server. Under http(s) the same
+///   shape moves no boundary, so a percent is left alone there rather than
+///   refusing an ordinary address whose password holds an escape.
+/// * An `@` in a NATIVE git authority. That protocol has no user component,
+///   unlike git's ssh URL syntax, so `git://user@github.com/o/r` looks up
+///   `user@github.com` on port 9418 while the URL grammar answers for
+///   `github.com`. Under ssh a user is legitimate; under http(s) it is
+///   credentials, correctly dropped as credentials.
 fn refuse_authority_git_reads_differently(input: &str, kind: SchemeKind) -> Result<(), String> {
     let percent_moves_the_boundary = match kind {
         SchemeKind::Ssh | SchemeKind::Git => true,
         SchemeKind::Web => return Ok(()),
     };
-    // The authority has to be read from the ORIGINAL text: the crate has
-    // already split and decoded it, which is exactly the split being questioned.
-    // Both of these schemes are non-special, so an authority exists only after a
-    // literal `://`; without one the crate reports no host at all and the
-    // address is refused a moment later regardless.
+    // The authority has to be read from the ORIGINAL text: the crate has already
+    // split and decoded it, which is the split being questioned. Both schemes
+    // are non-special, so without a literal `://` the crate reports no host and
+    // the address is refused a moment later regardless.
     let Some(authority) = raw_url_authority(input) else {
         return Ok(());
     };
@@ -520,10 +447,9 @@ fn refuse_authority_git_reads_differently(input: &str, kind: SchemeKind) -> Resu
     Ok(())
 }
 
-/// The authority of a scheme-qualified address, sliced out of the ORIGINAL
-/// input so no normalisation can reach it. Userinfo and an IPv6 literal cannot
-/// hold an unescaped `/`, `?` or `#`, so the first of those after the `://`
-/// ends the authority.
+/// The authority of a scheme-qualified address, sliced out of the ORIGINAL input
+/// so no normalisation can reach it. Userinfo and an IPv6 literal cannot hold an
+/// unescaped `/`, `?` or `#`, so the first of those after the `://` ends it.
 fn raw_url_authority(input: &str) -> Option<&str> {
     let after_scheme = input.split_once("://")?.1;
     Some(match after_scheme.find(['/', '?', '#']) {
@@ -533,8 +459,7 @@ fn raw_url_authority(input: &str) -> Option<&str> {
 }
 
 /// Percent-decode one path or fragment component, as a browser does. Invalid
-/// UTF-8 is refused rather than lossily substituted: `U+FFFD` is neither a
-/// control character nor whitespace, so a replacement character would survive
+/// UTF-8 is refused rather than lossily substituted: `U+FFFD` would survive
 /// every later check and travel into a name nobody wrote.
 fn decode_component(raw: &str) -> Result<String, String> {
     percent_encoding::percent_decode_str(raw)
@@ -546,10 +471,9 @@ fn decode_component(raw: &str) -> Result<String, String> {
 /// The two shapes that are NOT urls: git's scp-like shorthand, and the bare
 /// `owner/repo` / `host/owner/repo` a person writes from memory.
 ///
-/// Nothing here is percent-decoded, deliberately. A percent in an scp path is a
-/// literal character to git, and `owner/repo` is not an address at all, so
-/// decoding would invent an escape the user did not write. Decoding belongs to
-/// the URL form, where a browser really would decode.
+/// Nothing here is percent-decoded, deliberately: a percent in an scp path is a
+/// literal to git, and `owner/repo` is not an address at all, so decoding would
+/// invent an escape the user did not write.
 fn parse_schemeless_form(input: &str) -> Result<Parts, String> {
     // The fragment comes off before the query, because a fragment may itself
     // contain a `?` and that `?` is fragment text rather than a query.
@@ -566,14 +490,10 @@ fn parse_schemeless_form(input: &str) -> Result<Parts, String> {
         ColonForm::Ambiguous => return Err(AMBIGUOUS_PORT_OR_OWNER.to_string()),
         ColonForm::Scp(authority, path) => (Some(host_from_authority(authority, true)?), path),
         ColonForm::NotScp => {
-            // A schemeless value is `owner/repo[/...]` or
-            // `host/owner/repo[/...]`, and the shape of the leading segment is
-            // what tells them apart. A dot (or a port, or `localhost`) makes it
-            // a host, because an owner cannot hold one: GitHub account and
-            // organisation names are letters, digits and hyphens. So
-            // `github.com/example` is a host with its repository missing and is
-            // refused, rather than read as a repository named `example` owned
-            // by `github.com`.
+            // A schemeless value is `owner/repo[/...]` or `host/owner/repo[/...]`,
+            // told apart by the leading segment: a dot, a port or `localhost`
+            // makes it a host, because an owner is letters, digits and hyphens.
+            // So `github.com/example` is a host with its repository missing.
             let segments = path_segments(body);
             if looks_like_host(segments.first().copied().unwrap_or_default()) {
                 let host = host_from_authority(segments[0], false)?;
@@ -611,41 +531,23 @@ enum ColonForm<'a> {
 ///
 /// The shorthand is `[user@]host:path`, recognised only when the colon precedes
 /// any slash, exactly as git documents, so `example/application:tags` is not
-/// mistaken for an address.
+/// mistaken for an address. A `user@` prefix settles it as scp before any of the
+/// rules below, because no browser address carries one before a port.
 ///
-/// With ONE exception, which is a decision rather than an accident.
-/// `github.com:8443/acme/widget` is not scp syntax: git's scp shorthand has no
-/// notion of a port, so that all-digit run cannot be part of a path a person
-/// meant. It is a browser address with the scheme rubbed off, which is exactly
-/// what dropping `https://` from an address bar produces, and it is read as
-/// `host:port` + path by the schemeless branch, keeping the port on the host as
-/// every other web address does. Read as scp it answered with the host
-/// `github.com` and the repository `8443/acme`.
+/// An all-digit run is not on its own a port (`123` is a GitHub account and it
+/// owns `scriptaculous`), and neither is "the port reading names a repository",
+/// because a text can satisfy both readings. What decides is which reading
+/// accounts for the whole text:
 ///
-/// **An all-digit run is not enough on its own to mean a port**: `123` is a
-/// GitHub account and it owns `scriptaculous`, so `github.com:123/scriptaculous`
-/// is an ordinary scp address. Nor is "the port reading leaves an owner and a
-/// repository" enough, because a text can satisfy both readings. The rule is:
-///
-/// * The port reading leaves **fewer than two** segments, so it names no
-///   repository at all. `github.com:123/scriptaculous` leaves `scriptaculous`,
-///   which cannot be an owner and a repository, so the digits are the owner and
-///   this is scp shorthand.
-/// * The port reading leaves **exactly** an owner and a repository, with no
-///   route after it. `github.com:8443/acme/widget` names the whole text that
-///   way, while the scp reading has to discard `widget` as a route to get to
-///   `8443/acme`. Only one reading accounts for every segment, so it wins.
-/// * The port reading leaves an owner, a repository **and a route**, and so
-///   does the scp reading. `github.com:123/scriptaculous/pull/7` is
-///   `github.com:123` / `scriptaculous/pull` one way and `github.com` /
-///   `123/scriptaculous` / pull request 7 the other, both of them real
-///   repositories. Refused. Note what is deliberately NOT consulted: that the
-///   route reads `pull/7` and therefore "looks like" the scp reading. That is a
-///   guess at what the person meant, not a reading of what they wrote, and a
-///   person can just as well type a route onto an address with a port.
-///
-/// A `user@` prefix still settles it before any of this, because that is
-/// unambiguously scp and no browser address carries one before a port.
+/// * The port reading leaves fewer than two segments, so it names no repository:
+///   scp shorthand. `github.com:123/scriptaculous`.
+/// * The port reading leaves exactly an owner and a repository with no route,
+///   while the scp reading has to discard a segment: a port.
+///   `github.com:8443/acme/widget`.
+/// * Both readings leave an owner, a repository and a route: refused.
+///   `github.com:123/scriptaculous/pull/7`. That the route reads `pull/7` is
+///   deliberately not consulted: it guesses at intent rather than reading text,
+///   and a route can be typed onto an address with a port.
 fn read_colon_form(input: &str) -> ColonForm<'_> {
     let Some(colon) = input.find(':') else {
         return ColonForm::NotScp;
@@ -680,12 +582,10 @@ fn read_colon_form(input: &str) -> ColonForm<'_> {
 /// The host a message and a match should use, from a schemeless authority as
 /// written.
 ///
-/// Credentials come off, because a pasted address can carry a token and that
-/// token must not reach a log line or a match. A port comes off only for the
-/// ssh family, where it is the transport's port and says nothing about the
-/// server's API; a web port is KEPT, because dropping it would match a project
-/// on the default port, which is a different server, and answering about a
-/// different server is worse than answering about none.
+/// Credentials come off, because a pasted address can carry a token that must
+/// not reach a log line or a match. A port comes off only for the ssh family,
+/// where it is the transport's and says nothing about the server's API; a web
+/// port is KEPT, or the match lands on a different server.
 fn host_from_authority(authority: &str, ssh_like: bool) -> Result<String, String> {
     let host = match authority.rsplit_once('@') {
         Some((_, host)) => host,
@@ -716,21 +616,17 @@ fn looks_like_host(segment: &str) -> bool {
 }
 
 /// Split a path into its non-empty segments, so a doubled or trailing slash is
-/// simply absent rather than an empty component. Generous on purpose: all three
-/// are ordinary typing slips and none of them changes which repository is
-/// named.
+/// absent rather than an empty component. Generous on purpose: those are typing
+/// slips and none of them changes which repository is named.
 fn path_segments(path: &str) -> Vec<&str> {
     path.split('/').filter(|part| !part.is_empty()).collect()
 }
 
-/// An owner or a repository name, as far as this parser needs to judge it. It
-/// is not GitHub's own rule (which is narrower) because the answer is only ever
-/// used to look for a project that already has this address; the check exists
-/// to refuse text that plainly is not a name.
-///
-/// A separator is refused as well as whitespace, because a component is judged
-/// AFTER percent-decoding: `acme%2Fwidget` decodes to `acme/widget`, and
-/// letting one component hold a separator lets it pose as two.
+/// An owner or a repository name, as far as this parser needs to judge it. Not
+/// GitHub's own, narrower rule: the answer only looks for a project that already
+/// has this address, so the check exists to refuse text that plainly is not a
+/// name. A separator is refused as well as whitespace, because a component is
+/// judged AFTER percent-decoding and `acme%2Fwidget` would pose as two.
 fn is_repository_component(part: &str) -> bool {
     !part.is_empty()
         && !part
@@ -753,11 +649,9 @@ fn strip_dot_git(value: &str) -> &str {
 
 /// Why a project could not be compared against the reference at all.
 ///
-/// These are NOT non-matches. A project dux could not inspect might well be a
-/// checkout of the repository; dux simply cannot say. Collapsing the two is how
-/// a message ends up asserting "no project in dux is a checkout of that
-/// repository" when the truth is "the only project that might have been was
-/// unreadable".
+/// These are NOT non-matches: an uninspected project may well be a checkout.
+/// Collapsing the two is how a message asserts that no project is a checkout of
+/// the repository when the only candidate was merely unreadable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Uninspectable {
     /// The project's directory is gone, so there is nothing to ask git about.
@@ -796,9 +690,8 @@ pub struct UninspectedProject {
 /// What asking every project produced: the ones that ARE checkouts of the
 /// repository, and the ones dux could not ask about.
 ///
-/// The second half is the honesty. "No match" and "no match, and I could not
-/// look at four of them" are different answers, and only the first one licenses
-/// a surface to say there is no checkout.
+/// The second half is the honesty: only a no-match where everything was
+/// inspected licenses a surface to say there is no checkout.
 #[derive(Clone, Debug, Default)]
 pub struct ReferenceResolution {
     pub matches: Vec<crate::model::Project>,
@@ -815,9 +708,8 @@ impl ReferenceResolution {
     /// A clause naming what dux could not check, for a message that must not
     /// claim more than it knows. `None` when everything was inspected.
     ///
-    /// Reasons are grouped rather than listed per project, because a workspace
-    /// with thirty projects would otherwise produce a paragraph, and the thing
-    /// the user needs to know is that the answer is incomplete and why.
+    /// Reasons are grouped rather than listed per project, so a large workspace
+    /// produces a sentence rather than a paragraph.
     pub fn uninspected_summary(&self) -> Option<String> {
         if self.uninspected.is_empty() {
             return None;
@@ -844,27 +736,18 @@ impl ReferenceResolution {
 /// Which of `projects` are checkouts of the repository `reference` names, and
 /// which of them dux could not ask.
 ///
-/// This is ONE `git` call per project, on an explicit user action, so it
-/// belongs on a worker like every other git call and never on the interface
-/// thread.
+/// One `git` call per project, so callers run it on a worker. There is no cache,
+/// deliberately: the answer changes when an address is edited, when git's
+/// rewrite configuration changes, when a project's path moves under the same id
+/// and when an unreadable address is repaired, and dux watches none of those.
+/// Matching uses git's EFFECTIVE, rewritten address, which is what
+/// [`crate::git::resolve_remote_github_repo`] returns and what git would contact.
 ///
-/// **There is no cache, deliberately.** The answer changes when an address is
-/// edited, when git's rewrite configuration changes, when a project's path
-/// moves under the same id, and when an unreadable address is repaired. None of
-/// those are things dux watches, so a cached answer would go wrong quietly. It
-/// is recomputed per operation, over the live project list.
-///
-/// Matching uses git's EFFECTIVE address, the rewritten one, which is what
-/// [`crate::git::resolve_remote_github_repo`] already returns. That is the
-/// correct anchor: it is the address git would really contact.
-///
-/// A project dux could not compare against the reference at all is reported as
-/// UNINSPECTED rather than silently dropped, because "dux cannot tell" is a
-/// different answer from "this is not a checkout of that repository", and a
-/// surface that cannot tell them apart states a certainty it does not have.
-/// That covers a missing path and an address git cannot read. It covers a
-/// project on a host the policy denies only when the reference does not settle
-/// the question anyway; see the rule at the top of the body.
+/// A project dux could not compare at all is reported as UNINSPECTED rather than
+/// dropped, because "dux cannot tell" is not "this is not a checkout". That
+/// covers a missing path and an unreadable address, and a project on a denied
+/// host only when the reference does not settle the question anyway (see the
+/// rule at the top of the body).
 pub fn resolve_reference_projects(
     reference: &TypedReference,
     projects: &[crate::model::Project],
@@ -876,26 +759,20 @@ pub fn resolve_reference_projects(
     //
     // A denial means the address read cleanly and its host is not one dux may
     // ask `gh` about. When the reference names a host dux MAY ask about, a
-    // denied project is on some other host by construction (its host was
-    // refused, this one was not), so the two hosts are known and they differ,
-    // which is a plain non-match. Reporting it as uninspected made dux say it
-    // could not check every project about a project it had just conclusively
-    // ruled out.
+    // denied project is on some other host by construction, so the hosts are
+    // known and they differ: a plain non-match, not a failure to check.
     //
-    // The other two shapes are genuinely uncheckable and stay uninspected.
-    // `owner/repo#123` names no host at all, so every host is a candidate and a
-    // denied one may well be the checkout being looked for. And a reference on
-    // a host dux may not ask about cannot be told apart from a denied project
-    // either, because that project may be on exactly that host.
+    // The other two shapes stay uninspected. `owner/repo#123` names no host, so
+    // every host is a candidate; and a reference on a host dux may not ask about
+    // cannot be told apart from a denied project on exactly that host.
     let reference_host_is_askable = reference
         .host
         .as_deref()
         .is_some_and(|host| policy.allows(host));
     if reference.owner_repo.is_none() {
-        // A bare number names no repository, so there is nothing to resolve. The
-        // caller refuses it with an explanation rather than searching for a
-        // repository nobody named, and reporting every project as uninspected
-        // here would turn that refusal into a scare.
+        // A bare number names no repository, so there is nothing to resolve.
+        // Reporting every project as uninspected would turn the caller's
+        // explained refusal into a scare.
         return resolution;
     }
     for project in projects {
@@ -932,9 +809,8 @@ pub fn resolve_reference_projects(
 /// [`crate::worker::WorkerEvent::PullRequestReferenceResolved`] with the answer.
 ///
 /// Parsing is NOT done here: it is pure and instant, so the surface does it
-/// inline and can refuse a bare number (or unreadable text) without a round
-/// trip. Only a reference that actually names a repository is worth a git call
-/// per project, which is what this thread is for.
+/// inline and refuses a bare number or unreadable text without a round trip.
+/// Only a reference that names a repository is worth a git call per project.
 pub fn run_reference_resolution_job(
     reference: TypedReference,
     raw_input: String,

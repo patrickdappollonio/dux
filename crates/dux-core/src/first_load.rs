@@ -5,26 +5,20 @@
 //! Pure and shared. Both surfaces call [`plan`] at startup and [`after_fetch`]
 //! once the release-notes worker returns; neither reimplements the rules.
 //!
-//! The last-seen version lives in SQLite (`SessionStore::last_seen_version`) and
-//! is therefore SHARED: dismissing the what's-new screen in the TUI dismisses it
-//! in the web UI too. There is deliberately no per-browser or config-based
-//! alternative.
+//! The last-seen version is one shared SQLite row
+//! (`SessionStore::last_seen_version`), so dismissing a screen on either surface
+//! settles it for both. There is deliberately no per-browser alternative.
 //!
-//! # WHEN to stamp the version — the contract both surfaces must honor
+//! # WHEN to stamp the version
 //!
-//! [`FirstLoadPlan::mark_seen`] says *whether* to write `last_seen_version`. It
-//! deliberately does not say *when*, so here is the rule, and it is not
-//! negotiable per surface:
+//! [`FirstLoadPlan::mark_seen`] says WHETHER to write `last_seen_version`, not
+//! when, and the when is not negotiable per surface:
 //!
-//! - **`screen != Nothing`** — hold the plan in memory and stamp **when the user
-//!   dismisses the screen**, NOT when the plan is computed. The web server is
-//!   long-lived: if it stamped at startup, a browser that connected a minute
-//!   later would find the version already seen and show nothing at all.
-//! - **`screen == Nothing && mark_seen`** — stamp **immediately**. There is no
-//!   screen to dismiss, so there is nothing to wait for.
-//!
-//! Because the value is one shared SQLite row, dismissing on either surface
-//! settles it for both.
+//! - `screen != Nothing`: hold the plan in memory and stamp when the user
+//!   DISMISSES the screen. The web server is long-lived, so stamping at startup
+//!   would leave a browser connecting a minute later with nothing to show.
+//! - `screen == Nothing && mark_seen`: stamp immediately, since there is no
+//!   screen to wait for.
 
 /// The literal `DUX_DISPLAY_VERSION` of any build without `DUX_RELEASE_BUILD=1`.
 pub const DEVELOPMENT_VERSION: &str = "development";
@@ -47,12 +41,12 @@ pub struct FirstLoadPlan {
     pub screen: FirstLoad,
     /// Whether the running version should be written to `last_seen_version`.
     ///
-    /// True when a screen is actually going on the display (so it does not come
-    /// back next launch) and also when a screen was suppressed by config (the
-    /// user opted out, so keep the state moving forward rather than pinning them
-    /// at the old version forever). False when nothing changed, when the build is
-    /// a development build, and — critically — when the release-notes fetch
-    /// failed TRANSIENTLY, so the notes appear on a later launch that has network.
+    /// True when a screen is actually going on the display, so it does not come
+    /// back next launch, and when a screen was suppressed by config, so an
+    /// opted-out user is not pinned at the old version forever. False when
+    /// nothing changed, when the build is a development build, and, critically,
+    /// when the release-notes fetch failed TRANSIENTLY, so the notes appear on a
+    /// later launch that has network.
     ///
     /// See the module docs for WHEN to act on this.
     pub mark_seen: bool,

@@ -1,12 +1,11 @@
 //! Shared text-macro helpers used by both surfaces.
 //!
 //! The byte transform ([`macro_payload_bytes`]) and the surface-filter predicate
-//! ([`macro_matches_surface`]) live here — in core, not in the TUI — so a macro
-//! sent from the web (via a `WireCommand`) and a macro sent from the TUI produce
-//! BYTE-IDENTICAL input to the same PTY, with parity guaranteed by construction
-//! rather than by keeping two copies in sync. The macro DATA model
-//! ([`crate::config::MacroEntry`], [`crate::config::MacroSurface`]) stays in
-//! `config.rs` next to the rest of the serde-persisted config.
+//! ([`macro_matches_surface`]) live in core, not in the TUI, so a macro sent from
+//! the web and one sent from the TUI produce BYTE-IDENTICAL input to the same
+//! PTY. The macro DATA model ([`crate::config::MacroEntry`],
+//! [`crate::config::MacroSurface`]) stays in `config.rs` with the rest of the
+//! serde-persisted config.
 
 use crate::config::MacroSurface;
 use crate::model::SessionSurface;

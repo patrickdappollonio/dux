@@ -1,11 +1,9 @@
 //! The `Action` enum: dux's transport-agnostic command vocabulary.
 //!
-//! Every bindable/invokable action is an `Action`. `config_name` returns the
-//! stable snake_case identifier used as the `[keys]` config key; it is also the
-//! intended command id for future surfaces (web, server mode) per the design,
-//! but no surface dispatch exists yet. The TUI's key-parsing, default key
-//! tables, and runtime binding lookup live in the binary's `keybindings`
-//! module, not here.
+//! Every bindable or invokable action is an `Action`. `config_name` returns the
+//! stable snake_case identifier used as the `[keys]` config key. The TUI's key
+//! parsing, default key tables and runtime binding lookup live in the binary's
+//! `keybindings` module, not here.
 
 /// Unique identifier for every bindable action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -126,16 +124,14 @@ pub enum Action {
     /// `NewProjectTerminal` (project-scoped): this one needs nothing selected
     /// and no owner to exist. No default keybinding.
     NewStandaloneTerminal,
-    /// Open the folder browser to pick a directory the user
-    /// already has, and run an agent in it. Distinct from `NewAgent`, which
-    /// creates a branch and a worktree inside a project: this one belongs to no
-    /// project, makes nothing, and never creates, moves or removes the folder it
-    /// is pointed at. (The agent works IN that folder, of course; what dux never
-    /// touches is the folder's own existence and location.)
+    /// Open the folder browser to pick a directory the user already has, and run
+    /// an agent in it. Distinct from `NewAgent`, which creates a branch and a
+    /// worktree inside a project: this one belongs to no project, makes nothing,
+    /// and never creates, moves or removes the folder it is pointed at.
+    ///
     /// Reachable from the palette, from anywhere in the agents pane, and from
-    /// inside the NEW-AGENT project chooser, where it is the answer to "none of
-    /// these". It is inert in that modal's other intents, which ask a different
-    /// question. The standalone terminal beside it stays key-less.
+    /// inside the NEW-AGENT project chooser, where it answers "none of these". It
+    /// is inert in that modal's other intents, which ask a different question.
     NewStandaloneAgent,
     RenameSession,
     DeleteProject,

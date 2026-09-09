@@ -57,11 +57,10 @@ pub enum StartupCommandLogScope {
 /// Every run recorded for one scope, newest first, plus the newest run's
 /// contents pre-loaded.
 ///
-/// The pre-load is what lets a picker render the newest run's output in the
-/// same frame it opens, with no second round of file I/O and no "loading"
-/// placeholder for the row it starts on. `content` is empty exactly when
-/// `entries` is, which is also the signal that the scope has never run its
-/// startup command.
+/// The pre-load lets a picker render the newest run's output in the frame it
+/// opens, with no second round of file I/O and no loading placeholder.
+/// `content` is empty exactly when `entries` is, which is also the signal that
+/// the scope has never run its startup command.
 #[derive(Clone, Debug, Default)]
 pub struct StartupCommandLogListing {
     pub entries: Vec<StartupCommandLogEntry>,
@@ -168,10 +167,9 @@ pub fn read_log(path: &Path) -> Result<String> {
 
 /// Every log run recorded for `scope`, newest first.
 ///
-/// The one place the scope is matched. Callers that need a scope's runs ask
-/// here rather than re-deriving "agent means this directory, project means
-/// every session directory under it", which is how the two spellings drifted
-/// apart before.
+/// The one place the scope is matched. Callers ask here rather than re-deriving
+/// "agent means this directory, project means every session directory under it",
+/// so the two spellings cannot drift apart.
 pub fn list_logs_for_scope(
     paths: &DuxPaths,
     scope: StartupCommandLogScope,

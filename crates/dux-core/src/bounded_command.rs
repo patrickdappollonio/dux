@@ -4,25 +4,21 @@
 //! Every place dux shells out to a third-party CLI whose output it reads needs
 //! exactly this, and needs it to be impossible for that CLI to park a worker
 //! thread forever: a wedged credential helper, a hung network call, a daemon
-//! that stopped answering. `gh` needed it first; the Tailscale watcher needs it
-//! for the same reason, only more so, because a suspended-and-resumed
-//! `tailscaled` is precisely the situation the watcher exists to survive.
+//! that stopped answering.
 //!
-//! This is deliberately NOT `git::wait_child_or_kill`, which pipes only a tiny
-//! stderr and never drains stdout, so it cannot be used where the output is the
-//! answer.
+//! Deliberately NOT `git::wait_child_or_kill`, which pipes only a tiny stderr
+//! and never drains stdout, so it cannot be used where the output is the answer.
 
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 /// The FLOOR on how long to wait for the output-reader threads once the child is
-/// gone before abandoning them. They finish on their own the moment the pipe
-/// closes; the bound is there so a grandchild holding the pipe open can never
-/// freeze the caller. It is a floor rather than the whole allowance because a
-/// reader that has already read everything still has to be scheduled to hand its
-/// buffer over, and on a loaded machine that hand-off can lose a race with a
-/// short fixed window, which would silently return empty output for a command
-/// that in fact succeeded. See [`run_command_with_timeout`] for the ceiling.
+/// gone before abandoning them. They finish on their own when the pipe closes;
+/// the bound stops a grandchild holding the pipe open from freezing the caller.
+/// A floor rather than the whole allowance, because a reader that has already
+/// read everything still has to be scheduled to hand its buffer over, and on a
+/// loaded machine a short fixed window loses that race and silently returns
+/// empty output. See [`run_command_with_timeout`] for the ceiling.
 pub const DEFAULT_READER_DRAIN: Duration = Duration::from_secs(2);
 
 /// Outcome of a bounded invocation. `Failed` carries the failure text (a spawn or
@@ -40,18 +36,17 @@ pub enum CommandOutcome {
 
 /// Run `cmd` with piped stdout/stderr drained on threads and a hard wall-clock
 /// cap. On every non-[`CommandOutcome::Completed`] exit the child is killed and
-/// reaped, the reader threads are drained with a bounded wait and then abandoned
-/// (they self-terminate at EOF), so the caller can never block.
+/// reaped and the reader threads are drained with a bounded wait and then
+/// abandoned, so the caller can never block.
 ///
-/// A reader is waited on until the command's own wall-clock cap runs out, or for
-/// `reader_drain` when less than that is left, so the whole call still returns
-/// within roughly `timeout + reader_drain` however wedged the pipe is. Spending
-/// the cap's leftover on the readers is what keeps a fast command's output from
+/// A reader is waited on until the command's own cap runs out, or for
+/// `reader_drain` when less than that is left, so the call returns within
+/// roughly `timeout + reader_drain` however wedged the pipe is. Spending the
+/// cap's leftover on the readers is what keeps a fast command's output from
 /// being dropped on a loaded machine, where handing the buffer over is a
 /// scheduling race rather than a wedge.
 ///
-/// `label` names the program in failure text (e.g. `gh`, `tailscale`); it is only
-/// used for messages.
+/// `label` names the program in failure text and is only used for messages.
 pub fn run_command_with_timeout(
     mut cmd: Command,
     timeout: Duration,

@@ -1,12 +1,11 @@
 //! The sidebar row "state" priority ladder, core-owned and shared by rule with
-//! the web's `flatList.ts` `stateWord` and `flatTerminals.ts` `terminalStateWord`.
+//! the web's `flatList.ts` and `flatTerminals.ts`.
 //!
-//! The DECISION (which state a row is in, and its priority) lives here as a typed
-//! [`RowState`]; each surface maps that to its own WORD and color. The wording
-//! deliberately differs per surface for the busy state (an agent "Working" vs a
-//! terminal "Running"), so this returns a typed value rather than a string, per
-//! the same split used elsewhere in the codebase. The TS mirror is pinned by
-//! shared test vectors (`agent_search.rs` / `agentSearch.ts` style).
+//! The DECISION, which state a row is in and its priority, lives here as a typed
+//! [`RowState`]; each surface maps that to its own WORD and color, because the
+//! wording deliberately differs per surface for the busy state (an agent
+//! "Working" against a terminal "Running"). The TS mirror is pinned by shared
+//! test vectors.
 
 use crate::model::SessionStatus;
 

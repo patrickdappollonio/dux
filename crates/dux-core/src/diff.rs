@@ -32,23 +32,20 @@ pub struct DiffContents {
 /// NUL/control bytes, which `String::from_utf8` alone would accept and render
 /// garbled.
 ///
-/// This is the SINGLE binary-vs-text predicate for the whole app: the diff
-/// engine (both sides of a file diff), the editor's working-copy reader
-/// (`worktree_file`), and the TUI's diff renderer all call this so a file is
-/// never classified as binary on one surface and text on another.
+/// The SINGLE binary-vs-text predicate for the whole app, so a file is never
+/// classified as binary on one surface and text on another.
 pub fn is_renderable_text(bytes: &[u8]) -> bool {
     bytes.is_empty() || content_inspector::inspect(bytes) == content_inspector::ContentType::UTF_8
 }
 
-/// Read the two sides of a single file's working-tree-vs-HEAD diff as whole text:
-/// `original` is the file at HEAD, `modified` is the working copy on disk. A path
-/// absent on one side yields an empty string there (added → empty original;
-/// deleted → empty modified). Non-UTF-8 content on either side yields
-/// `binary: true` with empty sides.
+/// Read the two sides of a single file's working-tree-vs-HEAD diff as whole
+/// text: `original` is the file at HEAD, `modified` the working copy on disk. A
+/// path absent on one side yields an empty string there. Non-UTF-8 content on
+/// either side yields `binary: true` with empty sides.
 ///
-/// SECURITY: `rel_path` must be worktree-relative. Absolute paths, any
-/// `..`/root/prefix component, and symlinks that escape the worktree are
-/// rejected, since the web passes client-supplied paths here.
+/// SECURITY: `rel_path` must be worktree-relative. Absolute paths, any `..`,
+/// root or prefix component, and symlinks that escape the worktree are rejected,
+/// since the web passes client-supplied paths here.
 pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<DiffContents> {
     // Reject absolute paths, `..`/root components, the `.git` dir, and symlinks
     // that escape the worktree.

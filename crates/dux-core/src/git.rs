@@ -44,11 +44,9 @@ pub enum BranchLocation {
 }
 
 /// The create-agent branch preflight decision: whether creating an agent named
-/// `name` in a project would start a genuinely FRESH branch or ATTACH to an
-/// EXISTING branch's history. The single-source decision both surfaces consume
-/// so neither silently attaches without consent: the TUI resolves an
-/// `ExistingBranch` through its confirm dialog, and the web refuses an
-/// unconfirmed attach and surfaces the same confirmation.
+/// `name` in a project starts a genuinely FRESH branch or ATTACHES to an
+/// EXISTING branch's history. One source both surfaces consume, so neither can
+/// silently attach without consent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CreateAgentBranchPlan {
     /// No branch of that name exists (local or remote): a new branch is created.
@@ -89,13 +87,10 @@ const BINARY_SNIFF_BYTES: usize = 8000;
 
 /// How many UNTRACKED files one changed-files sweep counts lines for.
 ///
-/// Every untracked file costs a read, and a worktree can hold a hundred
-/// thousand of them (an unignored `node_modules`, a build directory) while the
-/// panel is re-read by a poller. Past this many, the remaining untracked rows
-/// are still LISTED, in full, with their status; they just carry no line
-/// counts, which renders exactly as an empty file's does today (no `+`/`-`
-/// column) and leaves them out of the panel's totals. Listing every change
-/// matters; the last few thousand line counts do not.
+/// Every untracked file costs a read, and a worktree can hold a hundred thousand
+/// of them while a poller re-reads the panel. Past this many, untracked rows are
+/// still LISTED in full with their status; they carry no line counts, rendering
+/// as an empty file does, and stay out of the panel's totals.
 const UNTRACKED_STATS_MAX_FILES: usize = 2000;
 
 pub fn current_branch(repo_path: &Path) -> Result<String> {
@@ -120,11 +115,10 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Like [`current_branch`], but tolerates a detached HEAD: returns `Ok(None)`
-/// when HEAD is not a symbolic ref (git `symbolic-ref` exit code 1, with
-/// `--quiet` suppressing the message), and `Err` for any real failure
-/// (exit 128 = not a repo, git missing, etc.). Used by inspection/preview
-/// call sites that must not treat a detached HEAD as a hard error.
+/// Like [`current_branch`], but tolerates a detached HEAD: `Ok(None)` when HEAD
+/// is not a symbolic ref (`symbolic-ref` exit code 1, `--quiet` suppressing the
+/// message), and `Err` for any real failure (exit 128 = not a repo, git
+/// missing). For inspection sites that must not treat a detached HEAD as fatal.
 pub fn current_branch_opt(repo_path: &Path) -> Result<Option<String>> {
     let output = Command::new("git")
         .args([
@@ -156,12 +150,9 @@ pub fn current_branch_opt(repo_path: &Path) -> Result<Option<String>> {
 }
 
 /// Returns the default branch name for the `origin` remote by reading
-/// `refs/remotes/origin/HEAD`.  This ref is set automatically by `git clone`;
-/// repos created with `git init` + manual remote typically lack it.
-///
-/// Returns `None` when the ref doesn't exist or the command fails — callers
-/// should fall back to a heuristic (e.g. checking if the current branch is
-/// `main` or `master`).
+/// `refs/remotes/origin/HEAD`. `git clone` sets that ref; repos created with
+/// `git init` plus a manual remote typically lack it, so `None` also means
+/// "unknown" and callers fall back to a heuristic.
 pub fn remote_default_branch(repo_path: &Path) -> Option<String> {
     let output = Command::new("git")
         .args([
@@ -226,11 +217,9 @@ pub fn is_git_repo(path: &Path) -> bool {
 }
 
 /// Where a path sits relative to git repositories, for the add-project and
-/// init-repository gates. Unlike [`is_git_repo`] (which answers "is git happy
-/// anywhere at or above this path?" and must stay loose because
-/// `load_projects` uses it for the `path_missing` flag), this classifies the
-/// path precisely so gates can distinguish a repository root from a folder
-/// buried inside one.
+/// init-repository gates. Unlike [`is_git_repo`], which must stay loose because
+/// `load_projects` uses it for the `path_missing` flag, this classifies the path
+/// precisely, so a gate can tell a repository root from a folder buried in one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoPathKind {
     /// The root of a normal (non-bare) work tree.
@@ -249,16 +238,15 @@ pub enum RepoPathKind {
     Indeterminate,
 }
 
-/// What a standalone agent's folder is, as far as a changes panel is
-/// concerned. Derived from [`repo_path_kind`]; there is deliberately no second
-/// detector, because two of them would drift and this is the decision that
-/// keeps dux from staging into somebody else's repository.
+/// What a standalone agent's folder is, as far as a changes panel is concerned.
+/// Derived from [`repo_path_kind`]; deliberately no second detector, because two
+/// would drift and this is the decision that keeps dux from staging into
+/// somebody else's repository.
 ///
-/// The distinction that matters: git answers questions by walking UP parent
-/// directories, so a folder INSIDE a repository would happily report, stage and
-/// commit to the parent. A "working repository" therefore means the folder is
-/// itself the repository's top level, compared on canonical paths so a symlink
-/// cannot fake it.
+/// git answers questions by walking UP parent directories, so a folder INSIDE a
+/// repository would report, stage and commit to the parent. A working repository
+/// therefore means the folder is itself the repository's top level, compared on
+/// canonical paths so a symlink cannot fake it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FolderRepoStatus {
     /// The folder IS a repository's top level. The changes panel works here
@@ -275,16 +263,13 @@ pub enum FolderRepoStatus {
     /// and every mutation is refused, matching the `CommitState` doctrine of
     /// failing closed on an unknown answer.
     Indeterminate,
-    /// Nobody has looked yet: the folder has no verdict because its probe has
-    /// not landed (it is spawned right after the agent is created, and again
-    /// on restore).
+    /// Nobody has looked yet: the probe, spawned right after the agent is
+    /// created and again on restore, has not landed.
     ///
-    /// A variant of its own rather than a second meaning for `Indeterminate`,
-    /// because the two gate identically but read completely differently: "dux
-    /// is still looking" is a wait, while "git could not be consulted" accuses
-    /// the user's machine of a fault it does not have. A freshly created agent
-    /// in a perfectly healthy repository hits this window, and it was the
-    /// sentence it got.
+    /// A variant of its own rather than a second meaning for `Indeterminate`.
+    /// The two gate identically but read differently: "dux is still looking" is
+    /// a wait, while "git could not be consulted" accuses a healthy machine of a
+    /// fault, and a freshly created agent passes through this window.
     Unprobed,
 }
 
@@ -315,10 +300,9 @@ impl FolderRepoStatus {
 
     /// Whether git can see files written at this path, which is a DIFFERENT
     /// question from whether the changes panel works. A folder inside somebody
-    /// else's repository is exactly where an unignored upload directory would
-    /// pollute their `git status`, so it gets the self-gitignoring seed even
-    /// though its own panel stays quiet. A plain folder gets no junk written
-    /// into it, and an unconsultable git also gets nothing.
+    /// else's repository still gets the self-gitignoring seed, though its own
+    /// panel stays quiet, or an unignored upload directory pollutes their
+    /// `git status`. A plain folder and an unconsultable git get nothing.
     pub fn git_can_see_path(self) -> bool {
         match self {
             Self::WorkingRepo | Self::InsideRepoRootedElsewhere => true,
@@ -356,9 +340,9 @@ impl FolderRepoStatus {
 
 /// Classify a standalone agent's folder per [`FolderRepoStatus`].
 ///
-/// A bare repository and git's own internals both answer [`FolderRepoStatus::NoRepo`]
-/// rather than getting variants of their own: from the changes panel's point of
-/// view they are the same fact, that there is no work tree here to show.
+/// A bare repository and git's own internals both answer
+/// [`FolderRepoStatus::NoRepo`] rather than getting variants of their own: to
+/// the changes panel they are one fact, that there is no work tree to show.
 pub fn folder_repo_status(path: &Path) -> FolderRepoStatus {
     match repo_path_kind(path) {
         RepoPathKind::WorkTreeRoot => FolderRepoStatus::WorkingRepo,
@@ -372,11 +356,10 @@ pub fn folder_repo_status(path: &Path) -> FolderRepoStatus {
 
 /// Classify `path` per [`RepoPathKind`] using plumbing only.
 ///
-/// The `--is-inside-git-dir` rung exists because inside a normal repo's
-/// `.git` directory `--git-dir` succeeds, `--is-bare-repository` prints
-/// `false`, and `--show-toplevel` exits 128 (measured); without the rung that
-/// combination would fall through to `Indeterminate` and the fail-open add
-/// gate would accept `~/repo/.git` as a project.
+/// The `--is-inside-git-dir` rung exists because inside a normal repo's `.git`
+/// directory `--git-dir` succeeds, `--is-bare-repository` prints `false` and
+/// `--show-toplevel` exits 128 (measured); without it that combination falls to
+/// `Indeterminate`, which the fail-open add gate accepts as a project.
 pub fn repo_path_kind(path: &Path) -> RepoPathKind {
     let run = |args: &[&str]| -> Option<std::process::Output> {
         Command::new("git")
@@ -403,9 +386,8 @@ pub fn repo_path_kind(path: &Path) -> RepoPathKind {
     // Path outputs must be decoded from the RAW bytes, never via
     // `from_utf8_lossy`: git prints path bytes verbatim, and a repo under a
     // non-UTF8 path (legal on Linux) would have its bytes rewritten to U+FFFD,
-    // fail canonicalization, and fall to Indeterminate, which the fail-open
-    // add gate accepts, i.e. exactly the paths this ladder exists to stop
-    // would slip through.
+    // fail canonicalization and fall to Indeterminate, which the fail-open add
+    // gate accepts.
     let capture_path = |args: &[&str]| -> Option<PathBuf> {
         use std::os::unix::ffi::OsStrExt;
         run(args).filter(|out| out.status.success()).map(|out| {
@@ -493,21 +475,19 @@ pub enum CommitState {
     /// the branch named by HEAD does not exist under `refs/heads/` until the
     /// first commit.
     Unborn,
-    /// Could not determine (git failed to run, not a repo, permission/I-O
-    /// error). Never conflate this with `Unborn`. The safe handling depends on
-    /// the decision: a *reject/gate* site (should this add be blocked? is this
-    /// repo unborn for messaging?) treats it as "not unborn" and proceeds
-    /// (don't block on a transient hiccup); a *mutation* site (about to create a
-    /// commit) refuses (don't mutate a repo whose state we can't confirm).
+    /// Could not determine (git failed to run, not a repo, permission or I/O
+    /// error). Never conflate this with `Unborn`. A reject or gate site treats
+    /// it as "not unborn" and proceeds, so a transient hiccup blocks nothing; a
+    /// mutation site refuses, so no repo is mutated in a state dux cannot
+    /// confirm.
     Indeterminate,
 }
 
 /// Precise, fail-closed probe of a repo's commit state. `git rev-parse --verify
-/// --quiet HEAD` exits 0 when HEAD resolves (`Born`), 1 when it doesn't
-/// (`Unborn`), and anything else (or a spawn error) is a real failure
-/// (`Indeterminate`). Prefer this over [`repo_has_commits`] at any site that
-/// makes a hard decision — rejecting an add, failing agent creation, creating a
-/// commit — so a transient git hiccup can't be mistaken for "no commits".
+/// --quiet HEAD` exits 0 when HEAD resolves (`Born`), 1 when it does not
+/// (`Unborn`), and anything else, a spawn error included, is `Indeterminate`.
+/// Prefer this over [`repo_has_commits`] wherever a hard decision is made, so a
+/// transient git hiccup cannot be mistaken for "no commits".
 pub fn repo_commit_state(path: &Path) -> CommitState {
     let out = Command::new("git")
         .args([
@@ -541,42 +521,33 @@ pub fn repo_has_commits(path: &Path) -> bool {
 /// Creates an empty initial commit so an otherwise-unborn repo gains a root
 /// commit and can back worktrees.
 ///
-/// It is built entirely with **plumbing** (`hash-object` for the empty tree,
-/// `commit-tree` for the commit object, `update-ref` to land it) rather than
-/// `git commit`, which buys three properties `git commit --allow-empty` cannot:
-/// - **No hooks run.** Plumbing never invokes `pre-commit`/`post-commit`/
-///   `reference-transaction`/… — a repo's hook scripts must not execute just
-///   because dux is adding the project. (`--no-verify` only skips the first two.)
-/// - **Empty tree, always.** The commit is built from an explicit empty tree, so
-///   it can never bake in whatever happens to be staged in the index at commit
-///   time (a race `git commit --allow-empty` is subject to). The user's files —
-///   staged or untracked — are left exactly as they were.
-/// - **Atomic and bare-safe.** `update-ref <branch> <sha> ""` is a compare-and-
-///   swap that creates the branch only if it does not yet exist, so a real
-///   commit landing concurrently makes this fail (never a second commit on top);
-///   and none of the steps need a work tree, so a **bare** repo works too.
-///
 /// Returns the short name of the branch the commit landed on, so callers persist
-/// the branch that was actually committed rather than one resolved separately
-/// (which a concurrent HEAD change could make stale).
+/// that rather than one resolved separately, which a concurrent HEAD change
+/// could make stale.
 ///
-/// It is *idempotent*: the goal is "the repo has a commit", so if a commit
-/// already exists — whether at entry or because the update-ref CAS lost a race
-/// to another writer — it returns `Ok(branch)` (no second commit is made)
-/// rather than a scary error, letting the caller register the project. It only
-/// errors when the index has staged changes (a deliberate courtesy stop so dux
-/// doesn't add a project while the user has staged work they may want in the
-/// first commit), when git's state can't be determined, on a detached HEAD, or
-/// on a genuine git failure (committer identity unset, etc. — surfaced verbatim).
-/// Callers still serialize concurrent initial commits on the same repo via the
-/// engine's in-flight gate; the CAS is the cross-process backstop.
+/// Built entirely with **plumbing** (`hash-object`, `commit-tree`,
+/// `update-ref`) rather than `git commit`, for three properties
+/// `git commit --allow-empty` cannot give:
+/// - **No hooks run.** A repo's hook scripts must not execute because dux is
+///   adding the project, and `--no-verify` does not cover them all.
+/// - **Empty tree, always.** Nothing staged in the index at commit time can be
+///   baked in; the user's files, staged or untracked, are left as they were.
+/// - **Atomic and bare-safe.** `update-ref <branch> <sha> ""` is a
+///   compare-and-swap creating the branch only if it does not yet exist, so a
+///   concurrent real commit makes this fail rather than land a second one, and
+///   no step needs a work tree, so a **bare** repo works too.
+///
+/// Idempotent: a repo that already has a commit, at entry or because the CAS
+/// lost a race, returns `Ok(branch)`. It errors when the index has staged
+/// changes (a courtesy stop, so dux does not add a project over work the user
+/// may want in the first commit), when git's state cannot be determined, on a
+/// detached HEAD, and on a genuine git failure, surfaced verbatim. The CAS is
+/// the cross-process backstop behind the engine's own in-flight gate.
 pub fn create_initial_commit(path: &Path) -> Result<String> {
     let repo = path.to_string_lossy();
-    // Fail closed on commit state — only bootstrap a confirmed-unborn repo. A
-    // Born repo is idempotent success (a commit already exists, e.g. one raced in
-    // between the caller's dispatch-time check and this worker running): the goal
-    // is met, so return the current branch (empty if detached — the caller
-    // handles that like the normal born path) and let it register.
+    // Fail closed on commit state: only bootstrap a confirmed-unborn repo. A
+    // Born repo is idempotent success, so return the current branch (empty if
+    // detached, which the caller handles as on the normal born path).
     match repo_commit_state(path) {
         CommitState::Born => return Ok(current_branch_opt(path)?.unwrap_or_default()),
         CommitState::Unborn => {}
@@ -664,13 +635,11 @@ pub fn create_initial_commit(path: &Path) -> Result<String> {
         .output()
         .with_context(|| format!("failed to create initial commit in {}", path.display()))?;
     if !update.status.success() {
-        // The CAS lost the race — most likely another writer (a second dux
-        // instance, or a concurrent `git commit`) just created the first commit.
-        // The goal is "the repo has a commit"; if it's now Born, that goal is
-        // met, so treat it as success (idempotent). Re-resolve the current branch
-        // fresh (not the pre-race `short`) so we persist the branch the repo is
-        // actually on, consistent with the entry-Born path. Only a
-        // still-unborn/indeterminate repo is a real error.
+        // The CAS lost the race, most likely to another writer creating the
+        // first commit. The goal is "the repo has a commit", so a now-Born repo
+        // is idempotent success. Re-resolve the branch fresh, not the pre-race
+        // `short`, so the persisted branch is the one the repo is actually on.
+        // Only a still-unborn or indeterminate repo is a real error.
         if repo_commit_state(path) == CommitState::Born {
             return Ok(current_branch_opt(path)?.unwrap_or_default());
         }
@@ -829,9 +798,9 @@ pub fn has_origin_remote(repo_path: &Path) -> Result<bool> {
 
 /// Fast-forwards `branch` from `origin`.
 ///
-/// The refspec is FULLY QUALIFIED (`refs/heads/<branch>`) and that is what
-/// makes an option-looking branch name safe here. A `--` separator does NOT,
-/// which was MEASURED on git 2.55 with `GIT_TRACE=1`:
+/// The refspec is FULLY QUALIFIED (`refs/heads/<branch>`), and that, not a `--`
+/// separator, is what makes an option-looking branch name safe. MEASURED on git
+/// 2.55 with `GIT_TRACE=1`:
 ///
 /// ```text
 /// $ git pull --ff-only origin -- --force
@@ -839,20 +808,16 @@ pub fn has_origin_remote(repo_path: &Path) -> Result<bool> {
 /// ```
 ///
 /// `pull` consumes the separator and forwards the refspec to an internal
-/// `fetch` carrying none of its own, the same mechanism `git worktree add`
-/// uses on its start point. So `--force`/`--prune`/`--all` are read as flags
-/// and the branch is silently never pulled, and `--depth=1` writes
-/// `.git/shallow` into the user's source checkout and converts it to a shallow
-/// clone. A `refs/heads/`-prefixed refspec cannot lead with a dash, so the
-/// internal fetch reads it as a ref no matter what the branch is called
-/// (measured: `git pull --ff-only origin -- refs/heads/--force` fetches and
-/// fast-forwards correctly).
+/// `fetch` carrying none of its own, so `--force`/`--prune`/`--all` are read as
+/// flags and the branch is silently never pulled, while `--depth=1` converts the
+/// user's source checkout to a shallow clone. A `refs/heads/` prefix cannot lead
+/// with a dash, so the internal fetch always reads it as a ref (measured:
+/// `git pull --ff-only origin -- refs/heads/--force` fast-forwards correctly).
 ///
 /// Resolving the name to an object id first, the way
-/// `create_worktree_from_start_point` does, is not an option here: the refspec
-/// names a ref on the REMOTE, and an object id is not something `origin` can
-/// be asked for. The `--` is kept as defence in depth for the `origin`
-/// argument's sake.
+/// `create_worktree_from_start_point` does, is not possible here: the refspec
+/// names a ref on the REMOTE. The `--` stays as defence in depth for the
+/// `origin` argument's sake.
 fn pull_origin_branch(repo_path: &Path, branch: &str) -> Result<()> {
     let refspec = format!("refs/heads/{branch}");
     let output = Command::new("git")
@@ -872,12 +837,10 @@ fn pull_origin_branch(repo_path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// Switches `repo_path` to `branch_name`. Uses `git switch` rather than
-/// `git checkout` because `switch` is single-purpose (branch switching only)
-/// and rejects the detached-HEAD and file-restore surprises that `checkout`
-/// silently allows. Returns the raw git stderr on failure so callers can
-/// surface the concrete reason (e.g. conflicting unstaged changes) to the
-/// user. Requires git >= 2.23 (August 2019).
+/// Switches `repo_path` to `branch_name`. `git switch` rather than `git
+/// checkout` because it is single-purpose and rejects the detached-HEAD and
+/// file-restore surprises `checkout` silently allows. Returns git's raw stderr
+/// on failure so callers can surface the concrete reason. Requires git >= 2.23.
 pub fn switch_branch(repo_path: &Path, branch_name: &str) -> Result<()> {
     let output = Command::new("git")
         .args([
@@ -936,12 +899,10 @@ pub fn local_branch_exists(repo_path: &Path, name: &str) -> bool {
 /// How much of a branch exists only on this machine, and whether there was
 /// anywhere for it to have been pushed to in the first place.
 ///
-/// The two travel together because the number means different things without
-/// the flag: in a repository with no remote-tracking refs at all, `--not
-/// --remotes` excludes nothing and the count is the branch's whole history.
-/// "It has 47 commits not pushed anywhere" is true there and reads as an
-/// accusation about work that was never going anywhere; the surfaces use the
-/// flag to say the honest thing instead.
+/// The two travel together because the number means different things without the
+/// flag: with no remote-tracking refs at all, `--not --remotes` excludes nothing
+/// and the count is the branch's whole history, which reads as an accusation
+/// about work that was never going anywhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnpushedCommits {
     pub count: u32,
@@ -973,27 +934,21 @@ fn has_remote_tracking_refs(repo_path: &Path) -> bool {
 /// How many commits on `branches` are reachable from no remote-tracking ref,
 /// i.e. how much work on them exists only on this machine.
 ///
-/// Asked by the delete-agent dialogs before they offer to remove a branch that
-/// predates the agent: "this branch is yours" is a weaker warning than "this
-/// branch is yours and holds 12 commits that are nowhere else". Callers run it
-/// in a background worker; it shells out to git.
+/// It shells out to git, so callers run it in a background worker.
 ///
-/// It takes a LIST because one delete can remove more than one branch: a
-/// drifted agent gives up both the branch its worktree is on now and the one it
-/// was born on, and a count for only one of them understates what ticking the
-/// box costs. The answer is the union, counting a commit both branches reach
-/// once, which is what naming several revisions on one `rev-list` already means.
+/// It takes a LIST because one delete can remove more than one branch: a drifted
+/// agent gives up both the branch its worktree is on now and the one it was born
+/// on, and a count for one of them understates what ticking the box costs. The
+/// answer is their union, counting a commit both branches reach once.
 ///
-/// `--not --remotes` excludes everything under `refs/remotes/`, which is every
-/// remote-tracking ref of every remote. A repository with NO remotes therefore
-/// counts the whole history, and that is the honest answer: nothing in it has
-/// been pushed anywhere, because there is nowhere to have pushed it.
+/// `--not --remotes` excludes every remote-tracking ref of every remote, so a
+/// repository with NO remotes counts its whole history. That is the honest
+/// answer: there is nowhere for any of it to have been pushed.
 ///
 /// Git-config immune by construction: `rev-list --count` is plumbing and prints
-/// one integer. Each branch is passed fully qualified as `refs/heads/<name>`,
-/// which cannot begin with a dash, so it can never be read as an option (the
-/// same technique `pull` uses); the trailing `--` pins the pathspec boundary so
-/// nothing after the revision list is read as a path either.
+/// one integer, each branch is passed fully qualified as `refs/heads/<name>`,
+/// which cannot begin with a dash, and the trailing `--` pins the pathspec
+/// boundary so nothing after the revision list is read as a path.
 pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<UnpushedCommits> {
     // No branches means nothing would be deleted, so nothing is at risk. Git
     // would refuse an empty revision list, and an error here would read to the
@@ -1124,19 +1079,13 @@ pub fn create_worktree_from_start_point(
     let repo = repo_path.to_string_lossy();
     let worktree = worktree_path.to_string_lossy();
     // Resolve the start point to an object id BEFORE handing it to
-    // `worktree add`. A `--` separator is not enough at this call shape, which
-    // was measured on git 2.55: `git worktree add` consumes the separator
-    // itself and then forwards the start point to an internal
-    // `git branch <name> <start-point>` with no separator of its own, so a
-    // start point named `--force` or `--quiet` is obeyed by that inner command
-    // as a FLAG. The worktree is then branched from HEAD and git exits 0, so
-    // dux reports a successful agent creation on the wrong commit. (`--lock`
-    // additionally left a worktree that `worktree remove` refused to clean up.)
-    // An object id is 40 hex characters and can never be read as an option, so
-    // resolving first closes the door for every option-looking name rather than
-    // the handful anyone thought to test. `--end-of-options` is what protects
-    // the resolve step itself; a start point that names nothing now fails here,
-    // loudly, instead of quietly becoming a HEAD worktree.
+    // `worktree add`: a `--` separator is not enough at this call shape
+    // (measured on git 2.55), because `worktree add` consumes the separator and
+    // forwards the start point to an internal `git branch <name> <start-point>`
+    // with none of its own, where `--force` or `--quiet` is obeyed as a FLAG,
+    // the worktree is branched from HEAD and git exits 0. An object id can never
+    // be read as an option; `--end-of-options` protects the resolve step itself,
+    // so a start point naming nothing fails loudly here.
     let resolved_start = match start_point {
         Some(start_point) => Some(run_git_capture(
             repo_path,
@@ -1427,11 +1376,10 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
 /// What a worktree removal did to the branches involved.
 ///
 /// Two branches, because an agent's branch can DRIFT: `branch_name` is kept in
-/// step with whatever the worktree is actually on (the branch-sync poller
-/// rewrites it, and the user may `git switch -c` inside the worktree), while
-/// `initial_branch` is the branch the agent was born on and never moves. Delete
-/// only the first and the birth branch survives the agent, which is exactly how
-/// "create foo, delete foo, recreate foo" ends in "branch already exists".
+/// step with whatever the worktree is on, while `initial_branch` is the branch
+/// the agent was born on and never moves. Delete only the first and the birth
+/// branch survives the agent, which is how "create foo, delete foo, recreate
+/// foo" ends in "branch already exists".
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RemoveResult {
     /// What happened to the branch the worktree was on.
@@ -1470,12 +1418,10 @@ impl BranchDeletion {
 }
 
 /// The recovery sentence for a branch git REFUSED to delete: what happened, why
-/// (in git's own words), and the two ways out. Shared so the TUI status line and
-/// the web toast say the same thing.
-///
-/// Both surfaces need this because a surviving branch is what makes recreating
-/// an agent under the same name fail later, and the failure surfaces far away
-/// from the deletion that caused it.
+/// in git's own words, and the two ways out. Shared so the TUI status line and
+/// the web toast say the same thing, which both need because a surviving branch
+/// makes recreating an agent under the same name fail far from the deletion that
+/// caused it.
 pub fn branch_refusal_note(branch: &str, reason: &str) -> String {
     let reason = clean_git_reason(reason);
     format!(
@@ -1484,12 +1430,10 @@ pub fn branch_refusal_note(branch: &str, reason: &str) -> String {
     )
 }
 
-/// git's stderr line, tidied for a status message: the "error: " prefix dropped
-/// (the sentence around it already says something went wrong) and a full stop
-/// added when git did not end with one.
-///
-/// An empty reason becomes a plain statement rather than a dangling colon, which
-/// is the shape a git build that says nothing at all would otherwise produce.
+/// git's stderr line, tidied for a status message: the "error: " prefix dropped,
+/// since the sentence around it already says something went wrong, and a full
+/// stop added when git did not end with one. An empty reason becomes a plain
+/// statement rather than a dangling colon.
 fn clean_git_reason(reason: &str) -> String {
     let trimmed = reason.trim();
     let trimmed = trimmed
@@ -1531,15 +1475,13 @@ impl RemoveResult {
 /// Force-delete one branch, best effort, reporting which of the three things
 /// happened.
 ///
-/// `--` so the name is read as a REF and never as an option. Without it a ref
+/// `--` so the name is read as a REF and never as an option: without it a ref
 /// that plumbing created as `--delete` is parsed as the flag and survives the
-/// cleanup. Measured on git 2.55.
-///
-/// A failure is then disambiguated with PLUMBING rather than by reading git's
-/// prose: `show-ref --verify` answers whether the ref is still there, which is
-/// the whole question. `--end-of-options` guards the positional (MEASURED:
-/// `show-ref` accepts it), and a fully qualified `refs/heads/...` cannot lead
-/// with a dash anyway, so the guard is belt and braces.
+/// cleanup (measured on git 2.55). A failure is then disambiguated with PLUMBING
+/// rather than by reading git's prose: `show-ref --verify` answers whether the
+/// ref is still there. `--end-of-options` guards that positional too (MEASURED:
+/// `show-ref` accepts it), belt and braces over a fully qualified
+/// `refs/heads/...` that cannot lead with a dash anyway.
 fn delete_branch_force(repo_path: &Path, branch_name: &str) -> Result<BranchDeletion> {
     let output = Command::new("git")
         .args([
@@ -1570,13 +1512,11 @@ fn delete_branch_force(repo_path: &Path, branch_name: &str) -> Result<BranchDele
 /// Force-delete a branch dux minted moments ago and then failed to build the
 /// agent around, best effort.
 ///
-/// This exists for the one window the worktree rollback cannot cover: a branch
-/// that already exists while its worktree does not, so there is nothing for
-/// [`remove_worktree`] to remove. It routes through the same
-/// `delete_branch_force` (so the `--` guard and the plumbing-based
-/// disambiguation are shared, and no new git call surface is added) and
-/// discards the outcome: the caller is already reporting a failure and a
-/// stubborn ref is not a second thing to say.
+/// It covers the one window the worktree rollback cannot: a branch that exists
+/// while its worktree does not, so there is nothing for [`remove_worktree`] to
+/// remove. It routes through `delete_branch_force`, sharing the `--` guard and
+/// the plumbing disambiguation, and discards the outcome: the caller is already
+/// reporting a failure and a stubborn ref is not a second thing to say.
 pub(crate) fn delete_created_branch_best_effort(repo_path: &Path, branch_name: &str) {
     let _ = delete_branch_force(repo_path, branch_name);
 }
@@ -1603,17 +1543,15 @@ fn branch_still_exists(repo_path: &Path, branch_name: &str) -> bool {
 /// Remove a worktree from disk and from git's registry, and DO NOT touch its
 /// branch.
 ///
-/// This is the half of [`remove_worktree`] that the callers who were NOT asked
-/// to delete a branch want. Deleting a branch is a second, separate act of
-/// destruction: `git branch -D` force-deletes it even when it holds commits that
-/// exist nowhere else, so it happens only when the user asked for it. Both
-/// worktree managers ask per removal (their confirmation carries a checkbox,
-/// and a request that does not mention the branch lands here), and so does the
-/// agent-delete path, which routes to one of the two halves on the branch's
-/// recorded provenance and on the delete dialog's answer, in either direction.
+/// The half of [`remove_worktree`] for callers who were NOT asked to delete a
+/// branch. `git branch -D` force-deletes even a branch holding commits that
+/// exist nowhere else, so it happens only where the user answered for it: a
+/// worktree manager's confirmation carries a checkbox, and the agent-delete path
+/// routes to one of the two halves on the branch's recorded provenance and on
+/// the delete dialog's answer, in either direction.
 ///
-/// `--force` matches the existing behavior: a worktree with uncommitted work is
-/// removed anyway, so every caller must confirm with the user first.
+/// `--force`, so a worktree with uncommitted work is removed anyway: every
+/// caller must confirm with the user first.
 pub fn remove_worktree_keep_branch(repo_path: &Path, worktree_path: &Path) -> Result<()> {
     let output = Command::new("git")
         .args([
@@ -1651,11 +1589,10 @@ pub fn remove_worktree_keep_branch(repo_path: &Path, worktree_path: &Path) -> Re
 /// Whether the worktree has anything uncommitted: staged changes, unstaged
 /// changes, or untracked files. Untracked files count deliberately, because
 /// `git worktree remove --force` deletes them along with the directory and they
-/// exist in no commit anywhere, which makes them the least recoverable thing a
-/// worktree can hold.
+/// exist in no commit anywhere.
 ///
-/// Uses `--porcelain=v1 -z`, the machine-stable form (CLAUDE.md's git rule); the
-/// paths are never parsed, only their presence is.
+/// Uses `--porcelain=v1 -z`, the machine-stable form; only the presence of the
+/// records is read, never the paths.
 pub fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
     let output = Command::new("git")
         .args([
@@ -1680,16 +1617,14 @@ pub fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
 /// Remove a worktree and delete the branches the agent owned.
 ///
 /// `branch_name` is the branch the worktree is on NOW. `initial_branch` is the
-/// branch the agent was born on, and it is deleted too when it differs: the
-/// agent's branch drifts (the branch-sync poller rewrites `branch_name`, and a
-/// `git switch -c` inside the worktree is an ordinary thing to do), and a birth
-/// branch left behind is what makes recreating an agent under its old name fail
-/// with "branch already exists". Pass `None` when the caller knows the two are
-/// the same by construction.
+/// branch the agent was born on, and is deleted too when it differs, because a
+/// birth branch left behind makes recreating an agent under its old name fail
+/// with "branch already exists". Pass `None` when the two are the same by
+/// construction.
 ///
 /// Both deletions are BEST EFFORT: a branch git will not delete is reported in
-/// the [`RemoveResult`] so the status message can say so, never an error. Only
-/// the worktree removal itself can fail this call.
+/// the [`RemoveResult`] for the status message, never as an error. Only the
+/// worktree removal itself can fail this call.
 pub fn remove_worktree(
     repo_path: &Path,
     worktree_path: &Path,
@@ -1724,15 +1659,14 @@ pub struct WorktreeFileList {
 }
 
 /// Walk the worktree's filesystem and return every file path (worktree-relative)
-/// except the contents of `.git/objects/` and `.git/logs/` (excluded for
-/// performance — tens of thousands of loose/pack entries that nobody edits).
-/// The rest of `.git/` is included so the editor can open `.git/config`,
-/// `.git/HEAD`, hooks, etc. as read-only. Symlinked directories are NOT
-/// recursed (`follow_links(false)`); a symlinked dir appears as a leaf entry.
+/// except the contents of `.git/objects/` and `.git/logs/`, excluded for
+/// performance. The rest of `.git/` is included so the editor can open
+/// `.git/config`, `.git/HEAD` and hooks read-only. Symlinked directories are NOT
+/// recursed (`follow_links(false)`) and appear as leaf entries.
 ///
-/// This feeds the web editor's file-SEARCH index, not its tree (the tree uses
-/// [`list_dir`]). Returns at most `max_files` entries and sets `truncated` if
-/// more exist; `max_files == 0` disables the cap entirely.
+/// This feeds the web editor's file-SEARCH index, not its tree ([`list_dir`]
+/// backs that). Returns at most `max_files` entries and sets `truncated` if more
+/// exist; `max_files == 0` disables the cap entirely.
 pub fn worktree_files(worktree_path: &Path, max_files: usize) -> Result<WorktreeFileList> {
     walk_files(worktree_path, max_files, DotDirectories::Walked)
 }
@@ -1740,22 +1674,18 @@ pub fn worktree_files(worktree_path: &Path, max_files: usize) -> Result<Worktree
 /// The same flat walk for a root that is NOT a worktree: the directory a
 /// terminal was spawned in, backing a terminal-rooted editor's search box.
 ///
-/// It differs from [`worktree_files`] in one way, and the difference is the
-/// reason it exists: dot directories are pruned. A worktree's dot directories
-/// are the project's own (`.github`, `.config`, and `.git` itself, which the
-/// editor can open read-only), so walking them is useful. A terminal roots
-/// wherever a shell starts, which is routinely a home directory, where the dot
-/// directories are caches, package stores and application state that nobody
-/// searches for source in and that can dwarf everything else in the walk. Plain
-/// dotFILES are kept, because a `.bashrc` is exactly what someone opens.
+/// It differs from [`worktree_files`] in pruning dot DIRECTORIES, which is the
+/// reason it exists. A worktree's are the project's own (`.github`, and `.git`
+/// itself, which the editor opens read-only); a terminal routinely roots in a
+/// home directory, where they are caches and application state that can dwarf
+/// the walk. Plain dotFILES are kept, because a `.bashrc` is what someone opens.
 ///
-/// What the prune is NOT is a containment or privacy measure. A standalone
-/// terminal may legally root at `/` (the fallback when the home directory
-/// cannot be resolved), and pruning dot directories does nothing about `/proc`,
-/// `/sys` or anything else under such a root. What bounds that walk is the same
+/// The prune is NOT containment or privacy: such a root may legally be `/`, the
+/// fallback when the home directory cannot be resolved, and pruning does nothing
+/// about `/proc` or `/sys`. What bounds the walk is the same
 /// `[server] search_index_max_files` cap every other walk gets, plus the
-/// single-tenant trusted-access model the whole server rests on: a client that
-/// can reach this can already browse the filesystem.
+/// single-tenant trusted-access model: a client that reaches this can already
+/// browse the filesystem.
 pub fn rooted_files(root: &Path, max_files: usize) -> Result<WorktreeFileList> {
     walk_files(root, max_files, DotDirectories::Pruned)
 }
@@ -1931,11 +1861,9 @@ pub fn list_dir(worktree: &Path, rel_dir: &str) -> Result<Vec<DirEntryInfo>> {
     }
 
     // `file_name().to_string_lossy()` replaces invalid UTF-8 bytes with U+FFFD,
-    // so two distinct non-UTF-8 names can collide onto the same lossy `path`
-    // (the client keys tree rows by path, so a collision would make one of
-    // them unreachable). Drop later duplicates and warn rather than build an
-    // escaping scheme — graceful degradation, not full fidelity for names that
-    // aren't valid UTF-8 to begin with.
+    // so two distinct non-UTF-8 names can collide onto one lossy `path` and the
+    // client, which keys tree rows by path, would lose one of them. Drop later
+    // duplicates and warn rather than build an escaping scheme.
     let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     entries.retain(|e| {
         if seen_paths.insert(e.path.clone()) {
@@ -2020,10 +1948,8 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     // The tracked diff and the untracked counting are two independent sources,
     // so the git call's answer is resolved to a map FIRST and the loop runs
     // whatever came back. A failed `git diff` yields an empty map, which costs
-    // tracked rows their line counts and nothing else; when the loop lived
-    // inside the call's `Ok` a tracked failure silently took the untracked
-    // files' counts down with it, and those are counted in process without
-    // asking git anything.
+    // tracked rows their line counts and nothing else; running the loop inside
+    // the call's `Ok` would take the untracked files' in-process counts with it.
     let tracked_stats = unstaged_numstat(wt.as_ref());
     apply_unstaged_stats(worktree_path, &mut unstaged, &tracked_stats);
 
@@ -2070,10 +1996,9 @@ fn unstaged_numstat(worktree: &str) -> HashMap<String, DiffStat> {
 /// them: `tracked` for anything git diffed, and an in-process read for the
 /// untracked files git has no recorded state for.
 ///
-/// Taking the tracked stats as a plain map, rather than computing them here, is
-/// what makes the independence type-evident: an empty map is exactly what a
-/// failed `git diff --numstat` produces, and the untracked arm below does not
-/// look at it at all.
+/// `tracked` is taken as a plain map rather than computed here, which makes the
+/// independence type-evident: an empty map is what a failed `git diff --numstat`
+/// produces, and the untracked arm below never looks at it.
 fn apply_unstaged_stats(
     worktree_path: &Path,
     unstaged: &mut [ChangedFile],
@@ -2111,14 +2036,11 @@ fn apply_unstaged_stats(
 
 /// Line counts for one UNTRACKED file, read in this process.
 ///
-/// git has no recorded state to diff a file it has never seen against, so these
-/// numbers have to be produced some other way. dux used to ask git itself, with
-/// one `git diff --no-index` subprocess PER untracked file. A worktree carrying
-/// a few thousand untracked files (a `node_modules`, a build directory, a fresh
-/// clone of somebody's assets) therefore spawned a few thousand processes every
-/// time the changes panel was read, and it is read by a poller. Opening the
-/// file and counting newlines is the same answer for a tiny fraction of the
-/// cost.
+/// git has no recorded state to diff a file it has never seen against, and
+/// asking it costs one `git diff --no-index` subprocess PER file: a worktree
+/// holding a few thousand untracked files spawns a few thousand processes every
+/// time the changes panel is read, and a poller reads it. Opening the file and
+/// counting newlines is the same answer for a fraction of the cost.
 ///
 /// The rules are git's own, so the numbers do not move: a NUL byte anywhere in
 /// the first [`BINARY_SNIFF_BYTES`] bytes makes the file binary (git's
@@ -2126,12 +2048,9 @@ fn apply_unstaged_stats(
 /// including a last line with no newline after it. Encoding does not enter into
 /// it: a latin-1 file with no NUL in it is text to git and is text here.
 ///
-/// The one thing this deliberately does not do is consult `.gitattributes`. A
-/// file marked `-diff` there was reported as binary by the subprocess and is
-/// counted as text now; that is the accepted cost of not asking git.
-///
-/// The file is streamed rather than read whole: an untracked disk image is not
-/// a reason to hold a gigabyte in memory.
+/// `.gitattributes` is deliberately not consulted, so a file marked `-diff`
+/// there is counted as text: the accepted cost of not asking git. The file is
+/// streamed rather than read whole.
 fn untracked_file_stat(path: &Path) -> DiffStat {
     let Ok(file) = fs::File::open(path) else {
         // Unreadable, or a dangling symlink, or gone between the status sweep
