@@ -103,31 +103,26 @@ pub struct BindingDef {
 // Declaration order within each scope determines:
 //   - hint display order in the status bar cheatsheet
 //   - help entry order within each help section
-//   - tiebreaker when the same key is bound to multiple actions in the
-//     same scope (first match wins). This is intentional and by design.
+//   - which action wins when one key is bound twice in a scope (first match)
+// Pane bindings come first so their hints precede the global hints appended
+// at the end of every context.
 //
-// Pane bindings come first so their hints appear before global hints
-// which are appended at the end of every context.
+// Key matching (see `lookup()`):
+//   - A binding with no modifiers matches only events with no modifiers:
+//     `d` never fires on Ctrl+d.
+//   - A binding with modifiers matches events carrying at least those
+//     modifiers (subset match).
 //
-// Key matching rules (see `lookup()`):
-//   - Plain bindings (no modifiers) only match events with no modifiers.
-//     A binding for `d` will not fire on Ctrl+d.
-//   - Modifier bindings require the incoming event to contain at least
-//     those modifiers (subset match).
-//
-// Case handling:
-//   - `crokey::parse()` lowercases its input, so a bare "P" in config
-//     silently becomes lowercase "p". Use `normalize_key_string()` before
-//     parsing to rewrite "P" → "shift-p" (crokey convention).
+// Case:
+//   - `crokey::parse()` lowercases its input, so run `normalize_key_string()`
+//     first to rewrite "P" into "shift-p" (crokey convention).
 //   - `crokey::normalized()` canonicalizes case:
 //       Char('P') + no mods  →  Char('P') + SHIFT
 //       Char('p') + SHIFT    →  Char('P') + SHIFT
-//     Both forms are equivalent after normalization, so `p` and `shift-p`
-//     can coexist as distinct bindings in the same scope.
+//     so `p` and `shift-p` coexist as distinct bindings in one scope.
 //
-// Conflict detection (`detect_conflicts()`) runs at startup and rejects
-// configs where the same normalized key is bound to two actions in
-// overlapping scopes.
+// `detect_conflicts()` runs at startup and rejects configs binding one
+// normalized key to two actions in overlapping scopes.
 pub const BINDING_DEFS: &[BindingDef] = &[
     // ── Navigation (Left / Files / Palette / Browser) ─────────────
     BindingDef {
@@ -190,24 +185,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[(HintContext::LeftProject, "New agent")],
     },
     BindingDef {
-        // Sits beside `new_agent` deliberately: the `<n>` flow only ever
-        // reaches a managed worktree, so without a key of its own the folder
-        // agent is discoverable through the palette alone.
-        //
-        // Two keys and two scopes, and the defaults are a flat CROSS PRODUCT
-        // rather than one key per surface: the chord also fires in the agents
-        // pane and the bare letter also fires in an idle chooser, both
-        // accepted. What each key is for is the chooser's search row, which
-        // types the letters the moment it is engaged (see
-        // `text_field_owns_key`): the bare letter is the pane-and-idle-list
-        // key, and the chord is the one that still reaches dux while a filter
-        // is being typed. A terminal or multiplexer that swallows the chord
-        // never delivers it; the bare key, the palette command and a rebinding
-        // are the ways round that.
-        //
-        // `new_standalone_terminal` beside it stays key-less on purpose: a
-        // shell in a directory is a smaller act than starting an agent, and it
-        // has no pane of its own to be discovered from.
+        // Two keys across both scopes as a flat cross product: the chooser's
+        // search row types printable keys once engaged, so the bare letter is
+        // the pane-and-idle-list key and the chord is the one that still
+        // reaches dux while a filter is being typed.
         action: Action::NewStandaloneAgent,
         default_keys: &[key!(s), key!(ctrl - s)],
         scopes: &[BindingScope::Left, BindingScope::ProjectChooser],
@@ -257,13 +238,8 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // Enters filter mode over the whole sidebar: the flat agent list and the
-        // terminal list below it. `/` is free in the Left scope (it is only bound
-        // in Files/Browser today, and scopes are independent). In filter mode
-        // printable keys type the query, so navigation falls back to the arrow
-        // keys, mirroring the project browser; those arrows cross the
-        // agents/terminals boundary, so every result is reachable whichever kind
-        // of row matched.
+        // Printable keys type the query in filter mode, so navigation falls
+        // back to the arrows, which cross the agents/terminals boundary.
         action: Action::FilterAgents,
         default_keys: &[KeyCombination::one_key(
             KeyCode::Char('/'),
@@ -507,11 +483,9 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         ],
     },
     // ── Agent tabs (Center-scope; never in fullscreen) ────────────
-    // Only the Ctrl arrows (and Ctrl-1..9) are tab keys: the focused center
-    // pane types into a live agent, so a plain arrow must reach the agent as a
-    // caret move ([`center_typing_owns_key`]), not switch tabs. A terminal that
-    // cannot deliver a modified arrow can rebind these actions to any
-    // deliverable chord.
+    // Only the Ctrl arrows and Ctrl-1..9 are tab keys: the focused center pane
+    // types into a live agent, so a plain arrow must reach it as a caret move
+    // ([`center_typing_owns_key`]) rather than switch tabs.
     BindingDef {
         action: Action::NextTab,
         default_keys: &[key!(ctrl - Right)],
@@ -557,13 +531,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // No default key. Under the legacy terminal protocol Ctrl-4 IS
-        // Ctrl-\ (both arrive as byte 0x1c, and `normalize_ctrl_punct` folds
-        // them together), and that key belongs to the macro bar
-        // (`OpenMacroBar`), which gained Center scope for the minimized
-        // typeable pane. Tab 4 stays reachable via
-        // NextTab/PrevTab or a custom rebind; a user who rebinds the macro
-        // bar off Ctrl-\ can give `select_tab_4` the key back.
+        // No default key: under the legacy terminal protocol Ctrl-4 arrives as
+        // byte 0x1c, the same as Ctrl-\ (`normalize_ctrl_punct` folds them),
+        // which `OpenMacroBar` holds in the Center scope. Tab 4 stays reachable
+        // via NextTab/PrevTab or a rebind.
         action: Action::SelectTab4,
         default_keys: &[],
         scopes: &[BindingScope::Center],
@@ -699,12 +670,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // The fullscreen toggle. In the Center scope it maximizes the focused
-        // agent (launching a dormant tab fullscreen-seeking); in Interactive
-        // scope its byte pattern minimizes; in the Left scope it reopens
-        // fullscreen for a live selected agent without launching a dormant
-        // one. It absorbed the retired `exit_interactive` action, whose
-        // bindings the config loader folds into this one.
+        // The fullscreen toggle: in Center scope it maximizes the focused agent
+        // (launching a dormant tab fullscreen-seeking), in Interactive scope
+        // its byte pattern minimizes, in Left scope it reopens fullscreen for a
+        // live selected agent without launching a dormant one. The config
+        // loader folds `exit_interactive` bindings into this action.
         action: Action::ToggleFullscreen,
         default_keys: &[key!(ctrl - g)],
         scopes: &[
@@ -1502,20 +1472,16 @@ const HELP_SECTION_ORDER: &[&str] = &[
 /// Keys that a dialog's single-line text field owns, so the dialog's binding
 /// lookup never sees them.
 ///
-/// The rename-agent and new-agent-name modals pair a text field with
-/// checkboxes. Plain characters type into the field and the horizontal arrows
-/// move its caret (modified arrows too: the field maps `Alt`/`Ctrl` arrows to
-/// word movement), so neither may be claimed by a Dialog-scope binding there.
-/// `Action::ToggleSelection` is bound by default to `h`/`l`/`Left`/`Right` as
-/// well as `Tab`/`Shift-Tab`, which is right for the button-only confirmation
-/// dialogs that make up almost every Dialog-scope consumer but wrong for these
-/// two.
+/// Plain characters type into the field and the horizontal arrows move its
+/// caret (modified arrows too, which the field maps to word movement), so a
+/// Dialog-scope binding may not claim them where a modal pairs a text field
+/// with checkboxes; `Action::ToggleSelection`'s default `h`/`l`/`Left`/`Right`
+/// otherwise would.
 ///
-/// This is the ONE predicate behind both halves of that behaviour: the input
-/// layer suppresses the lookup with it (`app::input`), and the renderer picks
-/// the footer's key with it via
-/// [`RuntimeBindings::label_for_text_field_dialog`]. Keeping both on this
-/// function is what stops the hint from naming a key the field swallows.
+/// One predicate behind both halves: the input layer suppresses the lookup with
+/// it (`app::input`) and the renderer picks the footer's key with it via
+/// [`RuntimeBindings::label_for_text_field_dialog`], so a hint cannot name a
+/// key the field swallows.
 ///
 /// Accepts anything that converts into a [`KeyCombination`], so the input layer
 /// can hand it a raw crossterm `KeyEvent` and the renderer a stored binding key.
@@ -1541,23 +1507,20 @@ pub const NO_PANE_CHORD_ADVICE: &str = "no pane chord reaches dux from the typea
 /// Keys the minimized, typeable center pane forwards to the agent's PTY
 /// instead of resolving as dux bindings.
 ///
-/// The routing rule is: chords belong to dux, typing belongs to the agent.
-/// Ctrl and Alt chords, Tab/Shift-Tab and the page keys resolve through the
-/// binding ladder as usual; unmodified (or Shift-modified) printables, Enter,
-/// Backspace, Delete, Esc, the arrows and Home/End type into the agent. "Dux
-/// wins" cannot apply literally to plain letters, or `q`, `?`, `[` and `]`
-/// would make the pane untypeable.
+/// Chords belong to dux, typing belongs to the agent: Ctrl and Alt chords,
+/// Tab/Shift-Tab and the page keys resolve through the binding ladder;
+/// unmodified (or Shift-modified) printables, Enter, Backspace, Delete, Esc,
+/// the arrows and Home/End type into the agent, or `q`, `?`, `[` and `]` would
+/// make the pane untypeable.
 ///
-/// `tab_reaches_agent` (`[ui] tab_reaches_agent`) is the one opt-in that moves
-/// the line: with it on, Tab and both spellings of Shift-Tab type into the
-/// agent too, and the chords bound to `focus_next`/`focus_prev` are what move
-/// panes. Pass the RAW crossterm event, before backtab normalization, so both
-/// spellings are seen.
+/// `[ui] tab_reaches_agent` moves that line: with it on, Tab and both spellings
+/// of Shift-Tab type into the agent too, and the chords bound to
+/// `focus_next`/`focus_prev` are what move panes. Pass the RAW crossterm event,
+/// before backtab normalization, so both spellings are seen.
 ///
-/// The ONE deliberate chord exception is Ctrl+c: it forwards to the agent (the
-/// encoder emits 0x03, SIGINT) because interrupting the agent quickly is the
-/// common intent, and Quit stays reachable via `q` from any non-typeable pane
-/// and via the palette.
+/// Ctrl+c is the one chord exception: it forwards to the agent (the encoder
+/// emits 0x03, SIGINT), and Quit stays reachable via `q` from a non-typeable
+/// pane and via the palette.
 ///
 /// The sibling of [`text_field_owns_key`]: `app::input::handle_key` suppresses
 /// the Global and Center binding lookups with it while the pane is typeable
@@ -1927,20 +1890,18 @@ impl RuntimeBindings {
 
     /// All palette-visible bindings matching a filter string, in two tiers.
     ///
-    /// `direct` is the palette's original rule, unchanged: case-insensitive,
-    /// runs of whitespace and dashes interchangeable, and the whole query has
-    /// to appear CONTIGUOUSLY in the command name or, failing that, in its
-    /// description. It is a phrase match, so `open current pr` finds
-    /// `open-current-pr` but `new tab` finds nothing.
+    /// `direct` is a phrase match: case-insensitive, runs of whitespace and
+    /// dashes interchangeable, and the whole query has to appear contiguously
+    /// in the command name or, failing that, its description, so `open current
+    /// pr` finds `open-current-pr` and `new tab` finds nothing.
     ///
     /// `other` is the looser tier, listed after the phrase hits: the words in
-    /// any order, each of them possibly partial, ranked by
+    /// any order, each possibly partial, ranked by
     /// [`dux_core::palette::search`], with everything already in `direct`
-    /// removed. It is usually a multi-word query that lands here, but not
-    /// only: the two tiers tokenize differently, and a single word can reach
-    /// the second tier through that gap. The scorer strips apostrophes, so
-    /// `agents` reaches a description that says `agent's` while the phrase
-    /// tier, which matches the text as written, does not.
+    /// removed. The two tiers tokenize differently, so a single word can reach
+    /// it too: the scorer strips apostrophes, so `agents` reaches a description
+    /// saying `agent's` while the phrase tier, matching the text as written,
+    /// does not.
     pub fn palette_matches(&self, input: &str) -> PaletteMatches<'_> {
         let direct = self.direct_palette_matches(input);
         let other = dux_core::palette::search::ranked_matches(input)
@@ -2087,20 +2048,17 @@ fn resolve_keys(
         .collect()
 }
 
-/// The scope a collision between these two scopes should be REPORTED under, or
-/// `None` when the same keystroke can never reach both.
+/// The scope a collision between these two scopes is reported under, or `None`
+/// when the same keystroke can never reach both.
 ///
-/// Usually two scopes collide only with themselves, but a surface whose key
-/// handler consults one scope and then FALLS THROUGH to another makes those two
-/// collide even though no binding lists both: the fallback is shadowed by the
-/// first lookup, silently, which is exactly what this detector exists to
-/// refuse. Such a pair reports under the surface the user can actually see, not
-/// whichever of the two happened to be declared first, so the message points at
-/// the modal where the shadowing is visible.
+/// A surface whose key handler consults one scope and then falls through to
+/// another makes those two collide even though no binding lists both, and the
+/// fallback is silently shadowed by the first lookup. Such a pair reports under
+/// the scope the user can see, not whichever was declared first.
 ///
-/// The one such ladder today is the project chooser, whose handler asks
-/// `ProjectChooser` and then `Palette` (`app::input`). Add a rule here whenever
-/// a handler grows another fallback, or the shadowing goes unreported.
+/// The project chooser is such a ladder: its handler asks `ProjectChooser` and
+/// then `Palette` (`app::input`). Add a rule here whenever a handler grows
+/// another fallback, or the shadowing goes unreported.
 fn conflict_scope(a: BindingScope, b: BindingScope) -> Option<BindingScope> {
     if a == b {
         return Some(a);
@@ -2252,11 +2210,9 @@ pub(crate) fn key_combination_to_bytes(kc: &KeyCombination) -> Option<Vec<u8>> {
 
     let norm = kc.normalized();
     match norm.codes {
-        // app_cursor is false here on purpose: these patterns match bytes the
-        // HOST terminal sends to dux, and dux never sets DECCKM on the host,
-        // so the host always sends cursor keys in the CSI form. The child's
-        // DECCKM state is a property of the child PTY and is irrelevant to
-        // what arrives on dux's own stdin.
+        // app_cursor is false on purpose: these patterns match bytes the HOST
+        // sends to dux, and dux never sets DECCKM on the host, so cursor keys
+        // always arrive in the CSI form.
         One(code) => crate::key_encode::encode_key(code, norm.modifiers, false),
         _ => None,
     }

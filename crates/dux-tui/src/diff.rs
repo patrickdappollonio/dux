@@ -206,21 +206,16 @@ pub(crate) fn spawn_diff_job(
 /// Combined size of the two versions, in bytes, above which the diff is
 /// rendered with no syntax highlighting.
 ///
-/// A megabyte of source is where syntect stops being free: it highlights every
-/// line of every hunk, a whole-file rewrite makes every line a hunk line, and
-/// the per-line cost is what turns a diff that took a moment into one that
-/// takes seconds. Dropping the token colors keeps the part of a diff people
-/// actually read (which lines went, which arrived) and costs only the colors
-/// inside them.
+/// Syntect's cost is per line of every hunk, and a whole-file rewrite makes
+/// every line a hunk line. Dropping the token colors keeps the part of a diff
+/// people read, which lines went and which arrived.
 pub(crate) const DIFF_PLAIN_ABOVE_BYTES: usize = 1 << 20;
 
 /// Combined line count of the two versions above which the diff is rendered
 /// with no syntax highlighting.
 ///
-/// Bytes alone miss the shape that hurts most: a file of very short lines is
-/// cheap to read and expensive to highlight, because the cost is per line
-/// rather than per byte. Twenty thousand lines is comfortably above anything
-/// hand-written and comfortably below the point where the wait is noticeable.
+/// Bytes alone miss a file of very short lines, cheap to read and expensive to
+/// highlight, because the cost is per line rather than per byte.
 pub(crate) const DIFF_PLAIN_ABOVE_LINES: usize = 20_000;
 
 /// Combined size of the two versions, in bytes, above which dux says so
@@ -228,9 +223,7 @@ pub(crate) const DIFF_PLAIN_ABOVE_LINES: usize = 20_000;
 ///
 /// The diff itself, not the highlighting, is what costs here: `similar` is
 /// superlinear in the number of differing lines, so a pair of multi-megabyte
-/// files can hold a worker thread for minutes. Sixteen megabytes is far past
-/// anything a person reads in a terminal pane and still leaves generated
-/// lockfiles and vendored sources comfortably inside.
+/// files can hold a worker thread for minutes.
 pub(crate) const DIFF_REFUSE_ABOVE_BYTES: usize = 16 << 20;
 
 /// Combined line count of the two versions above which dux says so instead of
@@ -285,12 +278,10 @@ fn count_lines(bytes: &[u8]) -> usize {
 /// `worktree_path` is the root of the git worktree and `rel_path` is the
 /// file path relative to it (as reported by `git status --porcelain`).
 ///
-/// Private on purpose: every one of the git reads, the whole-file read, the
-/// line diff and the highlighting inside it is slow enough to freeze the run
-/// loop on a large file, and the only way to reach it from the app is
-/// [`spawn_diff_job`], which runs it on a thread of its own. Keeping it out of
-/// the module's public surface is what makes "never on the UI thread" a
-/// compile-time fact rather than a convention.
+/// Private on purpose: the git reads, the whole-file read, the line diff and
+/// the highlighting are each slow enough to freeze the run loop on a large
+/// file, so the only way in from the app is [`spawn_diff_job`], which runs it
+/// on a thread of its own.
 fn diff_file(
     worktree_path: &Path,
     rel_path: &str,

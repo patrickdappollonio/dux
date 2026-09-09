@@ -58,11 +58,9 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
 }
 
 /// Reject a `[server] host` that is not an IP literal before the TUI starts.
-/// `dux server` resolves the bind plan with its own `?` validation as a backstop,
-/// but the TUI flip reads `host` too, so catch a bad value here with a clear
-/// message rather than failing later. Delegates to the single-source
-/// `dux_core::config::parse_server_host` (trimming and message shared with
-/// `resolve_server_plan`, so both accept exactly the same values).
+/// The TUI flip reads `host` too, so a bad value gets a clear message here
+/// rather than failing later. Delegates to `dux_core::config::parse_server_host`
+/// so this and `resolve_server_plan` accept exactly the same values.
 fn validate_server_host(config: &Config) -> Result<()> {
     dux_core::config::parse_server_host(&config.server.host).map_err(|e| anyhow::anyhow!(e))?;
     Ok(())
@@ -84,13 +82,11 @@ fn validate_project_envs(config: &Config) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Retired keybinding actions
 //
-// An action that once shipped (and could be bound in `[keys]`) but has since
-// been removed from the app. `validate_keys` rejects any `[keys]` entry whose
-// action is not in `BINDING_DEFS`, so a stale binding left in an existing config
-// would abort startup with `[keys] unknown action: "..."`. To let those configs
-// keep working, a binding for a retired action is pruned from the document on
-// load (and the pruned config is rewritten), exactly like a retired provider
-// block. This is the config migration that removes the key for good.
+// An action that once shipped and could be bound in `[keys]`, but is gone from
+// the app. `validate_keys` rejects any `[keys]` entry whose action is not in
+// `BINDING_DEFS`, so a binding for a retired action is pruned from the document
+// on load and the pruned config rewritten, exactly like a retired provider
+// block.
 // ---------------------------------------------------------------------------
 
 /// Actions that were removed from dux but may still appear in an older user's
@@ -127,18 +123,16 @@ fn prune_retired_key_actions(doc: &mut DocumentMut) -> bool {
 // ---------------------------------------------------------------------------
 // Folded keybinding actions
 //
-// The other half of the retirement story. A retired action was REMOVED from the
-// app, so its binding is dropped. A FOLDED action was MERGED into another
-// action that still does its job, so its binding must survive under the new
-// name instead of being thrown away.
+// A retired action is gone from the app, so its binding is dropped. A folded
+// action was merged into an action that still does its job, so its binding
+// survives under the new name instead of being thrown away.
 //
-// `exit_interactive` is the one such name so far: it used to be the "minimize
-// the fullscreen agent pane" half of what `toggle_fullscreen` now does in both
-// directions. Configs written by an older dux carry it as an ACTIVE row (dux
-// stores resolved defaults as real values), and its default was the very ctrl-g
-// that `toggle_fullscreen` inherited, so leaving it in place aborts startup with
-// a conflict. Folding it also UPGRADES a custom exit key: whatever key used to
-// only minimize now toggles fullscreen in both directions.
+// `exit_interactive` folds into `toggle_fullscreen`, which now minimizes as
+// well as maximizes. Configs written by an older dux carry it as an active row
+// (dux stores resolved defaults as real values) with the same default ctrl-g
+// `toggle_fullscreen` inherited, so leaving it in place aborts startup with a
+// conflict. The fold upgrades a custom exit key too: it now toggles fullscreen
+// in both directions.
 // ---------------------------------------------------------------------------
 
 /// `[keys]` action names that were merged into another action. The binding is
@@ -290,13 +284,11 @@ enum ConfigEntry {
 }
 
 /// KEEP IN SYNC WITH `crates/dux-web/web/src/lib/settingsDescriptors.ts`: the
-/// web Preferences dialog, opened from the app menu's cog, renders a
-/// first-cut subset of these `[ui]`/`[capabilities]` fields (plus
-/// `server.title`/`server.favicon`) with
-/// descriptions adapted from this table's `comment` text into readable
-/// prose. If you change a field's default, zero-value meaning, or comment
-/// here, check whether `settingsDescriptors.ts`'s matching entry needs the
-/// same update (and vice versa). There is no codegen linking the two.
+/// web Preferences dialog renders a subset of these `[ui]`/`[capabilities]`
+/// fields (plus `server.title`/`server.favicon`) with descriptions adapted from
+/// this table's `comment` text. A field's default, zero-value meaning or comment
+/// changing here needs the matching entry there checked, and vice versa; there
+/// is no codegen linking the two.
 fn config_schema() -> Vec<ConfigEntry> {
     vec![
         ConfigEntry::Comment("# dux configuration"),
@@ -1358,16 +1350,14 @@ impl RestoredConfig {
 /// Re-apply the fully-commented canonical template to an EXISTING config's raw
 /// text, keeping every value the file carries.
 ///
-/// This is the read-only half of `dux config restore-docs`: it returns the text
-/// to write and what changed, and never touches the filesystem, so the CLI can
+/// The read-only half of `dux config restore-docs`: it returns the text to
+/// write and what changed, and never touches the filesystem, so the CLI can
 /// preview it and the tests can exercise it without a temp directory.
 ///
 /// # Safety contract
 ///
-/// * An unparseable file is REFUSED with an error naming the parse failure. It
-///   deliberately does not fall through to a defaults-based regeneration —
-///   silently replacing a broken file with defaults is exactly the data loss
-///   this feature exists to prevent.
+/// * An unparseable file is refused with an error naming the parse failure, and
+///   never falls through to a defaults-based regeneration.
 /// * Unknown keys are preserved verbatim unless they sit under
 ///   [`dux_core::config_write::ORPHANED_CONFIG_SECTIONS`], which are reported as
 ///   dropped.
@@ -1390,18 +1380,16 @@ pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
     let report = dux_core::config_write::merge_unmanaged_keys(&mut rendered, &original);
     let text = rendered.to_string();
 
-    // Self-check: the restore must be a FIXED POINT of the renderer. Rendering
-    // the config we just wrote has to reproduce the very same text, which can
-    // only happen if every value survived the round trip.
+    // Self-check: the restore must be a fixed point of the renderer. Rendering
+    // the config just written has to reproduce the same text, which happens
+    // only if every value survived the round trip.
     //
-    // This is deliberately not a raw `reparsed == config` equality check. The
-    // canonical template MATERIALIZES defaults that a bare file leaves implicit
-    // — most visibly `[keys]`, which gains every default binding (that is the
-    // point: a keys section with no keys never tells the user rebinding is
-    // possible). Struct equality would flag those as changes and refuse every
-    // real restore. The fixed-point check tolerates materialized defaults while
-    // still catching an actual altered or lost value, because a changed value
-    // renders differently.
+    // Deliberately not a `reparsed == config` equality check: the canonical
+    // template materializes defaults a bare file leaves implicit, most visibly
+    // `[keys]`, which gains every default binding, so struct equality would
+    // flag those and refuse every real restore. The fixed-point check tolerates
+    // them and still catches an altered or lost value, which renders
+    // differently.
     let reparsed: Config = toml::from_str(&text)
         .context("the restored config did not parse back as a dux config; refusing to write it")?;
     if render_config_documented(&reparsed) != rendered_text {
@@ -1421,16 +1409,14 @@ pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
 
 /// Persist the in-memory `Config` to disk using surgical edits via `toml_edit`.
 ///
-/// If the config file already exists, it is parsed as a TOML document and only
-/// the keys that differ from the on-disk version are updated.  User comments,
-/// formatting, and unknown keys are preserved.  If the file does not yet exist,
-/// a fresh canonical config is rendered instead.
+/// An existing file is parsed as a TOML document and only the keys that differ
+/// from the on-disk version are updated, preserving user comments, formatting
+/// and unknown keys; a missing file gets a fresh canonical config.
 ///
-/// This wrapper is also deprecated: callers that used the TUI `save_config`
-/// bypassed the `ConfigWriteQueue` gate. All runtime writes must route through
-/// the queue; the only legitimate callers of this wrapper are the TUI bootstrap
+/// Deprecated: this bypasses the `ConfigWriteQueue` gate every runtime write
+/// must route through. Its only legitimate callers are the TUI bootstrap
 /// helpers (`persist_runtime_projects_to_config_and_store`,
-/// `sync_config_projects_with_store`) which are sync-direct by design.
+/// `sync_config_projects_with_store`), which are sync-direct by design.
 #[deprecated(
     note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
 )]
@@ -1482,11 +1468,9 @@ fn render_keys_config(
     for def in keybindings::BINDING_DEFS {
         let config_name = def.action.config_name();
         // Palette-only actions (no key scopes) are configured through the
-        // palette, not [keys], and stay out of the template. A key-scoped
-        // action that SHIPS unbound (select_tab_4) is
-        // documented as a commented-out row instead of being omitted: the
-        // config file is the documentation, and an invisible action is one
-        // nobody learns they can bind. A user who bound it gets a real row.
+        // palette and stay out of the template. A key-scoped action that ships
+        // unbound is a commented-out row rather than an omission: the config
+        // file is the documentation. A user who bound it gets a real row.
         let user_bound = keys
             .bindings
             .get(config_name)

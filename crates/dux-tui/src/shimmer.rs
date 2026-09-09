@@ -43,21 +43,18 @@ pub fn lerp_rgb(base: (u8, u8, u8), bright: (u8, u8, u8), t: f32) -> Color {
 }
 
 /// Build one styled `Span` per character of `label`, foreground-blended by its
-/// shimmer weight so a DARK band sweeps the text: characters rest at `base` (the
-/// name's normal identity color) and dip toward a dimmed trough as the band
-/// passes, so a working name keeps its normal brightness and the motion reads as
-/// a passing shadow (a bright band would be nearly invisible on the near-white
-/// base). Char-based (never byte-sliced), so multi-byte names are safe. Returns
-/// a single plain span for an empty label.
+/// shimmer weight: characters rest at `base`, the name's identity color, and
+/// dip toward a dimmed trough as the band passes, so the motion reads as a
+/// passing shadow rather than a highlight, which would be nearly invisible on
+/// the near-white base. Char-based, never byte-sliced, so multi-byte names are
+/// safe. Returns a single plain span for an empty label.
 pub fn shimmer_spans(label: &str, base: (u8, u8, u8), elapsed_ms: u128) -> Vec<Span<'static>> {
     let len = label.chars().count();
     if len == 0 {
         return vec![Span::raw(String::new())];
     }
-    // The band is the DARK part: the name rests at its normal identity color and
-    // a dimmed band sweeps through, so a working name keeps the same brightness
-    // as an idle one and the motion reads as a passing shadow. One dial: how deep
-    // the band dips (fraction of the base kept at the band's center).
+    // One dial: how deep the band dips, as the fraction of the base kept at the
+    // band's center.
     let dim = |v: u8| (v as f32 * 0.45).round() as u8;
     let trough = (dim(base.0), dim(base.1), dim(base.2));
     label

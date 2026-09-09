@@ -7,8 +7,7 @@ mod config;
 mod config_saver;
 mod diff;
 // The terminal-focus grace state machine is core-owned (`dux_core::focus`),
-// shared by rule with the web's viewed-ping grace. Re-exported so existing
-// `crate::focus::...` paths keep resolving.
+// shared by rule with the web's viewed-ping grace.
 pub(crate) use dux_core::focus;
 mod key_encode;
 mod keybindings;
@@ -99,9 +98,8 @@ pub fn run(
                 Some(acquire_lock_or_exit(&paths.lock_path))
             }
 
-            // Everything else is read-only or prints help — no shared
-            // state to protect. This includes: path, diff, diff --raw,
-            // regenerate (preview without --yes), --help, and empty.
+            // Everything else is read-only or prints help, so there is no
+            // shared state to protect.
             _ => None,
         };
 
@@ -175,10 +173,8 @@ pub fn print_help() {
     println!("{}", help_text());
 }
 
-/// The `dux --help` body. Split out of [`print_help`] so the text is a value the
-/// tests can assert on: a `println!` straight to stdout is not checkable, which
-/// is how `dux server` stayed missing from the listing while being a real
-/// subcommand.
+/// The `dux --help` body. Split out of [`print_help`] so the text is a value
+/// the tests can assert on; a `println!` straight to stdout is not checkable.
 pub fn help_text() -> &'static str {
     "dux\n\n\
          Terminal and web UI for AI worktree sessions.\n\n\

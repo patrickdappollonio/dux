@@ -1,22 +1,21 @@
 //! Server status screen shown by the binary while the TUI↔server flip is
 //! serving the web UI in this process.
 //!
-//! After a flip, the App's normal terminal teardown (`ratatui::restore()`) has
-//! already run, so the terminal is back in cooked mode. This screen owns the
-//! full raw/alt-screen/hidden-cursor lifecycle for the duration of serving and
-//! restores ALL of it in `Drop` (best-effort, errors ignored) so no exit
-//! path — including a panic — can leave the user with a wedged terminal.
+//! After a flip the App's terminal teardown (`ratatui::restore()`) has already
+//! run, so the terminal is back in cooked mode. This screen owns the full
+//! raw/alt-screen/hidden-cursor lifecycle while serving and restores all of it
+//! in `Drop` (best-effort, errors ignored), so no exit path, a panic included,
+//! leaves the user with a wedged terminal.
 //!
-//! The binary drives it as the `serve_with_engine` tick closure: each engine
+//! The binary drives it as the `serve_with_engine` tick closure: every engine
 //! loop iteration calls [`ServerStatusScreen::tick`], which polls keys without
-//! blocking and redraws when the displayed uptime second changes OR a new
-//! activity event arrives (so the ~50ms engine loop does not cause per-tick
-//! redraw churn — refresh cadence is wall-clock and event driven, not
-//! tick-count driven, per the project tenets).
+//! blocking and redraws when the displayed uptime second changes or a new
+//! activity event arrives, so the refresh cadence is wall-clock and event
+//! driven rather than tick driven.
 //!
-//! Dependency note: dux-web never sees crossterm/ratatui — the tick closure is
-//! a generic `FnMut`, and this dux-tui helper is wired into it by the binary
-//! (`crates/dux/src/main.rs`), the only crate that depends on both.
+//! dux-web never sees crossterm or ratatui: the tick closure is a generic
+//! `FnMut`, wired up by the binary (`crates/dux/src/main.rs`), the only crate
+//! that depends on both.
 
 use std::io::{Stdout, Write, stdout};
 use std::time::{Duration, Instant};
@@ -117,19 +116,14 @@ impl ServerStatusScreen {
         paths: &DuxPaths,
         activity: ActivityRing,
     ) -> Result<Self> {
-        // The theme name comes from `engine.config.ui.theme`; fall back to the
-        // bundled default (and log) if it cannot be loaded. We deliberately
-        // drop the fallback warning string here — the status screen has no
-        // status line, and the same warning already surfaces in the TUI.
+        // The status screen has no status line and the TUI already surfaces the
+        // same warning, so the fallback warning string is dropped here.
         let (theme, _warning) = crate::theme::load_or_fallback(theme_name, paths);
 
-        // Own the full lifecycle: the App already ran `ratatui::restore()`
-        // before the flip returned, so the terminal is in cooked mode now.
-        //
-        // Drop only runs once `Self` is constructed, so any setup step that
-        // fails AFTER raw mode is enabled but BEFORE construction must undo it
-        // by hand — otherwise the caller's fallback println path would inherit
-        // a raw-mode terminal. `enter_terminal` does that cleanup on error.
+        // `Drop` only runs once `Self` is constructed, so a setup step that
+        // fails after raw mode is enabled must undo it by hand, or the caller's
+        // fallback println path inherits a raw-mode terminal. `enter_terminal`
+        // does that cleanup on error.
         let terminal = enter_terminal()?;
 
         let started = Instant::now();
@@ -201,11 +195,10 @@ impl ServerStatusScreen {
         ServerScreenTick::Continue
     }
 
-    /// Show a persistent shutdown status line (e.g. "Stopping 2 agents...")
-    /// under the exit hints, styled muted like the uptime line, and redraw
-    /// immediately so it appears without waiting for the next tick. Rendered
-    /// through ratatui, never a raw `eprintln!`: raw output while the alt screen
-    /// is active lands wherever the cursor happens to sit.
+    /// Show a persistent shutdown status line under the exit hints, styled
+    /// muted like the uptime line, and redraw immediately. Rendered through
+    /// ratatui, never a raw `eprintln!`, which while the alt screen is active
+    /// lands wherever the cursor happens to sit.
     /// Render errors are swallowed like `tick`'s redraw: the process is about
     /// to exit either way and a failed final frame must not crash teardown.
     pub fn show_shutdown_message(&mut self, message: impl Into<String>) {
@@ -377,15 +370,14 @@ fn wrapped_row_count(segments: &ScreenLine, inner_width: u16) -> u16 {
 
 /// Map a key event to a screen action, or `None` to keep serving.
 ///
-/// These keys are NOT user-configurable bindings: the TUI keybinding system
-/// isn't running in server mode, so naming them literally here (and in the
-/// on-screen hints) is correct rather than a tenet violation. `q`/`Q` and `Esc`
-/// return to the TUI; `Ctrl-c` quits the process; everything else is ignored.
+/// These keys are not configurable bindings: the TUI keybinding system is not
+/// running in server mode, so naming them literally here and in the on-screen
+/// hints is correct. `q`/`Q` and `Esc` return to the TUI, `Ctrl-c` quits the
+/// process, everything else is ignored.
 fn action_for_key(key: KeyEvent) -> Option<ServerScreenTick> {
-    // Ignore key-release events so a single press maps to a single action on
-    // terminals that report them (kitty protocol). Repeat events are not
-    // filtered: crossterm only emits them under keyboard-enhancement flags this
-    // screen never enables, and a repeated exit key would be benign anyway.
+    // Ignore key-release events so one press is one action on terminals that
+    // report them (kitty protocol). Repeats are not filtered: crossterm emits
+    // them only under enhancement flags this screen never enables.
     if key.kind == KeyEventKind::Release {
         return None;
     }
@@ -453,10 +445,9 @@ fn header_lines(urls: &[String], safety_note: Option<&str>, uptime_secs: u64) ->
 }
 
 /// The two exit-hint rows shown in the footer (`<q>`/`<Esc>` return, `<Ctrl-c>`
-/// quit), plus an optional trailing shutdown status line (e.g. "Stopping 2
-/// agents...") once teardown has started. These keys are NOT user-configurable
-/// bindings: the TUI keybinding system isn't running in server mode, so naming
-/// them literally is correct.
+/// quit), plus an optional trailing shutdown status line once teardown has
+/// started. These keys are not configurable bindings: the TUI keybinding system
+/// is not running in server mode, so naming them literally is correct.
 fn footer_hint_lines(shutdown_message: Option<&str>) -> Vec<ScreenLine> {
     let mut lines = vec![
         vec![
@@ -532,12 +523,10 @@ fn line_for<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
                 .add_modifier(Modifier::BOLD),
             // Exit-hint description: muted hint text.
             Role::HintDesc => Style::default().fg(theme.hint_desc_fg),
-            // Activity-log message: colored by its captured tone, reusing
-            // existing semantic theme fields so the four tones stay visually
-            // distinct (Info→muted, Ok→success-green [the same token diff
-            // additions use], Warn→warning, Error→error). `status_info_fg` is NOT
-            // used for Ok because it equals `provider_label_fg` in the default
-            // theme, which would make Ok and Info indistinguishable.
+            // Activity-log message, colored by its captured tone through the
+            // semantic theme fields. `status_info_fg` is deliberately not used
+            // for Ok: it equals `provider_label_fg` in the default theme, which
+            // would make Ok and Info indistinguishable.
             Role::Log(tone) => {
                 let fg = match tone {
                     ActivityTone::Info => theme.provider_label_fg,

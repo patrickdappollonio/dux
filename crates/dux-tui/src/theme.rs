@@ -13,45 +13,32 @@ use dux_core::theme::DEFAULT_THEME_NAME;
 /// Broken-circle frames for spinner animations. Shared by the loading card,
 /// status line, and left-pane streaming indicator.
 pub const SPINNER_FRAMES: &[char] = &['◜', '◠', '◝', '◞', '◡', '◟'];
-/// Wall-clock milliseconds each spinner frame stays on screen: six frames, so
-/// one turn every 450ms. The event loop polls every 33ms while anything
-/// animates, which is what keeps this cadence honest.
+/// Wall-clock milliseconds each spinner frame stays on screen. The event loop
+/// polls every 33ms while anything animates, which keeps this cadence honest.
 pub const SPINNER_FRAME_MS: u128 = 75;
 
 /// Wall-clock milliseconds per sampled frame of the working-name shimmer. The
-/// band sweeps once every 1500ms (`shimmer::PERIOD_MS`) and its brightness is
-/// continuous, so unlike the spinner it has no glyph of its own to change: this
-/// is the interval at which a redraw is worth paying for, and it is the cadence
-/// the shimmer had when every poll drew a frame.
+/// band sweeps once every `shimmer::PERIOD_MS` and its brightness is
+/// continuous, so this is the interval at which a redraw is worth paying for.
 pub const SHIMMER_FRAME_MS: u128 = 33;
 
-/// The single shared solid-dot glyph used everywhere dux needs a round dot:
-/// the attention indicator, status dots, and the tab strip's active-tab
-/// marker. One literal, reused by name, so the glyph can never drift between
-/// call sites.
+/// The one solid round dot dux paints, reused by name so the glyph cannot
+/// drift between call sites.
 pub const DOT_GLYPH: &str = "●";
 
-/// Glyph shown (blinking, in the `session_attention` color) in the sidebar when
-/// an agent needs attention. The same solid round dot the status states use:
-/// attention takes precedence over the status dot while flagged, so the blink
-/// plus the theme's accent-colored `session_attention` color is what reads as
-/// "needs you", not a distinct shape.
+/// Glyph shown (blinking, in `session_attention`) in the sidebar when an agent
+/// needs attention. The same dot the status states use: the blink and the color
+/// are what read as "needs you", not a distinct shape.
 pub const ATTENTION_GLYPH: &str = DOT_GLYPH;
 
-/// Glyph shown (in the `session_typing` color) on an agent or terminal row while
-/// the user is actively typing into that PTY. A slim left-half block reads as a
-/// text caret, visually distinct from the round status/attention dots and the
-/// arc spinner, so "Typing" never gets confused with "Working" or "Needs
-/// you". Themed via `Theme::session_typing`, never a hardcoded color.
+/// Glyph shown (in `session_typing`) on an agent or terminal row while the user
+/// is typing into that PTY. A slim left-half block reads as a caret, distinct
+/// from the round status and attention dots and from the arc spinner.
 pub const TYPING_GLYPH: &str = "▍";
 
 /// The standalone identity glyph, worn (in `standalone_location_fg`) by every
 /// row whose subject lives in the user's own folder rather than a dux-managed
-/// working copy: a standalone agent's folder line and a standalone terminal's
-/// directory line. One filled star, reused by name, so "standalone" is a single
-/// indicator the user learns once. The star (U+2737) is deliberate: it is
-/// filled like the TUI's other icons, and screen renderers announce it by a
-/// neutral name. Its rendered width is pinned to one cell by a test against the
+/// working copy. Its rendered width is pinned to one cell by a test against the
 /// same `CellWidth` machinery the row layout measures with; do not swap the
 /// glyph without re-pinning.
 pub const STANDALONE_GLYPH: &str = "✷";
@@ -72,17 +59,12 @@ const GITHUB_PR_CLOSED_LABEL: OpalineColor = OpalineColor::new(140, 80, 80);
 /// instead of borrowing the app's.
 #[derive(Clone, Copy)]
 pub struct Theme {
-    /// Base surface color for the dux app — used as a frame-wide pre-fill so
-    /// every cell that no widget explicitly paints (gutters, modal interiors,
-    /// the row behind the PR pill caps, etc.) inherits the active theme's
-    /// background instead of the user's terminal default.
+    /// Base surface color, pre-filled frame-wide so every cell no widget paints
+    /// inherits the theme's background instead of the terminal default.
     pub app_bg: Color,
-    /// Primary body-text color used by widgets that render plain bold or
-    /// emphasis text on top of `app_bg` (project names, "Current: …" lines
-    /// in modals, etc.). Without an explicit fg these spans fall through to
-    /// the terminal's default foreground, which becomes invisible on light
-    /// themes — this field gives them a theme-driven color that contrasts
-    /// with `app_bg`.
+    /// Body-text color for plain bold or emphasis spans over `app_bg`. Without
+    /// it they fall through to the terminal's default foreground, which is
+    /// invisible on light themes.
     pub text_fg: Color,
     pub header_fg: Color,
     pub header_bg: Color,
@@ -96,44 +78,33 @@ pub struct Theme {
     pub selection_bg: Color,
     pub project_icon: Color,
     pub project_missing_fg: Color,
-    /// Foreground for the standalone indicator on sidebar rows: the star
-    /// glyph and the directory label on line two, worn by standalone agents
-    /// and standalone terminals alike. This is an IDENTITY color ("this one
-    /// lives in your folder"), never a state color, so it stays on line two
-    /// and must read quieter than the working/typing/attention cues.
-    /// Defaults to the theme's own info hue, the one semantic family no row
-    /// state uses, so the tone holds in every theme without shouting.
+    /// Foreground for the standalone star and the directory label on line two.
+    /// An identity color, never a state color, so it must read quieter than the
+    /// working, typing and attention cues; defaults to the theme's info hue,
+    /// the one semantic family no row state uses.
     pub standalone_location_fg: Color,
     pub session_active: Color,
     pub session_detached: Color,
     pub session_exited: Color,
-    /// Foreground used for a session row whose worktree is currently being
-    /// removed by a background worker. Defaults to the same shade as
-    /// `session_exited`; the render code adds `Modifier::ITALIC` to
-    /// visually distinguish the two states. A separate theme slot so that
-    /// future theme customization can differentiate the colors without a
-    /// code change.
+    /// Foreground for a session row whose worktree a background worker is
+    /// removing. Defaults to `session_exited`'s shade, told apart by the
+    /// `Modifier::ITALIC` the renderer adds; a separate slot so a theme can
+    /// split the two colors.
     pub session_deleting: Color,
-    /// Foreground for the blinking attention glyph shown in the sidebar when an
-    /// agent needs attention (a permission prompt, a finished turn). Mapped to
-    /// the theme's own accent color (`accent.primary`) by default; a dedicated
-    /// slot so themes can distinguish "needs you" from the ordinary
-    /// detached/warning states, and so a custom theme that sets
-    /// `dux.session_attention` explicitly still overrides this default.
+    /// Foreground for the blinking attention glyph in the sidebar. Defaults to
+    /// the theme's `accent.primary`, overridable as `dux.session_attention`; a
+    /// dedicated slot so themes can tell "needs you" from the detached and
+    /// warning states.
     pub session_attention: Color,
-    /// Foreground for the "Typing" state cue (a slim caret glyph on line one and
-    /// the "Typing" state word on line two) shown on an agent or terminal row
-    /// while the user is forwarding keystrokes to that PTY. A dedicated slot so
-    /// themes can keep it visually distinct from the working (`session_active`),
-    /// detached (`session_detached`), and attention (`session_attention`) colors.
-    /// Defaults to the theme's secondary accent for generic Opaline themes.
+    /// Foreground for the "Typing" cue (the caret glyph on line one and the
+    /// state word on line two). A dedicated slot so themes keep it distinct
+    /// from `session_active`, `session_detached` and `session_attention`;
+    /// defaults to the secondary accent for generic Opaline themes.
     pub session_typing: Color,
-    /// Foreground for the "Working" state cue (the animated spinner glyph on line
-    /// one and the "Working" state word on line two) shown on an agent or terminal
-    /// row while its PTY is streaming output. A dedicated slot, distinct from the
-    /// plain `session_active` shade, so a working row reads as green (matching the
-    /// web's `text-green-500`) while an idle-active row keeps the neutral active
-    /// color. Defaults to the theme's own success/green token.
+    /// Foreground for the "Working" cue (the spinner on line one and the state
+    /// word on line two) while a row's PTY streams output. Distinct from
+    /// `session_active` so a working row reads green, matching the web's
+    /// `text-green-500`, while an idle-active row keeps the neutral shade.
     pub session_working: Color,
     pub status_info_fg: Color,
     pub status_info_bg: Color,
@@ -155,20 +126,16 @@ pub struct Theme {
     pub hint_dim_desc_fg: Color,
     pub hint_bar_bg: Color,
     pub overlay_border: Color,
-    /// Border ring of a modal that is REFUSING an outside click, flashed for the
-    /// duration of the one-shot cue in `app::overlay_dismiss` and then dropped
-    /// back to `overlay_border`.
+    /// Border ring of a modal refusing an outside click, flashed for the
+    /// one-shot cue in `app::overlay_dismiss` and then dropped back to
+    /// `overlay_border`.
     ///
-    /// A dedicated slot rather than a reuse, and the reason is measured, not
-    /// aesthetic: `overlay_border` defaults to the theme's `border_focused`,
-    /// which in several themes (all three `ayu` variants) is the very same
-    /// colour as `warning_fg`, and in most of the rest is the same colour as
-    /// `session_attention` / `prompt_cursor`. Every candidate for reuse is
-    /// therefore invisible against the ring it is supposed to replace in at
-    /// least one shipped theme. Defaults to the theme's error colour — the one
-    /// family that collides with `border_focused` in none of them — because a
-    /// refusal reads as "no", and it is verified distinct for every loadable
-    /// theme by `the_modal_refusal_flash_is_visible_in_every_loadable_theme`.
+    /// A dedicated slot: `overlay_border` defaults to `border_focused`, which
+    /// in shipped themes is the same colour as `warning_fg`, `session_attention`
+    /// or `prompt_cursor`, so every reuse candidate is invisible against the
+    /// ring it replaces in some theme. Defaults to the theme's error colour,
+    /// which collides with `border_focused` in none of them;
+    /// `the_modal_refusal_flash_is_visible_in_every_loadable_theme` pins it.
     pub overlay_border_refused: Color,
     pub overlay_bg: Color,
     pub overlay_dim_bg: Color,
@@ -179,12 +146,10 @@ pub struct Theme {
     pub scroll_indicator_fg: Color,
     pub scroll_indicator_bg: Color,
     pub warning_fg: Color,
-    /// Emphasis for the part of a row label that the live agent-list search
-    /// query matched. Applied to the matched substring only (with BOLD at the
-    /// render site), so the hit is visible at a glance. A foreground, not a
-    /// background: the framed-row selection paints its tint on content rows
-    /// while keeping each span's fg, so a fg-based emphasis stays legible
-    /// inside a selected row.
+    /// Emphasis for the search-matched substring of a row label (BOLD is added
+    /// at the render site). A foreground, not a background: the framed-row
+    /// selection tints the row while keeping each span's fg, so the emphasis
+    /// stays legible inside a selected row.
     pub search_match_fg: Color,
     pub button_active_fg: Color,
     pub button_confirm_border: Color,
@@ -521,12 +486,9 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
 /// Convert an [`OpalineColor`] (always RGB) into a [`ratatui::style::Color`],
 /// remapping a few canonical RGB values back to their named ANSI equivalents.
 ///
-/// The remap exists to keep the dux-dark default visually identical to the
-/// pre-Opaline palette, which used `Color::Cyan`, `Color::Yellow`, etc.
-/// directly. On terminals that honor the user's customized 16-color profile
-/// (where "cyan" may not be `#00ffff`), this preserves that behavior. Custom
-/// themes that happen to specify exactly `#00ffff` will also benefit from the
-/// same terminal-palette routing — a deliberate choice for predictability.
+/// The remap routes those values through the terminal's own 16-color profile,
+/// so a user whose "cyan" is not `#00ffff` keeps it. A custom theme specifying
+/// exactly `#00ffff` is routed the same way, deliberately.
 /// Blend `top` over `bottom` at `alpha` (0.0 = all bottom, 1.0 = all top).
 /// Only defined for RGB colors; anything else returns `bottom` unchanged, since
 /// named ANSI colors resolve through the terminal palette and can't be mixed.
@@ -688,18 +650,16 @@ impl Theme {
         }
     }
 
-    /// Border style for one focusable control inside an overlay — a text
-    /// field's frame, a filter box's frame — where the unfocused state is the
-    /// modal's own `overlay_border`.
+    /// Border style for one focusable control inside an overlay (a text field's
+    /// frame, a filter box's frame), where the unfocused state is the modal's
+    /// own `overlay_border`.
     ///
-    /// This deliberately does NOT use `border_focused`. `overlay_border`
-    /// DEFAULTS to `border_focused` (see `register_default_token`), so a
-    /// focused/unfocused pair drawn from those two tokens resolves to the very
-    /// same colour in the default theme and the user cannot see what has
-    /// focus. Instead the focused state uses the app's existing focused-control
-    /// idiom — `button_active_fg` plus BOLD, the same one the overlay checkbox
-    /// and the macro editor's fields use — so the two states differ in both
-    /// colour and weight even if a theme ever maps the colours together.
+    /// Deliberately not `border_focused`: `overlay_border` defaults to it (see
+    /// `register_default_token`), so a focused/unfocused pair drawn from those
+    /// two tokens is one colour in the default theme. The focused state uses
+    /// the app's focused-control idiom instead, `button_active_fg` plus BOLD,
+    /// so the two states differ in colour and weight even if a theme maps the
+    /// colours together;
     /// `the_overlay_field_focus_is_visible_in_every_loadable_theme` pins it.
     pub fn overlay_field_border_style(&self, focused: bool) -> Style {
         if focused {
@@ -793,11 +753,8 @@ impl Theme {
 
     pub fn key_badge_default<'a>(&self, key: &'a str) -> Vec<Span<'a>> {
         // Pass `app_bg` rather than `Color::Reset` so the badge background
-        // tracks the active theme. With `Color::Reset` the bracket and key
-        // cells emit an SGR that overrides the surrounding pre-fill and
-        // falls through to the user's terminal default — which on a dark
-        // terminal kept those badges dark even after switching to a light
-        // dux theme.
+        // tracks the active theme: `Color::Reset` emits an SGR that overrides
+        // the surrounding pre-fill and falls through to the terminal default.
         self.key_badge(key, self.app_bg)
     }
 

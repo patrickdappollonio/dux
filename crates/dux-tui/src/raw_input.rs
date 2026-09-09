@@ -31,18 +31,11 @@ pub fn parse_focus_event(seq: &[u8]) -> Option<bool> {
 /// Recognize a HOST terminal's answer to a device query, arriving on dux's own
 /// stdin.
 ///
-/// The same rule the focus report above exists for, applied to the rest of the
-/// report family: dux's embedded emulator is the authoritative answerer for the
-/// child, so the child's queries never reach the host at all. Anything of this
-/// shape on dux's stdin is therefore an answer to a question dux, its host
-/// chain, or a program that ran in this terminal before dux resumed asked, and
-/// it is never the child's business. Forwarding it types the answer at the
-/// child's prompt as literal garbage (`11;rgb:0000/0000/0000`, `1;2c`), which is
-/// exactly the class of leak the OSC splitter was taught to keep whole rather
-/// than shred; keeping it whole is what finally makes it recognizable enough to
-/// drop.
+/// dux's embedded emulator answers the child's queries, so a report of this
+/// shape on dux's stdin is never the child's business, and forwarding it types
+/// literal garbage (`11;rgb:0000/0000/0000`, `1;2c`) at the child's prompt.
 ///
-/// What is matched, and only this:
+/// Matched, and only this:
 ///
 /// * A complete OSC (`ESC ] … BEL` or `ESC ] … ST`) — the color and clipboard
 ///   answers. A bare `ESC ]` (the Alt-`]` keystroke) has no terminator and is
@@ -52,11 +45,11 @@ pub fn parse_focus_event(seq: &[u8]) -> Option<bool> {
 ///   CSI beginning `?` and ending `u` (the kitty keyboard-flags report, whose
 ///   unprefixed form is a KEY under that protocol).
 ///
-/// Deliberately NOT matched: the cursor-position report `CSI row ; col R`. Its
-/// shape is indistinguishable from a modified F3 (`CSI 1 ; 5 R`) on xterm and
-/// its imitators, and eating a keystroke is worse than passing a stray report
-/// through. Also not matched: a DCS answer (`ESC P … ST`), because the sequence
-/// splitter cuts `ESC P` off after two bytes and never delivers one whole.
+/// Not matched: the cursor-position report `CSI row ; col R`, indistinguishable
+/// from a modified F3 (`CSI 1 ; 5 R`) on xterm and its imitators, where eating a
+/// keystroke is worse than passing a stray report through; and a DCS answer
+/// (`ESC P … ST`), which the sequence splitter cuts off after two bytes and
+/// never delivers whole.
 ///
 /// Bracketed-paste content is exempt at the CALL SITE, not here: pasted text
 /// really can contain these bytes, and a paste is user data.
@@ -205,14 +198,10 @@ pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
 /// screen offset.
 ///
 /// `origin_col` and `origin_row` are the 0-based screen position of the
-/// terminal content area's top-left corner (i.e. `term_area.x` and
-/// `term_area.y` from the layout).
-///
-/// The SGR wire format uses 1-based coordinates, so a screen click at
-/// column `origin_col + 1` (the first content column) maps to translated
-/// column 1. Returns `None` if the sequence is not a valid SGR mouse event
-/// or the click falls on or before the origin (i.e. outside the content
-/// area).
+/// terminal content area's top-left corner. The SGR wire format is 1-based, so
+/// a click at column `origin_col + 1` maps to translated column 1. Returns
+/// `None` if the sequence is not a valid SGR mouse event or the click falls on
+/// or before the origin.
 pub fn translate_sgr_mouse(seq: &[u8], origin_col: u16, origin_row: u16) -> Option<Vec<u8>> {
     if !is_sgr_mouse(seq) {
         return None;
@@ -244,11 +233,9 @@ enum SequenceStatus {
 
 /// Incremental parser for terminal input bytes.
 ///
-/// Terminals encode a bare Escape, Alt-key chords, CSI/OSC/SS3 controls,
-/// bracket paste markers, UTF-8, and SGR mouse reports on the same byte
-/// stream. This parser keeps incomplete trailing bytes in one place so
-/// callers do not need to splice buffers manually or guess whether a pending
-/// `ESC` is standalone.
+/// A bare Escape, Alt chords, CSI/OSC/SS3 controls, bracket paste markers,
+/// UTF-8 and SGR mouse reports share one byte stream; the parser holds
+/// incomplete trailing bytes so callers need not splice buffers themselves.
 #[derive(Debug, Clone, Default)]
 pub struct RawInputParser {
     pending: Vec<u8>,
@@ -404,14 +391,9 @@ fn scan_one_sequence(buf: &[u8]) -> SequenceStatus {
 
 /// Splits a raw byte buffer into complete terminal input sequences.
 ///
-/// Returns `(complete, remainder)` where `complete` is a list of byte-slice
-/// ranges representing fully received sequences and `remainder` is the
-/// trailing bytes that could be the start of an incomplete sequence (e.g. a
-/// partial CSI or UTF-8 character).
-///
-/// The splitter does **not** interpret what sequences mean — it only finds
-/// boundaries so that each sequence can be matched against intercepted
-/// bindings or forwarded to the PTY verbatim.
+/// Returns `(complete, remainder)`: fully received sequences, and the trailing
+/// bytes that could start an incomplete one (a partial CSI or UTF-8 character).
+/// Boundaries only; the splitter does not interpret what a sequence means.
 pub fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
     let mut sequences: Vec<&[u8]> = Vec::new();
     let mut i = 0;

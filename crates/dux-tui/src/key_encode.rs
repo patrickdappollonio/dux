@@ -1,7 +1,6 @@
 //! Encoding of key events into the raw bytes a legacy terminal would send.
 //!
-//! This module is the ONE source of truth for the key-to-bytes table. It is
-//! used two ways:
+//! The one source of truth for the key-to-bytes table, used two ways:
 //!
 //! - `key_event_to_pty_bytes` turns a crossterm `KeyEvent` into PTY bytes, so
 //!   the minimized center pane can forward typed keys to the agent.
@@ -9,12 +8,11 @@
 //!   `encode_key` for building the interactive-mode byte patterns from crokey
 //!   `KeyCombination`s. It carries no table of its own.
 //!
-//! Arrows and Home/End honor the child's DECCKM state, passed in by the
-//! caller: with application cursor keys on (DECSET 1), the UNMODIFIED forms
-//! take SS3 (`ESC O A` and friends); otherwise, and for every modified form,
-//! the CSI encoding applies, exactly as xterm behaves. DECKPAM (application
-//! keypad, `ESC =`) is a different mode governing the numeric keypad and is
-//! deliberately out of scope here.
+//! Arrows and Home/End honor the child's DECCKM state, passed in by the caller:
+//! with application cursor keys on (DECSET 1) the unmodified forms take SS3
+//! (`ESC O A` and friends), and otherwise, as for every modified form, the CSI
+//! encoding applies, exactly as xterm behaves. DECKPAM (application keypad,
+//! `ESC =`) governs the numeric keypad and is out of scope here.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 

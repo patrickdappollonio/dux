@@ -105,13 +105,11 @@ fn run_reset(paths: &DuxPaths, all: bool) -> Result<()> {
     remove_file_with_message(&paths.config_path)?;
     prune_empty_ancestors(&paths.config_path, &paths.root)?;
 
-    // The lockfile (`dux.lock`) is intentionally left in place. Unlinking
-    // it while holding the flock would orphan the inode: a new process
-    // could create a fresh file at the same path (different inode) and
-    // successfully flock it, breaking the single-instance guarantee. The
-    // stale lockfile is harmless — the next launch takes it over
-    // transparently — so `remove_root_if_empty` will simply skip removal
-    // of root when the lockfile is the sole remaining entry.
+    // The lockfile (`dux.lock`) is left in place: unlinking it while holding
+    // the flock would orphan the inode, letting a new process create and flock
+    // a fresh file at the same path and break the single-instance guarantee.
+    // `remove_root_if_empty` therefore skips the root when the lockfile is the
+    // sole remaining entry.
     remove_root_if_empty_with_message(&paths.root)?;
 
     println!("reset complete");
@@ -167,23 +165,20 @@ fn run_diff_summary(current: &Config) -> Result<()> {
 
 /// Every setting whose current value differs from the default, as display lines.
 ///
-/// DERIVED, never hand-maintained. `current` and [`Config::default()`] are both
+/// Derived, never hand-maintained: `current` and [`Config::default()`] are both
 /// projected to `serde_json::Value` and walked structurally, so a config key
-/// added anywhere in the struct tree is reported without anyone registering it
-/// here. The previous version was a hand-written list, and it had already
-/// drifted: every web-only `[ui]` field was missing from it and therefore
-/// silently absent from `dux config diff`.
+/// added anywhere in the struct tree is reported without being registered here.
 ///
 /// `serde_json` and not `toml` on purpose. TOML has no null and its serializer
-/// simply omits a `None` struct field, which would make every default-`None`
-/// setting (`defaults.start_directory`, the optional provider fields) invisible
-/// to the comparison. JSON keeps them as an explicit null.
+/// omits a `None` struct field, which would make every default-`None` setting
+/// (`defaults.start_directory`, the optional provider fields) invisible to the
+/// comparison. JSON keeps them as an explicit null.
 ///
-/// WHAT IS COMPARED is the PARSED FILE against [`Config::default()`]. This
-/// deliberately does not call `load_config` or `ProvidersConfig::ensure_defaults`,
-/// so the summary reports what the file says rather than what dux normalizes it
-/// into: no value clamping, and no shipped provider injected into a config that
-/// does not name it.
+/// What is compared is the parsed file against [`Config::default()`]: neither
+/// `load_config` nor `ProvidersConfig::ensure_defaults` runs, so the summary
+/// reports what the file says rather than what dux normalizes it into, with no
+/// value clamping and no shipped provider injected into a config that does not
+/// name it.
 fn collect_config_changes(current: &Config) -> Vec<String> {
     let (Ok(default_json), Ok(current_json)) = (
         serde_json::to_value(Config::default()),
@@ -207,9 +202,9 @@ fn collect_config_changes(current: &Config) -> Vec<String> {
 /// What the differ does with one subtree.
 ///
 /// There is deliberately no third "ignore this subtree" policy: a setting dux
-/// reads and never reports is exactly the silent drift this rewrite removed.
-/// Something too sensitive or too unstable to print is [`Policy::Summarize`]d,
-/// which still tells the user that it changed.
+/// reads and never reports is silent drift. Something too sensitive or too
+/// unstable to print is [`Policy::Summarize`]d, which still tells the user that
+/// it changed.
 enum Policy {
     /// An ordinary settings subtree: descend and report the leaves that differ.
     Recurse,
@@ -591,32 +586,28 @@ fn print_unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) {
 // ---------------------------------------------------------------------------
 
 fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
-    // Folders a STANDALONE agent occupies. Collected because the sweep of the
-    // whole worktrees root below is otherwise indiscriminate: nothing stops a
-    // user pointing a standalone agent at a directory inside dux's managed
-    // area, and dux resets what dux MADE, which that directory is not.
+    // Folders a standalone agent occupies: the sweep of the whole worktrees
+    // root below is otherwise indiscriminate, and nothing stops a user pointing
+    // a standalone agent at a directory inside dux's managed area, which dux
+    // did not make.
     let mut occupied_folders: Vec<PathBuf> = Vec::new();
     if paths.sessions_db_path.exists() {
         match SessionStore::open(&paths.sessions_db_path) {
             Ok(store) => match store.load_sessions() {
                 Ok(sessions) => {
-                    // A STANDALONE agent's folder is the user's and is never
-                    // removed, not even by a factory reset: dux resets what dux
-                    // made, and it did not make that directory. Its record goes
+                    // A standalone agent's folder is the user's and is never
+                    // removed, not even by a factory reset; its record goes
                     // with the database below like every other agent's.
                     //
                     // The filter is on the workspace, not on the managed-root
                     // path check inside the removal: a standalone agent pointed
-                    // AT a directory under dux's managed root would sail past
-                    // that check and have the ground deleted from under it.
+                    // at a directory under dux's managed root sails past that
+                    // check and has the ground deleted from under it.
                     //
-                    // TWO PASSES, and the order is the whole point. Collecting
-                    // the occupied folders while already removing worktrees left
-                    // the removal deciding with a half-filled list: a managed
-                    // worktree that CONTAINS (or IS) a standalone agent's folder
-                    // ends in an unconditional `remove_dir_all`, so whether the
-                    // user's folder survived came down to which row the loader
-                    // happened to return first.
+                    // Collect in a pass of its own, before any removal: a
+                    // managed worktree that contains or is such a folder ends in
+                    // an unconditional `remove_dir_all`, so a half-filled list
+                    // makes the folder's survival depend on row order.
                     for session in &sessions {
                         if session.workspace.as_managed().is_none() {
                             occupied_folders
@@ -645,13 +636,10 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
 
     // The sweep that finishes the job: whatever the per-session loop could not
     // account for (a worktree whose row was already gone, a stray directory)
-    // goes with the root.
-    //
-    // Except a folder a standalone agent occupies. Removing the root wholesale
-    // undid the filter above one line later, which is the exact scenario
-    // `remove_session_worktree`'s doc comment warns about, arriving by the
-    // other door. When one is in the way, the root's other entries are removed
-    // individually and the root itself is left standing around them.
+    // goes with the root, except a folder a standalone agent occupies, which
+    // removing the root wholesale would undo the filter above for. When one is
+    // in the way, the root's other entries are removed individually and the
+    // root itself is left standing around them.
     if occupied_folders.is_empty() {
         remove_dir_with_message(&paths.worktrees_root)?;
     } else {
@@ -721,20 +709,18 @@ fn worktree_holds_occupied_folder(worktree: &Path, occupied: &[PathBuf]) -> bool
     occupied.iter().any(|folder| folder.starts_with(&worktree))
 }
 
-/// Remove one agent's MANAGED worktree during a factory reset. Returns whether
+/// Remove one agent's managed worktree during a factory reset. Returns whether
 /// it was actually removed, so the caller's count cannot claim a skip.
 ///
 /// It takes a [`ManagedWorkspace`], not a session, and that is the guard: this
-/// function ends in an unconditional `remove_dir_all`, so a standalone agent's
-/// folder must not be nameable here at all. The managed-root path check below
-/// is not enough on its own, because a standalone agent pointed at a directory
-/// under dux's managed root would pass it.
+/// function ends in an unconditional `remove_dir_all`, and the managed-root
+/// path check below is not enough on its own, because a standalone agent
+/// pointed at a directory under dux's managed root would pass it.
 ///
-/// `occupied` closes the other door: the worktree itself may BE, or contain, a
-/// folder a standalone agent occupies (point a standalone agent at an empty
-/// directory under the managed root, then create a managed agent whose worktree
-/// lands on it). The `remove_dir_all` would take the user's folder with it, so
-/// the whole removal is skipped and the reason is printed.
+/// `occupied` closes the other door: the worktree itself may be, or contain, a
+/// folder a standalone agent occupies, and the `remove_dir_all` would take the
+/// user's folder with it, so the whole removal is skipped and the reason
+/// printed.
 fn remove_session_worktree(
     paths: &DuxPaths,
     managed: &dux_core::model::ManagedWorkspace,
@@ -759,17 +745,13 @@ fn remove_session_worktree(
 
     // Route through the shared core removal so the worktree is removed with the
     // correct `-C <repo>`, the repo's worktree registration is pruned, and the
-    // branch is deleted afterward. The old inline copy ran `git worktree remove`
-    // in the CLI's own cwd (no `-C`), which hit the wrong repo, failed, and left
-    // a stale worktree ref that made the branch undeletable. Continue-on-error is
-    // preserved: a factory reset must press on past any single failure.
+    // branch is deleted afterward. Continue-on-error: a factory reset must
+    // press on past any single failure.
     if let Some(project_path) = managed.project_path.as_deref() {
-        // The same branch-ownership gate the engine's delete applies, for the
-        // same reason. Both halves matter: a reset that left a drifted agent's
-        // own original branch behind would not be a reset, and a reset that
-        // deleted the user's `develop` because an agent was once attached to it
-        // would not be a reset either, it would be data loss. dux resets what
-        // dux made.
+        // The same branch-ownership gate the engine's delete applies: a reset
+        // that left a drifted agent's own original branch behind would not be a
+        // reset, and one that deleted the user's `develop` because an agent was
+        // once attached to it would be data loss.
         if managed.branch_provenance.dux_may_delete_branch() {
             let _ = git::remove_worktree(
                 Path::new(project_path),
