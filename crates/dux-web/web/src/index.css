@@ -208,73 +208,79 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     18% { opacity: 1; }
 }
 
-/* The working-agent name shimmer, a greyscale "loading" sweep that keeps the name
-   bright white and runs a soft grey highlight through it (see --dux-shimmer-*
-   below). Neutral so it sits quietly in the UI. One of two "working" cues on the
-   row (the Bot icon also bobs).
-
-   The machinery is ALWAYS on the name, only the STATE toggles (.agent-name-shimmer
-   --on), so the fill can cross-fade instead of snapping. Idle, the fill is
-   `currentColor`, so the name is normal solid text and the gradient sits hidden
-   behind the opaque fill; the sweep animation is present but paused. Working,
-   `--on` makes the fill transparent (revealing the moving gradient) and resumes
-   the sweep. When work stops the `transition` below eases the fill from transparent
-   back to the solid colour, so the name settles back to solid text instead of
-   snapping out of the shimmer. `background-clip: text` paints the gradient
-   through the glyphs; the keyframe slides it so the highlight travels left to
-   right.
-
-   MEASURED, two rows sweeping at once: the sweep is the entire paint cost of an
-   otherwise idle workspace (172 Paint/s, 57 Commit/s, 68ms/s of renderer main
-   thread; freezing only the sweep leaves 0 Paint/s and 10ms/s, so neither the
-   icon bob nor the state-word fade, both transform and opacity, paints at all).
-   Promoting the sweeping name to its own layer is not the cure: it shrinks the
-   invalidated rect from the whole row strip to the name box and leaves paint
-   time and CPU unchanged, because `background-position` is not a compositor
-   property and the per-frame bill is Blink's paint walk rather than the area.
-   The only compositor-only version, a duplicated text layer moved by transform
-   under a static mask, renders measurably differently at glyph edges, so the
-   look is what is being bought here. */
 .agent-name-shimmer {
-    background: linear-gradient(
-        90deg,
-        var(--dux-shimmer-base),
-        var(--dux-shimmer-accent),
-        var(--dux-shimmer-bright),
-        var(--dux-shimmer-accent),
-        var(--dux-shimmer-base)
-    );
-    background-size: 200% auto;
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: currentColor;
-    animation: agent-name-shimmer 2s linear infinite paused;
-    transition: -webkit-text-fill-color 500ms ease-out;
+    display: none;
 }
 
-.agent-name-shimmer--on {
-    /* Transparent WHITE, not the `transparent` keyword (which is transparent black
-       and would darken the cross-fade). Alpha 0 reveals the gradient; the fade
-       between this and the solid `currentColor` stays light the whole way. */
-    -webkit-text-fill-color: rgb(255 255 255 / 0);
-    animation-play-state: running;
+/* Firefox has no mask-clip: text; it gets a solid name until it does. */
+@supports (-webkit-mask-clip: text) {
+    /* A clone masks itself; masking the real name thins its edges. */
+    .agent-name-shimmer {
+        display: block;
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        color: transparent;
+        contain: strict;
+        pointer-events: none;
+        opacity: 0;
+        /* Hidden once the fade is over: find-in-page, hit testing and the
+           compositor all skip a hidden clone, a transparent one none of them. */
+        visibility: hidden;
+        transition:
+            opacity 500ms ease-out,
+            visibility 0s linear 500ms;
+        /* Half the band's width, in name glyphs; a chosen constant. */
+        --shimmer-spread: 9ch;
+        -webkit-mask-image: linear-gradient(white, white);
+        mask-image: linear-gradient(white, white);
+        -webkit-mask-clip: text;
+        mask-clip: text;
+    }
+
+    .agent-name-shimmer--on {
+        opacity: 1;
+        visibility: visible;
+        transition:
+            opacity 500ms ease-out,
+            visibility 0s;
+    }
+
+    /* Only transform and opacity animate on the compositor; a moving
+       background-position repaints the page's root layer every frame. */
+    .agent-name-shimmer::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+            90deg,
+            transparent calc(50% - var(--shimmer-spread)),
+            var(--dux-shimmer-accent) calc(50% - var(--shimmer-spread) / 2),
+            var(--dux-shimmer-bright) 50%,
+            var(--dux-shimmer-accent) calc(50% + var(--shimmer-spread) / 2),
+            transparent calc(50% + var(--shimmer-spread))
+        );
+        animation: agent-name-shimmer 2s linear infinite paused;
+    }
+
+    .agent-name-shimmer--on::after {
+        will-change: transform;
+        animation-play-state: running;
+    }
 }
 
 @keyframes agent-name-shimmer {
-    from { background-position: 200% center; }
-    to   { background-position: -200% center; }
+    from { transform: translateX(-100%); }
+    to   { transform: translateX(100%); }
 }
 
-/* Reduced motion: no sweep and no cross-fade. Working names stay solid; the
-   "active — working" badge carries the state when motion is disabled (the icon
-   bob is likewise motion-safe-gated). */
+/* Dropping the sweep costs nothing here: the state word says "Working" and the
+   icon bob is gated on the same query. */
 @media (prefers-reduced-motion: reduce) {
     .agent-name-shimmer {
-        animation: none;
-        transition: none;
-    }
-    .agent-name-shimmer--on {
-        -webkit-text-fill-color: currentColor;
+        display: none;
     }
 }
 
@@ -370,13 +376,11 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.708 0 0);
-    /* Greyscale shimmer for the working-agent name: the name rests at `base`
-       (white) and a `bright` (muted grey) highlight sweeps through it, `accent`
-       the transition between them. This is the "dark through" look — `bright` is
-       darker than `base` — so a soft grey band travels across bright white text.
-       Neutral to match the app's greyscale palette. Constant across light/dark
-       since the app is dark-only. */
-    --dux-shimmer-base: oklch(1 0 0);
+    /* Greyscale shimmer band for the working-agent name: `bright` (a muted grey)
+       at its centre, `accent` the fade out to the solid white name around it, so
+       a soft grey band travels across bright white text. Neutral to match the
+       app's greyscale palette. Constant across light/dark since the app is
+       dark-only. */
     --dux-shimmer-accent: oklch(0.8 0 0);
     --dux-shimmer-bright: oklch(0.62 0 0);
     /* Typing state color, matching the dux TUI bundled dark theme's soft violet
@@ -426,8 +430,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
-    /* Greyscale shimmer for the working-agent name (see :root above). */
-    --dux-shimmer-base: oklch(1 0 0);
+    /* Greyscale shimmer band for the working-agent name (see :root above). */
     --dux-shimmer-accent: oklch(0.8 0 0);
     --dux-shimmer-bright: oklch(0.62 0 0);
     /* Typing state color (see :root above). */

@@ -26,7 +26,7 @@ import {
   SquarePlus,
   SquareTerminal,
 } from "lucide-react"
-import type { CSSProperties, ReactNode } from "react"
+import type { ComponentProps, CSSProperties, ReactNode } from "react"
 import { useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
@@ -250,6 +250,34 @@ function HighlightedText({ text, query }: { text: string; query: string }) {
   )
 }
 
+// One home for the name and its shimmer clone, so the copy the band is masked
+// by can never carry different text from the name it covers.
+function RowName({
+  text,
+  query,
+  shimmer,
+  className,
+  ...rest
+}: {
+  text: string
+  query: string
+  shimmer: boolean
+} & ComponentProps<"span">) {
+  return (
+    <span {...rest} className={cn("relative min-w-0 flex-1 truncate text-sm", className)}>
+      <HighlightedText text={text} query={query} />
+      {/* A second copy of the name must be neither read out nor reachable. */}
+      <span
+        aria-hidden
+        inert
+        className={cn("agent-name-shimmer", shimmer && "agent-name-shimmer--on")}
+      >
+        {text}
+      </span>
+    </span>
+  )
+}
+
 // The two-line agent row: line one is the Bot (with the verbatim working bob +
 // attention pulse + name shimmer cues) + name + PR link + relative time; line two
 // is the clickable project tag, a colored state word, and a tab count. The
@@ -363,14 +391,7 @@ function AgentFlatRow({
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
               {/* Line one: name + PR + time. */}
               <span className="flex items-center gap-2">
-                <span
-                  className={cn(
-                    "min-w-0 flex-1 truncate text-sm agent-name-shimmer",
-                    shimmer && "agent-name-shimmer--on",
-                  )}
-                >
-                  <HighlightedText text={label} query={query} />
-                </span>
+                <RowName text={label} query={query} shimmer={shimmer} />
                 {session.pr ? (
                   <SimpleTooltip
                     content={`#${session.pr.number} · ${session.pr.title} (${prStateLabel(session.pr.state)})`}
@@ -579,14 +600,7 @@ function TerminalFlatRow({
               content={title !== terminal.label ? terminal.label : null}
               side="right"
             >
-              <span
-                className={cn(
-                  "min-w-0 flex-1 truncate text-sm agent-name-shimmer",
-                  shimmer && "agent-name-shimmer--on",
-                )}
-              >
-                <HighlightedText text={title} query={query} />
-              </span>
+              <RowName text={title} query={query} shimmer={shimmer} />
             </SimpleTooltip>
             {terminal.typing ? <TypingCaret /> : null}
           </span>

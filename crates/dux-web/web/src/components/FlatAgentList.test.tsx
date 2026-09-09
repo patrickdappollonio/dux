@@ -556,6 +556,19 @@ describe("FlatAgentList agent row branch", () => {
 // The search-match highlight: the matched part of a row's NAME (the field the
 // filter searched and the row displays) wraps in a token-styled emphasis span.
 describe("FlatAgentList search-match highlight", () => {
+  // A name wrapper also holds the inert shimmer clone, which repeats the name;
+  // what the row SHOWS is every child except that one.
+  function shown(el: HTMLElement | null | undefined): string {
+    if (!el) return ""
+    return [...el.childNodes]
+      .filter(
+        (node) =>
+          !(node instanceof HTMLElement && node.classList.contains("agent-name-shimmer")),
+      )
+      .map((node) => node.textContent ?? "")
+      .join("")
+  }
+
   const withQuery = (query: string): DuxState => {
     const state = makeState("name")
     ;(state as unknown as { agentSearch: string }).agentSearch = query
@@ -569,7 +582,7 @@ describe("FlatAgentList search-match highlight", () => {
     // Token-derived emphasis only, never a hardcoded color.
     expect(mark.className).toContain("bg-primary")
     // The full label survives around the mark.
-    expect(mark.parentElement?.textContent).toBe("Alpha")
+    expect(shown(mark.parentElement)).toBe("Alpha")
   })
 
   it("renders plain labels when no query is active", () => {
@@ -623,7 +636,7 @@ describe("FlatAgentList search-match highlight", () => {
     render(<FlatAgentList handlers={handlers} />)
     const mark = screen.getByText("zs")
     expect(mark.className).toContain("bg-primary")
-    expect(mark.parentElement?.textContent).toBe("zsh")
+    expect(shown(mark.parentElement)).toBe("zsh")
   })
 })
 
@@ -1477,5 +1490,132 @@ describe("FlatAgentList row actions on a coarse pointer", () => {
       expect(cls).toContain("max-md:max-w-none")
       expect(cls).toContain("shrink-0")
     }
+  })
+})
+
+describe("FlatAgentList working-name sweep", () => {
+  // The clone is what the band is painted through, so it has to say exactly
+  // what the name says; a stale copy would sweep the wrong glyphs.
+  function clones(container: HTMLElement): HTMLElement[] {
+    return [...container.querySelectorAll<HTMLElement>(".agent-name-shimmer")]
+  }
+
+  // The body of one declaration block, read from the authored stylesheet. The
+  // selector is matched inside the @supports gate, so a rule outside it (the
+  // display:none fallback, the reduced-motion override) cannot answer instead.
+  function block(css: string, selector: string): string {
+    const gate = css.indexOf("@supports (-webkit-mask-clip: text)")
+    expect(gate).toBeGreaterThan(-1)
+    const start = css.indexOf(`${selector} {`, gate)
+    expect(start).toBeGreaterThan(-1)
+    const end = css.indexOf("\n    }", start)
+    expect(end).toBeGreaterThan(start)
+    return css.slice(start, end)
+  }
+  // What a screen reader would read off the row: its subtree's text, minus the
+  // parts marked aria-hidden.
+  function computeName(el: Element): string {
+    return [...el.childNodes]
+      .map((node) => {
+        if (node instanceof HTMLElement || node instanceof SVGElement) {
+          return node.getAttribute("aria-hidden") === "true" ? "" : computeName(node)
+        }
+        return node.textContent ?? ""
+      })
+      .join("")
+  }
+  const cloneRule = (css: string) => block(css, ".agent-name-shimmer")
+  const litRule = (css: string) => block(css, ".agent-name-shimmer--on")
+
+  function workingAlpha(): DuxState {
+    const base = makeState("name")
+    return {
+      ...base,
+      spine: {
+        ...base.spine,
+        sessions: [makeSession({ id: "alpha", title: "Alpha", working: true })],
+        terminals: [],
+      },
+    } as DuxState
+  }
+
+  it("stacks an inert clone of the name on a working agent row", () => {
+    mockState = workingAlpha()
+    const { container } = render(<FlatAgentList handlers={handlers} />)
+
+    const [clone, ...rest] = clones(container)
+    expect(rest).toHaveLength(0)
+    expect(clone.textContent).toBe("Alpha")
+    expect(clone.getAttribute("aria-hidden")).toBe("true")
+    expect(clone.hasAttribute("inert")).toBe(true)
+    expect(clone.className).toContain("agent-name-shimmer--on")
+    // The real name is still its own node, so the accessible row reads once.
+    expect(clone.parentElement!.textContent).toBe("AlphaAlpha")
+  })
+
+  it("leaves the clone unlit on a row that is not working", () => {
+    const base = makeState("name")
+    mockState = {
+      ...base,
+      spine: {
+        ...base.spine,
+        sessions: [makeSession({ id: "alpha", title: "Alpha" })],
+        terminals: [],
+      },
+    } as DuxState
+    const { container } = render(<FlatAgentList handlers={handlers} />)
+
+    const [clone] = clones(container)
+    expect(clone.className).not.toContain("agent-name-shimmer--on")
+  })
+
+  it("sweeps a terminal row through the same clone", () => {
+    const base = makeState("name")
+    mockState = {
+      ...base,
+      spine: {
+        ...base.spine,
+        sessions: [],
+        terminals: [makeTerminal({ id: "t-a", label: "bash", foreground_cmd: "vim", working: true })],
+      },
+    } as DuxState
+    const { container } = render(<FlatAgentList handlers={handlers} />)
+
+    const [clone] = clones(container)
+    expect(clone.textContent).toBe("vim")
+    expect(clone.className).toContain("agent-name-shimmer--on")
+  })
+
+  // The clone is in the row's own subtree, so an accessible name computed over
+  // that subtree is where doubling it would show up first.
+  it("names a working row once", () => {
+    mockState = workingAlpha()
+    render(<FlatAgentList handlers={handlers} />)
+
+    const row = screen.getAllByRole("button").find((el) => /Alpha/.test(computeName(el)))
+    expect(row).toBeTruthy()
+    expect(computeName(row!).match(/Alpha/g)).toHaveLength(1)
+  })
+
+  // The whole point of the technique: the band moves by a compositor property
+  // and the clone never widens the row it is stacked on.
+  it("moves the band with a transform, out of flow", async () => {
+    const { readFileSync } = await import("node:fs")
+    const css = readFileSync(`${process.cwd()}/src/index.css`, "utf8")
+    const frames = /@keyframes agent-name-shimmer\s*\{([\s\S]*?)\n\}/.exec(css)
+    expect(frames).toBeTruthy()
+    expect(frames![1]).toContain("transform: translateX(")
+    expect(frames![1]).not.toContain("background-position")
+
+    const rule = cloneRule(css)
+    expect(rule).toContain("mask-clip: text;")
+    expect(rule).toContain("position: absolute;")
+    expect(rule).toContain("inset: 0;")
+    // The clone truncates the way the real name does, by the same declarations.
+    expect(rule).toContain("overflow: hidden;")
+    expect(rule).toContain("text-overflow: ellipsis;")
+    // Idle it is hidden outright, so find-in-page and hit testing skip it.
+    expect(rule).toContain("visibility: hidden;")
+    expect(litRule(css)).toContain("visibility: visible;")
   })
 })
