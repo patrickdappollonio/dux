@@ -103,6 +103,17 @@ pub fn is_sgr_mouse(seq: &[u8]) -> bool {
         && matches!(seq.last(), Some(b'M' | b'm'))
 }
 
+/// Decode the button an SGR button byte names, or `None` for the bit pattern
+/// that names no button (a motion report with nothing held).
+fn sgr_button(button_bits: u16) -> Option<MouseButton> {
+    match button_bits & 0x03 {
+        0 => Some(MouseButton::Left),
+        1 => Some(MouseButton::Middle),
+        2 => Some(MouseButton::Right),
+        _ => None,
+    }
+}
+
 /// Parse an SGR mouse sequence into a crossterm `MouseEvent`.
 ///
 /// SGR format: `ESC [ < Cb ; Cx ; Cy {M|m}`
@@ -153,37 +164,14 @@ pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
             _ => return None,
         }
     } else if is_release {
-        let button = match button_bits & 0x03 {
-            0 => MouseButton::Left,
-            1 => MouseButton::Middle,
-            2 => MouseButton::Right,
-            _ => return None,
-        };
-        MouseEventKind::Up(button)
+        MouseEventKind::Up(sgr_button(button_bits)?)
     } else if is_motion {
-        let button = match button_bits & 0x03 {
-            0 => MouseButton::Left,
-            1 => MouseButton::Middle,
-            2 => MouseButton::Right,
-            3 => {
-                return Some(MouseEvent {
-                    kind: MouseEventKind::Moved,
-                    column,
-                    row,
-                    modifiers,
-                });
-            }
-            _ => return None,
-        };
-        MouseEventKind::Drag(button)
+        match sgr_button(button_bits) {
+            Some(button) => MouseEventKind::Drag(button),
+            None => MouseEventKind::Moved,
+        }
     } else {
-        let button = match button_bits & 0x03 {
-            0 => MouseButton::Left,
-            1 => MouseButton::Middle,
-            2 => MouseButton::Right,
-            _ => return None,
-        };
-        MouseEventKind::Down(button)
+        MouseEventKind::Down(sgr_button(button_bits)?)
     };
 
     Some(MouseEvent {
@@ -991,6 +979,54 @@ mod tests {
         let ev = parse_sgr_mouse(seq).unwrap();
         assert_eq!(ev.kind, MouseEventKind::Up(MouseButton::Left));
         assert!(ev.modifiers.contains(KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn sgr_button_decodes_every_bit_pattern() {
+        assert_eq!(sgr_button(0), Some(MouseButton::Left));
+        assert_eq!(sgr_button(1), Some(MouseButton::Middle));
+        assert_eq!(sgr_button(2), Some(MouseButton::Right));
+        assert_eq!(sgr_button(3), None);
+        // Bits outside the low two are the caller's business, not the decode's.
+        assert_eq!(sgr_button(0b1100_0001), Some(MouseButton::Middle));
+    }
+
+    #[test]
+    fn parse_sgr_mouse_middle_and_right_across_gestures() {
+        let cases: [(&[u8], MouseEventKind); 6] = [
+            (b"\x1b[<1;3;4M", MouseEventKind::Down(MouseButton::Middle)),
+            (b"\x1b[<1;3;4m", MouseEventKind::Up(MouseButton::Middle)),
+            (b"\x1b[<33;3;4M", MouseEventKind::Drag(MouseButton::Middle)),
+            (b"\x1b[<2;3;4M", MouseEventKind::Down(MouseButton::Right)),
+            (b"\x1b[<2;3;4m", MouseEventKind::Up(MouseButton::Right)),
+            (b"\x1b[<34;3;4M", MouseEventKind::Drag(MouseButton::Right)),
+        ];
+        for (seq, kind) in cases {
+            let ev = parse_sgr_mouse(seq).unwrap();
+            assert_eq!(ev.kind, kind, "sequence {seq:?}");
+            assert_eq!(ev.column, 2);
+            assert_eq!(ev.row, 3);
+        }
+    }
+
+    #[test]
+    fn parse_sgr_mouse_scroll_left_and_right() {
+        let ev = parse_sgr_mouse(b"\x1b[<66;10;20M").unwrap();
+        assert_eq!(ev.kind, MouseEventKind::ScrollLeft);
+        let ev = parse_sgr_mouse(b"\x1b[<67;10;20M").unwrap();
+        assert_eq!(ev.kind, MouseEventKind::ScrollRight);
+    }
+
+    #[test]
+    fn parse_sgr_mouse_button_bits_three_is_rejected_off_motion() {
+        // Button bits 3 name no button; only a motion report gives them a
+        // meaning (a move with nothing held), so press and release are dropped.
+        assert!(parse_sgr_mouse(b"\x1b[<3;3;4M").is_none());
+        assert!(parse_sgr_mouse(b"\x1b[<3;3;4m").is_none());
+        assert_eq!(
+            parse_sgr_mouse(b"\x1b[<35;3;4M").unwrap().kind,
+            MouseEventKind::Moved
+        );
     }
 
     // -- translate_sgr_mouse tests --
