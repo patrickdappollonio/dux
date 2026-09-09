@@ -233,6 +233,36 @@ async fn existing_branch_conflict(state: &AppState, body: &CreateSessionBody) ->
     )
 }
 
+/// Dispatch a create and tell an accepted outcome from a refusal to serve back.
+///
+/// A synchronous guard refusal (unknown project, invalid name, un-adoptable
+/// worktree) is an `Err` → 400; the in-flight guard returns an `Ok` error-toned
+/// status → 409 (an agent is already being created). 409 rather than 503 with a
+/// `Retry-After`: the frontend suppresses this toast and the `/ws` status stream
+/// carries the message.
+async fn dispatch_create(
+    state: &AppState,
+    body: CreateSessionBody,
+    headers: &HeaderMap,
+) -> Result<dux_core::wire::WireCommandOutcome, Response> {
+    let outcome = state
+        .engine
+        .apply_wire_scoped(
+            body.into_wire(),
+            scope_from_headers(headers, &state.connections),
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e).into_response())?;
+    if outcome_is_error(&outcome) {
+        let msg = outcome
+            .status
+            .map(|s| s.message)
+            .unwrap_or_else(|| "create rejected".to_string());
+        return Err((StatusCode::CONFLICT, msg).into_response());
+    }
+    Ok(outcome)
+}
+
 async fn create_session(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -275,32 +305,9 @@ async fn create_session(
         None => return engine_unavailable(),
     };
 
-    // Dispatch. A synchronous guard refusal (unknown project, invalid name,
-    // un-adoptable worktree) is an `Err` → 400; the in-flight guard returns an
-    // `Ok` error-toned status → 409 (an agent is already being created).
-    let outcome = match state
-        .engine
-        .apply_wire_scoped(
-            body.into_wire(),
-            scope_from_headers(&headers, &state.connections),
-        )
-        .await
-    {
-        Ok(outcome) => {
-            if outcome_is_error(&outcome) {
-                let msg = outcome
-                    .status
-                    .map(|s| s.message)
-                    .unwrap_or_else(|| "create rejected".to_string());
-                // DEFER: 409 is acceptable for the in-flight guard refusal. A
-                // possible future refinement is 503 + `Retry-After` so a client can
-                // back off automatically; the frontend already suppresses this
-                // toast and the /ws status surfaces the message, so 409 stands.
-                return (StatusCode::CONFLICT, msg).into_response();
-            }
-            outcome
-        }
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    let outcome = match dispatch_create(&state, body, &headers).await {
+        Ok(outcome) => outcome,
+        Err(refusal) => return refusal,
     };
 
     // RACE-FREE PATH: `new`/`fork`/`from_worktree` mint the create op
@@ -1007,6 +1014,25 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert!(String::from_utf8_lossy(&body).starts_with("invalid create body:"));
+    }
+
+    #[tokio::test]
+    async fn create_for_an_unknown_project_is_the_engines_refusal_as_bad_request() {
+        // The synchronous guard arm: the engine refuses the dispatch outright and
+        // its sentence, not a generic one, is what the client is told.
+        let (_tmp, app) = router_no_auth();
+        let response = post_create(
+            &app,
+            serde_json::json!({ "kind": "new", "project_id": "nope", "name": "agent" }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            !String::from_utf8_lossy(&body).is_empty(),
+            "the refusal must carry the engine's message"
+        );
     }
 
     /// An unconfirmed create whose name matches an existing branch is
