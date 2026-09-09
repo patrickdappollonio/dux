@@ -252,29 +252,69 @@ export function wordSpanAt(
   const empty = range.endColExclusive <= range.startCol
   if (empty || isBlank(line.cells[range.startCol])) return span
 
-  // Upwards: only from column 0 of a row that is itself a continuation.
-  for (;;) {
-    if (span.startCol !== 0) break
-    const here = lineAt(span.startRow)
-    if (!here?.isWrapped) break
-    const above = lineAt(span.startRow - 1)
+  const start = wordStartAcrossWraps(lineAt, span.startRow, span.startCol, separators)
+  const end = wordEndAcrossWraps(lineAt, span.endRow, span.endColExclusive, separators)
+  return {
+    startRow: start.row,
+    startCol: start.col,
+    endRow: end.row,
+    endColExclusive: end.colExclusive,
+  }
+}
+
+/**
+ * The start of a word chased BACKWARDS into the rows it wrapped from, given the
+ * start it has on its own physical row.
+ *
+ * A row only continues the one above it when it starts at column 0 and says it
+ * `isWrapped`, and the join holds only while the last cell above is not a
+ * separator.
+ */
+export function wordStartAcrossWraps(
+  lineAt: (row: number) => WrappedRow | undefined,
+  startRow: number,
+  startCol: number,
+  separators: string = DEFAULT_WORD_SEPARATORS,
+): { row: number; col: number } {
+  let row = startRow
+  let col = startCol
+  while (col === 0) {
+    if (!lineAt(row)?.isWrapped) break
+    const above = lineAt(row - 1)
     if (!above || above.cells.length === 0) break
     const last = above.cells.length - 1
     if (isSeparator(above.cells[last], separators)) break
-    span.startRow -= 1
-    span.startCol = wordRangeAt(above.cells, last, separators).startCol
+    row -= 1
+    col = wordRangeAt(above.cells, last, separators).startCol
   }
-  // Downwards: only into a row that says it continues this one.
+  return { row, col }
+}
+
+/**
+ * The end of a word chased FORWARDS into the rows it wraps onto, given the end
+ * it has on its own physical row.
+ *
+ * The word can only continue when it reaches the right edge of its row and the
+ * row below says it continues this one with a non-separator in its first cell.
+ */
+export function wordEndAcrossWraps(
+  lineAt: (row: number) => WrappedRow | undefined,
+  endRow: number,
+  endColExclusive: number,
+  separators: string = DEFAULT_WORD_SEPARATORS,
+): { row: number; colExclusive: number } {
+  let row = endRow
+  let colExclusive = endColExclusive
   for (;;) {
-    const here = lineAt(span.endRow)
-    if (!here || span.endColExclusive < here.cells.length) break
-    const below = lineAt(span.endRow + 1)
+    const here = lineAt(row)
+    if (!here || colExclusive < here.cells.length) break
+    const below = lineAt(row + 1)
     if (!below?.isWrapped || below.cells.length === 0) break
     if (isSeparator(below.cells[0], separators)) break
-    span.endRow += 1
-    span.endColExclusive = wordRangeAt(below.cells, 0, separators).endColExclusive
+    row += 1
+    colExclusive = wordRangeAt(below.cells, 0, separators).endColExclusive
   }
-  return span
+  return { row, colExclusive }
 }
 
 /** The forward triple `Terminal.select(column, row, length)` wants. */

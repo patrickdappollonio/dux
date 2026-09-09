@@ -7,8 +7,10 @@ import {
   pointToCell,
   rowCells,
   selectionSpan,
+  wordEndAcrossWraps,
   wordRangeAt,
   wordSpanAt,
+  wordStartAcrossWraps,
   type RowCell,
   type WrappedRow,
 } from "./termselect"
@@ -381,6 +383,58 @@ describe("wordSpanAt across wrapped lines", () => {
       startCol: 4,
       endRow: 0,
       endColExclusive: 8,
+    })
+  })
+})
+
+describe("chasing a word across a wrap", () => {
+  const row = (text: string, isWrapped = false): WrappedRow => ({
+    cells: ascii(text.padEnd(10, " ")).map((c) =>
+      c.chars === " " ? { chars: "", width: 1 } : c,
+    ),
+    isWrapped,
+  })
+  const wrapped = [row("cd /very/l"), row("ong/path/t", true), row("o/file x", true)]
+  const lineAt = (y: number) => wrapped[y]
+
+  it("walks the start back to the row the word began on", () => {
+    expect(wordStartAcrossWraps(lineAt, 2, 0)).toEqual({ row: 0, col: 3 })
+  })
+
+  it("leaves a start that is not at column 0 alone", () => {
+    expect(wordStartAcrossWraps(lineAt, 1, 4)).toEqual({ row: 1, col: 4 })
+  })
+
+  it("stops at a row that does not continue the one above it", () => {
+    expect(wordStartAcrossWraps(lineAt, 0, 0)).toEqual({ row: 0, col: 0 })
+  })
+
+  it("stops when the cell above the seam is a separator", () => {
+    const seam = [row("cd /very "), row("ong/path/t", true)]
+    expect(wordStartAcrossWraps((y) => seam[y], 1, 0)).toEqual({ row: 1, col: 0 })
+  })
+
+  it("walks the end forward to the row the word finishes on", () => {
+    expect(wordEndAcrossWraps(lineAt, 0, 10)).toEqual({ row: 2, colExclusive: 6 })
+  })
+
+  it("leaves an end short of the row edge alone", () => {
+    expect(wordEndAcrossWraps(lineAt, 0, 5)).toEqual({ row: 0, colExclusive: 5 })
+  })
+
+  it("stops when the cell below the seam is a separator", () => {
+    const seam = [row("cd /very/l"), row(" ong/path", true)]
+    expect(wordEndAcrossWraps((y) => seam[y], 0, 10)).toEqual({ row: 0, colExclusive: 10 })
+  })
+
+  it("stops at the end of the buffer", () => {
+    expect(wordEndAcrossWraps(lineAt, 2, 10)).toEqual({ row: 2, colExclusive: 10 })
+  })
+
+  it("honours a caller-supplied separator set", () => {
+    expect(wordEndAcrossWraps(lineAt, 0, 10, DEFAULT_WORD_SEPARATORS + "/")).toEqual({
+      row: 1,
+      colExclusive: 3,
     })
   })
 })
