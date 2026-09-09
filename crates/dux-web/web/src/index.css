@@ -222,7 +222,19 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
    back to the solid colour, so the name settles back to solid text instead of
    snapping out of the shimmer. `background-clip: text` paints the gradient
    through the glyphs; the keyframe slides it so the highlight travels left to
-   right. */
+   right.
+
+   MEASURED, two rows sweeping at once: the sweep is the entire paint cost of an
+   otherwise idle workspace (172 Paint/s, 57 Commit/s, 68ms/s of renderer main
+   thread; freezing only the sweep leaves 0 Paint/s and 10ms/s, so neither the
+   icon bob nor the state-word fade, both transform and opacity, paints at all).
+   Promoting the sweeping name to its own layer is not the cure: it shrinks the
+   invalidated rect from the whole row strip to the name box and leaves paint
+   time and CPU unchanged, because `background-position` is not a compositor
+   property and the per-frame bill is Blink's paint walk rather than the area.
+   The only compositor-only version, a duplicated text layer moved by transform
+   under a static mask, renders measurably differently at glyph edges, so the
+   look is what is being bought here. */
 .agent-name-shimmer {
     background: linear-gradient(
         90deg,
