@@ -1000,6 +1000,13 @@ impl WireStatus {
     }
 }
 
+/// What one dispatch group did with a command: answered it, or handed it back
+/// untouched for the next group (or the shared tail) to answer.
+enum WireDispatch {
+    Handled(WireCommandOutcome),
+    Unhandled(WireCommand),
+}
+
 /// What the client learns synchronously from applying a command. Fresh domain
 /// state arrives separately via `view_model()`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -1435,43 +1442,103 @@ impl Engine {
     }
 
     fn apply_wire_inner(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
-        // Commands with direct engine methods or custom output shaping return
-        // here; the rest use the shared `wire_to_command`/`apply` tail.
+        // The groups own disjoint sets of variants, so the order they are
+        // offered in does not matter; what no group claims uses the shared
+        // `wire_to_command`/`apply` tail below.
+        let mut pending = command;
+        for dispatch in [
+            Self::dispatch_project_command,
+            Self::dispatch_agent_command,
+            Self::dispatch_preference_command,
+            Self::dispatch_pull_request_command,
+        ] {
+            match dispatch(self, pending)? {
+                WireDispatch::Handled(outcome) => return Ok(outcome),
+                WireDispatch::Unhandled(command) => pending = command,
+            }
+        }
+        let core = self.wire_to_command(pending)?;
+        let reaction = self.apply(core)?;
+        let mut status = wire_status_from_reaction(&reaction);
+        if status.is_none() {
+            status = self.drive_delete_followup(&reaction).into_iter().next();
+        }
+        Ok(WireCommandOutcome::with_optional_status(status))
+    }
+
+    /// Answer the commands that add a project or prepare its checkout.
+    fn dispatch_project_command(&mut self, command: WireCommand) -> anyhow::Result<WireDispatch> {
         match command {
-            WireCommand::RenameSession { session_id, title } => {
-                let status = self.rename_session(&session_id, &title)?;
-                return Ok(WireCommandOutcome::with_status(status));
-            }
-            WireCommand::ReconnectSession { session_id, force } => {
-                let status = self.reconnect_session(&session_id, force)?;
-                return Ok(WireCommandOutcome::with_optional_status(status));
-            }
-            WireCommand::RerunStartupCommand { session_id } => {
-                let status = self.rerun_startup_command(&session_id)?;
-                return Ok(WireCommandOutcome::with_status(status));
-            }
             WireCommand::CheckoutProjectDefaultBranch { project_id } => {
                 let status = self.checkout_project_default_branch(&project_id)?;
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::AddProjectCheckoutDefault { path, name } => {
                 let status = self.add_project_checkout_default(&path, name)?;
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::AddProjectCreateInitialCommit { path, name } => {
                 let status = self.add_project_create_initial_commit(&path, name)?;
-                return Ok(WireCommandOutcome::with_optional_status(status));
+                Ok(WireDispatch::Handled(
+                    WireCommandOutcome::with_optional_status(status),
+                ))
             }
             WireCommand::AddProjectInitRepo { path, name } => {
                 let status = self.add_project_init_repo(&path, name)?;
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
+            }
+            WireCommand::AddProject { .. } => {
+                // Add returns ProjectPersistenceOutcome rather than Status.
+                // Surface Added explicitly and relay rollback errors verbatim.
+                let core = self.wire_to_command(command)?;
+                let reaction = self.apply(core)?;
+                let status = added_status_message(&reaction)
+                    .map(|message| WireStatus::new("info", message))
+                    .or_else(|| wire_status_from_reaction(&reaction));
+                Ok(WireDispatch::Handled(
+                    WireCommandOutcome::with_optional_status(status),
+                ))
+            }
+            other => Ok(WireDispatch::Unhandled(other)),
+        }
+    }
+
+    /// Answer the commands that create, reshape or stop an agent session
+    /// or one of its tabs.
+    fn dispatch_agent_command(&mut self, command: WireCommand) -> anyhow::Result<WireDispatch> {
+        match command {
+            WireCommand::RenameSession { session_id, title } => {
+                let status = self.rename_session(&session_id, &title)?;
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
+            }
+            WireCommand::ReconnectSession { session_id, force } => {
+                let status = self.reconnect_session(&session_id, force)?;
+                Ok(WireDispatch::Handled(
+                    WireCommandOutcome::with_optional_status(status),
+                ))
+            }
+            WireCommand::RerunStartupCommand { session_id } => {
+                let status = self.rerun_startup_command(&session_id)?;
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::ChangeAgentProvider {
                 session_id,
                 provider,
             } => {
                 let status = self.change_agent_provider_wire(&session_id, &provider)?;
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::CreateAgentFromPr {
                 project_id,
@@ -1479,62 +1546,140 @@ impl Engine {
                 name,
             } => {
                 let status = self.create_agent_from_pr(&project_id, &pr, name)?;
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
+            WireCommand::KillSessionPty { session_id } => {
+                let (status, detached) = self.kill_session_pty(&session_id)?;
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_detached(
+                    status, detached,
+                )))
+            }
+            WireCommand::DetachAgent { session_id } => {
+                let status = self.detach_agent(&session_id)?;
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
+            }
+            WireCommand::CloseAgentTab { session_id, tab_id } => {
+                let (status, outcome) = self.close_agent_tab_wire(&session_id, &tab_id)?;
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_close_tab(
+                    status, &outcome,
+                )))
+            }
+            WireCommand::ChangeAgentTabProvider {
+                session_id,
+                tab_id,
+                provider,
+            } => {
+                let status = self.change_tab_provider_wire(&session_id, &tab_id, &provider)?;
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
+            }
+            WireCommand::SetLastFocusedTab { session_id, tab_id } => {
+                self.set_last_focused_tab(&session_id, tab_id.as_deref())?;
+                // Focus changes are high-frequency and user-paced, so they do
+                // not surface a toast or status.
+                Ok(WireDispatch::Handled(WireCommandOutcome::quiet()))
+            }
+            other => Ok(WireDispatch::Unhandled(other)),
+        }
+    }
+
+    /// Answer the commands that change a stored preference or a service
+    /// dux talks to.
+    fn dispatch_preference_command(
+        &mut self,
+        command: WireCommand,
+    ) -> anyhow::Result<WireDispatch> {
+        match command {
             WireCommand::SetChangesPaneVisible { visible } => {
                 let status = self.set_changes_pane_visible(visible);
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::SetInstanceIdentity { title, favicon } => {
                 let status = self.set_instance_identity(title, favicon)?;
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::SetSettings(patch) => {
                 // `set_settings` decides its own status presence: a quiet
                 // accessory-bar-only patch succeeds with `None` (no toast).
                 let status = self.set_settings(patch)?;
-                return Ok(WireCommandOutcome::with_optional_status(status));
+                Ok(WireDispatch::Handled(
+                    WireCommandOutcome::with_optional_status(status),
+                ))
             }
             WireCommand::ToggleRandomizedPetNameDefault {} => {
                 let status = self.toggle_randomized_pet_name_default();
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::TogglePrBannerPosition {} => {
                 let status = self.toggle_pr_banner_position();
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::SetAgentSort { sort } => {
                 let status = self.set_agent_sort(&sort);
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::ToggleCopyOnSelect {} => {
                 let status = self.toggle_copy_on_select();
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::ToggleAlwaysShowTabStrip {} => {
                 let status = self.toggle_always_show_tab_strip();
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::ToggleTabReachesAgent {} => {
                 let status = self.toggle_tab_reaches_agent();
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::SetTailscaleMode { mode } => {
                 self.set_tailscale_mode(&mode)?;
                 // The serve layer reports the listener outcome; a status here
                 // would produce two toasts for one gesture.
-                return Ok(WireCommandOutcome::quiet());
+                Ok(WireDispatch::Handled(WireCommandOutcome::quiet()))
             }
             WireCommand::ToggleGithubIntegration {} => {
                 let status = self.toggle_github_integration();
-                return Ok(WireCommandOutcome::with_status(status));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    status,
+                )))
             }
             WireCommand::RecheckGithub {} => {
                 let update = self.request_gh_recheck();
-                return Ok(WireCommandOutcome::with_status(WireStatus::from_update(
-                    &update,
-                )));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    WireStatus::from_update(&update),
+                )))
             }
+            other => Ok(WireDispatch::Unhandled(other)),
+        }
+    }
+
+    /// Answer the commands that change which pull request an agent's branch
+    /// is shown as.
+    fn dispatch_pull_request_command(
+        &mut self,
+        command: WireCommand,
+    ) -> anyhow::Result<WireDispatch> {
+        match command {
             WireCommand::AttachPullRequest {
                 session_id,
                 host,
@@ -1553,67 +1698,24 @@ impl Engine {
                     &state,
                     &url,
                 )?;
-                return Ok(WireCommandOutcome::with_status(WireStatus::new(
-                    "info", message,
-                )));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    WireStatus::new("info", message),
+                )))
             }
             WireCommand::ClearPullRequestOverride { session_id } => {
                 let message = self.clear_pull_request_override(&session_id)?;
-                return Ok(WireCommandOutcome::with_status(WireStatus::new(
-                    "info", message,
-                )));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    WireStatus::new("info", message),
+                )))
             }
             WireCommand::ResumePullRequestAutodetection { session_id } => {
                 let message = self.resume_pr_autodetection(&session_id)?;
-                return Ok(WireCommandOutcome::with_status(WireStatus::new(
-                    "info", message,
-                )));
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    WireStatus::new("info", message),
+                )))
             }
-            WireCommand::KillSessionPty { session_id } => {
-                let (status, detached) = self.kill_session_pty(&session_id)?;
-                return Ok(WireCommandOutcome::with_detached(status, detached));
-            }
-            WireCommand::DetachAgent { session_id } => {
-                let status = self.detach_agent(&session_id)?;
-                return Ok(WireCommandOutcome::with_status(status));
-            }
-            WireCommand::CloseAgentTab { session_id, tab_id } => {
-                let (status, outcome) = self.close_agent_tab_wire(&session_id, &tab_id)?;
-                return Ok(WireCommandOutcome::with_close_tab(status, &outcome));
-            }
-            WireCommand::ChangeAgentTabProvider {
-                session_id,
-                tab_id,
-                provider,
-            } => {
-                let status = self.change_tab_provider_wire(&session_id, &tab_id, &provider)?;
-                return Ok(WireCommandOutcome::with_status(status));
-            }
-            WireCommand::SetLastFocusedTab { session_id, tab_id } => {
-                self.set_last_focused_tab(&session_id, tab_id.as_deref())?;
-                // Focus changes are high-frequency and user-paced, so they do
-                // not surface a toast or status.
-                return Ok(WireCommandOutcome::quiet());
-            }
-            WireCommand::AddProject { .. } => {
-                // Add returns ProjectPersistenceOutcome rather than Status.
-                // Surface Added explicitly and relay rollback errors verbatim.
-                let core = self.wire_to_command(command)?;
-                let reaction = self.apply(core)?;
-                let status = added_status_message(&reaction)
-                    .map(|message| WireStatus::new("info", message))
-                    .or_else(|| wire_status_from_reaction(&reaction));
-                return Ok(WireCommandOutcome::with_optional_status(status));
-            }
-            _ => {}
+            other => Ok(WireDispatch::Unhandled(other)),
         }
-        let core = self.wire_to_command(command)?;
-        let reaction = self.apply(core)?;
-        let mut status = wire_status_from_reaction(&reaction);
-        if status.is_none() {
-            status = self.drive_delete_followup(&reaction).into_iter().next();
-        }
-        Ok(WireCommandOutcome::with_optional_status(status))
     }
 
     /// Persist the Changes (git) pane's visibility to `config.toml`
