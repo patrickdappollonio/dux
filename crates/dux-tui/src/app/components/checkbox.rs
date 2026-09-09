@@ -5,12 +5,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum CheckboxState {
     Normal,
-    Hovered,
     Focused,
-    Disabled,
 }
 
 #[derive(Clone, Debug)]
@@ -123,18 +120,14 @@ impl<'a> Checkbox<'a> {
     pub(crate) fn marker_style(&self, base_marker_style: Style) -> Style {
         match self.state {
             CheckboxState::Normal => base_marker_style,
-            CheckboxState::Hovered => base_marker_style.add_modifier(Modifier::BOLD),
             CheckboxState::Focused => base_marker_style.add_modifier(Modifier::BOLD),
-            CheckboxState::Disabled => base_marker_style,
         }
     }
 
     pub(crate) fn label_style(&self, base_label_style: Style) -> Style {
         match self.state {
             CheckboxState::Normal => base_label_style,
-            CheckboxState::Hovered => base_label_style.add_modifier(Modifier::BOLD),
             CheckboxState::Focused => base_label_style.add_modifier(Modifier::BOLD),
-            CheckboxState::Disabled => base_label_style,
         }
     }
 }
@@ -260,14 +253,13 @@ mod tests {
     }
 
     #[test]
-    fn checkbox_hover_and_focus_bolden_label_and_marker() {
+    fn checkbox_focus_boldens_label_and_marker() {
         let marker = Style::default();
         let label = Style::default();
-        let hovered = Checkbox::new("Label").state(CheckboxState::Hovered);
         let focused = Checkbox::new("Label").state(CheckboxState::Focused);
 
         assert!(
-            hovered
+            focused
                 .marker_style(marker)
                 .add_modifier
                 .contains(Modifier::BOLD)

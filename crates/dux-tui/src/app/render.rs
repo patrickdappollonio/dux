@@ -1197,14 +1197,10 @@ impl App {
         let checkbox = Checkbox::new(label).checked(checked).state(state);
         let marker_style = checkbox.marker_style(match state {
             CheckboxState::Focused => Style::default().fg(self.theme.button_active_fg),
-            CheckboxState::Hovered => Style::default().fg(self.theme.button_active_fg),
-            CheckboxState::Disabled => Style::default().fg(self.theme.hint_desc_fg),
             CheckboxState::Normal => Style::default().fg(self.theme.hint_key_fg),
         });
         let label_style = checkbox.label_style(match state {
             CheckboxState::Focused => Style::default().fg(self.theme.button_active_fg),
-            CheckboxState::Hovered => Style::default().fg(self.theme.button_active_fg),
-            CheckboxState::Disabled => Style::default().fg(self.theme.hint_desc_fg),
             CheckboxState::Normal => Style::default().fg(self.theme.input_label_fg),
         });
         let layout = checkbox
