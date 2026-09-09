@@ -1,19 +1,9 @@
-// Decision logic for the reconnect-replay idempotency guard (Mechanism A).
-//
-// On every (re)open the dux web server replays the whole terminal scrollback as one
-// Binary blob, tagged with a process-monotonic generation id carried on the
-// preceding `connected` handshake frame (see `ptySocket.ts` and the server's
-// `handle_pty_socket`). The client records the last generation it applied and drops
-// any replay whose generation it has already applied. On mobile the socket
-// reconnects constantly (backgrounding, lock, Wi-Fi/cellular handover), so a
-// duplicate replay or a late blob from a torn-down forwarder must be a no-op rather
-// than a second copy of the scrollback stacked on the buffer (the duplicated-text
-// bug). A fresh generation per open makes every legitimate reconnect strictly
-// newer, so in normal operation nothing is ever dropped and this guard is inert; it
-// fires ONLY on the anomaly.
-//
-// Kept pure and free of any xterm/DOM dependency so it is unit-testable without
-// mounting a terminal.
+// The reconnect-replay idempotency guard. Every open replays the whole scrollback as
+// one blob, tagged with a process-monotonic generation from the `connected`
+// handshake; a replay whose generation was already applied is dropped, so a
+// duplicate or a late blob from a torn-down forwarder cannot stack a second copy of
+// the scrollback on the buffer. A fresh generation per open makes every legitimate
+// reconnect strictly newer, so the guard is inert in normal operation.
 
 export function shouldApplyReplay(
   gen: number | null | undefined,
@@ -29,9 +19,8 @@ export function shouldApplyReplay(
   return gen > lastAppliedGen
 }
 
-// Fold the last-applied generation forward after a replay is applied. A tagged
-// generation advances the high-water mark; an untagged replay (older server) leaves
-// it unchanged so a later tagged one still compares sensibly.
+// Folds the last-applied generation forward. An untagged replay leaves the
+// high-water mark unchanged, so a later tagged one still compares sensibly.
 export function nextAppliedGeneration(
   gen: number | null | undefined,
   lastAppliedGen: number | null,

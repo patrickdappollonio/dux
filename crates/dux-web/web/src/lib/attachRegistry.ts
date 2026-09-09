@@ -1,34 +1,21 @@
 import { useSyncExternalStore } from "react"
 
-// WHICH MOUNTED PANE CAN ATTACH A FILE, keyed by PTY id.
+// Which mounted pane can attach a file, keyed by PTY id. A row menu is not a pane,
+// and an upload must travel the pane's own gated socket into the pane's own sink,
+// so the pane publishes this capability and the row menu borrows it.
 //
-// The row `⋯` menus (an agent row, a terminal row) are the desktop and
-// keyboard-only path into the upload journey: there is no drag gesture to make
-// and nothing on the clipboard. But a row is not a pane, and the upload has to
-// travel through the PANE's own already-gated socket and land in the PANE's own
-// sink (a compose draft or the terminal), never a side channel that would step
-// around the input-ownership gate. So the pane publishes a capability while it
-// is mounted, and the row menu borrows it.
-//
-// LIVE OWNERSHIP IS PART OF THE REGISTRATION, not something the menu checks
-// afterwards. A viewer's pane mounts completely (it renders the take-over card
-// over a live terminal), so a registration that ignored ownership would offer
-// an attach whose every file stranded as saved-but-not-sent. The pane registers
-// only while it owns the input and uploads are switched on, and retires the
-// moment either stops being true.
-//
-// A dormant tab never mounts a pane, so nothing here can force-launch one: the
-// item is simply absent, which is the row-menu convention for an inert action.
+// Live ownership is part of the registration rather than something the menu checks
+// after the fact: a viewer's pane mounts completely, so a registration ignoring
+// ownership would offer an attach whose every file stranded as saved-but-not-sent.
+// A dormant tab mounts no pane, so nothing here can force-launch one.
 
 /// Open the picker and upload whatever is chosen into this pane's own sink.
 type AttachFn = () => void
 
 const capabilities = new Map<string, AttachFn>()
 const listeners = new Set<() => void>()
-// A monotonic counter IS the snapshot: `useSyncExternalStore` compares
-// snapshots by value, and a Map's identity would either never change (mutation
-// in place) or change on every read (a fresh copy), neither of which it can
-// work with.
+// A monotonic counter is the snapshot: `useSyncExternalStore` compares snapshots by
+// value, and a Map's identity either never changes or changes on every read.
 let version = 0
 
 function publish(): void {
@@ -39,14 +26,9 @@ function publish(): void {
 /**
  * Publish this pane's attach capability. Returns the retirement.
  *
- * LAST WRITE WINS, and the retirement is symmetric: it removes the entry only
- * while the entry is still the one this call installed. The guard exists for
- * genuine replacement: when a second pane registers the same pty id before the
- * first unmounts (a cross-commit replacement), the first pane's late cleanup
- * must not retire the live pane's capability; an unconditional delete would,
- * and the menu item would vanish. React's StrictMode double-mount (setup,
- * cleanup, setup) retires and re-registers in order, so it is naturally
- * compatible with this guard.
+ * Last write wins, and the retirement removes the entry only while it is still the
+ * one this call installed: when a second pane registers the same pty id before the
+ * first unmounts, the first pane's late cleanup must not retire the live one.
  */
 export function registerAttachCapability(
   ptyId: string,
@@ -76,12 +58,8 @@ function snapshot(): number {
 }
 
 /**
- * The first attachable PTY among `ptyIds`, or null when none is.
- *
- * An agent passes its session-slot id plus every tab id, because any one of its
- * panes can be the mounted one; a terminal passes its single id. The array is
- * read during render rather than memoized: the subscription above is what
- * re-renders the menu when a pane mounts, takes over, or goes away.
+ * The first attachable PTY among `ptyIds`, or null when none is. An agent passes its
+ * session-slot id plus every tab id, since any of its panes may be the mounted one.
  */
 export function useAttachCapability(ptyIds: string[]): AttachFn | null {
   useSyncExternalStore(subscribe, snapshot, snapshot)

@@ -9,10 +9,9 @@ import type {
   StartupLogsList,
 } from "./types"
 
-// A failed sessions REST call. `status` is the HTTP status (0 for a network/
-// transport failure with no response); `message` is the parsed server detail;
-// `body` is the parsed JSON error body when the server returned one (used by the
-// existing-branch 409 to carry the structured confirm payload).
+// A failed sessions REST call. `status` is 0 for a transport failure with no
+// response, and `body` carries the server's parsed JSON error when there was one,
+// which is how the existing-branch 409 delivers its confirm payload.
 export class SessionsApiError extends Error {
   readonly status: number
   readonly body: unknown
@@ -25,10 +24,9 @@ export class SessionsApiError extends Error {
   }
 }
 
-// The discriminated create body the server matches on `kind`. `new` carries an
-// optional `use_existing_branch`: when the name matches an existing branch and
-// this is not set, the server refuses with a confirmable 409; the client then
-// re-sends with it true after the user confirms (see `ExistingBranchConflict`).
+// The discriminated create body the server matches on `kind`. Without
+// `use_existing_branch`, a name matching an existing branch is refused with a
+// confirmable 409 that the client re-sends with the flag set.
 export type CreateSessionBody =
   | {
       kind: "new"
@@ -110,22 +108,17 @@ const request = createJsonRequest(
     new SessionsApiError(message, status, parseJsonOrNull(responseText)),
 )
 
-// What the server made of a typed pull-request reference: the repository it
-// names, the number it carried, and every project that is a checkout of that
-// repository. `projects.length` is what the caller branches on, exactly as the
-// terminal UI does: one proceeds, several ask, none reports and offers the
-// picker. `repository` is `host/owner/repo`, or `owner/repo` when the reference
-// named no host (which dux must NOT fill in as github.com).
+// What the server made of a typed pull-request reference. Callers branch on
+// `projects.length`: one proceeds, several ask, none reports and offers the picker.
+// `repository` is `host/owner/repo`, or `owner/repo` when the reference named no
+// host, which dux must not fill in as github.com.
 export interface ResolvedPullRequestReference {
   repository: string | null
   number: number | null
   projects: { id: string; name: string }[]
-  // How many projects the server could not inspect at all (directory gone,
-  // address unreadable, host `gh` is not signed in to), and a clause naming
-  // them. These are NOT non-matches: they are unknowns, and without them an
-  // empty `projects` would be reported as "no project is a checkout of that
-  // repository" when the only project that mattered may be exactly the one that
-  // could not be read.
+  // How many projects the server could not inspect at all, and a clause naming them.
+  // They are unknowns rather than non-matches, so an empty `projects` must not be
+  // reported as "no project is a checkout of that repository" while any remain.
   uninspected_count: number
   uninspected_summary: string | null
 }
@@ -135,9 +128,8 @@ export interface ResolvedPullRequestReference {
 // their union, so the dialog can name exactly what would go.
 export type BranchUnpushed = {
   branches: string[]
-  // `null` when git could not answer. The count and whether the repository has
-  // any remote-tracking ref at all travel as one object, because the number
-  // means a different thing without the flag: with nowhere to have pushed to,
+  // `null` when git could not answer. The count travels with the has-remote flag
+  // because it means a different thing without it: with nowhere to have pushed to,
   // the count is simply the whole history.
   unpushed: { count: number; has_remote_refs: boolean } | null
 }
@@ -163,10 +155,9 @@ export const sessionsApi = {
       `/api/v1/sessions/${encodeURIComponent(id)}?delete_worktree=${deleteWorktree}` +
         (deleteBranch === null ? "" : `&delete_branch=${deleteBranch}`),
     ),
-  // How much work ticking that box would destroy: the branches the delete would
-  // remove, and how many of their commits no remote-tracking ref reaches. The
-  // count is `null` when git could not answer, and the dialog then says nothing
-  // about it rather than guessing.
+  // How much work ticking that box would destroy: the branches the delete removes and
+  // how many of their commits no remote-tracking ref reaches. A `null` count means git
+  // could not answer, and the dialog then says nothing rather than guessing.
   branchUnpushed: (id: string) =>
     request<BranchUnpushed>(
       "GET",
@@ -186,11 +177,9 @@ export const sessionsApi = {
   // the kill-running modal. A non-2xx throws.
   kill: (id: string) =>
     request<void>("POST", `/api/v1/sessions/${encodeURIComponent(id)}/kill`),
-  // Manually attach (pin) a pull request from the raw typed reference. Replies
-  // 202 with the keyed status op id; the outcome (attached, or the failure)
-  // rides the status toast stream and the pinned badge lands via
-  // `sessions.changed`. A synchronous refusal (gh unavailable, empty
-  // reference) is a 400 and throws.
+  // Attaches a pull request from the raw typed reference. Replies 202 with the keyed
+  // status op id, and the outcome rides the status stream; a synchronous refusal is a
+  // 400 and throws.
   attachPullRequest: (id: string, pr: string) =>
     request<{ op_id: string }>(
       "PUT",

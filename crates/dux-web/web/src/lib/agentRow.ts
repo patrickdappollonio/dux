@@ -3,27 +3,15 @@ import type { SessionStatus } from "@/lib/types"
 /** Visual treatment for an agent row, shared by the desktop sidebar and the
  *  mobile shell so the two surfaces never drift.
  *
- *  - `shimmer`: the agent is actively streaming output → its name gets the
- *    shimmer. The same flag drives the Bot icon's bob, so the two "working"
- *    motion cues stay in lockstep.
- *  - `dimmed`: the agent isn't running (detached/exited) → the whole row recedes
- *    (name, icon, and status indicator) so the running agents stand out. Mirrors
- *    the dux TUI, where active sessions render brighter than detached/exited.
- *
- *  The two are mutually exclusive by construction: `shimmer` requires `active`,
- *  `dimmed` requires not-`active`.
- *
- *  - `attention`: any of the agent's tabs needs attention (a permission prompt,
- *    a finished turn) the user has not looked at → a cyan dot on the row. The
- *    server tears the flag down when the tab exits, so it is effectively only
- *    ever set on a live (active) agent; it is orthogonal to shimmer/dimmed (a
- *    flagged agent may still be streaming its prompt).
- *
- *  - `typing`: the agent is streaming keystroke-level input (a finer cue than
- *    `working`). It shows the row's typing caret + violet "Typing" word. It is
- *    kept visually DISTINCT from working: the bob + name-shimmer (`shimmer`) fire
- *    only while working and NOT typing, so a typing agent shows the caret alone,
- *    a working agent shows the bob/shimmer alone. `typing` requires `active`. */
+ *  - `shimmer`: working. Drives the name shimmer and the Bot icon's bob
+ *    together, so the two motion cues stay in lockstep. Requires `active`.
+ *  - `dimmed`: not running, so the whole row recedes and running agents stand
+ *    out. Mutually exclusive with `shimmer` by construction.
+ *  - `attention`: a tab wants the user (a permission prompt, a finished turn),
+ *    shown as a cyan dot. Orthogonal to the other flags.
+ *  - `typing`: streaming keystroke-level input, shown as the caret and the
+ *    violet "Typing" word. Requires `active`, and suppresses `shimmer` so a row
+ *    shows the caret or the bob, never both. */
 export function agentRowVisual(
   status: SessionStatus,
   working: boolean,
@@ -42,14 +30,11 @@ export function agentRowVisual(
   }
 }
 
-// The status dot color, mirroring StatusBadge's STATUS map (active=green,
-// detached=amber, exited=muted). Kept here (a framework-free lib file, not a
-// component file) so both StatusBadge and any other surface building its own
-// status line (the agent vitals tooltip) can share the exact mapping without
-// re-deriving it and risking drift, and so StatusBadge.tsx stays a
-// components-only export for React Fast Refresh. `needsAttention` takes
-// precedence over the raw status, matching the cyan "needs attention"
-// treatment used elsewhere (the sidebar row's Bot icon, the favicon dot).
+// The status dot color, shared by StatusBadge and any other surface building a
+// status line so the mapping cannot drift. It lives in a framework-free lib
+// file rather than beside StatusBadge, which stays a components-only export for
+// React Fast Refresh. `needsAttention` outranks the raw status, matching the
+// cyan treatment the Bot icon and the favicon dot use.
 const STATUS_DOT_COLOR: Record<SessionStatus, string> = {
   active: "text-green-500",
   detached: "text-amber-500",

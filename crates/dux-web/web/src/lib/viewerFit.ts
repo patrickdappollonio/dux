@@ -1,42 +1,23 @@
-// THE WATCHER'S FAITHFUL VIEW: the pure half.
+// The pure half of the watcher's faithful view. One PTY has one grid, the
+// owner's, and a watcher whose grid differs renders wrapped, clamped output
+// into its own scrollback. The re-grid to the PTY's rows and columns belongs to
+// the resize coordinator; this module answers the other half, the font size
+// that makes that grid fit the window.
 //
-// ONE PTY HAS ONE GRID, the owner's. A watcher renders the same byte stream
-// into its own xterm, so a watcher whose grid differs is looking at wrapped,
-// clamped output, and every repaint the child makes scrolls mangled rows into
-// that watcher's LOCAL scrollback, where they stay until a fresh attach. The
-// badge and the bounce-heal (`components/terminal/viewerGrid.ts`) treat the
-// symptom; this module is how the divergence is removed instead.
+// The shrink is a font size and never a CSS `scale()`: selection, hyperlink
+// resolution and forwarded touch gestures resolve a cell by dividing a
+// client-space rect by the grid, and a transformed element reports the scaled
+// rect that xterm's own hit-testing disagrees with. Changing the font moves the
+// real cell metrics, so those paths keep working with no special case.
 //
-// THE ANSWER IS PRESENTATION, NOT GEOMETRY. The watcher's emulator is
-// re-gridded to the PTY's real rows and columns (that half is the resize
-// coordinator's, because it is a re-grid and every re-grid is the
-// coordinator's), and then the FONT is shrunk until that grid fits the window.
-// The picture is then byte-for-byte what the driver sees, just smaller.
-//
-// WHY A FONT AND NOT A CSS TRANSFORM. A `scale()` on the terminal would be one
-// line and would break xterm's pixel-to-cell arithmetic everywhere it matters:
-// selection, hyperlink resolution and the forwarded touch gestures all resolve
-// a cell by dividing a client-space rect by the grid, and a transformed element
-// reports the SCALED rect while xterm's own hit-testing does not agree with it.
-// Changing the font size moves the real cell metrics, so every one of those
-// paths keeps working with no special case.
-//
-// Deliberately free of any xterm/React/DOM import, so the arithmetic is
-// testable without a layout (see `viewerFit.test.ts`). The caller measures.
+// Deliberately free of any xterm, React or DOM import, so the arithmetic is
+// testable without a layout. The caller measures.
 
-/// The smallest font the faithful view will shrink to, in CSS pixels.
-///
-/// Below this the text is not small, it is gone: at 6px and under the bundled
-/// faces stop resolving strokes on an ordinary display, so a "faithful" view
-/// would be faithful to nothing a human can read. When the grid does not fit
-/// at this size the terminal is left OVERFLOWING its container and the pane
-/// makes the overflow pannable, which is an honest answer (the picture is
-/// still correct, you scroll to the rest of it) where an illegible one is not.
-/// Chosen rather than measured: it is a legibility judgement. There is no
-/// preference to escape it with any more: `ui.watcher_view` was removed with
-/// the badge, because the full-pane take-over card hid the only difference the
-/// two modes ever had, and the pannable overflow below the floor is the honest
-/// answer for a window too small to hold the driver's grid.
+/// The smallest font the faithful view will shrink to, in CSS pixels: a
+/// legibility judgement, since the bundled faces stop resolving strokes below
+/// it on an ordinary display. A grid that does not fit at this size is left
+/// overflowing its container, and the pane makes the overflow pannable. There
+/// is no preference to escape it with.
 export const VIEWER_MIN_FONT_SIZE = 7
 
 /// The granularity of the shrink, in CSS pixels. Half steps rather than whole
@@ -84,12 +65,9 @@ function positive(value: number): boolean {
  * The largest font size at which `grid` fits inside `available`, in half-pixel
  * steps, never above `maxFontSize` and never below [`VIEWER_MIN_FONT_SIZE`].
  *
- * NOTHING MEASURED IS NOT "SHRINK EVERYTHING". A container with no layout yet
- * (the frame before mount lays out, a backgrounded tab, a pane whose parent is
- * `display: none`) reports zero, and answering that with the floor font would
- * stamp 7px text on the terminal and bounce back a frame later. It answers
- * with the user's own size instead and waits to be asked again, which the
- * caller's resize observation guarantees.
+ * An unmeasured container (no layout yet, a backgrounded tab, a `display: none`
+ * parent) reports zero, and answers with the user's own size rather than the
+ * floor, waiting to be asked again on the caller's resize observation.
  */
 export function viewerFontFit(input: ViewerFitInput): ViewerFitResult {
   const { available, grid, cell, referenceFontSize, maxFontSize } = input
@@ -105,15 +83,12 @@ export function viewerFontFit(input: ViewerFitInput): ViewerFitResult {
   if (!measured) {
     return { fontSize: maxFontSize, overflows: false, width: 0, height: 0 }
   }
-  // Cell size per pixel of font size. xterm rounds the cell to whole device
-  // pixels, so this is very slightly approximate; the error is under one
-  // device pixel per cell and always in the direction of a marginally smaller
-  // font, which is the harmless direction.
+  // Cell size per pixel of font size. xterm rounds cells to whole device
+  // pixels, so this errs by under a device pixel toward a smaller font.
   const perFontWidth = cell.width / referenceFontSize
   const perFontHeight = cell.height / referenceFontSize
-  // Each ratio is already a font SIZE, not a scale: the grid at font `f` is
-  // `perFont * f * count` wide, so the `f` that exactly fills the space is the
-  // space divided by `perFont * count`.
+  // Each ratio is a font size, not a scale: the grid at font `f` is
+  // `perFont * f * count` wide, so dividing the space out yields `f`.
   const ideal = Math.min(
     available.width / (perFontWidth * grid.cols),
     available.height / (perFontHeight * grid.rows),

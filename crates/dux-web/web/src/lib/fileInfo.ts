@@ -1,14 +1,12 @@
-// Pure, React-free formatters for the editor's read-only file-info panel, so
-// every judgement the panel makes is unit-testable without mounting anything.
-// The shapes mirror `dux_core::worktree_file::WorktreeEntryInfo`.
+// Pure, React-free formatters for the editor's read-only file-info panel. The
+// shapes mirror `dux_core::worktree_file::WorktreeEntryInfo`.
 
 import { fileStatusMeta } from "@/lib/changedFiles"
 
-// What git has to say about the entry. Genuinely different answers, kept apart
-// on the wire (see the Rust `GitStatusView`) because collapsing any two of them
-// into a null makes the panel lie. `ignored` and `other_repository` exist
-// because `git status` lists NOTHING for either, so without them everything
-// under `node_modules` and every vendored subrepo read as "Unmodified".
+// What git has to say about the entry, kept apart on the wire (see the Rust
+// `GitStatusView`) because collapsing any two answers into a null makes the
+// panel lie: `git status` lists nothing for an ignored path or a nested
+// repository, which would otherwise read as "Unmodified".
 export type GitStatusView =
   | { state: "not_a_repository" }
   | { state: "other_repository" }
@@ -33,18 +31,17 @@ export interface WorktreeEntryInfo {
   permissions: string
   /** A symlink's target as stored on disk (not resolved). */
   symlink_target: string | null
-  /** The TARGET's mtime and size, present only for a symlink whose target
-   *  could be stat'd. The panel never shows these: they exist because the
-   *  editor's freshness check reads THROUGH a link and would otherwise be
-   *  comparing the target's stamp against the link's. See `stampFromInfo`. */
+  /** The target's mtime and size, present only for a symlink whose target could
+   *  be stat'd. The panel never shows these: the freshness check reads through a
+   *  link and would otherwise compare the target's stamp against the link's.
+   *  See `stampFromInfo`. */
   target_modified?: string | null
   target_size?: number | null
   git: GitStatusView
 }
 
-// One line of the panel's Git row. `status` is the RAW porcelain code when
-// there is one, so the shared FileStatusIcon renders it exactly as the changes
-// pane and the file tree do.
+// One line of the panel's Git row. `status` is the raw porcelain code when there
+// is one, so the shared `FileStatusIcon` renders it as every other surface does.
 export interface GitStatusRow {
   label: string
   status?: string
@@ -53,10 +50,8 @@ export interface GitStatusRow {
 const KIB = 1024
 const UNITS = ["KiB", "MiB", "GiB", "TiB"] as const
 
-// Sizes under 1 KiB read as a plain byte count (a 12-byte file saying "0.0
-// KiB" helps nobody). Above that, a one-decimal binary unit PLUS the exact
-// byte count, because both matter: the unit for scale, the exact number for
-// anyone diffing or checking a limit.
+// Sizes under 1 KiB read as a plain byte count; above that, a one-decimal binary
+// unit for scale plus the exact byte count for anyone checking a limit.
 export function formatBytes(bytes: number | null): string {
   if (bytes === null) return "—"
   if (bytes < KIB) return bytes === 1 ? "1 byte" : `${bytes} bytes`
@@ -69,10 +64,9 @@ export function formatBytes(bytes: number | null): string {
   return `${value.toFixed(1)} ${unit} (${bytes.toLocaleString("en-US")} bytes)`
 }
 
-// A timestamp the viewer can read, in THEIR timezone (the server's clock is
-// not necessarily the reader's). An unparseable value is passed through rather
-// than rendered as "Invalid Date": showing what the server actually sent is
-// more useful than showing that the browser's Date constructor gave up.
+// A timestamp in the viewer's own timezone, which the server's need not be. An
+// unparseable value is passed through rather than shown as "Invalid Date": what
+// the server sent is more useful than the Date constructor giving up.
 export function formatModified(iso: string | null): string {
   if (iso === null) return "Unknown"
   const d = new Date(iso)
@@ -80,12 +74,8 @@ export function formatModified(iso: string | null): string {
   return d.toLocaleString()
 }
 
-// The porcelain code, spelled out. The NOUN is `fileStatusMeta`'s, not a
-// second copy of the vocabulary: one marker and one word per status across the
-// whole app, including its deliberate refusal to print an unrecognised code
-// (it answers "Changed" rather than leaking the raw letter).
-// All this adds is which SIDE the change is on, which is the thing a one-word
-// "Modified" leaves ambiguous and which the panel has room to say.
+// The porcelain code, spelled out. The noun comes from `fileStatusMeta` so the
+// app keeps one word per status; all this adds is which side the change is on.
 function codeLabel(code: string, staged: boolean): string {
   const meta = fileStatusMeta(code)
   // Untracked and conflicted have no staged/unstaged half to name: the file is
@@ -116,9 +106,8 @@ export function gitStatusRows(git: GitStatusView): GitStatusRow[] {
       if (git.unstaged !== null) {
         rows.push({ label: codeLabel(git.unstaged, false), status: git.unstaged })
       }
-      // A "changed" answer with neither half set cannot come from the server
-      // (it would have been reported clean), but a defensive fallback beats
-      // rendering an empty row.
+      // A "changed" answer with neither half set cannot come from the server,
+      // but a fallback beats rendering an empty row.
       return rows.length > 0 ? rows : [{ label: "Unmodified" }]
     }
   }

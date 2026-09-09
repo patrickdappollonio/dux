@@ -1,19 +1,10 @@
-// dux service worker — offline-fallback ONLY.
+// dux service worker: offline fallback only, caching nothing but /offline.html.
 //
-// ==========================================================================
-//  DELIBERATE DESIGN: this SW caches NOTHING but /offline.html.
-// ==========================================================================
-//  There is intentionally NO app-shell caching and NO precaching of the JS/CSS
-//  bundle. dux ships a freshly-built bundle embedded in the Rust binary, and the
-//  whole point of this SW is to guarantee ZERO stale-bundle risk: the app is
-//  always loaded straight from the network. The only thing we keep offline is a
-//  small branded "server unreachable" page so navigations don't dead-end on the
-//  browser's raw error screen.
-//
-//  If you are a future contributor tempted to "improve" this by caching assets,
-//  DON'T. Stale bundles against a live WebSocket protocol are a debugging
-//  nightmare. The offline page is the entire contract.
-// ==========================================================================
+// There is no app-shell caching and no precaching of the JS/CSS bundle: dux
+// ships a bundle embedded in the Rust binary, and a cached bundle running
+// against a live WebSocket protocol is stale with nothing to say so. The app is
+// always loaded from the network, and the offline page exists only so a
+// navigation does not dead-end on the browser's raw error screen.
 
 // Bump this version to invalidate the cached offline page (e.g. when offline.html
 // changes). Old versioned caches are pruned in `activate`.
@@ -28,7 +19,6 @@ self.addEventListener("install", (event) => {
       .open(CACHE)
       .then((cache) => cache.add(new Request(OFFLINE_URL, { cache: "reload" }))),
   );
-  // Take over without waiting for existing tabs to close.
   self.skipWaiting();
 });
 
@@ -44,17 +34,16 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  // Only intercept top-level navigations. Everything else (the bundle, the
-  // WebSocket upgrade, icons, the manifest) is left entirely to the browser —
-  // we never call respondWith for those, so there is no caching of any kind.
+  // Navigations only: everything else (the bundle, the WebSocket upgrade, icons,
+  // the manifest) never reaches respondWith, which is what keeps it uncached.
   if (event.request.mode !== "navigate") {
     return;
   }
   event.respondWith(
     fetch(event.request).catch(() =>
-      // If the offline page somehow isn't cached (e.g. a partially failed
-      // install), fall back to a network-error response rather than letting
-      // respondWith(undefined) throw and dead-end the navigation.
+      // A partially failed install can leave the offline page uncached; a
+      // network-error response beats respondWith(undefined) throwing and
+      // dead-ending the navigation.
       caches.match(OFFLINE_URL).then((cached) => cached ?? Response.error()),
     ),
   );

@@ -1,10 +1,7 @@
-// External documentation links (getdux.app), so the two dialogs that link out
-// share one source of truth for the base URL and section anchors.
-//
-// The anchors are rehype-slug (github-slugger) slugs of headings in
-// website/docs/agent-tabs.md. They live in a separate package, so renaming a
-// heading there would silently break these; docs.test.ts guards the exact
-// headings these point at.
+// External documentation links, so every dialog that links out shares one base URL
+// and set of section anchors. The anchors are github-slugger slugs of headings in
+// website/docs/agent-tabs.md, which live in a separate package: renaming one there
+// breaks these silently, and docs.test.ts is what catches it.
 const DOCS_BASE = "https://getdux.app/docs"
 const DOCS_AGENT_TABS = `${DOCS_BASE}/agent-tabs`
 

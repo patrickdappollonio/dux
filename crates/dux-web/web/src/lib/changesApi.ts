@@ -1,28 +1,21 @@
-// HTTP client for a session's changed files. Unlike `fileApi.ts` (POST), this is
-// a plain GET (the read-only `git.ts` pattern, with `credentials: "same-origin"`)
-// so it composes with HTTP caching and reads as a resource fetch. The matching
-// `session.changes` event over `/ws/events` tells the client WHEN to re-GET; the
-// per-session `rev` lets the store drop out-of-order responses.
+// HTTP client for a session's changed files: a plain same-origin GET, re-issued
+// when a `session.changes` event arrives, with a per-session `rev` the store uses
+// to drop out-of-order responses.
 //
-// The server is authoritative: it resolves the session -> worktree and computes
-// the lists. A non-2xx is thrown as a `ChangesFetchError` carrying the HTTP
-// status so the caller can branch (404 -> clear, anything else -> retryable).
+// A non-2xx is thrown as a `ChangesFetchError` carrying the HTTP status.
 
 import type { ChangedFileView } from "./types"
 
-// The dedicated changed-files payload. Distinct from the legacy `ChangedFiles`
-// ViewModel shape (which carries `watched_session_id`, the global field being
-// retired, and lacks `rev`): this is the single source the store now trusts.
+// The changed-files payload, and the one source the store trusts.
 export interface SessionChangesResponse {
   rev: number
   staged: ChangedFileView[]
   unstaged: ChangedFileView[]
 }
 
-// A failed changed-files fetch. `status` is the HTTP status (0 for a network/
-// transport failure with no response) so the store can special-case 404
-// (session gone -> clear the slice) versus a retryable error (409 git lock,
-// 5xx, network) that surfaces a Refresh affordance.
+// A failed changed-files fetch; `status` is 0 for a transport failure with no
+// response. A 404 means the session is gone and the slice clears; anything else is
+// retryable and surfaces a Refresh control.
 export class ChangesFetchError extends Error {
   readonly status: number
   // The parsed `Retry-After` (seconds) on a 409 git-lock/rebase response, when

@@ -1,12 +1,7 @@
-// A compact "time ago" formatter for the flat agent list's per-row timestamp
-// (from `SessionView.updated_at` / a terminal's activity). It renders the short,
-// inbox-style form the mockup uses: "now", "5m", "3h", "4d", "2w". Kept pure and
-// React-free so it is trivially unit-testable and shared by both surfaces.
-//
-// The scale is deliberately coarse (no seconds past "now", weeks as the largest
-// unit): the row only needs a glanceable recency cue, not a precise duration.
-// An unparseable or future timestamp collapses to "now" rather than emitting a
-// negative or NaN value.
+// A compact "time ago" formatter for the agent list's per-row timestamp: "now", "5m",
+// "3h", "4d", "2w". The scale is deliberately coarse, since the row needs a
+// glanceable recency cue rather than a duration, and an unparseable or future
+// timestamp collapses to "now" rather than emitting a negative or NaN value.
 export function relativeTime(iso: string, now: number = Date.now()): string {
   const then = Date.parse(iso)
   if (Number.isNaN(then)) return ""

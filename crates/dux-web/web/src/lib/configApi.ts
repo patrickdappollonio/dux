@@ -1,12 +1,9 @@
-// HTTP client for the config-mutating operations the palette / dialogs trigger:
-// persist the global env map, replace the macro list wholesale, toggle the
-// Changes-pane visibility flag, and reload config from disk. Scoped REST
-// verbs, stamping the per-connection id so the server can route each
-// operation's status toast back to the initiating client.
+// HTTP client for the config-mutating operations the palette and dialogs trigger.
+// Each request carries the per-connection id so the server can route its status
+// toast back to the initiating client, and a non-2xx throws.
 //
-// The server validates each request (e.g. macro names/text/surface) and persists
-// to `config.toml`, emitting `config.changed` over `/ws/events` so every client
-// refetches `GET /api/v1/bootstrap`. A non-2xx throws so the caller can toast it.
+// The server validates and persists to `config.toml`, then emits `config.changed`
+// so every client refetches its bootstrap document.
 
 import { getConnectionId } from "./connection"
 import type { SettingValue } from "./settingsDescriptors"
@@ -23,9 +20,8 @@ async function send(method: string, path: string, body: unknown): Promise<void> 
       credentials: "same-origin",
       headers,
       body: JSON.stringify(body),
-      // A hung server must not wedge callers that await these writes (the
-      // customize-webapp dialog disables its whole form while one is
-      // pending): give up after 15s and surface the failure instead.
+      // A hung server must not wedge callers that await these writes: a dialog
+      // disables its whole form while one is pending.
       signal: AbortSignal.timeout(15_000),
     })
   } catch {
@@ -53,31 +49,23 @@ export const configApi = {
     send("POST", "/api/v1/ui/agent-sort", { sort }),
   // Reload config from disk (the app menu's "Reload config").
   reload: () => send("POST", "/api/v1/config/reload", {}),
-  // Flip GitHub PR integration AND its engine-side PR-sync side effects (arming
-  // or disarming the background poll, clearing cached PR statuses). This is why
-  // the `ui.github_integration` Preferences row routes here instead of through
-  // the generic settings PATCH: that logic must not be forked. Parameterless:
-  // the server owns the value and flips it, which is safe only because the row
-  // is sent ONLY when it actually changed, so "changed" means "flip". See the
-  // `writeTarget` doc in settingsDescriptors.ts.
+  // Flips GitHub PR integration and its engine-side sync side effects together, so
+  // the Preferences row routes here rather than forking that logic into the generic
+  // settings PATCH. Parameterless: the server owns the value, which is safe only
+  // because the row is sent only when it changed.
   toggleGithubIntegration: () =>
     send("POST", "/api/v1/ui/toggle-github-integration", {}),
-  // Ask `gh` again right now (the app menu's "Re-check GitHub"). NOT a
-  // preference and NOT a config write: it is the way back from a `gh` that
-  // failed for a reason that has since passed, for someone who cannot restart
-  // dux without taking every running agent with it. The engine answers with a
-  // routed status, and if availability actually changed every client is told to
-  // refetch its bootstrap document, so the pull-request entries appear.
+  // Asks `gh` again right now: neither a preference nor a config write, but the way
+  // back from a failure that has since passed, for someone who cannot restart dux
+  // without taking every running agent with it. A changed answer refetches every
+  // client's bootstrap document.
   recheckGithub: () => send("POST", "/api/v1/github/recheck", {}),
-  // Save `[server] tailscale` and, when a listener is up, move the Tailscale
-  // listener to match. Bespoke rather than part of the generic settings PATCH
-  // because the second half is a live act only the serve loop can perform.
+  // Saves `[server] tailscale` and, when a listener is up, moves the Tailscale
+  // listener to match; bespoke because that second half is a live act only the serve
+  // loop can perform.
   //
-  // The reply is the SENTENCE the server composed, not a status code to
-  // interpret: the TUI shows the same one, and a second copy written here is
-  // how the two drift apart. Choosing "no" from a browser reached over the
-  // Tailscale address cuts this tab's own connection; the reply is written
-  // before the unbind lands, so it still arrives.
+  // The reply is the sentence the server composed, which the TUI shows too, so a
+  // second copy written here is how the two drift apart.
   setTailscaleMode: async (
     mode: string,
   ): Promise<{ mode: string; warning: boolean; message: string }> => {
@@ -106,49 +94,32 @@ export const configApi = {
     }
     return resp.json()
   },
-  // Persist the instance identity (browser tab title + favicon colour). Either
-  // field may be omitted; the server validates the favicon against the curated
-  // colour set, caps/normalizes the title, persists to config.toml, and emits
-  // `config.changed` so every client re-applies title + favicon.
+  // Persists the instance identity: tab title and favicon colour, either omissible.
+  // The server validates the favicon against the curated colour set and caps the title.
   setInstanceIdentity: (body: {
     title?: string
     favicon?: string
   }): Promise<void> =>
     send("POST", "/api/v1/config/instance-identity", body),
-  // Persist an explicit patch of the Settings modal's `[ui]`/`[capabilities]`/
-  // `[defaults]` fields in one request. Groups and leaf fields are all
-  // optional; an absent field is left untouched server-side. The server clamps
-  // numeric fields to a documented ceiling and rejects an unrecognized enum
-  // value (`pr_banner_position`, `defaults.provider`) with a 400 that leaves
-  // config unchanged. `title`/`favicon` are NOT here, they stay on
-  // `setInstanceIdentity`, and `ui.github_integration` keeps its own endpoint.
+  // Persists a patch of the Settings modal's `[ui]`/`[capabilities]`/`[defaults]`
+  // fields in one request; every group and leaf is optional and an absent field is
+  // left untouched. `title` and `favicon` stay on `setInstanceIdentity`, and
+  // `ui.github_integration` keeps its own endpoint.
   //
-  // AUTHORITY: `SettingsBody` in `crates/dux-web/src/config_routes.rs` decides
-  // which keys are accepted. It is `deny_unknown_fields`, so a key invented
-  // here comes back as a 400 rather than being silently dropped.
+  // `SettingsBody` in `crates/dux-web/src/config_routes.rs` decides which keys are
+  // accepted and is `deny_unknown_fields`, so an invented key is a 400.
   //
-  // The leaf type is deliberately `Record<string, SettingValue>` and NOT a
-  // hand-listed key union. The only caller (`buildWrites` in
-  // `CustomizeWebappDialog.tsx`) builds exactly that and passes it as a
-  // variable, not an object literal: excess-property checking only fires on
-  // literals, and an index signature declares no properties for an
-  // all-optional target to compare against. A hand-listed union here therefore
-  // matches everything and rejects nothing. The previous one omitted the whole
-  // `defaults` group while that group shipped, and `tsc` never noticed, which
-  // is worse than no type because it reads as a guard. The real cross-language
-  // guard is a pair of loud tests: "the settings-PATCH key set matches the
-  // server's accepted fields" in `settingsDescriptors.test.ts` and
-  // `set_settings_accepts_every_key_the_modal_can_send` in `config_routes.rs`.
+  // The leaf type is deliberately an index signature rather than a key union: the
+  // caller passes a variable, so excess-property checking never fires and a union
+  // here would match everything and reject nothing. Tests on both sides of the wire
+  // are what actually pin the key set.
   patchSettings: (patch: {
     ui?: Record<string, SettingValue>
     capabilities?: Record<string, SettingValue>
     defaults?: Record<string, SettingValue>
-    // Not a settings field: asks the server to emit no info status for THIS
-    // request. The server honors it only when the patch is confined to the
-    // accessory-bar field (`SettingsPatch::quiet` in dux-core), so it can
-    // never silence any other settings write; errors still fail the request
-    // loudly. Sent by the accessory-bar toggle, whose feedback is the bar
-    // itself moving.
+    // Not a settings field: asks the server to emit no info status for this request.
+    // Honored only for a patch confined to the accessory-bar field, so it can never
+    // silence another write, and errors still fail loudly.
     quiet?: boolean
   }): Promise<void> => send("PATCH", "/api/v1/config/settings", patch),
   // Read the raw config.toml text for the Monaco editor. Returns the file

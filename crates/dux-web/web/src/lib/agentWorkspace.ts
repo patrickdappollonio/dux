@@ -1,17 +1,10 @@
-// Where an agent lives, defined ONCE and switched on exhaustively.
-//
-// An agent's home is one of exactly two things: a working copy dux created and
-// owns, or a folder the user already had and dux only visits. Every git field
-// (project, branch, source branch, birth branch, provenance, worktree path)
-// belongs to the first shape and does not exist in the second, so the server
-// sends a TAGGED value rather than a flat record with empty strings in it. An
-// empty string on the wire is a lie some screen eventually renders.
-//
-// This mirrors `lib/terminalOwner.ts` deliberately, down to the exhaustive
-// matcher-plus-`assertNever` shape: it is the same guarantee for a second
-// either/or. The Rust side is `dux_core::viewmodel::AgentWorkspaceView`, whose
-// own decisions live on `dux_core::model::AgentWorkspace` as exhaustive
-// matches.
+// Where an agent lives, defined ONCE and switched on exhaustively: a working
+// copy dux created and owns, or a folder the user already had. Every git field
+// belongs to the first shape and does not exist in the second, so the wire value
+// is TAGGED rather than a flat record padded with empty strings that some screen
+// eventually renders. Mirrors `lib/terminalOwner.ts` down to the
+// matcher-plus-`assertNever` shape; the Rust side is
+// `dux_core::viewmodel::AgentWorkspaceView`.
 
 import { assertNever } from "@/lib/assertNever"
 
@@ -55,12 +48,9 @@ export type AgentWorkspaceWire =
       quiet_reason: string
     }
 
-/** A handler per workspace variant, mapped over the union's `kind`.
- *
- * The second half of the guarantee, and the reason it exists: a `switch` inside
- * a HELPER only protects the helper. A consumer whose BEHAVIOUR depends on
- * which kind of agent this is takes one of these object literals, so a missing
- * key is a compile error at the consumer rather than a silently-wrong branch. */
+/** A handler per workspace variant. A `switch` inside a helper only protects
+ * the helper, so a consumer whose behaviour depends on the kind of agent takes
+ * one of these literals and a missing key is a compile error there. */
 export type WorkspaceMatch<T> = {
   [K in AgentWorkspaceWire["kind"]]: (
     workspace: Extract<AgentWorkspaceWire, { kind: K }>,
@@ -81,13 +71,10 @@ export function matchWorkspace<T>(
   }
 }
 
-/** The managed payload, or `null` for a standalone agent.
- *
- * LOSSY ON PURPOSE, and only for the sites where "does this agent have a branch
- * at all" is the entire question: a menu deciding whether the fork entry
- * exists, a banner deciding whether to render. A site whose behaviour DIFFERS
- * per kind must use `matchWorkspace` instead, so a third kind is a compile
- * error there. */
+/** The managed payload, or `null` for a standalone agent. LOSSY ON PURPOSE, for
+ * sites where "does this agent have a branch at all" is the whole question; a
+ * site whose behaviour differs per kind uses `matchWorkspace`, so a third kind
+ * is a compile error there. */
 export function managedWorkspace(
   workspace: AgentWorkspaceWire,
 ): Extract<AgentWorkspaceWire, { kind: "managed" }> | null {
@@ -108,24 +95,18 @@ export function folderWorkspace(
   })
 }
 
-/** Whether the branch-identity features exist for this agent: fork, pull
- * requests, push, pull, branch rename and display, provenance, the worktree
- * manager. They are about a branch dux manages, and a standalone agent has none
- * whatever its folder contains.
- *
- * This is NOT the question the changes panel asks: that one is FOLDER driven,
- * answered by `changesQuietReason` below, because a standalone agent pointed at
- * a repository's top level gets a real changes panel. */
+/** Whether the branch-identity features exist here: fork, pull requests, push,
+ * pull, branch rename and display, provenance, the worktree manager. They are
+ * about a branch dux manages, and a standalone agent has none whatever its
+ * folder contains. The changes panel asks `changesQuietReason` instead, folder
+ * driven, because a folder at a repository's top level gets a real panel. */
 export function supportsBranchGit(workspace: AgentWorkspaceWire): boolean {
   return managedWorkspace(workspace) !== null
 }
 
-/** Why the changes region is quiet, or `null` when it is not.
- *
- * This doubles as "does the changes panel work here": a null reason IS the
- * working case. There is deliberately no separate boolean predicate; the one
- * that existed had no caller, and a second spelling of the same question is how
- * the two answers drift. */
+/** Why the changes region is quiet, or `null` when it is not, which doubles as
+ * "does the changes panel work here". Deliberately the only spelling of that
+ * question: a second one is how the two answers drift. */
 export function changesQuietReason(
   workspace: AgentWorkspaceWire,
 ): string | null {
@@ -166,11 +147,9 @@ export function workspaceDirectory(workspace: AgentWorkspaceWire): string {
   })
 }
 
-/** What the agent menu's terminal entry says. A menu item that creates a
- * terminal has to name where the shell opens, and a companion terminal opens in
- * the agent's own directory, which is a worktree dux manages for one kind of
- * agent and the user's own folder for the other. Naming the worktree for both
- * would promise a standalone agent something it does not have. */
+/** What the agent menu's terminal entry says. A companion terminal opens in the
+ * agent's own directory, so naming the worktree for both kinds would promise a
+ * standalone agent something it does not have. */
 export function newTerminalLabel(workspace: AgentWorkspaceWire): string {
   return matchWorkspace(workspace, {
     managed: () => "New terminal in the worktree",
@@ -196,17 +175,12 @@ export function workspaceLocation(
 }
 
 /** The name to show for an agent: its title when it has one, the branch it
- * tracks otherwise, and for a standalone agent its folder's own name.
+ * tracks otherwise, and for a standalone agent its folder's own name. Creation
+ * guarantees a standalone agent has a title, so that last fallback is belt and
+ * braces rather than a path users reach.
  *
- * The twin of `AgentSession::display_label` in dux-core, and it exists for the
- * same reason: label sites fall back through the branch name, a standalone
- * agent has none, and without this rule they would render a nameless row.
- * Creation guarantees a standalone agent has a title, so the folder
- * fallback here is belt and braces rather than a path users reach.
- *
- * The folder half is pinned by shared vectors with `display_label`'s own test,
- * because a twin that answers differently is worse than no twin: the same agent
- * would be called two things on the two surfaces. */
+ * Twin of `AgentSession::display_label` in dux-core, pinned by shared vectors:
+ * a twin that answers differently calls one agent two things. */
 export function sessionLabel(session: {
   title: string | null
   workspace: AgentWorkspaceWire
@@ -220,15 +194,13 @@ export function sessionLabel(session: {
   })
 }
 
-/** The last NAMED component of a path, or null when it has none.
- *
- * The twin of Rust's `Path::file_name`, which is what `display_label` uses. The
- * rules a naive split-on-slash gets wrong, all MEASURED against the real
- * `Path::file_name`: a trailing slash is ignored, a trailing `.` is not a name
- * (`/a/notes/.` is `notes`), and a path whose last component is `..` has no name
- * at all rather than being labelled `..`. A path with no named component (`/`,
- * the empty string) answers null, and the caller falls back to the whole path,
- * exactly as the Rust side does. */
+/** The last NAMED component of a path, or null when it has none. Twin of Rust's
+ * `Path::file_name`, which `display_label` uses, including the rules a naive
+ * split-on-slash gets wrong:
+ * - a trailing slash is ignored
+ * - a trailing `.` is not a name (`/a/notes/.` is `notes`)
+ * - a last component of `..` is no name at all, not the label `..`
+ * - `/` and the empty string have none, and the caller falls back to the path */
 export function folderName(folderPath: string): string | null {
   const named = folderPath.split("/").filter((s) => s !== "" && s !== ".")
   const last = named[named.length - 1]
@@ -237,12 +209,10 @@ export function folderName(folderPath: string): string | null {
 }
 
 /** Whether an agent's current branch has drifted from the branch it was created
- * on, and what that original was.
- *
- * `drifted` is false for a standalone agent, and not because the branches
- * happen to match: it has none, so there is nothing that could have drifted.
- * The TWIN of dux-core's `agent_tabs::branch_drifted`; pinned by shared
- * vectors. Keep the empty-initial guard identical in both. */
+ * on, and what that original was. `drifted` is false for a standalone agent
+ * because it has no branch to drift. Twin of dux-core's
+ * `agent_tabs::branch_drifted`, pinned by shared vectors; keep the
+ * empty-initial guard identical in both. */
 export function branchDriftOf(workspace: AgentWorkspaceWire): {
   drifted: boolean
   initial: string
@@ -256,11 +226,10 @@ export function branchDriftOf(workspace: AgentWorkspaceWire): {
   })
 }
 
-// The sidebar names a standalone folder by its last component only: the star
-// and the identity tone already say "this lives in your folder", and the full
-// home-collapsed path is one glance away in the header chip and the info
-// panel. Home itself is written `$HOME`, since a bare `~` is a symbol rather
-// than a name; the root stays `/`.
+// The sidebar names a standalone folder by its last component only, the full
+// home-collapsed path being one glance away in the header chip and the info
+// panel. Home is written `$HOME`, since a bare `~` is a symbol rather than a
+// name; the root stays `/`.
 export function folderDisplayName(label: string): string {
   const trimmed = label.replace(/\/+$/, "")
   if (label === "~" || trimmed === "~") return "$HOME"

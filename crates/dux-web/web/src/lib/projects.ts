@@ -19,15 +19,11 @@ export interface PartitionedProjects {
   projectName: (id: string) => string
 }
 
-// Project GROUPING is owned by dux_core (`dux_core::sidebar`, surfaced as
-// `spine.sidebar`): which sessions belong to which project, which ids are
-// orphaned (a session whose project record was removed), the display names, and
-// whether the agent-less projects are split below a separator. This function
-// only PROJECTS that core model into the shape the components render — it makes
-// no grouping decisions of its own. Ordering follows the caller's already
-// reordered `projects`/`sessions`, since optimistic drag-reorder is display-only
-// state the server has not confirmed yet. Because the TUI consumes the same core
-// model, both surfaces group identically by construction.
+// Grouping is owned by `dux_core::sidebar` and surfaced as `spine.sidebar`, so this
+// makes no grouping decision of its own: it only projects that model into the shape
+// the components render, and both surfaces group identically by construction.
+// Ordering follows the caller's already reordered lists, since an optimistic
+// drag-reorder is display-only state the server has not confirmed.
 export function partitionProjects(
   sidebar: SidebarModel | undefined,
   projects: ProjectView[],

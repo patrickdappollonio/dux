@@ -1,14 +1,11 @@
-// HTTP client for mutating per-session git operations (stage/unstage/discard/
-// commit/push/pull). These are request/response — unlike the fire-and-forget
-// WebSocket commands — so callers can `await` completion, show a per-action
-// loading state, and surface a real error message. Live changed-files updates
-// still arrive over the WebSocket once the engine recomputes after the mutation.
+// HTTP client for mutating per-session git operations. Request/response rather than
+// a fire-and-forget socket command, so a caller can await completion, show a loading
+// state and surface a real error; the changed-files update still arrives over the
+// socket once the engine recomputes.
 //
-// Project-scoped git operations (pull-project, checkout-default) moved to the
-// REST `projectsApi` (`/api/v1/projects/{id}/pull` and `/checkout-default`).
-//
-// The server validates every request (session/project resolution + that a file
-// path is a real git-tracked file inside the worktree), so the UI never has to.
+// The server validates every request, resolving the session and confirming the path
+// is a git-tracked file inside the worktree, so the UI never has to. Project-scoped
+// operations live in `projectsApi`.
 
 import { getConnectionId } from "./connection"
 
@@ -20,9 +17,8 @@ async function postGit(
   const headers: Record<string, string> = {
     "content-type": "application/json",
   }
-  // The async git operations (push/pull/checkout) report progress on the status
-  // stream; stamp this connection's id so the server can scope those toasts back
-  // to this client. Omitted until the `connected` frame has set the id.
+  // The async git operations report progress on the status stream, so the connection
+  // id scopes those toasts back to this client. Absent until the `connected` frame.
   if (opts?.scopeToConnection) {
     const id = getConnectionId()
     if (id) headers["x-connection-id"] = id
@@ -72,18 +68,15 @@ export const git = {
     postGit(gitUrl(sessionId, "stage"), { path }),
   unstage: (sessionId: string, path: string) =>
     postGit(gitUrl(sessionId, "unstage"), { path }),
-  // A whole checked selection in one request: one git call, one changed-files
-  // refresh, one broadcast. The server partitions the batch and names what it
-  // could not act on, so the caller raises a single toast for the outcome.
+  // A whole checked selection in one request, so one git call and one broadcast. The
+  // server names what it could not act on, and the caller raises a single toast.
   stageMany: (sessionId: string, paths: string[]) =>
     postGitJson<BatchResult>(gitUrl(sessionId, "stage-files"), { paths }),
   unstageMany: (sessionId: string, paths: string[]) =>
     postGitJson<BatchResult>(gitUrl(sessionId, "unstage-files"), { paths }),
-  // Discard has no batch route: each file is independent, and a refusal on one
-  // ("unstage it first") must not block the rest. Sequential because parallel
-  // checkouts contend on index.lock. N discards therefore cost N changed-files
-  // refreshes and N broadcasts, which is accepted. The per-file outcomes come
-  // back to the caller, which raises one toast for the lot.
+  // Discard has no batch route: a refusal on one file must not block the rest.
+  // Sequential because parallel checkouts contend on index.lock, at the accepted cost
+  // of one changed-files refresh and broadcast per file.
   discardMany: async (
     sessionId: string,
     paths: string[],
@@ -103,19 +96,14 @@ export const git = {
     }
     return { done, failed }
   },
-  // `untracked` is intentionally NOT sent: the server re-derives the
-  // delete-vs-restore distinction from live git status (never trusting the
-  // client about a destructive outcome).
+  // `untracked` is deliberately not sent: the server re-derives delete versus restore
+  // from live git status rather than trusting a client about a destructive outcome.
   discard: (sessionId: string, path: string) =>
     postGit(gitUrl(sessionId, "discard"), { path }),
   commit: (sessionId: string, message: string) =>
     postGit(gitUrl(sessionId, "commit"), { message }),
-  // Force a changed-files recompute. Mutates nothing: it makes the server do
-  // the same refresh every mutating route above does, and the file-drop upload
-  // does for a file landing in the worktree, so a change dux did not make
-  // through one of its own routes (a file the user changed from a terminal, say)
-  // shows up now instead of on the next poll. Bodiless; the session is in the
-  // path.
+  // Forces a changed-files recompute and mutates nothing, so a change dux did not
+  // make through one of its own routes shows up now rather than on the next poll.
   refreshChanges: (sessionId: string) =>
     postGit(gitUrl(sessionId, "refresh-changes"), {}),
   // push/pull are bodiless; the session is in the path.

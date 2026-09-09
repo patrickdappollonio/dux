@@ -1,29 +1,13 @@
-// THE PHONE'S THEATER CHOREOGRAPHY, as a state machine and some arithmetic.
-//
-// Entering theater on a phone does not swap one control for another. The docked
-// flap TEARS OFF the band and flies to the floating pill's dock as one object,
-// and leaving theater flies it home and re-attaches it. That reads as one
-// control moving rather than two controls appearing and disappearing, which is
-// the whole point: the four buttons under the user's thumb are the same four
-// buttons in both modes, and an animation that says so is cheaper to learn than
-// a legend.
-//
-// Only the TOP chrome collapses. On a coarse pointer the compose bar and the
-// terminal-key row are the typing surface, not decoration, and taking them away
-// on the way into a mode about looking at the terminal would take away the way
-// to answer it. The desktop's theater is unaffected and keeps its own shape.
-//
-// Everything here is a rule or a number rather than a rendering, which is why
-// it is here: the phases and their clocks, the FLIP translation, and the one
-// piece of colour arithmetic the flight needs (a shadow with its alpha taken
-// out, so the real one can fade IN across the travel instead of popping).
+// The phone's theater choreography, as a state machine and some arithmetic:
+// the phases and their clocks, the FLIP translation, and the colour arithmetic
+// the flight needs. Entering theater tears the docked flap off the band and
+// flies it to the floating pill's dock as one object, so the same controls read
+// as moving rather than as two sets appearing and disappearing.
 
 /**
- * Where a flight is.
- *
- * `docked` and `floating` are the two RESTING states, one per mode; the other
- * five are the stages between them. A phase is what both surfaces are rendered
- * from, so "which of these exists right now" has exactly one answer.
+ * Where a flight is. `docked` and `floating` rest, one per mode; the rest are
+ * stages between them. Both surfaces render from the phase, so what exists at
+ * any moment has one answer.
  */
 export type FlightPhase =
   /// Theater off, settled: the flap is on the band and there is no pill.
@@ -59,12 +43,10 @@ export const FLIGHT_ATTACH_MS = 200
 /// The snap plus its own frame of slack.
 export const FLIGHT_ATTACH_HOLD_MS = 220
 
-/// A frame of slack past the CHROME's own clock, for the same reason the travel
-/// holds one past the travel. The timer is armed in the commit that flips the
-/// mode, and the chrome's transition does not start until the next paint, so a
-/// stage handed over exactly on the chrome's duration measures a dock that is
-/// still short of where it settles. That measurement IS the flight's start
-/// point, so the difference lands in the translation.
+/// A frame of slack past the chrome's own clock: the chrome's transition starts
+/// a paint after the commit that arms the timer, so a stage handed over exactly
+/// on the chrome's duration measures a dock short of where it settles, and that
+/// measurement is the flight's start point.
 export const FLIGHT_CHROME_SLACK_MS = 20
 
 /// The corner and colour morph at pull-off, which finishes inside the flight's
@@ -92,18 +74,10 @@ export function flightForMode(theater: boolean, chromeMs: number): FlightPhase {
 }
 
 /**
- * The same question, asked by a machine that is already in the middle of one.
- *
- * A MODE FLIPPED BACK DURING ITS OWN CHROME STAGE UNDOES THAT STAGE rather than
- * starting the opposite gesture. The chrome stages are the two where nothing has
- * moved yet: a collapse that is abandoned before the cluster ever left the band
- * has a flap still on the band to go back to, and running the leaving gesture
- * from there hides the flap and floats a pill over a screen the cluster never
- * flew off. So an abandoned stage rests at the state it started from, with no
- * flight at all, and the chrome animates back on its own flag.
- *
- * Every other interruption is a real gesture in the opposite direction, because
- * by then the cluster really is somewhere else.
+ * The same question from a machine already mid-flight. A mode flipped back
+ * during its own chrome stage undoes that stage and rests, with no flight: the
+ * cluster has not moved yet, so the opposite gesture would hide a flap that is
+ * still on the band. Any later interruption is a real gesture the other way.
  */
 export function flightForModeFrom(
   previous: FlightPhase,
@@ -116,13 +90,9 @@ export function flightForModeFrom(
 }
 
 /**
- * How long a stage lasts, or `null` for a resting state.
- *
- * The two chrome stages are the CHROME's clock rather than one of their own:
- * the flap may not leave the band until the band has finished leaving, and the
- * pill may not fly home until the dock it is aiming at is back on screen. Plus
- * the frame of slack the transition starts a paint late by, so the stage that
- * measures the dock reads it settled rather than nearly there.
+ * How long a stage lasts, or `null` for a resting state. The chrome stages run
+ * on the chrome's clock plus slack: the flap may not leave until the band has,
+ * and the pill may not fly home until its dock is back on screen.
  */
 export function flightHoldMs(
   phase: FlightPhase,
@@ -163,13 +133,9 @@ export function flightNext(phase: FlightPhase): FlightPhase {
 }
 
 /**
- * Is the flap in the DOM?
- *
- * Everywhere but the one phase where theater is settled. It is mounted through
- * the whole return flight (hidden) because it IS the dock: the choreography
- * measures the real element rather than reconstructing where it would have
- * been, so the capsule lands on the flap's own pixels and the final swap moves
- * nothing.
+ * Is the flap in the DOM? Everywhere but settled theater. It stays mounted and
+ * hidden through the return flight because it is the dock the choreography
+ * measures, so the capsule lands on its real pixels and the swap moves nothing.
  */
 export function flapMounted(phase: FlightPhase): boolean {
   return phase !== "floating"
@@ -186,14 +152,10 @@ export function pillMounted(phase: FlightPhase): boolean {
 }
 
 /**
- * Is the flight, rather than the pill's own drag state, saying where the pill
- * sits?
- *
- * Only on the way home. The detach flies FROM the flap TO the dock the pill
- * already knows about, so the pill keeps its own coordinates and the flight
- * adds a transform; the return has to pin the box at the coordinates it is
- * leaving and then park it on the flap's, neither of which is a position the
- * pill's drag state has any business holding.
+ * Is the flight, rather than the pill's drag state, saying where the pill sits?
+ * Only on the way home: the detach flies to coordinates the pill already holds
+ * and only adds a transform, while the return pins the box where it is leaving
+ * and parks it on the flap's, neither of which belongs to the drag state.
  */
 export function flightOwnsPosition(phase: FlightPhase): boolean {
   return phase === "returning" || phase === "attaching"
@@ -206,12 +168,9 @@ export interface FlightPoint {
 }
 
 /**
- * The FLIP translation from one painted box to another.
- *
- * A PURE translation, deliberately: the pill starts the detach gripless, at
- * which width its box is the flap's box exactly, so there is no scale to apply
- * and applying one anyway would smear a 1px border and a row of glyphs for the
- * length of the flight.
+ * The FLIP translation from one painted box to another. Deliberately pure: the
+ * pill starts the detach gripless, where its box is the flap's box exactly, and
+ * a scale would smear the border and the glyphs for the length of the flight.
  */
 export function flightTranslation(
   from: FlightPoint,
@@ -234,18 +193,13 @@ const SHADOW_COLOR =
   /\b(?:rgba?|hsla?|hwb|oklch|oklab|lab|lch|color)\([^()]*\)/gi
 
 /**
- * The same shadow with every colour taken down to fully transparent.
- *
- * The flap has NO shadow and the floating pill has one, so the shadow has to
- * fade in across the detach and back out across the return. Fading needs
- * something to interpolate FROM, and `none` is not that: a shadow going to or
- * from `none` snaps. Keeping the structure and zeroing the alpha is what makes
- * it a fade, and it is why the capsule arrives at the dock already shadowless,
- * where a swap to the shadowless flap wipes nothing visible.
+ * The same shadow with every colour taken to fully transparent, which is what
+ * the pill's shadow interpolates from: a shadow going to or from `none` snaps
+ * rather than fading, and the flap has none.
  *
  * `null` when there is nothing to fade (no shadow, or a value with no colour in
- * it, which is what a test environment with no stylesheet reports). The caller
- * skips that half of the animation rather than guessing at a value.
+ * it, as a test environment with no stylesheet reports). The caller then skips
+ * that half of the animation rather than guessing at a value.
  */
 export function transparentShadow(shadow: string | null | undefined): string | null {
   if (!shadow) return null
@@ -255,13 +209,10 @@ export function transparentShadow(shadow: string | null | undefined): string | n
   return trimmed.replace(SHADOW_COLOR, "rgba(0, 0, 0, 0)")
 }
 
-// THE DOCKED FLAP'S ELEMENT, published for the one thing that has to measure it.
-//
-// A module-level registration, the same idiom as `layoutGesture.ts` and
-// `terminalFocus.ts`, and for the same reason: the flap is a sibling of the
-// pane and the pill is inside it, so a prop chain joining them would have to
-// cross the whole terminal component. What travels is a measurement, not
-// control: the pill asks where the flap is and nothing else.
+// The docked flap's element, registered at module level as `layoutGesture.ts`
+// and `terminalFocus.ts` do: the flap is a sibling of the pane and the pill is
+// inside it, so a prop chain would cross the whole terminal component. What
+// travels is a measurement, not control.
 let flapElement: HTMLElement | null = null
 
 /** Publish the mounted flap. Returns the unregister. */
@@ -283,23 +234,15 @@ export function peekFlapRect(): DOMRect | null {
 /// wears for the length of a flight.
 export const FLAP_FILL_VAR = "--dux-flap-fill"
 
-/// The colour the pill has to be at the dock end of a flight.
+/// The last colour a flap published, remembered past its unmount.
 ///
-/// THE FLAP IS NOT ONE COLOUR. It takes the tone of whatever band it hangs
-/// from: the tab strip's composited one, or the plain app background for a
-/// single-tab agent or a hidden top bar, which is the common case rather than
-/// the exotic one. A flight that assumed the strip's colour popped in the wrong
-/// tone for a frame at both ends of the journey. The flap publishes its own
-/// answer on the element the flight already measures, so the two cannot
-/// disagree; the strip's tone is the fallback for a flight with no flap to ask.
-/// THE LAST COLOUR A FLAP PUBLISHED, remembered past its unmount.
-///
-/// The flap is unmounted for the whole of the floating stage, and the pill's
-/// SETTLED background is that same colour: without this the pill would fly out
-/// of a plain-band flap and then, one commit later, repaint itself in the
-/// strip's tone the moment the resting stage cleared the flight's writes. It is
-/// page-global, like the registration it shadows, which is honest for a phone
-/// showing one pane at a time.
+/// A flap is not one colour: it takes the tone of the band it hangs from, the
+/// tab strip's or the plain app background, and publishes its own answer on the
+/// element the flight already measures. The flap is unmounted for the whole
+/// floating stage and the pill's settled background is that same colour, so
+/// without the memory the pill would repaint in the strip's tone once the
+/// resting stage cleared the flight's writes. Page-global, like the
+/// registration it shadows, which suits a phone showing one pane at a time.
 let lastFlapFill = ""
 
 export function peekFlapFill(): string {

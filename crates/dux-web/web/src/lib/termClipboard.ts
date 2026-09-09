@@ -1,17 +1,11 @@
 // Copy and paste against an xterm instance, and the notifications that report
 // how it went.
 //
-// These two lived at module scope inside `TerminalPane.tsx`, where nothing
-// could reach them without mounting xterm. They are here so the thing that
-// matters about them is testable on its own: neither raise carries an ID.
-//
-// A fixed id is a REPLACEMENT instruction, and both of these fire on gestures
-// the user repeats freely (copy-on-select fires on every drag). sonner resets a
-// toast's remaining time only when its DURATION changes, while re-running its
-// close timer on every re-raise, so a repeat on one id restarts the countdown
-// and the toast never gets to finish: measured at 90 seconds of "Copied to
-// clipboard" across 30 copies. Leaving the id off makes each copy its own event
-// on its own clock.
+// No raise here carries a toast id. An id is a REPLACEMENT instruction, and
+// these fire on gestures the user repeats freely (copy-on-select fires on every
+// drag); sonner re-runs a toast's close timer on every re-raise of one id, so
+// the countdown restarts and the toast never gets to finish. Without an id each
+// copy is its own event on its own clock.
 //
 // Both take the terminal STRUCTURALLY (the one method each needs) rather than
 // as `Terminal`, so a test needs no xterm.
@@ -29,15 +23,11 @@ interface Pasteable {
 
 /// Copy the terminal's current selection to the browser clipboard.
 ///
-/// `copyToClipboard` writes via the async Clipboard API in a secure context and
-/// falls back SYNCHRONOUSLY to an execCommand hidden-textarea over plain-HTTP,
-/// so calling this from inside a user gesture (mouseup, keydown, menu click)
-/// keeps the write permitted even over a Tailscale plain-HTTP origin.
-///
-/// `refocus` restores focus once the copy settles: the call sites pass the
-/// pane's `focusTypingSurface` so focus lands on the ACTIVE typing surface (the
-/// compose textarea when the mobile compose bar is up, xterm otherwise) rather
-/// than being hardwired to `term.focus()`.
+/// Must be called from inside a user gesture: over a plain-HTTP origin
+/// `copyToClipboard` falls back SYNCHRONOUSLY to a hidden-textarea execCommand,
+/// which only a gesture permits. `refocus` restores focus once the copy settles,
+/// and callers pass the pane's `focusTypingSurface` so it lands on the ACTIVE
+/// typing surface rather than always on xterm.
 export async function copyTermSelection(
   term: Selectable,
   refocus: () => void,
@@ -55,15 +45,12 @@ export async function copyTermSelection(
 
 /// Paste the BROWSER clipboard into the terminal via the async Clipboard API.
 ///
-/// `readText` needs a secure context (HTTPS/localhost) and THROWS synchronously
-/// when `navigator.clipboard` is undefined (plain-HTTP) or `readText` is missing
-/// (Firefox web content), so the call must be guarded: a bare `catch` on the
-/// promise cannot catch a synchronous throw. The plain-HTTP/Ctrl-v path (handled
-/// by xterm's native paste event) stays the secure-context-free fallback.
-/// `term.paste` applies bracketed-paste (DECSET 2004) and newline
-/// normalization.
-///
-/// `refocus` mirrors `copyTermSelection`'s.
+/// `readText` needs a secure context and THROWS synchronously when
+/// `navigator.clipboard` is undefined (plain-HTTP) or `readText` is missing
+/// (Firefox web content), so the call must be guarded: a `catch` on the promise
+/// cannot catch a synchronous throw. Ctrl-v, handled by xterm's native paste
+/// event, is the secure-context-free fallback. `term.paste` applies bracketed
+/// paste and newline normalization; `refocus` mirrors `copyTermSelection`'s.
 export async function pasteIntoTerm(
   term: Pasteable,
   refocus: () => void,
@@ -74,12 +61,11 @@ export async function pasteIntoTerm(
 /// Read the BROWSER clipboard and hand the text to whatever the typing surface
 /// is right now.
 ///
-/// The same read, the same guards and the same single refusal message as
-/// `pasteIntoTerm`, which is now one call to this; only the destination
-/// differs. It exists because the terminal is not always the destination: while
-/// the message box is up it IS the typing surface, and a right-click that
-/// dropped the clipboard into the PTY behind an unsent draft would be typing
-/// past the buffer, which is the very thing the box exists to stop.
+/// The terminal is not always the destination: while the message box is up it IS
+/// the typing surface, and a right-click that dropped the clipboard into the PTY
+/// behind an unsent draft would type past the buffer, the very thing the box
+/// exists to stop. `pasteIntoTerm` is one call to this, with the same guards and
+/// the same refusal message.
 export async function pasteClipboardText(
   deliver: (text: string) => void,
   refocus: () => void,

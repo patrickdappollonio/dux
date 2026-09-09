@@ -1,26 +1,17 @@
-// Pure helpers backing the flat (no-project-grouping) agent list, shared by the
-// desktop sidebar and the mobile hub so the two surfaces never drift. Kept free
-// of React and dnd-kit so every rule here is trivially unit-testable.
+// Pure helpers backing the flat agent list, shared by the desktop sidebar and
+// the mobile hub so the two surfaces never drift. Kept free of React and
+// dnd-kit so every rule here is unit-testable.
 //
-// The flat model replaces the project -> agents tree with a single ordered list
-// of agents (their companion terminals nest under them; project terminals ride
-// along as their own rows). These helpers own the three data decisions that make
-// that list readable: which agents are "quiet" (dormant) and collapse into a
-// tail, how the main list is ordered, and how a drag persists given the server
-// only knows per-project session order plus a global project order.
-//
-// The ORDERING (main-bucket sort + the Active-mode recency-sorted quiet tail) is
-// a TWIN of the core-owned `dux_core::flat_list::order_sessions`, pinned by
-// shared vectors (`flatList.test.ts` mirrors `flat_list.rs`).
+// The ordering (main-bucket sort plus the Active-mode recency-sorted quiet
+// tail) is a twin of the core-owned `dux_core::flat_list::order_sessions`,
+// pinned by shared vectors.
 
 import { sortedSessionIds, type SortKey as BaseSortKey } from "@/lib/sortSessions"
 import type { SessionView } from "@/lib/types"
 
 // The flat list's display sort. "active" is the default (core order with
-// working / needs-attention agents floated to the top); the remaining keys reuse
-// the exact TUI-parity comparators; "manual" is the raw persisted order, and the
-// ONLY mode in which drag-reorder is offered (a computed sort would just snap a
-// dragged row back, and an active-first order is dynamic so it cannot persist).
+// working / needs-attention agents floated to the top); the remaining keys
+// reuse the TUI-parity comparators; "manual" is the raw persisted order.
 export type FlatSortKey = "active" | BaseSortKey | "manual"
 
 export const FLAT_SORT_LABELS: Record<FlatSortKey, string> = {
@@ -28,12 +19,9 @@ export const FLAT_SORT_LABELS: Record<FlatSortKey, string> = {
   updated: "Recently updated",
   created: "Recently created",
   name: "Name (A to Z)",
-  // The web picker does not OFFER name_desc (only the TUI cycles into it), but
-  // the web must DISPLAY it when the TUI set it, so it needs a label. Where it
-  // is displayed changed with the static sort trigger: the trigger now always
-  // reads "Sort", so the sort MENU appends a checked "Name (Z to A)" row while
-  // that mode is active (the touch-visible truth), and the trigger's tooltip
-  // names the mode as a desktop nicety on top of it.
+  // The web picker never offers name_desc (only the TUI cycles into it) but has
+  // to display it when the TUI set it: the menu appends a checked row for it
+  // while it is active, since the trigger always reads "Sort".
   name_desc: "Name (Z to A)",
   manual: "Manual order",
 }
@@ -44,13 +32,11 @@ export function isQuietSession(session: SessionView): boolean {
   return session.status !== "active"
 }
 
-// Whether the Quiet tail should render forced-open for the current search. TWIN
-// of the core-owned `dux_core::quiet_tail::quiet_tail_forced_open` (the DECISION),
-// pinned by shared vectors. `normalizedQuery` is the trimmed/lowercased query
-// (empty means no active search); `dismissedQuery` is the NORMALIZED query under
-// which the user last collapsed the search-expanded tail; `hasQuietHit` is
-// whether the query matches a dormant row. Keying on the normalized query means a
-// whitespace/case variant of a dismissed query does NOT resurrect the tail.
+// Whether the Quiet tail renders forced-open for the current search. Twin of
+// the core-owned `dux_core::quiet_tail::quiet_tail_forced_open`, pinned by
+// shared vectors. Both queries are trimmed and lowercased (empty means no
+// search, `dismissedQuery` is the one the user last collapsed the tail under),
+// so a whitespace or case variant does not resurrect a dismissed tail.
 export function quietTailForcedOpen(
   normalizedQuery: string,
   dismissedQuery: string | null,
@@ -108,11 +94,9 @@ export function sortMainSessions(
     .filter((session): session is SessionView => session !== undefined)
 }
 
-// Order the QUIET (inactive) tail for display. In "active" mode the tail sorts
-// MOST-RECENTLY-ACTIVE-FIRST (Reverse(updated_at)), matching the TUI's
-// build_left_items / the core-owned `flat_list::order_sessions`; every other mode
-// leaves the tail VERBATIM (only "active" reorders the tail, so the surfaces
-// agree). TWIN of the core ordering, pinned by shared vectors.
+// Order the quiet (inactive) tail for display: in "active" mode most recently
+// updated first, every other mode verbatim, matching the core-owned
+// `flat_list::order_sessions` so the surfaces agree.
 export function sortQuietTail(
   sessions: SessionView[],
   key: FlatSortKey,
@@ -125,16 +109,13 @@ export function sortQuietTail(
     .filter((session): session is SessionView => session !== undefined)
 }
 
-// The agent to land on when the focused one vanishes (deleted here or by another
-// client). "Next" is read off the SAME ordering the user is looking at: the main
-// (active) bucket in the current sort mode, exactly what `FlatAgentList` renders
-// above the quiet tail. `previous` is the session list as it was while the gone
-// agent still existed, which is what gives "next" a position to count from;
-// `current` is the list that just arrived. The scan starts after the gone agent
-// and wraps, so deleting the last row lands on the first one rather than on
-// nothing. Only ACTIVE agents are candidates: a detached or exited agent has no
-// live process to land in, so it stays in the quiet tail where it belongs.
-// Returns null when no active agent is left, which the caller renders as home.
+// The agent to land on when the focused one vanishes. "Next" is read off the
+// ordering the user is looking at, the main bucket in the current sort mode:
+// `previous` is the list as it was while the gone agent still existed, which
+// gives next a position to count from, and `current` is the list that just
+// arrived. The scan wraps, so deleting the last row lands on the first. Only
+// active agents are candidates, since a dormant one has no process to land in;
+// null when none is left, which the caller renders as home.
 export function nextActiveSessionId(
   previous: SessionView[],
   current: SessionView[],
@@ -162,50 +143,38 @@ export function nextActiveSessionId(
   return candidates[0]
 }
 
-// Agent order is a single GLOBAL flat order (agents are independent of project
-// grouping). A drag is a plain `moveItem` over the complete session id list,
-// sent via `reorderAgents` (see FlatAgentList's handleDragEnd).
+// Agent order is one global flat list, persisted by `reorderAgents` as a plain
+// move over every session id.
 
-// The drag baseline for a drop: the COMPLETE session id list in the order the
-// user is actually looking at. Drag-reorder works from every sort mode; on a
-// drop made in a computed mode (active/name/updated/created) the new manual
-// baseline must be "what the screen showed, totalized": the main list in the
-// active sort's display order, then the quiet tail (which renders below the
-// main list) in its base relative order. Every session is included, never just
-// the visible/filtered subset, because the persisted order is total. MANUAL is
-// deliberately the base order VERBATIM (quiet sessions stay interleaved where
-// the base has them): that is exactly how manual drags always computed their
-// move, and drag-from-any-mode must not change manual's behavior.
+// The drag baseline for a drop: the complete session id list in the order the
+// user is looking at. A drop made in a computed mode (active/name/updated/
+// created) totalizes what the screen showed, the main list then the quiet tail
+// below it. Every session is included, never the visible or filtered subset,
+// because the persisted order is total. "manual" is deliberately the base order
+// verbatim, quiet sessions interleaved where the base has them.
 export function displayedSessionOrder(
   sessions: SessionView[],
   key: FlatSortKey,
 ): string[] {
   if (key === "manual") return sessions.map((session) => session.id)
   const { main, quiet } = partitionQuiet(sessions)
-  // The tail rides below the main list, ordered by `sortQuietTail` (recency in
-  // "active" mode, verbatim otherwise) so the persisted drag baseline matches
-  // exactly what the screen shows.
   return [...sortMainSessions(main, key), ...sortQuietTail(quiet, key)].map(
     (session) => session.id,
   )
 }
 
-// The colored STATE WORD shown on a row's second line, the honest, field-backed
-// stand-in for an "activity" string (dux has no such field). It reads straight
-// off the same flags that drive the bob and the attention pulse, so the word and
-// the motion cue can never disagree. Colors are Tailwind palette utilities, the
-// established pattern in agentRow.ts (never raw hex/oklch).
+// The colored state word on a row's second line, read off the same flags that
+// drive the bob and the attention pulse so the word and the motion cue cannot
+// disagree. Colors are Tailwind palette utilities, as in agentRow.ts, never raw
+// hex or oklch.
 export interface StateWord {
   label: string
   className: string
 }
 
 export function stateWord(session: SessionView): StateWord {
-  // TWIN of the core-owned priority ladder `dux_core::row_state::agent_row_state`
-  // (the DECISION); this surface only words and colors it. Pinned by shared
-  // vectors (`flatList.test.ts` mirrors `row_state.rs`'s tests). The order:
-  // needs-attention wins; then for an active agent typing outranks working,
-  // working outranks idle; then the non-active detached/exited words.
+  // The priority ladder is the core-owned `dux_core::row_state::agent_row_state`
+  // decision, pinned by shared vectors; this surface only words and colors it.
   if (session.needs_attention) return { label: "Needs you", className: "text-cyan-100" }
   if (session.status === "active" && session.typing) {
     // The soft-violet typing token, matching the TUI's `#c586e0` typing hue.

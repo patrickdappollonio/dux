@@ -1,24 +1,13 @@
-// Decides how the terminal sizes its PTY on the first frame after a socket
-// (re)open.
+// Decides how the terminal sizes its PTY on the first frame after a socket opens.
 //
-// Background: on the first frame after each socket open the client resizes the
-// PTY to the true viewport size. On the VERY FIRST open the PTY was created at
-// some default size and the server's initial snapshot may not match this
-// viewport, so we "jiggle" the width down one column and back: each step is a
-// real winsize change, so the kernel raises SIGWINCH and the full-screen agent
-// repaints its true UI over the imperfect snapshot. A same-size resize is a
-// kernel no-op (no SIGWINCH), which is exactly why the plain resize would not
-// force that repaint on the first open.
+// On the first open the PTY was created at a default size the snapshot may not
+// match, so the width is jiggled down one column and back: a same-size resize is a
+// kernel no-op, and only a real winsize change raises the SIGWINCH that makes a
+// full-screen agent repaint over an imperfect snapshot.
 //
-// On a RECONNECT the server keeps the PTY alive at its prior size and replays a
-// fresh repaint as the first frame. If the viewport is unchanged the PTY is
-// already the right size, so jiggling would force TWO needless full-screen agent
-// repaints (at two different widths) on every reconnect. On mobile the socket
-// reconnects constantly, so that is a lot of rewrapping the desktop never sees.
-// Instead we send a SINGLE resize to the true size: it still re-asserts our
-// ownership server-side, it is a kernel no-op (no repaint) when the size is
-// unchanged, and it raises exactly one natural SIGWINCH (one repaint) only when
-// the viewport genuinely changed while disconnected.
+// A reconnect sends a single resize to the true size instead: the server keeps the
+// PTY at its prior size and replays a repaint anyway, so jiggling would cost two
+// needless full-screen repaints on every one of a phone's constant reconnects.
 export type FirstFrameResizePlan = "jiggle" | "single"
 
 export function firstFrameResizePlan(isFirstOpen: boolean): FirstFrameResizePlan {

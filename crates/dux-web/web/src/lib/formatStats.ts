@@ -1,10 +1,6 @@
-// Presentation helpers for the Task Manager's numbers.
-//
-// These mirror the TUI's `format_bytes` (`app/render.rs`) deliberately: both
-// surfaces read the same core sample, so a MiB in the TUI must be a MiB in the
-// browser. Binary units (KiB/MiB/GiB), same thresholds, same decimal places.
-// Formatting is presentation, so it lives here rather than in core: sharing it
-// from Rust would need a codegen path that does not exist.
+// Presentation helpers for the Task Manager's numbers, mirroring the TUI's
+// `format_bytes` in `app/render.rs`: both surfaces read the same core sample, so the
+// units, thresholds and decimal places must match.
 
 const KIB = 1024
 const MIB = KIB * 1024
@@ -18,12 +14,9 @@ export function formatBytes(bytes: number): string {
   return `${bytes} B`
 }
 
-// Render a CPU percentage to one decimal, matching the TUI.
-//
-// NEVER clamp this at 100: a process tree with several busy threads spread
-// across cores legitimately reads above 100% (a real measurement on a busy tree
-// was 129.5%), and pinning it to 100 would hide exactly the runaway the Task
-// Manager exists to surface.
+// Renders a CPU percentage to one decimal, matching the TUI. Never clamp it at 100: a
+// process tree with busy threads across several cores legitimately reads higher, and
+// clamping would hide the runaway the Task Manager exists to surface.
 export function formatCpu(percent: number): string {
   return `${percent.toFixed(1)}%`
 }

@@ -1,8 +1,6 @@
-// Copy text to the clipboard, returning whether it succeeded (callers surface
-// their own toast). `navigator.clipboard` only exists in a secure context
-// (HTTPS or localhost); a plain-HTTP remote (e.g. a LAN IP without TLS) has no
-// async clipboard, so fall back to the legacy hidden-textarea + execCommand
-// path. Pure of UI side effects so it can be unit-tested.
+// Copies text to the clipboard, reporting whether it succeeded; callers raise their
+// own toast. `navigator.clipboard` exists only in a secure context, and dux is
+// routinely served over plain HTTP, so there is a hidden-textarea fallback.
 export async function copyToClipboard(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {

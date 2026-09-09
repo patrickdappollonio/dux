@@ -1,21 +1,16 @@
-// The pure join behind the Task Manager: reconcile the sampled stats against the
-// live spine and produce the exact row list to render.
+// The pure join behind the Task Manager: the sampled stats reconciled against
+// the live spine, as the exact row list to render. Three rules:
 //
-// Two rules drive everything here:
-//
-//  1. **The spine is authoritative for existence.** A stat with no spine row is
-//     an orphan (the runtime was killed between the poll and the refetch) and is
-//     dropped. A spine row with no stat still renders, with dashes, and stays
-//     stoppable: never drop a killable row for lack of numbers.
-//  2. **Join by id, never by label.** Core stamps each sampled row with the tab
-//     or terminal id it came from precisely so this join is exact. Matching on a
-//     label like "Agent (claude): fix-auth" breaks on a title containing "): "
-//     and silently conflates two agents that share a title.
-//
-// Order is deterministic and never depends on a stat value: dux, then each
-// agent's session-slot tab with its extra tabs nested by `order`, then that
-// agent's terminals, then TOTAL. Sorting by CPU would reorder rows under the
-// user's cursor on every poll.
+//  1. The spine is authoritative for existence. A stat with no spine row is an
+//     orphan and is dropped; a spine row with no stat renders with dashes and
+//     stays stoppable, since a killable row must never be dropped for want of
+//     numbers.
+//  2. Join by id, never by label. Core stamps each sampled row with its tab or
+//     terminal id so the join is exact; a label like "Agent (claude): fix-auth"
+//     breaks on a title containing "): " and conflates two agents sharing one.
+//  3. Order never depends on a stat value: dux, then each agent's slot tab with
+//     its extra tabs nested by `order`, then that agent's terminals, then TOTAL.
+//     Sorting by CPU would reorder rows under the cursor on every poll.
 
 import { formatBytes, formatCpu } from "./formatStats"
 import type { ResourceStatsView } from "./resourcesApi"
@@ -35,20 +30,15 @@ export interface TaskRow {
   name: string
   /** Secondary text (provider, foreground command), or null. */
   detail: string | null
-  /** An extra tab, rendered indented under its agent's session-slot tab. On an
-   * agent row this is exactly "not this agent's first tab", resolved here from
-   * the session record, and it is the row's authoritative slot-ness answer: a
-   * consumer reads `!nested` rather than deriving slot-ness a second way from
-   * the two ids. Always false for the dux, TOTAL and terminal rows. */
+  /** An extra tab, rendered indented under its agent's slot tab, and the row's
+   * authoritative slot-ness answer: a consumer reads `!nested` rather than
+   * deriving it again from the ids. False for dux, TOTAL and terminal rows. */
   nested: boolean
   /** Whether this row offers a Stop control (dux and TOTAL do not). */
   stoppable: boolean
-  /** The Stop control's accessible name. Distinct from `name`: a nested extra
-   * tab's `name` is only its provider ("claude"), which collides across
-   * sibling tabs of the same provider (a supported configuration, see
-   * CLAUDE.md's agent-tabs tenets) and carries no agent identity on its own.
-   * This field always includes the owning agent and the tab's position so it
-   * stays unique and meaningful even when `name` alone would not. */
+  /** The Stop control's accessible name, which always carries the owning agent
+   * and the tab's position. `name` cannot serve: a nested tab's is only its
+   * provider, which collides across sibling tabs of the same provider. */
   stopLabel: string
   /** The owning session, for the stop action. Null for dux/total AND for a
    * project terminal (whose owner is a project, not a session). */
@@ -62,22 +52,17 @@ export interface TaskRow {
   stats: ResourceStatsView | null
 }
 
-// Build the Task Manager's rows from the spine and the latest sample.
-//
-// `sessions` is the spine's session list, `projects` its project list (whose
-// project terminals produce rows too); `stats` the rows from
-// `GET /api/v1/resources` (possibly empty before the first poll lands, in which
-// case every row renders with dashes).
+// Build the Task Manager's rows from the spine and the latest sample. `stats`
+// may be empty before the first poll lands, in which case every row renders
+// with dashes.
 export function taskManagerRows(
   sessions: readonly SessionView[],
   stats: readonly ResourceStatsView[],
   projects: readonly ProjectView[],
   terminals: readonly TerminalView[],
 ): TaskRow[] {
-  // Terminals arrive as one flat, owner-tagged collection. Group them by owner
-  // KEY, which is a total function of the owner, so no terminal can fall out of
-  // the grouping; the walks below then emit each group where its owner sits, in
-  // the same order the nested collections used to carry.
+  // Grouped by owner KEY, a total function of the owner, so no terminal can
+  // fall out; the walks below emit each group where its owner sits.
   const terminalGroups = groupTerminalsByOwnerKey(terminals)
   // Index the sampled rows by the id core stamped on them.
   const byId = new Map<string, ResourceStatsView>()
@@ -90,12 +75,11 @@ export function taskManagerRows(
   const labels = new Map(sessions.map((s) => [s.id, sessionLabel(s)] as const))
   const projectNames = new Map(projects.map((p) => [p.id, p.name] as const))
 
-  // One terminal's row. What it says about its owner is decided by an EXHAUSTIVE
-  // match on that owner, so a new owner kind is a compile error right here, at
-  // the site that chooses the row's secondary text and which stop action it
-  // carries. It is deliberately not `ownerSessionId`/`ownerProjectId`: those
-  // collapse an unknown owner into a pair of nulls and keep compiling, which is
-  // how a row ends up rendered with no identity and no way to act on it.
+  // One terminal's row, whose secondary text and stop action come from an
+  // EXHAUSTIVE match, so a new owner kind is a compile error here. Deliberately
+  // not `ownerSessionId`/`ownerProjectId`, which collapse an unknown owner into
+  // a pair of nulls and keep compiling, rendering a row with no identity and no
+  // way to act on it.
   const terminalRow = (
     terminal: TerminalView,
     group: readonly TerminalView[],
@@ -115,10 +99,8 @@ export function taskManagerRows(
         sessionId: null,
         projectId: o.project_id,
       }),
-      // No owner, so the secondary text says where it is instead, which is what
-      // its sidebar row says too. Both ids are null because there is genuinely
-      // no owner to scope the row to; the stop action is keyed by `targetId`
-      // (the terminal id) and works regardless.
+      // No owner, so the secondary text says where it is, as its sidebar row
+      // does. Both ids are null; the stop action is keyed by `targetId`.
       standalone: (o) => ({
         detail: o.cwd_label,
         sessionId: null,
@@ -200,13 +182,11 @@ export function taskManagerRows(
           name: isSlot ? label : tab.provider,
           detail: isSlot ? tab.provider : null,
           nested: !isSlot,
-          // A dormant tab has no process but is still actionable, so it keeps
-          // its Stop control. WHICH act that is rides on `nested`, resolved
-          // just above through the shared `isFirstTab`: a first tab STOPS the
-          // agent, an extra tab is closed. A first tab is closable elsewhere,
-          // but a process monitor's Stop ends a process rather than deleting
-          // the row it is showing numbers for. `handleStop` reads that flag
-          // rather than asking the question over again.
+          // A dormant tab is still actionable, so it keeps its Stop control.
+          // WHICH act that is rides on `nested`, which `handleStop` reads
+          // rather than asking again: a first tab STOPS the agent, an extra tab
+          // is closed, because a process monitor's Stop ends a process rather
+          // than deleting the row it is showing numbers for.
           stoppable: true,
           stopLabel: isSlot
             ? `Stop ${label}`
@@ -219,38 +199,27 @@ export function taskManagerRows(
       }
     }
 
-    // Companion terminals are independent of the owning session's status:
-    // detaching an agent DELIBERATELY leaves its terminals running (a live
-    // PTY the user may still want to reach or stop), so this must never sit
-    // inside the `status === "active"` gate above. Every terminal in the
-    // spine is a live PTY (terminals are never persisted dormant), so
-    // existence always means running, regardless of the agent's own status.
+    // Never move this inside the `status === "active"` gate: detaching an agent
+    // DELIBERATELY leaves its terminals running, and every terminal in the
+    // spine is a live PTY, so existence means running whatever the agent's own
+    // status is.
     emitTerminalGroup(ownerKey({ kind: "session", session_id: session.id }))
   }
 
-  // Project terminals: live shells at a project's repo root with no agent
-  // attached. They are never gated on any session's status (they have no
-  // session), and their stats join by terminal id exactly like session
-  // terminals; the resource monitor samples the whole terminal map.
+  // Project terminals have no session, so no session's status gates them.
   for (const project of projects) {
     emitTerminalGroup(ownerKey({ kind: "project", project_id: project.id }))
   }
 
-  // Standalone terminals: live shells in the user's home directory with neither
-  // an agent nor a project behind them. They have no owner section to sit under,
-  // so they get their own emit, before the sweep below, so their rows land in a
-  // predictable place rather than wherever the leftover pass happens to put
-  // them. The sweep would catch them either way, which is the safety net, not
-  // the plan.
+  // Standalone terminals have no owner section to sit under, so they are
+  // emitted here to land in a predictable place. The sweep below would catch
+  // them anyway, but as a safety net rather than the plan.
   emitTerminalGroup(ownerKey({ kind: "standalone", cwd_label: "" }))
 
-  // Anything the two walks never reached: a terminal whose owner id resolves to
-  // nothing in this spine, or one belonging to a kind of owner these walks have
-  // no section for. It is emitted here rather than dropped, because the Task
-  // Manager's "Stop all" confirmation counts EVERY terminal in the flat
-  // collection: a terminal with no row would leave the rows and that count
-  // disagreeing about what is going to be stopped, and would take away the only
-  // control the user has for stopping it.
+  // Anything the walks above never reached, emitted rather than dropped: the
+  // "Stop all" confirmation counts EVERY terminal in the flat collection, so a
+  // terminal with no row leaves rows and count disagreeing about what is about
+  // to be stopped, and takes away the only control for stopping it.
   for (const key of terminalGroups.keys()) emitTerminalGroup(key)
 
   const total = stats.find((s) => s.kind === "total") ?? null
@@ -277,14 +246,10 @@ export function nothingRunning(rows: readonly TaskRow[]): boolean {
   return !rows.some((r) => r.stoppable)
 }
 
-// The footer's muted totals line (e.g. "4 running · 14 processes · 65.6% CPU
-// · 1.4 GB"), read straight off the TOTAL row rather than summed here: core
-// already computes that aggregate once, and re-deriving it client-side would
-// risk drifting from the collector's own rounding.
-//
-// `null` when nothing is running: an all-dash summary next to an empty list
-// says nothing a reader needs, and the footer already omits "Stop all…" in
-// that state, so the summary disappears with it.
+// The footer's muted totals line, read straight off the TOTAL row rather than
+// summed here: core computes that aggregate once, and re-deriving it would risk
+// drifting from the collector's own rounding. `null` when nothing is running,
+// so the summary disappears alongside the footer's "Stop all…".
 export function taskManagerSummary(rows: readonly TaskRow[]): string | null {
   const runningCount = rows.filter((r) => r.stoppable).length
   if (runningCount === 0) return null

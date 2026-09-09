@@ -35,10 +35,8 @@ interface GestureState {
 
 /**
  * Own the timing-sensitive interaction state around react-resizable-panels'
- * Changes pane. The hook deliberately keeps the library-facing event targets,
- * capture phases and scheduling primitives in one place: window capture for
- * gesture observation, requestAnimationFrame for re-show healing, a microtask
- * for the synchronous keyboard report, and a macrotask for collapse commit.
+ * Changes pane: the library-facing event targets, capture phases and scheduling
+ * primitives all live here rather than spread across the shell.
  */
 export function useChangesPaneController(showChanges: boolean) {
   // `defaultSize` is consumed in the render that mounts the panel. Re-read the
@@ -158,10 +156,8 @@ export function useChangesPaneController(showChanges: boolean) {
     setChangesPanePercent(percent)
   }
 
-  // Observe the same global events, on the same target and in the same capture
-  // phase, as the previous inline controller. The verdict intentionally
-  // survives pointerup/cancel because the library's bad zero-width report can
-  // arrive later; the next pointerdown resets it.
+  // The verdict intentionally survives pointerup/cancel because the library's
+  // bad zero-width report can arrive later; the next pointerdown resets it.
   useEffect(() => {
     const onDown = (event: Event) => {
       const gesture = gestureRef.current

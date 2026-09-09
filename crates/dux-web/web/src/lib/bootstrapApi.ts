@@ -1,39 +1,25 @@
-// HTTP client for the build-static / config-derived bootstrap document. Like
-// `changesApi.ts`, this is a plain GET (the read-only `git.ts` pattern, with
-// `credentials: "same-origin"`) so it composes with HTTP caching and reads as a
-// resource fetch. The matching `config.changed` event over `/ws/events` tells
-// the client WHEN to re-GET.
+// HTTP client for the config-derived bootstrap document: a plain same-origin GET,
+// re-issued when a `config.changed` event arrives. The server projects config and
+// runtime capabilities into this one document and is authoritative.
 //
-// These fields are static per server config, so they live on a document GET
-// rather than a volatile broadcast channel.
-// The server is authoritative: it projects the config + runtime capabilities
-// into this single document. A non-2xx is thrown as a `BootstrapFetchError`
-// carrying the HTTP status so the caller can branch.
+// A non-2xx is thrown as a `BootstrapFetchError` carrying the HTTP status.
 
 import type { DropPasteProfile } from "./fileDrop"
 import type { FlatSortKey } from "./flatList"
 import type { MacroView } from "./types"
 
-// The bootstrap document. Field names/types mirror the server's JSON (snake_case)
-// and the values the legacy ViewModel carried, so consumers move over without a
-// shape change. Newer fields may be absent when talking to an older server (a `?`
-// marks the ones typed optional, e.g. `title`); consumers fall back to the
-// per-field documented default rather than assuming every field is present.
+// The bootstrap document; field names and types mirror the server's snake_case
+// JSON. An optional field may be absent against an older server, and consumers
+// fall back to the default documented on it rather than assuming it is present.
 export interface Bootstrap {
   /** Configured agent providers (the new-agent / change-provider pickers). */
   available_providers: string[]
-  /** What CONFIG currently says a DROPPED file's path should look like for each
-   * configured provider: the paste form (normalized server-side to one of the
-   * names `DragDropPasteForm` knows) and the file name of the command the block
-   * runs, which is what identifies the receiving CLI. Keyed by provider name.
+  /** What config says a dropped file's path should look like per provider: the
+   * paste form and the file name of the command the block runs. Keyed by provider.
    *
-   * This is the FALLBACK, used only for a pane with no live process to read
-   * from. What a live process launched with rides the SPINE, on the tab itself
-   * (`AgentTabView.drop_paste`), because that is what a launch and a termination
-   * refresh; this document is refreshed by `config.changed`, which is what can
-   * change IT. A provider absent from this map, and the whole field being absent
-   * on an older server, both resolve to "bare" with no length limit (see
-   * `dragDropPasteFormFor`). */
+   * The fallback only, for a pane with no live process; what a live process
+   * launched with rides `AgentTabView.drop_paste`. An absent provider or field
+   * resolves to "bare" with no length limit (see `dragDropPasteFormFor`). */
   provider_drop_paste?: Record<string, DropPasteProfile>
   /** Text macros from `[macros]` in config order (the macro popover/editor). */
   macros: MacroView[]
@@ -48,95 +34,64 @@ export interface Bootstrap {
   copy_uncommitted_changes_by_default?: boolean
   /** Whether the new-agent-from-PR flow is available (GitHub integration + `gh`). */
   gh_available: boolean
-  /** Raw `config.ui.github_integration` flag (distinct from `gh_available`, the
-   * composite). The palette hides the PR-banner-position command when this is
-   * false — i.e. when integration is OFF, not merely when `gh` is unreachable. */
+  /** Raw `config.ui.github_integration` flag, distinct from the `gh_available`
+   * composite: false means integration is off, not merely that `gh` is unreachable. */
   github_integration: boolean
   /** Mirrors `config.ui.copy_on_select`: whether selecting text in the web
    * terminal auto-copies it to the clipboard (default true). */
   copy_on_select: boolean
-  /** Mirrors `config.ui.terminal_font_family`: a font name installed on the
-   * VIEWING device, placed ahead of dux's bundled terminal font stack so the
-   * bundled faces still fill in glyphs it lacks. Empty string (the default)
-   * means "use the bundled stack only." Web UI only; the TUI uses the host
-   * terminal's own font. Older servers omit it, so consumers fall back to "". */
+  /** Mirrors `config.ui.terminal_font_family`: a font on the viewing device, placed
+   * ahead of the bundled stack, which still fills in glyphs it lacks. Falls back to
+   * "", the bundled stack alone. */
   terminal_font_family?: string
-  /** Mirrors `config.ui.terminal_font_size`: the web terminal's font size in
-   * pixels (default 14, valid 8..=32; an out-of-range or invalid config value
-   * degrades to the default at load time). Older servers omit it, so
-   * consumers fall back to 14. */
+  /** Mirrors `config.ui.terminal_font_size`: the web terminal's font size in pixels,
+   * valid 8..=32, falling back to 14 when absent or out of range. */
   terminal_font_size?: number
-  /** Mirrors `config.ui.compose_bar`: WHEN the touch terminal shows the
-   * compose bar (a buffered textarea with native autocorrect whose Send
-   * delivers the message plus a submitting Enter) and redirects a tap on the
-   * terminal into it. When it is down, a tap focuses xterm directly, the
-   * pre-compose-bar behavior.
+  /** Mirrors `config.ui.compose_bar`: when the terminal shows the compose bar and
+   * redirects a tap into it. With the bar down, a tap focuses xterm directly.
    *
-   * One of `"auto"` (the default: the BROWSER decides, from whether touch is
-   * the primary pointer), `"always"` or `"never"`. This was a boolean before
-   * the mode existed; an older server omits the field entirely, and both that
-   * and an unrecognized value read as `"auto"` through `composeBarMode`. */
+   * One of "auto" (the browser decides from the primary pointer), "always" or
+   * "never"; an absent or unrecognized value reads as "auto" via `composeBarMode`. */
   compose_bar?: string
-  /** Mirrors `config.ui.mobile_accessory_bar`: whether the touch terminal
-   * screens show the accessory key bar (Esc/Tab/Ctrl/Alt/arrows). A pure
-   * render gate; a hidden bar is restored from the input ⋯ menu below the
-   * terminal or from the Preferences dialog. Older servers omit it, so
-   * consumers fall back to true. A `mobile_top_bar` sibling published the
-   * same gate for the phone's top bar and is gone: theater mode hides that
-   * chrome and carries its own way back. */
+  /** Mirrors `config.ui.mobile_accessory_bar`: whether the touch terminal screens
+   * show the accessory key bar. A pure render gate, restored from the input menu or
+   * Preferences; falls back to true. */
   mobile_accessory_bar?: boolean
-  /** Mirrors `config.ui.upload_write_gitignore`: whether the agent upload
-   * directory keeps a `.gitignore` holding a single `*`, so a file dropped or
-   * pasted onto an agent stays invisible to git. Read by the Preferences
-   * dialog; older servers omit it, so consumers fall back to true. Its
-   * companion `ui.upload_directory` is deliberately not published as a
-   * preference: it is a path, and there is no directory picker to edit it. */
+  /** Mirrors `config.ui.upload_write_gitignore`: whether the agent upload directory
+   * keeps a `.gitignore` of `*`, so a dropped file stays invisible to git. Falls
+   * back to true. Its `ui.upload_directory` companion is deliberately not a
+   * preference: it is a path, and there is no directory picker for it. */
   upload_write_gitignore?: boolean
-  /** Mirrors `config.ui.upload_pasted_text_chars`: how many characters a TEXT
-   * paste onto an AGENT pane may run to before dux saves it as a `.txt` file
-   * and pastes that file's path instead of typing the text. `0` switches the
-   * behaviour off. Older servers omit it, and this document arrives after the
-   * first render, so consumers treat an absent value as OFF (0): nothing
-   * surprising happens to a paste until dux has said the feature exists, the
-   * same rule `file_drop_max_bytes` follows. Never applies to a TERMINAL pane,
-   * where a long paste is a command or a heredoc. */
+  /** Mirrors `config.ui.upload_pasted_text_chars`: how long a text paste onto an
+   * agent pane may run before dux saves it as a file and pastes the path; 0 is off.
+   * Absent reads as off, since the document arrives after the first render. Never
+   * applies to a terminal pane, where a long paste is a command or a heredoc. */
   upload_pasted_text_chars?: number
-  /** Mirrors `config.ui.auto_reopen_agents`: the GLOBAL startup auto-reopen
-   * switch. When on, agents that were still running when dux last exited (and
-   * have their per-agent opt-in) relaunch at the next startup, on the TUI and
-   * on `dux serve` alike. Older servers omit it, so consumers fall back to
-   * FALSE, the config default (unlike `compose_bar`'s true). */
+  /** Mirrors `config.ui.auto_reopen_agents`: the global startup auto-reopen switch,
+   * which relaunches agents that were running at exit and carry the per-agent
+   * opt-in. Falls back to false, the config default. */
   auto_reopen_agents?: boolean
-  /** Mirrors `config.ui.attention_grace_seconds`: seconds the attention
-   * indicators stay visible after the browser tab returns to the foreground,
-   * before the focused agent's needs-attention flag clears (default 3; 0
-   * clears immediately). Older servers omit it, so consumers fall back to 3. */
+  /** Mirrors `config.ui.attention_grace_seconds`: seconds the attention indicators
+   * survive the tab returning to the foreground; 0 clears immediately, absent is 3. */
   attention_grace_seconds?: number
-  /** Mirrors `config.capabilities.web_notifications`: whether the web UI bridges
-   * an agent's notification sequences to a browser desktop Notification. Still
-   * gated on visitor permission and a backgrounded tab. Older servers omit it,
-   * so consumers fall back to true. */
+  /** Mirrors `config.capabilities.web_notifications`: whether an agent's
+   * notification sequences reach a browser Notification, still gated on visitor
+   * permission and a backgrounded tab. Falls back to true. */
   web_notifications?: boolean
-  /** Mirrors `config.capabilities.hyperlinks`: whether the web terminal renders
-   * OSC 8 hyperlinks as clickable (http/https only). Older servers omit it, so
-   * consumers fall back to true. */
+  /** Mirrors `config.capabilities.hyperlinks`: whether the web terminal renders OSC 8
+   * hyperlinks as clickable (http/https only). Falls back to true. */
   hyperlinks?: boolean
-  /** Mirrors `config.capabilities.clipboard_passthrough` (normalized): whether an
-   * agent's OSC 52 clipboard SET reaches the visitor's browser clipboard:
-   * "focused"/"always" write it (the browser still requires the tab to have
-   * focus), "off" never does. The server resolves the `capabilities.passthrough`
-   * master switch INTO this value, so a server with passthrough off publishes
-   * "off" here and there is no second field to combine. That switch has no
-   * bearing on browser notifications; `web_notifications` alone governs those.
-   * Older servers omit this field, so consumers fall back to "focused". */
+  /** Mirrors `config.capabilities.clipboard_passthrough`, normalized: whether an
+   * agent's OSC 52 clipboard set reaches the browser clipboard. "focused"/"always"
+   * write it, "off" never does, and the `capabilities.passthrough` master switch is
+   * already resolved into this value, so there is no second field. Absent is
+   * "focused". */
   clipboard_passthrough?: "focused" | "always" | "off"
-  /** Mirrors `config.ui.pr_banner_position`: "bottom" places the PR lane below
-   * the terminal, anything else above. (Server sends a free string; the two
-   * known values are the only ones the UI branches on.) */
+  /** Mirrors `config.ui.pr_banner_position`: "bottom" places the PR lane below the
+   * terminal, anything else above. The server sends a free string. */
   pr_banner_position: "top" | "bottom"
-  /** Mirrors `config.ui.agent_sort`: the flat agent-list sort mode, persisted
-   * server-side so it survives restarts and every client agrees. Older servers
-   * omit it, so consumers fall back to "active". */
+  /** Mirrors `config.ui.agent_sort`: the agent-list sort mode, persisted server-side
+   * so every client agrees. Falls back to "active". */
   agent_sort?: FlatSortKey
   /** Mirrors `config.ui.agent_scrollback_lines`; sizes each xterm.js instance. */
   agent_scrollback_lines: number
@@ -145,99 +100,69 @@ export interface Bootstrap {
   /** Mirrors `[server] tailscale` as its canonical name: "auto" | "yes" | "no".
    * An older server omits it, so the Preferences row falls back to "auto". */
   tailscale_mode?: string
-  /** True when THIS RUN of the server was started with `--no-tailscale`, which
-   * outranks the saved mode until it restarts. Injected per request by the
-   * server process, not projected from config. */
+  /** True when this run of the server was started with `--no-tailscale`, which
+   * outranks the saved mode until it restarts. Per run, not projected from config. */
   tailscale_forced_no?: boolean
-  /** Mirrors `config.ui.always_show_tab_strip`: when true the agent tab strip
-   * renders even with a single tab (default false, matching today's chrome-free
-   * single-tab pane). */
+  /** Mirrors `config.ui.always_show_tab_strip`: when true the agent tab strip renders
+   * even with a single tab. Default false. */
   always_show_tab_strip: boolean
-  /** Mirrors `config.ui.tab_reaches_agent`: when true the TERMINAL app's
-   * typeable center pane sends Tab and Shift-Tab to the agent instead of
-   * cycling panes. Nothing in the web UI acts on it; it is here so the
-   * Preferences dialog can show and change it. Older servers omit it, so
-   * consumers fall back to `false`. */
+  /** Mirrors `config.ui.tab_reaches_agent`: when true the terminal UI's typeable
+   * pane sends Tab and Shift-Tab to the agent instead of cycling panes. Nothing in
+   * the web UI acts on it; Preferences shows and changes it. Falls back to false. */
   tab_reaches_agent?: boolean
   /** Global environment variables applied to every spawned agent/terminal. */
   global_env: Record<string, string>
-  /** Mirrors `config.ui.status_clear_seconds`: how long an info/success toast
-   * stays before auto-clearing. It is the BASE for every tone, not just
-   * info/success: `lib/notify.ts` scales warning and error off it. 0 means
-   * "never auto-clear" for final states. Older servers omit it, so consumers
-   * fall back to 6. */
+  /** Mirrors `config.ui.status_clear_seconds`: the base window every tone is scaled
+   * off in `lib/notify.ts`, not info/success alone. 0 never auto-clears a final
+   * state; absent is 6. */
   status_clear_seconds: number
-  /** The operator-chosen display name for this dux instance (`config.server
-   * .title`). Shown as the browser tab title and the projects-pane wordmark.
-   * Optional: older servers omit it, so consumers resolve a missing/blank value
-   * to "dux" via `resolveInstanceTitle`. */
+  /** The operator-chosen display name for this instance (`config.server.title`),
+   * shown as the tab title and wordmark. A missing or blank value resolves to "dux"
+   * via `resolveInstanceTitle`. */
   title?: string
-  /** The operator-chosen favicon for this dux instance (`config.server.favicon`).
-   * Empty/missing shows the bundled full-colour duck (`/favicon.png`); a curated
-   * tint colour name recolours the duck silhouette in that colour; anything else
-   * (a legacy hex or URL, a dropped colour name) degrades to the default duck with
-   * a one-time notice. Resolved and applied by `applyFavicon`. Optional: older
-   * servers omit it. */
+  /** The operator-chosen favicon (`config.server.favicon`), resolved and applied by
+   * `applyFavicon`: empty shows the bundled duck, a curated tint name recolours its
+   * silhouette, and anything else degrades to the duck with a one-time notice. */
   favicon?: string
-  /** Mirrors `config.ui.agent_tabs_max` (normalized): the per-agent tab cap
-   * INCLUDING the session-slot tab. The tab strip disables its "+" once a session has
-   * this many tabs; the server re-enforces on create. Older servers omit it, so
-   * consumers fall back to `DEFAULT_AGENT_TABS_MAX`. */
+  /** Mirrors `config.ui.agent_tabs_max`, normalized: the per-agent tab cap, counting
+   * the session-slot tab. The strip disables its "+" at the cap and the server
+   * re-enforces on create; absent falls back to `DEFAULT_AGENT_TABS_MAX`. */
   agent_tabs_max?: number
-  /** Mirrors `config.ui.attention_indicator`: whether an attention cue is
-   * shown at all when an agent asks for attention (default true). Read by the
-   * Settings modal's "Both surfaces" group. Older servers omit it, so
-   * consumers fall back to true. */
+  /** Mirrors `config.ui.attention_indicator`: whether any cue is shown when an agent
+   * asks for attention. Falls back to true. */
   attention_indicator?: boolean
-  /** Mirrors `config.ui.attention_on_bell`: whether a plain terminal bell also
-   * counts as an attention request (default true; no effect when
-   * `attention_indicator` is false). Older servers omit it, so consumers fall
+  /** Mirrors `config.ui.attention_on_bell`: whether a plain terminal bell also counts
+   * as an attention request. No effect while `attention_indicator` is false; falls
    * back to true. */
   attention_on_bell?: boolean
-  /** Mirrors `config.defaults.provider`: the GLOBAL default provider for new
-   * agents in projects without a project-specific override, matching the
-   * TUI's `change-default-provider` palette command. Distinct from a
-   * project's own `default_provider` override (see `ProjectView` in
-   * `types.ts`), which is the effective per-project value. Older servers omit
-   * it, so consumers fall back to "claude". */
+  /** Mirrors `config.defaults.provider`: the global default provider for new agents
+   * in projects with no override of their own (`ProjectView.default_provider` in
+   * `types.ts` is the effective per-project value). Falls back to "claude". */
   global_default_provider?: string
-  /** The first-run welcome screen's copy, from `dux_core::welcome_screen` so the
-   * web and the TUI say identical words. Present unconditionally, not only when
-   * the welcome is pending: the app menu can open the screen on demand. Older
-   * servers omit it, so consumers must tolerate `undefined` (the menu entry then
-   * has nothing to show). Distinct from `welcome_tips`, the rotating idle-pane
-   * tips. */
+  /** The welcome screen's copy, from `dux_core::welcome_screen` so both surfaces say
+   * identical words. Present unconditionally, since the app menu can open the screen
+   * on demand, but consumers must tolerate `undefined`. Not `welcome_tips`. */
   welcome_screen?: WelcomeScreenView
-  /** `dux_core::urls::WEBSITE` — where the welcome screen's secondary button
-   * goes. Server-projected so the two surfaces cannot disagree about a dux URL.
-   * Older servers omit it. */
+  /** `dux_core::urls::WEBSITE`, where the welcome screen's secondary button goes.
+   * Server-projected so the two surfaces cannot disagree about a dux URL. */
   website_url?: string
-  /** The first-load screen THIS launch should show, or null/absent for neither.
-   * Decided once by the server at startup and held in its memory, so a browser
-   * that connects at any point still receives it. Dismissing it (`dismissFirstLoad`)
-   * records the version as seen in SQLite, which the TUI reads too — so a
-   * dismissal here settles the screen on both surfaces. */
+  /** The first-load screen this launch should show, or absent for neither. Decided
+   * once at startup and held in the server's memory, so a browser connecting at any
+   * point still receives it; `dismissFirstLoad` settles it on both surfaces. */
   pending_first_load?: PendingFirstLoad | null
-  /** Mirrors `config.ui.disable_automated_welcome_screen`: suppresses the
-   * AUTOMATIC first-run welcome only; the app menu entry still opens it. Older
-   * servers omit it, so consumers fall back to false. */
+  /** Mirrors `config.ui.disable_automated_welcome_screen`: suppresses the automatic
+   * first-run welcome only, never the app menu entry. Falls back to false. */
   disable_automated_welcome_screen?: boolean
-  /** Mirrors `config.ui.disable_release_notes`: suppresses the AUTOMATIC
-   * what's-new screen only; the app menu entry still opens it. Older servers omit
-   * it, so consumers fall back to false. */
+  /** Mirrors `config.ui.disable_release_notes`: suppresses the automatic what's-new
+   * screen only, never the app menu entry. Falls back to false. */
   disable_release_notes?: boolean
-  /** Mirrors `config.server.file_drop_max_bytes`: the per-file size cap for a
-   * file dropped onto a pane, where 0 switches file drop OFF. The terminal pane
-   * gates its whole drag surface on this, so a disabled feature offers nothing
-   * rather than advertising a drop target and collecting a server refusal after
-   * the fact (the server refusal remains the real enforcement). Older servers
-   * omit it, and this document also arrives after the first render, so
-   * consumers treat an absent value as OFF: nothing is offered until dux has
-   * said the feature exists. */
+  /** Mirrors `config.server.file_drop_max_bytes`: the per-file cap for a dropped
+   * file, where 0 switches file drop off and the pane offers no drop target at all.
+   * The server refusal remains the real enforcement, and an absent value reads as
+   * off, since this document arrives after the first render. */
   file_drop_max_bytes?: number
-  /** Mirrors `config.server.replay_wait_seconds`: seconds of VISIBLE time a
-   * terminal pane waits for its screen after connecting, before offering
-   * Reconnect. */
+  /** Mirrors `config.server.replay_wait_seconds`: seconds of visible time a terminal
+   * pane waits for its screen after connecting, before offering Reconnect. */
   replay_wait_seconds?: number
   /** Mirrors `config.server.reconnect_backoff_cap_seconds`: the longest gap
    * between two automatic reconnect attempts. */
@@ -284,19 +209,14 @@ export interface PendingFirstLoad {
   notes?: ReleaseNotesView | null
 }
 
-/** Fallback per-agent tab cap when the server omits `agent_tabs_max` (older
- * servers). Mirrors `dux_core::config::DEFAULT_AGENT_TABS_MAX`
- * (`crates/dux-core/src/config.rs`) — this is a plain duplicated literal, not
- * generated from the Rust constant, so nothing enforces the two staying equal.
- * `bootstrapApi.test.ts` pins this value so a change here (or there) without
- * updating the other shows up as a failing test rather than a silent drift;
- * if you bump one, bump the other in the same change. */
+/** Fallback per-agent tab cap when the server omits `agent_tabs_max`. A duplicated
+ * literal that must stay equal to `dux_core::config::DEFAULT_AGENT_TABS_MAX` in
+ * `crates/dux-core/src/config.rs`; bump one and bump the other. */
 export const DEFAULT_AGENT_TABS_MAX = 20
 
-// A failed bootstrap fetch. `status` is the HTTP status (0 for a network/
-// transport failure with no response). The boot path swallows this and keeps the
-// last-known bootstrap (null on first boot); a later `config.changed` event or a
-// reconnect retries.
+// A failed bootstrap fetch; `status` is 0 for a transport failure with no response.
+// The boot path swallows it and keeps the last-known bootstrap, retrying on a later
+// `config.changed` event or reconnect.
 export class BootstrapFetchError extends Error {
   readonly status: number
 

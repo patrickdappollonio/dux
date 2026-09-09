@@ -1,16 +1,11 @@
-// What the editor SAYS when a file mutation lands.
+// What the editor says when a file mutation lands.
 //
-// Only the mutations whose outcome is NOT already on screen: a move, which
-// takes the entry out of the folder the user was looking at, and a delete,
-// whose dialog closes BEFORE the request settles (deliberately; see
-// EditorBody's handler) and so leaves no other trace of what happened. A
-// create and an in-place rename are read straight off the tree row and the
-// open tab, so they say nothing.
-//
-// Kept pure and here rather than inline at the call sites so the wording is
-// one place, testable without mounting the editor, and hard to drift between
-// the two shells. Nothing in this file imports the notification raiser: the
-// caller decides WHEN to raise, this decides WHAT it says.
+// Only the mutations whose outcome is not already on screen: a move, which
+// takes the entry out of the folder in view, and a delete, whose dialog closes
+// before the request settles. A create and an in-place rename are read off the
+// tree row and the open tab, so they say nothing. Nothing here imports the
+// notification raiser: the caller decides when to raise, this decides what it
+// says.
 
 /// The two things the editor can create. Mirrors `NewEntryTarget.kind`.
 export type EntryKind = "file" | "folder"
@@ -20,12 +15,9 @@ function noun(isDir: boolean): EntryKind {
   return isDir ? "folder" : "file"
 }
 
-/// "Moved notes.md to docs/", or "Moved notes.md to the worktree root".
-///
-/// The destination is a DIRECTORY here, which is the opposite of the rename
-/// case: what changed is where the entry lives, and its name is unchanged. An
-/// empty destination is the worktree root, which is a real destination and
-/// deserves a real word rather than an empty string or a bare "/".
+/// "Moved notes.md to docs/", or "Moved notes.md to the worktree root". The
+/// destination is a directory, unlike the rename case: the name is unchanged.
+/// An empty destination is the worktree root and gets a word rather than "/".
 export function movedMessage(from: string, destDir: string): string {
   if (destDir === "") return `Moved ${from} to the worktree root`
   return `Moved ${from} to ${destDir}/`

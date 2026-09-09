@@ -1,106 +1,8 @@
 /**
- * Forwarding a TOUCH gesture to a mouse-reporting app in the PTY.
- *
- * # Why this is a replay and not an encoder
- *
- * A terminal mouse report is not one wire format. The app chooses BOTH a
- * tracking protocol and an encoding, with separate DEC private modes, and the
- * two are independent:
- *
- * | DECSET | meaning                          | kind     |
- * | ------ | -------------------------------- | -------- |
- * | `?9`   | X10: press only, no modifiers     | protocol |
- * | `?1000`| VT200: press + release            | protocol |
- * | `?1002`| cell-motion (drag while pressed)  | protocol |
- * | `?1003`| any-motion                        | protocol |
- * | `?1005`| UTF-8 coordinates                 | encoding |
- * | `?1006`| SGR                               | encoding |
- * | `?1015`| urxvt                             | encoding |
- * | `?1016`| SGR pixels                        | encoding |
- *
- * A browser-side encoder cannot be correct: `term.modes.mouseTrackingMode`
- * reports the PROTOCOL and says nothing about the ENCODING, so hardcoding SGR
- * sends unparseable text to an app on `?1000`/`?1002` without `?1006`, and a
- * release report to an app on `?9`, which must never receive one. Cell math
- * must be xterm's own (`getMouseReportCoords` measures against the
- * `.xterm-screen` element, subtracts its CSS padding and divides by the
- * MEASURED cell size); dividing the container width by the column count
- * inflates every cell (the container includes the scrollbar gutter; measured
- * on a 390px viewport, 15 of 21 points resolve to a different cell, drifting
- * up to two columns).
- *
- * MEASURED against the installed `@xterm/xterm` 6.0.0 bundle
- * (`node_modules/@xterm/xterm/lib/xterm.mjs`):
- *
- *  - xterm implements exactly three encodings, `DEFAULT` (the classic X10 byte
- *    form `ESC [ M Cb Cx Cy`), `SGR` and `SGR_PIXELS`. `?1005` and `?1015` are
- *    parsed and DELIBERATELY IGNORED ("DECSET 1005 not supported (see #2507)"),
- *    so a browser-side encoder that supported them would be encoding for a
- *    state xterm can never be in.
- *  - the active encoding lives on `CoreMouseService._activeEncoding` behind an
- *    `activeEncoding` accessor. `IModes` publishes `mouseTrackingMode` and
- *    NOTHING about the encoding, so there is no public read of it. Reaching
- *    into `term._core` for it is not on the table.
- *  - `DEFAULT`-encoded reports are emitted through `triggerBinaryEvent`, i.e.
- *    `Terminal.onBinary`, NOT `onData` (`triggerMouseEvent` branches on
- *    `activeEncoding === "DEFAULT"`). A pane that subscribes only to `onData`
- *    silently drops every X10-encoded mouse report, including a real DESKTOP
- *    click. `TerminalPane` subscribes to both.
- *
- * So this module does not encode anything. It REPLAYS the DOM mouse events the
- * browser's own synthetic ones would have been, straight at the element xterm
- * binds its mouse pipeline to, and lets xterm do the coordinate math, the
- * protocol gating (X10 sends no release; a wheel report is suppressed for a
- * protocol that did not ask for one) and the encoding. That is the same
- * technique, and the same reasoning, as `lib/termlink.ts`: drive xterm through
- * its own public contract instead of re-implementing a private one beside it.
- *
- * # What real agent CLIs ask for
- *
- * MEASURED by reading the shipped code of each CLI installed on a development
- * machine (static analysis, not a wire capture), plus upstream source where it
- * is published. Be honest about what this table says: EVERY measured CLI pairs
- * its tracking mode with `?1006`, so the old hardcoded SGR happened to be right
- * for all four defaults, and the encoding half of this change is insurance
- * rather than a fix for them. The CELL half is not insurance: it was wrong for
- * every one of them (see below).
- *
- * | CLI          | version | tracking                | encoding | source |
- * | ------------ | ------- | ----------------------- | -------- | ------ |
- * | Claude Code  | 2.1.227 | `?1000`+`?1002`+`?1003` | `?1006`  | its bundle, composed at runtime from a numeric mode table |
- * | opencode     | 1.17.10 | `?1000`+`?1002`+`?1003` | `?1006`  | OpenTUI's `terminal.zig` `setMouseMode`, cross-checked against the shipped native lib |
- * | Copilot CLI  | 1.0.73  | `?1002` (or `?1003`)    | `?1006`  | shipped bundle only; no source is published |
- * | Codex        | 0.145.0 | NONE                    | n/a      | no `EnableMouseCapture` anywhere; it uses `?1007` alternate scroll instead |
- *
- * Two things that table teaches, both of which argue for the replay:
- *  - crossterm (which any ratatui provider a user configures will pull in)
- *    writes `?1015` urxvt BEFORE `?1006`. xterm ignores 1015, so SGR still
- *    wins, but a browser-side encoder reasoning from "what did the app ask
- *    for?" would have had to know that.
- *  - dux's whole provider model is "any CLI can be a provider", so the set of
- *    apps whose mouse modes matter is open-ended by design. Four measured rows
- *    are not a licence to hardcode the fifth.
- *
- * One gap is known and NOT fixed here, because it is not the browser's to fix:
- * `dux_core::pty`'s reconnect replay re-asserts 1000/1002/1003/1005/1006 but
- * has no X10 (`?9`) flag to re-assert, since alacritty_terminal does not model
- * one. So a `?9` app's tracking is lost the moment a browser attaches, and no
- * report is produced at all (MEASURED in `tools/preview-env`). Nothing in the
- * table above uses `?9`.
- *
- * # Where the events go
- *
- * xterm binds its mouse-report handler to `Terminal.element` (the `.xterm`
- * div), and moves `mouseup` onto the DOCUMENT for the duration of a press
- * (`bindMouse` in `CoreBrowserTerminal`), so a release dispatched at the
- * element alone is never seen. The steps below say which target each event
- * needs. Note that the `.xterm-screen` child is what `termlink.ts` targets, one
- * level down, which is why a link replay cannot accidentally fire a mouse
- * report and this one cannot accidentally activate a link.
- *
- * No clamping happens here on purpose. xterm clamps the point into the canvas
- * and then REJECTS a cell outside the grid in `triggerMouseEvent`, so a tap in
- * the padding resolves to the edge cell exactly as a desktop click there does.
+ * Replays the DOM mouse events a touch gesture would have produced, letting xterm
+ * do the cell math, protocol gating and encoding: xterm publishes the mouse
+ * tracking protocol but no read of the active encoding, so encoding here cannot
+ * be correct. Reports under the X10 encoding arrive on `onBinary`, not `onData`.
  */
 
 import { markDuxReplay } from "./termreplay"
@@ -121,13 +23,8 @@ export interface MouseReplayStep {
 }
 
 /**
- * The events a single-finger TAP would have produced.
- *
- * Press then release, left button. xterm's own `mousedown` handler is what
- * arms the document-level `mouseup` listener, so the order matters and the
- * release must go to the document. Under the `?9` X10 protocol xterm never arms
- * that listener and the release lands on nothing, which is correct: X10 reports
- * presses only.
+ * The events a single-finger tap would have produced, in order: xterm's own
+ * `mousedown` arms the document-level `mouseup`, so the release goes to the document.
  */
 export function tapReplaySteps(): MouseReplayStep[] {
   return [
@@ -137,19 +34,11 @@ export function tapReplaySteps(): MouseReplayStep[] {
 }
 
 /**
- * The events `notches` wheel clicks would have produced.
+ * The events `notches` wheel clicks would have produced, one per notch and signed
+ * like `Terminal.scrollLines`: negative reveals older output.
  *
- * Signed like `Terminal.scrollLines`: NEGATIVE reveals older output (wheel up),
- * POSITIVE reveals newer output (wheel down). One event per notch, because a
- * real wheel emits one event per detent and a mouse-tracking pager is built for
- * that cadence — see the touch-scroll tenet in CLAUDE.md and `dragWheelReport`,
- * which is what caps a flick to a single notch before it gets here.
- *
- * `deltaY` is ±1 rather than the notch count: xterm reads only the SIGN of
- * `deltaY` to pick wheel-up from wheel-down, and passes the event through
- * `consumeWheelEvent` purely as a zero test. A `deltaMode` of
- * `WheelEvent.DOM_DELTA_LINE` keeps it out of the pixel branch, which
- * accumulates a fractional remainder across events and would swallow some.
+ * `deltaY` is ±1 because xterm reads only its sign; the line `deltaMode` keeps the
+ * event out of xterm's pixel branch, which accumulates a fractional remainder.
  */
 export function wheelReplaySteps(notches: number): MouseReplayStep[] {
   const count = Math.abs(Math.trunc(notches))
@@ -178,17 +67,9 @@ export function rectCenter(rect: {
 }
 
 /**
- * Dispatches a planned replay at xterm's mouse pipeline.
- *
- * `element` is `Terminal.element`; `undefined`/`null` (an unopened terminal) is
- * a no-op. The events BUBBLE, unlike the link replay's: xterm's listener is on
- * this exact node, and a bubbling event is what the browser would really have
- * delivered.
- *
- * Every event is TAGGED as a dux replay, because a bubbling event dispatched
- * inside the pane travels the container's capture-phase link intercept on the
- * way down, and that intercept must judge only what a human did. See
- * `lib/termreplay.ts` for why the tag exists rather than an `isTrusted` check.
+ * Dispatches a planned replay at `Terminal.element`; a null element (an unopened
+ * terminal) is a no-op. The events bubble and carry the dux-replay tag, so the
+ * container's capture-phase link intercept judges only what a human did.
  */
 export function dispatchMouseReplay(
   element: HTMLElement | null | undefined,
@@ -222,13 +103,8 @@ export function dispatchMouseReplay(
 }
 
 /**
- * Encodes an xterm `onBinary` payload.
- *
- * `onBinary` carries a "binary string": each code unit is one BYTE, values up
- * to 255. The X10 mouse encoding puts `col + 32` in a byte, so a column past 95
- * exceeds ASCII, and `TextEncoder` would emit the TWO-byte UTF-8 form and
- * corrupt the report. This is the reason `onBinary` exists as a separate event
- * from `onData` at all, so it must not share `onData`'s encoder.
+ * Encodes an xterm `onBinary` payload, whose code units are single bytes: the X10
+ * mouse encoding puts `col + 32` in a byte and `TextEncoder` would emit two.
  */
 export function latin1Bytes(data: string): Uint8Array {
   const out = new Uint8Array(data.length)

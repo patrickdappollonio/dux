@@ -1,11 +1,6 @@
-// Pure helper deciding how a project row renders its current git branch.
-// Kept free of React so it's trivially unit-testable. Render-only: it never
-// dispatches anything.
-//
-// The ViewModel exposes `current_branch` ("" / a branch name) and
-// `branch_status` ("leading" | "not_leading" | "unknown"). It does NOT carry
-// the project's leading branch NAME, so the non-leading tooltip can't name it
-// (mirroring the TUI's heuristic warning, which also doesn't always know it).
+// Decides how a project row renders its current git branch. Render-only: it never
+// dispatches. The view model carries `current_branch` and `branch_status` but not the
+// project's leading branch NAME, so the non-leading tooltip cannot name it.
 
 import type { ProjectView } from "./types"
 

@@ -1,17 +1,10 @@
-// THE FOUR CONNECTION TIMINGS, and the one place their defaults live.
+// The connection timings and the one place their defaults live. Each mirrors a
+// `[server]` key, and its default applies whenever the server does not answer. The
+// defaults are duplicated literals of `dux_core::config::ServerConfig`, so nothing
+// enforces the two staying equal.
 //
-// Each mirrors a `[server]` key and each has a documented default that is used
-// whenever the server does not answer: an older build that predates the key, or
-// any render before the first bootstrap fetch lands. The defaults are plain
-// duplicated literals of the Rust ones (`dux_core::config::ServerConfig`), not
-// generated from them, so nothing enforces the two staying equal; the test
-// beside this file pins the browser's half.
-//
-// Published at module scope from the store when the bootstrap document lands,
-// on the same idiom (and for the same reason) as `notify.ts`'s status window: a
-// value read out of a render closure by a long-lived socket or timer callback is
-// pinned to whatever it was at mount, forever. With the value living where it is
-// read there is nothing to capture, so there is nothing to capture stale.
+// Published at module scope so a long-lived socket or timer callback reads the live
+// value rather than pinning whatever its render closure captured at mount.
 import type { Bootstrap } from "./bootstrapApi"
 
 /// Seconds of VISIBLE time a pane waits for its screen after connecting before
@@ -84,18 +77,10 @@ export function heartbeatPeriodMs(): number {
 /// What an inverted pair is clamped to, as a multiple of the beat period.
 const INVERTED_DEADLINE_PERIODS = 2
 
-/// `[server] heartbeat_deadline_seconds` in ms.
-///
-/// A deadline AT OR BELOW the period is a permanent reconnect loop rather than a
-/// tight setting: the deadline is checked on the send timer, so the very first
-/// tick after a frame goes out already finds it elapsed and drops a perfectly
-/// healthy socket, forever. Zero and negatives were already refused here; this
-/// pair was not, and the docs already promise the deadline is comfortably larger
-/// than the interval, so a pair that says otherwise is a typo. It is CLAMPED
-/// rather than rejected: a working terminal on a corrected timing beats no
-/// terminal on a refused config. A deadline merely a little larger than the
-/// period is left exactly as written; it costs an extra period before a miss is
-/// noticed and nothing else.
+/// `[server] heartbeat_deadline_seconds` in ms, clamped above the send period: the
+/// deadline is checked on the send timer, so a deadline at or below the period finds
+/// itself elapsed on the first tick and drops a healthy socket forever. Clamped
+/// rather than refused, since a working terminal beats a rejected config.
 export function heartbeatDeadlineMs(): number {
   const configured = seconds(
     published?.heartbeat_deadline_seconds,

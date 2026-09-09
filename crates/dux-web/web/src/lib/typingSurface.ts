@@ -1,25 +1,14 @@
-// WHERE THE USER LAST LEFT THE TYPING-SURFACE TOGGLE, on this device.
+// Where the user last left the typing-surface toggle, on this device.
 //
-// This is transient UI state and it must stay that way. `ui.compose_bar`
-// (auto/always/never) is the one CONFIGURATION surface for the compose bar, and
-// the toggle deliberately does not write it: the same tablet wants the buffered
-// box with no keyboard case attached and direct typing with one, which is a
-// question about the next ten minutes rather than about how dux is set up. The
-// browser genuinely cannot see the difference (measured: with and without a
-// physical keyboard, every interaction media query is identical), so the person
-// swaps it themselves.
-//
-// It is remembered in `localStorage` for one reason: a reload that snapped the
-// surface back under someone mid-session would make the toggle feel broken.
-// Nothing else about it is persistent, and it is per DEVICE by construction,
-// which is what a device-shaped question deserves.
+// Transient per-device UI state, and it must stay that way: `ui.compose_bar`
+// (auto/always/never) is the one configuration surface for the compose bar and
+// this toggle never writes it. Kept in `localStorage` only so a reload does not
+// snap the surface back mid-session.
 //
 // A module-level listener set, read through `useSyncExternalStore`, so every
-// open pane in the tab agrees the moment one of them flips it. The snapshot
-// reads storage on every call rather than caching: it returns a string or null,
-// so `useSyncExternalStore` compares it by value and never loops, and a fresh
-// read is what makes a second tab's write visible on the next render instead of
-// needing a cache to invalidate.
+// open pane in the tab agrees the moment one flips it. The snapshot reads
+// storage on every call: it returns a string or null, compared by value, so a
+// second tab's write shows on the next render with no cache to invalidate.
 
 import { isMobileViewport } from "@/hooks/use-mobile"
 
@@ -56,14 +45,9 @@ let fallback: TypingSurface | null = null
 const listeners = new Set<() => void>()
 
 /**
- * Read the device-local choice.
- *
- * Only a value this module wrote counts. Anything else, missing or garbage, is
- * "nothing stored", and nothing stored falls through to the in-memory answer.
- * That last step is what a storage which allows reads and refuses writes needs:
- * the string sitting under the key is stale or nonsense, the choice the user
- * just made lives only in `fallback`, and reading the nonsense as a decision
- * would leave the toggle looking dead for the rest of the page.
+ * Read the device-local choice. Only a value this module wrote counts; missing
+ * or garbage falls through to the in-memory answer, which is what a storage
+ * that allows reads and refuses writes needs so the toggle keeps working.
  */
 export function readTypingSurface(): TypingSurface | null {
   let raw: string | null
@@ -95,11 +79,9 @@ export function setTypingSurface(next: TypingSurface | null): void {
 export const DIRECT_INPUT_HINT_KEY = "dux:direct-input-hint"
 
 /**
- * Should the "where the way back lives" hint fire on this device?
- *
- * Storage that cannot be read cannot be written either, so a browser that
- * refuses it never hints rather than hinting on every switch. Same shape, and
- * same reason, as the theater pill's grip hint.
+ * Should the "where the way back lives" hint fire on this device? Storage that
+ * cannot be read cannot be written either, so a browser refusing it never hints
+ * rather than hinting on every switch, as the theater pill's grip hint does.
  */
 export function directHintPending(): boolean {
   try {
@@ -126,22 +108,17 @@ export function markDirectHintShown(): void {
 /// sentence: it sends the reader looking for a control that is not there.
 export type TypingSurfaceShell = "phone" | "computer"
 
-/// WHICH FLIP TOOK THE LAST ROW AWAY. Both leave the same pane with nothing
-/// under its terminal and the way back in the same top menu, so they share one
-/// latch; only the row that went, and the item that brings it back, differ.
+/// Which flip took the last row away. Both leave the pane with nothing under
+/// its terminal and the way back in the same top menu, so they share one latch;
+/// only the row that went, and the item that brings it back, differ.
 export type VirtualInputExit = "direct" | "keys"
 
 /**
- * The hint's sentence, naming a control that exists on the shell it fires on.
- *
- * On a phone the pane's own `⋯` is the cluster over the terminal (docked in the
- * band, or floating in theater); on a computer it is the agent's or terminal's
- * row menu in the sidebar. Pure, so a test can pin both without a DOM.
- *
- * The ITEM it names is the one the reader will be looking for, which is the
- * half that depends on which flip they made: a message box comes back through
- * "Use virtual input", a key row through "Show terminal keys". Naming the wrong
- * one sends them hunting exactly as naming the wrong shell would.
+ * The hint's sentence, naming a control that exists on the shell it fires on:
+ * on a phone the `⋯` over the terminal, on a computer the row menu in the
+ * sidebar. The item named follows the flip that was made, since a message box
+ * and a key row come back through different entries. Pure, so a test can pin
+ * both without a DOM.
  */
 export function directHintMessage(
   shell: TypingSurfaceShell,
@@ -157,11 +134,9 @@ export function directHintMessage(
 }
 
 /**
- * Raise the one-time "here is the way back" hint, if this is its moment.
- *
- * ONE LATCH, ONE DEVICE, EITHER DOOR. Both flips teach the same lesson (the way
- * back is in the top menu now), so somebody who has already been told does not
- * need telling again because they left by the other one.
+ * Raise the one-time "here is the way back" hint, if this is its moment. One
+ * latch per device covers both flips: they teach the same lesson, so leaving by
+ * the other door does not earn a second telling.
  */
 function raiseVirtualInputHint(
   exit: VirtualInputExit,
@@ -175,43 +150,25 @@ function raiseVirtualInputHint(
 }
 
 /**
- * THE OTHER WAY OUT OF THE VIRTUAL INPUT: hiding the terminal keys.
- *
- * From direct typing with the key row still down, that row IS the bottom bar
- * and the `⋯` hanging off it is the visible way back. Hiding the keys takes
- * both, which is the very state the surface switch raises the hint for, so it
- * raises the same hint rather than leaving the user with no signpost at all.
- * The caller answers whether anything is left below, for the same reason it
- * does for the switch: this module cannot see the rows.
+ * The other way out of the virtual input: hiding the terminal keys. From direct
+ * typing, that row is the bottom bar and the `⋯` on it is the visible way back,
+ * so hiding it raises the same hint the surface switch does. The caller answers
+ * whether anything is left below; this module cannot see the rows.
  */
 export function hideTerminalKeysHint(nothingLeftBelow: boolean): void {
   raiseVirtualInputHint("keys", nothingLeftBelow)
 }
 
 /**
- * THE ONE GESTURE that changes the typing surface, and the reason the switch
- * cannot become a dead end.
+ * The one gesture that changes the typing surface: every surface that flips the
+ * choice calls this rather than `setTypingSurface`, so none of them can raise a
+ * different hint or none at all.
  *
- * Choosing to type directly in the terminal takes the message box away, and on
- * a pane whose terminal keys are down too it takes the last row under the
- * terminal with it, the `⋯` that hung off it included. That is the moment a
- * user has no way of knowing where the way back went, so the first time it
- * happens on a device dux says so, once, through the one raiser. INFO and not
- * sticky: nothing is lost if it goes unread, and the menu it names is on screen
- * either way.
- *
- * `nothingLeftBelow` is what makes it that moment rather than every switch. A
- * key row that stays is a bottom `⋯` that stays, visibly carrying the way back,
- * and a toast sending the reader to a different menu would be noise pointing at
- * the wrong control. The caller knows which case it is; this module cannot.
- *
- * `setTypingSurface` stays the writer. Every surface that flips the choice
- * calls this instead, so none of them can raise a different hint or none at all.
- *
- * The sentence names a control that is actually on the shell reading it, which
- * is why the width is consulted here rather than a shell being threaded down
- * from each call site: none of them knows, and all of them are on screen on
- * both shells.
+ * `nothingLeftBelow` is what narrows the hint to the switch that leaves nothing
+ * under the terminal at all, the `⋯` included; a key row that stays is a bottom
+ * `⋯` that visibly carries the way back. The caller knows that, this module
+ * cannot, and the shell is read from the width here for the same reason. The
+ * hint is info and not sticky: nothing is lost if it goes unread.
  */
 export function switchTypingSurface(
   next: TypingSurface,

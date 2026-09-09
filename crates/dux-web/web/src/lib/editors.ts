@@ -1,7 +1,6 @@
 // The editors offered in the web "Open editor…" menu. `key` is the dux-core
-// editor config key (crates/dux-core/src/editor.rs): the server launches the
-// matching CLI on PATH and returns an "isn't installed" error otherwise. Order
-// mirrors dux-core's EDITOR_SPECS. Icons render via EditorIcon, keyed by `key`.
+// editor config key (crates/dux-core/src/editor.rs), which the server resolves
+// and `EditorIcon` renders; order mirrors that file's EDITOR_SPECS.
 export interface EditorChoice {
   key: string
   label: string

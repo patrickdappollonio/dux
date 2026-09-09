@@ -1,16 +1,13 @@
 import { ReconnectingSocket } from "./reconnectingSocket"
 import type { EventsClientMessage, EventsServerMessage } from "./types"
 
-// The server silently rejects an interest frame carrying more than this many
-// topics (its `MAX_EVENT_TOPICS_PER_FRAME`). The reconnect resend, which sends
-// the WHOLE interest set, chunks into frames of at most this size so a client
-// watching many sessions never loses its tail of subscriptions on reconnect.
+// Must stay at or below the server's own `MAX_EVENT_TOPICS_PER_FRAME`, above which
+// it silently rejects an interest frame; the reconnect resend chunks to this size.
 const MAX_EVENT_TOPICS_PER_FRAME = 64
 
-// JSON events channel. It tracks subscriptions, resends them in bounded chunks
-// after every open, parses resource/control frames, and exposes connection state.
-// It stays active while hidden so attention events can reach notifications;
-// reconnect timing and lifecycle live in `ReconnectingSocket`.
+// JSON events channel: it tracks subscriptions, resends them in bounded chunks after
+// every open, and stays active while hidden so attention events still reach
+// notifications. Reconnect timing and lifecycle live in `ReconnectingSocket`.
 export class EventsSocket extends ReconnectingSocket {
   // The complete, authoritative interest set. Coarse topics (sessions/projects/
   // config) plus the per-screen fine topics (session:<id>:changes) all live

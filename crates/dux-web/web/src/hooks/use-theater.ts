@@ -13,24 +13,20 @@ import {
 } from "@/lib/theater"
 
 /**
- * ONE PTY REFIT PER TOGGLE.
+ * One PTY refit per toggle.
  *
- * Mounted once per shell, above every piece of chrome that animates. It watches
- * the mode rather than the chrome, so however many stacks are collapsing (the
- * desktop shell has two, the header and the pane's own band-plus-strip) the
- * gesture is one hold and one release, and the terminal is re-gridded once at
- * the geometry the gesture settled on.
+ * Mounted once per shell, above every piece of chrome that animates, and it
+ * watches the mode rather than the chrome: however many stacks are collapsing,
+ * the gesture is one hold and one release and the terminal is re-gridded once,
+ * at the geometry the gesture settled on.
  *
- * A SECOND TOGGLE INSIDE THE WINDOW RE-ARMS IT rather than ending it. Written
- * as an ordinary effect cleanup, the first gesture's canceller ran the moment
- * the mode changed again, which released the hold in the middle of an animation
- * and fitted the terminal at a geometry it was only passing through. So the
- * handle lives in a ref, a mode change restarts it, and only unmounting ends it
- * early.
+ * A second toggle inside the window restarts the hold rather than ending it, so
+ * the handle lives in a ref and only unmounting ends it early: releasing
+ * mid-animation fits the terminal at a geometry it is only passing through.
  *
- * The first run is skipped deliberately: a page that OPENS in theater (a shared
- * link, a restored pane) has no transition to wait out, and holding the pane's
- * very first fit would delay the terminal's first paint for nothing.
+ * The first run is skipped deliberately: a page that opens in theater has no
+ * transition to wait out, and holding the pane's very first fit would delay the
+ * terminal's first paint for nothing.
  */
 export function useTheaterGesture(): void {
   const { theater } = useDux()
@@ -72,21 +68,18 @@ export function useTheaterGesture(): void {
 }
 
 /**
- * ESCAPE LEAVES THEATER, and only where nothing else wants the keystroke.
+ * Escape leaves theater, and only where nothing else wants the keystroke.
  *
- * A document-level listener rather than a handler on the pane: the exit has to
- * work from wherever focus happens to be (the pill, a header control, the page
- * body), and the one place it must NOT work is inside a typing surface, where
- * Escape is already the child's. `isTypingSurfaceElement` answers that from the
- * event's own target, which covers both the compose textarea and xterm's helper
- * textarea without either of them having to know theater exists.
+ * A document-level listener rather than a handler on the pane, so the exit works
+ * from wherever focus happens to be; the one place it must not work is inside a
+ * typing surface, where Escape is already the child's, which
+ * `isTypingSurfaceElement` answers from the event's own target.
  *
- * BUBBLE PHASE, and it abstains on an already-answered event. Base UI's dismiss
- * hook listens on the document too and calls `preventDefault` on the Escape that
- * closed a menu, a popover or a dialog; in capture phase this rule ran first and
- * one press both closed the overlay and left the mode. Reading that flag needs
- * the bubble phase, and waiting takes nothing from the child, which never sees a
- * keystroke this rule claims.
+ * Bubble phase, abstaining on an already-answered event: Base UI's dismiss hook
+ * listens on the document too and calls `preventDefault` on the Escape that
+ * closed a menu, a popover or a dialog, and reading that flag needs the bubble
+ * phase. Waiting takes nothing from the child, which never sees a keystroke this
+ * rule claims.
  */
 export function useTheaterEscape(): void {
   const { theater } = useDux()
@@ -118,13 +111,11 @@ export function useTheaterEscape(): void {
   }, [theater])
 }
 
-// WHERE FOCUS GOES WHEN THE CHROME MOVES. Each direction destroys the control
-// that was just used, so with nothing done about it a keyboard user is left on
-// the document body, the far end of the page from what they were doing.
-//
-// A module-level flag rather than a ref threaded through both shells, for the
-// same reason the tab registry is one: the header toggle and the floating pill
-// live in different subtrees, and only one of them exists at a time.
+// Where focus goes when the chrome moves: each direction destroys the control
+// that was just used, leaving a keyboard user on the document body. A
+// module-level flag rather than a ref threaded through both shells, because the
+// header toggle and the floating pill live in different subtrees and only one of
+// them exists at a time.
 let toggleFocusArmed = false
 
 /** Ask the header toggle to take focus as soon as it comes back. */
@@ -140,8 +131,7 @@ function consumeToggleFocus(): boolean {
 
 /**
  * The header toggle taking focus back after an exit that was not its own press.
- *
- * Only on an ARMED exit: a toggle that grabbed focus on every mount would pull
+ * Only on an armed exit: a toggle that grabbed focus on every mount would pull
  * it out of the terminal on an ordinary page load.
  */
 export function useTheaterToggleFocus(
@@ -152,13 +142,11 @@ export function useTheaterToggleFocus(
 }
 
 /**
- * The same hand-off, for a control whose "I am on screen and settled" is not
- * simply "theater is off".
- *
- * The phone's docked flap is mounted (hidden) through the whole return flight
- * so the choreography can measure the dock it is flying to; focusing it in that
- * state would put the keyboard on something invisible. Its readiness is the
- * flight's, not the mode's, so it says so itself.
+ * The same hand-off for a control whose readiness is not simply "theater is
+ * off". The phone's docked flap stays mounted but hidden through the return
+ * flight so the choreography can measure the dock it is flying to, and focusing
+ * it in that state would put the keyboard on something invisible, so the caller
+ * states its own readiness.
  */
 export function useTheaterToggleFocusWhen(
   ref: React.RefObject<HTMLElement | null>,
@@ -174,16 +162,13 @@ export function useTheaterToggleFocusWhen(
 /**
  * The pill's exit button taking focus when the chrome leaves.
  *
- * IT CONSUMES THE TOKEN, because an armed entry is precisely the case this hook
- * exists for: the press that turned the mode on destroyed the control it was
- * made on, and this is the control that replaced it. Consuming is also what
- * retires the token, which otherwise stayed armed for the whole theater session
- * with its only consumer (the docked flap) unmounted, and pulled focus onto a
- * later, unrelated flap the next time one appeared.
+ * It consumes the arm token: the press that turned the mode on destroyed the
+ * control it was made on, and this is the control that replaced it. Consuming is
+ * also what retires the token, which would otherwise stay armed for the whole
+ * theater session and pull focus onto a later, unrelated flap.
  *
- * Unarmed, it takes focus only when nothing else holds it: entering from the
- * input menu, or from a shared link that opens straight into theater, leaves
- * focus somewhere real, and the pill must not pull it out of a terminal the
+ * Unarmed, it takes focus only when nothing else holds it, so entering from the
+ * input menu or from a shared link must not pull focus out of a terminal the
  * user is about to type into.
  */
 export function useTheaterPillFocus(

@@ -1,12 +1,10 @@
-// Pure helpers for the editor's LAZY file tree. The tree is a partially-loaded
-// view of the worktree: each directory's children are fetched from
-// `/files/tree` the first time the directory is expanded, and cached in a
-// Map<dirPath, DirState> owned by the component. Kept free of React so it's
-// trivially unit-testable.
+// Pure helpers for the editor's lazy file tree: a partially-loaded view of the
+// worktree, where each directory's children are fetched from `/files/tree` the
+// first time it is expanded and cached in a Map<dirPath, DirState> the
+// component owns.
 
-// One directory entry as returned by the server's `/files/tree` route
-// (mirrors the Rust `DirEntryInfo`). Entries arrive pre-sorted dirs-first,
-// case-insensitive.
+// One directory entry from the server's `/files/tree` route (mirrors the Rust
+// `DirEntryInfo`), pre-sorted dirs-first, case-insensitive.
 export interface DirEntry {
   // The child's own name (final path segment).
   name: string
@@ -41,9 +39,8 @@ export function ancestorDirs(filePath: string): string[] {
   return dirs
 }
 
-/// Given a target file path and the set of already-loaded dirs, return the
-/// ancestor dirs (root included) that still need fetching, top-down, so a
-/// deep link can expand the chain to reveal the file.
+/// The ancestor dirs of `filePath` (root included) that still need fetching,
+/// top-down, so a deep link can expand the chain to reveal the file.
 export function dirsToLoadFor(filePath: string, loaded: Set<string>): string[] {
   return ["", ...ancestorDirs(filePath)].filter((d) => !loaded.has(d))
 }
@@ -56,29 +53,24 @@ export interface TreeRow {
   isDir: boolean
   expandable: boolean
   isSymlink: boolean
-  // For dir rows: "loading" while the dir's children fetch is in flight (or an
-  // expanded dir has no cache entry yet), "error" when the fetch failed.
-  // Placeholder child rows carry the same state at depth+1 so the component
-  // can render a spinner/retry row.
+  // For dir rows: "loading" while the children fetch is in flight or an expanded
+  // dir has no cache entry yet, "error" when the fetch failed. Placeholder child
+  // rows carry the same state at depth+1.
   state: "idle" | "loading" | "error"
-  // Explicit discriminant for placeholder rows, checked by the component
-  // INSTEAD of the row's path. flattenLazy synthesizes a `<dir>/__loading__`
-  // or `<dir>/__error__` path for placeholder rows purely so each has a
-  // unique React `key`; a real worktree file named `__loading__` or
-  // `__error__` still gets `kind: "entry"` and renders as a normal file row.
+  // Explicit discriminant for placeholder rows, checked instead of the row's
+  // path: `flattenLazy` synthesizes `<dir>/__loading__` and `<dir>/__error__`
+  // paths purely for React keys, so a real file named `__loading__` still gets
+  // `kind: "entry"`.
   kind: "entry" | "loading" | "error"
-  // True for a dir row whose cache entry is `loaded` with zero children.
-  // Independent of `expanded`: the file-tree icon shows a distinct empty
-  // glyph whether the empty dir is expanded or collapsed, as soon as it's
-  // been fetched once. Always false for file rows and for dirs never fetched.
+  // True for a dir row whose cache entry is `loaded` with zero children,
+  // independent of `expanded`, so the icon reads empty either way. Always false
+  // for file rows and for dirs never fetched.
   empty: boolean
 }
 
-/// The cached dir paths strictly nested under `path` (not `path` itself),
-/// e.g. descendantDirPaths(dirs, "a") with dirs keyed "a", "a/b", "a/b/c",
-/// "ax" returns ["a/b", "a/b/c"]. Used on collapse to evict a subtree's
-/// cached listings (and any still-loading/errored entries) instead of
-/// leaking them in memory forever.
+/// The cached dir paths strictly nested under `path`, not `path` itself, so a
+/// collapse can evict a subtree's cached listings (still-loading and errored
+/// entries included) instead of leaking them in memory.
 export function descendantDirPaths(
   dirs: Map<string, DirState>,
   path: string,
@@ -153,11 +145,10 @@ function expandedChildRows(
   return [placeholderRow(entry.path, depth + 1, state)]
 }
 
-/// Flatten the loaded tree into render rows honoring the `expanded` set. Only
-/// descends into dirs that are BOTH expanded AND loaded; an expanded-but-not-
-/// yet-loaded dir contributes a single synthetic "loading" placeholder row, an
-/// errored one a single "error" row. Returns [] when the root isn't loaded
-/// (the component shows a top-level spinner instead).
+/// Flatten the loaded tree into render rows honoring `expanded`. Descends only
+/// into dirs that are both expanded and loaded; one not yet loaded contributes a
+/// single "loading" placeholder row, an errored one an "error" row. Returns []
+/// when the root is not loaded.
 export function flattenLazy(
   dirs: Map<string, DirState>,
   expanded: Set<string>,

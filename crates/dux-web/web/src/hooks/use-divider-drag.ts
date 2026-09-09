@@ -12,24 +12,12 @@ import { beginLayoutGesture, endLayoutGesture } from "@/lib/layoutGesture"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 
 // The drag half of the shared divider mechanism, for the dividers dux drives
-// itself. It is a deliberate reimplementation of what `react-resizable-panels`
-// does for the Changes separator, so the two gestures feel the same:
-//
-//   - the press is acquired on the DOCUMENT, in the capture phase, by testing
-//     the pointer against the divider's grab band rather than by hit-testing
-//     the element, so nothing painted over the divider can swallow it;
-//   - non-primary mouse buttons are ignored, a second pointer arriving mid-drag
-//     is ignored, the divider takes focus without a focus ring and without
-//     scrolling, and the press is default-prevented;
-//   - the move is a DELTA from the press point, so the divider does not
-//     teleport under a finger that landed off centre;
-//   - a mouse that reports no buttons held ends the gesture, because a
-//     `pointerup` delivered to another window never reaches us;
-//   - the resize cursor is painted over the whole document while the band is
-//     hovered or dragged, and is dropped when the pointer leaves the document;
-//   - a double-click inside the band resets the divider.
-//
-// Everything above is measured against react-resizable-panels 4.11.2.
+// itself, deliberately mirroring what react-resizable-panels 4.11.2 does for the
+// Changes separator so the two gestures feel the same. The press is acquired on
+// the document, in the capture phase, by testing the pointer against the
+// divider's grab band rather than by hit-testing the element, so nothing painted
+// over the divider can swallow it; the move is a delta from the press point, so
+// the divider does not teleport under a finger that landed off centre.
 
 export interface DividerDragHandlers {
   /** The press was accepted; snapshot whatever the delta will be measured from. */
@@ -74,36 +62,29 @@ function claimCursor(owner: symbol, claimed: boolean) {
   syncCursorStyle()
 }
 
-// The held paint, written by dux on both dividers. Always present rather than
-// added and removed, so an element either takes part in the held paint or does
-// not, and a parity test can tell which. See DIVIDER_HELD_ATTR.
+// The held paint, written by dux on both dividers. The attribute is always
+// present rather than added and removed, so a parity test can tell which
+// elements take part in the paint. See DIVIDER_HELD_ATTR.
 function paintHeld(el: HTMLElement | null, held: boolean) {
   el?.setAttribute(DIVIDER_HELD_ATTR, held ? DIVIDER_HELD_ON : DIVIDER_HELD_OFF)
 }
 
 /**
- * Publish the held paint on a divider dux does NOT drive: the Changes pane's
- * separator, which react-resizable-panels drags itself.
+ * Publish the held paint on a divider dux does not drive: the Changes pane's
+ * separator, which react-resizable-panels drags itself. It paints and brackets
+ * and nothing else, so the drag, the layout and the persistence stay with the
+ * library; acquisition is the shared `dividerPressHits` against the same grab
+ * band the library claims, so both dividers light on the same presses.
  *
- * WHY DUX WATCHES THE POINTER FOR A GESTURE IT DOES NOT OWN. 4.11.2 has no
- * `pointercancel` listener, so a touch the browser takes away (a page pan it
- * decided to claim, a call arriving, a palm) leaves its own `data-separator`
- * latched at `active` with nothing on the glass, and a paint keyed on that
- * attribute stays lit until the next press. This hook hears the cancel, so the
- * held paint ends when the gesture does.
+ * dux watches the pointer for a gesture it does not own because 4.11.2 has no
+ * `pointercancel` listener: a touch the browser takes away leaves the library's
+ * own `data-separator` latched at `active`, and a paint keyed on that attribute
+ * stays lit until the next press.
  *
- * It paints and BRACKETS, and nothing else: the drag, the layout and the
- * persistence stay with the library and App.tsx. Acquisition is the shared rule
- * (`dividerPressHits`) against the same grab band the library claims, so the
- * two dividers light on exactly the same presses.
- *
- * THE BRACKET is the layout gesture. Dragging this separator moves the terminal
- * pane's box on every pointer move, and the pane's own debounce only coalesces
- * the moves that fall inside one quiet window: a finger that pauses mid-drag
- * buys a full refit at a geometry it is merely passing through. Holding the
- * gesture from the press to the release is the same guarantee theater mode
- * already takes, for the same reason, and pays for exactly one fit at the width
- * the drag settles on.
+ * The bracket is the layout gesture. The terminal pane's debounce coalesces only
+ * the moves inside one quiet window, so a finger that pauses mid-drag would buy
+ * a refit at a geometry it is passing through; holding from press to release
+ * pays for one fit at the width the drag settles on.
  */
 export function useDividerHeld(): React.RefObject<HTMLDivElement | null> {
   const ref = React.useRef<HTMLDivElement | null>(null)
@@ -128,10 +109,9 @@ export function useDividerHeld(): React.RefObject<HTMLDivElement | null> {
     }
 
     const onPointerDown = (event: PointerEvent) => {
-      // Deliberately NOT gated on `defaultPrevented`: the library's own
-      // document listener runs in the same capture phase and may already have
-      // claimed the press. This one only paints, so an already-handled press is
-      // exactly the press it wants.
+      // Deliberately not gated on `defaultPrevented`: the library's own document
+      // listener runs in the same capture phase and may already have claimed the
+      // press, and this one only paints.
       if (heldPointer !== null) return
       if (event.pointerType === "mouse" && event.button > 0) return
       if (!dividerPressHits(ref.current, event, minWidth)) return
@@ -180,9 +160,9 @@ export function useDividerDrag(
   const ref = React.useRef<HTMLDivElement | null>(null)
   const coarse = useIsCoarsePointer()
 
-  // The handlers are re-created on every render of the owning component (they
-  // close over live state), so they are read through a ref and the listeners
-  // below are installed once.
+  // The handlers close over live state and are re-created on every render of the
+  // owning component, so they are read through a ref and the listeners below are
+  // installed once.
   const handlersRef = React.useRef(handlers)
   React.useEffect(() => {
     handlersRef.current = handlers
@@ -231,11 +211,9 @@ export function useDividerDrag(
       lastDeltaX = 0
       handlersRef.current.onGrab?.()
       const el = ref.current
-      // `focusVisible: false`, exactly as react-resizable-panels 4.11.2 asks
-      // for it on its own separator. Focus still moves (a drag can be carried
-      // on from the keyboard), but a browser that honours the option is told
-      // not to treat a press as a keyboard arrival, so no focus ring is left
-      // painted beside the line once the finger lifts.
+      // `focusVisible: false`, as react-resizable-panels 4.11.2 asks for it on
+      // its own separator: focus still moves, so a drag can be carried on from
+      // the keyboard, but a press leaves no focus ring beside the line.
       el?.focus({ preventScroll: true, focusVisible: false })
       el?.setPointerCapture?.(event.pointerId)
       claimCursor(owner, true)
@@ -244,18 +222,15 @@ export function useDividerDrag(
 
     const onPointerMove = (event: PointerEvent) => {
       if (activePointer === null) {
-        // Not dragging: the document cursor follows the band, the way the
-        // panel library's does, so the splitter cursor appears before the
-        // pointer reaches the hair-thin line.
+        // Not dragging: the document cursor follows the band, the way the panel
+        // library's does, so it appears before the pointer reaches the line.
         claimCursor(owner, event.pointerType === "mouse" && hits(event))
         return
       }
       if (event.pointerId !== activePointer) return
-      // THE LOST POINTERUP. A release over another window, over browser chrome,
-      // or swallowed by a native drag never reaches this document, and the
-      // divider would then follow the mouse with nothing held down. The first
-      // move that reports no buttons ends the gesture where it stands, which is
-      // what the library does for the same reason.
+      // A release over another window, over browser chrome, or swallowed by a
+      // native drag never reaches this document, so the first move that reports
+      // no buttons ends the gesture where it stands, as the library does.
       if (event.pointerType === "mouse" && event.buttons === 0) {
         finish()
         return
@@ -276,9 +251,8 @@ export function useDividerDrag(
       handlersRef.current.onCancel?.()
     }
 
-    // Capture can be lost without a pointerup: the element is removed, or the
-    // browser hands the pointer to something else. Either way the gesture is
-    // over, and the divider must not keep following the pointer.
+    // Capture can be lost without a pointerup (the element is removed, or the
+    // browser hands the pointer elsewhere); the gesture is over either way.
     const onLostCapture = (event: PointerEvent) => {
       if (activePointer === null || event.pointerId !== activePointer) return
       finish()

@@ -1,41 +1,31 @@
-// THE ONE PERIODIC CLIENT FRAME, and the one timer behind it.
+// The one periodic client frame on a PTY socket, and the one timer behind it.
+// Never a second pinger: the two halves of the frame share a cadence.
 //
-// There is exactly one periodic message on a PTY socket and exactly one timer
-// driving it. Never two pingers: two timers on one socket is two things to keep
-// in step, and the halves genuinely share a cadence.
+// The frame is `{"beat": <increasing integer>, "viewed": <boolean>}`, answered
+// by the server with `{"event":"beat","n":<same>}`.
 //
-// THE FRAME is `{"beat": <increasing integer>, "viewed": <boolean>}`, answered by
-// the server with `{"event":"beat","n":<same>}`.
+//   `viewed` is decided by `shouldSendViewed` in `viewedPing.ts`; this module
+//   calls it and does not re-decide it.
 //
-//   `viewed` is the older half and its rule is unchanged: owner AND visible AND
-//   outside the attention grace window, decided by `shouldSendViewed` in
-//   `viewedPing.ts`. This module calls that; it does not re-decide it.
+//   `beat` is liveness. The server's own WebSocket ping is send-only with no
+//   pong deadline, so it cannot see the half-open socket a Wi-Fi to cellular
+//   handoff leaves behind; an echoed number gives the browser a round trip to
+//   time out on. A watcher sends the frame too, with `viewed: false`, because
+//   its socket goes half-open the same way.
 //
-//   `beat` is the liveness half. The server's own WebSocket ping is send-only
-//   with no pong deadline, so it reaps a socket the OS has already given up on
-//   but cannot see the half-open socket a Wi-Fi to cellular handoff leaves
-//   behind, where both ends still believe they are connected. An application
-//   number the server echoes gives the browser a round trip it can time out on.
-//   A WATCHER sends the frame too, with `viewed: false`: a watcher's socket can
-//   go half-open exactly like a driver's, and the beat is not about ownership.
+// The period is two values from one pure function. `VIEWED_PING_INTERVAL_MS`
+// must stay under the engine's attention window or a continuously watched
+// agent's flag rises between pings, so it holds while this device is
+// owner-and-visible; `[server] heartbeat_seconds` applies otherwise, where only
+// liveness is at stake.
 //
-// ONE PERIOD, FROM ONE PURE FUNCTION, and it is two values rather than one for a
-// reason worth writing down. The viewed ping runs at `VIEWED_PING_INTERVAL_MS`
-// (2s) deliberately: it has to stay comfortably under the engine's 3s attention
-// window, or a continuously watched agent's flag rises between pings. So the
-// period cannot simply be slowed to the heartbeat's. It is 2s while this device
-// is owner-and-visible, which is exactly when the viewed half has work to do, and
-// `[server] heartbeat_seconds` otherwise, where only liveness is at stake.
-//
-// EVERY CLOCK HERE IS VISIBLE TIME (see `visibleClock.ts`). A hidden page is
+// Every clock here is visible time (`visibleClock.ts`): a hidden page is
 // throttled and a suspended one resumes believing hours passed, so a wall-clock
-// deadline would declare a perfectly good socket dead the moment a phone came out
-// of a pocket. The frame is only sent while the page is visible, and the answer
-// deadline only elapses while it is visible too.
+// deadline would kill a healthy socket on a phone leaving a pocket. Frames go
+// out only while visible and the deadline elapses only while visible.
 //
-// A MISSED ANSWER forces a PLAIN reconnect: drop the socket and let the ordinary
-// retry path bring it back. Never a flagged one; an automatic reconnect is never
-// a take-over.
+// A missed answer forces a plain reconnect through the ordinary retry path,
+// never a flagged one: an automatic reconnect is never a take-over.
 import { heartbeatDeadlineMs, heartbeatPeriodMs } from "./connectionTiming"
 import { createVisibleClock, type VisibleClock } from "./visibleClock"
 import { VIEWED_PING_INTERVAL_MS } from "./viewedPing"
@@ -81,15 +71,11 @@ export type Heartbeat = {
   /// Forget any outstanding beat without treating it as a miss. The socket
   /// reopened, so the question the old beat asked is moot.
   reset: () => void
-  /// The inputs to the cadence may have changed: re-read them and, if the period
-  /// is now different, CLEAR the armed timer and arm the new one.
-  ///
-  /// Without it the pending timer had to expire first, so a take-over or a
-  /// return to the tab left the engine's attention flag lit for up to a whole
-  /// slow period (15s configured, or a hidden page's platform-clamped minute)
-  /// past a boundary the engine answers in 3s. It also unparks a heartbeat that
-  /// the page going hidden parked. Fired by this module's own visibility
-  /// listener, and by the pane when ownership flips.
+  /// Re-read the cadence inputs and, if the period changed, clear the armed
+  /// timer and arm the new one; also unparks a heartbeat the page going hidden
+  /// parked. Without it a take-over or a return to the tab waits out a whole
+  /// slow period past a boundary the engine answers in seconds. Fired by this
+  /// module's visibility listener, and by the pane when ownership flips.
   resync: () => void
 }
 
@@ -100,11 +86,9 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
       typeof document === "undefined" || document.visibilityState === "visible")
   const period = deps.periodMs ?? heartbeatIntervalMs
   const deadline = deps.deadlineMs ?? heartbeatDeadlineMs
-  // The OWNED clock is rebuilt by `start()` when a previous `stop()` disposed
-  // it. A disposed clock is not dead, it is DEAF: its visibility listener is
-  // gone, so it counts hidden time as visible and the deadline elapses against
-  // a page that spent the interval in a pocket. An injected clock belongs to the
-  // caller and is never disposed or replaced here.
+  // `start()` rebuilds an owned clock a previous `stop()` disposed: a disposed
+  // clock has lost its visibility listener and counts hidden time as visible.
+  // An injected clock belongs to the caller and is never disposed here.
   let clock = deps.clock ?? createVisibleClock()
   let clockDisposed = false
 
@@ -121,11 +105,9 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
   // beats times out at the deadline rather than at deadline-plus-one-period.
   let pendingSince: number | null = null
   let pendingFrom: number | null = null
-  // Whether the most recent frame actually reached the wire. A socket that is
-  // CONNECTING or CLOSED discards every frame silently, and while it does there
-  // is no question outstanding for anybody to be late answering; timing one
-  // anyway made the deadline drop the reconnect attempt in flight, once per
-  // deadline, for the whole outage. Starts true because nothing has failed yet.
+  // Whether the most recent frame reached the wire. A connecting or closed
+  // socket discards frames silently, and a discarded frame asks nothing, so no
+  // deadline may run against it. Starts true because nothing has failed yet.
   let lastSendReached = true
 
   const currentPeriod = () =>
@@ -134,9 +116,8 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
   const schedule = () => {
     if (!running) return
     if (timer !== null) return
-    // PARKED. A hidden page sends nothing and its visible clock is paused, so an
-    // armed timer there is not a heartbeat, it is a wake-up the platform will
-    // throttle or drop. The visibility listener picks it straight back up.
+    // Park while hidden: a hidden page sends nothing and its clock is paused, so
+    // an armed timer is only a wake-up the platform throttles or drops.
     if (!visible()) {
       armedPeriod = null
       return
@@ -172,20 +153,14 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
   const tick = () => {
     timer = null
     armedPeriod = null
-    // Only while visible. A hidden page sends nothing, and because the clock is
-    // paused too, its outstanding beat's deadline cannot elapse while it waits.
+    // The paused clock means an outstanding beat's deadline cannot elapse here.
     if (!visible()) {
       schedule()
       return
     }
-    // The deadline is checked here, on the send timer, rather than on a second
-    // timer of its own: one periodic timer is the rule. The cost is that a miss
-    // is noticed at the next tick after the deadline passes, which is within one
-    // period of it.
-    //
-    // AND ONLY AGAINST A SOCKET THAT IS TAKING FRAMES. A deadline is a claim
-    // that an answer is overdue, which is only true of a question that was
-    // asked; a discarded frame asks nothing. See `lastSendReached`.
+    // The deadline is checked on the send timer, since one periodic timer is the
+    // rule, so a miss is noticed within one period of it. Only against a socket
+    // taking frames: a discarded frame asked nothing (see `lastSendReached`).
     if (
       lastSendReached &&
       pendingSince !== null &&
@@ -205,9 +180,8 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
         pendingFrom = n
       }
     } else {
-      // The socket is down or reconnecting. Retire whatever was outstanding: it
-      // was asked of a connection that is gone, and the next healthy frame
-      // starts a fresh deadline of its own.
+      // Retire whatever was outstanding: it was asked of a connection that is
+      // gone, and the next frame that reaches the wire starts a fresh deadline.
       clearPending()
     }
     lastSendReached = reached
@@ -220,9 +194,9 @@ export function createHeartbeat(deps: HeartbeatDeps): Heartbeat {
   }
 
   // This module's own visibility listener, so a return to the tab retimes the
-  // beat without every caller having to remember to say so. Guarded on the
-  // method rather than the global: this runs off-browser and under harnesses
-  // that stub a partial `document`.
+  // beat with no help from callers. Guarded on the method rather than the
+  // global: this runs off-browser and under harnesses stubbing a partial
+  // `document`.
   const canListen =
     typeof document !== "undefined" &&
     typeof document.addEventListener === "function"

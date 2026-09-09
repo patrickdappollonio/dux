@@ -1,31 +1,21 @@
 // Agent-name input rules, ported from `dux_core::git` so the web new-agent
-// dialog accepts exactly the same strings the TUI does.
-//
-// The TUI filters input per-keystroke via `agent_name_char_map`: it REJECTS a
-// keystroke that would make the name invalid (a disallowed char, a leading
-// non-alphanumeric, a `/` adjacent to another `/`), and transparently maps a
-// space to a dash. React inputs hand us the WHOLE next value instead of a single
-// keystroke, so `sanitizeAgentName` maps the full string through the equivalent
-// rules. The two converge on identical ACCEPTED strings:
-//   - space -> dash                (same)
-//   - drop chars outside [A-Za-z0-9-_/]  (TUI rejects the keystroke; we drop it)
-//   - first char must be alphanumeric    (TUI rejects a leading -, _, /; we drop
-//                                         leading -, _, / until the first alnum)
-//   - no "//"                       (TUI rejects the second /; we collapse // -> /)
-// One intentional difference: `sanitizeAgentName` does NOT strip a single
-// trailing `/`, because the user may be mid-typing (e.g. "feat/" before
-// "feat/x"). `isValidAgentName` still rejects a trailing `/` for SUBMIT, which
-// is what the TUI's submit-time validation (`is_valid_agent_name`) also does.
+// dialog accepts exactly the same strings the TUI does. The TUI rejects an
+// offending keystroke (`agent_name_char_map`); a React input hands over the
+// whole next value, so `sanitizeAgentName` maps the string through rules that
+// converge on the same accepted set:
+//   - space -> dash
+//   - drop chars outside [A-Za-z0-9-_/]
+//   - first char must be alphanumeric (drop leading -, _, / until one)
+//   - collapse "//" to "/"
+// A single trailing `/` is deliberately kept, since the user may be mid-typing
+// "feat/" before "feat/x"; `isValidAgentName` rejects it at submit, as the
+// TUI's `is_valid_agent_name` does.
 
 const ALLOWED = /[A-Za-z0-9\-_/]/
 
 /**
- * Map a full input value through the agent-name character rules. Spaces become
- * dashes, disallowed characters are dropped, leading non-alphanumerics are
- * dropped until the first alphanumeric, and consecutive slashes are collapsed to
- * a single slash. A single trailing slash is preserved so the user can keep
- * typing a path-style name; submit-time validation (`isValidAgentName`) is what
- * rejects a trailing slash.
+ * Map a full input value through the agent-name character rules listed above.
+ * A trailing slash survives here and is rejected by `isValidAgentName`.
  */
 export function sanitizeAgentName(next: string): string {
   let out = ""

@@ -8,14 +8,10 @@ import {
 
 /**
  * The device-local typing-surface choice, live: every open pane re-renders when
- * one of them flips the toggle.
- *
- * Same construction as `useIsCoarsePointer` and `useIsMobile`: the value is
- * read during render through `useSyncExternalStore` rather than mirrored into
- * state in an effect, so there is no initial flash and no synchronous setState
- * in an effect. The server snapshot is "unchosen", which lands on the pointer
- * capability, the same place the feature starts on a device nobody has touched
- * the toggle on.
+ * one of them flips the toggle. Read during render through
+ * `useSyncExternalStore`, so there is no initial flash and no synchronous
+ * setState in an effect; the server snapshot is "unchosen", which lands on the
+ * pointer capability, where a device nobody has touched the toggle on starts.
  */
 export function useTypingSurface(): TypingSurface | null {
   return React.useSyncExternalStore(

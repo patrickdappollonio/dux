@@ -1,15 +1,11 @@
 // Uploading one dropped file. One file per request, raw body, filename as a
 // query parameter.
 //
-// The route SAVES the file and returns where it landed. It never writes to the
-// terminal: that is gated on holding input, enforced on the websocket, and an
-// upload handler injecting the path would walk straight past the gate. The
+// The route saves the file and returns where it landed; it never writes to the
+// terminal, because writing is gated on holding input on the websocket and an
+// upload handler injecting the path would walk straight past that gate. The
 // caller pastes the returned path over its own already-gated socket.
 
-/// The TERMINAL SOCKET's connection id travels in `conn`, deliberately NOT in
-/// the `x-connection-id` header the other API modules stamp. That header names
-/// the EVENTS socket, and the server explicitly refuses a PTY-class id in it, so
-/// sending it there would be checking a different thing entirely.
 export interface SavedDropResponse {
   path: string
   saved_name: string
@@ -28,13 +24,12 @@ export class FileDropApiError extends Error {
   }
 }
 
-/// `dir` is what switches the route between dux's two drop intents, and it is
-/// distinguished by PRESENCE and not by emptiness: `undefined` is a drop on a
-/// pane (the file goes to the agent's invisible upload folder, or to where the
-/// terminal actually is), while any string, INCLUDING the empty one, is a drop
-/// on the editor's file tree and names the worktree-relative folder the user
-/// dropped on. The empty string is the worktree root, which is a perfectly
-/// ordinary place to drop, so it must not be treated as "no directory".
+/// `dir` switches the route between dux's two drop intents by presence, not
+/// emptiness: `undefined` is a drop on a pane, while any string, the empty one
+/// included, is a drop on the editor's file tree naming a worktree-relative
+/// folder, where "" is the worktree root. The terminal socket's connection id
+/// travels in `conn` rather than the `x-connection-id` header, which names the
+/// events socket and which the server refuses a PTY-class id in.
 export async function uploadDroppedFile(
   file: File,
   opts: { pty: string; conn: string | null; dir?: string },

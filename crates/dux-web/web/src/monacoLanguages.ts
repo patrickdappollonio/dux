@@ -1,7 +1,6 @@
-// Generated: registers the Monarch syntax-highlighting grammar for every
-// monaco basic language (highlighting only — no language services/IntelliSense,
-// so we ship no language-service workers). Regenerate by listing
-// node_modules/monaco-editor/esm/vs/basic-languages/*/.
+// Generated: the Monarch highlighting grammar for every monaco basic language,
+// with no language services, so no language-service worker ships. Regenerate by
+// listing node_modules/monaco-editor/esm/vs/basic-languages/*/.
 import "monaco-editor/esm/vs/basic-languages/abap/abap.contribution"
 import "monaco-editor/esm/vs/basic-languages/apex/apex.contribution"
 import "monaco-editor/esm/vs/basic-languages/azcli/azcli.contribution"

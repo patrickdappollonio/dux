@@ -1,6 +1,6 @@
-// Publishes run-identity probe results to pane state keyed by server counters.
-// Ghost connection ids may be used only when their run stamp is confirmed;
-// replay-generation high-water marks retire whenever the run is not confirmed
+// Publishes run-identity probe results to pane state keyed by server counters: a
+// ghost connection id may be used only under a confirmed run stamp, and a
+// replay-generation high-water mark retires whenever the run is not confirmed
 // unchanged. Socket admission is a separate policy in `serverValidated.ts`.
 
 /// What the probe said about the run behind this reconnect.
@@ -23,11 +23,9 @@ export type RunStamp = number
 /// behind every stamped memory were reset.
 let runStamp: RunStamp = 1
 
-/// Whether the CURRENT run is confirmed to be `runStamp`. True at load, because
-/// the document itself came from the run that served it; false the moment a
-/// probe cannot answer, and true again as soon as one says the run is the same.
-/// A "same" answer compares against the boot baseline, so it proves the run
-/// never moved and re-validates every stamp taken since.
+/// Whether the current run is confirmed to be `runStamp`: true at load, false the
+/// moment a probe cannot answer, true again when one says the run is the same. That
+/// answer compares against the boot baseline, so it revalidates every stamp since.
 let runConfirmed = true
 
 /// The stamp to record alongside a memory keyed to this run's counters.

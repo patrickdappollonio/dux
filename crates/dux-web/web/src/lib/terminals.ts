@@ -27,10 +27,9 @@ export function ownerHasTerminal(
   return terminals.some((t) => t.id === terminalId && sameOwner(t.owner, owner))
 }
 
-// Terminals grouped by `ownerKey`, keeping input order inside each group. This
-// is the TOTAL grouping: `ownerKey` answers for every owner, so no terminal can
-// fall out of the result whatever it belongs to. Use it wherever every terminal
-// must be accounted for (the Task Manager's rows); the two-bucket
+// Terminals grouped by `ownerKey`, keeping input order inside each group. The
+// TOTAL grouping: `ownerKey` answers for every owner, so no terminal falls out.
+// Use it wherever every terminal must be accounted for; the two-bucket
 // `groupTerminalsByOwner` below answers a narrower question.
 export function groupTerminalsByOwnerKey(
   terminals: readonly TerminalView[],
@@ -46,17 +45,14 @@ export function groupTerminalsByOwnerKey(
 }
 
 // Terminals bucketed into the two owners a PROJECT can reach: its own project
-// terminals, and the terminals of the sessions it owns. Each bucket keeps the
-// input order, which is the global `sort_order` base, so a bucket preserves the
-// global sequence.
+// terminals, and those of the sessions it owns. Each bucket keeps input order,
+// the global `sort_order` base.
 //
-// LOSSY ON PURPOSE, and its one caller is `projectLiveCounts`, where the entire
-// question is how many terminals a given project reaches, directly or through
-// one of its agents. A terminal owned by anything that is neither reaches no
-// project, so leaving it out of both buckets is the right answer there rather
-// than an omission. Anything that must ACCOUNT for every terminal uses
-// `groupTerminalsByOwnerKey` above, and anything whose behaviour depends on the
-// owner uses `matchOwner`/`matchWireOwner` so a new kind is a compile error.
+// LOSSY ON PURPOSE, for `projectLiveCounts`, whose whole question is how many
+// terminals a project reaches: a terminal owned by neither reaches no project,
+// so it belongs in no bucket. Anything that must ACCOUNT for every terminal uses
+// `groupTerminalsByOwnerKey`, and anything whose behaviour depends on the owner
+// uses `matchOwner`/`matchWireOwner` so a new kind is a compile error.
 export interface TerminalsByOwner {
   bySession: Map<string, TerminalView[]>
   byProject: Map<string, TerminalView[]>
@@ -85,11 +81,8 @@ export function groupTerminalsByOwner(
       case "project":
         push(byProject, owner.project_id, t)
         break
-      // A standalone terminal reaches no project, directly or through an agent,
-      // so it belongs in neither bucket. That is the right answer for this
-      // helper's one caller (`projectLiveCounts`) and is exactly the case the
-      // "LOSSY ON PURPOSE" note above describes: anything that must account for
-      // every terminal uses `groupTerminalsByOwnerKey` instead.
+      // A standalone terminal reaches no project, so it belongs in neither
+      // bucket. This is the "LOSSY ON PURPOSE" case noted above.
       case "standalone":
         break
       default:
@@ -109,11 +102,10 @@ export function terminalSiblings(
 }
 
 // The terminal's NORMALIZED foreground command, or null when the shell itself is
-// in the foreground (idle). TWIN of the core-owned
-// `dux_core::terminal_title::terminal_foreground_display` (the DECISION), pinned
-// by shared vectors (`terminals.test.ts` mirrors `terminal_title.rs`). Trim
-// first, strip a leading "TERM "/"term " prefix off the trimmed string, then
-// discard the result only if it is empty/blank.
+// in the foreground. Twin of core's
+// `dux_core::terminal_title::terminal_foreground_display`, which owns the
+// decision, pinned by shared vectors: trim, then strip a leading "TERM "/"term "
+// off the trimmed string, then discard the result only if it is blank.
 export function terminalForeground(t: TerminalView): string | null {
   const raw = t.foreground_cmd
   if (raw == null) return null
@@ -136,18 +128,14 @@ function terminalNumber(label: string): number | null {
   return match ? Number(match[1]) : null
 }
 
-// The terminal's display title. When an app is running in the foreground its
-// command name is the most useful label, so we surface it alone ("vim",
-// "htop") rather than appending the redundant "Terminal N" suffix. The stable
-// label returns the moment the app exits. The one exception is collision: when
-// another terminal in `siblings` runs the same app, both would read identically,
-// so we disambiguate with the terminal's own counter number ("vim (#1)",
-// "vim (#2)"). `siblings` is the set of terminals shown together (one session's
-// terminals on the web); it includes `t` itself, which we skip by id. TWIN of the
-// core-owned `dux_core::terminal_title::terminal_title` (the DECISION), which the
-// TUI sidebar and Kill overlay also call; pinned by shared vectors. The core fn
-// takes the OTHER siblings' foregrounds (self already excluded); here we pass all
-// and skip by id, but the RULE is identical.
+// The terminal's display title: a running foreground app's command name alone
+// ("vim"), falling back to the stable label the moment it exits, and
+// disambiguated by the terminal's counter number ("vim (#1)") when a sibling
+// runs the same app. `siblings` is the set shown together and includes `t`,
+// which is skipped by id. Twin of core's
+// `dux_core::terminal_title::terminal_title`, which owns the decision and is
+// pinned by shared vectors; the core fn is passed the other siblings with self
+// already excluded, but the rule is identical.
 export function terminalTitle(
   t: TerminalView,
   siblings: readonly TerminalView[],
