@@ -687,23 +687,6 @@ impl Theme {
         blend_over(self.selection_bg, self.app_bg, 0.16)
     }
 
-    pub fn status_style(&self, tone: crate::statusline::StatusTone) -> Style {
-        match tone {
-            crate::statusline::StatusTone::Info => Style::default()
-                .fg(self.status_info_fg)
-                .bg(self.status_info_bg),
-            crate::statusline::StatusTone::Busy => Style::default()
-                .fg(self.status_busy_fg)
-                .bg(self.status_busy_bg),
-            crate::statusline::StatusTone::Warning => {
-                Style::default().fg(self.warning_fg).bg(self.status_info_bg)
-            }
-            crate::statusline::StatusTone::Error => Style::default()
-                .fg(self.status_error_fg)
-                .bg(self.status_error_bg),
-        }
-    }
-
     pub fn status_dot(&self, tone: crate::statusline::StatusTone) -> (&'static str, Color) {
         match tone {
             crate::statusline::StatusTone::Info => ("●", self.session_active),
