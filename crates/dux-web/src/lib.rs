@@ -929,28 +929,16 @@ async fn run_serve_loop(
                 finish_leg_task(joined, &shutdown, &ts.bound, &mut last_bind_failure);
             }
             command = commands.recv() => {
-                // The lane never closes while serving: the loop holds a sender
-                // for its whole life, so a mode that runs no watcher simply has
-                // nobody sending. A `None` therefore means the loop's own state
-                // is gone, which cannot happen before this arm stops running.
-                if let Some((generation, command)) = command {
-                    // A watcher parked in a five-second probe when the mode
-                    // changed comes back with a command for the mode dux already
-                    // left. Its generation is stale, so it is dropped: acting on
-                    // it would re-bind the leg the change just let go.
-                    if generation == ts.generation {
-                        apply_leg_command(
-                            command,
-                            &mut tasks,
-                            &shutdown,
-                            &app,
-                            &console,
-                            &ts.bound,
-                            &mut last_bind_failure,
-                        )
-                        .await;
-                    }
-                }
+                apply_current_generation_command(
+                    command,
+                    &ts,
+                    &mut tasks,
+                    &shutdown,
+                    &app,
+                    &console,
+                    &mut last_bind_failure,
+                )
+                .await;
             }
         }
     }
@@ -964,6 +952,42 @@ async fn run_serve_loop(
     // The lane is tripped and `trigger` has fanned out to every leg, so each task
     // is winding down. Reap them; the CALLER bounds how long it waits for this.
     while tasks.join_next().await.is_some() {}
+}
+
+/// Act on a watcher's leg command, unless it belongs to a watcher generation the
+/// loop has already left behind.
+///
+/// A watcher parked in a five-second probe when the mode changed comes back with a
+/// command for the mode dux already left; acting on it would re-bind the leg the
+/// change just let go. `None` cannot arrive while the loop runs: the loop holds a
+/// sender for its whole life, so a mode that runs no watcher simply has nobody
+/// sending.
+#[allow(clippy::too_many_arguments)]
+async fn apply_current_generation_command(
+    command: Option<(u64, LegCommand)>,
+    ts: &TailscaleLoop,
+    tasks: &mut tokio::task::JoinSet<()>,
+    shutdown: &ServeShutdown,
+    app: &Router,
+    console: &Console,
+    last_bind_failure: &mut Option<SocketAddr>,
+) {
+    let Some((generation, command)) = command else {
+        return;
+    };
+    if generation != ts.generation {
+        return;
+    }
+    apply_leg_command(
+        command,
+        tasks,
+        shutdown,
+        app,
+        console,
+        &ts.bound,
+        last_bind_failure,
+    )
+    .await;
 }
 
 /// Account for one serve leg's task having ended.
