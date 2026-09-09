@@ -17,6 +17,30 @@ import {
 import type { InputMenuGates } from "@/lib/inputMenu"
 import { hideTerminalKeysHint, switchTypingSurface } from "@/lib/typingSurface"
 
+// The surface-switch row, named for what tapping it gets you rather than for the
+// state it is in. Glyph, word and destination are decided together, so the row
+// can never offer one surface and travel to the other.
+function surfaceSwitchRow(composeSurface: boolean) {
+  return composeSurface
+    ? {
+        icon: <SquareTerminal />,
+        label: "Type directly in the terminal",
+        target: "direct" as const,
+      }
+    : {
+        icon: <MessageSquare />,
+        label: "Use virtual input",
+        target: "compose" as const,
+      }
+}
+
+// The terminal-keys row, decided the same way and for the same reason.
+function keysToggleRow(visible: boolean) {
+  return visible
+    ? { icon: <KeyboardOff />, label: "Hide terminal keys" }
+    : { icon: <Keyboard />, label: "Show terminal keys" }
+}
+
 // The input items, shared by every menu that carries any of them, so the labels,
 // icons and store writes cannot drift. VISIBILITY IS THE CALLER'S: the same item
 // belongs on different predicates depending on where the menu is anchored, so
@@ -60,6 +84,8 @@ export function InputMenuItems({
 }) {
   const duxState = useDux()
   const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
+  const surfaceRow = surfaceSwitchRow(composeSurface)
+  const keysRow = keysToggleRow(accessoryBarVisible)
   return (
     <>
       {attach ? (
@@ -68,23 +94,18 @@ export function InputMenuItems({
           Attach a file…
         </DropdownMenuItem>
       ) : null}
-      {/* NAMED FOR WHAT IT DOES, not for the state it is in. A menu row is a
-          sentence, and "Use virtual input" says what tapping it gets you. The
-          bottom `⋯` carries BOTH directions, because it exists for as long as
-          any row under the terminal does; the top menu carries the way back
+      {/* The bottom `⋯` carries BOTH directions, because it exists for as long
+          as any row under the terminal does; the top menu carries the way back
           alone, for the pane that has no row left to hold one. Both write
           through the one `switchTypingSurface`, so they cannot drift. */}
       {gates.surfaceSwitch ? (
         <DropdownMenuItem
           onClick={() =>
-            switchTypingSurface(
-              composeSurface ? "direct" : "compose",
-              directLeavesNothingBelow,
-            )
+            switchTypingSurface(surfaceRow.target, directLeavesNothingBelow)
           }
         >
-          {composeSurface ? <SquareTerminal /> : <MessageSquare />}
-          {composeSurface ? "Type directly in the terminal" : "Use virtual input"}
+          {surfaceRow.icon}
+          {surfaceRow.label}
         </DropdownMenuItem>
       ) : null}
       {gates.keysToggle ? (
@@ -99,8 +120,8 @@ export function InputMenuItems({
             }
           }}
         >
-          {accessoryBarVisible ? <KeyboardOff /> : <Keyboard />}
-          {accessoryBarVisible ? "Hide terminal keys" : "Show terminal keys"}
+          {keysRow.icon}
+          {keysRow.label}
         </DropdownMenuItem>
       ) : null}
       {/* The guaranteed way out of theater. It is a way BACK only, so there is
