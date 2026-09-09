@@ -306,7 +306,6 @@ impl TextInput {
     }
 
     /// Total number of visual lines (accounting for soft-wrap).
-    #[allow(dead_code)] // public API for callers; exercised by tests
     pub fn total_lines(&self) -> usize {
         visual_line_count(&self.text, self.wrap_width())
     }
