@@ -27,14 +27,11 @@ fn main() -> Result<()> {
     }
 }
 
-/// Default arm: run the TUI, and when it flips to the web server, serve the
-/// same engine in this process until the server stops, then resume the TUI.
-/// The cycle repeats until the user quits from either surface.
-///
-/// While serving, the terminal shows the dux-tui status screen
-/// ([`dux_tui::ServerStatusScreen`]); its keys drive the flip — `q`/`Esc`
-/// returns to the TUI, `Ctrl-C` quits the process — alongside SIGINT/SIGTERM
-/// (→ `QuitProcess`) handled inside `serve_with_engine`.
+/// Default arm: run the TUI, and when it flips to the web server, serve the same
+/// engine in this process until the server stops, then resume the TUI, repeating
+/// until the user quits from either surface. While serving, the terminal shows
+/// [`dux_tui::ServerStatusScreen`], whose keys drive the flip alongside the
+/// SIGINT/SIGTERM handling inside `serve_with_engine`.
 fn run_tui_with_flip() -> Result<()> {
     let mut next = dux_tui::run(Box::new(companion::WebCompanion::new()))?;
     loop {
@@ -45,13 +42,10 @@ fn run_tui_with_flip() -> Result<()> {
                 listeners,
                 urls,
             } => {
-                // Read everything the status screen needs BEFORE the engine and
-                // listeners move into `serve_with_engine`. The theme name lives
-                // on the engine's config. The flip is LOCAL MODE: the primary addr
-                // is always loopback, and the only non-loopback addr is the
-                // Tailscale best-effort leg (if it bound). Derive the safety note
-                // from the URLs: a non-loopback URL means the Tailscale leg
-                // successfully bound and the server is reachable on the tailnet.
+                // Read before the engine and listeners move into
+                // `serve_with_engine`. The flip is LOCAL MODE, so the primary
+                // address is always loopback and a non-loopback URL means only that
+                // the Tailscale leg bound, which is what the safety note reads.
                 let theme_name = engine.config.ui.theme.clone();
                 let paths = engine.paths.clone();
                 let tailscale = engine.config.server.tailscale_mode();
@@ -81,18 +75,13 @@ fn run_tui_with_flip() -> Result<()> {
                 // (the consumer). Created here so both get the same handle.
                 let activity = dux_core::activity::ActivityRing::new();
 
-                // Try to set up the interactive status screen. If it fails (no
-                // TTY, raw-mode error), fall back to a plain line — the server
-                // must still run. `screen` lives outside the tick closure so we
-                // can drop it (restoring the terminal) AFTER serving returns.
-                //
-                // `serve_with_engine` takes two separate FnMut callbacks (the
-                // per-tick poll and the shutdown-status reporter), so a plain `&mut
-                // screen` capture can't be shared between them — Rust would see two
-                // simultaneous exclusive borrows. A `RefCell` lets both closures
-                // borrow it in turn (they're never called concurrently: the tick
-                // closure and the shutdown callback run one at a time on this same
-                // thread) while still yielding `screen` back afterward for `drop`.
+                // A failure here (no TTY, a raw-mode error) falls back to a plain
+                // line, because the server must still run. `screen` lives outside
+                // the tick closure so it can be dropped, restoring the terminal,
+                // after serving returns. The `RefCell` is what lets
+                // `serve_with_engine`'s two FnMut callbacks borrow it in turn: they
+                // run one at a time on this thread, but a plain `&mut` capture would
+                // be two simultaneous exclusive borrows.
                 let screen = std::cell::RefCell::new(
                     match dux_tui::ServerStatusScreen::new(
                         &urls,
@@ -136,11 +125,8 @@ fn run_tui_with_flip() -> Result<()> {
                         }
                     },
                     |message| {
-                        // Route the teardown message through the status screen so
-                        // it renders on its own themed line instead of raw text
-                        // landing wherever the cursor happens to sit. Without the
-                        // screen (fallback path), echo it plainly like that path
-                        // already does elsewhere.
+                        // Through the status screen so it renders on its own themed
+                        // line rather than as raw text wherever the cursor sits.
                         match screen.borrow_mut().as_mut() {
                             Some(screen) => screen.show_shutdown_message(message),
                             None => eprintln!("{message}"),
@@ -203,10 +189,9 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     dux_core::logger::init(&config.logging, &paths);
     dux_core::logger::info("bootstrapping dux server");
 
-    // Detect the Tailscale address up front (blocking is fine at CLI startup, and
-    // the call is bounded). It feeds the Tailscale leg of the bind plan. When
-    // detection fails but the user wanted the leg, warn and proceed on the
-    // configured host only, never block. On the `auto` mode the serve path then
+    // Detected up front to feed the Tailscale leg of the bind plan; blocking is fine
+    // at CLI startup and the call is bounded. A failed detection warns and proceeds
+    // on the configured host only, never blocks, and under `auto` the serve path
     // keeps watching, so the warning says so rather than sounding final.
     let tailscale_mode = dux_core::config::effective_tailscale_mode(
         config.server.tailscale_mode(),

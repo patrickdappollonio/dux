@@ -1,20 +1,15 @@
 //! Turning the terminal UI's ownership facts into the broadcasts a browser's
 //! own claim would have produced.
 //!
-//! The terminal UI is a participant in the PTY-ownership registry while a
-//! background server is serving, so it can take a pty, hand one back and resize
-//! one. It cannot ANNOUNCE any of that: the event bus and the per-PTY grid bus
-//! live on this serve's tokio runtime, in a crate `dux-tui` deliberately cannot
-//! see. So the facts cross the background-serve seam as plain
-//! [`dux_core::background_serve::PtyOwnershipEvent`] data and land here, where
-//! they become the same two broadcasts a socket handler emits: a `pty.owner` on
-//! the event bus, and a grid change on the PTY grid bus.
+//! The terminal UI takes, releases and resizes ptys while a background server
+//! serves, but cannot announce any of it: both buses live on this serve's tokio
+//! runtime, in a crate `dux-tui` deliberately cannot see. The facts cross the seam
+//! as [`dux_core::background_serve::PtyOwnershipEvent`] data and become the same
+//! two broadcasts a socket handler emits, a `pty.owner` and a grid change.
 //!
-//! Deliberately a dumb relay. Every decision (who owns what, which epoch, which
-//! seq) was made under the owners lock before these events were built, exactly as
-//! it is for a browser; publishing after the lock releases is the same ordering
-//! the socket handlers have always had, and the epoch and seq stamps are what let
-//! receivers put reordered arrivals back in order.
+//! Deliberately a dumb relay: who owns what, which epoch and which seq were all
+//! decided under the owners lock before these events were built, and the epoch and
+//! seq stamps are what let receivers reorder arrivals.
 
 use std::sync::Arc;
 
@@ -24,11 +19,9 @@ use crate::event_bus::EventBus;
 use crate::pty_sizes::PtyGridBus;
 
 /// The two buses one serve announces ownership on, kept together so the seam has
-/// a single thing to hold.
-///
-/// Built inside `build_app` (which is where both buses are born) and published
-/// into a slot the caller passes down, because the router swallows the app state
-/// whole and there is no other way back to it.
+/// a single thing to hold. Built inside `build_app`, where both buses are born,
+/// and published into a slot the caller passes down: the router swallows the app
+/// state whole, so there is no other way back to it.
 #[derive(Clone)]
 pub(crate) struct OwnershipPublisher {
     bus: Arc<EventBus>,
@@ -40,11 +33,9 @@ impl OwnershipPublisher {
         Self { bus, grid }
     }
 
-    /// Announce one batch of the terminal UI's ownership facts.
-    ///
-    /// In batch order, because that is claim order: the terminal UI records these
-    /// as it makes them, and a release published before the claim that replaced
-    /// it would be discarded by the client's epoch ordering rather than obeyed.
+    /// Announce one batch of the terminal UI's ownership facts, in batch order,
+    /// which is claim order: a release published before the claim that replaced it
+    /// would be discarded by the client's epoch ordering rather than obeyed.
     pub(crate) fn publish(&self, events: &[PtyOwnershipEvent]) {
         for event in events {
             match event {

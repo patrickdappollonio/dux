@@ -1,27 +1,20 @@
 //! The web layer: exposes the `dux-core` engine over HTTP/WebSocket so a browser
 //! SPA can drive the same agent sessions the TUI does.
 //!
-//! ## Entry points
+//! Entry points:
 //!
-//! - [`run_server`] — the `dux server` CLI path. Boots the engine on its own
-//!   thread and serves axum on a self-built tokio runtime until SIGINT/SIGTERM.
-//! - [`serve_with_engine`] — the in-process TUI↔server flip. Serves the web UI
-//!   over an EXISTING live engine (PTYs intact) on the caller's thread, returning
-//!   the engine when serving stops so the TUI can resume around the same agents.
+//! - [`run_server`] boots the engine on its own thread and serves axum on a
+//!   self-built tokio runtime until SIGINT or SIGTERM.
+//! - [`serve_with_engine`] serves over an EXISTING live engine, PTYs intact, on the
+//!   caller's thread, returning the engine when serving stops so the TUI can resume
+//!   around the same agents.
 //!
-//! ## Major pieces
+//! [`server`] holds the axum router and the same-origin WebSocket check;
+//! [`engine_actor`] holds the `EngineHandle` and the loop that owns the `!Send`
+//! engine on its thread.
 //!
-//! - [`server`] — the axum router (all routes plain; dux is trusted-local with no
-//!   login gate) and the same-origin WebSocket check, plus the `/ws` bridge to the
-//!   engine.
-//! - [`engine_actor`] — the `EngineHandle` and the request/drain loop that owns
-//!   the `!Send` engine on its thread.
-//!
-//! ## Dependency isolation
-//!
-//! This crate depends on `dux-core`, never `dux-tui`. Isolation is enforced by
-//! the `dep-isolation` CI job, which runs `cargo tree -p dux-web` and fails if
-//! any TUI-only crate appears.
+//! This crate depends on `dux-core`, never `dux-tui`. The `dep-isolation` CI job
+//! runs `cargo tree -p dux-web` and fails if any TUI-only crate appears.
 
 pub mod background;
 pub mod bootstrap;
@@ -45,12 +38,9 @@ pub mod project_actions;
 pub mod project_reads;
 pub mod pty_log;
 /// The PTY input-ownership registry, re-exported from `dux-core`: a rule two
-/// surfaces obey belongs in the crate both can see, and the re-export keeps
-/// every call site and test in this crate on the path it already uses.
-///
-/// A glob rather than a named list because some names are used only by this
-/// crate's test modules, and a named re-export of those is an unused import in
-/// a normal build.
+/// surfaces obey belongs in the crate both can see. A glob rather than a named
+/// list, because some names are used only by this crate's test modules and naming
+/// them would be an unused import in a normal build.
 pub(crate) mod pty_owners {
     pub(crate) use dux_core::pty_owners::*;
 }

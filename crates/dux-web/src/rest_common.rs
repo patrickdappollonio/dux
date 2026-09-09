@@ -40,17 +40,10 @@ pub const IDEMPOTENCY_TTL: Duration = Duration::from_secs(600);
 /// Generous because a real create does `git worktree add` + a provider PTY spawn.
 pub const CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Longer await window for the from-PR create. The from-PR path does a
-/// `gh pr view` network round trip BEFORE the worktree+PTY worker even starts, so
-/// the default 20s window routinely expires and yields a bodyless `202` for a
-/// create that ultimately succeeds. Sixty seconds covers a slow network lookup
-/// plus the worktree/PTY work.
-///
-/// DEFERRED FOLLOW-UP: the fuller fix is to stop blocking on a long poll at all —
-/// reply `202` immediately with a body carrying an `op_key` the client correlates
-/// against the status stream, plus an in-progress indicator — so neither the
-/// from-PR nor a slow ordinary create depends on a fixed timeout. Tracked as a
-/// later REST-migration refinement.
+/// Longer await window for the from-PR create, which does a `gh pr view` network
+/// round trip before the worktree and PTY worker even starts: the ordinary window
+/// expires on it and yields a bodyless `202` for a create that succeeds. This one
+/// covers a slow network lookup plus the worktree and PTY work.
 pub const FROM_PR_CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The class of a live WebSocket connection tracked in the [`ConnectionRegistry`].
@@ -68,28 +61,23 @@ pub enum ConnClass {
     TerminalPty,
 }
 
-/// Thread-safe map of live connection id → its [`ConnClass`]. Every upgraded
+/// Thread-safe map of live connection id to its [`ConnClass`]. Every upgraded
 /// WebSocket registers its server-minted id on connect and deregisters on
-/// disconnect, so the map is the authoritative set of LIVE connection ids.
+/// disconnect, so this is the authoritative set of live connection ids.
 ///
 /// [`scope_from_headers`] validates an inbound `X-Connection-Id` against it: an id
-/// not present (or not of class [`ConnClass::Events`]) falls back to broadcast, so a
-/// forged, stale, or PTY-class id cannot silence a toast by routing it to a
-/// non-events connection.
-///
-/// A plain `Mutex<HashMap<..>>`: every operation takes the lock, does an O(1) map
-/// op, and releases it WITHOUT awaiting, so the guard never crosses an `.await`.
+/// that is absent or not [`ConnClass::Events`] falls back to broadcast, so a forged,
+/// stale or PTY-class id cannot silence a toast. A plain `Mutex<HashMap<..>>`, and
+/// every operation releases the lock without awaiting, so no guard crosses an
+/// `.await`.
 #[derive(Default)]
 pub struct ConnectionRegistry {
     entries: Mutex<HashMap<String, ConnClass>>,
     /// How many [`ConnClass::Events`] connections are live, maintained on every
-    /// insert and remove so the number can be read without the lock and, more to
-    /// the point, from a crate that cannot see this type at all.
-    ///
-    /// That is what it is for. The terminal UI's serving chip counts connected
-    /// browsers, `dux-tui` never sees `dux-web`, and the map itself cannot travel;
-    /// an `Arc<AtomicUsize>` can. Every registry has one, so the count is never a
-    /// special case, and the background serve shares its own clone in.
+    /// insert and remove so it can be read without the lock and from a crate that
+    /// cannot see this type: the terminal UI's serving chip counts connected
+    /// browsers and `dux-tui` never sees `dux-web`. Every registry has one, so the
+    /// count is never a special case.
     events_live: Arc<AtomicUsize>,
 }
 
@@ -99,13 +87,10 @@ impl ConnectionRegistry {
     }
 
     /// A registry that reports its live Events count into `gauge`, so a reader
-    /// outside this crate can see it.
-    ///
-    /// One registry per gauge. Two registries sharing one would each subtract from
-    /// a total neither of them owns, and the reset below would zero a count the
-    /// other still has entries for, after which its next disconnect wraps the
-    /// `usize` and the chip reports a number with twenty digits. The assert says so
-    /// where a future caller would find out.
+    /// outside this crate can see it. One registry per gauge: two sharing one would
+    /// each subtract from a total neither owns, and the reset below would zero a
+    /// count the other still has entries for, after which its next disconnect wraps
+    /// the `usize`.
     pub fn with_events_gauge(gauge: Arc<AtomicUsize>) -> Self {
         debug_assert_eq!(
             gauge.load(Ordering::Relaxed),
@@ -134,14 +119,10 @@ impl ConnectionRegistry {
         self.adjust_events_count(previous, None);
     }
 
-    /// How many Events connections are live: one per open browser tab.
-    ///
-    /// Events sockets only, deliberately. A tab that is watching a terminal has a
-    /// PTY socket open beside its Events one, and counting those would report
-    /// three connections for one browser.
-    ///
-    /// Called with the entries lock held, so a concurrent insert and remove cannot
-    /// interleave into a count that drifts from the map.
+    /// How many Events connections are live: one per open browser tab. Events
+    /// sockets only, because a tab watching a terminal has a PTY socket open beside
+    /// its Events one. Called with the entries lock held, so a concurrent insert and
+    /// remove cannot interleave into a count that drifts from the map.
     fn adjust_events_count(&self, previous: Option<ConnClass>, current: Option<ConnClass>) {
         let was = previous == Some(ConnClass::Events);
         let is = current == Some(ConnClass::Events);

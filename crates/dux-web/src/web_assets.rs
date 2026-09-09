@@ -1,51 +1,41 @@
 //! The built web UI embedded into the binary by rust-embed and served with SPA
 //! fallback. Built by build.rs.
 //!
-//! The embedded tree is `$OUT_DIR/ui`, a Brotli-compressed mirror build.rs stages from
-//! `web/dist` on every path it can take, NOT `web/dist` itself. Reading the
-//! generated directory directly meant the embedded bytes depended on the state of
-//! a directory cargo was not allowed to watch (watching it re-runs the frontend
-//! build forever); emptying it baked in zero files and the server answered 404 at
-//! the root with nothing said anywhere. The KNOWN GAP comment in build.rs has the
-//! measurements, and the honest limits of the repair.
+//! The embedded tree is `$OUT_DIR/ui`, the Brotli-compressed mirror build.rs stages
+//! from `web/dist` on every path it can take, and never `web/dist` itself: cargo
+//! cannot watch the generated directory (watching it re-runs the frontend build
+//! forever), so embedding it directly makes the baked bytes depend on state nothing
+//! tracks. The KNOWN GAP comment in build.rs has the measurements.
 //!
 //! Interpolating `$OUT_DIR` in the `folder` attribute needs rust-embed's
-//! `interpolate-folder-path` feature, which Cargo.toml enables. Nothing here has
-//! to pin it, and no test could: rust-embed enforces it at COMPILE time. Read
-//! against the pinned 8.11.0, the expansion is `#[cfg]`-gated on that feature,
-//! and without it the literal `$OUT_DIR/ui` is a RELATIVE path joined onto the
-//! crate's manifest directory, so it names a directory that does not exist and
-//! the derive fails with an error quoting it. What
-//! `the_embed_folder_resolves_to_something` covers is the state that DOES
-//! compile: a staging directory that exists and is empty.
+//! `interpolate-folder-path` feature, which Cargo.toml enables and rust-embed
+//! enforces at compile time, so nothing here pins it and no test could: without the
+//! feature the literal path is relative to the manifest directory, names nothing,
+//! and the derive fails quoting it.
 //!
-//! The text assets are Brotli-compressed during that staging, so the bytes
-//! rust-embed bakes in are already compressed (shrinking the binary). Brotli has
-//! NO magic bytes, so unlike the gzip scheme this replaced the handler cannot
-//! sniff compressed-ness from the payload: it decides by extension, through the
-//! same [`crate::compressible_exts`] list build.rs compresses by, and serves
-//! those assets with `Content-Encoding: br` for clients that accept it (every
-//! browser), decompressing on the fly for the rare client that doesn't.
+//! Text assets are compressed during staging, so the bytes rust-embed bakes in are
+//! already compressed. Brotli has no magic bytes, so the handler cannot sniff
+//! compressed-ness and decides by extension through the same
+//! [`crate::compressible_exts`] list build.rs compresses by, serving those assets
+//! with `Content-Encoding: br` and decompressing on the fly for a client that does
+//! not accept it.
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
-/// Public so the integration tests can assert on the embedded set DIRECTLY
-/// (`WebAssets::iter()` / `WebAssets::get()`) instead of only through the router.
-/// Every other gate in this crate is indirect: it fetches a page and happens to
-/// fail when the embed is empty. A direct assertion holds no matter where
-/// `folder` points and reports the cause instead of a 404.
+/// Public so the integration tests can assert on the embedded set directly instead
+/// of only through the router: every other gate here fetches a page and happens to
+/// fail when the embed is empty, where a direct assertion holds wherever `folder`
+/// points and reports the cause instead of a 404.
 #[derive(RustEmbed)]
 #[folder = "$OUT_DIR/ui"]
 pub struct WebAssets;
 
 /// What the page served at `/` actually is, decided at compile time by `build.rs`.
-///
 /// Three states rather than a bool, because skipping the frontend build has two
-/// outcomes that need DIFFERENT things said about them. Telling an operator their
-/// binary "contains NO web UI" when it is serving a real (if old) one sends them
-/// hunting for the wrong problem, and so does the reverse.
+/// outcomes needing different things said: telling an operator their binary has no
+/// web UI when it serves a real if old one sends them after the wrong problem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiBuildState {
     /// The frontend was built during this binary's compilation. The normal case.
@@ -59,21 +49,18 @@ pub enum UiBuildState {
     StaleReuse,
 }
 
-/// Map the build-script marker onto a state. Its own function because
-/// `option_env!` is fixed at compile time and cannot be varied from a test.
+/// Map the build-script marker onto a state. Its own function because `option_env!`
+/// is fixed at compile time and cannot be varied from a test.
 ///
-/// ONE marker with three values, not two booleans, and not because it is tidier.
-/// `option_env!` reads the AMBIENT rustc environment as well as what the build
-/// script emits, and a `cargo:rustc-env` ALWAYS wins over an ambient value of the
-/// same name (measured with a throwaway crate, not assumed). So `build.rs` must
-/// emit this marker on ALL THREE paths: a path that emits nothing leaves an
-/// ambient value of the same name in force, and a workflow-level `env:` would
-/// then make a completely genuine build report itself as skipped.
+/// ONE marker with three values rather than two booleans: `option_env!` reads the
+/// ambient rustc environment too, and a `cargo:rustc-env` always wins over an
+/// ambient value of the same name, so `build.rs` must emit this marker on every one
+/// of its paths. A path that emits nothing leaves an ambient value in force, and a
+/// workflow-level `env:` would then make a genuine build report itself as skipped.
 ///
-/// An unrecognised or absent value means Built, which is the safe default here:
-/// the only states that let a test skip are the two spelled out below, so a
-/// garbled marker fails loudly against whatever page is embedded rather than
-/// quietly excusing the suite.
+/// An unrecognised or absent value means Built, the safe default: only the states
+/// below let a test skip, so a garbled marker fails loudly against whatever page is
+/// embedded rather than quietly excusing the suite.
 fn state_from(marker: Option<&str>) -> UiBuildState {
     match marker {
         Some("not_built") => UiBuildState::NotBuilt,
@@ -82,12 +69,10 @@ fn state_from(marker: Option<&str>) -> UiBuildState {
     }
 }
 
-/// This binary's UI build state.
-///
-/// `build.rs` sets `cargo:rustc-env=DUX_UI_BUILD_STATE` to `built`, `not_built`
-/// or `stale` on every path it can take (and declares
-/// `cargo:rerun-if-env-changed=DUX_DISABLE_UI_BUILD` so toggling the hatch is not
-/// masked by cargo's build-script cache).
+/// This binary's UI build state. `build.rs` sets
+/// `cargo:rustc-env=DUX_UI_BUILD_STATE` to `built`, `not_built` or `stale` on every
+/// path it can take, and declares `cargo:rerun-if-env-changed=DUX_DISABLE_UI_BUILD`
+/// so toggling the hatch is not masked by the build-script cache.
 pub fn ui_build_state() -> UiBuildState {
     state_from(option_env!("DUX_UI_BUILD_STATE"))
 }
@@ -101,11 +86,9 @@ pub const UI_NOT_BUILT_WARNING: &str = "This binary was built with DUX_DISABLE_U
      (run `npm ci` in crates/dux-web/web first) to serve the real web UI.";
 
 /// Operator-facing warning for a binary that reused an existing `web/dist`.
-///
-/// Deliberately different wording from [`UI_NOT_BUILT_WARNING`]: there IS a web
-/// UI here and it will look completely normal, which is exactly why it has to be
-/// said out loud. Nothing records when that `dist` was built, so "old" is the
-/// strongest claim available and the message does not pretend otherwise.
+/// Deliberately worded unlike [`UI_NOT_BUILT_WARNING`]: there IS a web UI here and
+/// it looks completely normal. Nothing records when that `dist` was built, so "old"
+/// is the strongest claim available.
 pub const UI_STALE_WARNING: &str = "This binary was built with DUX_DISABLE_UI_BUILD set and embedded a web/dist that \
      was already on disk, so the web UI it serves was NOT built from this source \
      and may be arbitrarily out of date. It will otherwise look and behave \
@@ -131,26 +114,18 @@ pub const UI_EMPTY_EMBED_WARNING: &str = "This binary reports a real frontend bu
      Installed dux from a release archive, npm, or the install script? That is a \
      packaging bug, not something you can fix locally. Please report it.";
 
-/// The smallest number of embedded files a real build can plausibly have.
-///
-/// The failure this guards is total: a broken embed carries ZERO files, so any
-/// floor at all would catch it. 8 is a little headroom above that without
-/// approaching a real build, which is 108 files (measured, 2026-07: `web/dist`
-/// holds 108 files, 92 of them hashed bundles under `assets/`). Even an app that
-/// abandoned code splitting entirely would still ship an `index.html`, an entry
-/// chunk, a stylesheet, the service worker, the manifest, the offline page and
-/// its icons. Kept deliberately low because this fires a WARNING at every server
-/// start: a floor that could cry wolf on a legitimate build is worse than one
-/// that only ever catches the empty case.
+/// The smallest number of embedded files a real build can plausibly have. The
+/// failure this guards is total, a broken embed carrying zero files, so this is a
+/// little headroom above that and nowhere near a real build, which ships an
+/// `index.html`, an entry chunk, a stylesheet, the service worker, the manifest, the
+/// offline page and its icons even without code splitting. Kept deliberately low
+/// because it fires a warning at every server start.
 const MIN_PLAUSIBLE_EMBEDDED_FILES: usize = 8;
 
 /// The single warning row `dux server` shows, or `None` when there is nothing to
 /// say. Pure over its inputs so it can be tested; [`ui_startup_warning`] supplies
-/// the real ones.
-///
-/// A skip state outranks the embed check because it EXPLAINS it: a notice-page
-/// binary legitimately embeds one file, and telling that operator their embed is
-/// implausibly small would send them hunting for the wrong problem.
+/// the real ones. A skip state outranks the embed check because it explains it: a
+/// notice-page binary legitimately embeds one file.
 fn startup_warning(state: UiBuildState, embedded_files: usize) -> Option<&'static str> {
     match ui_build_warning(state) {
         Some(warning) => Some(warning),
@@ -160,28 +135,23 @@ fn startup_warning(state: UiBuildState, embedded_files: usize) -> Option<&'stati
 }
 
 /// This binary's startup warning row: the build-state warning when the frontend
-/// build was skipped, otherwise the empty-embed warning when the build state and
-/// the embedded set disagree, otherwise nothing.
-///
-/// Counting is bounded: it stops at the floor rather than walking all 108 entries.
+/// build was skipped, otherwise the empty-embed warning when the build state and the
+/// embedded set disagree, otherwise nothing. Counting stops at the floor rather than
+/// walking the whole embedded set.
 pub fn ui_startup_warning() -> Option<&'static str> {
     let embedded = WebAssets::iter().take(MIN_PLAUSIBLE_EMBEDDED_FILES).count();
     startup_warning(ui_build_state(), embedded)
 }
 
-/// Cache policy per request path. Vite fingerprints everything under `assets/`
-/// with a content hash in the filename, so a changed bundle is a changed URL and
-/// those files can be cached forever. Everything that is NOT content-addressed
-/// (the `index.html` entry point that references the hashed chunks, the PWA
-/// manifest, the service worker, the offline page) must revalidate on every
-/// load, or a browser keeps rendering a stale bundle after the binary is
-/// rebuilt. Revalidation is cheap: responses carry a sha256 `ETag`, so an
-/// unchanged file answers `304 Not Modified` with no body. Icons and images
-/// are not content-addressed either (hashing them would require generating
-/// the manifest, whose icon paths Vite does not rewrite), so they take the
-/// same no-cache-plus-ETag policy: a changed logo shows on the next load
-/// instead of up to a day late, and an unchanged one costs one empty `304`
-/// per load, which is nothing on a loopback/Tailscale server.
+/// Cache policy per request path. Vite fingerprints everything under `assets/` with
+/// a content hash, so a changed bundle is a changed URL and those files cache
+/// forever. Everything not content-addressed (`index.html`, the PWA manifest, the
+/// service worker, the offline page, icons and images) must revalidate on every
+/// load, or a browser keeps rendering a stale bundle after a rebuild.
+///
+/// Revalidation is cheap: responses carry a sha256 `ETag`, so an unchanged file
+/// answers `304` with no body. Hashing the icons would mean generating the manifest,
+/// whose icon paths Vite does not rewrite, so they take the same policy.
 fn cache_policy(path: &str) -> &'static str {
     if path.starts_with("assets/") {
         "public, max-age=31536000, immutable"
@@ -212,15 +182,10 @@ fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
         .is_some_and(|v| v.split(',').any(|candidate| candidate.trim() == etag))
 }
 
-/// Serve an embedded asset by request path, falling back to `index.html` for
-/// unknown paths (client-side routing). `/ws` and `/healthz` are matched before
-/// this fallback, so they never reach here.
-///
-/// Special cases for PWA support:
-/// - `.webmanifest` is served as `application/manifest+json` (mime-guess already
-///   maps it correctly, so the generic path below handles it).
-/// - `offline.html` is a real embedded asset, so it is served here directly and
-///   never shadowed by the SPA `index.html` fallback below.
+/// Serve an embedded asset by request path, falling back to `index.html` for unknown
+/// paths so client-side routing works. `/ws` and `/healthz` are matched before this
+/// fallback and never reach here, and `offline.html` is a real embedded asset served
+/// directly rather than shadowed by that fallback.
 pub async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
     let accepts_br = accepts_br(&headers);
     let path = uri.path().trim_start_matches('/');
@@ -229,12 +194,10 @@ pub async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
         let mime = content.metadata.mimetype().to_string();
         return serve_embedded(&mime, path, content, accepts_br, &headers);
     }
-    // The hashed bundle lives under `assets/`. A miss here means the browser is
-    // requesting a chunk URL from a stale `index.html` (the binary was rebuilt
-    // and restarted with a new content hash). Returning the SPA `index.html`
-    // would hand back HTML for a `*.js` import(), the browser rejects HTML as a
-    // module, and React.lazy unmounts the whole tree. A real 404 lets the
-    // client surface a "reload needed" error instead of silently white-screening.
+    // A miss under `assets/` means a chunk URL from a stale `index.html`. Falling
+    // back to the SPA `index.html` would hand HTML to a `*.js` import(), which the
+    // browser rejects as a module, unmounting the tree; a real 404 lets the client
+    // surface a "reload needed" error instead of white-screening.
     if path.starts_with("assets/") {
         return (StatusCode::NOT_FOUND, "asset not found").into_response();
     }

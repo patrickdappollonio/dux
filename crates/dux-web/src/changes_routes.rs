@@ -1,20 +1,13 @@
-//! `GET /api/v1/sessions/:id/changes` — the REST read for a session's changed
-//! files, backed by [`crate::changes::ChangesService`].
+//! `GET /api/v1/sessions/:id/changes`: a session's changed files, backed by
+//! [`crate::changes::ChangesService`].
 //!
-//! Status codes (per the REST-first design):
-//! - 200 with a dedicated [`ChangesResponseBody`] (`{ rev, staged, unstaged }`).
-//!   We deliberately do NOT serialize `dux_core::viewmodel::ChangedFilesView`: it
-//!   carries the global `watched_session_id` we are removing and lacks `rev`.
-//! - 404 when the session is unknown (no worktree), reusing `resolve_worktree`.
-//! - 409 + `Retry-After` on a git lock/rebase error (logged first by the service);
-//!   409 (not 503) because proxies may reroute a 503.
-//!
-//! Served like every other API route. dux has NO authentication of any kind, so
-//! nothing here ever 401s. That open access is deliberate: the single-tenant
-//! trusted-access model documented in CLAUDE.md. The two app-wide guards are a
-//! Host-header allowlist, which stops a malicious web page from rebinding DNS
-//! into this server, and a same-origin check that applies to MUTATIONS only, so
-//! this GET is not behind it. Neither guard is authentication.
+//! Status codes:
+//! - 200 with [`ChangesResponseBody`]. Deliberately not
+//!   `dux_core::viewmodel::ChangedFilesView`, which carries a global watched
+//!   session id and has no `rev`.
+//! - 404 when the session is unknown (no worktree).
+//! - 409 with `Retry-After` on a git lock or rebase error; 409 rather than 503
+//!   because proxies may reroute a 503.
 
 use axum::{
     Json, Router,

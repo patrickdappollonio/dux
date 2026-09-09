@@ -27,13 +27,10 @@ impl WebCompanion {
         Self::default()
     }
 
-    /// Drop a serve whose required listener died, so the TUI stops servicing a
-    /// server that has stopped answering and says so once rather than every
-    /// iteration.
-    ///
-    /// Returns the sentence for the user when it retired something. The log line
-    /// on its own was not enough: the last thing the status line said was
-    /// "serving on ...", and nobody reads `dux.log` to find out that stopped
+    /// Drop a serve whose required listener died, so the TUI stops servicing a server
+    /// that has stopped answering and says so once rather than every iteration.
+    /// Returns the sentence for the user when it retired something: the status line
+    /// last said "serving on ...", and nobody reads `dux.log` to learn that stopped
     /// being true.
     fn retire_if_failed(&mut self) -> Option<String> {
         let failed = self.server.as_ref().is_some_and(|s| s.is_failed());

@@ -5,56 +5,20 @@
 //! [`EngineHandle::apply_wire_scoped`]. The connection id is the one `/ws/events`
 //! hands the client in its `connected` handshake frame.
 //!
-//! Every route is served plainly: dux has NO authentication, so none of these
-//! ever 401s. The open access is deliberate (the single-tenant trusted-access
-//! model in CLAUDE.md), and the app-wide guards are not authentication: a
-//! Host-header allowlist stops a malicious web page rebinding DNS into this
-//! server, and the same-origin check stops another site driving these verbs from a
-//! visitor's browser, but a client sending no `Origin` (curl, a script) bypasses
-//! it by design.
-//!
-//! Routes:
-//! - `POST   /api/v1/sessions`                     — create (body discriminator:
-//!   `new` | `fork` | `from_worktree` | `from_pr`); `Idempotency-Key` honored.
-//! - `DELETE /api/v1/sessions/:id`                 — delete (`?delete_worktree=`,
-//!   `?delete_branch=`; an absent `delete_branch` keeps the provenance default).
-//! - `GET    /api/v1/sessions/:id/branch-unpushed` — the branches the delete
-//!   dialog would remove, and how many of their commits no remote-tracking ref
-//!   reaches.
-//! - `PATCH  /api/v1/sessions/:id`                 — rename / change provider /
-//!   toggle auto-reopen (optional body fields).
-//! - `POST   /api/v1/sessions/:id/reconnect`       — relaunch (`{force}`).
-//! - `POST   /api/v1/sessions/:id/rerun-startup-command` — re-run the agent's
-//!   project startup command in its worktree (keyed Busy → final toast).
-//! - `POST   /api/v1/sessions/reorder`             — persist order (literal
-//!   segment, registered so it does not collide with `:id`).
-//! - `PUT    /api/v1/sessions/:id/pull-request`, manually attach (pin) a
-//!   PR from a raw typed reference; `202` + `{op_id}` (deferred, the outcome
-//!   rides the toast stream and the pushed workspace document, announced by
-//!   `sessions.changed`).
-//! - `DELETE /api/v1/sessions/:id/pull-request`, detach the agent's pull
-//!   request: the pin goes if there is one, the badge clears, and
-//!   autodetection stops for the agent (synchronous, `200`).
-//! - `POST   /api/v1/sessions/:id/pull-request/autodetect`, the way back:
-//!   resume autodetection for the agent and check once now (synchronous,
-//!   `200`).
-//! - `POST   /api/v1/pull-requests/resolve`, read a typed pull-request
-//!   reference and say which projects are checkouts of the repository it names.
-//!   A READ, not a write: it starts nothing and changes nothing, so it answers
-//!   the client directly instead of going through a wire command and a toast.
-//!   The client then posts the create with the project it settled on.
+//! The create route honors `Idempotency-Key` and discriminates its body on
+//! `new`, `fork`, `from_worktree` or `from_pr`. Delete takes `?delete_worktree=`
+//! and `?delete_branch=`, and an absent `delete_branch` keeps the provenance
+//! default. `POST /api/v1/pull-requests/resolve` is a READ among these writes: it
+//! starts nothing, so it answers the client directly rather than going through a
+//! wire command and a toast, and the client then posts the create with the project
+//! it settled on.
 //!
 //! The idempotent `200` replay always serves
 //! [`crate::workspace_routes::SessionWithTerminals`], the same nested shape as
 //! `GET /api/v1/sessions/:id`, so a replay and a later read of that session agree
-//! field for field. The create's `201` serves that shape too WHENEVER THE VIEW IS
-//! AVAILABLE, and falls back to a minimal id-only body when it is not, so the
-//! agreement holds on that branch and not unconditionally. A nested terminal
-//! entry carries a tagged `owner` field, which
-//! is additive and documented in `workspace_routes`'s module docs; the exact key set
-//! of the replay body, and of the create body on its full branch, is pinned by
-//! `session_create_and_its_replay_pin_the_same_terminal_key_set` in
-//! `tests/ws_transport.rs`.
+//! field for field. The create's `201` serves that shape whenever the view is
+//! available and falls back to a minimal id-only body when it is not, so the
+//! agreement holds on that branch and not unconditionally.
 
 use axum::{
     Json, Router,
@@ -152,12 +116,10 @@ enum CreateSessionBody {
         #[serde(default)]
         name: String,
     },
-    /// A STANDALONE agent: run a provider in a folder the user already has.
-    ///
-    /// It carries no `project_id`, because a standalone agent belongs to no
-    /// project, and it is the only kind that carries a `provider`: the others
-    /// take their project's default, and this one has no project to take one
-    /// from, so it takes the GLOBAL default unless the caller names one.
+    /// A STANDALONE agent: run a provider in a folder the user already has. It
+    /// carries no `project_id`, belonging to no project, and it is the only kind
+    /// carrying a `provider`: the others take their project's default, and this one
+    /// takes the GLOBAL default unless the caller names one.
     Standalone {
         /// An absolute path on the SERVER's filesystem. Accepted whatever it
         /// contains; it does not have to be a repository.
@@ -292,13 +254,10 @@ async fn create_session(
         return response;
     }
 
-    // Existing-branch consent (the "no silent attach" tenet): for a `new` create
-    // with a user-typed name that the client has NOT confirmed, run the shared
-    // core branch preflight. If it names an existing branch, refuse with a
-    // confirmable 409 carrying the branch name + location, so the client shows a
-    // confirmation and re-POSTs with `use_existing_branch: true` rather than
-    // silently adopting that branch's history. (The wire command enforces the
-    // same refusal as defense in depth for a client that skips this dialog.)
+    // Existing-branch consent: an unconfirmed user-typed name that names an existing
+    // branch is refused with a confirmable 409 carrying the branch and its location,
+    // so the client asks and re-POSTs with `use_existing_branch` rather than silently
+    // adopting that branch's history. The wire command refuses the same way.
     if let Some(response) = existing_branch_conflict(&state, &body).await {
         return response;
     }
@@ -417,14 +376,11 @@ struct BranchUnpushedResponse {
     /// than working the pair out again from its own copy of the session, so
     /// what the user is asked about is what the server would delete.
     branches: Vec<String>,
-    /// Commits on those branches reachable from no remote-tracking ref, counted
-    /// as a union, or `null` when git could not answer (a branch that is already
-    /// gone, a locked or unreadable repository). The dialog then simply omits
-    /// the sentence: it warns about what it knows and never guesses a number.
-    ///
-    /// The count and "does this repository have remote-tracking refs at all"
-    /// travel as one object because the number means a different thing without
-    /// the flag, and two nullable fields would eventually disagree.
+    /// Commits on those branches reachable from no remote-tracking ref, counted as a
+    /// union, or `null` when git could not answer; the dialog then omits the
+    /// sentence rather than guessing a number. The count and whether the repository
+    /// has remote-tracking refs at all travel as one object, because the number
+    /// means a different thing without the flag.
     unpushed: Option<UnpushedPayload>,
 }
 
@@ -664,12 +620,10 @@ async fn reconnect_session(
 
 // ── Rerun startup command ────────────────────────────────────────────────────
 
-/// Re-run the agent's project startup command in that agent's worktree (the web
-/// counterpart to the TUI's `rerun-startup-command-on-agent` palette command).
-/// The engine resolves the session + project, requires a non-empty project
-/// startup command, and runs it off-thread; the keyed Busy → final status pair
-/// rides the `/ws/events` toast stream back to the initiating client. A missing
-/// session/project or absent startup command is the engine's `Err` → 400.
+/// Re-run the agent's project startup command in that agent's worktree. The engine
+/// resolves the session and project, requires a non-empty startup command, and runs
+/// it off-thread; the keyed busy and its final ride the toast stream back to the
+/// initiating client. A missing session or project, or an absent command, is a 400.
 async fn rerun_startup_command(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -696,18 +650,16 @@ async fn rerun_startup_command(
 
 // ── Kill (force-detach a running agent) ──────────────────────────────────────
 
-/// Detach the agent WHOLE: stop every one of its tabs' provider processes
-/// without deleting its session or worktree (the agent-level "Detach agent"
-/// action). The engine drops each provider (SIGKILL) and marks the session
-/// Detached, so it can be reconnected. This is distinct from closing a single
-/// tab. Unknown session → 404; an agent that is not running is a successful
-/// no-op. Companion terminals are killed through the existing
-/// `DELETE /api/v1/sessions/:id/terminals/:tid`.
+/// Detach the agent WHOLE: stop every tab's provider process without deleting the
+/// session or worktree, marking the session Detached so it can be reconnected.
+/// Distinct from closing a single tab, and companion terminals are killed through
+/// their own route. An unknown session is a 404; an agent that is not running is a
+/// successful no-op.
 ///
-/// Note: unlike the git-mutation routes, this does NOT call `resolve_worktree` —
-/// killing a PTY needs no worktree on disk (a hung agent whose worktree was
-/// removed must still be killable). The engine's own unknown-session error is
-/// the existence check, mapped to 404 here.
+/// Deliberately unlike the git-mutation routes, this calls no `resolve_worktree`:
+/// killing a PTY needs no worktree on disk, or a hung agent whose worktree was
+/// removed could not be killed. The engine's unknown-session error is the existence
+/// check.
 async fn kill_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -808,12 +760,10 @@ async fn attach_pull_request(
     }
 }
 
-/// Detach a session's pull request: this agent has no PR, as of now. Removes
-/// a pin if there is one, clears the badge immediately, and stops
-/// autodetection for the session until it is attached by hand or detection is
-/// resumed. Applies to an autodetected association too, not only a pinned one.
-/// Synchronous; the info status rides the stream
-/// like the sibling handlers' outcomes (the `ApplyWire` arm broadcasts it).
+/// Detach a session's pull request: removes a pin if there is one, clears the badge
+/// immediately, and stops autodetection until the agent is attached by hand or
+/// detection is resumed. Applies to an autodetected association too. Synchronous;
+/// the info status rides the stream like the sibling handlers' outcomes.
 async fn detach_pull_request(
     State(state): State<AppState>,
     Path(id): Path<String>,

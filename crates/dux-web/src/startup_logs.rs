@@ -1,44 +1,25 @@
-//! REST reads for startup-command logs, the web counterpart to the TUI's
-//! `read-startup-command-logs` palette command. Each run of a project's startup
-//! command (see [`crate::session_actions`]'s `rerun_startup_command` and the
-//! agent-create launch path) writes a timestamped `.log` file under
+//! REST reads for startup-command logs. Each run of a project's startup command
+//! writes a timestamped `.log` file under
 //! `{dux_root}/startup-command-logs/{project_id}/{session_id}/`; these GETs list
 //! those files and return a chosen file's contents.
 //!
-//! Both SCOPES of `dux_core::startup::StartupCommandLogScope` are served, so the
-//! web matches the TUI (which picks Agent scope when an agent is selected and
-//! Project scope otherwise):
+//! Both scopes of `dux_core::startup::StartupCommandLogScope` are served:
 //!
-//! - `GET /api/v1/sessions/:id/startup-logs` — the agent's log files, newest
-//!   first, plus the newest file's contents pre-loaded (`selected`) so the viewer
-//!   renders without a second round-trip. 404 for an unknown session id.
-//! - `GET /api/v1/sessions/:id/startup-logs/content?name=` — one log file's
-//!   contents. `name` must be one of the listed files (membership-checked, so a
-//!   `..`/path-traversal value can never escape the agent's log directory); an
-//!   empty/absent `name` returns the newest. 404 for an unknown session or an
-//!   unknown log name.
-//! - `GET /api/v1/projects/:id/startup-logs` and
-//!   `GET /api/v1/projects/:id/startup-logs/content?name=`, the same two reads
-//!   in PROJECT scope: every run across every session of the project. 404
-//!   (`unknown project`) for an unknown project id.
+//! - `GET /api/v1/sessions/:id/startup-logs` lists the agent's files newest first,
+//!   with the newest one's contents pre-loaded as `selected` so the viewer renders
+//!   without a second round trip. 404 for an unknown session id.
+//! - `GET /api/v1/sessions/:id/startup-logs/content?name=` returns one file. `name`
+//!   must be one of the listed files, which is the traversal guard; an empty or
+//!   absent `name` returns the newest. 404 for an unknown session or log name.
+//! - The `/api/v1/projects/:id/...` pair is the same two reads in PROJECT scope,
+//!   spanning every session of the project.
 //!
 //! The scope is never re-derived here: both handlers hand a
-//! `StartupCommandLogScope` to `dux_core::startup::list_logs_for_scope`, which is
-//! the one place "agent means this directory, project means every session
-//! directory under it" is written down.
+//! `StartupCommandLogScope` to `dux_core::startup::list_logs_for_scope`, the one
+//! place that says what each scope's directories are.
 //!
-//! The directory listing and file reads run OFF the async reactor
-//! (`spawn_blocking`), following the read precedent in [`crate::project_reads`].
-//! The session → `(paths, project_id)` and project → `paths` resolutions are
-//! instant clones off the engine thread
-//! (`EngineHandle::session_startup_log_context` /
-//! `EngineHandle::project_startup_log_context`). Served like every other API
-//! route: dux has NO authentication of any kind, so nothing here ever 401s. That
-//! open access is deliberate, the single-tenant trusted-access model documented in
-//! CLAUDE.md. The two app-wide guards are a Host-header allowlist, which stops a
-//! malicious web page from rebinding DNS into this server, and a same-origin check
-//! that applies to MUTATIONS only, so these GETs are not behind it. Neither guard
-//! is authentication.
+//! Listings and reads run off the async reactor; resolving a session or project to
+//! its paths is an instant clone off the engine thread.
 
 use axum::{
     Json, Router,
@@ -221,22 +202,14 @@ async fn read_project_startup_log(
     }
 }
 
-/// The two failures these reads can hit, worded for the client and stripped of
-/// the server's own filesystem layout.
+/// The failures these reads can hit, worded for the client and stripped of the
+/// server's own filesystem layout. Every error arriving here is annotated by
+/// `dux_core::startup` with an absolute path under the dux config root, which
+/// contains the user's home directory and is not the browser's business.
 ///
-/// Every error arriving here is annotated with an ABSOLUTE path:
-/// `dux_core::startup` wraps each `read_dir`/`read_to_string` in
-/// `with_context(|| format!("failed to read {}", path.display()))`, and those
-/// paths are under the dux config root, which is a place the browser has no
-/// business learning about (the user's home directory is in it). Formatting the
-/// whole anyhow chain with `{e:#}` put all of it in the response body.
-///
-/// So we keep only `root_cause()`, which is the OS error ("Is a directory",
-/// "Permission denied") and is the part that actually tells the user something,
-/// and prefix it with what dux was trying to do. This is the pattern already set
-/// by the config write in [`crate::engine_actor`]; these three sites were the
-/// ones that had not adopted it. Nothing is lost to the operator: the full
-/// chain is still what `dux.log` gets from the code that logs these failures.
+/// So only `root_cause()` is kept, the OS error that tells the user something, with
+/// a prefix naming what dux was trying to do. The full chain still reaches
+/// `dux.log` from the code that logs these failures.
 fn listing_failed(e: anyhow::Error) -> String {
     format!(
         "Could not list this project's startup command logs: {}",
@@ -274,16 +247,14 @@ fn collect_logs(
     Ok(StartupLogsReply { entries, selected })
 }
 
-/// Read one of `scope`'s startup-command logs by file `name` (empty → newest).
-/// `Ok(None)` when the scope has no logs or `name` does not match a listed file;
-/// matching `name` against the listed files is the traversal guard (a value can
-/// only ever name a real `.log` file inside the scope's own directories). `Err`
-/// on a directory-listing or read failure.
+/// Read one of `scope`'s startup-command logs by file `name`, empty meaning the
+/// newest. `Ok(None)` when the scope has no logs or `name` matches no listed file,
+/// which is the traversal guard: a value can only ever name a real `.log` inside the
+/// scope's own directories. `Err` on a listing or read failure.
 ///
-/// In PROJECT scope the listing spans every session directory, so two runs can
-/// in principle carry the same file name (same second, same branch name, two
-/// sessions). The search takes the first hit in a newest-first listing, so a
-/// duplicate name resolves to the newest of them, deterministically.
+/// A PROJECT-scope listing spans every session directory, so two runs can carry the
+/// same file name; the search takes the first hit in a newest-first listing, so a
+/// duplicate resolves deterministically to the newest.
 fn read_named_log(
     paths: &DuxPaths,
     scope: StartupCommandLogScope,

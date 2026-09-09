@@ -2,38 +2,23 @@
 //! [`ResourceService`] that samples CPU/RSS off both the engine thread and the
 //! reactor.
 //!
-//! ## Why REST and not the event bus
+//! REST rather than the event bus, whose contract is that an event names what
+//! changed and never the changed value. Resource stats are a value that changes on
+//! every sample, so a topic would push a payload per tick to every client whether
+//! or not anyone is looking; REST gives natural backpressure. The pushed workspace
+//! document is not a counter-example: it changes rarely, every client holds it all
+//! the time, and pushing it replaced N clients fetching the same bytes.
 //!
-//! [`crate::event_bus`] states its contract: an event names what changed, never
-//! the changed value. Resource stats ARE a value, and one that changes on every
-//! sample, so a ws topic would push a payload every tick to every connected
-//! client whether or not anyone is looking. REST gives natural backpressure: no
-//! Task Manager open, no cost.
+//! Not `Engine::spawn_resource_stats_worker` either: that worker is shaped for the
+//! TUI event loop, and its `InFlightKey::ResourceStats` guard silently drops a
+//! concurrent request, which is right for a repainting TUI and wrong for REST,
+//! where the second browser would get nothing back.
 //!
-//! The workspace document is pushed over that socket and is not a
-//! counter-example. It changes when the workspace changes, which is rarely and
-//! never faster than the engine's own change gate; every client holds it all the
-//! time, open dialog or not; and pushing it REPLACED N clients each fetching the
-//! same bytes. Resource stats have the opposite shape on all three counts:
-//! unbounded rate, one dialog's audience, and nothing to coalesce.
-//!
-//! ## Why not `Engine::spawn_resource_stats_worker`
-//!
-//! That worker is shaped for the TUI event loop: fire-and-forget into a
-//! `WorkerEvent`, no reply channel, and its `InFlightKey::ResourceStats` guard
-//! SILENTLY DROPS a concurrent request. Dropping a redundant refresh is right for
-//! a repainting TUI and wrong for REST, where the second browser would simply get
-//! nothing back. It is left untouched for the TUI; the web samples through this
-//! service instead.
-//!
-//! ## Single-flight + TTL
-//!
-//! Modeled on [`crate::changes::ChangesService`]. N browsers polling at 1s
-//! collapse to ONE sysinfo walk: a fresh cache entry (younger than [`CACHE_TTL`])
-//! is served directly, and concurrent misses elect one owner while the rest await
-//! it and re-read the cache. A drop guard clears the inflight slot on every exit
-//! path including future cancellation (an HTTP client disconnecting drops the
-//! handler future at its `.await`).
+//! Single-flight with a TTL, modeled on [`crate::changes::ChangesService`]:
+//! concurrent browsers collapse to one sysinfo walk. An entry younger than
+//! [`CACHE_TTL`] is served directly, and concurrent misses elect one owner while
+//! the rest await it and re-read the cache. A drop guard clears the inflight slot
+//! on every exit path, cancellation included.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

@@ -1,112 +1,64 @@
 //! The upload half of dropping a file onto a terminal or agent pane.
 //!
-//! # This route saves bytes. It never writes to a terminal.
+//! This route saves bytes and never writes to a terminal. Writing is gated on
+//! being the connection that holds input, and that gate lives on the websocket in
+//! `PtySizeOwners::may_write`; a handler that pasted the path itself would be a
+//! plain HTTP request walking past it. So the route saves the file, returns where
+//! it landed, and the browser pastes that path over its own gated socket.
 //!
-//! That split is the whole security design, so it is stated here rather than
-//! left to be re-derived. Writing to a terminal is gated on being the connection
-//! that currently HOLDS INPUT, and that gate lives on the websocket, enforced
-//! server-side in `PtySizeOwners::may_write`. An upload handler that injected
-//! the path itself would walk straight past it: it is not that connection, it is
-//! a plain HTTP request. So this route saves the file and returns where it
-//! landed, and the BROWSER pastes that path over its own already-gated socket,
-//! exactly like every other write reaching a terminal.
+//! The ownership check here is a courtesy that turns "saved and then silently not
+//! pasted" into a clear refusal. It is not the protection and must never be
+//! described as one. It needs its own identifier: `X-Connection-Id` names the
+//! EVENTS socket, and input ownership is tracked against the number minted when
+//! the terminal socket connects, which the upload carries in `conn`.
 //!
-//! The route does check whether someone else currently holds input, and that
-//! check is a **courtesy**: it turns "your file was saved and then silently not
-//! pasted" into a clear refusal. It is not the protection, it must never be
-//! described as one, and removing it would weaken nothing.
+//! Three destinations, for two intents:
 //!
-//! **The courtesy check needs the right identifier, and there are two.** The
-//! `X-Connection-Id` header the other REST routes carry names the EVENTS socket,
-//! and `rest_common::scope_from_headers` deliberately refuses a PTY-class id in
-//! it. Input ownership is tracked against a different number, minted when the
-//! terminal socket connects and handed to the browser in its first frame. The
-//! upload carries THAT one, in its own `conn` parameter. Reusing the header
-//! would be checking a different thing entirely.
+//! - An AGENT pane: the agent's upload directory (`ui.upload_directory`), created
+//!   on first use with a self-ignoring `.gitignore`. A file handed to an agent
+//!   must never touch git status and should die with the agent, and it sits inside
+//!   the worktree because some CLIs refuse to read outside their workspace.
+//! - A TERMINAL pane: wherever the terminal actually is, discovered live, because
+//!   a shell's directory moves the moment someone types `cd`. True of all three
+//!   kinds, a standalone terminal included, which has no worktree at all.
+//! - The EDITOR'S FILE TREE: the directory dropped on, as an ordinary visible
+//!   file. Nothing here goes near the upload directory and nothing writes a
+//!   `.gitignore`; hiding the file would defeat the intent. Marked by the `dir`
+//!   query parameter, which is present (possibly empty) for exactly this case.
 //!
-//! # Where the file lands, and why the three answers differ
+//! A tree drop naming a terminal is the one place a terminal answers with a fixed
+//! path: a terminal-rooted editor is pinned to the spawn directory the tree was
+//! drawn from, so following the live shell would land the same click elsewhere
+//! after a `cd`.
 //!
-//! There are two INTENTS and three SURFACES, so there are three destinations.
+//! The pane cases resolve through `Engine::file_drop_destination` and the tree
+//! case through `Engine::file_drop_tree_destination`; creation, probing and
+//! writing all run on a blocking pool.
 //!
-//! On an AGENT, the agent's upload directory (`ui.upload_directory`, default
-//! `.dux/uploads` inside the worktree), created on first use with a
-//! self-ignoring `.gitignore`. A file handed to an agent is "look at this for
-//! me": it should never touch the user's git status, and it should die with the
-//! agent, which it does because it lives in the agent's own worktree. It is
-//! inside the worktree rather than beside it because the path is handed to a
-//! CLI to read and some CLIs refuse to read outside their workspace.
+//! A tree drop reuses this route rather than getting one of its own, because
+//! everything except the destination is the part that is easy to get wrong: the
+//! size cap, the concurrency permit taken before the body is buffered, the name
+//! validated and never rewritten, the create relative to a pinned directory
+//! handle, the refusal of a symlink at any candidate, and the collision suffix.
 //!
-//! On a TERMINAL, unchanged: wherever the terminal ACTUALLY is, discovered live
-//! because a shell's directory changes the moment someone types `cd`. A
-//! terminal is where the user is working, and that is true of all three kinds,
-//! including an agent's companion terminal (a companion terminal is not that
-//! agent's pane) and a standalone terminal (which has no worktree at all, so an
-//! upload directory could not be resolved for it even in principle).
+//! On an occupied name a drop suffixes where the editor's MOVE refuses. Both
+//! promise that nothing on disk is overwritten, and they differ because a move
+//! names one exact destination while a drop names only a folder, so the next free
+//! name is the honest answer; the response reports it as `renamed`, with
+//! `requested_name` beside `saved_name`.
 //!
-//! On the EDITOR'S FILE TREE, the tree directory the user dropped on, as an
-//! ordinary VISIBLE file. This is the other intent, "add this file to my
-//! project", and the editor is where it belongs because the editor is the only
-//! surface where the user picks the destination. Nothing here goes near the
-//! upload directory and nothing writes a `.gitignore`: hiding the file from git
-//! would defeat the whole point. A tree drop is marked by the `dir` query
-//! parameter, which is PRESENT (possibly empty, meaning the editor's root) for
-//! exactly this case.
+//! There is one size limit, `[server] file_drop_max_bytes`, applied by the
+//! `DefaultBodyLimit` layer below. Uploads to an agent go through the same limit;
+//! do not add a second one for them.
 //!
-//! A tree drop naming a TERMINAL is served, and it is the one place a terminal
-//! answers with a fixed path. A terminal-rooted editor is pinned to the
-//! directory the terminal was spawned in, so the tree the user pointed at was
-//! drawn from that root and the drop has to land under the same one. Following
-//! the live shell here would make the same click land somewhere else after a
-//! `cd`, which is exactly what the pane case above wants and exactly what a
-//! tree cannot have.
-//!
-//! The two pane cases resolve through `Engine::file_drop_destination` and the
-//! tree case through `Engine::file_drop_tree_destination`; the directory
-//! creation, the probing and the writing all run on a blocking pool, like every
-//! other filesystem call in this crate.
-//!
-//! **A tree drop reuses this route rather than getting one of its own**, and
-//! that is a decision worth defending: everything except the destination is
-//! shared, and it is the part that is easy to get wrong. The size cap, the
-//! concurrency permit taken before the body is buffered, the name validated and
-//! never rewritten so a non-Latin name survives, the create relative to a
-//! PINNED directory handle, the refusal of a symlink at any candidate, and the
-//! collision suffix carrying both a counter and a timestamp. A second route
-//! would be a second copy of all of it.
-//!
-//! **On an occupied name the tree drop suffixes, where the editor's MOVE
-//! refuses.** Both promise the same thing (nothing already on disk is
-//! overwritten) and they differ because the user said different things. A move
-//! names one exact destination, so silently moving to a different name would be
-//! a different operation from the one asked for. A drop names no destination
-//! name at all, only a folder, so the next free name is the honest answer and
-//! the response reports it (`renamed`, with `requested_name` beside
-//! `saved_name`) for the browser to say out loud.
-//!
-//! There is ONE size limit on this route, `[server] file_drop_max_bytes`,
-//! applied by the `DefaultBodyLimit` layer below and reported by the handler in
-//! its own words. Uploads to an agent go through the same limit; do not add a
-//! second one for them.
-//!
-//! # A saved file tells the Changes pane, when git can see it
-//!
-//! dux has no file watcher, so a file written outside the git and editor routes
-//! is invisible in the Changes pane until the next poll, up to ten seconds. A
-//! successful drop therefore ends with the same
+//! dux has no file watcher, so a successful drop ends with the same
 //! [`crate::git_routes::refresh_changed_files_now`] every mutating git route
-//! calls, on one condition: the file has to have landed inside the owning
-//! agent's worktree, because that is the only tree git is watching.
-//!
-//! The condition is a real check, not a formality. An agent drop lands in the
-//! upload directory, which is inside the worktree by construction (the walk
-//! that creates it refuses a symlinked component rather than following one out
-//! of the tree). A TERMINAL's directory comes
-//! from a live process and the shell may have been `cd`'d anywhere, including to
-//! a sibling directory whose path merely starts with the worktree's, so the
-//! check is made on the FINAL path written, with both sides resolved and
-//! compared component-wise. A terminal owned by a project or by nothing has no
-//! agent pane at all and refreshes nothing, and neither does a refusal or a
-//! failed write.
+//! calls, on one condition: the file landed inside the owning agent's worktree,
+//! which is the only tree git is watching. That is a real check made on the FINAL
+//! path with both sides resolved and compared component-wise, because a terminal's
+//! shell may have been `cd`'d to a sibling directory whose path merely starts with
+//! the worktree's. A terminal owned by a project or by nothing refreshes nothing,
+//! and neither does a refusal or a failed write.
 
 use axum::Router;
 use axum::body::Bytes;
@@ -139,17 +91,10 @@ struct DropQuery {
     /// `X-Connection-Id`). Optional: a browser that has not yet received its
     /// first frame simply skips the courtesy check.
     conn: Option<u64>,
-    /// PRESENT means the drop came from the editor's FILE TREE, and its value
-    /// is the worktree-relative directory the user dropped on (`""` for the
-    /// worktree root). ABSENT means a drop on the agent or terminal PANE.
-    ///
-    /// This one optional parameter is what carries the two intents, rather
-    /// than a second route, because everything the two share is the part worth
-    /// sharing: the size and concurrency limits, the name validation that
-    /// never rewrites, the pinned-handle exclusive create that refuses a
-    /// symlink at any candidate, and the collision suffix. Only the
-    /// DESTINATION differs, and a destination is what
-    /// `FileDropDestination` already models.
+    /// Present means the drop came from the editor's file tree, and the value is the
+    /// root-relative directory dropped on (`""` for the root). Absent means a drop
+    /// on the agent or terminal pane. This one parameter carries both intents rather
+    /// than a second route, because only the destination differs between them.
     dir: Option<String>,
 }
 
@@ -189,12 +134,10 @@ pub fn routes(state: &AppState) -> Router<AppState> {
             // display. A `0` cap is handled inside the handler as "file drop is
             // off" rather than as a zero-byte limit, so the refusal can say so.
             .layer(DefaultBodyLimit::max(max_bytes.max(1)))
-            // OUTERMOST, and that placement is the point: the request body is
-            // buffered in full before the handler's first line runs, so a permit
-            // taken inside the handler would be taken after the memory was
-            // already spent. Taken here, it bounds how much upload exists at
-            // once. A request beyond the limit WAITS, but only up to
-            // `PERMIT_WAIT`, and is then refused.
+            // Outermost is the point: the body is buffered in full before the
+            // handler's first line, so a permit taken inside it would be taken after
+            // the memory was already spent. A request beyond the limit waits up to
+            // `PERMIT_WAIT` and is then refused.
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 hold_a_file_drop_permit,
@@ -204,45 +147,28 @@ pub fn routes(state: &AppState) -> Router<AppState> {
 
 /// How long a drop waits for a free upload slot before it is refused.
 ///
-/// The wait exists because the slots turn over: two uploads finish and the third
-/// proceeds, which is nicer than refusing a drop that only arrived a moment too
-/// early. What it must not do is wait FOREVER. The permit is held across the
-/// whole body read, the default concurrency is 2, and a client is free to
-/// trickle its body, so an unbounded wait lets two slow requests hold both slots
-/// for as long as they like and every later drop queues behind them with no
-/// answer at all.
+/// The wait exists because slots turn over, so a drop arriving a moment too early
+/// still works. It must not be unbounded: the permit is held across the whole body
+/// read and a client may trickle its body, so two slow requests would otherwise
+/// hold both default slots indefinitely with every later drop queued behind them.
 ///
-/// **The window has to cover somebody ELSE'S transfer, not your own**, and the
-/// earlier version of this comment had that backwards. It justified 30 seconds
-/// by saying a legitimate 100 MB upload finishes well inside it, which is a
-/// claim about the request being timed. Nothing here times a transfer: the
-/// `DefaultBodyLimit` layer inside this one bounds the SIZE of a body and the
-/// server puts no deadline on reading it at all. This bounds only how long a
-/// waiter sits before it is told no, and what it is waiting on is every
-/// slot-holder ahead of it finishing. A drop arriving behind a genuinely slow
-/// 100 MB upload can therefore be refused while nothing is stalled, and calling
-/// that "a stalled peer rather than a busy one" was wrong.
+/// The window covers somebody ELSE'S transfer, not the waiter's own. Nothing here
+/// times a transfer: `DefaultBodyLimit` bounds a body's size and the server puts
+/// no deadline on reading it, so this bounds only how long a waiter sits before
+/// being told no. A drop behind a genuinely slow large upload can be refused while
+/// nothing is stalled.
 ///
-/// 30 seconds is kept anyway, and the reason is a tradeoff rather than a
-/// measurement. Shorter refuses drops that would have gone through, since the
-/// wait exists precisely so a drop arriving a moment too early still works.
-/// Longer is worse than a refusal: a refusal names the problem and says to try
-/// again, where a longer wait just extends the silence. It is tolerable at all
-/// only because the browser is not silent during it. The web client raises a
-/// spinner naming the file for the whole in-flight window and turns the 503
-/// into "try the drop again in a moment", so this reads as slow rather than as
-/// broken. If that indication is ever removed, this number is too long.
+/// The value is a tradeoff, not a measurement: shorter refuses drops that would
+/// have gone through, and longer just extends the silence, since a refusal at
+/// least names the problem. It is tolerable only because the browser raises a
+/// spinner naming the file for the whole in-flight window and turns the 503 into
+/// "try again in a moment". If that indication is ever removed, this is too long.
 const PERMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Hold one file-drop permit for the whole request, body included.
-///
-/// The binding must be NAMED (not `_`), or the permit would be dropped
-/// immediately and the layer would bound nothing at all.
-///
-/// A wait that expires answers 503 and says to try again, which is the same
-/// shape the websocket connection caps use when they are full (see
-/// `acquire_ws_permit` in [`crate::server`]); that path refuses immediately
-/// because a socket is long-lived, where an upload is not.
+/// Hold one file-drop permit for the whole request, body included. The binding must
+/// be named, never `_`, or the permit drops immediately and the layer bounds
+/// nothing. An expired wait answers 503; the websocket caps refuse immediately
+/// instead, because a socket is long-lived where an upload is not.
 async fn hold_a_file_drop_permit(
     State(state): State<AppState>,
     req: axum::extract::Request,
@@ -271,18 +197,11 @@ async fn hold_a_file_drop_permit(
     next.run(req).await
 }
 
-/// The refusal for a pane id nothing answers to.
-///
-/// It NAMES THE ID, and that is the whole reason it exists as a function. The
-/// bare "unknown terminal or agent" it replaces was indistinguishable from a
-/// refusal about a pane the user was looking at while it was live, so a bug that
-/// resolved the wrong keyspace read to everyone (owner and maintainer alike) as
-/// a truthful answer about a missing agent. Saying which id was asked about
-/// turns that into a report somebody can act on.
-///
-/// The id is echoed back CHAR-truncated: the length bound is checked by the
-/// caller, but the over-length case is one of the callers, so this cannot lean
-/// on it. Byte slicing would panic inside a multi-byte character.
+/// The refusal for a pane id nothing answers to. It names the id, so a refusal
+/// about a pane the user is looking at is distinguishable from one about a missing
+/// agent. The id is echoed back char-truncated, never byte-sliced, which would
+/// panic inside a multi-byte character; the over-length case is one of the callers,
+/// so this cannot lean on the caller's length bound.
 fn unknown_pane(pane_id: &str) -> String {
     const SHOWN: usize = 64;
     let mut shown: String = pane_id.chars().take(SHOWN).collect();
@@ -317,33 +236,21 @@ async fn upload_dropped_file(
         return (StatusCode::NOT_FOUND, unknown_pane(&query.pty)).into_response();
     }
 
-    // THE ID IS CANONICALIZED ONCE, HERE, BEFORE ANYTHING IS ASKED ABOUT IT.
-    //
-    // A pane addresses its PTY with whichever id its surface holds, and for an
-    // agent's slot tab that is the SESSION id: the tab's own id is generated and
-    // the client's URL grammar spells "whichever tab is in the slot" with the
-    // one id a hash can carry before a spine has named the real one. The PTY
-    // socket route resolves that spelling already, so everything below has to
-    // resolve it the same way or the first tab of every agent (the one pane
-    // every agent has) answers "unknown" to an upload while it is visibly live.
-    //
-    // Resolving it here rather than inside each lookup is what keeps the
-    // courtesy check honest: input ownership is recorded against the REAL pty
-    // key by the terminal socket, so a check asked with the placeholder would
-    // quietly find nothing and pass a drop it should have refused.
+    // Canonicalized once, before anything is asked about it. A pane addresses its
+    // PTY with whichever id its surface holds, and for an agent's slot tab that is
+    // the session id, which the PTY socket route resolves the same way. Resolving
+    // here rather than inside each lookup keeps the courtesy check honest: input
+    // ownership is recorded against the real pty key, so a check asked with the
+    // placeholder would find nothing and pass a drop it should have refused.
     let Some(pty) = state.engine.pty_key_for_pane_id(query.pty.clone()).await else {
         return (StatusCode::NOT_FOUND, unknown_pane(&query.pty)).into_response();
     };
 
-    // The courtesy check. See the module docs: the websocket's own write check
-    // is what actually enforces input authority. This only exists so a viewer
-    // who cannot paste is told before a file is written rather than after.
-    //
-    // An EDITOR TREE drop pastes nothing into anything, so there is nothing to
-    // be told about and no input to hold: it is skipped rather than merely
-    // unreached, so a browser that happens to carry a `conn` from the pane it
-    // came from cannot have a durable save refused by a check that does not
-    // apply to it.
+    // The courtesy check: the websocket's own write check enforces input authority,
+    // and this only tells a viewer who cannot paste before the file is written. An
+    // editor tree drop pastes nothing, so it is skipped explicitly, or a browser
+    // carrying a `conn` from the pane it came from could have a durable save
+    // refused by a check that does not apply to it.
     if query.dir.is_none()
         && let Some(conn) = query.conn
         && state.input_held_by_someone_else(&pty, conn)
@@ -409,12 +316,9 @@ async fn upload_dropped_file(
         let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let saved = dux_core::file_drop::save_drop(&dir, &filename, &bytes, &stamp)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        // On the FINAL path, once it exists, and resolved on both sides. An
-        // agent drop lands in the agent's upload directory, which the walk in
-        // `open_uploads` guarantees is reached by named components from the
-        // worktree with no symlink followed, so this stays true for it; a
-        // terminal's shell may have been `cd`'d anywhere, including to a sibling
-        // directory whose path merely starts with the worktree's.
+        // On the final path, once it exists, and resolved on both sides: a
+        // terminal's shell may have been `cd`'d to a sibling directory whose path
+        // merely starts with the worktree's.
         let inside = worktree
             .as_deref()
             .is_some_and(|w| dux_core::file_drop::saved_file_is_within(w, &saved.path));

@@ -3,25 +3,17 @@
 //! interface watcher that adds and drops the Tailscale leg while dux keeps
 //! serving.
 //!
-//! ## Why a leg is a thing
+//! dux serves one router on several listeners: the REQUIRED one the operator named
+//! and the BEST-EFFORT Tailscale one. A required listener dying means the server is
+//! over; the Tailscale one dying is a suspended laptop or a restarted daemon. So
+//! each listener gets its own stop lane and its own failure verdict, and one leg can
+//! end without taking the server with it.
 //!
-//! dux serves one router on several listeners: the REQUIRED one the operator
-//! named, and the BEST-EFFORT Tailscale one. Those two do not deserve the same
-//! treatment. The required listener dying means the server is over. The Tailscale
-//! listener dying is Tuesday: the laptop suspended, the daemon restarted, the
-//! user logged out of their tailnet. So each listener gets its own stop lane and
-//! its own failure verdict, and one leg can end without taking the server with
-//! it.
+//! - A PARENT trip (a signal, a required leg's death, the flip's engine loop
+//!   returning) fans out over every leg lane, so nothing holds a socket afterwards.
+//! - A LEG trip stops exactly one listener and leaves the parent alone.
 //!
-//! ## The two directions
-//!
-//! - The PARENT trip (a signal, a required leg's death, the flip's engine loop
-//!   returning) fans out over every leg lane, so nothing is left holding a socket
-//!   after a teardown.
-//! - A LEG trip (the interface went away) stops exactly one listener and leaves
-//!   the parent alone.
-//!
-//! Every serve future therefore waits on both its own lane and the parent's.
+//! Every serve future waits on both its own lane and the parent's.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -32,17 +24,15 @@ use std::time::Duration;
 use dux_core::config::{TailscaleMode, TailscaleModeOutcome};
 use dux_core::tailscale::TailscaleUnavailable;
 
-/// How often the watcher asks whether the Tailscale address is there.
+/// How often the watcher asks whether the Tailscale address is there. A constant
+/// rather than a setting: an implementation cadence, well inside the time a person
+/// takes to notice a laptop is back and reach for a browser, paying for one bounded
+/// local call per period.
 ///
-/// A constant, not a setting: this is an implementation cadence, not a
-/// preference. Ten seconds is well inside the time it takes a person to notice a
-/// laptop has come back and reach for a browser, and the probe it pays for is one
-/// bounded local call to a local daemon.
-///
-/// This period is also the flap debounce. There is deliberately no second
-/// hysteresis window on top of it: an interface that appears and disappears
-/// faster than this produces at most one transition per period, and one that
-/// flaps slower than this is not flapping, it is changing.
+/// This period is also the flap debounce, and there is deliberately no second
+/// hysteresis window: an interface appearing and disappearing faster than this
+/// produces at most one transition per period, and one slower than this is not
+/// flapping, it is changing.
 pub(crate) const WATCH_PERIOD: Duration = Duration::from_secs(10);
 
 /// How long the watcher parks between checks of the stop flag. Small enough that
@@ -50,11 +40,10 @@ pub(crate) const WATCH_PERIOD: Duration = Duration::from_secs(10);
 /// and nothing else.
 const WATCH_SLICE: Duration = Duration::from_millis(250);
 
-/// The ONE serve-shutdown primitive shared by all serve paths. It bundles the
-/// first-error bookkeeping with the `watch<bool>` parent lane every listener
-/// awaits AND the registry of per-leg lanes, so a single dying listener winds the
-/// siblings down identically everywhere while a best-effort leg can be stopped on
-/// its own:
+/// The one serve-shutdown primitive every serve path shares: first-error
+/// bookkeeping, the parent lane every listener awaits, and the per-leg lanes, so a
+/// dying listener winds its siblings down identically everywhere while a
+/// best-effort leg can still be stopped alone.
 ///
 /// - `failed` is armed once (compare-exchange) so the FIRST failing REQUIRED
 ///   listener is the one that records the returned error and is reported.

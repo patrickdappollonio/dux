@@ -4,50 +4,26 @@
 //! the agent's LAST live tab detaches the agent. (The distinct agent-level
 //! "Detach agent" action, which stops every tab at once, is `POST .../kill`.)
 //!
-//! Every route is served plainly: dux has NO authentication, so none of these
-//! ever 401s. The open access is deliberate (the single-tenant trusted-access
-//! model in CLAUDE.md), and the app-wide guards are not authentication: a
-//! Host-header allowlist stops a malicious web page rebinding DNS into this
-//! server, and the same-origin check stops another site driving these verbs from a
-//! visitor's browser, but a client sending no `Origin` (curl, a script) bypasses
-//! it by design.
-//!
 //! Every tab of `:id` is addressable at `.../tabs/:tab`, the session-slot tab
-//! included, and so is its PTY socket. What each verb DOES with the slot tab is
-//! therefore a stated decision per route rather than a consequence of the slot
-//! tab having no `agent_tabs` row: `DELETE` closes it by PROMOTING the next tab
-//! in strip order into the slot (the slot is a pointer, so the successor keeps
-//! its own id, row, process and sockets and only changes role), and `PATCH`
-//! accepts it and delegates to the session-level provider change. Neither
-//! infers slot-ness from a missing row; both ask `EngineHandle::is_slot_tab`,
-//! `DELETE` only to decide whether the ownership check applies.
+//! included, and so is its PTY socket. What each verb does with the slot tab is a
+//! stated decision per route rather than a consequence of the slot tab having no
+//! `agent_tabs` row: `DELETE` closes it by PROMOTING the next tab in strip order
+//! into the slot, which is a pointer move, so the successor keeps its own id, row,
+//! process and sockets and only changes role; `PATCH` accepts it and delegates to
+//! the session-level provider change. Neither infers slot-ness from a missing row;
+//! both ask `EngineHandle::is_slot_tab`.
 //!
-//! Routes:
-//! - `POST   /api/v1/sessions/:id/tabs`            - create a tab running
-//!   `{ "provider"? }` (the session's project default when omitted). 201 +
-//!   `{ "tab_id", "provider" }`. 404 when `:id` is unknown; 400 when the provider
-//!   is not configured.
-//! - `DELETE /api/v1/sessions/:id/tabs/:tab`       - close one tab, returning
-//!   200 + `{ "detached": <bool>, "promoted"?: <tab id> }` (closing an agent's
-//!   LAST live tab detaches it; `promoted` names the tab that took the session
-//!   slot, and is absent for an ordinary extra tab's close). Closing the agent's
-//!   ONLY tab is refused with a 400 carrying the engine's sentence: an agent
-//!   always has a slot, and that gesture is the agent's detach. A `:tab` not
-//!   owned by `:id` is a 404.
-//! - `POST   /api/v1/sessions/:id/tabs/:tab/start` - start a DORMANT tab (the
-//!   "Start session" press). 200 once the launch is dispatched, or when the tab
-//!   was already running. This is the only start that gets past a recorded
-//!   launch failure: opening a failed tab's PTY socket deliberately refuses to
-//!   launch it, so a tab that cannot come up never relaunches itself. 404 when
-//!   `:tab` is not a tab of `:id`.
-//! - `PATCH  /api/v1/sessions/:id/tabs/:tab`       - retarget the tab's provider
-//!   `{ "provider" }`. 200 on success; 400 when the provider is not configured.
-//! - `PUT    /api/v1/sessions/:id/focused-tab`     - remember the tab the user
-//!   last focused on this agent, so a later sidebar/bare-route navigation to
-//!   this agent restores it. `{ "tab_id": string | null }`. A `tab_id` equal to
-//!   `:id`, or naming a tab that isn't a live extra tab of `:id`, is normalized
-//!   to "no memory" (resolves to the session-slot tab) rather than rejected.
-//!   Fire-and-forget on the client side; 200 on success.
+//! Closing an agent's ONLY tab is refused with a 400: an agent always has a slot,
+//! and that gesture is the agent's detach. A `:tab` not owned by `:id` is a 404,
+//! and a provider that is not configured is a 400.
+//!
+//! `POST .../tabs/:tab/start` is the only start that gets past a recorded launch
+//! failure: opening a failed tab's PTY socket deliberately refuses to launch it, so
+//! a tab that cannot come up never relaunches itself.
+//!
+//! `PUT /api/v1/sessions/:id/focused-tab` normalizes a `tab_id` equal to `:id`, or
+//! one naming anything but a live extra tab of `:id`, to "no memory", which resolves
+//! to the session-slot tab, rather than rejecting it.
 
 use axum::{
     Json, Router,
@@ -140,18 +116,17 @@ async fn create_tab(
     }
 }
 
-/// Resolve a `.../tabs/:tab` address: `:id` names a live session and `:tab` is
-/// one of its tabs. Every `:tab`-scoped verb opens with this, so they cannot
-/// drift on what a bad address answers. The refusal is boxed because an axum
-/// response is wide enough to trip clippy's large-error lint on macOS.
+/// Resolve a `.../tabs/:tab` address: `:id` names a live session and `:tab` is one
+/// of its tabs. Every `:tab`-scoped verb opens with this, so they cannot drift on
+/// what a bad address answers. The refusal is boxed because an axum response is wide
+/// enough to trip clippy's large-error lint on macOS.
 ///
-/// The two ids are checked separately because an out-of-bound `:id` is an
-/// unknown SESSION (matching `resolve_worktree`'s 404 below it), and collapsing
-/// both into `unknown_tab()` blames the tab even when the session id is the bad
-/// one. Slot-ness decides only whether the ownership check applies: the slot tab
-/// is named by the session's own pointer, not by the extra-tab map that
-/// `tab_session` answers from. An extra tab must belong to `:id`, so no verb here
-/// ever reaches across sessions.
+/// The two ids are checked separately: an out-of-bound `:id` is an unknown SESSION,
+/// and collapsing both into `unknown_tab()` blames the tab for a bad session id.
+/// Slot-ness decides only whether the ownership check applies, because the slot tab
+/// is named by the session's pointer rather than the extra-tab map `tab_session`
+/// answers from; an extra tab must belong to `:id`, so no verb reaches across
+/// sessions.
 async fn resolve_tab_of_session(
     state: &AppState,
     id: &str,
@@ -269,13 +244,10 @@ async fn retarget_tab(
     }
 }
 
-/// `PUT /api/v1/sessions/:id/focused-tab` - remember the tab the user last
-/// focused on this agent (J4: a dedicated route rather than piggybacking on an
-/// existing verb, matching the one-verb-per-action style above). Silent
-/// (`SetLastFocusedTab` carries no status/toast, J3): the engine itself
-/// normalizes an id equal to `:id`, or a tab not owned by `:id`, down to "no
-/// memory" rather than erroring, so this handler only needs to validate the
-/// session exists.
+/// `PUT /api/v1/sessions/:id/focused-tab`: remember the tab the user last focused on
+/// this agent. Silent, since `SetLastFocusedTab` carries no status, and the engine
+/// normalizes an id equal to `:id`, or a tab not owned by `:id`, down to "no memory"
+/// rather than erroring, so this handler only validates that the session exists.
 async fn set_focused_tab_route(
     State(state): State<AppState>,
     Path(id): Path<String>,

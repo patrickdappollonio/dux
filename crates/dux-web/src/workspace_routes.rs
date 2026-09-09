@@ -1,67 +1,35 @@
 //! The REST reads for the projects/sessions/sidebar "spine".
 //!
-//! - `GET /api/v1/workspace`, the whole document `{ rev, projects, sessions,
-//!   terminals, sidebar }`. Terminals ride here as ONE flat collection, each
-//!   tagged with its owner; this is the document the browser reads.
+//! - `GET /api/v1/workspace` is the whole document, and the one the browser reads.
+//!   Terminals ride here as ONE flat collection, each tagged with its owner. A
+//!   browser reads it once at boot and is then pushed the same bytes over
+//!   `/ws/events` on every change, so N tabs no longer answer one change with N
+//!   identical GETs; `rev` is the revision the push carries, so a client can order
+//!   what it fetched against what it was pushed.
+//! - `GET /api/v1/projects`, `GET /api/v1/sessions` and `GET /api/v1/sessions/:id`
+//!   are the thin reads: a documented programmability surface, separate from the
+//!   document the browser consumes, and each has always carried a `terminals` array
+//!   on the owner. Moving terminals to a flat collection changed what the BROWSER
+//!   receives and deliberately not these, so they re-nest each owner's terminals
+//!   through [`SessionWithTerminals`] and [`ProjectWithTerminals`].
 //!
-//!   The browser normally reads it ONCE, at boot. After that the server pushes
-//!   the same bytes over `/ws/events` as a `workspace` frame on every change
-//!   (see `engine_actor::WorkspaceDoc`), so N open tabs no longer answer one
-//!   change with N identical GETs. This route remains the boot read, the
-//!   recovery read, and the programmable one; `rev` is the same revision the
-//!   push carries, so a client can order what it fetched against what it was
-//!   pushed.
-//! - `GET /api/v1/projects` — just the `ProjectView[]` (for programmability).
-//! - `GET /api/v1/sessions` — just the `SessionView[]`.
-//! - `GET /api/v1/sessions/:id` — one `SessionView`, 404 if unknown.
+//! A nested terminal entry carries a tagged `owner` field. That is additive and it
+//! is kept, not hidden behind a parallel stripped-down type: the tag says out loud
+//! what the nesting only implied. It is also pinned. `tests/ws_transport.rs` asserts
+//! the exact key set of a terminal entry on every response that can carry one, the
+//! thin reads and the idempotent 200 replay; the session-create 201 is not in that
+//! list, because a session just created owns no terminals, and what it pins instead
+//! is that the array is present and empty rather than missing.
 //!
-//! The three thin reads are a documented programmability surface, separate from
-//! the spine document the browser consumes, and each has always carried a
-//! `terminals` array on the owner. Moving terminals to a flat collection was a
-//! change to what the BROWSER receives; it is deliberately NOT a change here, so
-//! those reads re-nest each owner's terminals ([`SessionWithTerminals`],
-//! [`ProjectWithTerminals`]) and nothing reading them loses information.
-//!
-//! ## The one shape change, stated plainly
-//!
-//! A nested terminal entry carries a tagged `owner` field, a
-//! `{"kind":"session","session_id":…}` or `{"kind":"project","project_id":…}`.
-//! That is ADDITIVE and it is kept: adding a
-//! field is the ordinary way an API grows, a consumer that breaks on an unknown
-//! field is already fragile, and the tag says out loud what the nesting only
-//! implied. It is NOT hidden behind a parallel stripped-down type.
-//!
-//! What it is not allowed to be is a surprise. `thin_reads_pin_the_exact_terminal_key_set`
-//! and `session_create_and_its_replay_pin_the_same_terminal_key_set`
-//! (`tests/ws_transport.rs`) assert the EXACT key set of a terminal entry on
-//! every response that can carry one: these three reads and the idempotent 200
-//! replay. The session-create 201 is deliberately NOT in that list, because a
-//! session that has just been created owns no terminals, so it has no entry to
-//! assert against; what the 201 pins instead is that the array is present and
-//! empty rather than missing. Note the 201 has TWO shapes, this full view and a
-//! minimal id-only fallback for when the view is unavailable, so its terminal
-//! entry shape follows the replay's only on the full branch, which is the one
-//! the test exercises. Add or remove a field and those fail, which is the
-//! point.
-//!
-//! `POST /api/v1/sessions` and its idempotent replay also reuse
-//! [`SessionWithTerminals`] (see `session_actions.rs`). The replay always does,
-//! so it and a later GET of that session agree field for field. The create's
-//! `201` does so only when the session view is available, and otherwise answers
-//! with a minimal id-only body, so state that agreement for the replay and not
-//! for both.
+//! `POST /api/v1/sessions` and its replay also reuse [`SessionWithTerminals`]. The
+//! replay always does, so it and a later GET of that session agree field for field;
+//! the create's `201` does so only when the session view is available and otherwise
+//! answers with a minimal id-only body.
 //!
 //! Status codes:
 //! - 200 with the JSON body.
 //! - 404 for an unknown session id on the per-session read.
-//! - 503 if the engine actor is gone (the handle round-trip failed).
-//!
-//! Served like every other API route. dux has NO authentication of any kind, so
-//! nothing here ever 401s. That open access is deliberate: the single-tenant
-//! trusted-access model documented in CLAUDE.md. The two app-wide guards are a
-//! Host-header allowlist, which stops a malicious web page from rebinding DNS
-//! into this server, and a same-origin check that applies to MUTATIONS only, so
-//! these GETs are not behind it. Neither guard is authentication.
+//! - 503 if the engine actor is gone.
 
 use axum::{
     Json, Router,
@@ -102,14 +70,10 @@ struct ProjectWithTerminals {
     terminals: Vec<TerminalView>,
 }
 
-/// Re-nest the spine's flat, owner-tagged collection under the owners the thin
-/// reads document: `(by session id, by project id)`.
-///
-/// The match over the owner is EXHAUSTIVE with no wildcard arm, so a new kind of
-/// owner has to be answered for here rather than silently vanishing from these
-/// endpoints, which is the whole reason the owner is a tagged value. A terminal
-/// owned by nothing nests under nothing and is answered for by being dropped, on
-/// purpose and out loud at the arm below.
+/// Re-nest the spine's flat, owner-tagged collection under the owners the thin reads
+/// document, as `(by session id, by project id)`. The match over the owner is
+/// EXHAUSTIVE with no wildcard arm, so a new kind of owner has to be answered for
+/// here rather than silently vanishing from these endpoints.
 fn nest_terminals_by_owner(
     terminals: Vec<TerminalView>,
 ) -> (
@@ -130,13 +94,9 @@ fn nest_terminals_by_owner(
                 .entry(project_id.clone())
                 .or_default()
                 .push(terminal),
-            // A standalone terminal is owned by nothing, so it nests under
-            // nothing and is dropped from these two re-nested reads. That is not
-            // an omission: these endpoints answer "what does this session/project
-            // have", and the answer for a terminal that belongs to neither is
-            // "not yours". `GET /api/v1/workspace` is where every terminal of every
-            // kind is listed, flat and owner-tagged, and it is the only read that
-            // claims to be complete.
+            // Owned by nothing, so it nests under nothing and is dropped here on
+            // purpose: these endpoints answer what one session or project has.
+            // `GET /api/v1/workspace` is the only read that claims to be complete.
             TerminalOwnerView::Standalone { .. } => {}
         }
     }
@@ -168,12 +128,10 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn get_workspace(State(state): State<AppState>) -> Response {
-    // Served from the engine loop's cached serialization (rebuilt only when the
-    // document changes), not re-projected per request. The cache is already a
-    // JSON string with its `rev` embedded, so return it raw with the JSON
-    // content-type rather than deserializing just to re-`Json`-serialize it.
-    // These are the exact bytes the push frame carries, which is what makes the
-    // two orderable against each other.
+    // The engine loop's cached serialization, not a per-request re-projection: it is
+    // already a JSON string with its `rev` embedded, so it goes back raw rather than
+    // being deserialized to be re-serialized. These are the exact bytes the push
+    // frame carries, which is what makes the two orderable.
     match state.engine.spine_json().await {
         Some(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
         None => engine_unavailable(),

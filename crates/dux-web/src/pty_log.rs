@@ -1,20 +1,11 @@
-//! The log lines a PTY socket writes, as pure formatters.
+//! The log lines a PTY socket writes, as pure formatters, so their exact text is
+//! under test: a user reports "my terminal is blank", and the server-side fact
+//! that explains it (whose claim won, which send timed out) is only useful if the
+//! line names the connection and the pty.
 //!
-//! ## Why these live in a module of their own
-//!
-//! A PTY socket's interesting moments are ownership handovers, refusals,
-//! releases and the two sends a stranded client never receives. Every one of
-//! them is invisible from the outside: the symptom a user reports is "my
-//! terminal is blank" or "my keystrokes do nothing", and the server-side fact
-//! that explains it (whose claim won, which send timed out) was previously
-//! either unlogged or logged at debug, which nobody has on.
-//!
-//! Building each line in a pure function keeps its exact text under test, which
-//! matters more than it sounds: a log line is a support tool, and one that omits
-//! the connection id or the pty it is talking about costs a round trip with the
-//! person reporting the bug. There is no tracing and no subscriber here; the
-//! project logs through [`dux_core::logger`], whose entry points take `&str`, so
-//! these functions return `String` and the call site logs them.
+//! There is no tracing and no subscriber here. The project logs through
+//! [`dux_core::logger`], whose entry points take `&str`, so these return `String`
+//! and the call site logs them.
 
 /// Why a resize frame was refused. A small enum rather than a free-text reason
 /// so a third refusal cannot be added without the formatter being taught about
@@ -58,15 +49,11 @@ fn device_label(device: Option<&str>) -> &str {
     device.unwrap_or("no device label")
 }
 
-/// A pty changed hands: `conn_id` now owns input and sizing.
-///
-/// THREE WAYS TO WIN, and the line names which, because two of them are the same
-/// flag on the wire and nothing else in the log tells them apart. A press is a
-/// person taking a terminal from another device; a SELF-SUCCESSION is a blipped
-/// owner recognising its own dead connection in the handshake and taking its own
-/// pty back, which happens on every mobile drop and involves no user at all. The
-/// two are distinguished by `expected_owner`, which only a self-succession names
-/// (a press may take from anyone, so it names nobody).
+/// A pty changed hands: `conn_id` now owns input and sizing. The line names which
+/// way the claim won, because a press and a self-succession are the same flag on
+/// the wire: a press is a person taking a terminal from another device, a
+/// self-succession is a blipped owner taking its own pty back on reconnect. They
+/// are told apart by `expected_owner`, which only a self-succession names.
 pub fn describe_claim_granted(
     pty_id: &str,
     conn_id: u64,

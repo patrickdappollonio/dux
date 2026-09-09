@@ -1,26 +1,11 @@
-//! REST write verbs for projects. Same
-//! pattern as [`crate::session_actions`]: each handler derives a per-connection
+//! REST write verbs for projects, on the same pattern as
+//! [`crate::session_actions`]: each handler derives a per-connection
 //! [`StatusScope`] from the optional `X-Connection-Id` header and dispatches the
 //! matching [`WireCommand`] via [`EngineHandle::apply_wire_scoped`].
 //!
-//! Every route is served plainly: dux has NO authentication, so none of these
-//! ever 401s. The open access is deliberate (the single-tenant trusted-access
-//! model in CLAUDE.md), and the app-wide guards are not authentication: a
-//! Host-header allowlist stops a malicious web page rebinding DNS into this
-//! server, and the same-origin check stops another site driving these verbs from a
-//! visitor's browser, but a client sending no `Origin` (curl, a script) bypasses
-//! it by design.
-//!
-//! Routes:
-//! - `POST   /api/v1/projects`                 — add (body `{path, name?,
-//!   checkout_default?}`); `Idempotency-Key` honored.
-//! - `DELETE /api/v1/projects/:id`             — remove (does not touch the checkout).
-//!   With `?delete_worktrees=true` it deletes the agents' worktrees too.
-//! - `PATCH  /api/v1/projects/:id`             — update settings (provider /
-//!   auto_reopen / startup_command / env), tri-state per field.
-//! - `POST   /api/v1/projects/reorder`         — persist order (literal segment).
-//! - `POST   /api/v1/projects/:id/pull`        — refresh the source checkout.
-//! - `POST   /api/v1/projects/:id/checkout-default` — switch the checkout to default.
+//! Removing a project does not touch its checkout unless `?delete_worktrees=true`
+//! asks for the agents' worktrees too. The add route honors `Idempotency-Key`, and
+//! the settings PATCH is tri-state per field.
 
 use std::collections::BTreeMap;
 
@@ -109,14 +94,11 @@ async fn add_project(
         None => return engine_unavailable(),
     };
 
-    // Pick the add variant, a strict precedence ladder: `init_repo` outranks
-    // `create_initial_commit` (init subsumes the commit), which outranks
-    // `checkout_default` (an unborn repo has no default branch to check out).
-    // Like the checkout-default flow, the engine validates the path, serializes
-    // per repo path, and runs the commit on a worker before registering — so the
-    // mutating git work never runs on the async reactor here, and a failure (or
-    // a repo that gained commits since inspect, which the handler registers as a
-    // plain add) surfaces through the keyed status stream.
+    // A strict precedence ladder: `init_repo` subsumes `create_initial_commit`,
+    // which outranks `checkout_default`, since an unborn repo has no default branch
+    // to check out. The engine validates the path, serializes per repo path and runs
+    // the commit on a worker, so no mutating git work runs on the async reactor and
+    // a failure surfaces through the keyed status stream.
     let cmd = if body.init_repo {
         WireCommand::AddProjectInitRepo {
             path: body.path,

@@ -2,47 +2,28 @@
 //! server side: the startup gate, the pending screen held in memory, dismissal,
 //! and the on-demand release-notes read.
 //!
-//! Both routes are served plainly: dux has NO authentication, so neither ever
-//! 401s. The open access is deliberate (the single-tenant trusted-access model in
-//! CLAUDE.md), and the app-wide guards are not authentication: a Host-header
-//! allowlist stops a malicious web page rebinding DNS into this server, and the
-//! same-origin check stops another site driving the dismissal from a visitor's
-//! browser, but a client sending no `Origin` (curl, a script) bypasses it by
-//! design. (The "gate" this module talks about below is the FIRST-LOAD gate, a
-//! per-launch decision about which welcome screen to show. It has nothing to do
-//! with access control.)
+//! The gate here is the FIRST-LOAD gate, a per-launch decision about which welcome
+//! screen to show. It has nothing to do with access control.
 //!
-//! Routes:
-//! - `POST /api/v1/first-load/dismiss` — record the running version as seen and
-//!   drop the pending screen.
-//! - `GET  /api/v1/release-notes`      — fetch the running version's notes ON
-//!   DEMAND, for the app menu's "What's new…" entry.
-//!
-//! # Why the plan is computed once and held
-//!
-//! `dux_core::first_load::plan` runs ONCE, in a task spawned at
+//! `dux_core::first_load::plan` runs once, in a task spawned at
 //! [`crate::server::build_app`] time, and the result is parked in
-//! [`FirstLoadState`]. It is deliberately NOT computed per request:
+//! [`FirstLoadState`]. Deliberately not per request:
 //!
-//! - The gate is a decision about this LAUNCH, not about this request. Two
-//!   browsers connecting to one `dux serve` must see the same answer.
-//! - The what's-new path needs the release notes, and that fetch BLOCKS (up to
-//!   `release_notes::FETCH_TIMEOUT`). It must never sit on a request path.
-//! - Most importantly, the version is stamped as seen on DISMISSAL, never when
-//!   the plan is computed. The server is long-lived: stamping at startup would
-//!   mean a browser that connects a minute later finds the version already seen
-//!   and shows nothing at all. See the `dux_core::first_load` module docs, which
-//!   spell this contract out; this module is its web half.
+//! - The gate is a decision about this LAUNCH, so two browsers connecting to one
+//!   server must see the same answer.
+//! - The what's-new path needs release notes, and that fetch blocks, so it must
+//!   never sit on a request path.
+//! - The version is stamped as seen on DISMISSAL, never when the plan is computed.
+//!   The server is long-lived, so stamping at startup would leave a browser
+//!   connecting a minute later with nothing to show.
 //!
 //! A `Nothing` plan carrying `mark_seen` is the one case that stamps immediately:
 //! there is no screen to dismiss, so there is nothing to wait for.
 //!
-//! Once the plan resolves the server emits a `config.changed` event so any
-//! already-connected client refetches `/api/v1/bootstrap` and finds the pending
-//! screen. Clients that connect later simply read it out of their first bootstrap.
-//! DISMISSAL emits the same event, for the mirror-image reason: with two browsers
-//! open, the one that did not dismiss must be told to refetch, or its dialog would
-//! stay up long after the screen was settled everywhere else.
+//! Resolving the plan emits a `config.changed` so an already-connected client
+//! refetches its bootstrap and finds the screen; later clients read it out of their
+//! first bootstrap. Dismissal emits the same event, or a second browser's dialog
+//! would stay up after the screen was settled everywhere else.
 
 use std::sync::{Arc, Mutex};
 
@@ -70,11 +51,9 @@ use crate::server::AppState;
 const RELEASE_NOTES_STATUS_KEY: &str = "release-notes-fetch";
 
 /// The pending first-load screen for this launch, plus the release-notes API base
-/// the on-demand read talks to.
-///
-/// Lives in [`crate::server::AppState`] as an `Arc` so every request sees the same
-/// decision. The screen is `None` until the resolver task finishes (and again once
-/// a client dismisses it).
+/// the on-demand read talks to. Held in [`crate::server::AppState`] as an `Arc` so
+/// every request sees one decision. The screen is `None` until the resolver task
+/// finishes, and again once a client dismisses it.
 pub struct FirstLoadState {
     pending: Mutex<Option<PendingFirstLoadView>>,
     /// Where release-notes fetches point. Production passes
@@ -173,19 +152,10 @@ pub fn spawn_first_load_resolver(
                     }
                     (_, result) => {
                         if let Err(err) = &result {
-                            // Not a user-facing toast: nobody asked for this, it
-                            // happened at startup. A log line is the right
-                            // loudness, and it keeps "explicit failure over
-                            // silent waiting" honest for an operator reading
-                            // dux.log.
-                            //
-                            // The SEVERITY branches on the same `is_definitive()`
-                            // the response-code choice uses: a definitive answer
-                            // (GitHub simply has no release for this tag, e.g. a
-                            // locally built tagged binary) is expected and
-                            // unactionable, so it is info. Only a transient
-                            // failure (offline, timeout, rate limit) is a warning,
-                            // which keeps the warn stream meaning "look at this".
+                            // A log line rather than a toast: nobody asked for this,
+                            // it happened at startup. The severity branches on the
+                            // same `is_definitive()` the response code uses, so only
+                            // a transient failure reaches the warn stream.
                             let message =
                                 format!("[server] no what's-new screen this launch: {err}");
                             if resolver_failure_is_actionable(err) {
@@ -204,15 +174,11 @@ pub fn spawn_first_load_resolver(
     });
 }
 
-/// Whether a startup-resolver fetch failure is worth an operator's attention (a
-/// `warn`) rather than a routine note (an `info`).
-///
-/// A DEFINITIVE failure is expected and unactionable: GitHub simply has no
-/// release for this tag, which is the normal shape of a locally built tagged
-/// binary. Nothing an operator does changes it, so warning about it only teaches
-/// them to ignore the warn stream. Only a TRANSIENT failure (offline, DNS,
-/// timeout, rate limit) is something they might act on. This is the same
-/// `is_definitive()` split the on-demand handler uses to choose 404 vs 502.
+/// Whether a startup-resolver fetch failure is worth an operator's attention as a
+/// `warn` rather than an `info`. A definitive failure means GitHub has no release
+/// for this tag, the normal shape of a locally built tagged binary, and nothing an
+/// operator does changes it; only a transient failure is actionable. Same
+/// `is_definitive()` split the on-demand handler uses to choose 404 or 502.
 fn resolver_failure_is_actionable(err: &release_notes::FetchError) -> bool {
     !err.is_definitive()
 }
@@ -228,28 +194,21 @@ async fn mark_seen_logging_failure(engine: &EngineHandle, version: &str) {
     }
 }
 
-/// `POST /api/v1/first-load/dismiss`. The user closed a first-load screen.
+/// `POST /api/v1/first-load/dismiss`. Records the running version as seen and drops
+/// the pending screen. The write is what makes dismissal SHARED: `last_seen_version`
+/// is one SQLite row the TUI reads too.
 ///
-/// Records the running version as seen and drops the pending screen. This write
-/// is what makes a dismissal SHARED: `last_seen_version` is one SQLite row that
-/// the TUI reads too, so dismissing in the browser settles the screen for both
-/// surfaces.
-///
-/// `200` on success; `500` with a message when the store write fails (the screen
-/// stays pending in that case rather than silently vanishing for this client
-/// only, so the next bootstrap still carries it and the state on disk and in
-/// memory cannot disagree).
+/// `500` with a message when the store write fails, and the screen then stays
+/// pending, so the next bootstrap still carries it and disk and memory cannot
+/// disagree.
 async fn dismiss_first_load(State(state): State<AppState>) -> Response {
     let version = dux_core::display_version().to_string();
     match state.engine.mark_version_seen(version).await {
         Ok(()) => {
             state.first_load.set_pending(None);
-            // Tell every OTHER connected client the screen is settled, mirroring
-            // the two emit sites in `spawn_first_load_resolver`. `config.changed`
-            // is the only event that drives a bootstrap refetch, so without this
-            // a second browser tab keeps its dialog open indefinitely after the
-            // first one dismissed — which contradicts the module contract above
-            // that a dismissal settles the screen everywhere.
+            // `config.changed` is the only event that drives a bootstrap refetch,
+            // so without this a second tab keeps its dialog open after the first
+            // one dismissed.
             state.event_bus.emit(crate::server::config_changed_event());
             StatusCode::OK.into_response()
         }
@@ -257,21 +216,13 @@ async fn dismiss_first_load(State(state): State<AppState>) -> Response {
     }
 }
 
-/// `GET /api/v1/release-notes`. The app menu's "What's new…" entry.
+/// `GET /api/v1/release-notes`. Independent of the gate: it works even under
+/// `ui.disable_release_notes`, which suppresses only the automatic screen, and it
+/// stamps no version, because looking at the notes is not a dismissal.
 ///
-/// Deliberately independent of the gate: it works even when
-/// `ui.disable_release_notes` is set, because that flag suppresses only the
-/// AUTOMATIC screen. It also does not stamp the version — an explicit look at the
-/// notes is not a dismissal of this launch's screen.
-///
-/// May fetch (cache first, six-hour TTL), so it runs on a blocking task and
-/// reports through the shared keyed status controller: a `Busy` while it works,
-/// then a success or an error on the SAME key so the web's toast is replaced
-/// rather than stranded.
-///
-/// `200` with the notes; `404` when GitHub has no release for this tag (a
-/// definitive answer, e.g. a locally built tagged binary); `502` for anything
-/// retryable (offline, timeout, rate limit).
+/// May fetch, cache first, so it runs on a blocking task and reports a `Busy` and
+/// then its final on the same key, so the toast is replaced rather than stranded.
+/// `404` when GitHub has no release for this tag, `502` for anything retryable.
 async fn get_release_notes(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let scope = scope_from_headers(&headers, &state.connections);
     let Some(inputs) = state.engine.first_load_inputs().await else {
@@ -299,15 +250,10 @@ async fn get_release_notes(State(state): State<AppState>, headers: HeaderMap) ->
         );
     };
 
-    // Bounded by `state.release_notes_semaphore`
-    // (`[server] release_notes_max_concurrency`), for the same reason
-    // `/files/tree` is bounded: the fetch below runs on a `spawn_blocking`
-    // thread, every browser tab can trigger it from the app menu, and a burst
-    // must not exhaust the server's blocking-thread pool. A request beyond the
-    // limit WAITS for a permit rather than being rejected — the notes are
-    // cached with a six-hour TTL, so a waiter usually answers from cache the
-    // moment it gets in. `None` means the config value is 0 (unlimited): skip
-    // the permit entirely.
+    // The fetch below runs on a blocking thread and every tab can trigger it, so a
+    // burst must not exhaust the pool. A request beyond the limit waits rather than
+    // being rejected, and usually answers from cache once it gets in. `None` means
+    // the config value is 0, unlimited.
     let _permit = match &state.release_notes_semaphore {
         Some(sem) => match Arc::clone(sem).acquire_owned().await {
             Ok(permit) => Some(permit),

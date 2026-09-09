@@ -4,41 +4,18 @@
 //! `/ws/projects/:id/terminals/:tid/pty` (see `server.rs`); these routes manage
 //! only the terminal's lifecycle.
 //!
-//! Every route is served plainly: dux has NO authentication, so none of these
-//! ever 401s. The open access is deliberate (the single-tenant trusted-access
-//! model in CLAUDE.md), and the app-wide guards are not authentication: a
-//! Host-header allowlist stops a malicious web page rebinding DNS into this
-//! server, and the same-origin check stops another site driving these verbs from a
-//! visitor's browser, but a client sending no `Origin` (curl, a script) bypasses
-//! it by design.
+//! A session terminal nests under its session, a project terminal under its
+//! project, and a standalone terminal has no owner to nest under, so it lives at
+//! the un-nested `/api/v1/terminals` and takes no path parameter: nothing has to
+//! exist first. Each address serves its own kind only, so a `:tid` belonging to a
+//! different owner, or to none, is a 404 rather than a way past ownership.
 //!
-//! Routes:
-//! - `POST   /api/v1/sessions/:id/terminals`       — create a companion terminal,
-//!   returning `{ "terminal_id", "label" }` (201 + `Location`). 404 when `:id` is
-//!   not a known session.
-//! - `DELETE /api/v1/sessions/:id/terminals/:tid`  — delete a companion terminal.
-//!   The `:tid` ownership against `:id` is enforced before the delete (the legacy
-//!   `DeleteTerminal` looks a terminal up by id alone and does not check
-//!   ownership), so a `:tid` that does not belong to `:id` is a 404.
-//! - `POST   /api/v1/projects/:id/terminals`       creates a project terminal (a
-//!   plain shell at the project's repo root with no agent attached). 404 when
-//!   `:id` is not a known project.
-//! - `DELETE /api/v1/projects/:id/terminals/:tid`  deletes a project terminal,
-//!   with the same ownership enforcement: a terminal owned by a session (or by a
-//!   different project) is a 404 on this route, and a project terminal is a 404
-//!   on the session-nested route.
-//! - `POST   /api/v1/terminals`                    creates a STANDALONE terminal
-//!   (a plain shell in the user's home directory, owned by neither an agent nor
-//!   a project). Un-nested, because there is no owner to nest it under, and it
-//!   takes no path parameter for the same reason: nothing has to exist first.
-//! - `DELETE /api/v1/terminals/:tid`               deletes a standalone terminal.
-//!   The un-nested address serves standalone terminals ONLY: a session- or
-//!   project-owned `:tid` is a 404 here, exactly as a standalone `:tid` is a 404
-//!   on both nested addresses.
-//! - `POST   /api/v1/terminals/reorder`            reorders every companion
-//!   terminal (all three owners) as one flat, global list; the body is the
-//!   complete set of terminal ids in the desired order. Runtime-only (no
-//!   persistence).
+//! Ownership of `:tid` against the path owner is enforced before every delete,
+//! because `DeleteTerminal` looks a terminal up by id alone and checks nothing.
+//!
+//! `POST /api/v1/terminals/reorder` reorders every companion terminal, all three
+//! owners, as one flat global list, and its body is the complete set of ids in the
+//! desired order. Runtime-only, with no persistence.
 
 use axum::{
     Json, Router,

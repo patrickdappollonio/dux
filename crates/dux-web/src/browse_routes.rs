@@ -1,41 +1,19 @@
-//! Two stateless "utility" reads the add-project / new-agent dialogs need
-//! Plain unauthenticated GETs.
+//! Two stateless reads the add-project and new-agent dialogs need:
 //!
-//! - `GET /api/v1/browse?path=` — directory listing for the add-project picker.
-//!   An absent (or empty) `path` resolves the configured `defaults.start_directory`
-//!   (shared fallback chain) from the live engine config, so the picker honors the
-//!   setting and reflects an explicit reload; if the engine is gone it falls back
-//!   to `$HOME`. The reply echoes the resolved `path` plus the child `entries`.
-//! - `GET /api/v1/agent-name` — a freshly generated two-word pet name for the
-//!   new-agent dialog's randomized-name preview (reuses `git::docker_style_name`).
+//! - `GET /api/v1/browse?path=` lists a directory. An absent or empty `path`
+//!   resolves `defaults.start_directory` from the live engine config, falling back
+//!   to `$HOME` when the engine is gone. The reply echoes the resolved path.
+//! - `GET /api/v1/agent-name` generates a two-word pet name for the new-agent
+//!   dialog's randomized-name preview.
 //!
-//! The filesystem read runs OFF the async reactor (`spawn_blocking`), following
-//! the old handler's precedent.
+//! Filesystem reads run off the async reactor, through `spawn_blocking`.
 //!
-//! # Access model: read this before extending `?path=`
-//!
-//! `GET /api/v1/browse` has NO authentication, NO root restriction and NO
-//! sandbox: any client that can reach the server can list ANY directory the
-//! server process can read, anywhere on the host, by passing an absolute
-//! `?path=`. That is deliberate, not an oversight. dux is single-tenant
-//! trusted-access (CLAUDE.md): the picker exists so the operator can point the
-//! server at any repo on their own machine, and every client is assumed to be
-//! that operator.
-//!
-//! The app-wide guards are NOT authentication and do not narrow what is
-//! browsable:
-//!
-//! - A **Host-header allowlist** stops a malicious web page from rebinding DNS to
-//!   this server's address and reaching it through the victim's browser.
-//! - A **same-origin check** stops another site driving these routes from a
-//!   visitor's browser, but it applies to MUTATIONS only, so it covers
-//!   `POST /api/v1/browse/mkdir` and NOT the `GET` listings above. A client that
-//!   sends no `Origin` header at all (curl, a script) skips it by design.
-//!
-//! So the only real boundary is who can reach the listening address: keep it on
-//! loopback, a trusted tailnet, or behind an authenticating proxy. Do not add a
-//! feature here that assumes mutually-distrusting web users without first
-//! designing the per-user isolation model CLAUDE.md calls for.
+//! Read this before extending `?path=`: browse has no root restriction and no
+//! sandbox, so any client that can reach the server can list any directory the
+//! server process can read. That follows from the single-tenant trusted-access
+//! model, and the app-wide Host allowlist and same-origin check do not narrow it
+//! (the latter covers mutations only, so it reaches `mkdir` and not these GETs).
+//! The only boundary is who can reach the listening address.
 
 use axum::{
     Json, Router,
@@ -85,11 +63,8 @@ struct BrowseReply {
 }
 
 async fn browse(State(state): State<AppState>, Query(query): Query<BrowseQuery>) -> Response {
-    // An explicit `path` always wins. An absent OR empty path means "open at the
-    // configured default": resolve `defaults.start_directory` (with the shared
-    // fallback chain) from the LIVE engine config, so the picker honors the
-    // setting and reflects an explicit reload. If the engine is gone, fall back to
-    // `$HOME` (then `/`).
+    // Absent or empty means the configured default, read from the live engine
+    // config so a reload is reflected; `$HOME` then `/` if the engine is gone.
     let dir = match query.path.filter(|p| !p.is_empty()) {
         Some(p) => p,
         None => match state.engine.browse_start_dir().await {
@@ -140,26 +115,17 @@ struct MkdirReply {
     path: String,
 }
 
-/// `POST /api/v1/browse/mkdir`: create ONE new directory inside an existing
-/// parent, for the add-project picker's "New folder" affordance (built for the
-/// terminal-less phone-over-Tailscale case).
+/// `POST /api/v1/browse/mkdir`: create one new directory inside an existing
+/// parent, for the add-project picker's "New folder" affordance.
 ///
-/// Safety argument, from the threat model rather than borrowed helpers: the
-/// server is single-tenant/trusted by design, and every client can already browse
-/// the entire filesystem via this module's GET (no containment, by design), so
-/// this endpoint's job is shape discipline and non-destructiveness, not
-/// containment. `name` is validated to a single path component (no `/`, no
-/// NUL, not `.`/`..`), so there is NO path arithmetic to defeat (the dde64db
-/// lesson: that escape lived in containment math over a multi-segment path);
-/// one `join` of an absolute parent with a vetted component. A symlinked
-/// parent resolves exactly as if the user had browsed there, which the GET
-/// already permits. `create_dir` never overwrites, follows, or removes; the
-/// worst case is a new empty directory where the operator's own account can
-/// write. As a POST it sits inside `rest_mutation_origin_check` and the host
-/// allowlist layered in `server.rs`, guarding cross-site requests.
+/// This endpoint's job is shape discipline and non-destructiveness, not
+/// containment: the GET above already browses the whole filesystem. `name` must
+/// be a single path component (no `/`, no NUL, not `.` or `..`), so the path is
+/// one `join` of an absolute parent with a vetted component and there is no
+/// arithmetic to defeat. `create_dir` never overwrites, follows, or removes.
 async fn mkdir(State(_state): State<AppState>, Json(body): Json<MkdirBody>) -> Response {
     let parent = body.parent;
-    // Mirror the inspect endpoint's path checks, check for check.
+    // The same path checks the inspect endpoint makes, in the same order.
     if parent.is_empty() {
         return (StatusCode::BAD_REQUEST, "parent is required").into_response();
     }

@@ -1,40 +1,27 @@
 //! The web-layer event bus: a tiny `tokio::sync::broadcast` fan-out plus a
 //! global per-topic interest refcount.
 //!
-//! Named `event_bus.rs` to avoid colliding with `dux-core`'s
-//! `engine/events.rs`. It is a pure web concern held in [`crate::server::AppState`]
-//! as an `Arc<EventBus>` beside the engine handle — no dux-core / engine-actor
-//! touch.
+//! A pure web concern held in [`crate::server::AppState`] beside the engine
+//! handle, touching neither dux-core nor the engine actor.
 //!
-//! ## What it carries
+//! The bus carries resource-change signals only ([`Event::Resource`]): an event
+//! names what changed, and a monotonic `rev` where the client needs ordering,
+//! never the changed value; the client decides whether to GET. Status and toast
+//! events share the `/ws/events` socket but ride the engine's status broadcast.
 //!
-//! The bus carries resource-change *signals* only ([`Event::Resource`]): an event
-//! names *what changed* (and a monotonic `rev` where the client needs ordering),
-//! never the changed value. The client decides whether to issue a REST GET in
-//! response. Status/toast events are delivered on the SAME `/ws/events` socket
-//! (scope-filtered), but ride the engine's status broadcast rather than this bus.
+//! The one value pushed to clients on that socket, the workspace document, rides a
+//! dedicated `tokio::sync::watch` (`engine_actor::WorkspaceDoc`) the socket selects
+//! on: a watch coalesces, so a slow connection gets the latest document rather than
+//! a queue of superseded ones, and it cannot lag.
 //!
-//! One value IS pushed to clients on that socket: the whole workspace document.
-//! It does not ride this bus. It rides a dedicated `tokio::sync::watch` channel
-//! from the engine loop (`engine_actor::WorkspaceDoc`), which the events socket
-//! selects on directly. That keeps the promise above literally true, and a watch
-//! is the right carrier for a value anyway: it coalesces by construction, so a
-//! slow connection is handed the latest document rather than a queue of
-//! superseded ones, and it cannot lag. The bus keeps carrying the value-less
-//! `projects.changed` / `sessions.changed` signals alongside it.
+//! There is deliberately no bus variant for lag recovery. A lagged connection
+//! synthesizes its own catch-up frames to its own sink, because a "resync" on the
+//! broadcast would fan one slow connection's recovery out to every connection and
+//! could itself fill the buffer.
 //!
-//! There is deliberately NO bus variant for lag recovery: a lagged `/ws/events`
-//! connection synthesizes its own catch-up frames directly to its sink (see the
-//! `RecvError::Lagged` arm in `server.rs`). Putting a "resync" on the broadcast
-//! bus would fan one slow connection's recovery out to every connection and could
-//! itself fill the buffer.
-//!
-//! ## Interest
-//!
-//! Each `/ws/events` connection registers interest in the fine topics it is
-//! subscribed to (e.g. `session:<id>:changes`). The interest map is a global
-//! refcount so the changed-files poller does background git work ONLY for sessions
-//! some client is actually showing (see [`EventBus::interested_sessions`]).
+//! Each connection registers interest in the fine topics it subscribed to. The
+//! interest map is a global refcount, so the changed-files poller does background
+//! git work only for sessions some client is showing.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -56,27 +43,20 @@ pub enum Event {
         event: String,
         id: Option<String>,
         rev: Option<u64>,
-        /// The claiming connection's id for a `pty.owner` handover (the
-        /// `PtySizeOwners` conn id, stringified). `None` for every other event.
-        /// A client viewing that PTY compares it against its own PTY-socket
-        /// connection id to decide definitively whether the handover is its own
-        /// claim (stay owner) or a foreign takeover (show the read-only
-        /// placeholder).
+        /// The claiming connection's `PtySizeOwners` id for a `pty.owner` handover,
+        /// `None` for every other event. A viewer compares it against its own
+        /// PTY-socket connection id to tell its own claim from a foreign takeover.
         owner: Option<String>,
-        /// The monotonic ownership epoch for a `pty.owner` handover, assigned
-        /// UNDER the [`PtySizeOwners`](crate::server) owners lock at the instant a
-        /// new owner is recorded. Because it is bumped in the same critical
-        /// section that serializes owner writes, epochs reflect TRUE claim order
-        /// even when two connections claim at once. The `pty.owner` broadcast is
-        /// emitted after the lock releases and can be reordered by the runtime, so
-        /// clients keep only the highest epoch seen per pty and ignore any older
-        /// arrival, converging on the latest claim. `None` for every other event.
+        /// The monotonic ownership epoch for a `pty.owner` handover, bumped under the
+        /// [`PtySizeOwners`](crate::server) owners lock that serializes owner writes,
+        /// so epochs are true claim order. The broadcast leaves after the lock
+        /// releases and can be reordered, so a client keeps only the highest epoch it
+        /// has seen per pty. `None` for every other event.
         epoch: Option<u64>,
         /// The claiming connection's raw `User-Agent` for a `pty.owner` handover,
-        /// captured server-side at that connection's PTY upgrade (the other device
-        /// is only known to the server). A client viewing the PTY parses it into a
-        /// human label ("Chrome on macOS") for the take-over placeholder. `None` for
-        /// every other event, and `None` when the claimer sent no `User-Agent`.
+        /// captured at that connection's PTY upgrade because only the server knows
+        /// the other device. A viewer parses it into a label for the take-over
+        /// placeholder. `None` for every other event and for a claimer that sent none.
         device: Option<String>,
     },
 }

@@ -3,16 +3,13 @@
 //! REST (`/api/v1/*`); the sockets carry only change events + status (events) and
 //! terminal byte streams (PTY).
 //!
-//! ## Route structure
+//! There is no login gate: static assets, `/healthz`, every `/api/v1/*` route and
+//! every WS upgrade are served plainly.
 //!
-//! dux is a trusted-local tool: there is no login gate. Every route is served
-//! plainly: static assets, `/healthz`, all `/api/v1/*` reads and actions, and
-//! every WS upgrade (`/ws/events` and the per-PTY sockets).
-//!
-//! The Origin check on every WS upgrade still runs (cross-site WebSocket
-//! hijacking defense): a browser attaches the page's `Origin`, and we only allow
-//! same-host origins. Non-browser clients (no `Origin`) are allowed — documented
-//! tradeoff: a CLI/test client is trusted to not be a hijacked browser tab.
+//! Every WS upgrade still runs an Origin check against cross-site WebSocket
+//! hijacking, allowing same-host origins only. A client that sends no `Origin` is
+//! allowed, a documented tradeoff: a CLI or test client is trusted not to be a
+//! hijacked browser tab.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -50,12 +47,10 @@ pub struct AppState {
     /// at bind time.
     pub live_limits: Arc<crate::engine_actor::LiveServerLimits>,
     /// Caps concurrent EVENTS WebSocket connections
-    /// (`[server] max_websocket_events_connections`). This is the `/ws/events`
-    /// status/changed-files stream (`ws_events_upgrade`). Each upgrade takes a
-    /// permit before upgrading and holds it for the socket's lifetime; when none
-    /// are free the upgrade is refused with HTTP 503. This class is sized and
-    /// exhausted INDEPENDENTLY of the agent and terminal PTY classes. A cheap `Arc`
-    /// clone so every request hits the same permit pool.
+    /// (`[server] max_websocket_events_connections`). An upgrade takes a permit
+    /// before upgrading and holds it for the socket's lifetime, and is refused with
+    /// a 503 when none are free. Sized and exhausted independently of the agent and
+    /// terminal PTY classes.
     pub ws_events_semaphore: Arc<tokio::sync::Semaphore>,
     /// Caps concurrent AGENT-PTY WebSocket connections
     /// (`[server] max_websocket_agent_connections`). The embedded-terminal stream
@@ -73,46 +68,37 @@ pub struct AppState {
     /// included, and not from `ws_agent_semaphore`, so the per-tab address can
     /// never starve the bare per-agent one.
     pub ws_tab_semaphore: Arc<tokio::sync::Semaphore>,
-    /// Per-agent fairness sub-quota (`[server] max_websocket_tabs_per_agent`) on
-    /// top of `ws_tab_semaphore`: the count of live per-tab-addressed sockets
-    /// keyed by owning session id. `ws_tab_pty_upgrade` refuses a new tab socket for a
-    /// session already at `max_ws_tabs_per_agent` BEFORE taking a tab-pool permit,
-    /// so one agent's tabs cannot monopolize the shared tab pool. A [`TabWsGuard`]
-    /// increments on connect and decrements on drop (every early return included).
+    /// Live per-tab-addressed sockets keyed by owning session id, the per-agent
+    /// fairness sub-quota on top of `ws_tab_semaphore`. `ws_tab_pty_upgrade` refuses
+    /// a session already at `max_ws_tabs_per_agent` BEFORE taking a tab-pool permit,
+    /// so one agent cannot monopolize the shared pool. A [`TabWsGuard`] increments on
+    /// connect and decrements on drop, every early return included.
     pub tab_ws_counts: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
     /// The per-agent live-tab-socket ceiling (`[server] max_websocket_tabs_per_agent`).
     /// `0` permanently blocks all tab sockets (matching the WS-connection-cap family).
     pub max_ws_tabs_per_agent: u32,
-    /// Bounds concurrent `/files/tree` directory listings across all sessions
-    /// (`[server] tree_list_max_concurrency`). Protects the server's
-    /// blocking-thread pool (`spawn_blocking`) from a burst of tree requests
-    /// exhausting it and starving other blocking work. `None` when the
-    /// configured value is `0` (unlimited): the route skips acquiring a
-    /// permit entirely. A request beyond the limit WAITS for a free permit
-    /// (`acquire().await`) rather than being rejected — unlike the
-    /// `ws_*_semaphore` connection caps, this bounds a small, fast unit of
-    /// background work, not a long-lived connection.
+    /// Bounds concurrent `/files/tree` listings across all sessions
+    /// (`[server] tree_list_max_concurrency`), so a burst cannot exhaust the
+    /// blocking-thread pool and starve other blocking work. `None` when the value is
+    /// `0`, unlimited, and the route takes no permit. A request beyond the limit
+    /// waits rather than being rejected, unlike the `ws_*_semaphore` connection caps:
+    /// this bounds small, fast background work, not a long-lived connection.
     pub tree_list_semaphore: Option<Arc<tokio::sync::Semaphore>>,
-    /// Bounds concurrent release-notes fetches (`GET /api/v1/release-notes`)
-    /// (`[server] release_notes_max_concurrency`). Same shape and rationale as
-    /// [`tree_list_semaphore`]: the fetch is a blocking HTTPS round trip on a
-    /// `spawn_blocking` thread and every browser tab can ask for it, so a burst
-    /// must not exhaust the blocking pool. `None` when the configured value is
-    /// `0` (unlimited): the route skips acquiring a permit. A request beyond the
-    /// limit WAITS (`acquire_owned().await`) rather than being rejected — and
-    /// with the six-hour notes cache the waiter usually answers from cache.
+    /// Bounds concurrent release-notes fetches
+    /// (`[server] release_notes_max_concurrency`), same shape and reason as
+    /// [`tree_list_semaphore`]: the fetch is a blocking HTTPS round trip and every
+    /// browser tab can ask for it. A waiter usually answers from the notes cache.
     pub release_notes_semaphore: Option<Arc<tokio::sync::Semaphore>>,
     /// Per-file size cap for a dropped file (`[server] file_drop_max_bytes`),
     /// applied to the upload route as an explicit body limit. `0` disables file
     /// drop entirely and the route refuses every upload.
     pub file_drop_max_bytes: usize,
     /// Bounds how many dropped-file uploads are in flight
-    /// (`[server] file_drop_max_concurrency`). Unlike [`tree_list_semaphore`]
-    /// this is never `None`: a configured `0` clamps to one permit, because the
-    /// point of this bound is total buffered-upload MEMORY and "unlimited" would
-    /// not bound it at all. The permit is taken in a LAYER around the handler,
-    /// not inside it, because a request body is buffered in full before the
-    /// handler's first line runs.
+    /// (`[server] file_drop_max_concurrency`). Never `None`, unlike
+    /// [`tree_list_semaphore`]: a configured `0` clamps to one permit, because this
+    /// bounds total buffered-upload MEMORY and unlimited would bound nothing. The
+    /// permit is taken in a layer around the handler, since a request body is
+    /// buffered in full before the handler's first line runs.
     pub file_drop_semaphore: Arc<tokio::sync::Semaphore>,
     /// The web-layer event bus: resource-change signals (`/ws/events`) plus the
     /// per-topic interest refcount that drives the changed-files poller.
@@ -162,19 +148,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Whether some OTHER connection currently holds input on `pty_id`.
+    /// Whether some OTHER connection currently holds input on `pty_id`, so the
+    /// file-drop route can refuse a read-only viewer's drop instead of saving a file
+    /// it cannot paste. A COURTESY, not the protection: only the websocket's own
+    /// [`PtySizeOwners::may_write`] enforces input authority.
     ///
-    /// This exists so the file-drop route can refuse a drop from a read-only
-    /// viewer with a clear message instead of saving a file the browser will
-    /// then be unable to paste. **It is a COURTESY, not the protection.** The
-    /// only thing enforcing input authority is the websocket's own write check
-    /// (see [`PtySizeOwners::may_write`]), which is why the upload route saves
-    /// bytes and never writes to a terminal: a handler injecting text would walk
-    /// straight past that gate, and hiding the drop target from non-owners is a
-    /// courtesy too.
-    ///
-    /// An UNOWNED pty is not denied, matching `may_write`: the first write
-    /// claims it.
+    /// An unowned pty is not denied, matching `may_write`: the first write claims it.
     pub(crate) fn input_held_by_someone_else(&self, pty_id: &str, conn_id: u64) -> bool {
         matches!(
             self.pty_size_owners.owners.lock().unwrap().map.get(pty_id),
@@ -183,13 +162,10 @@ impl AppState {
     }
 
     /// Hand input ownership of `pty_id` to `conn_id`, for tests that need the
-    /// courtesy check above to have something to say.
-    ///
-    /// Test-only and narrow on purpose: the alternative was widening the
-    /// `pty_size_owners` field to the whole crate so a route test could reach
-    /// past `AppState`'s surface into a lock, which is a lot of new reach to buy
-    /// one fixture. Ownership is otherwise only ever taken by a live terminal
-    /// socket, which a `oneshot` router test has no way to open.
+    /// courtesy check above to have something to say. Narrow on purpose: the
+    /// alternative is widening `pty_size_owners` to the whole crate so a route test
+    /// can reach into a lock. Ownership is otherwise only ever taken by a live
+    /// terminal socket, which a `oneshot` router test cannot open.
     #[cfg(test)]
     pub(crate) fn give_input_to(&self, pty_id: &str, conn_id: u64) {
         let _ = self.pty_size_owners.claim(pty_id, conn_id);

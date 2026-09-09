@@ -1,15 +1,11 @@
 //! Host-allowlist middleware (DNS-rebinding defense).
 //!
-//! ## What this module owns
+//! [`HostAllowlist`] and [`host_allowlist_layer`] pin requests to the server's own
+//! bound addresses and any operator-configured hostnames, so a DNS-rebinding
+//! attacker gets a 403.
 //!
-//! - [`HostAllowlist`] + [`host_allowlist_layer`] -- the Host header guard that
-//!   pins requests to the server's own bound addresses and any operator-configured
-//!   hostnames, so a DNS-rebinding attacker gets 403 instead of a response.
-//!
-//! ## Allow rules (NO wildcard)
-//!
-//! Given `bound_ips` (the IPs the server actually bound to) and `configured`
-//! (the `[server] allowed_hosts` list), a Host is allowed when:
+//! Given `bound_ips`, the IPs the server actually bound to, and `configured`, the
+//! `[server] allowed_hosts` list, a Host is allowed when (no wildcard):
 //!
 //! 1. It is a loopback literal (`localhost`, `127.0.0.1`, `[::1]`, or any IP
 //!    that `is_loopback()`).
@@ -23,28 +19,19 @@
 //! 4. The Host case-insensitively equals a (port-stripped) entry in `configured`.
 //! 5. **`[server] tailscale` is not `"no"` and the Host is a literal IP inside
 //!    Tailscale's own ranges** (CGNAT `100.64.0.0/10` or the `fd7a:115c:a1e0::/48`
-//!    ULA). This is what makes the `auto` mode usable: the Tailscale listener
-//!    comes and goes with the interface, and the router (with this allowlist
-//!    inside it) is built once per serve, so a rule derived from what happened
-//!    to be bound at that moment would 403 every tailnet device whenever dux
-//!    re-bound the leg later. The rule is therefore STRUCTURAL: it is evaluated
-//!    on every listener including loopback, and it fires even while the Tailscale
-//!    leg is unbound. That is harmless under dux's trust model, because it admits
-//!    a Host value and nothing else: reaching a listener at all is still the
-//!    operator's network's business.
+//!    ULA). Structural rather than derived from what is bound: the leg comes and
+//!    goes with the interface while the router is built once per serve, so this is
+//!    evaluated on every listener and fires even while the leg is unbound. The MODE
+//!    is live, threaded in through
+//!    [`HostAllowlist::with_live_tailscale_literals`], so a mode change while dux
+//!    serves moves this rule with the listener.
 //!
-//!    The MODE itself is live. A serve threads its Tailscale-mode cell in through
-//!    [`HostAllowlist::with_live_tailscale_literals`], so changing
-//!    `[server] tailscale` while dux serves moves this rule with the listener
-//!    instead of leaving `no` admitting tailnet literals until a restart.
-//!
-//! A Tailscale MagicDNS name (`box.tailnet.ts.net`) is NOT an IP literal, so
-//! rule 5 does not cover it and it still only works when the user adds it to
-//! `[server] allowed_hosts`. Widening literals is safe where widening names is
-//! not: DNS rebinding needs an attacker-controlled NAME, and no browser can be
-//! made to send an IP-literal Host for a name the attacker owns. A local reverse
-//! proxy that forwards a spoofed Host is the operator's own configuration and is
-//! out of scope here, exactly as it already is for rule 2.
+//! A Tailscale MagicDNS name is not an IP literal, so rule 5 does not cover it and
+//! it still needs an `[server] allowed_hosts` entry. Widening literals is safe where
+//! widening names is not: DNS rebinding needs an attacker-controlled NAME, and no
+//! browser can be made to send an IP-literal Host for a name the attacker owns. A
+//! local reverse proxy forwarding a spoofed Host is the operator's own
+//! configuration, here as for rule 2.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -134,11 +121,10 @@ fn is_tailscale_range(ip: IpAddr) -> bool {
 // ── HostAllowlist ──────────────────────────────────────────────────────────
 
 /// The Host allowlist built from the server's bound IPs and the operator's
-/// configured hostname list. Implements the five DNS-rebinding allow rules
-/// described in the module doc. Thread-safe via interior immutability: clone the
-/// `Arc` for each request, never mutate after construction.
-///
-/// Construct with [`HostAllowlist::new`] and test with [`HostAllowlist::allows_host`].
+/// configured hostname list, implementing the allow rules in the module doc.
+/// Thread-safe by interior immutability: clone the `Arc` per request, never mutate
+/// after construction. Built with [`HostAllowlist::new`], asked with
+/// [`HostAllowlist::allows_host`].
 #[derive(Debug, Clone)]
 pub struct HostAllowlist {
     /// The raw bound IPs (for rule 3 membership test). Loopback IPs here are
@@ -178,16 +164,12 @@ impl TailscaleLiterals {
 }
 
 impl HostAllowlist {
-    /// Build an allowlist from the IPs the server bound to and the operator's
-    /// `[server] allowed_hosts` list. `bound_ips` is typically derived from the
-    /// bound listeners' local addresses; `configured` is the raw string list from
-    /// config (port suffixes are stripped and entries are lowercased here).
-    ///
-    /// `tailscale_literals` comes from the serve mode (`[server] tailscale` not
-    /// being `"no"`) rather than from what bound, because the Tailscale leg may
-    /// be bound and unbound many times behind this one allowlist. A serve that
-    /// can change that mode while running follows this call with
-    /// [`Self::with_live_tailscale_literals`].
+    /// Build an allowlist from the IPs the server bound to and the raw
+    /// `[server] allowed_hosts` list, whose port suffixes are stripped and entries
+    /// lowercased here. `tailscale_literals` comes from the serve mode rather than
+    /// from what bound, because the leg may be bound and unbound many times behind
+    /// one allowlist; a serve that can change the mode while running follows this
+    /// with [`Self::with_live_tailscale_literals`].
     pub fn new(bound_ips: &[IpAddr], configured: &[String], tailscale_literals: bool) -> Self {
         let has_unspecified = bound_ips.iter().any(|ip| ip.is_unspecified());
         let configured = configured
@@ -281,12 +263,11 @@ async fn host_allowlist_middleware(
     }
 }
 
-/// Wrap a router with the Host allowlist middleware. Every route in the router
-/// is pinned to the allowed host set (DNS-rebinding defense). This layer should
-/// sit OUTSIDE the access-log layer so rejected probes are not access-logged.
-/// `live_tailscale_literals` is the serve's Tailscale-mode cell when there is a
-/// serve behind this router, so rule 5 follows a mode change that happens while
-/// dux is serving; `None` pins rule 5 to `tailscale_literals`.
+/// Wrap a router with the Host allowlist middleware, pinning every route to the
+/// allowed host set. This layer must sit OUTSIDE the access-log layer, so rejected
+/// probes are not access-logged. `live_tailscale_literals` is the serve's
+/// Tailscale-mode cell, so rule 5 follows a mode change while dux serves; `None`
+/// pins rule 5 to `tailscale_literals`.
 pub fn host_allowlist_layer(
     router: Router,
     bound_ips: Vec<IpAddr>,

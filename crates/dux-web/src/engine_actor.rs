@@ -1,9 +1,9 @@
-//! The engine runs on its own thread (the `Engine` is `!Send`). Async code talks to it
-//! through `EngineHandle`: requests over a BOUNDED tokio mpsc (so the handle is
-//! `Send + Sync` for use as axum state, and a misbehaving/flooding client cannot grow
-//! the queue without limit — see [`REQ_CHANNEL_CAPACITY`]), the engine thread polling it
-//! with `try_recv` on a tick (so it also drains worker events and fires the
-//! coarse spine-change/status/commit signals); replies over tokio oneshots.
+//! The engine runs on its own thread, being `!Send`. Async code talks to it
+//! through `EngineHandle`: requests over a bounded tokio mpsc, so the handle is
+//! `Send + Sync` for axum state and a flooding client cannot grow the queue
+//! without limit (see [`REQ_CHANNEL_CAPACITY`]); replies over tokio oneshots. The
+//! engine thread `try_recv`s on a tick, so it also drains worker events and fires
+//! the coarse spine-change, status and commit signals.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -34,16 +34,12 @@ pub type PtySubscription = (PtyViewerGuard, Vec<u8>, std::sync::mpsc::Receiver<V
 
 /// Which half of the projects/sessions spine changed since the last tick. The
 /// engine loop fingerprints the projected spine each tick and fires the matching
-/// variant; the web layer's forwarder turns it into a coarse `projects.changed` /
-/// `sessions.changed` event. Since the whole document is also pushed on the same
-/// socket (see [`WorkspaceDoc`]), that event is a nudge for a client too old to
-/// read the push, and a pointer at the thin per-resource reads.
+/// variant, which the web forwarder turns into a coarse `projects.changed` or
+/// `sessions.changed` event and a pointer at the thin per-resource reads.
 ///
-/// A single coarse signal per side is intentional: the sessions side
-/// also covers session lifecycle/status, the `working` hysteresis flag, and the
-/// per-session terminal list (they all live in the sessions/sidebar projection).
-/// The spec's finer `session.status` / `session.working` / `terminals.changed`
-/// split is an optional later optimization and is deliberately NOT implemented here.
+/// One coarse signal per side is intentional: the sessions side also covers
+/// session lifecycle and status, the `working` hysteresis flag and the per-session
+/// terminal list, which all live in the same projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpineChange {
     Projects,
@@ -65,23 +61,17 @@ pub enum EngineRequest {
     /// to broadcast through the shared status controller so it auto-clears and
     /// reaches every client, exactly like engine-originated statuses.
     EmitStatus(WireStatus),
-    /// Dismiss a keyed status without replacing it: the pending→final contract
-    /// allows a CLEAR as the final, for operations whose success is already on
-    /// the user's screen (the release-notes route: the rendered notes are the
-    /// success signal, so a "loaded" toast would narrate the visible). Errors
-    /// still post a real final on the same key.
+    /// Dismiss a keyed status without replacing it. A clear is a legal final for an
+    /// operation whose success is already on screen, such as rendered release notes.
+    /// Errors still post a real final on the same key.
     ClearStatus(String),
     SubscribePty(String, oneshot::Sender<Result<PtySubscription, String>>),
     WritePty(String, Vec<u8>),
     /// Resize a PTY: id, rows, cols, and the apply-order seq the owners lock
-    /// stamped for it.
-    ///
-    /// The seq travels with the request because this resize is applied LATER,
-    /// whenever this queue is drained, while another surface (the terminal UI,
-    /// when it is serving in the background) applies its own resizes the moment
-    /// it claims them. The apply site offers the seq to
-    /// `PtySizeOwners::accept_grid_apply`, which drops a resize that a newer
-    /// claim's geometry has already overtaken.
+    /// stamped. The seq travels because this resize applies whenever the queue is
+    /// drained while the terminal UI applies its own the moment it claims them; the
+    /// apply site offers it to `PtySizeOwners::accept_grid_apply`, which drops a
+    /// resize a newer claim's geometry has overtaken.
     ResizePty(String, u16, u16, u64),
     /// Read a live PTY's current grid as `(rows, cols)`, replying `None` when the
     /// id names nothing running. The PTY socket asks once per attach so the
@@ -89,11 +79,9 @@ pub enum EngineRequest {
     /// is actually drawing for.
     PtyGridSize(String, oneshot::Sender<Option<(u16, u16)>>),
     /// A "user is looking at this tab" ping from a foregrounded, input-owning
-    /// browser terminal. Fire-and-forget; routed to
-    /// [`dux_core::engine::Engine::note_agent_viewed_if_known`] so continuous
-    /// viewing keeps a tab's attention flag down even without typing, mirroring
-    /// the TUI's per-tick focus stamp. The engine self-gates on the id being a
-    /// real tab, so a stale/bogus id is a harmless no-op.
+    /// browser terminal. Fire-and-forget, and routed so continuous viewing keeps a
+    /// tab's attention flag down without typing. The engine self-gates on the id
+    /// naming a real tab, so a stale id is a harmless no-op.
     NoteViewed(String),
     /// Subscribe to an existing companion terminal (no launch; replies immediately).
     SubscribeTerminal(String, oneshot::Sender<Result<PtySubscription, String>>),
@@ -106,20 +94,16 @@ pub enum EngineRequest {
     /// owned by neither an agent nor a project), replying `(terminal_id, label)`.
     /// Carries no owner id, because there is no owner to name.
     CreateStandaloneTerminal(oneshot::Sender<Result<(String, String), String>>),
-    /// Resolve the owner of a companion terminal (instant lookup), or `None`
-    /// when the terminal id is unknown. Lets the nested PTY sockets and the
-    /// terminal REST routes enforce that a `:tid` belongs to its path owner
-    /// (session or project) before subscribing to or deleting it (the legacy
-    /// `SubscribeTerminal`/`DeleteTerminal` path looks terminals up by id alone
-    /// and does not check ownership).
+    /// Resolve the owner of a companion terminal, or `None` for an unknown id. Lets
+    /// the nested PTY sockets and terminal REST routes enforce that a `:tid` belongs
+    /// to its path owner before subscribing to or deleting it, which
+    /// `SubscribeTerminal` and `DeleteTerminal` do not check on their own.
     TerminalOwnerOf(String, oneshot::Sender<Option<TerminalOwner>>),
-    /// A terminal's owner paired with the ABSOLUTE directory it was spawned in:
-    /// the root a terminal-rooted editor serves files from. Both halves in one
-    /// call because the caller needs both to answer a single question, whether
-    /// this address may serve this terminal and from where; asking twice would
-    /// let the pair come from two different moments. Only the ~-collapsed
-    /// display label travels the wire elsewhere, which is why the real path
-    /// needs a query of its own.
+    /// A terminal's owner paired with the absolute directory it was spawned in, the
+    /// root a terminal-rooted editor serves from. Both halves in one call because
+    /// the caller answers one question with them, whether this address may serve
+    /// this terminal and from where, and asking twice could straddle two moments.
+    /// Only the home-collapsed display label travels the wire elsewhere.
     TerminalRoot(
         String,
         oneshot::Sender<Option<(TerminalOwner, std::path::PathBuf)>>,
@@ -133,12 +117,10 @@ pub enum EngineRequest {
         Option<String>,
         oneshot::Sender<Result<(String, String), String>>,
     ),
-    /// Start a DORMANT tab explicitly: the press on its "Start session" card.
-    /// It is the one launch path that gets past a recorded failure, because a
-    /// press is the user saying "try it again anyway"; dispatching the launch is
-    /// itself what clears the verdict, so the pane that mounts behind the card
-    /// then attaches to a launch already in flight rather than starting a second
-    /// one. A tab that is already running is an idempotent `Ok`.
+    /// Start a dormant tab explicitly, the press on its start card. The one launch
+    /// path that gets past a recorded failure verdict, and dispatching the launch
+    /// is what clears that verdict, so the pane mounting behind the card attaches
+    /// to a launch in flight rather than starting a second. Already running is `Ok`.
     StartAgentTab(String, oneshot::Sender<Result<(), String>>),
     /// Resolve the owning session id of an EXTRA tab (instant lookup), or
     /// `None` when the tab id is unknown or names a session's first tab, whose
@@ -170,13 +152,10 @@ pub enum EngineRequest {
         String,
         oneshot::Sender<Option<dux_core::engine::BranchDeleteInputs>>,
     ),
-    /// What git dux may do for one agent, in ONE round trip: the directory, and
-    /// whether the changes panel works and the branch features exist there.
-    /// Asking those separately would let a caller act on half an answer.
-    ///
-    /// Asking also REFRESHES a standalone folder's verdict off-thread, so a
-    /// folder that became a repository since the last look starts working the
-    /// next time the panel asks. `None` means the session is unknown.
+    /// What git dux may do for one agent in one round trip: the directory, whether
+    /// the changes panel works, and whether the branch features exist there. Asking
+    /// separately would let a caller act on half an answer. Asking also refreshes a
+    /// standalone folder's verdict off-thread. `None` means the session is unknown.
     SessionGitAccess(
         String,
         oneshot::Sender<Option<dux_core::engine::SessionGitAccess>>,
@@ -194,12 +173,10 @@ pub enum EngineRequest {
         String,
         oneshot::Sender<Option<dux_core::file_drop::FileDropDestination>>,
     ),
-    /// Where a file dropped onto the EDITOR'S FILE TREE should be saved: the
-    /// root-relative directory the user dropped on, inside that editor's root.
-    /// That root is an agent's worktree, or, for a terminal-rooted editor, the
-    /// directory the terminal was spawned in. The directory travels
-    /// UNVALIDATED; its guards live beside the walk that opens it, on the
-    /// blocking pool.
+    /// Where a file dropped onto the editor's file tree should be saved: the
+    /// root-relative directory dropped on, inside that editor's root (an agent's
+    /// worktree, or a terminal's spawn directory). The directory travels
+    /// unvalidated; its guards live beside the walk that opens it.
     FileDropTreeDestination(
         String,
         String,
@@ -228,25 +205,19 @@ pub enum EngineRequest {
     /// global env) served by `GET /api/v1/bootstrap`. Instant clone off engine
     /// state; refetched by the client on a `config.changed` event.
     Bootstrap(oneshot::Sender<dux_core::viewmodel::BootstrapView>),
-    /// Snapshot the projects/sessions/sidebar spine served by the thin
-    /// per-resource reads (`/api/v1/projects`, `/api/v1/sessions`). Instant clone
-    /// off engine state; refetched by the client on a `projects.changed` /
-    /// `sessions.changed` event. The hot whole-spine read (`GET /api/v1/workspace`)
-    /// instead uses [`EngineRequest::SpineJson`] (the loop's cached serialization).
+    /// Snapshot the spine behind the thin per-resource reads: an instant clone off
+    /// engine state, refetched by a client on a change event. The hot whole-spine
+    /// read uses [`EngineRequest::SpineJson`] and its cached serialization instead.
     Spine(oneshot::Sender<dux_core::viewmodel::SpineView>),
-    /// The pre-serialized whole-spine JSON for `GET /api/v1/workspace`, served
-    /// from the loop's cache (rebuilt only when the spine actually changes)
-    /// instead of re-projecting + re-serializing on every client request. It
-    /// carries the document's `rev`, because the cache is serialized WITH it (see
-    /// [`WorkspaceDoc`]), so a fetched body and a pushed frame are the same bytes.
-    /// Handled inline in the loop because the cache is loop-local state.
+    /// The pre-serialized whole-spine JSON for `GET /api/v1/workspace`, served from
+    /// the loop's cache, which is rebuilt only when the spine changes. The `rev` is
+    /// serialized into that cache, so a fetched body and a pushed frame are the
+    /// same bytes. Handled inline in the loop, because the cache is loop-local.
     SpineJson(oneshot::Sender<String>),
-    /// Project ONLY the requested session for `GET /api/v1/sessions/:id` instead of
-    /// building the whole spine to find one session, together with THAT session's
-    /// terminals: the thin read still nests them (see
-    /// [`crate::workspace_routes::SessionWithTerminals`]), and fetching them here
-    /// keeps it to one round trip and one consistent snapshot. `None` when the id
-    /// is unknown (the handler returns 404).
+    /// Project only the requested session for `GET /api/v1/sessions/:id`, together
+    /// with that session's terminals, which the thin read nests: fetching both here
+    /// keeps it to one round trip and one consistent snapshot. `None` for an
+    /// unknown id, which the handler turns into a 404.
     Session(
         String,
         oneshot::Sender<
@@ -261,14 +232,11 @@ pub enum EngineRequest {
     /// ITS exact new session instead of a racy set-difference. `None` while the
     /// create is still in flight or the entry has expired.
     CreatedSessionForOp(String, oneshot::Sender<Option<String>>),
-    /// Manually attach (pin) a pull request to a session from a raw typed
-    /// reference (`PUT /api/v1/sessions/:id/pull-request`). Dispatches
-    /// [`dux_core::engine::Engine::dispatch_attach_pull_request`], which mints
-    /// the ONE keyed op spanning resolve and attach and spawns the gh lookup
-    /// worker; the reply carries the op id. The pending busy is broadcast on
-    /// the status stream by the handler arm (scoped like the `ApplyWire` arm's
-    /// statuses), and the final is resolved engine-side in
-    /// `process_worker_event`, so it rides the normal status stream.
+    /// Pin a pull request to a session from a raw typed reference. Dispatches
+    /// [`dux_core::engine::Engine::dispatch_attach_pull_request`], which mints the
+    /// one keyed op spanning resolve and attach and spawns the gh lookup worker;
+    /// the reply carries that op id. The handler arm broadcasts the pending busy
+    /// and `process_worker_event` resolves the final, both on the status stream.
     AttachPullRequest(
         String,
         String,
@@ -284,25 +252,19 @@ pub enum EngineRequest {
     /// "cursor"/"vscode"/"zed"). Instant clone; the detect + launch I/O for the
     /// "open in editor" action runs off-thread in the server handler.
     EditorDefault(oneshot::Sender<String>),
-    /// Resolve the directory the add-project picker should open at from the LIVE
-    /// config (`defaults.start_directory`, with the shared fallback chain). Read
-    /// through the engine so it reflects the currently-applied config — a reload
-    /// that swaps `engine.config` changes the answer; a not-yet-reloaded raw save
-    /// does not. Instant clone of a resolved path; the filesystem listing runs
-    /// off-thread in the browse handler.
+    /// Resolve the directory the add-project picker opens at from
+    /// `defaults.start_directory` in the live config, so a reload changes the answer
+    /// and a raw save that has not been reloaded does not. An instant clone; the
+    /// filesystem listing runs off-thread in the browse handler.
     BrowseStartDir(oneshot::Sender<String>),
-    /// Ask the engine to recompute the changed-files lists for a worktree (after
-    /// an HTTP git mutation ran the git op off-thread). Fire-and-forget: the
-    /// engine spawns its off-thread refresh worker, whose result flows back
-    /// through the normal `ChangedFilesReady` path; the refreshed lists are then
-    /// served by the REST changed-files read.
+    /// Ask the engine to recompute a worktree's changed-files lists after an HTTP
+    /// git mutation. Fire-and-forget: the engine spawns its refresh worker and the
+    /// result flows back through the normal `ChangedFilesReady` path.
     RefreshChangedFiles(String),
-    /// Snapshot the inputs needed to classify a project's managed worktrees:
-    /// the project, the dux paths, and the current sessions. Instant clones off
-    /// engine state; the git work (`list_worktrees` + classification) runs
-    /// off-thread in the server handler (it shells to git), mirroring how
-    /// `SessionWorktree` feeds the off-thread diff. `None` when the project id is
-    /// unknown.
+    /// Snapshot the inputs for classifying a project's managed worktrees: the
+    /// project, the dux paths, and the current sessions. Instant clones, because the
+    /// classification shells to git and runs off-thread in the server handler.
+    /// `None` when the project id is unknown.
     ProjectWorktreeInputs(
         String,
         oneshot::Sender<
@@ -313,16 +275,12 @@ pub enum EngineRequest {
             )>,
         >,
     ),
-    /// Everything the pull-request reference resolver needs: the live project
-    /// list and the GitHub host policy. Both are instant clones off engine
-    /// state; the git call per project runs off-thread in the caller (the
-    /// [`EngineRequest::ProjectWorktreeInputs`] precedent), because reading a
-    /// project's configured address shells out to git and must not run on the
-    /// engine loop or the async reactor.
-    ///
-    /// Deliberately fetched per request, never cached: the answer changes when
-    /// an address is edited, when git's rewrite configuration changes, and when
-    /// a project's path moves under the same id.
+    /// Everything the pull-request reference resolver needs: the live project list
+    /// and the GitHub host policy. Instant clones, because reading a project's
+    /// configured address shells to git and must not run on the engine loop or the
+    /// async reactor. Fetched per request, never cached: the answer changes when an
+    /// address is edited, when git's rewrite configuration changes, and when a
+    /// project's path moves under the same id.
     PullRequestResolutionInputs(
         oneshot::Sender<(
             Vec<dux_core::model::Project>,
@@ -344,30 +302,24 @@ pub enum EngineRequest {
     /// unknown, which is what makes the GET 404 instead of reporting an empty
     /// listing for a project that was never registered.
     ProjectStartupLogContext(String, oneshot::Sender<Option<dux_core::config::DuxPaths>>),
-    /// Read the raw `config.toml` text off the engine thread for the Monaco
-    /// config editor. Replies with the file's contents verbatim, or the canonical
-    /// plain render of the running config when the file does not exist yet. A
-    /// non-`NotFound` read error (permission denied, I/O failure) is an `Err` so
-    /// the editor refuses to open with wrong content rather than silently showing
-    /// (and letting the user save) a blank/default over their real config.
+    /// Read the raw `config.toml` text for the config editor: the file verbatim, or
+    /// a plain render of the running config when the file does not exist yet. Any
+    /// other read error is an `Err`, so the editor refuses to open rather than let
+    /// the user save a blank default over their real config.
     ReadRawConfig(oneshot::Sender<Result<String, String>>),
-    /// Validate and write raw `config.toml` text from the Monaco editor. Parses
-    /// the text as a `Config` first (rejecting invalid TOML), flushes any pending
-    /// managed writes so they cannot clobber it, then atomically writes the file
-    /// verbatim. The caller adopts the change via the existing config reload.
-    /// `Ok(())` on success; `Err(message)` for a parse or IO failure.
+    /// Validate and write raw `config.toml` text: parse as a `Config`, flush any
+    /// pending managed writes so they cannot clobber it, then write the file
+    /// atomically and verbatim. The caller adopts the change through a config
+    /// reload. `Err(message)` for a parse or IO failure.
     WriteRawConfig(String, oneshot::Sender<Result<(), String>>),
-    /// Read everything `dux_core::first_load::plan` needs, off the engine thread:
-    /// the last-seen version from SQLite, the running display version, the two
-    /// `[ui]` suppression flags, and the state root the release-notes cache lives
-    /// under. One round-trip so the resolver never touches the store directly
-    /// (the engine is the single writer/reader of `sessions.sqlite3`).
+    /// Read everything `dux_core::first_load::plan` needs in one round trip: the
+    /// last-seen version, the running display version, the `[ui]` suppression flags,
+    /// and the state root the release-notes cache lives under. One trip so the
+    /// resolver never touches the store, of which the engine is the single reader.
     FirstLoadInputs(oneshot::Sender<FirstLoadInputs>),
-    /// Record the running version as seen (`SessionStore::set_last_seen_version`).
-    ///
-    /// Routed through the engine because it owns the ONE `SessionStore` handle,
-    /// which is also what makes dismissal shared: the TUI reads the same row, so
-    /// dismissing in a browser settles the screen for both surfaces.
+    /// Record the running version as seen. Routed through the engine because it owns
+    /// the one `SessionStore` handle, which is also what makes dismissal shared: the
+    /// TUI reads the same row.
     MarkVersionSeen(String, oneshot::Sender<Result<(), String>>),
     /// Gracefully wind down every running PTY (SIGTERM the children so CLIs can
     /// save state for a later resume), then stop the engine thread. Replies once
@@ -390,22 +342,19 @@ fn pty_for<'a>(engine: &'a Engine, id: &str) -> Option<&'a PtyClient> {
 
 const TICK: Duration = Duration::from_millis(50);
 
-/// Consider running the spine fingerprint/cache check every Nth tick rather than
-/// every tick (one decision per ~250ms instead of per 50ms). Whether the check
-/// actually serializes the spine on a given interval is then gated further by
-/// the change signals below ([`SpineCheck::maybe_check`]): an idle interval with
-/// no mutation, no streaming transition, and no backstop does ZERO work.
+/// Consider running the spine fingerprint check every Nth tick rather than every
+/// tick. [`SpineCheck::maybe_check`] gates it further on the change signals, so an
+/// interval with no mutation, no streaming transition and no backstop does no work.
 const SPINE_CHECK_TICK_INTERVAL: u64 = 5;
 
 /// Every ~40 ticks (~2s), run an unconditional spine fingerprint comparison so
 /// mutations that do not bump `mutation_version` are still published.
 const SPINE_BACKSTOP_TICK_INTERVAL: u32 = 40;
 
-/// Per-iteration control for [`run_engine_loop`]. Checked once at the top of
-/// every outer loop iteration: `Continue` runs another tick, `Exit` stops the
-/// loop and returns the engine to the caller. The in-process flip's status
-/// screen drives this (via [`crate::serve_with_engine`]); the dedicated-thread
-/// path always returns `Continue` (it exits only on the `Shutdown` request).
+/// Per-iteration control for [`run_engine_loop`], checked at the top of every outer
+/// iteration: `Continue` runs another tick, `Exit` returns the engine to the caller.
+/// The flip's status screen drives this; the dedicated-thread path always answers
+/// `Continue` and exits only on the `Shutdown` request.
 pub enum LoopControl {
     Continue,
     Exit,
@@ -424,21 +373,17 @@ pub(crate) struct ActorLoopEnds {
     /// `/api/v1/bootstrap`). Broadcast — the web forwarder is the only listener,
     /// but a broadcast keeps the send a cheap fire-and-forget with no receiver.
     config_reload_tx: broadcast::Sender<()>,
-    /// Fires a [`SpineChange`] whenever the projected projects-portion or
-    /// sessions+sidebar-portion of the spine changes, so the web layer emits a
-    /// coarse `projects.changed` / `sessions.changed` event. The document itself
-    /// travels on `workspace_tx` below; this stays a value-less signal.
-    /// Broadcast, though the web forwarder is the only listener: a broadcast keeps
-    /// the send a cheap fire-and-forget with no receiver.
+    /// Fires a [`SpineChange`] whenever the projected projects or sessions portion
+    /// of the spine changes, staying a value-less signal: the document travels on
+    /// `workspace_tx`. A broadcast, though the web forwarder is the only listener,
+    /// so the send stays a cheap fire-and-forget with no receiver.
     spine_change_tx: broadcast::Sender<SpineChange>,
-    /// Publishes the whole workspace document each time the loop rebuilds its
-    /// cached serialization, so `/ws/events` connections can be PUSHED the new
-    /// document instead of each refetching it. A `watch` rather than a
-    /// broadcast: it coalesces by construction (a slow connection sees only the
-    /// latest document, never a queue of superseded ones), it has no `Lagged`
-    /// variant to recover from, and its current value IS the replay a
-    /// newly-subscribing connection needs. `None` only before the loop has
-    /// built its first document; a replay never sends that.
+    /// Publishes the whole workspace document each time the loop rebuilds its cached
+    /// serialization, so `/ws/events` connections are pushed it instead of each
+    /// refetching. A `watch` rather than a broadcast: it coalesces, so a slow
+    /// connection sees only the latest document; it has no `Lagged` to recover from;
+    /// and its current value is the replay a new subscriber needs. `None` only
+    /// before the loop built its first document, which a replay never sends.
     workspace_tx: watch::Sender<Option<Arc<WorkspaceDoc>>>,
     /// Shared with the caller-facing [`EngineHandle`] and every PTY forwarder.
     /// The inline `Shutdown` request trips this so forwarders exit promptly even
@@ -460,13 +405,10 @@ pub(crate) struct ActorLoopEnds {
 }
 
 /// Extract the reloaded `Config` from a reload follow-up reaction, consuming it.
-///
-/// The engine returns `ApplyReloadedConfig` bare in the common case, but folds it
-/// into a `Multi` (alongside the deferred saves' status reactions) when
-/// config-mutating commands were deferred during the reload. The actor must
-/// handle BOTH so the config-reload and server-restart warning always fire.
-/// Returns `None` for any reaction that is not (and does not wrap) an
-/// `ApplyReloadedConfig`.
+/// The engine returns `ApplyReloadedConfig` bare, or folded into a `Multi` when
+/// config-mutating commands were deferred during the reload, and both must be
+/// handled or the config-reload and server-restart warning stop firing. `None` for
+/// any reaction that neither is nor wraps one.
 fn take_apply_reloaded_config(reaction: EventReaction) -> Option<Box<dux_core::config::Config>> {
     match reaction {
         EventReaction::ApplyReloadedConfig(config) => Some(config),
@@ -477,13 +419,11 @@ fn take_apply_reloaded_config(reaction: EventReaction) -> Option<Box<dux_core::c
     }
 }
 
-/// The warning a reload owes the user about `[server]` settings it could not
-/// make live, or `None` when nothing startup-bound moved.
-///
-/// Two independent sentences because the two sets are read at different moments.
-/// `background` picks the bind sentence's remedy: with the background server the
-/// restart is stopping and starting it. The console sentence never takes that
-/// remedy, because only `dux server` builds a console at all.
+/// The warning a reload owes the user about `[server]` settings it could not make
+/// live, or `None` when nothing startup-bound moved. Two independent sentences,
+/// because the two sets are read at different moments. `background` picks the bind
+/// sentence's remedy; the console sentence never takes it, because only
+/// `dux server` builds a console.
 fn server_restart_warning_copy(
     prev: &dux_core::config::ServerConfig,
     next: &dux_core::config::ServerConfig,
@@ -512,44 +452,27 @@ fn server_restart_warning_copy(
     }
 }
 
-/// Bound on the engine request channel. A burst buffer, not a steady-state
-/// queue: the engine drains the WHOLE channel every `TICK` (50ms), so under
-/// normal use it holds only a handful of in-flight requests. The cap exists so a
-/// flooding or buggy client cannot grow the queue without limit. Reply-bearing
-/// sends apply backpressure when full (`.send().await`
-/// waits for the next drain); fire-and-forget sends (`write_pty`, `resize_pty`,
-/// `refresh_changed_files`, `emit_status`) use `try_send` and drop on a full
-/// channel — acceptable overload shedding, since reaching this depth means the
-/// producer is far outrunning a 20-drains-per-second consumer. Kept a const,
-/// like the broadcast capacities above, rather than user config: it is an
-/// internal safety ceiling, not a preference.
+/// Bound on the engine request channel: a burst buffer, not a steady-state queue,
+/// since the engine drains the whole channel every `TICK`. The cap exists so a
+/// flooding client cannot grow the queue without limit, and stays a const rather
+/// than user config because it is an internal safety ceiling.
 ///
-/// WITH THE BACKGROUND SERVER the consumer is the terminal UI's run loop rather
-/// than this 50ms tick, so the drain cadence is that loop's poll interval (capped
-/// at 33ms while serving, so if anything faster). The shedding above is accepted
-/// unchanged, and it is worth saying why rather than leaving it to be rediscovered:
-/// 1024 in-flight fire-and-forget requests means a producer far outrunning a
-/// ~30-drains-per-second consumer, and the two kinds of request that can be shed
-/// there already heal. A dropped keystroke is a keystroke the user watches not
-/// appear and retypes; a dropped resize is recovered by the grid handshake, which
-/// re-reads the authoritative geometry on the next attach or bounce rather than
-/// trusting that every resize frame landed.
+/// Reply-bearing sends apply backpressure when it is full; fire-and-forget sends
+/// use `try_send` and drop, which is accepted shedding at this depth because both
+/// kinds heal. A dropped keystroke is one the user watches not appear and retypes,
+/// and a dropped resize is recovered by the grid handshake, which re-reads the
+/// authoritative geometry on the next attach or bounce.
 const REQ_CHANNEL_CAPACITY: usize = 1024;
 
-/// Build the actor channels and split them into the caller-facing
-/// [`EngineHandle`] and the loop-side [`ActorLoopEnds`]. Both server entry
-/// points (the dedicated engine thread and the in-process flip) call this so
-/// the channel topology is defined in exactly one place.
-/// The `[server]` limits a running listener can adopt from a config reload.
+/// The `[server]` limits a running listener can adopt from a config reload. These
+/// are plain scalars the routes and socket handlers read per request, so the actor
+/// stores reloaded values here and the next request honors them.
 ///
-/// Everything else under `[server]` is frozen when the listener binds (a
-/// semaphore, a body-limit layer) or when `dux server` builds its console, and
-/// is reported by [`server_restart_warning_copy`] instead. These are plain
-/// scalars the routes and socket handlers read per request, so the actor stores
-/// the reloaded values here and the next one honors them.
-///
-/// Seeded from the router's own bind-time values in `build_app`, because a test
-/// or a serve path may pass something other than the engine's config.
+/// Everything else under `[server]` is frozen when the listener binds or when
+/// `dux server` builds its console, and is reported by
+/// [`server_restart_warning_copy`] instead. Seeded from the router's own bind-time
+/// values in `build_app`, because a serve path may pass something other than the
+/// engine's config.
 #[derive(Debug, Default)]
 pub struct LiveServerLimits {
     search_index_max_files: AtomicUsize,
@@ -578,12 +501,11 @@ impl LiveServerLimits {
         self.access_log.store(value, Ordering::Relaxed);
     }
 
-    /// Deadline on one of a PTY socket's OPENING sends, in seconds. Read when a
-    /// socket opens, so a reload applies to the next connection rather than to
-    /// the ones already attached. `0` means "not seeded yet" and the caller
-    /// falls back to the compiled default; the config renderer never writes 0
-    /// and a user who does is asking for no bound at all, which is the one
-    /// answer this must not give.
+    /// Deadline on one of a PTY socket's opening sends, in seconds, read when a
+    /// socket opens so a reload applies to the next connection rather than to the
+    /// ones already attached. `0` means not seeded yet and the caller falls back to
+    /// the compiled default, because no bound at all is the one answer this must
+    /// never give.
     pub fn pty_send_timeout_seconds(&self) -> usize {
         self.pty_send_timeout_seconds.load(Ordering::Relaxed)
     }
@@ -593,12 +515,11 @@ impl LiveServerLimits {
             .store(value, Ordering::Relaxed);
     }
 
-    /// How long a browser waits for the server's answer to one beat before it
-    /// treats the socket as half-open and reconnects
-    /// (`[server] heartbeat_deadline_seconds`). Nothing on the server times
-    /// itself by this; it is read so a send that ANSWERS a beat cannot outlive
-    /// the window the client is waiting in. `0` means "not seeded yet" and the
-    /// caller falls back to the compiled default.
+    /// How long a browser waits for the server's answer to one beat before treating
+    /// the socket as half-open and reconnecting. Nothing on the server times itself
+    /// by this; it is read so a send that answers a beat cannot outlive the window
+    /// the client waits in. `0` means not seeded yet, and the caller falls back to
+    /// the compiled default.
     pub fn heartbeat_deadline_seconds(&self) -> usize {
         self.heartbeat_deadline_seconds.load(Ordering::Relaxed)
     }
@@ -617,6 +538,9 @@ impl LiveServerLimits {
     }
 }
 
+/// Build the actor channels and split them into the caller-facing [`EngineHandle`]
+/// and the loop-side [`ActorLoopEnds`]. Every server entry point calls this, so the
+/// channel topology is defined in exactly one place.
 pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopEnds) {
     let (req_tx, req_rx) = mpsc::channel::<EngineRequest>(REQ_CHANNEL_CAPACITY);
     // Status uses THREE channels driven from one place (the StatusEmitter):

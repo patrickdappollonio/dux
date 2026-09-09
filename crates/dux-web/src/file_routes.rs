@@ -3,33 +3,27 @@
 //! (a process spawned ON the server). Request/response so the editor gets real
 //! content + errors and can drive per-file loading/saving state.
 //!
-//! Security model (per the worktree-containment directive): the editor may touch
-//! ANY path inside the worktree tree — tracked or not — and may create new files,
-//! but NOTHING outside it. Containment is enforced by `dux_core`:
-//! `resolve_worktree_path` rejects absolute/`..`/`.git` paths and symlinks that
-//! escape, `worktree_file::{read,write}_file` additionally refuse symlinks and
-//! (on create) validate the parent stays inside the tree. There is deliberately
-//! NO git-tracked/changed-file gate here — that is the changes pane's concern;
-//! the editor works against the worktree itself. The `tree` endpoint lazily
-//! lists exactly ONE directory per request (no recursion, no cap) and backs the
-//! editor's file tree; the `list` endpoint is a flat filesystem walk capped by
-//! `[server] search_index_max_files` that backs ONLY the "Search files…" box.
-//! Neither bounds what is editable.
-//! `open-in-editor` only spawns an editor (no extra capability beyond read/write
-//! given the single-tenant trusted-access model); it is gated to local-access
-//! clients in the UI and is a harmless no-op when spawned on a headless server.
+//! The editor may touch any path inside the root, tracked or not, and may create
+//! files, but nothing outside it. Containment is enforced by `dux_core`:
+//! `resolve_worktree_path` rejects absolute, `..` and `.git` paths and escaping
+//! symlinks, and `worktree_file::{read,write}_file` additionally refuse symlinks
+//! and validate a created file's parent stays inside the tree. There is
+//! deliberately no git-tracked gate: the editor works against the worktree itself.
+//!
+//! `tree` lazily lists exactly one directory per request and backs the file tree;
+//! `list` is a flat walk capped by `[server] search_index_max_files` backing only
+//! the search box. Neither bounds what is editable. `open-in-editor` only spawns an
+//! editor, is gated to local-access clients in the UI, and is a harmless failure on
+//! a headless server.
 //!
 //! A save may carry the freshness token the read handed out, as the pair
-//! `expected_modified`/`expected_size`. With it, the write is refused with a 409 when the file
-//! moved underneath the editor's buffer, which is the whole answer to an agent
-//! and a browser editing the same file; without it the write is unconditional,
-//! exactly as it always was. See `WriteOp` and
-//! `dux_core::worktree_file::write_file_checked`.
+//! `expected_modified`/`expected_size`; with it the write is refused with a 409
+//! when the file moved underneath the buffer, and without it the write is
+//! unconditional, so every other writer is unaffected.
 //!
-//! All routes are served like every other API route, with the host-allowlist
-//! and same-origin guard applied app-wide, and run the file I/O OFF the async reactor
-//! (`spawn_blocking`). After a write, the changed-files cache is invalidated so a
-//! `session.changes` event reaches subscribed clients on `/ws/events`.
+//! Every route runs its file I/O off the async reactor. After a write the
+//! changed-files cache is invalidated, so a `session.changes` event reaches
+//! subscribed clients.
 
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
@@ -65,17 +59,15 @@ struct ReadOp {
 struct WriteOp {
     path: String,
     content: String,
-    /// The freshness token the editor was handed by `read` (or by this route's
-    /// own success body), echoed back so the server can refuse to overwrite a
-    /// file that moved underneath the buffer.
+    /// The freshness token `read` handed out, echoed back so the server can refuse
+    /// to overwrite a file that moved underneath the buffer.
     ///
-    /// Optional, and the guard is opt-in BY PRESENCE of BOTH halves: a client
-    /// that sends neither (an older page, any other writer) gets exactly the
-    /// unconditional write this route has always done. Half a token is treated
-    /// as no token: enforcing a size against an mtime nobody supplied would be
-    /// comparing against a value the server invented. Both halves are needed
-    /// because mtime granularity is coarse enough that two writes inside one
-    /// tick share a timestamp, which is the very race the guard is for.
+    /// The guard is opt-in by presence of BOTH halves, so a client that sends
+    /// neither gets the unconditional write. Half a token counts as none, since
+    /// enforcing a size against an mtime nobody supplied compares against a value
+    /// the server invented. Both halves are needed because mtime granularity is
+    /// coarse enough for two writes in one tick to share a timestamp, which is the
+    /// race the guard exists for.
     #[serde(default)]
     expected_modified: Option<String>,
     #[serde(default)]
@@ -163,47 +155,30 @@ struct OpenedEditor {
     editor: String,
 }
 
-/// Largest request body the editor's save route accepts.
+/// Largest request body the editor's save route accepts. It must cover anything
+/// the reader opens, so it is derived from `MAX_EDITABLE_BYTES` rather than left at
+/// the framework's default, which would let a file open and then refuse to save.
 ///
-/// It exists because the read and the write disagreed. The reader opens
-/// anything up to `MAX_EDITABLE_BYTES` (5 MB), while the save route inherited
-/// the framework's 2 MB default, so a 3 MB file opened in the editor and then
-/// could not be saved, failing with the framework's terse length message that
-/// names no cause. That is a functional bug, not a memory one.
-///
-/// It is not simply the read cap, because the content travels as a JSON STRING
-/// and escaping grows it. serde_json escapes a quote, a backslash and the
-/// newline/carriage-return/tab controls to two bytes each and passes every other
-/// non-ASCII byte through untouched, so twice the read cap covers any text file,
-/// even one made entirely of quotes. The extra 64 KB is room for the envelope
-/// and the path.
-///
-/// The remaining case that does not fit is a file made largely of OTHER control
-/// characters, which each escape to a six-character u-escape. Such a file is valid
-/// UTF-8, so the reader will open it, but it is not a thing anybody edits, and
-/// the refusal now says what the limit is instead of failing opaquely.
+/// Not simply the read cap, because the content travels as a JSON string: serde_json
+/// escapes a quote, a backslash and the newline, carriage-return and tab controls to
+/// two bytes each and passes other non-ASCII through, so twice the read cap covers
+/// any text file, and the extra room is the envelope and the path. A file made
+/// largely of OTHER control characters escapes to six bytes each and does not fit;
+/// the refusal names the limit rather than failing opaquely.
 const MAX_EDIT_WRITE_BYTES: usize =
     2 * dux_core::worktree_file::MAX_EDITABLE_BYTES as usize + 64 * 1024;
 
-/// What an editor request's paths are resolved against, decided by the ADDRESS
-/// the request arrived at and never by the id alone.
+/// What an editor request's paths resolve against, decided by the ADDRESS the
+/// request arrived at and never by the id alone. Each address is an extractor that
+/// answers the root or refuses with a 404, so a namespace's guard is written once
+/// and every handler is generic over which one ran. There is deliberately no
+/// session-nested terminal address: a session-owned terminal shares its agent's
+/// worktree, so its editor is the agent's editor.
 ///
-/// Three addresses reach exactly the same handlers. `/api/v1/sessions/{id}/files/*`
-/// roots at an agent's worktree; `/api/v1/terminals/{tid}/files/*` roots at a
-/// STANDALONE terminal's spawn directory; and
-/// `/api/v1/projects/{pid}/terminals/{tid}/files/*` roots at a project
-/// terminal's. Each address is an extractor that answers the root or refuses
-/// with a 404, so the guard for a namespace is written once and every handler
-/// is generic over which one ran. There is deliberately no session-nested
-/// terminal address: a session-owned terminal shares its agent's worktree, so
-/// its editor IS the agent's editor and gets the agent's routes, diff mode and
-/// changes broadcast along with it.
-///
-/// The terminal roots are pinned at spawn. That is the one place this parts
-/// company with the file-drop tenet, which follows the shell's live directory
-/// so a dropped file lands where the user is typing. An editor root backs a
-/// tree, a set of buffers, their drafts and a bookmarkable URL, and a root that
-/// moved when somebody typed `cd` would invalidate all four at once.
+/// Terminal roots are pinned at spawn, parting company with the file-drop tenet,
+/// which follows the live shell so a dropped file lands where the user is typing.
+/// An editor root backs a tree, a set of buffers, their drafts and a bookmarkable
+/// URL, and a root that moved on a `cd` would invalidate all four at once.
 trait EditorRoot: Send + 'static {
     /// The absolute directory every path in the request resolves against.
     fn path(&self) -> &StdPath;
@@ -334,15 +309,11 @@ impl FromRequestParts<AppState> for ProjectTerminalRoot {
     }
 }
 
-/// The one place a terminal id becomes an editor root, for every terminal
-/// address there is.
-///
-/// It takes the ROUTE NAMESPACE, never just the id, and hands it to the
-/// exhaustive [`dux_core::model::TerminalOwner::is_at_route`] that the terminal
-/// delete routes already enforce membership with. That is what makes a session
-/// id, a project terminal at the un-nested address, or a terminal belonging to
-/// another project a 404 rather than a way to read a directory the address
-/// never named.
+/// The one place a terminal id becomes an editor root, for every terminal address.
+/// It takes the route namespace, never just the id, and hands it to the exhaustive
+/// [`dux_core::model::TerminalOwner::is_at_route`], which is what makes a project
+/// terminal at the un-nested address, or one belonging to another project, a 404
+/// rather than a way to read a directory the address never named.
 async fn resolve_terminal_root(
     state: &AppState,
     route: TerminalRoute<'_>,
@@ -450,19 +421,15 @@ async fn list_files<R: EditorRoot>(State(state): State<AppState>, root: R) -> Re
     }
 }
 
-/// A permit from `state.tree_list_semaphore` (`[server] tree_list_max_concurrency`)
-/// so a burst of directory work cannot exhaust the server's blocking-thread
-/// pool. A request beyond the limit WAITS for a free permit
-/// (`acquire_owned().await`) rather than being rejected: this is a small, fast
-/// unit of background work, not a long-lived connection like the
-/// `ws_*_semaphore` classes, which 503 on exhaustion instead. `None` means the
-/// config value is 0 (unlimited) and no permit is taken at all.
+/// A permit from `state.tree_list_semaphore` so a burst of directory work cannot
+/// exhaust the blocking-thread pool. A request beyond the limit waits rather than
+/// being rejected, because this is small, fast background work rather than a
+/// long-lived connection like the `ws_*_semaphore` classes, which 503 instead.
+/// `None` means the config value is 0, unlimited, and no permit is taken.
 ///
-/// One config edge: the permit also serializes `list_files`, whose walk is
-/// bounded by `[server] search_index_max_files`, and with that cap set to 0
-/// (disabled) a `/`-rooted terminal editor can hold a permit for a very long
-/// walk; the default cap bounds the hold, and an operator who disables it has
-/// chosen unbounded work.
+/// The permit also serializes `list_files`, whose walk is bounded by
+/// `[server] search_index_max_files`; with that cap disabled a `/`-rooted terminal
+/// editor can hold a permit for a very long walk.
 async fn tree_list_permit(
     state: &AppState,
 ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, RouteRejection> {
@@ -566,30 +533,20 @@ async fn diff_contents(
     }
 }
 
-/// Serve a worktree file's raw bytes for the markdown preview's relative-image
-/// proxy (an `<img src>` backed by this GET). Uses the same read-permissive
-/// resolver as `read_file` so `.git/` assets and symlinked images reach this
-/// proxy. Symlinks are followed: `canonicalize()` resolves the real target,
-/// then `read_nofollow` re-opens it with `O_NOFOLLOW` to close the TOCTOU
-/// window between the canonicalize and the read. The write path is unaffected.
-/// Content-Type is guessed from the extension; SVGs served to `<img>` never
-/// run scripts. Served like every other `/api/v1/sessions/:id/files/*` route,
-/// with the host-allowlist and same-origin guard applied app-wide.
+/// Serve a file's raw bytes for the markdown preview's relative-image proxy. Uses
+/// the same read-permissive resolver as `read_file`, so `.git/` assets and symlinked
+/// images reach it; `canonicalize()` resolves a leaf symlink and `read_nofollow`
+/// re-opens the target with `O_NOFOLLOW` to close the TOCTOU window between them.
+/// Content-Type is guessed from the extension.
 ///
-/// Containment is enforced in two stages:
+/// Containment is enforced in two stages, and unlike `read_file`, which allows an
+/// outside-resolving symlink as read-only so the editor can display it, this proxy
+/// must serve nothing outside the root:
 ///
-/// 1. `resolve_worktree_path_for_read` catches outside-resolving symlinks at
-///    the resolution stage and sets `is_outside = true`. We reject those
-///    immediately — the image proxy must not serve files outside the worktree.
-/// 2. After following a leaf symlink with `canonicalize()` we re-verify that
-///    the resolved target is still inside the worktree's canonical root. This
-///    closes any TOCTOU gap between the resolver's containment check and the
-///    moment we actually read the file (a symlink could be replaced between the
-///    two calls).
-///
-/// Note: `read_file` intentionally ALLOWS outside-resolving symlinks (marking
-/// them `read_only: true`) so the editor can display them. We do NOT change
-/// that behaviour here; this restriction is image-proxy–only.
+/// 1. `resolve_worktree_path_for_read` flags an outside-resolving symlink as
+///    `is_outside`, which is rejected immediately.
+/// 2. After `canonicalize()` the resolved target is re-verified inside the
+///    canonical root, closing the gap in which a symlink could be replaced.
 async fn read_raw<R: EditorRoot>(root: R, Query(q): Query<RawQuery>) -> Response {
     let worktree = root.path().to_path_buf();
     let path = q.path;
@@ -655,14 +612,10 @@ async fn read_raw<R: EditorRoot>(root: R, Query(q): Query<RawQuery>) -> Response
                 // Working-copy content can change between views; don't let a stale
                 // image stick in the browser cache.
                 (header::CACHE_CONTROL, "no-cache"),
-                // Defense against a same-origin stored XSS: an `<img src>` never
-                // runs scripts, but navigating DIRECTLY to this URL ("open image in
-                // new tab") would render the response as a top-level document in
-                // dux's origin — and an SVG document can carry <script>. CSP sandbox
-                // strips script execution from such a top-level render; nosniff
-                // blocks MIME-confusion; attachment makes a direct navigation
-                // download instead of render. None of these affect <img> subresource
-                // rendering, so legit markdown images still display.
+                // An `<img src>` runs no scripts, but navigating directly to this URL
+                // renders a top-level document in dux's origin, and an SVG document
+                // can carry <script>. None of these three affect subresource
+                // rendering, so markdown images still display.
                 (header::CONTENT_SECURITY_POLICY, "sandbox"),
                 (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
                 (header::CONTENT_DISPOSITION, "attachment"),
@@ -770,13 +723,9 @@ async fn write_file<R: EditorRoot>(
     .into_response()
 }
 
-/// Turn a save-route body rejection into a response the user can act on.
-///
-/// Only the size case is reworded; everything else (a malformed body, a wrong
-/// content type) keeps the framework's own wording, which is already accurate
-/// and is not something a user provokes. The size case reports the cap in MB and
-/// says the two things that are true: the file is too large to save through the
-/// editor, and it can still be edited outside dux.
+/// Turn a save-route body rejection into a response the user can act on. Only the
+/// size case is reworded, reporting the cap in MB and saying the file can still be
+/// edited outside dux; everything else keeps the framework's own accurate wording.
 fn write_rejection(rejection: JsonRejection) -> Response {
     let too_large = matches!(rejection, JsonRejection::BytesRejection(_))
         || rejection.status() == StatusCode::PAYLOAD_TOO_LARGE;
@@ -794,13 +743,11 @@ fn write_rejection(rejection: JsonRejection) -> Response {
     (rejection.status(), rejection.body_text()).into_response()
 }
 
-/// Describe one worktree entry for the editor's read-only file-info panel:
-/// path, kind, size, modified time, permissions, and what git says about it.
-/// Read-only and side-effect free, so unlike every mutating route below it does
-/// NOT touch the changed-files cache. Containment is
-/// `dux_core::worktree_file::entry_info`'s, which is the same boundary the
-/// write path uses. The git lookup shells out, so the whole thing runs off the
-/// async reactor.
+/// Describe one entry for the editor's read-only file-info panel: path, kind, size,
+/// modified time, permissions, and what git says. Side-effect free, so unlike the
+/// mutating routes below it does not touch the changed-files cache. Containment is
+/// the write path's own boundary, and the git lookup shells out, so this runs off
+/// the async reactor.
 async fn entry_info<R: EditorRoot>(root: R, Json(op): Json<PathOp>) -> Response {
     let worktree = root.path().to_path_buf();
     let path = op.path;
@@ -941,17 +888,13 @@ async fn delete_entry<R: EditorRoot>(
     StatusCode::OK.into_response()
 }
 
-/// Open a worktree file in a locally-installed GUI editor, reusing the TUI's
-/// detection + launch path. `op.editor` (a dux-core editor config key like
-/// "vscode") picks a specific editor — the web picker always sends one — and we
-/// report "<editor> isn't installed" when it isn't on PATH. With no pick we fall
-/// back to the configured/preferred editor (`config.editor.default`). The editor
-/// is spawned on the SERVER machine, so this is only useful when the browser is on
-/// that same machine — the web UI gates the picker to local-access URLs and
-/// disables it for remote clients. On a headless/remote server the spawn simply
-/// fails and we return the error. Containment is enforced by
-/// `resolve_worktree_path` exactly like read/write, so no path outside the
-/// worktree can be targeted.
+/// Open a file in a locally-installed GUI editor, reusing the TUI's detection and
+/// launch path. `op.editor` names a dux-core editor config key, which the web picker
+/// always sends, and an editor not on PATH is reported by name; with no pick this
+/// falls back to `config.editor.default`. The editor is spawned on the SERVER
+/// machine, so the UI gates the picker to local-access URLs and a headless server
+/// simply returns the spawn error. Containment is `resolve_worktree_path`'s, as for
+/// read and write.
 async fn open_in_editor<R: EditorRoot>(
     State(state): State<AppState>,
     root: R,

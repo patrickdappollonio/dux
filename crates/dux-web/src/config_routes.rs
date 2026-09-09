@@ -1,46 +1,14 @@
-//! REST write verbs for the config-mutating operations the palette / dialogs
-//! trigger. Each is a scoped REST verb dispatching the matching
-//! [`WireCommand`] (`update_macros`, `persist_global_env`,
-//! `set_changes_pane_visible`, `reload_config`) via
-//! [`EngineHandle::apply_wire_scoped`] with a per-connection [`StatusScope`]
-//! derived from the optional `X-Connection-Id` header (the same pattern as
-//! `session_actions`).
+//! REST write verbs for the config-mutating operations. Each dispatches its
+//! [`WireCommand`] through [`EngineHandle::apply_wire_scoped`] with a
+//! per-connection [`StatusScope`] taken from the optional `X-Connection-Id`
+//! header, the same pattern as `session_actions`.
 //!
-//! Every route is served plainly: dux has NO authentication, so none of these
-//! ever 401s. The open access is deliberate (the single-tenant trusted-access
-//! model in CLAUDE.md), and the app-wide guards are not authentication: a
-//! Host-header allowlist stops a malicious web page rebinding DNS into this
-//! server, and the same-origin check stops another site driving these verbs from a
-//! visitor's browser, but a client sending no `Origin` (curl, a script) bypasses
-//! it by design. Any client that can reach the address can rewrite `config.toml`.
+//! Any client that can reach the address can rewrite `config.toml`: that follows
+//! from the single-tenant trusted-access model, and the Host allowlist and
+//! same-origin check are not authentication.
 //!
-//! Routes:
-//! - `PUT  /api/v1/macros`           — replace the macro set wholesale.
-//! - `PUT  /api/v1/global-env`       — replace the workspace-wide env map.
-//! - `PUT  /api/v1/ui/changes-pane`  — set the Changes-pane visibility flag.
-//! - `POST /api/v1/config/reload`    — re-read `config.toml` from disk.
-//! - `POST /api/v1/defaults/toggle-randomized-pet-name` — flip the random
-//!   pet-name default.
-//! - `POST /api/v1/ui/toggle-pr-banner-position` — swap the PR banner top/bottom.
-//! - `POST /api/v1/ui/agent-sort` — set the web agent-list sort mode (validated).
-//! - `POST /api/v1/ui/toggle-github-integration` — flip GitHub PR integration.
-//! - `POST /api/v1/github/recheck` — ask `gh` again right now (no config write).
-//! - `POST /api/v1/ui/toggle-copy-on-select` — flip web-terminal copy-on-select.
-//! - `POST /api/v1/ui/toggle-always-show-tab-strip` — flip whether the agent tab
-//!   strip always renders, even with a single tab.
-//! - `POST /api/v1/config/instance-identity`: set the browser tab title and
-//!   favicon color.
-//! - `POST /api/v1/server/tailscale-mode`: save `[server] tailscale` and, when
-//!   something is serving, move the Tailscale listener to match. Bespoke rather
-//!   than part of the generic settings PATCH because the listener half is a live
-//!   act only the serve loop can perform, and the reply is what it did.
-//! - `PATCH /api/v1/config/settings`: set explicit values for the grouped
-//!   Settings modal's other `[ui]`/`[capabilities]` fields in one request (see
-//!   `crates/dux-web/web/src/lib/settingsDescriptors.ts`).
-//!
-//! On a successful config change the engine emits a `config.changed` event (via
-//! the event forwarder in `server.rs`), so subscribed clients refetch
-//! `/api/v1/bootstrap` — these handlers do not echo the new state in their reply.
+//! A successful config change makes the engine emit `config.changed`, so clients
+//! refetch `/api/v1/bootstrap`; no handler here echoes the new state.
 
 use std::collections::BTreeMap;
 
@@ -180,12 +148,8 @@ async fn reload_config(State(state): State<AppState>, headers: HeaderMap) -> Res
     dispatch(&state, &headers, WireCommand::ReloadConfig {}).await
 }
 
-// ── Preference toggles ───────────────────────────────────────────────────────
-//
-// These mirror the TUI palette toggles. Each is a parameterless POST: the server
-// owns the current value and flips it (so two surfaces never disagree about the
-// "next" state), persists, and emits `config.changed` so every client refetches
-// the bootstrap document. The frontend confirms via the routed status toast.
+// Each preference toggle below is a parameterless POST: the server owns the
+// current value and flips it, so two surfaces never disagree about the next state.
 
 /// `POST /api/v1/defaults/toggle-randomized-pet-name`. Flip the random pet-name
 /// default (`defaults.enable_randomized_pet_name_by_default`).
@@ -269,11 +233,9 @@ struct InstanceIdentityBody {
     favicon: Option<String>,
 }
 
-/// `POST /api/v1/config/instance-identity`. Persist this dux instance's browser
-/// tab title (`config.server.title`) and favicon color (`config.server.favicon`).
-/// Bare `200` on success; plain-text `400` on rejection (an unknown favicon color)
-/// via the shared `dispatch`. The engine validates + normalizes and fires
-/// `config.changed` so every tab refetches its title + favicon.
+/// `POST /api/v1/config/instance-identity`. Persist this instance's browser tab
+/// title (`config.server.title`) and favicon color (`config.server.favicon`). Bare
+/// `200`, or plain-text `400` when the engine rejects an unknown favicon color.
 async fn set_instance_identity(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -290,19 +252,10 @@ async fn set_instance_identity(
     .await
 }
 
-// ── Settings PATCH (grouped Settings modal) ──────────────────────────────────
-//
-// Body shape decision (see the plan's section 6/open-risk-2 tension between a
-// flat dotted-key map and a typed struct that rejects unknown keys): a
-// `HashMap<String, Value>` can't enforce per-field types or reject unknown
-// keys, so this uses NESTED typed sub-structs: `{"ui": {...}, "capabilities":
-// {...}}`, each `#[serde(default, deny_unknown_fields)]` with every field
-// `Option<T>`. `#[serde(rename = "...")]` dotted keys on a flat struct fight
-// `deny_unknown_fields` in practice here (the two groups' fields would need to
-// live in one flat struct to dotted-rename cleanly, which reintroduces the
-// "which endpoint owns title/favicon" ambiguity), so nesting by config section
-// is the form that compiles cleanly AND matches how the fields are actually
-// grouped in `config.toml` (`[ui]` / `[capabilities]`).
+// The settings-PATCH body nests typed sub-structs by config section, each
+// `#[serde(default, deny_unknown_fields)]` with `Option<T>` fields: a flat map
+// could enforce neither per-field types nor unknown-key rejection, and flat
+// dotted-rename keys fight `deny_unknown_fields` across two groups.
 
 /// The `[ui]` half of a settings-PATCH body. Every field is optional; an
 /// absent field is left untouched. Unknown fields are rejected (400) so a
@@ -357,14 +310,10 @@ struct CapabilitiesSettingsPatch {
     hyperlinks: Option<bool>,
 }
 
-/// The `[defaults]` half of a settings-PATCH body. Same optional/
-/// unknown-field-rejecting shape as [`UiSettingsPatch`]. `provider` is the
-/// GLOBAL default provider for new agents in projects without a
-/// project-specific override (mirrors the TUI's `change-default-provider`
-/// palette command); it is validated engine-side against the configured
-/// provider list, the same source `BootstrapView::available_providers` is
-/// built from. This is distinct from a project's own `default_provider`
-/// override, which has its own dedicated wire path.
+/// The `[defaults]` half of a settings-PATCH body, shaped like [`UiSettingsPatch`].
+/// `provider` is the global default for new agents in projects with no override of
+/// their own, validated engine-side against the configured provider list; a
+/// project's `default_provider` has its own wire path.
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct DefaultsSettingsPatch {
@@ -372,60 +321,37 @@ struct DefaultsSettingsPatch {
     provider: Option<String>,
 }
 
-/// `PATCH /api/v1/config/settings` body:
-/// `{"ui": {...}, "capabilities": {...}, "defaults": {...}}`, every group
-/// optional, every leaf field optional. `title`/`favicon` are deliberately
-/// absent here, they stay on `POST /api/v1/config/instance-identity`, and
-/// `ui.github_integration` is deliberately absent too: flipping it arms or
-/// disarms background PR syncing, so it keeps its dedicated
-/// `POST /api/v1/config/toggle-github-integration` endpoint rather than forking
-/// that side-effect logic into this route.
+/// `PATCH /api/v1/config/settings` body: every group and every leaf optional.
+/// `title` and `favicon` stay on `POST /api/v1/config/instance-identity`, and
+/// `ui.github_integration` keeps its own endpoint because flipping it arms or
+/// disarms background PR syncing.
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct SettingsBody {
     ui: UiSettingsPatch,
     capabilities: CapabilitiesSettingsPatch,
     defaults: DefaultsSettingsPatch,
-    /// Top-level because it is not a settings field: it asks the engine to
-    /// emit no info status for this request, and the engine honors it only
-    /// for a patch confined to the accessory-bar field (see
-    /// `SettingsPatch::quiet`), so it cannot silence any other settings
-    /// write. Sent by the web's accessory-bar toggle, whose feedback is the
-    /// bar itself moving.
+    /// Suppress this request's info status. Top-level because it is not a settings
+    /// field, and honored by the engine only for a patch confined to the
+    /// accessory-bar field, so it can silence no other settings write.
     quiet: bool,
 }
 
-/// `PATCH /api/v1/config/settings`. Set explicit values for the Settings
-/// modal's `[ui]`/`[capabilities]` fields in one request (see
-/// `crates/dux-web/web/src/lib/settingsDescriptors.ts` for the exact field
-/// set the modal renders). Any field omitted from the body is left untouched;
-/// a body with no fields present is a no-op `200`. `200` on success; plain-text
-/// `400` on a validation error (unknown enum value, unknown/mistyped field) via
-/// the shared `dispatch`. A rejected patch mutates nothing. The engine clamps
-/// numeric fields to a documented ceiling server-side, so the client should
-/// treat its own bounds as UX-only and re-seed from the post-save bootstrap
-/// refetch for the authoritative saved value.
+/// `PATCH /api/v1/config/settings`. Set explicit values for the Settings modal's
+/// fields in one request; an omitted field is left untouched and an empty body is
+/// a no-op `200`. A validation error is a plain-text `400` and mutates nothing.
+/// The engine clamps numeric fields server-side, so a client's own bounds are
+/// UX-only and the saved value comes from the post-save bootstrap refetch.
 async fn set_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<SettingsBody>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
-    // axum's default `Json` extractor answers a deserialize failure (an
-    // unknown field caught by `deny_unknown_fields`, or a field of the wrong
-    // type) with 422 Unprocessable Entity. This route deliberately maps that
-    // rejection to plain-text 400 instead. This is an intentional DIVERGENCE
-    // from the other `Json<...>`-extracting routes in this file (e.g.
-    // `set_instance_identity`), which still fall through to axum's default
-    // 422 on a malformed body, not an attempt to make every config-mutation
-    // route return the same status for a bad body. The divergence is
-    // acceptable here because this route is the one that layers typed,
-    // `deny_unknown_fields` nested sub-structs on `Json` (see the body-shape
-    // decision above), so a client typo or client/server field-set drift is
-    // far more likely to surface as a deserialize rejection on this route
-    // than on the others' flat bodies; mapping it to 400 with the
-    // rejection's message as the body matches this route's own hand-rolled
-    // 400 validation failures, so a caller of `set_settings` only ever needs
-    // to branch on "ok" vs "4xx with a message" for THIS route.
+    // Deliberately unlike `set_instance_identity`, which lets axum answer a bad
+    // body with its default 422: this route's nested `deny_unknown_fields` structs
+    // turn a client typo or field-set drift into a deserialize rejection, so it is
+    // mapped to the same plain-text 400 its own validation failures use and a
+    // caller need only branch on ok versus 4xx-with-a-message.
     let Json(body) = match body {
         Ok(json) => json,
         Err(rejection) => {
@@ -483,11 +409,9 @@ struct WriteRawConfigBody {
     content: String,
 }
 
-/// `GET /api/v1/config/raw`. Return the raw `config.toml` text for the Monaco
-/// editor. Served like every other config route (no authentication) but takes no
-/// body. A
-/// read failure (permission/IO, or the engine being gone) is a `503` so the
-/// editor surfaces an error instead of opening on blank content.
+/// `GET /api/v1/config/raw`. Return the raw `config.toml` text for the editor. A
+/// read failure, or a missing engine, is a `503` so the editor surfaces an error
+/// instead of opening on blank content.
 async fn read_raw_config(State(state): State<AppState>) -> Response {
     match state.engine.read_raw_config().await {
         Ok(content) => Json(RawConfigBody { content }).into_response(),
@@ -495,11 +419,10 @@ async fn read_raw_config(State(state): State<AppState>) -> Response {
     }
 }
 
-/// `PUT /api/v1/config/raw`. Validate (`toml::from_str::<Config>`) and write the
-/// raw `config.toml` text verbatim. `200 OK` on success; `400` with the parse/IO
-/// error otherwise. This PERSISTS only — the engine does NOT adopt the change and
-/// emits no `config.changed`; the running config is untouched until the user
-/// explicitly runs `POST /api/v1/config/reload`. Reload is the single apply point.
+/// `PUT /api/v1/config/raw`. Validate and write the raw `config.toml` text
+/// verbatim, `400` with the parse or IO error otherwise. Persists only: the
+/// running config is untouched and no `config.changed` fires until
+/// `POST /api/v1/config/reload`, which is the single apply point.
 async fn write_raw_config(
     State(state): State<AppState>,
     Json(body): Json<WriteRawConfigBody>,
@@ -519,11 +442,9 @@ struct TailscaleModeBody {
     mode: String,
 }
 
-/// What the mode change did, for the browser to raise as a toast.
-///
-/// The SENTENCE travels rather than being rebuilt client-side, because the
-/// terminal UI shows the same one and a second copy in TypeScript is how the two
-/// drift apart.
+/// What the mode change did, for the browser to raise as a toast. The sentence
+/// travels rather than being rebuilt client-side: the terminal UI shows the same
+/// one, and a second copy in TypeScript is how the two drift apart.
 #[derive(Serialize)]
 struct TailscaleModeReply {
     /// The mode that was saved, canonicalized.
@@ -533,16 +454,12 @@ struct TailscaleModeReply {
     message: String,
 }
 
-/// `POST /api/v1/server/tailscale-mode`. Save `[server] tailscale` and apply it
-/// to the running listener.
+/// `POST /api/v1/server/tailscale-mode`. Save `[server] tailscale`, then apply it
+/// to the running listener: the write comes first so the choice survives whatever
+/// happens to the listener, and the reply says so when nothing is serving.
 ///
-/// Two halves, deliberately in this order: the WRITE first (so the choice
-/// survives whatever happens to the listener), then the live change. When
-/// nothing is serving there is no second half and the reply says exactly that.
-///
-/// A browser connected over the Tailscale leg that chooses `no` cuts its own
-/// connection. That is allowed under the single-tenant trusted-access model, and
-/// the reply is written before the unbind lands so this response still arrives.
+/// A browser on the Tailscale leg choosing `no` cuts its own connection; the reply
+/// is written before the unbind lands so this response still arrives.
 async fn set_tailscale_mode(
     State(state): State<AppState>,
     headers: HeaderMap,

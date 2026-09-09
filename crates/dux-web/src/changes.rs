@@ -6,26 +6,18 @@
 //! Held in [`crate::server::AppState`] as an `Arc<ChangesService>`. The poller is
 //! spawned once at construction (see [`ChangesService::new`]).
 //!
-//! ## How a change is detected and signalled
+//! `compute(id)` resolves the session's worktree, runs `git status` off the
+//! reactor, sorts both lists by `(path, status)` and compares them to the cached
+//! previous lists. A real difference, or a recovery from an error state, bumps the
+//! SQLite-persisted per-session `rev` through the one chokepoint
+//! ([`crate::engine_actor::EngineHandle::next_changes_rev`]) and emits
+//! `session.changes`; the client re-GETs and applies only a newer `rev`.
 //!
-//! `compute(id)` resolves the session's worktree (an async actor round-trip) then
-//! runs `git status` off the reactor in `spawn_blocking`, sorts both lists by
-//! `(path, status)`, and compares them to the cached previous lists. On a real
-//! difference (or a recovery from an error state) it bumps the SQLite-persisted
-//! per-session `rev` (the single chokepoint, via [`crate::engine_actor::EngineHandle::next_changes_rev`])
-//! and emits `session.changes {id, rev}` on the [`EventBus`]. The client then
-//! re-GETs and applies the response only if its `rev` is newer.
-//!
-//! ## Single-flight
-//!
-//! Many GETs or poll ticks for the same cold session collapse to exactly one git
-//! compute. The owner inserts a `watch::Receiver<bool>` under the inflight lock;
-//! late callers clone it and `wait_for(done)`, then re-read the cache. A drop
-//! guard guarantees the inflight slot is cleared and waiters are woken on EVERY
-//! exit path including future cancellation (an HTTP client disconnect drops the
-//! compute future at its `.await`); a waiter that wakes to an absent cache (owner
-//! cancelled before storing) re-elects a new owner rather than returning a
-//! spurious empty-cache error.
+//! Concurrent callers for one cold session collapse to a single git compute. The
+//! owner publishes a `watch::Receiver<bool>` under the inflight lock and late
+//! callers wait on it, then re-read the cache. A drop guard clears the inflight
+//! slot and wakes waiters on every exit path, cancellation included, and a waiter
+//! that wakes to an absent cache re-elects an owner rather than reporting an error.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -69,10 +61,9 @@ const EVICT_GRACE: Duration = Duration::from_secs(30);
 /// raised (cleared by a keyed success on the next good compute).
 const ERROR_WARN_THRESHOLD: usize = 3;
 
-/// Lock a `Mutex` poison-tolerantly: a thread that panicked while holding one of
-/// these maps poisons it, but the maps are plain caches whose invariants are
-/// re-established on the next compute, so recovering the inner guard is safe and
-/// far better than propagating the panic across every interested session.
+/// Lock a `Mutex` poison-tolerantly. These maps are plain caches whose invariants
+/// the next compute re-establishes, so recovering the inner guard beats
+/// propagating one panic across every interested session.
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -136,19 +127,16 @@ pub struct ChangesService {
     inflight: Mutex<HashMap<String, watch::Receiver<bool>>>,
     /// Consecutive-error streaks per session, for the keyed `Warning` escalation.
     error_streak: Mutex<HashMap<String, usize>>,
-    /// Sessions for which a keyed `Warning` was actually emitted (the streak hit
-    /// [`ERROR_WARN_THRESHOLD`]). Only these get a "Changed files are available
-    /// again" recovery info on the next good compute, so a short 1-2 error blip
-    /// that never showed a warning does not leave an orphaned recovery toast.
+    /// Sessions whose error streak reached [`ERROR_WARN_THRESHOLD`] and so emitted a
+    /// keyed `Warning`. Only these get a recovery info on the next good compute, so
+    /// a blip that never warned leaves no orphaned recovery toast.
     warning_emitted: Mutex<HashSet<String>>,
     /// First time each cache entry was seen with zero interest, for grace eviction.
     uninterested_since: Mutex<HashMap<String, Instant>>,
-    /// Monotonic invalidation generation. [`Self::invalidate`] bumps it after a git
-    /// mutation; each compute stamps the entry it stores with the value observed
-    /// when it STARTED reading the filesystem. A waiter that wakes to an entry
-    /// stamped at an older generation than the one it required (a concurrent
-    /// compute that read the PRE-mutation filesystem) re-elects as owner and
-    /// recomputes, so the post-mutation state always wins.
+    /// Monotonic invalidation generation, bumped by [`Self::invalidate`] after a git
+    /// mutation. A compute stamps its entry with the value it observed when it began
+    /// reading the filesystem, so a waiter that wakes to an older stamp re-elects as
+    /// owner and recomputes: the post-mutation state always wins.
     invalidation_gen: AtomicU64,
     /// Total git computes run. Test instrumentation for the single-flight test.
     compute_count: AtomicUsize,
@@ -188,10 +176,8 @@ impl ChangesService {
                         dux_core::logger::error(&format!(
                             "changed-files poller panicked; restarting after backoff: {join_err}"
                         ));
-                        // Stop if the service is already gone; otherwise surface the
-                        // degradation to web clients (not just dux.log) before the
-                        // restart so a stalled file list is explainable. Keyed so a
-                        // repeated restart replaces rather than stacks the toast.
+                        // Surface the degradation to web clients before the restart,
+                        // keyed so a repeated restart replaces rather than stacks.
                         let Some(svc) = weak.upgrade() else {
                             break;
                         };
@@ -210,10 +196,10 @@ impl ChangesService {
         });
     }
 
-    /// The poll loop body. Each tick: pick a cadence from `has_active_processes`,
-    /// sleep, then recompute every interested session with bounded fan-out and a
-    /// per-session timeout, and grace-evict cache entries that lost all interest.
-    /// Exits when the service is dropped (the `Weak` fails to upgrade).
+    /// The poll loop body: pick a cadence from `has_active_processes`, sleep,
+    /// recompute every interested session with bounded fan-out and a per-session
+    /// timeout, then grace-evict entries that lost all interest. Exits when the
+    /// service is dropped and the `Weak` stops upgrading.
     async fn poll_loop(weak: Weak<Self>) {
         loop {
             let cadence = match weak.upgrade() {
@@ -231,11 +217,10 @@ impl ChangesService {
             let Some(svc) = weak.upgrade() else {
                 return;
             };
-            // Stop polling once a shutdown is underway. The engine thread is busy
-            // in its (up to `shutdown_timeout_seconds`) grace wait and is not
-            // servicing these round-trips, so a compute issued now would only block
-            // until PER_SESSION_TIMEOUT and log a spurious timeout error during an
-            // ordinary shutdown. A clean return stops the supervisor too.
+            // The engine thread is in its shutdown grace wait and answers no
+            // round-trips, so a compute issued now would only block to
+            // PER_SESSION_TIMEOUT and log a spurious error. Returning stops the
+            // supervisor too.
             if svc.engine.shutdown_flag().load(Ordering::SeqCst) {
                 return;
             }
@@ -251,9 +236,8 @@ impl ChangesService {
                                 .is_err()
                             {
                                 // A shutdown that began mid-compute leaves the engine
-                                // unable to answer; the timeout is then expected, not
-                                // a real failure, so don't log it as an error or
-                                // record a Warning-escalating cached error.
+                                // unable to answer, so this timeout is expected and
+                                // must not escalate to a cached error.
                                 if svc.engine.shutdown_flag().load(Ordering::SeqCst) {
                                     dux_core::logger::debug(&format!(
                                         "changed-files compute for session {id_for_err} \
@@ -261,23 +245,18 @@ impl ChangesService {
                                     ));
                                     return;
                                 }
-                                // The per-session compute exceeded its budget (a
-                                // slow/locked repo). Don't swallow it: log, then
-                                // record a cached error so the keyed-Warning streak
-                                // escalation fires just like a real git failure.
+                                // Recorded as a cached error, so a slow or locked repo
+                                // escalates the keyed-Warning streak like a git failure.
                                 dux_core::logger::warn(&format!(
                                     "changed-files compute for session {id_for_err} timed out \
                                      after {PER_SESSION_TIMEOUT:?}; recording an error"
                                 ));
                                 let rev = svc.engine.next_changes_rev(id_for_err.clone()).await;
                                 let generation = svc.invalidation_gen.load(Ordering::SeqCst);
-                                // `clobber_ok = false`: this timeout runs AFTER its
-                                // compute was cancelled, racing a freshly-elected
-                                // owner. That owner may have just stored a valid
-                                // `Cached::Ok` (with a LOWER rev than this later-minted
-                                // timeout rev), so the plain `rev >= existing` guard
-                                // would let the giving-up error clobber the good result
-                                // and surface a spurious 409. Refuse to overwrite an Ok.
+                                // `clobber_ok = false`: this timeout races a freshly
+                                // elected owner whose good `Cached::Ok` carries a lower
+                                // rev, which the plain `rev >= existing` guard would let
+                                // this error overwrite into a spurious 409.
                                 svc.store_err(
                                     &id_for_err,
                                     rev,
@@ -325,11 +304,9 @@ impl ChangesService {
 
     /// Serve the cached changed files, computing under single-flight on a miss.
     ///
-    /// When no cache entry exists AFTER a compute, the session either is unknown
-    /// (the compute deliberately stores nothing for a vanished session, so the
-    /// caller gets [`GitError::SessionNotFound`] → 404 and clears/unsubscribes) or
-    /// its entry was evicted by the poller mid-call (a real-session race), in which
-    /// case the compute is retried exactly once rather than returning a false 409.
+    /// A compute stores nothing for a vanished session, so an absent entry after one
+    /// means either an unknown session ([`GitError::SessionNotFound`]) or an eviction
+    /// racing this call, which is retried exactly once rather than returning a 409.
     pub async fn get(self: &Arc<Self>, session_id: &str) -> Result<ChangesResponse, GitError> {
         if let Some(result) = self.read_fresh(session_id) {
             return result;
@@ -392,19 +369,14 @@ impl ChangesService {
         }
     }
 
-    /// Drop a session's cached lists and trigger a fresh compute+emit. Called by
-    /// the git/file mutation handlers after a successful stage/unstage/discard/
-    /// commit/write so the pane refreshes immediately rather than after the poll
-    /// interval. Dropping the entry forces the next compute to detect a change
-    /// (no `prev`) and emit `session.changes`.
+    /// Drop a session's cached lists and trigger a fresh compute and emit, so the
+    /// pane refreshes right after a git or file mutation rather than at the next
+    /// poll. With no `prev`, the next compute always detects a change.
     pub fn invalidate(self: &Arc<Self>, session_id: String) {
-        // Bump the invalidation generation BEFORE clearing the entry and spawning
-        // the recompute. If a poller compute is already past its `spawn_blocking`
-        // (it read the PRE-mutation filesystem) it stays the single-flight owner
-        // and will store its now-stale snapshot; the recompute spawned below would
-        // otherwise become a waiter, see that populated entry, and exit early —
-        // briefly serving pre-mutation files. By requiring an entry stamped at this
-        // newer generation, that waiter re-elects as owner and recomputes instead.
+        // Bumped before the entry is cleared: an in-flight compute that already read
+        // the pre-mutation filesystem still stores its stale snapshot, and requiring
+        // this newer stamp is what makes the recompute below re-elect as owner
+        // instead of waiting on it and serving pre-mutation files.
         self.invalidation_gen.fetch_add(1, Ordering::SeqCst);
         {
             let mut cache = lock(&self.cache);
@@ -416,10 +388,9 @@ impl ChangesService {
         });
     }
 
-    /// The cached `rev` for a session, if any. Used by the `/ws/events` lag
-    /// catch-up and subscribe catch-up to stamp the synthetic `session.changes`
-    /// frame. Returns `None` for a cold cache; the caller serialises that as an
-    /// absent `rev` field, which the client treats as a force-refetch.
+    /// The cached `rev` for a session, used to stamp the synthetic `session.changes`
+    /// frame the `/ws/events` catch-ups send. `None` for a cold cache, which the
+    /// caller serialises as an absent `rev` and the client reads as a force-refetch.
     pub fn peek_rev(&self, session_id: &str) -> Option<u64> {
         let cache = lock(&self.cache);
         match cache.get(session_id) {

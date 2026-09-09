@@ -7,32 +7,22 @@
 //! the changed-files cache, which emits a `session.changes` event on `/ws/events`
 //! so subscribed clients refetch `GET /api/v1/sessions/:id/changes`.
 //!
-//! `refresh-changes` is the one route here that mutates nothing: it performs
-//! only that post-mutation refresh, so a change dux did not make through one of
-//! these routes (a file the user changed from a terminal, or an agent writing in
-//! its worktree) can be picked up now instead of on the next poll. See
-//! [`refresh_changed_files_now`], which every handler in this module, every
-//! handler in [`crate::file_routes`], and the file-drop upload in
-//! [`crate::file_drop_routes`] share so they can never drift apart.
+//! `refresh-changes` is the one route here that mutates nothing: it performs only
+//! that post-mutation refresh, so a change dux did not make through one of these
+//! routes can be picked up now instead of on the next poll. It shares
+//! [`refresh_changed_files_now`] with every handler here, every handler in
+//! [`crate::file_routes`], and the file-drop upload, so they cannot drift apart.
 //!
-//! Safety: every handler runs git OFF the engine actor thread AND off the async
-//! reactor (`spawn_blocking`), so a slow/locked repo never stalls other clients.
-//! File-path ops PRE-VALIDATE that the path is a file git actually tracks in the
-//! worktree — `changed_files` only ever returns worktree-relative paths inside
-//! the tree, so membership proves both "handled by git" and "inside the worktree
-//! tree" (and unlike a filesystem canonicalize check it correctly accepts
-//! deleted files, which appear in status but no longer exist on disk).
+//! Every handler runs git off the engine actor thread AND off the async reactor,
+//! so a slow or locked repo never stalls other clients. File-path ops pre-validate
+//! that the path is one git tracks in the worktree: `changed_files` only ever
+//! returns worktree-relative paths inside the tree, so membership proves both, and
+//! unlike a canonicalize check it accepts deleted files, which appear in status but
+//! no longer exist on disk.
 //!
-//! All routes are served plainly, like every other API route. dux has NO
-//! authentication of any kind, so nothing here ever 401s: the open access is
-//! deliberate, the single-tenant trusted-access model documented in CLAUDE.md.
-//! Two app-wide guards apply (see [`crate::server::build_app`]'s middleware
-//! doc): a Host-header allowlist, which stops a malicious web page from rebinding
-//! DNS into this server, and the same-origin check on mutating verbs, which stops
-//! another site driving these POSTs from a visitor's browser. Neither is
-//! authentication, and a client that sends no `Origin` header (curl, a script)
-//! bypasses the origin check by design, so any client that can reach the address
-//! can commit, push and discard in every worktree.
+//! Any client that can reach the address can commit, push and discard in every
+//! worktree: that follows from the single-tenant trusted-access model, and the
+//! Host allowlist and same-origin check are not authentication.
 
 use std::path::{Path, PathBuf};
 
@@ -92,13 +82,9 @@ struct CommitOp {
 /// commit message and guards against runaway clients.
 const MAX_COMMIT_MSG_LEN: usize = 65_536;
 
-/// The git-mutation routes. These
-/// are path-keyed: the session id is the `:id` path segment under
-/// `/api/v1/sessions/:id/git/*`, validated by `id_within_bound` and then resolved
-/// to a worktree at the top of each handler (mirroring the other resource-nested
-/// REST routes). Project-scoped git actions (refresh the source checkout and
-/// switch it to the default branch) live in [`crate::project_actions`] under the
-/// path-keyed `/api/v1/projects/:id/{pull,checkout-default}` routes.
+/// The git-mutation routes, path-keyed on the session id, which `id_within_bound`
+/// validates and each handler resolves to a worktree at its top. Project-scoped git
+/// actions live in [`crate::project_actions`].
 pub fn routes() -> Router<AppState> {
     let prefix = "/api/v1/sessions/{id}/git";
     Router::new()
@@ -119,21 +105,13 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{prefix}/refresh-changes"), post(refresh_changes))
 }
 
-/// Recompute a session's changed files NOW: the exact pair of calls every
-/// mutating handler in this module makes after it touches a file.
+/// Recompute a session's changed files now: the pair of calls every route that
+/// changes a file makes afterwards. dux has no file watcher, so anything dux did
+/// not do through one of them catches up only on the next poll.
 ///
-/// dux has no file watcher: the cached answer is dropped by the routes that
-/// change a file, which is every handler here, every handler in
-/// [`crate::file_routes`], and the file-drop upload in
-/// [`crate::file_drop_routes`] when the dropped file lands inside the agent's
-/// worktree. Anything dux did not do through one of them only catches up on the
-/// next poll (2s while any agent or terminal in the workspace is running, 10s
-/// while none is).
-///
-/// Both halves are needed and neither is redundant: the engine call refreshes
-/// the lists the engine itself serves, and the invalidate drops the REST cache
-/// entry so the next GET recomputes rather than re-serving the pre-edit
-/// snapshot.
+/// Both halves are needed. The engine call refreshes the lists the engine itself
+/// serves; the invalidate drops the REST cache entry, so the next GET recomputes
+/// rather than re-serving the pre-edit snapshot.
 pub(crate) fn refresh_changed_files_now(state: &AppState, session_id: String, worktree: &Path) {
     state
         .engine
@@ -155,19 +133,14 @@ pub(crate) async fn resolve_worktree(
     }
 }
 
-/// Resolve the directory a CHANGES-PANEL route may run git in: a managed
-/// worktree, or a standalone agent's folder when that folder is itself a
-/// repository.
+/// Resolve the directory a CHANGES-PANEL route may run git in: a managed worktree,
+/// or a standalone agent's folder when that folder is itself a repository.
 ///
-/// Folder-driven and not agent-driven, deliberately: a standalone agent pointed
-/// at a repository gets a real changes panel. When the folder is not one, the
-/// refusal carries the folder's OWN sentence ("this folder has no git
-/// repository", "this folder sits inside a repository rooted elsewhere"), never
-/// a git error about a repository nobody named.
-///
-/// `409` rather than `404`, because the agent exists and the route is real: it
-/// is the folder underneath that cannot answer, which is the same shape as a
-/// locked repository and the status the client already knows how to render.
+/// Folder-driven rather than agent-driven, so a standalone agent pointed at a
+/// repository gets a real changes panel; when the folder is not one, the refusal
+/// carries the folder's own sentence, never a git error about a repository nobody
+/// named. `409` rather than `404`, because the agent exists and the route is real
+/// and only the folder cannot answer, which is the shape a locked repository has.
 pub(crate) async fn resolve_changes_worktree(
     state: &AppState,
     session_id: String,
@@ -175,13 +148,10 @@ pub(crate) async fn resolve_changes_worktree(
     resolve_git_directory(state, session_id, GitAsk::Read).await
 }
 
-/// The same directory for a route that WRITES (stage, unstage, discard,
-/// commit), gated on the engine's mutation predicate instead.
-///
-/// A separate entry point because it is a separate question: the two predicates
-/// answer identically today, and a read-only repository view would show files it
-/// must not let anyone stage. Asking the read question in a mutating handler is
-/// how that difference would go unnoticed the day it appears.
+/// The same directory for a route that WRITES, gated on the engine's mutation
+/// predicate instead. A separate entry point because it is a separate question: a
+/// read-only repository view would show files nobody may stage, and asking the read
+/// question in a mutating handler is how that difference goes unnoticed.
 pub(crate) async fn resolve_mutation_worktree(
     state: &AppState,
     session_id: String,
@@ -254,36 +224,19 @@ async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), RouteR
 /// Run a blocking git closure off the reactor, mapping its result to a response
 /// error (the success arm is left to the caller, which may also refresh state).
 ///
-/// `action` names what was attempted, in a form that reads inside a sentence
-/// ("could not stage the file"), and PREFIXES git's own message rather than
-/// replacing it. The client is told both.
-///
-/// An earlier version returned the action alone and sent the reader to
-/// `dux.log`. That was wrong twice over. It is not actionable: the preflight
-/// upstream covers exactly two cases (empty message, nothing staged), and
-/// everything else arrives here with the explanation the user needs and nothing
-/// to do with it, including a `pre-commit` or `commit-msg` hook's report (the
-/// entire reason a hook prints anything), `gpg failed to sign the data`,
-/// "Committing is not possible because you have unmerged files" which carries
-/// its own fix instruction, and a held `index.lock` whose message literally
-/// says how to clear it. And on a remote browser `dux.log` is on a machine the
-/// reader may have no way to reach. It was also inconsistent: push and pull
-/// deliver git's full text to this same browser through the status toast, so a
-/// failed push explained itself and a failed commit did not. The project's own
-/// rule is that messages are verbose and actionable.
+/// `action` names what was attempted, in a form that reads inside a sentence, and
+/// PREFIXES git's own message rather than replacing it: git's text is what carries
+/// a hook's report, a signing failure, an unmerged-files instruction or a held
+/// `index.lock`, and pointing at `dux.log` instead strands a remote browser on a
+/// machine its reader may not reach.
 ///
 /// The server's worktree path is stripped by
-/// [`dux_core::git::redact_worktree_path`], which is the part of the old
-/// reasoning that was worth keeping: the browser may be on another machine
-/// entirely, where the server's directory layout is noise. That is a tidiness
-/// measure, not a security boundary. dux is single-tenant and loopback by
-/// default, and the same redaction is applied at the source for commit, push
-/// and pull so all three read the same way on both surfaces. The full,
-/// unredacted chain still goes to `dux.log` for the operator.
+/// [`dux_core::git::redact_worktree_path`], a tidiness measure and not a security
+/// boundary, applied at the source for commit, push and pull too so all three read
+/// the same way on both surfaces. The unredacted chain still goes to `dux.log`.
 ///
-/// The ordinary refusals a user actually hits do not come through here: the
-/// empty-message and nothing-staged commit cases are caught by
-/// `git::commit_preflight` and answered as a 400 with their own wording.
+/// The ordinary refusals do not come through here: `git::commit_preflight` catches
+/// the empty-message and nothing-staged cases and answers 400 in its own wording.
 async fn run_git<F>(action: &'static str, worktree: &Path, op: F) -> Result<(), RouteRejection>
 where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
@@ -440,20 +393,15 @@ impl Section {
     }
 }
 
-/// Stage or unstage a whole batch: one validating `git status` read, one git
-/// call, one changed-files refresh.
+/// Stage or unstage a whole batch: one validating `git status` read, one git call,
+/// one changed-files refresh.
 ///
-/// The batch is PARTITIONED rather than refused whole. Validation is
-/// section-scoped, because the two verbs mean opposite things: staging is
-/// offered for a file in the unstaged list and unstaging for one in the staged
-/// list, and a path that left its section between the click and the request is
-/// reported in `refused` while the rest proceed. Only an empty present set is a
-/// 400.
-///
-/// Partitioning does not make the git call itself partial: the present subset
-/// runs as one batch, so a path that vanishes between the status read and the
-/// git call fails the whole batch with git's own error rather than turning into
-/// another `refused` entry.
+/// The batch is PARTITIONED rather than refused whole, and validation is
+/// section-scoped because the two verbs mean opposite things: a path that left its
+/// section between the click and the request is reported in `refused` while the
+/// rest proceed, and only an empty present set is a 400. The git call itself stays
+/// whole, so a path vanishing between the status read and the call fails the batch
+/// with git's own error rather than becoming another `refused` entry.
 async fn files_op(
     state: AppState,
     session_id: String,
@@ -647,13 +595,10 @@ async fn commit(
     StatusCode::OK.into_response()
 }
 
-/// `POST /api/v1/sessions/:id/git/refresh-changes` — recompute this session's
-/// changed files now.
-///
-/// dux invalidates its cached answer whenever DUX changes a file, but it cannot
-/// see a file the user changed from a terminal, so this is how the user says
-/// "look again" instead of waiting out the poll interval. It changes nothing on
-/// disk; it only forces the read that every mutating handler here forces.
+/// `POST /api/v1/sessions/:id/git/refresh-changes`. dux invalidates its cached
+/// answer whenever dux changes a file, but cannot see one the user changed from a
+/// terminal, so this is how a user says "look again" without waiting out the poll.
+/// It changes nothing on disk and only forces the read every mutating handler does.
 async fn refresh_changes(State(state): State<AppState>, ApiPath(id): ApiPath<String>) -> Response {
     if !id_within_bound(&id) {
         return unknown_session();
@@ -667,12 +612,10 @@ async fn refresh_changes(State(state): State<AppState>, ApiPath(id): ApiPath<Str
     StatusCode::OK.into_response()
 }
 
-// push / pull are async, worker-based engine operations with stateful guards
-// (in-flight dedup, leading-branch resolution) and busy/done status. Rather than
-// re-run raw git and lose all of that, these endpoints TRIGGER the existing engine
-// command via `apply_wire` (which spawns the worker off the actor thread). A 200
-// means "accepted"; the busy/completion status flows to the originating client as
-// `status` events on `/ws/events` (scoped via the `X-Connection-Id` header).
+// push and pull trigger the engine command through `apply_wire` rather than running
+// raw git, which would lose the in-flight dedup, the leading-branch resolution and
+// the busy/done status. A 200 means accepted; the outcome reaches the originating
+// client as a scoped `status` event.
 
 async fn push(
     State(state): State<AppState>,

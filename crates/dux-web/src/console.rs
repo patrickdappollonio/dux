@@ -1,32 +1,18 @@
-//! The `dux server` terminal console: vite-style, colored, well-formatted
-//! output that shows the server's life as it runs (bind banner, client
-//! connect/disconnect, config reload, and a
-//! per-request access log).
+//! The `dux server` terminal console: colored, formatted stdout showing the
+//! server's life as it runs.
 //!
-//! ## Scope
+//! This is the `dux server` CLI surface only. The flip owns the terminal and must
+//! not print here: it constructs a [`Console::capture`], which writes nothing to
+//! stdout and records lifecycle events into the `ActivityRing` behind the status
+//! screen's Activity panel. [`Console::noop`] does neither.
 //!
-//! This is the `dux server` CLI surface ONLY. The in-process TUI↔server flip
-//! ([`crate::serve_with_engine`]) keeps its themed status screen and owns the
-//! terminal, so it MUST NOT print here — it constructs a [`Console::capture`],
-//! which writes nothing to stdout but records lifecycle events into the shared
-//! `ActivityRing` that drives the status screen's Activity panel. (A pure
-//! [`Console::noop`] is used where neither stdout nor capture is wanted.)
+//! The console is additive to `dux.log`, which keeps logging every lifecycle event
+//! it already logged. The access log is the one console-only line: piping stdout
+//! is the access log, and keeping it out of `dux.log` keeps the log lean.
 //!
-//! ## What goes where
-//!
-//! The console is ADDITIVE to `dux.log`: lifecycle events the rest of the crate
-//! already logs keep logging exactly as before; the console is a second, richer,
-//! human-facing surface. The ONE exception is the access log, which is
-//! console-only (piping `dux server`'s stdout IS the access log; keeping it out
-//! of `dux.log` keeps the log lean).
-//!
-//! ## Color
-//!
-//! Color is hand-rolled minimal ANSI (no color dependency). [`detect`] decides
-//! whether to color from the `[server] color` setting plus the environment
-//! (`IsTerminal`, `NO_COLOR`, `TERM`). When color is OFF the formatters emit
-//! plain ASCII with word glyphs (`info`/`ok`/`warn`/`error`) instead of the
-//! Unicode glyph vocabulary, so piped/redirected output is clean.
+//! Color is hand-rolled minimal ANSI. [`detect`] decides from the `[server] color`
+//! setting plus `IsTerminal`, `NO_COLOR` and `TERM`; with color off the formatters
+//! emit plain ASCII word glyphs so redirected output stays clean.
 
 use std::io::{IsTerminal, Write};
 use std::net::IpAddr;
@@ -158,10 +144,9 @@ pub fn detect(setting: &str) -> bool {
 
 // ── Writer seam ────────────────────────────────────────────────────────────
 
-/// The bound on the writer channel. Emitters `try_send` into it; when it is full
-/// (a stalled stdout consumer — a full pipe or a `Ctrl-S`-stopped terminal) the
-/// line is DROPPED rather than blocking the emitting tokio worker. 1024 lines is
-/// generous headroom for a momentary stall while staying a fixed, bounded cost.
+/// The bound on the writer channel. Emitters `try_send`, so a stalled stdout
+/// consumer drops lines rather than blocking the emitting tokio worker; sized for
+/// a momentary stall at a fixed, bounded cost.
 const WRITER_CHANNEL_BOUND: usize = 1024;
 
 /// A message handed to the writer thread.

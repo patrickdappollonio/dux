@@ -1,35 +1,23 @@
-//! REST reads scoped to a single project. Plain unauthenticated GETs.
+//! REST reads scoped to a single project.
 //!
-//! - `GET /api/v1/projects/:id/worktrees`: the project's managed worktrees for
-//!   the Worktrees manager: adoptable candidates and the ones an agent already
-//!   holds, each with its dirtiness. 404 for an unknown project id.
-//! - `DELETE /api/v1/projects/:id/worktrees?path=`: remove ONE managed worktree
-//!   from disk. Refuses anything that is not a managed worktree of that project
-//!   (404) and anything an agent is attached to (409). Answers 200 with a small
-//!   body reporting what happened to the branch, because `git branch -D` can
-//!   REFUSE (a branch checked out in another worktree) and the client must not
-//!   report the checkbox it sent as the outcome.
-//! - `GET /api/v1/projects/worktree-counts`: how many managed worktrees each
-//!   project has, so the project picker can label its rows before the user
-//!   drills in and finds an empty list.
-//! - `GET /api/v1/projects/inspect?path=` — branch pre-flight for the add-project
-//!   flow: the candidate repo's current branch + a non-default-branch warning.
-//!   400 for an empty/relative path (the path must be absolute — it is not a
-//!   registered project yet, so it is inspected straight off the filesystem).
+//! - `GET /api/v1/projects/:id/worktrees`: the project's managed worktrees for the
+//!   Worktrees manager, adoptable candidates and agent-held alike, each with its
+//!   dirtiness. 404 for an unknown project id.
+//! - `DELETE /api/v1/projects/:id/worktrees?path=`: remove ONE managed worktree.
+//!   Refuses anything that is not a managed worktree of that project (404) and
+//!   anything an agent is attached to (409). Answers 200 with a body reporting what
+//!   happened to the branch, because `git branch -D` can refuse one checked out in
+//!   another worktree and the client must not report its checkbox as the outcome.
+//! - `GET /api/v1/projects/worktree-counts`: how many managed worktrees each project
+//!   has, so the picker can label its rows before the user drills into an empty one.
+//! - `GET /api/v1/projects/inspect?path=`: branch pre-flight for the add-project
+//!   flow. 400 for an empty or relative path: the path must be absolute, because it
+//!   is not a registered project yet and is inspected straight off the filesystem.
 //!
-//! Both shell to git, so the classification/inspection runs OFF the async reactor
-//! (`spawn_blocking`), following the old handlers' precedent. Served like every
-//! other API route: dux has NO authentication of any kind, so nothing here ever
-//! 401s. That open access is deliberate, the single-tenant trusted-access model
-//! documented in CLAUDE.md. The two app-wide guards are a Host-header allowlist,
-//! which stops a malicious web page from rebinding DNS into this server, and a
-//! same-origin check that applies to MUTATIONS only, so these GETs are not behind
-//! it. Neither guard is authentication.
-//!
-//! NOTE: `/api/v1/projects/inspect` (a static segment) coexists with
-//! `/api/v1/projects/:id` (the parameterized PATCH/DELETE in
-//! [`crate::project_actions`]) — axum's matcher prefers the static segment, the
-//! same way `/api/v1/projects/reorder` already does.
+//! These shell to git, so the classification and inspection run off the async
+//! reactor. The static `inspect` and `worktree-counts` segments coexist with the
+//! parameterized `/api/v1/projects/:id` routes because axum's matcher prefers a
+//! static segment.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -128,17 +116,13 @@ async fn list_worktrees(State(state): State<AppState>, AxumPath(id): AxumPath<St
     }
 }
 
-/// Project a project's MANAGED worktrees (under dux's worktrees root, minus the
-/// project checkout) into wire-safe entries.
-///
-/// A thin adapter: which worktrees the manager owns, and their dirtiness, is
-/// decided by [`dux_core::worktree_manager::list_manageable_worktrees`], shared
-/// with the TUI's worktree manager so the two surfaces cannot classify
-/// differently. Everything left here is presentation: the wire field names and
-/// the user-facing reason string.
-///
-/// Runs in `spawn_blocking`: the listing shells to git. Returns a user-facing
-/// error string when the git listing fails.
+/// Project a project's managed worktrees, under dux's worktrees root and minus the
+/// project checkout, into wire-safe entries. A thin adapter: which worktrees the
+/// manager owns and their dirtiness are decided by
+/// [`dux_core::worktree_manager::list_manageable_worktrees`], shared with the TUI so
+/// the two surfaces cannot classify differently, and only the wire field names and
+/// the reason string are decided here. Runs in `spawn_blocking`, since the listing
+/// shells to git, and returns a user-facing error string when that fails.
 fn classify_managed_worktrees(
     project: &dux_core::model::Project,
     paths: &dux_core::config::DuxPaths,
@@ -165,15 +149,10 @@ fn classify_managed_worktrees(
 
 // ── Worktree counts ────────────────────────────────────────────────────────────
 
-/// How many managed worktrees each project has.
-///
-/// The project picker labels its rows with this so drilling into a project with
-/// nothing in it is a CHOICE rather than a surprise. Empty projects are still
-/// listed and still clickable: disabling a row gives no reason and reads as
-/// broken.
-///
-/// One request rather than one per row, and all the git work in a single
-/// `spawn_blocking`, because the listing shells to git per project.
+/// How many managed worktrees each project has, so the picker's rows say it before
+/// the user drills in. Empty projects stay listed and clickable: a disabled row
+/// gives no reason and reads as broken. One request rather than one per row, with
+/// all the git work in a single `spawn_blocking`.
 async fn list_worktree_counts(State(state): State<AppState>) -> Response {
     let Some(spine) = state.engine.spine().await else {
         return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();
@@ -224,15 +203,11 @@ struct DeleteWorktreeQuery {
     delete_branch: bool,
 }
 
-/// What the removal did to the worktree's branch, when it was asked to touch it
-/// at all. `None` on the reply means no branch deletion was attempted (the
-/// request did not ask, or the worktree is detached), so the client must not
-/// claim one either way.
-///
-/// A bare 204 would leave the client to toast "and deleted its branch" off its
-/// own CHECKBOX, which says what was requested and not what happened: `git
-/// branch -D` refuses a branch checked out in another worktree, and the toast
-/// would assert the opposite.
+/// What the removal did to the worktree's branch, when it was asked to touch it at
+/// all. `None` means no deletion was attempted, because the request did not ask or
+/// the worktree is detached, so the client must claim nothing either way: its own
+/// checkbox says what was requested, and `git branch -D` refuses a branch checked
+/// out in another worktree.
 #[derive(Serialize)]
 struct BranchOutcomeReply {
     /// The branch the removal targeted.
@@ -366,11 +341,9 @@ enum BranchWarningView {
 #[derive(Serialize)]
 struct InspectReply {
     /// How the path classifies for the add flow: `"repo"` (work-tree root),
-    /// `"bare"` (bare root), `"repo_subdir"` (inside a repo or inside git's
-    /// internal directory; blocked client-side), or `"plain"` (not a repo; the
-    /// client offers to initialize one). Old bundles never see the new kinds
-    /// because they only inspect rows they already believe are repos; a new
-    /// bundle treats a missing `kind` as `"repo"`.
+    /// `"bare"` (bare root), `"repo_subdir"` (inside a repo or git's internal
+    /// directory, blocked client-side), or `"plain"` (not a repo, and the client
+    /// offers to initialize one). A client treats a missing `kind` as `"repo"`.
     kind: &'static str,
     /// The enclosing repository root, for the `repo_subdir` kind. `None` when
     /// the path is inside git's internal directory (no user-facing root to
@@ -383,12 +356,11 @@ struct InspectReply {
     gitignore_candidates: Vec<String>,
     current_branch: Option<String>,
     warning: Option<BranchWarningView>,
-    /// `false` for a freshly `git init`'d repo with an unborn HEAD (no
-    /// commits). The UI uses this to offer creating an initial commit before
-    /// the repo can back worktrees. NOTE: this is `repo_has_commits`'s fail-open
-    /// bool, so a transient git failure also yields `false` — acceptable for a
-    /// read-only hint (the mutating add path independently re-checks with the
-    /// fail-closed `repo_commit_state` and never double-commits).
+    /// `false` for a freshly `git init`'d repo with an unborn HEAD, which the UI
+    /// uses to offer an initial commit before the repo can back worktrees. This is
+    /// `repo_has_commits`'s fail-open bool, so a transient git failure also yields
+    /// `false`; the mutating add path re-checks with the fail-closed
+    /// `repo_commit_state` and never double-commits.
     has_commits: bool,
 }
 
@@ -409,13 +381,9 @@ async fn inspect_path(
         return (StatusCode::BAD_REQUEST, "path is too long").into_response();
     }
 
-    // Pre-flight branch inspection mirroring the TUI's `add_project`: it runs
-    // `current_branch_opt` then `branch_warning_kind` before the non-default-branch
-    // prompt. Both are bounded git plumbing reads with no working-tree writes, so
-    // this runs off the async reactor in `spawn_blocking` (the browse precedent).
-    // A detached HEAD yields `current_branch: null` in the response with no warning
-    // (the caller cannot switch the user to a default branch from a detached state).
-    // A non-repo path still fails with a non-Ok result, which is returned as 400.
+    // Bounded git plumbing reads with no working-tree writes, run off the async
+    // reactor. A detached HEAD yields a null `current_branch` and no warning, since
+    // no default branch can be offered from there; a non-repo path returns 400.
     let result = tokio::task::spawn_blocking(move || {
         let repo = Path::new(&path);
         // Classify first so the add flow can distinguish a plain folder (offer
@@ -470,12 +438,9 @@ async fn inspect_path(
         };
         let branch = dux_core::git::current_branch_opt(repo).map_err(|e| format!("{e:#}"))?;
         let has_commits = dux_core::git::repo_has_commits(repo);
-        // Derive the branch WARNING from the CORE-owned `add_project_plan` (the
-        // single-source decision the TUI's add_project also consumes, pinned by
-        // the shared vector matrix). The reply `kind` still comes from
-        // `RepoPathKind` (bare vs repo) and `has_commits` drives the client's
-        // initial-commit offer; only the warning selection is the shared
-        // decision. A detached HEAD carries no branch_warning.
+        // Only the warning selection is the shared core-owned decision the TUI's
+        // add_project also consumes; the reply `kind` comes from `RepoPathKind` and
+        // `has_commits` drives the initial-commit offer. A detached HEAD warns not.
         let branch_warning = branch
             .as_deref()
             .and_then(|b| dux_core::git::branch_warning_kind(repo, b));

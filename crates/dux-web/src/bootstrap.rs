@@ -1,8 +1,6 @@
-//! Headless `Engine` bootstrap for the web server. Mirrors the TUI's field-by-field
-//! assembly (crates/dux-tui/src/app/mod.rs) but with a read-only config load and a
-//! `WebConfigSurface`. Config is loaded via `dux_core::config::load_config`, which reads
-//! `config.toml` read-only and falls back to defaults on missing/malformed files.
-//! Sessions and projects come from the SQLite store.
+//! Headless `Engine` bootstrap for the web server: the TUI's field-by-field
+//! assembly with a read-only `load_config` (defaults on a missing or malformed
+//! file) and a `WebConfigSurface`. Sessions and projects come from SQLite.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -21,11 +19,9 @@ use dux_core::model::GhStatus;
 use dux_core::storage::SessionStore;
 use dux_core::worker::WorkerEvent;
 
-/// Config surface for the web server. Owns the two front-end-specific config
-/// concerns the engine can't: reload (a read-only re-load of `config.toml`) and
-/// recover rendering (a plain, comment-free serialization — the web has no
-/// canonical commented renderer; that needs the TUI's `RuntimeBindings`). The
-/// engine owns the config *write* path (the `ConfigWriteQueue`).
+/// Config surface for the web server: a read-only reload of `config.toml`, and
+/// recover rendering as plain comment-free TOML, since the canonical commented
+/// renderer needs the TUI's `RuntimeBindings`. The engine owns the write path.
 pub struct WebConfigSurface;
 
 impl ConfigSurface for WebConfigSurface {
@@ -38,11 +34,9 @@ impl ConfigSurface for WebConfigSurface {
             // Re-read config from disk (read-only load — same as bootstrap). Returns the
             // REAL config, not Config::default().
             let mut config = dux_core::config::load_config(&paths);
-            // Reconcile config's `[[projects]]` with SQLite on reload too (the
-            // "config wins" tenet), mirroring `TuiConfigSurface::reload` so an
-            // edited config.toml applies its project preferences on a live
-            // `dux serve`. A store-open or reconciliation error is surfaced
-            // through the reload result rather than crashing the reload thread.
+            // Config wins: an edited `[[projects]]` applies its preferences to
+            // SQLite on a live serve. Errors ride the reload result rather than
+            // crashing the reload thread.
             let reconciled = SessionStore::open(&paths.sessions_db_path)
                 .map_err(|e| format!("{e:#}"))
                 .and_then(|store| {
@@ -68,34 +62,29 @@ impl ConfigSurface for WebConfigSurface {
     }
 
     fn recover_render(&self, config: &Config) -> String {
-        // Plain (comment-free) render — the web has no canonical commented
-        // renderer (that needs the TUI's `RuntimeBindings`). Returning the text
-        // (not writing) lets the engine perform the atomic write through its own
-        // writer while holding the quiesce barrier.
+        // Returning the text rather than writing it lets the engine do the atomic
+        // write through its own writer while holding the quiesce barrier.
         dux_core::config_write::render_config_plain(config)
     }
 }
 
 /// Assemble a headless `Engine` from `paths`, loading sessions from the store and
-/// acquiring the single-instance lock at `paths.lock_path`. Config is loaded
-/// read-only from `config.toml` via `load_config` — no file creation, migration,
-/// or write-back occurs here. Persisted session statuses are normalized before
-/// returning (the headless counterpart of the TUI's `restore_sessions`): nothing
-/// is running yet, so a session whose worktree still exists is `Detached` and one
-/// whose worktree vanished is `Exited`.
+/// acquiring the single-instance lock at `paths.lock_path`. Config is read
+/// read-only: no file creation, migration, or write-back happens here.
+///
+/// Persisted session statuses are normalized before returning, since nothing is
+/// running yet: a session whose worktree still exists becomes `Detached`, one
+/// whose worktree vanished becomes `Exited`.
 pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     // The single-instance lock must be held before any config read, DB open, or
     // config write — matching the TUI's invariant.
     let single_instance_lock = SingleInstanceLock::acquire(&paths.lock_path)?;
     let mut config = dux_core::config::load_config(paths);
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
-    // Reconcile config's `[[projects]]` with SQLite (the "config wins" tenet),
-    // the same core routine the TUI bootstrap runs, so `dux serve` also adopts
-    // config-only projects, applies config-edited preferences to SQLite, and
-    // validates identity conflicts. Persist any normalized config back through
-    // the core save path (surgical toml_edit patch, comment-preserving, when the
-    // file exists; a plain render otherwise). Blessed sync-direct: bootstrap runs
-    // before the engine's config-write queue exists, mirroring the TUI invariant.
+    // Config wins: adopt config-only projects, apply config-edited preferences to
+    // SQLite, and validate identity conflicts, persisting any normalization back
+    // through the core save path. The write is sync-direct because bootstrap runs
+    // before the engine's config-write queue exists.
     #[allow(deprecated)]
     dux_core::config_sync::reconcile_config_projects(&mut config, &session_store, |config| {
         dux_core::config_write::save_config_with(
@@ -199,10 +188,8 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     };
 
     engine.normalize_restored_sessions();
-    // Seed PR badges from the persisted `latest_prs` rows (the same core routine
-    // the TUI runs at startup), so `dux serve` shows PR state immediately instead
-    // of blank until the first network poll, and shows persisted state even when
-    // `gh` is unavailable. A no-op when GitHub integration is off.
+    // Seed from the persisted `latest_prs` rows so PR state shows before the first
+    // network poll, and shows at all when `gh` is unavailable.
     engine.seed_pr_statuses_from_store();
 
     Ok(engine)

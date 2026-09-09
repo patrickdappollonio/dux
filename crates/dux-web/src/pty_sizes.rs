@@ -1,26 +1,20 @@
 //! The per-PTY grid-change broadcast: how every socket attached to one PTY
 //! learns that its grid moved.
 //!
-//! ONE PTY HAS ONE AUTHORITATIVE GRID, the owner's. Every other attached
-//! browser renders the same byte stream into its own, differently sized xterm,
-//! so a viewer whose grid disagrees is rendering wrapped and clamped garbage
-//! and, before this, had no way to know it: the wire never told a non-owner the
-//! PTY's size. The `connected` handshake now carries the grid at attach time
-//! and this bus carries every change after it, so a viewer can say so on screen
-//! and heal itself with a fresh attach.
+//! One pty has one authoritative grid, the owner's. Every other attached browser
+//! renders the same byte stream into its own xterm, so a viewer whose grid
+//! disagrees renders wrapped and clamped garbage. The `connected` handshake
+//! carries the grid at attach time and this bus carries every change after it, so
+//! a viewer can say so on screen and heal itself with a fresh attach.
 //!
-//! WHY A BROADCAST CHANNEL AND NOT A REGISTRY OF SINKS. Every socket in this
-//! crate is driven by its own `select!` loop and no sink is ever held anywhere
-//! else (see the liveness-ping note in `server.rs` for the same reasoning
-//! applied to the ping): a registry would mean holding another task's sink, and
-//! locking one across an await. A `tokio::sync::broadcast` fits the existing
-//! shape instead, as one more arm in the loop each socket already runs.
+//! A broadcast rather than a registry of sinks: every socket here runs its own
+//! `select!` loop and no sink is held elsewhere, so a registry would mean holding
+//! another task's sink and locking it across an await.
 //!
-//! WHY NOT THE EVENT BUS. `pty.owner` rides `/ws/events` because surfaces with
-//! no PTY socket attached (the sidebar, the agent menu) need it. A grid change
-//! is meaningful only to a client rendering that PTY's bytes, which is exactly
-//! the set of sockets this bus reaches, and delivering it on the PTY socket
-//! keeps it ordered against that socket's own `connected` handshake.
+//! Not the event bus: `pty.owner` rides `/ws/events` because surfaces with no PTY
+//! socket need it, while a grid change matters only to a client rendering that
+//! pty's bytes, and delivering it here keeps it ordered against that socket's own
+//! `connected` handshake.
 
 /// One applied grid change: the PTY whose grid moved and what it moved to.
 /// Cloned per receiver, so it stays three integers and a short id.
@@ -30,19 +24,15 @@ pub(crate) struct PtyGridChange {
     pub(crate) rows: u16,
     pub(crate) cols: u16,
     /// The per-pty apply-order sequence stamped by `claim_for_resize` under the
-    /// owners lock. Publishes happen AFTER that lock releases, so two sockets'
-    /// announcements of two ordered applies can reach this bus inverted; a
-    /// receiver drops any change whose seq is at or below the newest it has
-    /// seen for the pty, so the stale one can never become the last word.
+    /// owners lock. Publishes happen after that lock releases, so two ordered
+    /// applies can arrive inverted; a receiver drops any change whose seq is at or
+    /// below the newest it has seen for the pty.
     pub(crate) seq: u64,
 }
 
-/// How many grid changes a slow socket may fall behind before its receiver is
-/// told it lagged. A grid change is tiny and rare (one per settled resize), and
-/// a lagged receiver loses nothing that matters: the NEXT change carries the
-/// current geometry, and the viewer's own reconnect handshake re-reads it from
-/// scratch. Sized well above any realistic burst so the lag branch is the
-/// anomaly rather than the resize-drag norm.
+/// How many grid changes a slow socket may fall behind before its receiver is told
+/// it lagged. Sized well above any realistic burst; a lagged receiver loses nothing
+/// that matters, since the next change carries the current geometry.
 const PTY_GRID_CHANNEL_CAPACITY: usize = 64;
 
 /// The process-wide grid-change bus, shared by every PTY socket through
@@ -66,12 +56,10 @@ impl PtyGridBus {
         self.tx.subscribe()
     }
 
-    /// Announce a grid change that has ALREADY been applied. Called after the
-    /// owners lock is released, like the `pty.owner` broadcast beside it, and
-    /// only on the paths that really resized the child: a refused resize
-    /// changed nothing and must say nothing. `seq` is the apply-order stamp
-    /// the claim took under the lock (see [`PtyGridChange::seq`]). A send with
-    /// no live receivers is not an error (nobody is attached).
+    /// Announce a grid change that has already been applied, after the owners lock
+    /// is released and only on the paths that really resized the child: a refused
+    /// resize changed nothing and must say nothing. `seq` is the apply-order stamp
+    /// the claim took under the lock. A send with no live receivers is not an error.
     pub(crate) fn publish(&self, pty_id: &str, rows: u16, cols: u16, seq: u64) {
         let _ = self.tx.send(PtyGridChange {
             pty_id: pty_id.to_string(),
