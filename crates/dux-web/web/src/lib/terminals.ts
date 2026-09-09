@@ -2,7 +2,6 @@ import { assertNever } from "@/lib/assertNever"
 import {
   ownerKey,
   sameOwner,
-  sameWireOwner,
   type TerminalOwnerRef,
 } from "@/lib/terminalOwner"
 import type { TerminalView } from "@/lib/types"
@@ -90,15 +89,6 @@ export function groupTerminalsByOwner(
     }
   }
   return { bySession, byProject }
-}
-
-// The terminals sharing `t`'s owner, INCLUDING `t`. `terminalTitle` uses this to
-// disambiguate two same-owner terminals running the same app.
-export function terminalSiblings(
-  terminals: readonly TerminalView[],
-  t: TerminalView,
-): TerminalView[] {
-  return terminals.filter((other) => sameWireOwner(other.owner, t.owner))
 }
 
 // The terminal's NORMALIZED foreground command, or null when the shell itself is
