@@ -22,7 +22,7 @@ use std::sync::mpsc::{SyncSender, TrySendError};
 
 use dux_core::activity::{ActivityEvent, ActivityRing, ActivityTone};
 
-// ── ANSI palette (hand-rolled — no color dependency) ───────────────────────
+// ── ANSI palette (hand-rolled, no color dependency) ────────────────────────
 
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
@@ -32,7 +32,7 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 
-/// The tone of a console line — drives both the glyph and the color. `Ok`/`Error`
+/// The tone of a console line, which drives both the glyph and the color. `Ok`/`Error`
 /// are part of the vocabulary the renderers support; not every tone has a live
 /// emit site today.
 #[allow(dead_code)]
@@ -165,7 +165,7 @@ enum WriterMsg {
 /// tokio worker on a blocking `write()`; tests inject an in-memory buffer the
 /// thread writes into and read it back through a deterministic sync barrier.
 enum Sink {
-    /// No output at all — the flip path and any disabled console. Every emit is
+    /// No output at all: the flip path and any disabled console. Every emit is
     /// a cheap no-op.
     Noop,
     /// The bounded sender to the writer thread. `emit`/`access`/`banner`
@@ -188,8 +188,8 @@ enum Sink {
 ///
 /// The writer thread lives as long as any `Console` clone does: it loops on the
 /// channel receiver, so when the LAST `Console` drops, the `SyncSender` is
-/// dropped, the channel closes, the loop ends, and the thread exits on its own —
-/// no detached-thread hang. The thread is a plain (daemon-style) `std::thread`,
+/// dropped, the channel closes, the loop ends, and the thread exits on its own,
+/// with no detached-thread hang. The thread is a plain (daemon-style) `std::thread`,
 /// so even a hard process exit while a `Console` is still alive simply tears it
 /// down with the process; it never blocks shutdown.
 #[derive(Clone)]
@@ -438,7 +438,7 @@ impl Console {
 
 /// The dedicated writer thread body: own the writer, drain the channel, write +
 /// flush each line. A `Sync` barrier (test-only) is acknowledged once everything
-/// before it has been processed. The loop ends — and the thread exits — when the
+/// before it has been processed. The loop ends, and the thread exits, when the
 /// channel closes (the last `Console` dropped its sender).
 fn writer_loop(mut writer: Box<dyn Write + Send>, rx: std::sync::mpsc::Receiver<WriterMsg>) {
     while let Ok(msg) = rx.recv() {
@@ -506,7 +506,7 @@ fn status_color(status: u16) -> Option<&'static str> {
 
 /// Format one access-log line: `<ts> <METHOD> <path> <status> <latency>ms`. The
 /// status code is colored by class in color mode; plain otherwise. The `path`
-/// argument is printed VERBATIM — this formatter does not interpret or sanitize
+/// argument is printed VERBATIM: this formatter does not interpret or sanitize
 /// it. The CALLER decides what to pass: `server.rs`'s `log_request` strips the
 /// query string before calling here, because query params can carry secrets
 /// (e.g. `/api/file/raw?session_id=…`). Do not pass a full path-and-query.
@@ -549,7 +549,7 @@ pub struct ListenerRow {
 #[derive(Debug, Clone)]
 pub struct Banner {
     /// The dux display version, already formatted (`vX.Y.Z` for release builds,
-    /// `development` otherwise) — the same string the TUI footer and web sidebar
+    /// `development` otherwise), the same string the TUI footer and web sidebar
     /// show, via `dux_core::display_version`. Rendered verbatim.
     pub version: String,
     /// The mode line (e.g. `plain HTTP`).
@@ -569,7 +569,7 @@ fn render_banner(color: bool, banner: &Banner) -> Vec<String> {
 
     // Header: bold "dux" + version + the mode in the info tone. `banner.version`
     // is already the display string (e.g. "v0.1.0" or "development"), so it is
-    // rendered verbatim — no "v" prefix is added here.
+    // rendered verbatim: no "v" prefix is added here.
     let header_name = if color {
         format!("{BOLD}{CYAN}dux{RESET}")
     } else {
@@ -870,7 +870,7 @@ mod tests {
     fn access_line_prints_path_argument_verbatim() {
         // The formatter is a passthrough: it prints whatever `path` it is given,
         // unchanged. Stripping the query string (to avoid leaking secrets) is the
-        // CALLER's job — server.rs's log_request does it before calling here.
+        // CALLER's job: server.rs's log_request does it before calling here.
         let line = format_access_line(false, "t", "GET", "/x?a=1&b=2", 200, 1);
         assert!(
             line.contains("/x?a=1&b=2"),
@@ -937,7 +937,7 @@ mod tests {
     fn noop_console_writes_nothing_and_is_inactive() {
         let console = Console::noop();
         assert!(!console.is_active(), "a noop console must report inactive");
-        // Every emit is a no-op — there is no observable output, and these calls
+        // Every emit is a no-op: there is no observable output, and these calls
         // must not panic.
         console.client_connected(ip("10.0.0.1"));
         console.client_disconnected(ip("10.0.0.1"));

@@ -308,7 +308,7 @@ async fn discard(
     };
     // Discard is destructive (deletes untracked files / restores tracked ones),
     // so the tracked-vs-untracked distinction is derived SERVER-SIDE from live
-    // git status — never trusted from the client. This also rejects staged files
+    // git status, never trusted from the client. This also rejects staged files
     // ("unstage first") and files with nothing to discard, with a message.
     let wt = worktree.clone();
     let p = op.path.clone();

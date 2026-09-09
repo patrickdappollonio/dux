@@ -109,8 +109,8 @@ struct RenameOp {
 struct OpenInEditorOp {
     path: String,
     /// Which editor to open, as a dux-core editor config key/alias (e.g.
-    /// "vscode", "zed"). When absent, the configured/preferred editor is used —
-    /// the original auto-pick behavior.
+    /// "vscode", "zed"). When absent, the configured/preferred editor is used,
+    /// which is the original auto-pick behavior.
     #[serde(default)]
     editor: Option<String>,
 }
@@ -469,7 +469,7 @@ async fn list_tree<R: EditorRoot>(
         })
         .into_response(),
         // list_dir errors are containment/traversal/missing-dir conditions the
-        // client caused — surface them as a 400, not a server error.
+        // client caused, so surface them as a 400, not a server error.
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -486,7 +486,7 @@ async fn read_file<R: EditorRoot>(root: R, Json(op): Json<ReadOp>) -> Response {
         .await
     {
         Ok(Ok(file)) => Json(file).into_response(),
-        // read_file's errors are path/containment/binary/size — client conditions.
+        // read_file's errors are path/containment/binary/size: client conditions.
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -553,7 +553,7 @@ async fn read_raw<R: EditorRoot>(root: R, Query(q): Query<RawQuery>) -> Response
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(&'static str, Vec<u8>)> {
         // Use the read-permissive resolver so symlinked images inside the
         // worktree reach this proxy. The image proxy intentionally does NOT
-        // serve .git/ internals — those never contain renderable assets and
+        // serve .git/ internals: those never contain renderable assets and
         // exposing them (e.g. .git/config, pack files) is unnecessary risk.
         let (abs, is_git, is_outside) =
             dux_core::worktree_file::resolve_worktree_path_for_read(&worktree, &path)?;
@@ -565,7 +565,7 @@ async fn read_raw<R: EditorRoot>(root: R, Query(q): Query<RawQuery>) -> Response
             anyhow::bail!("refusing to serve path outside the worktree");
         }
 
-        // Also refuse .git/ internals — they are not renderable image assets.
+        // Also refuse .git/ internals: they are not renderable image assets.
         if is_git {
             anyhow::bail!("refusing to serve git internal path via image proxy");
         }
@@ -633,7 +633,7 @@ async fn read_raw<R: EditorRoot>(root: R, Query(q): Query<RawQuery>) -> Response
     }
 }
 
-/// Best-effort Content-Type from a path's extension — enough for the image types
+/// Best-effort Content-Type from a path's extension, enough for the image types
 /// markdown references; anything else falls back to a generic binary type.
 fn mime_for_path(path: &str) -> &'static str {
     let ext = path
@@ -683,7 +683,7 @@ async fn write_file<R: EditorRoot>(
             modified: Some(modified),
             size,
         });
-    // write_file's errors are path/containment validation — client conditions, so
+    // write_file's errors are path/containment validation, all client conditions, so
     // map them to 400. The one exception is a freshness conflict, which is a
     // 409 carrying the file's CURRENT stamp so the browser can offer a choice
     // (overwrite, reload, cancel) without another round trip.
@@ -904,7 +904,7 @@ async fn open_in_editor<R: EditorRoot>(
     let configured = state.engine.editor_default().await;
     let path = op.path;
     let requested = op.editor;
-    // Detecting editors scans PATH and launching spawns a process — both blocking,
+    // Detecting editors scans PATH and launching spawns a process, both blocking,
     // so run them off the async reactor.
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
         let abs = dux_core::git::resolve_worktree_path(&worktree, &path)?;
@@ -918,7 +918,7 @@ async fn open_in_editor<R: EditorRoot>(
             Some(name) => {
                 // The key comes from the fixed editor menu. Bound the length by
                 // CHARS (never byte-slice user-facing input) and don't echo the raw
-                // value back in the error — it could carry control characters.
+                // value back in the error: it could carry control characters.
                 if name.chars().count() > 64 {
                     anyhow::bail!("unrecognized editor key");
                 }
@@ -983,10 +983,10 @@ mod tests {
     /// These tests exercise the two-stage containment logic in `read_raw`'s
     /// blocking closure at the filesystem level, mirroring what the handler does:
     ///
-    /// Stage 1 — `resolve_worktree_path_for_read` sets `is_outside = true` when
-    ///            the symlink resolves outside the worktree.
-    /// Stage 2 — After `canonicalize()` on a leaf symlink, we re-verify the
-    ///            target is still under the canonical worktree root.
+    /// Stage 1: `resolve_worktree_path_for_read` sets `is_outside = true` when
+    ///           the symlink resolves outside the worktree.
+    /// Stage 2: After `canonicalize()` on a leaf symlink, we re-verify the
+    ///           target is still under the canonical worktree root.
     ///
     /// RED before fix: outside symlinks would pass through; GREEN after fix: they
     /// are rejected, while in-worktree symlinks are still served.
@@ -1091,7 +1091,7 @@ mod tests {
         }
 
         /// A symlink whose target is INSIDE the worktree must NOT be flagged as
-        /// outside, and the stage-2 canonicalize check must pass — the proxy must
+        /// outside, and the stage-2 canonicalize check must pass: the proxy must
         /// continue to serve in-worktree images correctly.
         #[test]
         fn inside_symlink_is_allowed() {

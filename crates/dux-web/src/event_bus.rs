@@ -97,7 +97,7 @@ impl EventBus {
     }
 
     /// Publish an event to every connected subscriber. A send error means there
-    /// are no live receivers, which is normal (nobody connected) — ignore it.
+    /// are no live receivers, which is normal (nobody connected), so ignore it.
     pub fn emit(&self, ev: Event) {
         let _ = self.tx.send(ev);
     }

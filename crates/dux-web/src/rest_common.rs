@@ -293,7 +293,7 @@ pub fn id_within_bound(id: &str) -> bool {
 /// back in `WireCommandOutcome.created_op_id` for a synchronous create
 /// (`new`/`fork`/`from_worktree`), and the engine records `op_id -> session_id`
 /// when the worker-minted session lands, so the handler resolves ITS exact
-/// session — never a concurrent create's. Returns `None` on timeout (the create
+/// session, never a concurrent create's. Returns `None` on timeout (the create
 /// was dispatched but has not completed yet; its completion/failure still rides
 /// the status stream).
 pub async fn await_session_for_op(
@@ -461,7 +461,7 @@ mod tests {
         );
     }
 
-    /// A PTY-class id (AgentPty or TerminalPty) must fall back to All — PTY
+    /// A PTY-class id (AgentPty or TerminalPty) must fall back to All: PTY
     /// connection ids are never disclosed to clients and must not scope toasts.
     #[test]
     fn pty_class_id_falls_back_to_all_scope() {

@@ -85,14 +85,14 @@ use crate::server::RouterParams;
 
 /// Boot the engine on its own thread and serve the web UI on every address in
 /// the plan (one axum task per listener, sharing the router/state). Blocking
-/// entry — builds its own tokio runtime.
+/// entry: it builds its own tokio runtime.
 ///
 /// `version` is the dux crate version the binary passes in (`CARGO_PKG_VERSION`)
 /// for the console banner header.
 ///
 /// This is the ONLY surface that owns the [`Console`]: it is built here from the
 /// engine's loaded `[server] color`/`access_log` and threaded into the serve
-/// paths. The TUI flip ([`serve_with_engine`]) NEVER constructs a real console —
+/// paths. The TUI flip ([`serve_with_engine`]) NEVER constructs a real console:
 /// it keeps its themed status screen and must not print to stdout.
 pub fn run_server(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<()> {
     run_plain_http(paths, plan, version)
@@ -170,18 +170,18 @@ struct BoundListener {
 /// Bind every [`PlanAddr`], honoring its required/best-effort tag.
 ///
 /// - REQUIRED (the configured `host:port` or an explicit `--bind`): a bind
-///   failure is FATAL — it logs a `logger::error` with the failing address and
+///   failure is FATAL: it logs a `logger::error` with the failing address and
 ///   returns the error (with address context) so the serve aborts. This is the
 ///   explicit-failure tenet: the operator named this address.
 /// - BEST-EFFORT (the Tailscale leg of LOCAL MODE): a bind failure logs a WARN
 ///   naming the address, the cause, and both remedies, collects the SAME text in
 ///   the returned warnings vec, and CONTINUES without that listener.
 ///
-/// If NOTHING binds (every address failed) the whole serve is fatal — there is
+/// If NOTHING binds (every address failed) the whole serve is fatal: there is
 /// nothing left to serve. Returns the bound listeners (with their addresses) and
 /// the best-effort warnings (the caller logs them to `dux.log`; they are not
-/// re-broadcast — see [`run_plain_http`] for why a startup broadcast reaches no
-/// clients). The returned vec is retained because the bind tests assert on it.
+/// re-broadcast, and [`run_plain_http`] explains why a startup broadcast reaches
+/// no clients). The returned vec is retained because the bind tests assert on it.
 async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<String>)> {
     let mut bound = Vec::with_capacity(addrs.len());
     let mut warnings = Vec::new();
@@ -290,7 +290,7 @@ fn plain_http_banner(
 /// best-effort non-loopback leg makes it `Tailscale`; otherwise `LoopbackOnly`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reachability {
-    /// Every bound leg is genuine loopback — nothing off-host can reach it.
+    /// Every bound leg is genuine loopback: nothing off-host can reach it.
     LoopbackOnly,
     /// A best-effort (Tailscale local-mode) non-loopback leg is bound, and no
     /// public/LAN leg is.
@@ -1502,7 +1502,7 @@ impl ServeCore {
         );
         handle.set_tailscale_mode_control(mode_control.clone());
 
-        // The shared shutdown primitive — the SAME [`ServeShutdown`] the CLI serve
+        // The shared shutdown primitive: the SAME [`ServeShutdown`] the CLI serve
         // path uses. Its watch is the graceful-shutdown lane every serve task and
         // the sweep await; a dying listener flips it via `record_failure`.
         let shutdown = ServeShutdown::new(mode_control.watched());
@@ -1697,7 +1697,7 @@ impl ServeCore {
 /// the exit:
 /// - `Continue` keeps serving.
 /// - `ReturnToTui` triggers graceful axum shutdown and returns `(engine,
-///   ReturnToTui)` with PTYs UNTOUCHED — the TUI resumes around the same agents.
+///   ReturnToTui)` with PTYs UNTOUCHED, so the TUI resumes around the same agents.
 /// - `QuitProcess` (or a SIGINT/SIGTERM during serving) triggers graceful axum
 ///   shutdown, then SIGTERMs the children (`shutdown_ptys`) like the CLI path,
 ///   and returns `(engine, QuitProcess)`.
@@ -1717,7 +1717,7 @@ pub fn serve_with_engine(
 ) -> Result<(Engine, ServerExit)> {
     warn_if_ui_not_built();
     // The flip owns the terminal with its themed status screen, so this console
-    // writes NOTHING to stdout — but it captures every lifecycle event into the
+    // writes NOTHING to stdout, but it captures every lifecycle event into the
     // shared ring that drives the status screen's Activity panel.
     let console = Console::capture(activity);
     let (handle, ends) = engine_actor::build_actor_channels(&engine);
@@ -1726,7 +1726,7 @@ pub fn serve_with_engine(
     // Grab the teardown flag before the handle moves into the router. `ServeCore`
     // trips it the instant serving ends (before axum graceful shutdown) so any
     // PTY forwarders parked on their blocking `recv_timeout` exit within one poll
-    // window — even on ReturnToTui, where the engine and its PtyClient senders
+    // window, even on ReturnToTui, where the engine and its PtyClient senders
     // stay alive and the forwarders' channels would otherwise never disconnect.
     let shutdown_flag = handle.shutdown_flag();
 
@@ -1856,7 +1856,7 @@ pub fn serve_with_engine(
 }
 
 /// Resolves when the process receives SIGINT (Ctrl-C) or SIGTERM. The first such
-/// signal resolves this future — the caller then triggers a graceful shutdown —
+/// signal resolves this future (the caller then triggers a graceful shutdown)
 /// and also arms a watcher so a SECOND signal forces an immediate exit, rather
 /// than leaving the operator trapped if the graceful drain wedges.
 async fn shutdown_signal() {
@@ -1873,15 +1873,15 @@ async fn shutdown_signal() {
     let mut terminate = install_signal(tokio::signal::unix::SignalKind::terminate(), "SIGTERM");
 
     if interrupt.is_none() && terminate.is_none() {
-        // Neither handler installed — we can observe no stop signal. Park so this
+        // Neither handler installed, so we can observe no stop signal. Park so this
         // future never resolves spuriously; `install_signal` already logged loudly.
         std::future::pending::<()>().await;
     }
 
     next_terminate_signal(&mut interrupt, &mut terminate).await;
 
-    // A graceful shutdown has now been requested. If it wedges — a stuck PTY
-    // write, a client socket that never closes, an unbounded connection drain — a
+    // A graceful shutdown has now been requested. If it wedges (a stuck PTY
+    // write, a client socket that never closes, an unbounded connection drain), a
     // SECOND Ctrl-C/SIGTERM must NOT be swallowed, or the operator is trapped and
     // forced to `kill -9`. Reuse the already-armed streams (so there is no
     // re-registration gap) and force-exit on the next signal. This deliberately
@@ -1897,7 +1897,7 @@ async fn shutdown_signal() {
     });
 }
 
-/// Install a SIGINT/SIGTERM handler, returning the stream — or `None` (logged
+/// Install a SIGINT/SIGTERM handler, returning the stream, or `None` (logged
 /// loudly) if registration fails, so the caller can still rely on the other
 /// signal. `label` is the human name used in the failure message.
 fn install_signal(
@@ -1932,7 +1932,7 @@ async fn next_terminate_signal(
         match sig {
             Some(s) => {
                 // `recv()` yields `None` only when the stream closes (runtime
-                // teardown), which is NOT a delivered signal — resolving on it
+                // teardown), which is NOT a delivered signal: resolving on it
                 // would make the second-signal watcher force-exit spuriously
                 // during a clean shutdown. Park on a closed stream so this arm
                 // never fires (and so we don't busy-loop on a persistent `None`).
@@ -2231,7 +2231,7 @@ mod tests {
     #[tokio::test]
     async fn bind_plan_addrs_required_failure_is_fatal_and_names_the_addr() {
         // A REQUIRED address that is already held must FAIL the whole bind with the
-        // address in the error message (the explicit-failure tenet — the operator
+        // address in the error message (the explicit-failure tenet: the operator
         // named this address). dux.log also gets a logger::error (not asserted here
         // because the test logger is process-global; the message text is the
         // contract we pin).
@@ -2450,7 +2450,7 @@ mod tests {
             target: "session worktree".to_string(),
         };
         // Exercise pattern-matching so the variant fields are actually
-        // referenced — a dead-code construction wouldn't catch API drift.
+        // referenced: a dead-code construction wouldn't catch API drift.
         match cmd {
             Command::OpenPath { path, target } => {
                 assert_eq!(target, "session worktree");

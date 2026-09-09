@@ -370,7 +370,7 @@ pub(crate) struct ActorLoopEnds {
     status_snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
     /// Fires `()` once per successful config reload so the web layer can emit a
     /// `config.changed` event on its event bus (clients then refetch
-    /// `/api/v1/bootstrap`). Broadcast — the web forwarder is the only listener,
+    /// `/api/v1/bootstrap`). Broadcast: the web forwarder is the only listener,
     /// but a broadcast keeps the send a cheap fire-and-forget with no receiver.
     config_reload_tx: broadcast::Sender<()>,
     /// Fires a [`SpineChange`] whenever the projected projects or sessions portion
@@ -557,11 +557,11 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     let (status_snapshot_tx, status_snapshot_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
     // Config-reload notifier: the loop fires `()` on each successful reload and the
     // web layer's forwarder turns it into a `config.changed` event. A small buffer
-    // is plenty — reloads are rare and the forwarder drains promptly.
+    // is plenty: reloads are rare and the forwarder drains promptly.
     let (config_reload_tx, _config_reload_rx) = broadcast::channel::<()>(8);
     // Spine-change notifier: the loop fingerprints the spine each tick and fires a
     // `SpineChange` per changed side; the web forwarder turns it into a coarse
-    // `projects.changed` / `sessions.changed` event. A small buffer is plenty — the
+    // `projects.changed` / `sessions.changed` event. A small buffer is plenty: the
     // forwarder drains promptly and a `Lagged` recovery just re-emits both coarse
     // signals (idempotent refetches).
     let (spine_change_tx, _spine_change_rx) = broadcast::channel::<SpineChange>(64);
@@ -620,7 +620,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
 
 /// Spawn the four global background workers on `engine`. Both `App::run` (the
 /// TUI) and every server entry point spawn these, and the in-process flip hands
-/// the SAME engine — with these workers already running — to the other surface,
+/// the SAME engine, with these workers already running, to the other surface,
 /// which calls this again. The spawn helpers are individually idempotent for
 /// the long-lived pollers (see `dux_core::engine`), so a redundant call here is
 /// safe: it will not start a second poller.
@@ -671,8 +671,8 @@ pub struct EngineHandle {
     workspace_rx: watch::Receiver<Option<Arc<WorkspaceDoc>>>,
     /// Tripped when the server is tearing down (ReturnToTui, QuitProcess, or a
     /// `Shutdown` request). PTY forwarders poll it so their blocking
-    /// `recv_timeout` loop exits promptly even when the engine — and therefore
-    /// the std-mpsc `Sender` in the `PtyClient` reader thread — stays alive
+    /// `recv_timeout` loop exits promptly even when the engine, and therefore
+    /// the std-mpsc `Sender` in the `PtyClient` reader thread, stays alive
     /// across the flip. Without this, a forwarder parked on a never-disconnecting
     /// channel would wedge the tokio blocking pool and hang the runtime teardown.
     shutdown_flag: Arc<AtomicBool>,
@@ -746,8 +746,8 @@ impl EngineHandle {
 
     /// All currently open statuses (anonymous + keyed), from the snapshot watch.
     /// A client connecting mid-operation reads this once and sends each entry as
-    /// a `Status` frame so it sees all active toasts immediately — e.g. a
-    /// "Launching agent…" Busy that hasn't resolved yet — instead of a blank
+    /// a `Status` frame so it sees all active toasts immediately (e.g. a
+    /// "Launching agent…" Busy that hasn't resolved yet) instead of a blank
     /// line until the next live update. An empty `Vec` means nothing is showing.
     pub fn status_snapshot(&self) -> Vec<KeyedWireStatus> {
         self.status_snapshot_rx.borrow().clone()
@@ -763,18 +763,18 @@ impl EngineHandle {
     }
 
     /// Publish a status from a non-engine producer (the changed-files
-    /// `ChangesService`) THROUGH the shared status controller — not directly onto
-    /// the broadcast — so it auto-clears on the same tone-aware policy as every
+    /// `ChangesService`) THROUGH the shared status controller, not directly onto
+    /// the broadcast, so it auto-clears on the same tone-aware policy as every
     /// other status and can never linger. The engine loop drains this and emits it
     /// via its `StatusEmitter`. A no-op if the engine loop has already exited.
     pub fn emit_status(&self, status: WireStatus) {
         // `try_send` (not `send().await`): this is sync fire-and-forget, called
         // from non-engine producers (the changed-files `ChangesService`). On a
-        // full channel the status is dropped
-        // — only under extreme overload — but a dropped status is worth a
-        // breadcrumb, so log the Full case with the status's tone/key so the
-        // operator can tell WHICH producer's update went missing. A Closed channel
-        // means the engine is already gone (normal shutdown), so it stays silent.
+        // full channel the status is dropped, only under extreme overload, but a
+        // dropped status is worth a breadcrumb, so log the Full case with the
+        // status's tone/key so the operator can tell WHICH producer's update went
+        // missing. A Closed channel means the engine is already gone (normal
+        // shutdown), so it stays silent.
         let tone = status.tone.clone();
         let key = status.key.clone();
         if let Err(mpsc::error::TrySendError::Full(_)) =
@@ -1085,7 +1085,7 @@ impl EngineHandle {
 
     /// Gracefully wind down the engine: SIGTERM the agent/terminal children so
     /// CLIs can save state for a later resume, then stop the engine thread.
-    /// Errors are ignored — if the thread is already gone, shutdown has already
+    /// Errors are ignored: if the thread is already gone, shutdown has already
     /// happened.
     pub async fn shutdown(&self) {
         let (tx, rx) = oneshot::channel();
@@ -1384,7 +1384,7 @@ impl EngineHandle {
     }
 
     /// The configured preferred editor name for the "open in editor" action
-    /// (`config.editor.default`). Empty if the engine is gone — the handler then
+    /// (`config.editor.default`). Empty if the engine is gone, in which case the handler
     /// falls back to the first detected editor.
     pub async fn editor_default(&self) -> String {
         let (tx, rx) = oneshot::channel();
@@ -1400,7 +1400,7 @@ impl EngineHandle {
     }
 
     /// The directory the add-project picker should open at, resolved from the
-    /// live config. `None` if the engine is gone — the browse handler then falls
+    /// live config. `None` if the engine is gone, in which case the browse handler falls
     /// back to `$HOME` on its own.
     pub async fn browse_start_dir(&self) -> Option<String> {
         let (tx, rx) = oneshot::channel();
@@ -1424,7 +1424,7 @@ impl EngineHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(worktree.clone());
-        // `try_send`: a dropped refresh under overload self-heals — the periodic
+        // `try_send`: a dropped refresh under overload self-heals, because the periodic
         // changed-files poller recomputes the lists on its next pass regardless.
         let _ = self
             .req_tx
@@ -1442,7 +1442,7 @@ impl EngineHandle {
     }
 
     /// Snapshot the inputs to classify a project's managed worktrees (project,
-    /// paths, sessions). Instant — the git classification runs off-thread in the
+    /// paths, sessions). Instant: the git classification runs off-thread in the
     /// caller. `None` when the project id is unknown.
     #[allow(clippy::type_complexity)]
     pub async fn project_worktree_inputs(
@@ -1488,7 +1488,7 @@ impl EngineHandle {
     }
 
     /// Resolve a session's startup-command-log context: the dux paths and the
-    /// session's owning project id. Instant lookup — the log directory listing /
+    /// session's owning project id. Instant lookup: the log directory listing /
     /// file read runs off-thread in the caller (the `project_worktree_inputs`
     /// precedent). `None` when the session id is unknown.
     pub async fn session_startup_log_context(
@@ -1614,7 +1614,7 @@ pub struct FirstLoadInputs {
 /// its own std thread for its whole life. The channel setup, worker spawns, and
 /// loop body are shared with the in-process flip ([`crate::serve_with_engine`])
 /// via [`build_actor_channels`], [`spawn_global_workers`], and
-/// [`run_engine_loop`] — this path simply runs the loop on a spawned thread and
+/// [`run_engine_loop`]. This path simply runs the loop on a spawned thread and
 /// drops the returned engine. The control closure always returns `Continue`, so
 /// the loop's only exit is the inline `Shutdown` request, exactly as before.
 /// Relaunch agents with auto-reopen intent, once, at server startup. The
@@ -1954,7 +1954,7 @@ pub(crate) struct EngineService {
     pending: Vec<PendingSubscribe>,
     /// The session most recently brought to the foreground via a PTY subscribe.
     /// Workspace-global (single-tenant server), last-subscribe-wins across
-    /// browser clients — deliberately NOT the engine's `watched_session_id` (that
+    /// browser clients, deliberately NOT the engine's `watched_session_id` (that
     /// is the TUI's changed-files watch). Gates the tight foreground PR check so a
     /// socket reconnect for an already-focused agent doesn't re-fire it (only a
     /// real focus change does).
@@ -2136,8 +2136,8 @@ impl EngineService {
 
         // A project mutation just updated SQLite + in-memory projects; mirror
         // it into the portable config.toml so a later TUI start doesn't clobber it.
-        // Skip for `Added` — that arm already wrote config inline in command.rs,
-        // and Skip for `PersistenceFailed` — nothing was saved.
+        // Skip for `Added`, since that arm already wrote config inline in command.rs,
+        // and Skip for `PersistenceFailed`, since nothing was saved.
         if let EventReaction::ProjectPersistenceOutcome(outcome) = reaction
             && !matches!(
                 outcome.view,
@@ -2269,7 +2269,7 @@ impl EngineService {
         }
 
         // Reap PTYs that an individual delete/close SIGTERMed and that have now
-        // exited or passed their grace deadline (force-killed + dropped) — the
+        // exited or passed their grace deadline (force-killed + dropped): the
         // non-blocking background half of graceful close. For a reaped agent whose
         // delete also removes its worktree, dispatch that removal now, only after
         // the agent's process is actually gone (the existing
@@ -2552,7 +2552,7 @@ impl EngineService {
 /// `control` is consulted once at the top of each outer iteration: `Exit` stops
 /// the loop and returns the engine WITHOUT shutting down any PTYs (the flip's
 /// ReturnToTui path relies on this). The inline `Shutdown` request still stops
-/// the loop too — it SIGTERMs the children (the CLI/quit teardown).
+/// the loop too, and it SIGTERMs the children (the CLI/quit teardown).
 pub(crate) fn run_engine_loop(
     mut engine: Engine,
     ends: ActorLoopEnds,
@@ -2563,7 +2563,7 @@ pub(crate) fn run_engine_loop(
     loop {
         // Caller-driven exit (the flip's status screen asked to stop). Checked
         // before any work so an exit takes effect on the next tick. PTYs are
-        // left untouched — teardown, if any, is the caller's responsibility.
+        // left untouched: teardown, if any, is the caller's responsibility.
         if matches!(control(), LoopControl::Exit) {
             break;
         }
@@ -2573,7 +2573,7 @@ pub(crate) fn run_engine_loop(
         while let Ok(event) = engine.worker_rx.try_recv() {
             let reaction = engine.process_worker_event(event);
             // Bump #2: a worker event can insert/remove a provider, flip a session
-            // status, or apply a project mutation — all spine state. Bump
+            // status, or apply a project mutation, all of it spine state. Bump
             // unconditionally; the fingerprint compare stays the precise emit gate.
             svc.note_mutation();
             svc.fanout_reaction(&mut engine, &reaction, FollowupRouting::RunEverything);
@@ -2596,9 +2596,9 @@ pub(crate) fn run_engine_loop(
                 // Capture the rebind-relevant [server] settings
                 // BEFORE the swap so we can tell whether the reload touched
                 // anything that only takes effect at startup (listeners are
-                // bound once; reload-config never rebinds). Comparing here — the
+                // bound once; reload-config never rebinds). Comparing here, where the
                 // arm already holds both the running config (pre-swap) and the
-                // incoming one — keeps the detection next to the config-reload handler.
+                // incoming one, keeps the detection next to the config-reload handler.
                 let restart_warning =
                     server_restart_warning_copy(&engine.config.server, &config.server, false);
                 // The parsed MODE, never the raw string: the value is trimmed
@@ -2709,7 +2709,7 @@ fn peek_apply_reloaded_config(reaction: &EventReaction) -> Option<&dux_core::con
 /// [`KeyedStatusController`]: [`send`](Self::send) upserts the status by key,
 /// refreshes the Vec snapshot watch (all open statuses, for clients connecting
 /// mid-operation), and broadcasts it LIVE so a transient pending flash is never
-/// coalesced away; [`tick`](Self::tick) — called once per loop iteration —
+/// coalesced away; [`tick`](Self::tick), called once per loop iteration,
 /// expires timed-out entries, pushes removed keys onto `clear_tx` (so the WS
 /// forwarder sends `StatusCleared` frames), and upgrades stale Busy entries
 /// to Warning (busy-timeout). The `send` method name and broadcast return type
@@ -2843,7 +2843,7 @@ impl StatusEmitter {
 ///
 /// The sidebar is deliberately EXCLUDED from both fingerprints: it is fully
 /// DERIVED from projects + sessions, so every sidebar input change is already
-/// captured by one of the two halves — a project name/`path_missing` change moves
+/// captured by one of the two halves: a project name/`path_missing` change moves
 /// the projects fingerprint, and a session `project_id`/order/orphan transition
 /// moves the sessions fingerprint. Folding the sidebar (which embeds project
 /// fields) into the sessions half instead made a PROJECT-only change spuriously
@@ -3015,7 +3015,7 @@ fn serialize_workspace(rev: u64, spine: &dux_core::viewmodel::SpineView) -> Arc<
 /// The gate's job is to skip the (relatively expensive) project + serialize on
 /// idle intervals: it runs the [`owned_spine`] build + [`fingerprint_halves`] only when a change signal moved
 /// since the last check, or the backstop fired. The fingerprint compare remains
-/// the PRECISE emit gate — it never emits a coarse event for an unchanged half —
+/// the PRECISE emit gate (it never emits a coarse event for an unchanged half),
 /// so the version signals only need to be a conservative "something might have
 /// changed" hint, never a false negative for a covered mutator.
 struct SpineCheck {
@@ -3033,8 +3033,8 @@ struct SpineCheck {
     /// at the last fingerprint compare. Ownership lives outside the engine, so
     /// neither `mutation_version` nor `streaming_version` can observe a claim
     /// or a disconnect release; this third signal is what opens the gate for
-    /// them. It moves ONLY on take-over/first-claim/release — never on
-    /// ordinary keystrokes — so publishing ownership does not churn the spine
+    /// them. It moves ONLY on take-over/first-claim/release, never on
+    /// ordinary keystrokes, so publishing ownership does not churn the spine
     /// per write.
     last_checked_ownership: u64,
     /// Ticks accumulated toward the next backstop fire. Counted in real ticks
@@ -3161,12 +3161,12 @@ impl SpineCheck {
 /// Track each agent's `is_agent_streaming()` value and bump `*streaming_version`
 /// on any transition. The streaming flag is time-derived (it flips to `false`
 /// once [`dux_core::engine::AGENT_STREAMING_WINDOW`] elapses with no new output),
-/// so a mutation counter cannot observe it — this poll is the only way the gate
+/// so a mutation counter cannot observe it: this poll is the only way the gate
 /// learns the `working` projection changed.
 ///
 /// O(1)-per-agent and allocation-free on the hot path: it walks the existing
-/// `pty_activity` map (the complete set of possibly-streaming sessions — an agent
-/// with no recent activity is never streaming), compares against the carried
+/// `pty_activity` map (the complete set of possibly-streaming sessions, since an
+/// agent with no recent activity is never streaming), compares against the carried
 /// `prev_streaming` map, and bumps on a differing or first-seen value. Entries
 /// for agents that left `pty_activity` (session teardown, prune) are dropped via
 /// `retain` so the map cannot grow without bound. No sort, no per-tick `Vec`.
@@ -3370,14 +3370,14 @@ fn handle_request(
     status_tx: &mut StatusEmitter,
     config_reload_tx: &broadcast::Sender<()>,
     // `true` when a raw `config.toml` write (Monaco "Save") has landed on disk but
-    // has NOT been adopted into `engine.config` yet — i.e. disk is ahead of memory.
+    // has NOT been adopted into `engine.config` yet, i.e. disk is ahead of memory.
     // Set by the WriteRawConfig path; cleared whenever memory is reconciled with
     // disk (an explicit reload, or the reconcile below before a config-static
     // mutation). Loop-local because only the web surface writes raw config.
     config_disk_ahead: &mut bool,
     // The shared input-ownership registry, so the `Spine` and `Session` reads
-    // carry the same `input_owner` overlay the cached `/spine` document does —
-    // without it the REST list/single reads would permanently answer "unowned"
+    // carry the same `input_owner` overlay the cached `/spine` document does.
+    // Without it the REST list/single reads would permanently answer "unowned"
     // while `/spine` names an owner.
     input_owners: &PtySizeOwners,
 ) {
@@ -3671,7 +3671,7 @@ fn handle_request(
 /// "Save" PERSISTS but does NOT apply: the new file is written verbatim and left
 /// on disk, but `engine.config` is intentionally NOT reloaded and no
 /// `config.changed` is emitted, so the running app keeps its current settings
-/// until the user explicitly runs "Reload config". This is deliberate — some
+/// until the user explicitly runs "Reload config". This is deliberate: some
 /// settings (the `[server]` perimeter, the port) only take effect at restart, so
 /// silently adopting an edit on save would be surprising and, for those, a no-op
 /// that hides the need to restart. Reload is the single apply point.
@@ -3739,7 +3739,7 @@ fn handle_subscribe(
     tab_id: String,
     reply: oneshot::Sender<Result<PtySubscription, String>>,
 ) {
-    // Opening an agent's PTY foregrounds it — refresh its PR status. What is
+    // Opening an agent's PTY foregrounds it, so refresh its PR status. What is
     // subscribed is always a TAB id (a slot tab's or an extra tab's), never a
     // session id, so resolve the owning session first. Only a GENUINE focus
     // change gets the tight foreground refresh; a reconnect/remount of the
@@ -3871,7 +3871,7 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
         return dispatch_launch(engine, request);
     }
     // Extra tab: resolve the owning session + the tab's own provider and launch.
-    // Resume is per-provider — reopening a dormant tab resumes that provider's
+    // Resume is per-provider: reopening a dormant tab resumes that provider's
     // conversation when it is the sole live tab of that provider (see
     // `tab_resume_decision`). A tab-aware status message avoids the Main-only
     // `agent_reconnect_status_message` (which would name the wrong provider).
@@ -4764,7 +4764,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // StatusEmitter unit tests (no Engine, no I/O — channels only)
+    // StatusEmitter unit tests (no Engine, no I/O, channels only)
     // -----------------------------------------------------------------------
 
     /// Build a `StatusEmitter` directly from inline channels (no engine needed)
@@ -5066,7 +5066,7 @@ mod tests {
         e.generations.insert(key.to_string(), stale_generation);
         e.clear(key.to_string());
 
-        // The newer busy must still be present — the stale clear was a no-op.
+        // The newer busy must still be present: the stale clear was a no-op.
         let snap = snap_rx.borrow().clone();
         assert_eq!(
             snap.len(),
@@ -5566,7 +5566,7 @@ mod tests {
     fn idle_ticks_do_not_serialize_the_spine() {
         // With no command, worker event, or streaming transition bumping the
         // versions, and before the backstop interval, the gate must NEVER call
-        // the fingerprint serialize — proving idle ticks cost zero serialization.
+        // the fingerprint serialize, proving idle ticks cost zero serialization.
         let (_tmp, paths) = temp_paths();
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let (tx, _rx) = broadcast::channel::<SpineChange>(64);
@@ -6182,7 +6182,7 @@ mod tests {
             "disk must hold the saved edit"
         );
 
-        // NOT APPLIED: the running config still resolves to dir A — saving did not
+        // NOT APPLIED: the running config still resolves to dir A, so saving did not
         // adopt. Give any erroneous async adopt a moment to (not) happen.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         assert_eq!(
@@ -6220,8 +6220,8 @@ mod tests {
         handle.write_raw_config(new_body).await.expect("write");
 
         // Now toggle a config-static setting. Its wholesale toml_edit patch would
-        // serialize the (stale) in-memory config over the file — reverting the
-        // saved dir B back to dir A — UNLESS the handler reconciles with disk first.
+        // serialize the (stale) in-memory config over the file, reverting the
+        // saved dir B back to dir A, UNLESS the handler reconciles with disk first.
         handle
             .apply_wire(WireCommand::SetChangesPaneVisible { visible: false })
             .await

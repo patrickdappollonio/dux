@@ -71,7 +71,7 @@ struct CreatedTerminal {
     label: String,
 }
 
-/// `POST /api/v1/sessions/:id/terminals` — create a companion terminal for a
+/// `POST /api/v1/sessions/:id/terminals`: create a companion terminal for a
 /// session. Runs through the dedicated engine request; it mints no status, so no
 /// `X-Connection-Id` scoping is needed here.
 async fn create_terminal(State(state): State<AppState>, Path(id): Path<String>) -> Response {
@@ -161,7 +161,7 @@ async fn delete_standalone_terminal(
     dispatch_delete(&state, tid, &headers).await
 }
 
-/// `DELETE /api/v1/sessions/:id/terminals/:tid` — delete a companion terminal,
+/// `DELETE /api/v1/sessions/:id/terminals/:tid`: delete a companion terminal,
 /// enforcing that `:tid` is session-owned by `:id` before dispatching the delete.
 async fn delete_terminal(
     State(state): State<AppState>,

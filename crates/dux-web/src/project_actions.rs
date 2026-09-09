@@ -700,7 +700,7 @@ mod tests {
     async fn create_initial_commit_flag_on_already_born_repo_registers_without_a_second_commit() {
         // Race: a commit landed between the client's inspect and this request.
         // The flag must gracefully register the repo (no error, no extra commit),
-        // not hard-fail — it's a bootstrap no-op when there's nothing to bootstrap.
+        // not hard-fail: it's a bootstrap no-op when there's nothing to bootstrap.
         let repo = tempfile::tempdir().unwrap();
         init_repo_with_commit(repo.path());
         let before = commit_count(repo.path());

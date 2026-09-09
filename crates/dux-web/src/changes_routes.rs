@@ -67,7 +67,7 @@ async fn get_changes(State(state): State<AppState>, Path(id): Path<String>) -> R
         Err(GitError::SessionNotFound) => {
             (StatusCode::NOT_FOUND, "unknown session").into_response()
         }
-        // A git lock/rebase (or other git failure) — the service already logged it.
+        // A git lock/rebase (or other git failure): the service already logged it.
         Err(GitError::Git(_)) => (
             StatusCode::CONFLICT,
             [(header::RETRY_AFTER, RETRY_AFTER_SECS.to_string())],

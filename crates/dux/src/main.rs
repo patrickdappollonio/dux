@@ -185,7 +185,7 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
 
     // Initialize the logger early so every subsequent logger::* call in the server
     // path (bootstrap, bind) actually reaches dux.log.
-    // OnceLock::set is idempotent — safe if the TUI already initialized it (flip).
+    // OnceLock::set is idempotent, so it is safe if the TUI already initialized it (flip).
     dux_core::logger::init(&config.logging, &paths);
     dux_core::logger::info("bootstrapping dux server");
 

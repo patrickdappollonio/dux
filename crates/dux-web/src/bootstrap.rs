@@ -28,10 +28,10 @@ impl ConfigSurface for WebConfigSurface {
     fn reload(&self, paths: DuxPaths, worker_tx: mpsc::Sender<WorkerEvent>) {
         std::thread::spawn(move || {
             // The guard guarantees a `ConfigReloadReady` is posted even if the
-            // read-only load below panics — otherwise the engine's reload barrier
+            // read-only load below panics. Otherwise the engine's reload barrier
             // would never close and config saves would freeze.
             let guard = ReloadCompletionGuard::new(worker_tx);
-            // Re-read config from disk (read-only load — same as bootstrap). Returns the
+            // Re-read config from disk (a read-only load, same as bootstrap). Returns the
             // REAL config, not Config::default().
             let mut config = dux_core::config::load_config(&paths);
             // Config wins: an edited `[[projects]]` applies its preferences to
@@ -77,7 +77,7 @@ impl ConfigSurface for WebConfigSurface {
 /// whose worktree vanished becomes `Exited`.
 pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     // The single-instance lock must be held before any config read, DB open, or
-    // config write — matching the TUI's invariant.
+    // config write, matching the TUI's invariant.
     let single_instance_lock = SingleInstanceLock::acquire(&paths.lock_path)?;
     let mut config = dux_core::config::load_config(paths);
     let session_store = SessionStore::open(&paths.sessions_db_path)?;

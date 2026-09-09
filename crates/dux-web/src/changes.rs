@@ -331,7 +331,7 @@ impl ChangesService {
         self.compute_cached(session_id.to_string()).await;
         match self.read_cached(session_id) {
             Some(result) => result,
-            // Still nothing — it vanished during the retry (or raced again): treat
+            // Still nothing: it vanished during the retry (or raced again), so treat
             // it as gone so the client stops polling it.
             None => Err(GitError::SessionNotFound),
         }
@@ -472,7 +472,7 @@ impl ChangesService {
                         return;
                     }
                     // The owner was cancelled before storing, or stored a snapshot
-                    // older than our required generation — re-elect a new owner.
+                    // older than our required generation, so re-elect a new owner.
                     continue;
                 }
             }
@@ -521,7 +521,7 @@ impl ChangesService {
         // Stage 1: resolve the worktree. An unknown session (no worktree) is NOT a
         // git error: storing one would recreate a phantom SQLite rev row every
         // poll tick, strand a permanent All-scoped warning, and make GETs return
-        // 409 instead of 404. So leave no cache entry at all — `get` distinguishes
+        // 409 instead of 404. So leave no cache entry at all: `get` distinguishes
         // "no entry, session gone" (404) from a real git error (409).
         //
         // The resolution is FOLDER-DRIVEN for a standalone agent: it yields a
@@ -656,7 +656,7 @@ impl ChangesService {
     /// poll-tick timeout path passes `false`: it runs after its compute was
     /// cancelled and races a freshly-elected owner whose successful `Cached::Ok`
     /// (stored with a LOWER rev than this later-minted timeout rev) must not be
-    /// clobbered by a giving-up timeout — that would surface a spurious 409. A
+    /// clobbered by a giving-up timeout, which would surface a spurious 409. A
     /// timeout that thus declines to overwrite a concurrent success is not a real
     /// error for this session and does not escalate the warning streak.
     fn store_err(
@@ -670,7 +670,7 @@ impl ChangesService {
         let stored = {
             let mut cache = lock(&self.cache);
             // Keep the higher rev (a stale error must not clobber a newer entry),
-            // and — unless `clobber_ok` — never overwrite a concurrent success.
+            // and, unless `clobber_ok`, never overwrite a concurrent success.
             let should_store = match cache.get(session_id) {
                 Some(Cached::Ok { rev: existing, .. }) => clobber_ok && rev >= *existing,
                 Some(Cached::Err { rev: existing, .. }) => rev >= *existing,
@@ -842,7 +842,7 @@ mod tests {
         std::fs::write(wt.join("f.txt"), "line1\nCHANGED\n").unwrap();
 
         // A second worktree dir that is NOT a git repo, so its `changed_files`
-        // compute fails — this deterministically exercises the cached-error path
+        // compute fails, which deterministically exercises the cached-error path
         // (an unknown session no longer caches an error; it 404s).
         let wt_err = root.join("wt_err");
         std::fs::create_dir_all(&wt_err).unwrap();
@@ -1021,7 +1021,7 @@ mod tests {
         }
 
         // A poll-tick timeout error mints a HIGHER rev (it ran later) but must NOT
-        // overwrite the concurrent success — `clobber_ok = false`. Otherwise a GET
+        // overwrite the concurrent success: `clobber_ok = false`. Otherwise a GET
         // would see a spurious 409 over a perfectly good result.
         svc.store_err("s1", 6, 0, "timed out".to_string(), false);
         match lock(&svc.cache).get("s1") {

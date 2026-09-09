@@ -362,7 +362,7 @@ mod tests {
         let paths = paths_for(tmp.path());
         seed_two_logs(&paths);
         // A name not among the listed files (including a traversal attempt) yields
-        // None — the membership check keeps reads inside the agent's log dir.
+        // None: the membership check keeps reads inside the agent's log dir.
         assert!(
             read_named_log(&paths, agent_scope("s1"), "../../etc/passwd")
                 .expect("read")

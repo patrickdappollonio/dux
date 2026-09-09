@@ -512,7 +512,7 @@ struct PatchSessionBody {
 
 /// 200 body for a session PATCH. `provider_change` is `Some("pending_reconnect")`
 /// only when the request asked to change the provider, signaling the caller that
-/// the live agent did not switch — it takes effect on the next reconnect.
+/// the live agent did not switch: it takes effect on the next reconnect.
 #[derive(Serialize)]
 struct PatchSessionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]

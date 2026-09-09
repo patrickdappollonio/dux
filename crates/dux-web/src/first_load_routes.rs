@@ -329,7 +329,7 @@ mod tests {
     /// The resolver's failure log must not cry wolf: a definitive "GitHub has no
     /// release for this tag" is the routine shape of a locally built tagged
     /// binary and is unactionable, so it is an info. A transient failure is the
-    /// only one an operator might act on, so it stays a warning — which is what
+    /// only one an operator might act on, so it stays a warning, which is what
     /// keeps the warn stream meaning "look at this".
     #[test]
     fn only_a_transient_resolver_failure_is_worth_a_warning() {

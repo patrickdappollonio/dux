@@ -143,7 +143,7 @@ async fn set_changes_pane(
 // ── Reload ─────────────────────────────────────────────────────────────────────
 
 /// `POST /api/v1/config/reload`. No body is required (the frontend sends `{}`),
-/// so no `Json` extractor — a config reload re-reads `config.toml` from disk.
+/// so no `Json` extractor is used. A config reload re-reads `config.toml` from disk.
 async fn reload_config(State(state): State<AppState>, headers: HeaderMap) -> Response {
     dispatch(&state, &headers, WireCommand::ReloadConfig {}).await
 }
@@ -223,7 +223,7 @@ async fn toggle_always_show_tab_strip(
 // ── Instance identity (customize-webapp dialog) ──────────────────────────────
 
 /// The instance identity body. Both fields are `#[serde(default)]` so a single-field
-/// body (`{"favicon":"amber"}`) or an empty body (`{}`) both deserialize — the
+/// body (`{"favicon":"amber"}`) or an empty body (`{}`) both deserialize: the
 /// handler only touches the fields that are present, and an empty body is a no-op.
 #[derive(Deserialize, Default)]
 struct InstanceIdentityBody {
