@@ -926,28 +926,7 @@ async fn run_serve_loop(
                 .await;
             }
             Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
-                if let Err(join_err) = joined {
-                    // A task PANICKED and recorded nothing, so record it here and
-                    // trip the lane: a panicking serve task is not a leg going
-                    // quietly, it is a bug, and the server must not limp on
-                    // half-dead. So the other listeners are shut down too.
-                    dux_core::logger::error(&format!(
-                        "[server] a serve task panicked: {join_err}. Shutting the other \
-                         listeners down so the server does not limp on half-dead."
-                    ));
-                    shutdown.record_failure(anyhow::anyhow!(
-                        "a serve task panicked: {join_err}"
-                    ));
-                }
-                // A leg's task has ended. If it was the Tailscale leg dying on its
-                // own (its accept loop failed mid-run, or it panicked), it forgot
-                // itself from the registry but nothing cleared the watcher-facing
-                // "what is bound" cell, and a watcher that still believes the leg
-                // is bound plans Nothing forever: the leg would only come back
-                // after a full interface flap. Reconcile here, where the serve loop
-                // is the cell's ONE writer, rather than letting a dying task write
-                // it from underneath.
-                reconcile_bound_tailscale(&shutdown, &ts.bound, &mut last_bind_failure);
+                finish_leg_task(joined, &shutdown, &ts.bound, &mut last_bind_failure);
             }
             command = commands.recv() => {
                 // The lane never closes while serving: the loop holds a sender
@@ -985,6 +964,34 @@ async fn run_serve_loop(
     // The lane is tripped and `trigger` has fanned out to every leg, so each task
     // is winding down. Reap them; the CALLER bounds how long it waits for this.
     while tasks.join_next().await.is_some() {}
+}
+
+/// Account for one serve leg's task having ended.
+///
+/// A task that PANICKED recorded nothing, so record it here and trip the lane: a
+/// panicking serve task is not a leg going quietly, it is a bug, and the server
+/// must not limp on half-dead, so the other listeners are shut down too.
+///
+/// Either way the leg may have been the Tailscale one dying on its own (its accept
+/// loop failed mid-run, or it panicked): it forgot itself from the registry but
+/// nothing cleared the watcher-facing "what is bound" cell, and a watcher that
+/// still believes the leg is bound plans Nothing forever. Reconciling here keeps
+/// the serve loop the cell's ONE writer, rather than letting a dying task write it
+/// from underneath.
+fn finish_leg_task(
+    joined: Result<(), tokio::task::JoinError>,
+    shutdown: &ServeShutdown,
+    bound_tailscale: &Arc<std::sync::Mutex<Option<SocketAddr>>>,
+    last_bind_failure: &mut Option<SocketAddr>,
+) {
+    if let Err(join_err) = joined {
+        dux_core::logger::error(&format!(
+            "[server] a serve task panicked: {join_err}. Shutting the other \
+             listeners down so the server does not limp on half-dead."
+        ));
+        shutdown.record_failure(anyhow::anyhow!("a serve task panicked: {join_err}"));
+    }
+    reconcile_bound_tailscale(shutdown, bound_tailscale, last_bind_failure);
 }
 
 /// Carry out one live `[server] tailscale` change and answer the caller.
@@ -1926,6 +1933,42 @@ mod tests {
     };
     use dux_core::config::{PlanAddr, TailscaleMode};
     use dux_core::engine::Command;
+
+    #[tokio::test]
+    async fn a_panicking_serve_task_trips_the_lane_while_a_clean_end_does_not() {
+        let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
+        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
+        let _leg = shutdown.register_leg(ts);
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
+        let mut streak = None;
+
+        super::finish_leg_task(Ok(()), &shutdown, &cell, &mut streak);
+        assert!(
+            !shutdown.is_failed(),
+            "a task ending cleanly is not a reason to shut the other listeners down"
+        );
+
+        let panicked = tokio::spawn(async { panic!("a serve task fell over") })
+            .await
+            .expect_err("the task panicked");
+        super::finish_leg_task(Err(panicked), &shutdown, &cell, &mut streak);
+        assert!(shutdown.is_failed(), "a panic trips the lane");
+    }
+
+    #[tokio::test]
+    async fn a_leg_task_that_ends_clears_a_cell_the_registry_no_longer_backs() {
+        let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
+        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
+        let mut streak = Some(ts);
+        super::finish_leg_task(Ok(()), &shutdown, &cell, &mut streak);
+        assert_eq!(
+            *cell.lock().unwrap(),
+            None,
+            "an address no leg is registered for stops looking bound"
+        );
+        assert_eq!(streak, None);
+    }
 
     #[test]
     fn reconciling_leaves_a_cell_that_still_names_a_live_leg_alone() {
