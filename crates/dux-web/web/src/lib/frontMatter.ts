@@ -156,28 +156,41 @@ function readNestedMap(parent: string, block: string[]): FrontMatterRow[] {
     // Neither an entry at this level nor a continuation: give up on the whole
     // block, so the caller shows its text rather than a table missing rows.
     if (entry === null) return []
-    const inner: string[] = []
-    let j = i + 1
-    while (j < block.length && (isBlank(block[j]) || indentOf(block[j]) > base)) {
-      inner.push(block[j])
-      j += 1
-    }
-    const trimmed = trimBlankEdges(inner)
-    const key = `${parent}.${entry.key}`
-    if (entry.rest !== "") {
-      rows.push({ key, value: parseScalarOrList(entry.rest) })
-    } else if (trimmed.length === 0) {
-      rows.push({ key, value: null })
-    } else if (isListItem(trimmed.find((l) => !isIgnorable(l)) ?? "")) {
-      const items = readBlockList(trimmed)
-      if (items === null) return []
-      rows.push({ key, value: items })
-    } else {
-      rows.push({ key, value: rawText(trimmed) })
-    }
-    i = j
+    const inner = childBlock(block, i + 1, base)
+    const held = nestedEntryValue(entry.rest, trimBlankEdges(inner))
+    if (held === null) return []
+    rows.push({ key: `${parent}.${entry.key}`, value: held.value })
+    i += 1 + inner.length
   }
   return rows
+}
+
+// The lines belonging to the entry above `from`: everything indented deeper than
+// the level's own base, blank lines included, up to the next sibling.
+export function childBlock(block: string[], from: number, base: number): string[] {
+  const inner: string[] = []
+  let j = from
+  while (j < block.length && (isBlank(block[j]) || indentOf(block[j]) > base)) {
+    inner.push(block[j])
+    j += 1
+  }
+  return inner
+}
+
+// The value of one nested entry, wrapped so a genuine `null` value stays
+// distinguishable from a block this reader cannot flatten, which comes back as
+// null and sends the caller to raw text.
+export function nestedEntryValue(
+  rest: string,
+  block: string[],
+): { value: FrontMatterValue } | null {
+  if (rest !== "") return { value: parseScalarOrList(rest) }
+  if (block.length === 0) return { value: null }
+  if (isListItem(block.find((l) => !isIgnorable(l)) ?? "")) {
+    const items = readBlockList(block)
+    return items === null ? null : { value: items }
+  }
+  return { value: rawText(block) }
 }
 
 // A block list of plain scalars, or null when it is something else: a list of

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 import {
+  childBlock,
   formatFrontMatterValue,
+  nestedEntryValue,
   splitFlowItems,
   splitFrontMatter,
   type FrontMatterRow,
@@ -285,5 +287,46 @@ describe("splitFlowItems", () => {
   it("refuses a nested list or map, whose commas it would split on", () => {
     expect(splitFlowItems("a, [b, c]")).toBeNull()
     expect(splitFlowItems("a, {b: c}")).toBeNull()
+  })
+})
+
+describe("childBlock", () => {
+  const block = ["a:", "  one", "", "  two", "b:", "  three"]
+
+  it("takes the lines indented deeper than the level's base, blanks included", () => {
+    expect(childBlock(block, 1, 0)).toEqual(["  one", "", "  two"])
+  })
+
+  it("stops at the next sibling", () => {
+    expect(childBlock(block, 5, 0)).toEqual(["  three"])
+  })
+
+  it("answers an empty block when the next line is a sibling", () => {
+    expect(childBlock(["a:", "b:"], 1, 0)).toEqual([])
+  })
+})
+
+describe("nestedEntryValue", () => {
+  it("reads a value written on the key's own line", () => {
+    expect(nestedEntryValue("hi", [])).toEqual({ value: "hi" })
+    expect(nestedEntryValue("[a, b]", [])).toEqual({ value: ["a", "b"] })
+  })
+
+  it("reads a key with nothing under it as an absent value", () => {
+    expect(nestedEntryValue("", [])).toEqual({ value: null })
+  })
+
+  it("reads a block list under the key", () => {
+    expect(nestedEntryValue("", ["  - a", "  - b"])).toEqual({ value: ["a", "b"] })
+  })
+
+  it("refuses a list this reader cannot flatten", () => {
+    expect(nestedEntryValue("", ["  - a: 1", "    b: 2"])).toBeNull()
+  })
+
+  it("falls back to raw text for any other block", () => {
+    expect(nestedEntryValue("", ["  deep:", "    deeper: 1"])).toEqual({
+      value: "deep: deeper: 1",
+    })
   })
 })
