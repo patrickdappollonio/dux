@@ -2491,21 +2491,8 @@ function syncUrl(mode?: "replace" | "push"): void {
   // unchanged screen) and rewrite the identical URL. Skipping the write is
   // cheaper and keeps `history.state` untouched, but nothing depends on it.
   if (current === next) return
-  // An empty target hash collapses to the bare path so the URL doesn't keep a
-  // dangling "#"; otherwise write just the hash, preserving path + query.
-  const base =
-    typeof location !== "undefined"
-      ? (location.pathname ?? "") + (location.search ?? "")
-      : ""
-  const url = next === "" ? base : next
-  // `routePushKey`, not `routeScreen`: the editor-open bit must push and pop
-  // like a screen without being one. `mode: "push"` is for a move the key
-  // cannot describe: entering theater is a position Back must come out of,
-  // while still being the terminal screen. Leaving replaces, so Back never
-  // re-enters a mode just dismissed.
-  const movedScreen =
-    mode === "push" ||
-    routePushKey(parseRoute(next)) !== routePushKey(parseRoute(current))
+  const url = historyUrlFor(next)
+  const movedScreen = movesScreen(mode, next, current)
   try {
     if (mode !== "replace" && movedScreen && typeof history.pushState === "function") {
       history.pushState({ duxRoute: next }, "", url)
@@ -2515,6 +2502,31 @@ function syncUrl(mode?: "replace" | "push"): void {
   } catch (err) {
     console.warn("[dux] history write refused", err)
   }
+}
+
+// The URL to write for a hash. An empty target hash collapses to the bare path
+// so the URL doesn't keep a dangling "#"; otherwise write just the hash,
+// preserving path + query.
+function historyUrlFor(hash: string): string {
+  if (hash !== "") return hash
+  if (typeof location === "undefined") return ""
+  return (location.pathname ?? "") + (location.search ?? "")
+}
+
+// Whether writing `next` over `current` is a move Back should come out of.
+//
+// `routePushKey`, not `routeScreen`: the editor-open bit must push and pop like
+// a screen without being one. `mode: "push"` is for a move the key cannot
+// describe: entering theater is a position Back must come out of, while still
+// being the terminal screen. Leaving replaces, so Back never re-enters a mode
+// just dismissed.
+function movesScreen(
+  mode: "replace" | "push" | undefined,
+  next: string,
+  current: string,
+): boolean {
+  if (mode === "push") return true
+  return routePushKey(parseRoute(next)) !== routePushKey(parseRoute(current))
 }
 
 // Adopt the route the URL currently names. Called from popstate, where the
