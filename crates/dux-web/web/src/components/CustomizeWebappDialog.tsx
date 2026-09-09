@@ -396,6 +396,28 @@ function SettingRow({
   )
 }
 
+type SettingsGroup = Record<string, SettingValue>
+
+interface SettingsBody {
+  ui?: SettingsGroup
+  capabilities?: SettingsGroup
+  defaults?: SettingsGroup
+}
+
+// The settings patch, or null when no group changed. An untouched group is
+// omitted rather than sent empty, so the server writes only what the user moved.
+function settingsBody(groups: Required<SettingsBody>): SettingsBody | null {
+  const changed = (rows: SettingsGroup) =>
+    Object.keys(rows).length ? rows : undefined
+  const body: SettingsBody = {
+    ui: changed(groups.ui),
+    capabilities: changed(groups.capabilities),
+    defaults: changed(groups.defaults),
+  }
+  if (!body.ui && !body.capabilities && !body.defaults) return null
+  return body
+}
+
 // Build the write bodies for [descriptor, value] pairs, sending only entries that
 // differ from their pre-touch value; null when there is nothing to write.
 // `originalOf` supplies that baseline and must be override-aware for any field
@@ -406,19 +428,15 @@ function buildWrites(
   originalOf: (d: SettingDescriptor) => SettingValue,
 ): {
   identity: { title?: string; favicon?: string } | null
-  settings: {
-    ui?: Record<string, SettingValue>
-    capabilities?: Record<string, SettingValue>
-    defaults?: Record<string, SettingValue>
-  } | null
+  settings: SettingsBody | null
   changesPane: boolean | null
   github: boolean | null
   tailscale: string | null
 } {
   const identity: { title?: string; favicon?: string } = {}
-  const ui: Record<string, SettingValue> = {}
-  const capabilities: Record<string, SettingValue> = {}
-  const defaults: Record<string, SettingValue> = {}
+  const ui: SettingsGroup = {}
+  const capabilities: SettingsGroup = {}
+  const defaults: SettingsGroup = {}
   let changesPane: boolean | null = null
   let tailscale: string | null = null
   let github: boolean | null = null
@@ -445,19 +463,9 @@ function buildWrites(
       else ui[field] = wire
     }
   }
-  const hasSettings =
-    Object.keys(ui).length ||
-    Object.keys(capabilities).length ||
-    Object.keys(defaults).length
   return {
     identity: Object.keys(identity).length ? identity : null,
-    settings: hasSettings
-      ? {
-          ui: Object.keys(ui).length ? ui : undefined,
-          capabilities: Object.keys(capabilities).length ? capabilities : undefined,
-          defaults: Object.keys(defaults).length ? defaults : undefined,
-        }
-      : null,
+    settings: settingsBody({ ui, capabilities, defaults }),
     changesPane,
     github,
     tailscale,
