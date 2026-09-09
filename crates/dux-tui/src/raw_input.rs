@@ -315,6 +315,31 @@ fn scan_csi(buf: &[u8]) -> SequenceStatus {
     }
 }
 
+/// Measure the OSC sequence starting at `buf[0..2]` (`ESC ]`), which ends at
+/// a BEL or an ST (`ESC \\`). An ESC that starts anything else ends the
+/// sequence short, so the caller reconsiders that ESC as its own introducer.
+fn scan_osc(buf: &[u8]) -> SequenceStatus {
+    let mut i = 2;
+    loop {
+        if i >= buf.len() {
+            return SequenceStatus::Incomplete;
+        }
+        if buf[i] == 0x07 {
+            return SequenceStatus::Complete(i + 1);
+        }
+        if buf[i] == 0x1b {
+            if i + 1 >= buf.len() {
+                return SequenceStatus::Incomplete;
+            }
+            if buf[i + 1] == b'\\' {
+                return SequenceStatus::Complete(i + 2);
+            }
+            return SequenceStatus::Complete(i);
+        }
+        i += 1;
+    }
+}
+
 fn scan_one_sequence(buf: &[u8]) -> SequenceStatus {
     if buf.is_empty() {
         return SequenceStatus::Incomplete;
@@ -343,29 +368,7 @@ fn scan_one_sequence(buf: &[u8]) -> SequenceStatus {
                     SequenceStatus::Complete(3)
                 }
             }
-            b']' => {
-                let mut i = 2;
-                loop {
-                    if i >= buf.len() {
-                        return SequenceStatus::Incomplete;
-                    }
-                    if buf[i] == 0x07 {
-                        return SequenceStatus::Complete(i + 1);
-                    }
-                    if buf[i] == 0x1b {
-                        if i + 1 >= buf.len() {
-                            return SequenceStatus::Incomplete;
-                        }
-                        if buf[i + 1] == b'\\' {
-                            return SequenceStatus::Complete(i + 2);
-                        }
-                        // Malformed OSC: complete the bytes before the new ESC
-                        // and let the outer parser reconsider that ESC next.
-                        return SequenceStatus::Complete(i);
-                    }
-                    i += 1;
-                }
-            }
+            b']' => scan_osc(buf),
             _ => SequenceStatus::Complete(2),
         }
     } else if (0xc0..0xfe).contains(&b) {
@@ -996,6 +999,18 @@ mod tests {
         let ev = parse_sgr_mouse(seq).unwrap();
         assert_eq!(ev.kind, MouseEventKind::Up(MouseButton::Left));
         assert!(ev.modifiers.contains(KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn scan_osc_measures_to_bel_st_or_a_foreign_escape() {
+        assert_eq!(
+            scan_osc(b"\x1b]11;rgb:0/0/0\x07"),
+            SequenceStatus::Complete(15)
+        );
+        assert_eq!(scan_osc(b"\x1b]0;t\x1b\\"), SequenceStatus::Complete(7));
+        assert_eq!(scan_osc(b"\x1b]0;t\x1b[A"), SequenceStatus::Complete(5));
+        assert_eq!(scan_osc(b"\x1b]0;t"), SequenceStatus::Incomplete);
+        assert_eq!(scan_osc(b"\x1b]0;t\x1b"), SequenceStatus::Incomplete);
     }
 
     #[test]
