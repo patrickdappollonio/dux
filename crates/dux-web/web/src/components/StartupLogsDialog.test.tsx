@@ -47,7 +47,8 @@ function installBootStubs() {
   )
 }
 installBootStubs()
-const { StartupLogsDialog, startupLogsCopy } = await import("./StartupLogsDialog")
+const { StartupLogsDialog } = await import("./StartupLogsDialog")
+const { startupLogsCopy } = await import("./startupLogsCopy")
 
 const SPINE = {
   projects: [{ id: "p1", name: "Repo" }],
