@@ -2749,7 +2749,7 @@ fn push_replay_cell(
     }
     // A tab cell stores a literal '\t' as a one-column anchor (the span's fill
     // spaces follow in later cells); emitting it raw would make the client
-    // interpret a tab control and jump columns. Map any C0 control to a space —
+    // interpret a tab control and jump columns. Map any C0 control to a space,
     // only '\t' is reachable here, but this is defensively safe for all of them.
     out.push(if cell.c < ' ' { ' ' } else { cell.c });
     if let Some(zerowidth) = cell.zerowidth() {

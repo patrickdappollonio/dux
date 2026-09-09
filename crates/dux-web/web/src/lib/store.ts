@@ -2176,7 +2176,7 @@ function agentTarget(m: RegExpMatchArray): SelectedTarget | null {
     const tabId = decodeSegment(m[3])
     if (!tabId) return null
     // A self-aliased `#/agent/<sid>/tab/<sid>` is the session-slot tab written
-    // the long way — `selectionHash` normalizes it back to the canonical bare
+    // the long way, `selectionHash` normalizes it back to the canonical bare
     // form on the way out, so there is only ever one representation of it.
     return { kind: "agent", sessionId, tabId }
   }
