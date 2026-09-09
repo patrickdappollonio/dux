@@ -47,7 +47,7 @@ function installBootStubs() {
   )
 }
 installBootStubs()
-const { StartupLogsDialog } = await import("./StartupLogsDialog")
+const { StartupLogsDialog, startupLogsCopy } = await import("./StartupLogsDialog")
 
 const SPINE = {
   projects: [{ id: "p1", name: "Repo" }],
@@ -121,6 +121,36 @@ describe("StartupLogsDialog", () => {
     ).toBeTruthy()
   })
 
+  it("shows the error instead of the log list when the fetch failed", () => {
+    renderOpen({
+      startupLogsTarget: "s1",
+      startupLogsScope: "agent",
+      ...ONE_RUN,
+      startupLogsError: "could not read the log directory",
+    })
+    expect(screen.getByText("could not read the log directory")).toBeTruthy()
+    expect(screen.queryByText("install ok")).toBeNull()
+  })
+
+  it("shows a spinner rather than the empty state while the first list is loading", () => {
+    renderOpen({
+      startupLogsTarget: "s1",
+      startupLogsScope: "agent",
+      startupLogsLoading: true,
+    })
+    expect(screen.queryByText(/Run the startup command for this agent/)).toBeNull()
+  })
+
+  it("keeps the log body on screen while switching to another run", () => {
+    renderOpen({
+      startupLogsTarget: "s1",
+      startupLogsScope: "agent",
+      ...ONE_RUN,
+      startupLogsLoading: true,
+    })
+    expect(screen.getByText("install ok")).toBeTruthy()
+  })
+
   it("closes itself when the project it is scoped to vanishes", () => {
     renderOpen({ startupLogsTarget: "gone", startupLogsScope: "project" })
     expect(closeStartupLogsSpy).toHaveBeenCalled()
@@ -131,5 +161,33 @@ describe("StartupLogsDialog", () => {
     // it off the session list would slam the dialog shut immediately.
     renderOpen({ startupLogsTarget: "p1", startupLogsScope: "project", ...ONE_RUN })
     expect(closeStartupLogsSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe("startupLogsCopy", () => {
+  it("names the entity in the title and the breadth in the subtitle", () => {
+    const project = startupLogsCopy("project", "Repo", undefined)
+    expect(project.title).toBe("Startup command logs: Repo (all agents)")
+    expect(project.description).toContain("across every agent in this project")
+    expect(project.emptyMessage).toContain("for an agent in this project")
+
+    const agent = startupLogsCopy("agent", undefined, "Fix login")
+    expect(agent.title).toBe("Startup command logs: Fix login")
+    expect(agent.description).toContain("in this agent's worktree")
+    expect(agent.emptyMessage).toContain("for this agent")
+  })
+
+  it("falls back to the generic noun when the entity is not in the spine", () => {
+    expect(startupLogsCopy("project", undefined, undefined).title).toBe(
+      "Startup command logs: project (all agents)",
+    )
+    expect(startupLogsCopy("agent", undefined, undefined).title).toBe(
+      "Startup command logs: agent",
+    )
+  })
+
+  it("ignores the other scope's name", () => {
+    expect(startupLogsCopy("project", "Repo", "Fix login").title).toContain("Repo")
+    expect(startupLogsCopy("agent", "Repo", "Fix login").title).toContain("Fix login")
   })
 })
