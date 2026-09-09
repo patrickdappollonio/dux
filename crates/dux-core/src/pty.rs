@@ -2548,52 +2548,8 @@ impl TerminalState {
                 }
                 out.push_str("\r\n");
             }
-            // Right-trim trailing empty default cells so we don't emit a screen's
-            // worth of spaces per line. `Cell::is_empty` is false for colored
-            // (non-default-background) spaces, so visible trailing blocks survive.
-            // A wrapped row keeps its full width — the trailing cells are load
-            // bearing for the autowrap to fire at the right column.
-            let emit_to = if wrapped {
-                cols
-            } else {
-                let mut last_col = 0usize;
-                for c in 0..cols {
-                    if !row[Column(c)].is_empty() {
-                        last_col = c + 1;
-                    }
-                }
-                last_col
-            };
-            for c in 0..emit_to {
-                let cell = &row[Column(c)];
-                // The trailing spacer of a wide char carries no glyph; the wide
-                // char itself (at the previous column) holds the symbol.
-                if cell
-                    .flags
-                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    continue;
-                }
-                let fg = convert_terminal_color(cell.fg, colors);
-                let bg = convert_terminal_color(cell.bg, colors);
-                let modifier = cell_modifier(cell);
-                let style = (fg, bg, modifier);
-                if last_style != Some(style) {
-                    out.push_str("\x1b[0m");
-                    out.push_str(&sgr_sequence(fg, bg, modifier));
-                    last_style = Some(style);
-                }
-                // A tab cell stores a literal '\t' as a one-column anchor (the
-                // span's fill spaces follow in later cells); emitting it raw would
-                // make the client interpret a tab control and jump columns. Map
-                // any C0 control to a space — only '\t' is reachable here, but
-                // this is defensively safe for all of them.
-                out.push(if cell.c < ' ' { ' ' } else { cell.c });
-                if let Some(zerowidth) = cell.zerowidth() {
-                    for ch in zerowidth {
-                        out.push(*ch);
-                    }
-                }
+            for c in 0..row_emit_width(&row[..], cols, wrapped) {
+                push_replay_cell(&mut out, &row[Column(c)], colors, &mut last_style);
             }
             prev_wrapped = wrapped;
         }
@@ -2750,6 +2706,59 @@ impl Dimensions for TerminalDimensions {
 
 /// Translate an alacritty cell's style flags into our serializable
 /// `CellModifier`. Shared by the per-frame snapshot and the reconnect repaint.
+/// How many of a row's columns the reconnect replay prints. A soft-wrapped row
+/// keeps its full width, whose trailing cells are what make the client's
+/// autowrap fire at the right column; any other row is right-trimmed to its last
+/// non-empty cell so a blank screen does not cost a screenful of spaces.
+/// `Cell::is_empty` is false for a colored space, so visible trailing blocks
+/// survive the trim.
+fn row_emit_width(cells: &[Cell], cols: usize, wrapped: bool) -> usize {
+    if wrapped {
+        return cols;
+    }
+    cells[..cols]
+        .iter()
+        .rposition(|cell| !cell.is_empty())
+        .map_or(0, |last| last + 1)
+}
+
+/// Write one cell into the reconnect replay, emitting an SGR change only when
+/// this cell's style differs from the last one written.
+fn push_replay_cell(
+    out: &mut String,
+    cell: &Cell,
+    palette: &alacritty_terminal::term::color::Colors,
+    last_style: &mut Option<(CellColor, CellColor, CellModifier)>,
+) {
+    // The trailing spacer of a wide char carries no glyph; the wide char itself
+    // (at the previous column) holds the symbol.
+    if cell
+        .flags
+        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+    {
+        return;
+    }
+    let fg = convert_terminal_color(cell.fg, palette);
+    let bg = convert_terminal_color(cell.bg, palette);
+    let modifier = cell_modifier(cell);
+    let style = (fg, bg, modifier);
+    if *last_style != Some(style) {
+        out.push_str("\x1b[0m");
+        out.push_str(&sgr_sequence(fg, bg, modifier));
+        *last_style = Some(style);
+    }
+    // A tab cell stores a literal '\t' as a one-column anchor (the span's fill
+    // spaces follow in later cells); emitting it raw would make the client
+    // interpret a tab control and jump columns. Map any C0 control to a space —
+    // only '\t' is reachable here, but this is defensively safe for all of them.
+    out.push(if cell.c < ' ' { ' ' } else { cell.c });
+    if let Some(zerowidth) = cell.zerowidth() {
+        for ch in zerowidth {
+            out.push(*ch);
+        }
+    }
+}
+
 fn cell_modifier(cell: &Cell) -> CellModifier {
     let mut modifier = CellModifier::default();
     if cell.flags.contains(Flags::BOLD) {
@@ -3689,6 +3698,65 @@ mod tests {
         // render completes too.
         let snapshot = terminal.snapshot();
         assert!(snapshot.scrollback_offset <= snapshot.scrollback_total);
+    }
+
+    #[test]
+    fn row_emit_width_trims_only_unwrapped_rows() {
+        let mut cells = vec![Cell::default(); 6];
+        cells[0].c = 'h';
+        cells[1].c = 'i';
+        assert_eq!(row_emit_width(&cells, 6, false), 2, "right-trimmed");
+        assert_eq!(row_emit_width(&cells, 6, true), 6, "a wrapped row is whole");
+
+        let mut colored = vec![Cell::default(); 3];
+        colored[2].bg = TermColor::Named(NamedColor::Red);
+        assert_eq!(
+            row_emit_width(&colored, 3, false),
+            3,
+            "a colored trailing space is visible, so it survives the trim"
+        );
+
+        assert_eq!(row_emit_width(&vec![Cell::default(); 4], 4, false), 0);
+    }
+
+    #[test]
+    fn push_replay_cell_emits_one_style_run_and_skips_wide_spacers() {
+        let palette = alacritty_terminal::term::color::Colors::default();
+        let mut out = String::new();
+        let mut last_style = None;
+        let mut cell = Cell {
+            c: 'a',
+            ..Cell::default()
+        };
+        push_replay_cell(&mut out, &cell, &palette, &mut last_style);
+        let after_first = out.len();
+        assert!(out.ends_with('a'), "the glyph is written: {out:?}");
+        assert!(last_style.is_some(), "the style run is now open");
+
+        cell.c = 'b';
+        push_replay_cell(&mut out, &cell, &palette, &mut last_style);
+        assert_eq!(
+            out.len(),
+            after_first + 1,
+            "an unchanged style repeats no SGR: {out:?}"
+        );
+
+        let spacer = Cell {
+            c: 'x',
+            flags: Flags::WIDE_CHAR_SPACER,
+            ..Cell::default()
+        };
+        let before_spacer = out.clone();
+        push_replay_cell(&mut out, &spacer, &palette, &mut last_style);
+        assert_eq!(out, before_spacer, "a wide-char spacer writes nothing");
+
+        let tab = Cell {
+            c: '\t',
+            ..Cell::default()
+        };
+        out.clear();
+        push_replay_cell(&mut out, &tab, &palette, &mut last_style);
+        assert_eq!(out, " ", "a control character is written as a space");
     }
 
     #[test]
