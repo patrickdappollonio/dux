@@ -7,6 +7,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 import { closeRemoveProject, removeProject, useDux } from "@/lib/store"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
 
@@ -47,7 +48,7 @@ export function RemoveProjectDialog() {
           <DialogDescription>
             This removes &ldquo;{name}&rdquo;
             {agentCount > 0
-              ? ` and deletes its ${agentCount} agent${agentCount === 1 ? "" : "s"}`
+              ? ` and deletes its ${formatRegularCount(agentCount, "agent")}`
               : ""}{" "}
             from dux. Worktrees on disk are kept.
           </DialogDescription>

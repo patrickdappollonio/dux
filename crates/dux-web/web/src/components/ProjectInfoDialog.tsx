@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import { formatDisplayDate, projectLiveCounts } from "@/lib/projectInfo"
 import { closeProjectInfo, useDux } from "@/lib/store"
@@ -95,15 +96,13 @@ export function ProjectInfoDialog() {
           )}
         </InfoRow>
         <InfoRow label="Environment">
-          {envCount === 1 ? "1 variable" : `${envCount} variables`}
+          {formatRegularCount(envCount, "variable")}
         </InfoRow>
         <InfoRow label="Live agents">
-          {counts.agents === 1 ? "1 agent" : `${counts.agents} agents`}
+          {formatRegularCount(counts.agents, "agent")}
         </InfoRow>
         <InfoRow label="Companion terminals">
-          {counts.terminals === 1
-            ? "1 terminal"
-            : `${counts.terminals} terminals`}
+          {formatRegularCount(counts.terminals, "terminal")}
         </InfoRow>
       </dl>
     )

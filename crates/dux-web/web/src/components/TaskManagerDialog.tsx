@@ -25,6 +25,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { isFirstTab } from "@/lib/agentTabs"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 import { formatBytes, formatCpu } from "@/lib/formatStats"
 import {
   RESOURCE_POLL_INTERVAL_MS,
@@ -634,7 +635,7 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
         <DialogHeader>
           <DialogTitle>Stop everything?</DialogTitle>
           <DialogDescription>
-            {`This stops ${countLabel(agents, "agent")} and ${countLabel(terminals, "terminal")}. `}
+            {`This stops ${formatRegularCount(agents, "agent")} and ${formatRegularCount(terminals, "terminal")}. `}
             Agents detach and stay in Projects, reopenable; terminals are
             destroyed and cannot be recovered.
           </DialogDescription>
@@ -698,7 +699,7 @@ function ConfirmStopAgentDialog() {
             This ends the process running in this agent&apos;s first tab. The
             agent stays in your list and can be started again at any time.{" "}
             {liveSiblings > 0
-              ? `Its other ${countLabel(liveSiblings, "tab")} keep running, so the agent stays active.`
+              ? `Its other ${formatRegularCount(liveSiblings, "tab")} keep running, so the agent stays active.`
               : "It has no other running tab, so the agent detaches and stays in Projects, reopenable."}
           </DialogDescription>
         </DialogHeader>
@@ -715,8 +716,4 @@ function ConfirmStopAgentDialog() {
       </DialogContent>
     </Dialog>
   )
-}
-
-function countLabel(n: number, noun: string): string {
-  return n === 1 ? `1 ${noun}` : `${n} ${noun}s`
 }

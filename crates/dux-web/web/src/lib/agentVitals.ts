@@ -2,6 +2,7 @@
 // and the expanded sidebar agent rows (components/AgentVitalsTooltip.tsx).
 
 import { statusDotColorClass } from "@/lib/agentRow"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 import type { ChangesSlice } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 import {
@@ -128,7 +129,7 @@ export function buildAgentVitals(
     rows.push({
       key: "changes",
       label: "Changes",
-      value: `${changesCount} file${changesCount === 1 ? "" : "s"}`,
+      value: formatRegularCount(changesCount, "file"),
     })
   }
 

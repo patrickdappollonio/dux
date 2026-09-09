@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dialog"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { fileStatusMeta } from "@/lib/changedFiles"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 import type { ChangedFileView } from "@/lib/types"
 
 interface Props {
@@ -18,10 +19,6 @@ interface Props {
   unstaged: ChangedFileView[]
   onCancel: () => void
   onConfirm: (paths: string[]) => void
-}
-
-function count(n: number, noun: string) {
-  return `${n} ${noun}${n === 1 ? "" : "s"}`
 }
 
 // Confirmation before discarding a whole checked selection. The two outcomes
@@ -46,8 +43,8 @@ export function ConfirmDiscardFilesDialog({
     (f) => fileStatusMeta(f.status).kind === "untracked",
   ).length
   const tracked = targets.length - untracked
-  const deleted = `${count(untracked, "untracked file")} will be permanently DELETED from disk`
-  const restored = `${count(tracked, "tracked file")} will be restored to ${
+  const deleted = `${formatRegularCount(untracked, "untracked file")} will be permanently DELETED from disk`
+  const restored = `${formatRegularCount(tracked, "tracked file")} will be restored to ${
     tracked === 1 ? "its" : "their"
   } last committed state`
   const body =
@@ -62,7 +59,7 @@ export function ConfirmDiscardFilesDialog({
       <DialogContent showCloseButton={false} destructive>
         <DialogHeader>
           <DialogTitle>
-            Discard changes to {count(targets.length, "file")}?
+            Discard changes to {formatRegularCount(targets.length, "file")}?
           </DialogTitle>
         </DialogHeader>
         <p className="text-sm text-destructive">{body}</p>

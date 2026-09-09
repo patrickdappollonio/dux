@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 import { formatDisplayDate } from "@/lib/projectInfo"
 import { closeAgentInfo, useDux } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
@@ -144,7 +145,7 @@ export function AgentInfoDialog() {
           {formatDisplayDate(session.updated_at)}
         </InfoRow>
         <InfoRow label="Tabs">
-          {tabCount === 1 ? "1 tab" : `${tabCount} tabs`}
+          {formatRegularCount(tabCount, "tab")}
         </InfoRow>
         {session.pr ? (
           // Mirrors the TUI Agent Info's "Pull request:" line, including the

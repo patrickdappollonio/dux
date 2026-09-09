@@ -7,6 +7,7 @@ import {
   type ChangedFileSelection,
   type ChangedFilesRecap,
 } from "@/lib/changedFiles"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 import { git } from "@/lib/git"
 import { notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
 import type { ChangesSlice } from "@/lib/store"
@@ -40,10 +41,6 @@ interface ChangedFilesModel {
   visibleUnstaged: string[]
   visibleCount: number
   allVisibleChecked: boolean
-}
-
-function fileCount(count: number): string {
-  return `${count} file${count === 1 ? "" : "s"}`
 }
 
 function emptySelection(): ChangedFileSelection {
@@ -112,8 +109,9 @@ function bulkResultToast(
   // did not move are the ones there is nothing on screen to explain.
   if (result.refused.length === 0) return
   notifyWarning(
-    `${fileCount(result.done.length)} ${past}. ${fileCount(
+    `${formatRegularCount(result.done.length, "file")} ${past}. ${formatRegularCount(
       result.refused.length,
+      "file",
     )} had already left the list, starting with ${result.refused[0]}.`,
   )
 }
@@ -123,7 +121,9 @@ function discardResultToast(result: {
   failed: { path: string; message: string }[]
 }): void {
   if (result.failed.length === 0) {
-    notifySuccess(`Discarded the changes to ${fileCount(result.done.length)}.`)
+    notifySuccess(
+      `Discarded the changes to ${formatRegularCount(result.done.length, "file")}.`,
+    )
     return
   }
   if (result.done.length === 0) {
@@ -133,8 +133,9 @@ function discardResultToast(result: {
     return
   }
   notifyWarning(
-    `Discarded the changes to ${fileCount(result.done.length)}. ${fileCount(
+    `Discarded the changes to ${formatRegularCount(result.done.length, "file")}. ${formatRegularCount(
       result.failed.length,
+      "file",
     )} could not be discarded, starting with ${result.failed[0]!.path}: ${
       result.failed[0]!.message
     }`,
