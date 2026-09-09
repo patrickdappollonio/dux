@@ -178,27 +178,38 @@ export function closeTabConsequences(
   tab: AgentTabView | undefined,
 ): CloseTabConsequences {
   const provider = tab?.provider
-  // Detaching is counted by LIVENESS: dormant siblings left by a restart do not
-  // keep the agent running, so they cannot save it from detaching.
-  const liveTabs = session?.tabs.filter((t) => t.has_live_process).length ?? 0
-  const willDetach = (tab?.has_live_process ?? false)
-    ? liveTabs <= 1
-    : liveTabs === 0
-  // The successor is the first tab that is not this one, which relies on
-  // `SessionView.tabs` arriving slot-tab-first then extras in strip order (its
-  // contract in `lib/types.ts`), the same ordering the engine promotes by.
-  const successor =
-    session && tab && isFirstTab(session, tab.id)
-      ? session.tabs.find((t) => t.id !== tab.id)
-      : undefined
   return {
     sessionLabel: provider ? `the ${provider} session` : "the session",
-    willDetach,
-    successorLabel:
-      successor && session
-        ? tabProseLabel(session.tabs, successor.id)
-        : undefined,
+    willDetach: closeDetachesAgent(session, tab),
+    successorLabel: slotSuccessorLabel(session, tab),
   }
+}
+
+// Whether closing this tab leaves the agent with nothing running.
+//
+// Counted by LIVENESS: dormant siblings left by a restart do not keep the agent
+// running, so they cannot save it from detaching.
+export function closeDetachesAgent(
+  session: SessionView | undefined,
+  tab: AgentTabView | undefined,
+): boolean {
+  const liveTabs = session?.tabs.filter((t) => t.has_live_process).length ?? 0
+  return (tab?.has_live_process ?? false) ? liveTabs <= 1 : liveTabs === 0
+}
+
+// The prose name of the tab that takes the session slot, absent unless the slot
+// tab is the one closing.
+//
+// The successor is the first tab that is not this one, which relies on
+// `SessionView.tabs` arriving slot-tab-first then extras in strip order (its
+// contract in `lib/types.ts`), the same ordering the engine promotes by.
+export function slotSuccessorLabel(
+  session: SessionView | undefined,
+  tab: AgentTabView | undefined,
+): string | undefined {
+  if (!session || !tab || !isFirstTab(session, tab.id)) return undefined
+  const successor = session.tabs.find((t) => t.id !== tab.id)
+  return successor ? tabProseLabel(session.tabs, successor.id) : undefined
 }
 
 // The tab id a session focuses when reached by the sidebar or the bare

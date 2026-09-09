@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest"
 
 import {
   ONLY_TAB_CLOSE_REFUSAL,
+  closeDetachesAgent,
   closeTabConsequences,
+  slotSuccessorLabel,
   defaultProviderForSession,
   dormantTabNeedsCard,
   exitEjectsToWelcome,
@@ -523,6 +525,59 @@ describe("closeTabConsequences", () => {
     expect(result.sessionLabel).toBe("the session")
     expect(result.willDetach).toBe(true)
     expect(result.successorLabel).toBeUndefined()
+  })
+})
+
+describe("closeDetachesAgent", () => {
+  it("detaches when the closing tab is the only live one", () => {
+    const only = extraTab("t1", true)
+    expect(closeDetachesAgent(sessionWithSlot("t1", [only]), only)).toBe(true)
+  })
+
+  it("does not detach while a live sibling keeps the agent running", () => {
+    const closing = extraTab("t2", true)
+    const session = sessionWithSlot("t1", [extraTab("t1", true), closing])
+    expect(closeDetachesAgent(session, closing)).toBe(false)
+  })
+
+  it("counts liveness, not tabs, when a dormant tab closes", () => {
+    const dormant = extraTab("t2", false)
+    expect(
+      closeDetachesAgent(sessionWithSlot("t1", [extraTab("t1", true), dormant]), dormant),
+    ).toBe(false)
+    expect(
+      closeDetachesAgent(
+        sessionWithSlot("t1", [extraTab("t1", false), dormant]),
+        dormant,
+      ),
+    ).toBe(true)
+  })
+
+  it("detaches when there is no session or tab to read", () => {
+    expect(closeDetachesAgent(undefined, undefined)).toBe(true)
+  })
+})
+
+describe("slotSuccessorLabel", () => {
+  it("names the next tab in strip order when the slot tab closes", () => {
+    const slot = extraTab("t1", true)
+    const session = sessionWithSlot("t1", [slot, extraTab("t2", true)])
+    expect(slotSuccessorLabel(session, slot)).toBe("Codex 2")
+  })
+
+  it("names nobody when an extra tab closes", () => {
+    const extra = extraTab("t2", true)
+    const session = sessionWithSlot("t1", [extraTab("t1", true), extra])
+    expect(slotSuccessorLabel(session, extra)).toBeUndefined()
+  })
+
+  it("names nobody when the slot tab is the only tab", () => {
+    const only = extraTab("t1", true)
+    expect(slotSuccessorLabel(sessionWithSlot("t1", [only]), only)).toBeUndefined()
+  })
+
+  it("names nobody when there is no session or tab to read", () => {
+    expect(slotSuccessorLabel(undefined, undefined)).toBeUndefined()
   })
 })
 
