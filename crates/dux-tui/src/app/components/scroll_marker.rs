@@ -1,22 +1,21 @@
 //! The one-cell scroll-direction marker, shared by every scrollable surface.
 //!
-//! The semantics — whether a surface can scroll, and which way there is more to
-//! see — live in [`dux_core::scroll_hint`]. This module owns only the
+//! The semantics (whether a surface can scroll, and which way there is more to
+//! see) live in [`dux_core::scroll_hint`]. This module owns only the
 //! presentation: the glyph table, the theme color, and where the cell goes.
 //!
-//! The marker goes in the surface's right BORDER column, never in the content
-//! pane. That is deliberate, and the first-load modal learned it the hard way: a
-//! word too long to break makes a paragraph fill its pane's full width, so a
-//! marker drawn in the pane's own last column silently eats a character of real
-//! content, on the very row the reader is heading toward. A border column is
-//! chrome by construction and nothing can collide with it.
+//! The marker goes in the surface's right border column, never in the content
+//! pane: a word too long to break makes a paragraph fill its pane's full width,
+//! so a marker drawn in the pane's own last column silently eats a character of
+//! real content. A border column is chrome by construction and nothing can
+//! collide with it.
 //!
 //! # The caller chooses the unit, and must choose the right one
 //!
 //! `offset`/`viewport`/`total` are passed straight to
 //! [`dux_core::scroll_hint::scroll_hint`], so the caller's unit is the one that
-//! matters: **wrapped visual rows** for a paragraph surface (pass the count
-//! AFTER wrapping, not the number of logical lines), **whole items** for a list
+//! matters: **wrapped visual rows** for a paragraph surface (the count after
+//! wrapping, not the number of logical lines), **whole items** for a list
 //! surface driven by a `ListState`. A marker fed mismatched units lies about
 //! whether there is more to read, which is worse than no marker at all.
 

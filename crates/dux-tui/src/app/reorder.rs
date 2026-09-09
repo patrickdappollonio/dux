@@ -104,19 +104,17 @@ impl App {
         self.apply_agent_order(&order, new_order, &session_id);
     }
 
-    /// The COMPLETE agent id order a drop is computed against: the whole roster
+    /// The complete agent id order a drop is computed against: the whole roster
     /// in the order the user is actually looking at.
     ///
-    /// This is the cross-language twin of the web's `displayedSessionOrder`, and
-    /// it must stay that way: the persisted order is shared, so a drop made on
-    /// either surface has to mean the same thing. Every session is included,
-    /// never just the rows a live query leaves on screen, because the stored
-    /// order is total. Under a computed sort (active first, by name, by
-    /// recency) the baseline is the displayed order: the main list as that
-    /// comparator arranges it, then the quiet tail. Under MANUAL the stored
-    /// order is taken verbatim instead, quiet agents left interleaved where the
-    /// stored order has them, which is how the web's manual drags compute their
-    /// move.
+    /// The cross-language twin of the web's `displayedSessionOrder`, and it must
+    /// stay that way: the persisted order is shared, so a drop made on either
+    /// surface has to mean the same thing. Every session is included, never just
+    /// the rows a live query leaves on screen, because the stored order is
+    /// total. Under a computed sort the baseline is the displayed order: the
+    /// main list as that comparator arranges it, then the quiet tail. Under
+    /// `Manual` the stored order is taken verbatim, quiet agents left
+    /// interleaved where it has them.
     pub(crate) fn agent_drag_baseline(&self) -> Vec<String> {
         let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
         if mode == AgentSortMode::Manual {
@@ -151,14 +149,13 @@ impl App {
     /// order, rebuild the sidebar, and leave the selection on `follow` (the id of
     /// the agent that moved).
     ///
-    /// `baseline` is the order the caller computed `new_order` FROM, and an order
+    /// `baseline` is the order the caller computed `new_order` from, and an order
     /// that comes back equal to it is a no-op: nothing is persisted and the sort
     /// mode is left alone, so an already-at-the-edge move or a drop back where it
-    /// started does not silently take the list off its computed sort. The
-    /// baseline is a parameter rather than the current `engine.sessions` order
-    /// because a drop's baseline is what the SCREEN shows, which in a computed
-    /// sort mode is not the Vec order (the web's `handleDragEnd` compares against
-    /// the same displayed baseline, for the same reason).
+    /// started does not silently take the list off its computed sort. It is a
+    /// parameter rather than the current `engine.sessions` order because a drop's
+    /// baseline is what the screen shows, which under a computed sort is not the
+    /// Vec order (the web's `handleDragEnd` compares against the same baseline).
     ///
     /// Every caller that reorders agents goes through here, so the manual flip,
     /// the persisted write and the status the user reads cannot drift apart.

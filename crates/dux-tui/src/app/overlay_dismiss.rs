@@ -1,23 +1,22 @@
 //! Click-outside modal dismissal.
 //!
 //! Esc and a click outside a modal are the same intent arriving through two
-//! different input devices. They therefore run the SAME code: the mouse path
+//! different input devices. They therefore run the same code: the mouse path
 //! decides *whether* to dismiss (the pure policy in this module) and then hands
 //! off to [`App::cancel_prompt`], which routes every variant to the cancel path
 //! its Esc key already uses. A bare `self.prompt = PromptState::None` from the
-//! mouse path is not acceptable — several modals revert a live theme preview,
+//! mouse path is not acceptable: several modals revert a live theme preview,
 //! restore a parent prompt, or stamp a version as seen on dismissal, and a
 //! second, parallel "close" would silently skip that and then drift.
 //!
 //! The geometry comes from [`OverlayMouseLayoutState::frame`], recorded during
 //! render because a modal's rect does not survive the frame it was painted in.
 //!
-//! Not every modal may be dismissed this way. Nine of them hold unsaved free
-//! text or a built-up selection, so the policy answers their outside click with
-//! a REFUSAL instead: a short, self-terminating blink of the modal's border
-//! ring, armed here and painted by `themed_overlay_block`. The click is still
-//! answered, just not with a close — which is the point, since a swallowed
-//! click teaches the user nothing.
+//! Not every modal may be dismissed this way. The ones holding unsaved free text
+//! or a built-up selection have their outside click answered with a refusal
+//! instead: a short, self-terminating blink of the modal's border ring, armed
+//! here and painted by `themed_overlay_block`. The click is still answered, just
+//! not with a close, since a swallowed click teaches the user nothing.
 
 use super::input::contains_point;
 use super::*;
@@ -204,20 +203,18 @@ impl App {
             .is_some_and(refusal_blink_highlight_phase)
     }
 
-    /// Cancel the open prompt through the SAME path its Esc key uses, and
+    /// Cancel the open prompt through the same path its Esc key uses, and
     /// report whether anything was cancelled.
     ///
     /// Every arm either calls the variant's existing `resolve_*`/`cancel_*`
-    /// helper or reproduces the exact statements its Esc arm runs. The ones
-    /// that must not be a bare `prompt = None` are called out inline; blanking
-    /// them would leave a previewed theme applied, destroy a parent prompt, or
-    /// skip the first-load version stamp.
+    /// helper or reproduces the exact statements its Esc arm runs. Blanking one
+    /// to `prompt = None` would leave a previewed theme applied, destroy a
+    /// parent prompt, or skip the first-load version stamp.
     ///
-    /// DELIBERATELY SETS NO STATUS MESSAGE of its own. The keyboard ladder
-    /// announces some dismissals; firing that on every stray click would be
-    /// noise for something the user just watched happen. (Helpers that own a
-    /// message — the Kill Running ones — keep theirs, since that is their
-    /// cancel path and parity with Esc is the point.)
+    /// Deliberately sets no status message of its own: the keyboard ladder
+    /// announces some dismissals, and firing that on every stray click would be
+    /// noise for something the user just watched happen. Helpers that own a
+    /// message keep theirs, since parity with Esc is the point.
     pub(crate) fn cancel_prompt(&mut self) -> bool {
         // A press cannot outlive the modal it was made in.
         self.pressed_button = None;
@@ -339,18 +336,13 @@ impl App {
                 self.prompt = PromptState::None;
             }
 
-            // Not dismissible by an outside click (see `outside_click_policy`).
-            // Reached only if a caller ignores the policy, so it is a no-op
-            // rather than a surprise close.
-            //
-            // The macro EDITOR is deliberately absent from the "matches its
-            // Esc arm" contract above, and cannot be added to it: its Esc is
-            // state-dependent (in the engaged body it leaves edit mode; in the
-            // editor it cancels the edit back to the list), so there is no
-            // single statement to mirror. A stray click gets the blink
-            // instead, which is the right answer for a surface holding
-            // unsaved text. (The list state is handled above: it has a single
-            // unambiguous Esc, which closes the overlay.)
+            // Not dismissible by an outside click (see `outside_click_policy`);
+            // reached only if a caller ignores the policy, so it is a no-op
+            // rather than a surprise close. The macro editor cannot join the
+            // "matches its Esc arm" contract above: its Esc is state-dependent
+            // (in the engaged body it leaves edit mode, in the editor it cancels
+            // back to the list), so there is no single statement to mirror. A
+            // stray click gets the blink instead.
             PromptState::EditMacros { .. }
             | PromptState::BrowseProjects { .. }
             | PromptState::ConfigureStartupCommand { .. }

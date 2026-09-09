@@ -76,9 +76,6 @@ pub(crate) use dux_core::worker::{
 #[cfg(test)]
 pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
 
-/// Maximum agent-passthrough bytes written to the host terminal per tick. A larger
-/// burst is split, with the remainder carried to the next tick, so one oversized
-/// forward can never stall the single-threaded run loop on a blocking `write_all`.
 /// Status key shared by every hint that describes what the interface is doing
 /// right now (a chrome toggle's new state, the palette opening, a redraw). One
 /// key, because there is only one current state to describe: see
@@ -89,6 +86,10 @@ pub(crate) const UI_HINT_KEY: &str = "tui-ui-hint";
 /// [`App::set_prompt_hint`].
 pub(crate) const PROMPT_HINT_KEY: &str = "tui-prompt-hint";
 
+/// Maximum agent-passthrough bytes written to the host terminal per tick. A
+/// larger burst is split, with the remainder carried to the next tick, so one
+/// oversized forward can never stall the single-threaded run loop on a blocking
+/// `write_all`.
 const HOST_FORWARD_MAX_PER_TICK: usize = 32 * 1024;
 
 /// Minimum interval between logged host-forward write failures, so a persistently
@@ -311,14 +312,13 @@ pub struct App {
     pub(crate) startup_log_viewer: Option<StartupLogViewer>,
     pub(crate) status: KeyedStatusController,
     /// The generation of the missing-project warning this App last wrote to the
-    /// anonymous status slot, so it can retire ITS OWN message when the
+    /// anonymous status slot, so it can retire its own message when the
     /// selection moves off the row and leave every other producer's alone.
     ///
-    /// The check has to be by generation. `update_missing_project_warning` runs
+    /// The check has to be by generation: `update_missing_project_warning` runs
     /// on every selection move, the slot is shared, and several producers write
-    /// warnings to it, so "the line holds a warning" was true of the pinned
-    /// restart and theme warnings too and a Down key in the agent list wiped
-    /// them.
+    /// warnings to it, so "the line holds a warning" is true of the pinned
+    /// restart and theme warnings too.
     pub(crate) missing_project_warning_gen: Option<dux_core::statusline::Generation>,
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
@@ -347,16 +347,16 @@ pub struct App {
     pub(crate) agent_tab_regions: Vec<(String, Rect)>,
     pub(crate) terminal_return_to_list: bool,
     pub(crate) last_pty_size: (u16, u16),
-    /// Which terminal surface `last_pty_size` was last SENT to, so the resize
+    /// Which terminal surface `last_pty_size` was last sent to, so the resize
     /// dedupe is keyed by target and not by geometry alone.
     ///
-    /// One slot for the size was a workspace-wide filter: resize the window while
-    /// looking at agent A, then select agent B, and B's pane measures the same as
-    /// A's does now, so the send is deduped away and B's child keeps its
-    /// pre-resize geometry for as long as it lives. Comparing the target too
-    /// makes every switch send once, which also covers a target resized by some
-    /// other surface (the web pane drives the same PTYs) and cannot be defeated
-    /// by a new switch site forgetting to reset anything.
+    /// Keying on the size alone filters workspace-wide: select another agent
+    /// whose pane measures what this one measures now, the send is deduped away,
+    /// and that child keeps its pre-resize geometry for as long as it lives.
+    /// Comparing the target too makes every switch send once, which also covers
+    /// a target resized by some other surface (the web pane drives the same
+    /// PTYs) and cannot be defeated by a new switch site forgetting to reset
+    /// anything.
     pub(crate) last_pty_resize_target: Option<String>,
     /// A pty this surface has been told to TAKE OVER, armed by the take-over
     /// action and consumed by the next resize of that pty.
@@ -380,19 +380,15 @@ pub struct App {
     /// demoted pane is on screen, which without this would be tens of identical
     /// debug lines a second in the log.
     pub(crate) last_refused_pty_resize: Option<(String, u16, u16)>,
-    /// PTYs this surface LAUNCHED and has not yet claimed, keyed by pty id.
+    /// PTYs this surface launched and has not yet claimed, keyed by pty id.
     ///
-    /// Drawing a pane is not a claim, so an agent this terminal started would
-    /// otherwise stay unowned until somebody typed into it, and a window resize
-    /// in between would never reach its child. Starting one IS a deliberate act
-    /// though, so the launch claims the child once it exists. The id is recorded
-    /// at dispatch and spent (or dropped, on a failed launch) at the launch's
-    /// outcome, because the pty does not exist until then and a claim against an
-    /// id no child answers to is a phantom driver.
+    /// Drawing a pane is not a claim, so the launch is what claims the child:
+    /// the id is recorded at dispatch and spent (or dropped, on a failed launch)
+    /// at the launch's outcome, because no child answers to it until then and a
+    /// claim against such an id is a phantom driver.
     ///
-    /// Only ever populated by this surface's own launch paths. A launch a browser
-    /// asked for is nobody's entry here, which is exactly what leaves the pty free
-    /// for that browser's own attach.
+    /// Populated only by this surface's own launch paths, which is what leaves a
+    /// pty a browser asked for free for that browser's own attach.
     pub(crate) tui_launched_ptys: std::collections::HashSet<String>,
     /// Whether the agent create currently in flight was started HERE.
     ///
@@ -408,38 +404,26 @@ pub struct App {
     /// answer once the history ring is full.
     pub(crate) grid_generation: u64,
     /// Which terminal surfaces (focused tab ids, companion terminal ids) the
-    /// user has put into SCROLL MODE. Empty means nobody is scrolled back.
+    /// user has put into scroll mode. Empty means nobody is scrolled back.
     ///
-    /// A SET, not one slot, because the offset this mirrors is per-surface:
-    /// it lives in each PTY client, so "agent A and terminal B are both parked
-    /// in their scrollback" is an ordinary state that one slot cannot
-    /// represent. It shipped as one slot, and the consequence was that any
-    /// surface snapping to its live edge cleared the mode for a DIFFERENT
-    /// surface, leaving that pane frozen at its old offset with no cue, no
-    /// status, and the next keystroke going through to its child. Every write
-    /// here is scoped to the one surface it concerns.
+    /// A set rather than one slot: the offset it mirrors lives in each PTY
+    /// client, so two surfaces can sit parked in their scrollback at once, and
+    /// every write here is scoped to the one surface it concerns.
     ///
-    /// This is an explicit mode, entered and left by the user, exactly as
-    /// tmux's copy mode is a property of the pane rather than a function of
-    /// where the grid happens to be sitting. Nothing ever ENTERS the mode from
-    /// a sample of the grid, and nothing that gates behaviour on it (keystroke
-    /// suppression, the cue, the badge) samples the grid either: those read
-    /// this state. The offset is read in exactly two places, and both are
-    /// transitions rather than gates. `note_user_scroll` reads it in the same
-    /// breath as a scroll the USER performed, to decide whether that gesture
-    /// entered or left the mode. `reconcile_scroll_mode` reads it once per
-    /// input batch to notice the CHILD yanking the view back and to end the
-    /// mode out loud.
+    /// The mode is explicit, entered and left by the user, the way tmux's copy
+    /// mode is a property of the pane rather than of where the grid sits.
+    /// Nothing enters the mode from a sample of the grid, and everything that
+    /// gates on it (keystroke suppression, the cue, the badge) reads this state
+    /// rather than the offset. The offset is read only as a transition:
+    /// `note_user_scroll` decides whether the user's own gesture entered or left
+    /// the mode, and `reconcile_scroll_mode` notices the child yanking the view
+    /// back and ends the mode out loud.
     ///
-    /// That second read is why the mode cannot simply BE "offset > 0":
-    /// measured against the terminal library we pin, starting from a
-    /// scrolled-back grid, `ESC [ ? 1049 h` (enter the alternate screen),
-    /// `ESC [ 3 J` (erase scrollback) and `ESC c` (full reset) each drop
-    /// `scrollback_offset()` to 0. Deriving the mode from the offset let any
-    /// pager, editor or full-screen agent silently hand the user's keystrokes
-    /// back to the child while the user believed they were still reading
-    /// history. Keeping the mode as state means that transition is announced
-    /// instead of being invisible.
+    /// The mode cannot be derived as `offset > 0`: in the terminal library dux
+    /// pins, `ESC [ ? 1049 h` (alternate screen), `ESC [ 3 J` (erase scrollback)
+    /// and `ESC c` (full reset) each drop `scrollback_offset()` to 0 from a
+    /// scrolled-back grid, which would hand keystrokes back to the child while
+    /// the user believed they were still reading history.
     pub(crate) scroll_mode: std::collections::HashSet<String>,
     pub(crate) show_diff_line_numbers: bool,
     pub(crate) last_diff_height: u16,
@@ -713,16 +697,13 @@ pub struct App {
     /// The id of the ONE reference resolution whose answer this screen is still
     /// waiting for, or `None` when it is waiting for none.
     ///
-    /// This is the generation guard, and it is not optional. A resolution is a
-    /// git call per project, so it can easily still be out when the user has
-    /// cancelled the modal, retargeted it at a project, or submitted a
-    /// different reference. Nothing can recall a reply that is already in
-    /// flight, so the ONLY safe rule is that a reply acts on state when its id
-    /// is still the current one and is discarded otherwise. Checking merely
-    /// that some pull-request modal is open is not enough: the modal that is
-    /// open may be a different one, asking about a different reference.
+    /// The generation guard: a resolution is a git call per project and cannot
+    /// be recalled, so a reply acts on state only while its id is still the
+    /// current one and is discarded otherwise. Checking that some pull-request
+    /// modal is open is not enough, since the open one may be asking about a
+    /// different reference.
     ///
-    /// Stamped by [`App::dispatch_pull_request_reference`], and dropped by
+    /// Stamped by [`App::dispatch_pull_request_reference`], dropped by
     /// [`App::invalidate_pull_request_resolution`] on every close, retarget and
     /// resubmit.
     pub(crate) pending_pr_reference_op: Option<String>,
@@ -751,41 +732,29 @@ pub struct App {
     /// git succeeds) and reproduces the surface's exact wording.
     pub(crate) pending_delete_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<TuiDeleteOutcome>>,
-    /// In-flight reconnect / fresh-restart status ops (the "Launching agent …" /
-    /// "Starting fresh agent …" busy). When `reconnect_selected_session` or
-    /// `restart_selected_session_fresh` dispatches a launch the TUI mints a
-    /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its pending
-    /// busy, and stashes it here keyed by the **session id** — the natural
-    /// correlation handle because the shared `AgentLaunchReadyView` /
-    /// `AgentLaunchFailedOutcome` reactions that produce the final all carry the
-    /// session id. The matching ready (Reconnect / ResumeFallback / SessionMissing)
-    /// or failed (Reconnect / ForceReconnect) view pops the op and resolves it
-    /// against the handler-computed [`dux_core::engine::LaunchOutcome`], reproducing the exact
-    /// final wording. Create-kind launches are NOT routed through this map: their
-    /// busy/final ride the SHARED engine-side create op
-    /// (`Engine::pending_create_ops`), resolved engine-side to a keyed `Status` that
-    /// both surfaces apply.
+    /// In-flight reconnect / fresh-restart status ops, keyed by session id: the
+    /// correlation handle the `AgentLaunchReadyView` and
+    /// `AgentLaunchFailedOutcome` reactions that produce the final all carry.
+    ///
+    /// The matching ready or failed view pops the op and resolves it against the
+    /// handler-computed [`dux_core::engine::LaunchOutcome`], reproducing the
+    /// exact final wording. Create-kind launches are not routed here: their busy
+    /// and final ride the engine-side create op (`Engine::pending_create_ops`),
+    /// resolved to a keyed `Status` that both surfaces apply.
     pub(crate) pending_reconnect_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<dux_core::engine::LaunchOutcome>>,
-    /// In-flight checkout / branch-inspection status ops. Three TUI dispatches feed
-    /// this one map, all keyed by their op's own opaque id and all resolving to a
-    /// [`dux_core::engine::Final::Clear`] (the visible final comes from elsewhere —
-    /// the engine's unkeyed `Status` for the inspect/switch terminals, or a TUI
-    /// `set_info`/`finish_add_project_with_status`/`set_error` in the view handler),
-    /// so the op only DISMISSES its keyed busy and never strands to the busy
-    /// timeout:
+    /// In-flight checkout / branch-inspection status ops, keyed by their op's own
+    /// opaque id.
     ///
-    /// 1. `dispatch_non_default_branch_checkout` (add-project & checkout-default
-    ///    switch): id threaded through `run_add_project_checkout_job`, resolved when
-    ///    `NonDefaultBranchCheckoutCompleted` returns carrying it.
-    /// 2. `dispatch_create_agent_branch_inspection`: id threaded through the
-    ///    inspection job, resolved when `CreateAgentBranchInspected` returns.
-    /// 3. `checkout_selected_project_default_branch`: id threaded through worker 1,
-    ///    resolved when `CheckoutProjectDefaultBranchInspected` short-circuits
-    ///    (already-leading / heuristic / inspect-failed), OR — on the Known case —
-    ///    re-emitted as a `progress` busy and the SAME id forwarded into worker 2 so
-    ///    ONE op spans the inspect→switch chain (one spinner, changing text),
-    ///    resolved when that worker's `NonDefaultBranchCheckoutCompleted` returns.
+    /// Every dispatch that feeds this map resolves to a
+    /// [`dux_core::engine::Final::Clear`], so the op only dismisses its keyed
+    /// busy and never strands to the busy timeout; the visible final comes from
+    /// the engine's unkeyed `Status` or from the view handler. Each id is
+    /// threaded through its worker and resolved when that worker's completion
+    /// reaction returns carrying it. `checkout_selected_project_default_branch`
+    /// is the one that can span two workers: on the Known case its id is
+    /// re-emitted as a progress busy and forwarded into the switch worker, so
+    /// one op (one spinner, changing text) covers inspect and switch alike.
     pub(crate) pending_checkout_inspect_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<TuiCheckoutInspectOutcome>>,
     /// The one in-flight `refresh-changes` command, if any. The command hands
@@ -1081,13 +1050,11 @@ struct SignalHandles {
 /// is delivered as a key event in raw mode, not as SIGINT. Each handler only
 /// sets its atomic flag (async-signal-safe); the run loop polls both flags.
 ///
-/// This is also called from `App::resume` after a TUI→server→TUI flip. Both the
-/// TUI and the server's `tokio::signal` register through the same process-global
-/// `signal-hook-registry`, whose master OS handler is installed once (here, on
-/// the TUI's first boot) and routes each signal to whatever actions are live. So
-/// re-registering on resume re-arms graceful shutdown, provided the server does
-/// not reset the disposition to `SIG_DFL` on hand-back, which it deliberately no
-/// longer does (see the `ReturnToTui` branch of `serve_with_engine`).
+/// Also called from `App::resume` after a flip back from the server. The TUI and
+/// the server's `tokio::signal` register through the same process-global
+/// `signal-hook-registry`, so re-registering re-arms graceful shutdown provided
+/// the server does not reset the disposition to `SIG_DFL` on hand-back, which it
+/// does not (see the `ReturnToTui` branch of `serve_with_engine`).
 fn register_signal_handles() -> Result<SignalHandles> {
     let sigwinch_flag = Arc::new(AtomicBool::new(false));
     let sigwinch_sig_id =
@@ -1420,13 +1387,11 @@ pub(crate) fn attention_blink_phase(elapsed_ms: u128) -> bool {
 /// [`overlay_dismiss::REFUSAL_BLINK_MS`], which is what guarantees it ends at
 /// rest instead of freezing mid-cycle.
 ///
-/// `prompt` records WHICH modal armed the cue. Without it a blink armed on one
-/// modal would keep flashing a different modal opened within the cue's lifetime
-/// (dismiss the refusing modal by Esc, open another straight away, and the new
-/// one would inherit the flash). The two `EditMacros` arms share a discriminant,
-/// so a blink on the macro editor can bleed onto the delete-confirm raised out
-/// of it inside the same 800ms; that is a deliberate non-problem, since the user
-/// only gets there by opening the confirm themselves.
+/// `prompt` records which modal armed the cue, so a blink armed on one modal
+/// cannot flash a different modal opened within the cue's lifetime. The two
+/// `EditMacros` arms share a discriminant, so a blink on the macro editor can
+/// bleed onto the delete-confirm raised out of it; that is deliberate, since the
+/// user only gets there by opening the confirm themselves.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RefusalBlink {
     pub(crate) started: Instant,
@@ -1591,18 +1556,16 @@ pub(crate) struct ChangeThemePrompt {
 
 /// The startup-log picker's focus ring.
 ///
-/// It is the second Picker (after [`KillRunningFocus`]) that pairs a list with
-/// a footer button, so it follows that precedent rather than inventing a
-/// second pattern: focus is a two-stop ring, and search is a MODE layered over
-/// the list rather than a stop of its own (`Cancel`/`Apply` pickers do the
-/// same; see `set_kill_running_search_cursor_from_mouse`).
+/// A two-stop ring over the list and the footer button, following
+/// [`KillRunningFocus`] rather than inventing a second pattern: search is a mode
+/// layered over the list rather than a stop of its own (see
+/// `set_kill_running_search_cursor_from_mouse`).
 ///
-/// The picker's other two interactive regions are deliberately NOT stops. The
-/// Output pane has no focus-dependent behaviour to gain one: it is a Picker,
-/// so the vertical keys always move the SELECTION and the paging keys always
-/// scroll the Output, whichever stop holds focus. A stop that changes nothing
-/// is focus theatre, and it would cost the user a Tab press on the way to the
-/// only control that needs focus to be operable at all.
+/// The filter and the Output pane are deliberately not stops. This is a Picker,
+/// so the vertical keys always move the selection and the paging keys always
+/// scroll the Output whichever stop holds focus; a stop that changes nothing
+/// would only cost a press on the way to the control that needs focus to be
+/// operable at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StartupCommandLogFocus {
     List,
@@ -1734,22 +1697,17 @@ pub(crate) struct ProjectChooserEntry {
 
 /// Leave a search row, discarding whatever was typed into it.
 ///
-/// The ONE Escape semantics every filterable modal in dux shares: the close key
-/// leaves search mode and clears the query in the SAME press, so the list comes
-/// back whole and the next close key shuts the modal. A middle state (leave
-/// search but keep filtering) would cost a user who typed a query three presses
-/// to get out of a two-line dialog.
+/// The one Escape semantics every filterable modal in dux shares: the close key
+/// leaves search mode and clears the query in the same press, so the list comes
+/// back whole and the next close key shuts the modal.
 ///
 /// Returns `true` when there was something to leave, which is exactly the
 /// caller's "stay open" signal; `false` means the search row was already empty
 /// and idle, so the press belongs to the modal and should close it.
 ///
-/// Two of the five callers hold a [`SearchableList`] and go through
-/// [`SearchableList::exit_search_clearing_filter`]; the other three keep their
-/// `searching` flag and their query in separate fields for reasons of their own
-/// (the startup-log picker's `selected` is an ABSOLUTE entry index rather than a
-/// visible one, and the fullscreen log viewer has no row selection at all), so
-/// they call this directly. One definition, three call shapes.
+/// Callers holding a [`SearchableList`] reach this through
+/// [`SearchableList::exit_search_clearing_filter`]; callers that keep their
+/// `searching` flag and their query in separate fields call it directly.
 pub(crate) fn exit_search_clearing_filter(searching: &mut bool, filter: &mut TextInput) -> bool {
     let had_something = *searching || !filter.is_empty();
     *searching = false;
@@ -2195,25 +2153,18 @@ pub(crate) enum PromptState {
     /// The windowed startup-log browser, and where the "read startup command
     /// logs" journey lands.
     ///
-    /// `EventReaction::StartupLogsArrived` opens it on the NEWEST run with that
+    /// `EventReaction::StartupLogsArrived` opens it on the newest run with that
     /// run's output already loaded, so "see the last log" needs no interaction;
-    /// the rows beside it are how an older run is chosen. The FULLSCREEN viewer
-    /// (`FullscreenOverlay::StartupLog` + [`App::startup_log_viewer`]) is still
-    /// there and is now this modal's PROMOTION, reached with the confirm key.
-    /// A scope with no runs at all opens nothing and reports through the keyed
-    /// status API instead.
+    /// the rows beside it are how an older run is chosen. The fullscreen viewer
+    /// (`FullscreenOverlay::StartupLog` plus [`App::startup_log_viewer`]) is this
+    /// modal's promotion, reached with the confirm key. A scope with no runs at
+    /// all opens nothing and reports through the keyed status API instead.
     ///
-    /// This variant was unreachable outside `#[cfg(test)]` until that change,
-    /// which is how two bugs survived in it: the OS-open actions resolved their
-    /// path from the fullscreen viewer rather than from this picker's own
-    /// selection, and the click mapping assumed one screen row per run when
-    /// each run draws two. Both are fixed and pinned.
-    ///
-    /// It has four interactive regions (the filter, the Runs list, the Output
-    /// body, the Close button) and its focus model is
-    /// [`StartupCommandLogFocus`], a two-stop ring over the list and the
-    /// button. Read that type's doc before adding a stop: the other two
-    /// regions are unfocusable on purpose.
+    /// Its focus model is [`StartupCommandLogFocus`], a two-stop ring over the
+    /// Runs list and the Close button. Read that type's doc before adding a
+    /// stop: the filter and the Output body are unfocusable on purpose. Each run
+    /// draws two screen rows, and the OS-open actions resolve their path from
+    /// this picker's own selection rather than from the fullscreen viewer.
     StartupCommandLogs(StartupCommandLogPrompt),
     /// The project chooser: lists every project (agent-less included) so a
     /// project-scoped action can target one when the flat agent list has no
@@ -2363,17 +2314,14 @@ pub(crate) enum PromptState {
     /// Name the standalone agent about to run in the folder the user just
     /// picked in the browser.
     ///
-    /// The terminal-UI twin of the web's standalone-agent dialog, which shows
-    /// a name field the moment a folder is committed. ONE single-line control
-    /// and therefore no focus enum, exactly like
+    /// One single-line control and therefore no focus enum, like
     /// [`PromptState::AttachPullRequestInput`]: there is nowhere for focus to
     /// move, so Enter submits and the modal needs no confirm button.
     ///
     /// An empty field is the ordinary case (the agent takes the folder's own
-    /// name); a typed one is used VERBATIM, since no branch is created here
-    /// and the ref-name rules deliberately do not apply. Closing the prompt
-    /// abandons the creation, the way the web dialog's Cancel does: no agent,
-    /// and nothing written into the user's folder.
+    /// name); a typed one is used verbatim, since no branch is created here and
+    /// the ref-name rules deliberately do not apply. Closing the prompt abandons
+    /// the creation: no agent, and nothing written into the user's folder.
     NameStandaloneAgent {
         /// Absolute path of the folder the browser committed to.
         folder: String,
@@ -2612,11 +2560,9 @@ pub(crate) struct MacroEditState {
 
 /// Which control has focus in the macro editor.
 ///
-/// The macro editor used to be a one-way two-stage wizard (`EditName` then
-/// `EditText`) where Escape SAVED from the second stage and the surface
-/// selector was unreachable once you left the first. It is now an ordinary
-/// modal: every control is a focus stop, movement keys move between them and
-/// change nothing, Space acts on whichever one has focus, and Escape cancels.
+/// An ordinary modal: every control is a focus stop, movement keys move between
+/// them and change nothing, Space acts on whichever one has focus, and Escape
+/// cancels.
 ///
 /// Declared in visual order, which is also the forward focus order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2679,11 +2625,10 @@ impl MacroEditFocus {
 /// Which control has focus in the three `Configure*` modals (startup command,
 /// project environment, global environment).
 ///
-/// All three hold ONE full-text field, so Enter cannot mean "submit": it is
+/// All three hold one full-text field, so Enter cannot mean "submit": it is
 /// content the moment the field is engaged. The field therefore keeps the
 /// engage step, and the modal carries the Cancel/Save pair that gives Enter its
-/// third, unambiguous meaning. That is the dual-mode rule, and these three used
-/// to be the only modals breaking it.
+/// third, unambiguous meaning. That is the dual-mode rule.
 ///
 /// Declared in visual order, which is also the forward focus order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2713,13 +2658,10 @@ impl ConfigureFieldFocus {
 
 /// Which control has focus in a two-button confirmation.
 ///
-/// Nine confirmations used to carry a bare `confirm_selected: bool` for this.
-/// Two states is the right CARDINALITY (there are exactly two buttons), so the
-/// defect was never the arity: it was that a `bool` cannot SAY which control
-/// has focus, and `confirm_selected: false` at a construction site reads as a
-/// checkbox that is off rather than as focus resting on Cancel. Every other
-/// modal in dux names its focus with an enum, and these do now too; the shared
-/// type is what stops nine near-identical `…Focus` enums appearing instead.
+/// A `bool` cannot say which control has focus: `confirm_selected: false` at a
+/// construction site reads as a checkbox that is off rather than as focus
+/// resting on Cancel. Every modal in dux names its focus with an enum, and this
+/// shared type is what stops a near-identical `…Focus` enum per confirmation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ConfirmFocus {
     /// The safe default: a confirmation opens with Cancel focused.
@@ -2789,16 +2731,12 @@ pub(crate) struct SelectionOrigin {
     /// `TerminalSnapshot::scrollback_total` (alacritty's `history_size`): how
     /// many lines of scrollback exist behind the viewport.
     pub scrollback_total: usize,
-    /// Whether the scrollback ring was already FULL in this frame, i.e.
-    /// `scrollback_total` had reached the configured capacity and can no longer
-    /// grow. [`TerminalSelection::to_origin_row`] leans on history growth to
-    /// stand in for the grid's advancing bottom, so a selection stamped here
-    /// cannot be corrected once anything else moves the grid; `App::
-    /// drop_drifted_selection` retires it instead of letting it point at other
-    /// text. Read from the selected PTY's own spawn-time capacity
-    /// (`PtyClient::scrollback_capacity`), never from live config: capacity is
-    /// fixed when the emulator is built, so a reload that raises the setting
-    /// leaves every running PTY on the old number.
+    /// Whether `scrollback_total` had already reached capacity in this frame.
+    /// [`TerminalSelection::to_origin_row`] cannot correct a selection stamped
+    /// here, so `App::drop_drifted_selection` retires it instead. Read from the
+    /// PTY's spawn-time `PtyClient::scrollback_capacity`, never live config:
+    /// capacity is fixed when the emulator is built, so a reload that raises the
+    /// setting leaves every running PTY on the old number.
     pub history_saturated: bool,
     /// The value of `App::grid_generation` in this frame: how many times the
     /// grid had been rebuilt when the origin was stamped. Only meaningful
@@ -2806,18 +2744,12 @@ pub(crate) struct SelectionOrigin {
     pub grid_generation: u64,
     /// The viewport dimensions (rows, cols) the selection was recorded against.
     ///
-    /// KNOWN LIMIT 3 from [`TerminalSelection::to_origin_row`], and it is handled
-    /// here rather than tolerated. A WIDTH change REFLOWS the grid: alacritty
-    /// rewraps rows to the new width and moves lines between history and the
-    /// viewport, so the recorded row no longer names the text it named and the
-    /// offset/total arithmetic translates it to an arbitrary row. Below
-    /// saturation nothing else notices, so the selection used to survive a
-    /// resize and quietly point somewhere else. `App::drop_drifted_selection`
-    /// retires it on a column change only: a height-only change moves whole,
-    /// unrewrapped lines between history and the viewport, which the offset and
-    /// total arithmetic translates exactly, so the selection keeps following
-    /// its text. Both dimensions are still stamped so the record says what was
-    /// measured, even though only the width is compared.
+    /// A width change reflows the grid, so the recorded row no longer names the
+    /// text it named and [`TerminalSelection::to_origin_row`] translates it to
+    /// an arbitrary row; `App::drop_drifted_selection` retires the selection on
+    /// a column change. A height-only change moves whole, unrewrapped lines
+    /// between history and the viewport, which the arithmetic translates
+    /// exactly, so only the width is compared.
     pub grid_size: (u16, u16),
 }
 
@@ -2872,68 +2804,28 @@ impl TerminalSelection {
     }
 
     /// Translate a row of the LIVE viewport back into the frame this selection
-    /// was recorded in, or `None` when that row holds text the selection could
-    /// never have covered.
+    /// was recorded in, or `None` when that row predates the recorded viewport
+    /// (a negative row comes back as `None` rather than wrapping).
     ///
-    /// A viewport row does not name a fixed piece of text. Writing `bottom` for
-    /// the absolute index of the newest grid line and `rows` for the viewport
-    /// height, row `r` shows absolute line `bottom - offset - (rows - 1) + r`,
-    /// so for one fixed line the row moves by
-    /// `(offset_now - offset_then) - (bottom_now - bottom_then)`.
+    /// A viewport row names a fixed line only while the grid holds still, so the
+    /// row is corrected by `(offset_now - offset_then) - (total_now -
+    /// total_then)`. `scrollback_total` stands in for the grid's advancing
+    /// bottom, which is not exposed, because the scroll that grows history is
+    /// the scroll that advances it.
     ///
-    /// `bottom` is not exposed, but `scrollback_total` is alacritty's
-    /// `history_size`, and in the ordinary case the event that grows history is
-    /// the event that advances `bottom`: `Grid::scroll_up` pushes the top line
-    /// into history and moves everything up by one. So `scrollback_total`
-    /// stands in for `bottom`.
+    /// Two regimes break that substitution, and the correction drifts in both.
+    /// A saturated scrollback ring stops growing while the bottom keeps moving:
+    /// `SelectionOrigin::history_saturated` records it and
+    /// `App::drop_drifted_selection` retires the selection rather than let it
+    /// name other text. A scrolling region with a top margin advances the
+    /// display offset without pushing into history, at any history depth, and is
+    /// not detected at all, because the child's scrolling region is not exposed;
+    /// a selection held across one can still drift.
     ///
-    /// The two deltas are NOT equal in general; see KNOWN LIMITS below for the
-    /// two measured cases where they part company.
-    ///
-    /// That covers both ways the numbers move. A user scroll changes `offset`
-    /// while history holds still, so the text moves down the screen by the
-    /// scroll distance. New output grows history; alacritty already bumps
-    /// `display_offset` in step while the user is scrolled back
-    /// (`Grid::scroll_up`, `if self.display_offset != 0 { … }` in
-    /// alacritty_terminal 0.26.0), so the two deltas cancel and the text stays
-    /// put, while at the live edge `offset` stays 0 and the text scrolls up.
-    ///
-    /// KNOWN LIMIT 1, saturation, and it is HANDLED rather than tolerated.
-    /// Once history saturates at the configured scrollback size,
-    /// `scrollback_total` stops growing while `bottom` keeps moving, so the
-    /// correction under-counts by exactly the number of lines produced.
-    /// Measured on a 5-line ring: select `L30`, feed three lines, and the copy
-    /// yields `L33`. With the default 10,000-line scrollback saturation is the
-    /// steady state of any long session, so this would be the NORMAL behaviour
-    /// rather than a corner. Following text past that point needs absolute grid
-    /// coordinates, which this deliberately does not introduce; instead
-    /// `SelectionOrigin::history_saturated` records the regime and
-    /// `App::drop_drifted_selection` retires the selection the moment the grid
-    /// moves under it. A selection that vanishes is honest; one that quietly
-    /// names other text is not.
-    ///
-    /// KNOWN LIMIT 2, top-margin scrolling regions, and it is NOT handled.
-    /// `Grid::scroll_up` bumps the display offset for every scroll while the
-    /// offset is non-zero, but pushes the scrolled-out line into history only
-    /// when the scrolling region starts at row zero (the same asymmetry
-    /// `dux_core::pty::TerminalState::clamp_display_offset_to_history` documents
-    /// and works around for a different symptom). So a child that sets a
-    /// scrolling region with a TOP margin and scrolls it advances the offset
-    /// while history stands still, and this correction drifts the same way it
-    /// does at saturation. The saturation guard does not cover it: that case is
-    /// gated on the ring being full, and this one happens at any history depth.
-    /// Detecting it would mean knowing the child's current scrolling region,
-    /// which is not exposed. A selection held across a top-margin scroll can
-    /// therefore still drift, and that is a recorded gap rather than a claim
-    /// that it cannot happen.
-    ///
-    /// A live row that predates the recorded viewport translates to a negative
-    /// row and comes back as `None` rather than wrapping. The other direction
-    /// needs no guard: selected text that has scrolled off the screen simply
-    /// stops appearing among the snapshot's cells, so it drops out of the
-    /// highlight and out of the copy on its own. Copying a selection that has
-    /// scrolled out of the viewport is OUT OF SCOPE here; it would mean reading
-    /// scrollback the snapshot does not carry.
+    /// Text that has scrolled out of the viewport needs no guard: it stops
+    /// appearing among the snapshot's cells, so it leaves the highlight and the
+    /// copy on its own. Copying it back is out of scope; the snapshot carries no
+    /// scrollback.
     pub fn to_origin_row(&self, live_row: u16, now: SelectionOrigin) -> Option<u16> {
         let offset_delta = now.scrollback_offset as i64 - self.origin.scrollback_offset as i64;
         let total_delta = now.scrollback_total as i64 - self.origin.scrollback_total as i64;
@@ -3021,25 +2913,20 @@ impl MouseLayoutState {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct OverlayMouseLayoutState {
     pub(crate) active: OverlayMouseLayout,
-    /// Outer rect of the TOPMOST modal painted this frame, or `None` when no
+    /// Outer rect of the topmost modal painted this frame, or `None` when no
     /// modal was painted. Recorded by the one chokepoint every modal passes
-    /// through, [`App::clear_overlay_area`], and read on a LATER event by the
+    /// through, [`App::clear_overlay_area`], and read on a later event by the
     /// click-outside dismissal engine (see [`super::overlay_dismiss`]).
     ///
-    /// Two properties are load-bearing:
+    /// It fails closed: `None` means "no dismissal", never "dismiss on any
+    /// click", since a prompt can be open while a fullscreen overlay is up, in
+    /// which case no rect is recorded yet the mouse still routes to prompt
+    /// handling. A zero-sized `Rect` sentinel would be a silent trap here, so
+    /// the `Option` is deliberate.
     ///
-    /// * It FAILS CLOSED. `None` means "no dismissal", never "dismiss on any
-    ///   click": a prompt can be open while a fullscreen overlay is up, in
-    ///   which case `render_overlay` returns before `render_prompt` and no rect
-    ///   is recorded, yet the mouse still routes to prompt handling. A
-    ///   zero-sized `Rect` sentinel would be a silent trap here, so the
-    ///   `Option` is deliberate.
-    /// * Last write wins, which is what makes nested modals work: the macro
-    ///   editor paints its popup and THEN its nested delete-confirm paints a
-    ///   smaller rect, so `frame` ends up as the modal actually on top.
-    ///
-    /// A [`Cell`] permits last-write-wins recording through the renderer's
-    /// shared reference while preserving the fail-closed `Option`.
+    /// Last write wins, which is what makes nested modals work: the [`Cell`]
+    /// permits that recording through the renderer's shared reference, and the
+    /// rect left behind is the modal actually on top.
     pub(crate) frame: Cell<Option<Rect>>,
 }
 
@@ -3267,22 +3154,21 @@ pub(crate) enum OverlayMouseLayout {
         /// `CreateAgentRequest::NewProject` prompts.
         copy_checkbox: Option<OverlayCheckbox>,
     },
-    /// The macro EDITOR (not the macro list, which has no click targets of its
-    /// own, and not the nested delete-confirm, which publishes
-    /// `ConfirmDeleteMacro` over the top of this).
-    ///
-    /// The two input rects are the fields' INNER areas, so a click maps
-    /// straight onto a text position. `surface_options` is one rect per
-    /// [`MacroSurface`] variant in `Agent, Terminal, Both` order, so clicking
-    /// one selects exactly that option rather than advancing the cycle.
-    /// The macro LIST: a Picker, so it publishes its rows and nothing else.
-    /// (The EDITOR that opens on top of it publishes
-    /// [`OverlayMouseLayout::EditMacros`] instead.)
+    /// The macro list: a Picker, so it publishes its rows and nothing else. The
+    /// editor that opens on top of it publishes
+    /// [`OverlayMouseLayout::EditMacros`] instead.
     EditMacroList {
         list: Rect,
         items: usize,
         offset: usize,
     },
+    /// The macro editor, not the nested delete-confirm, which publishes
+    /// `ConfirmDeleteMacro` over the top of this.
+    ///
+    /// The two input rects are the fields' inner areas, so a click maps straight
+    /// onto a text position. `surface_options` is one rect per [`MacroSurface`]
+    /// variant in `Agent, Terminal, Both` order, so clicking one selects exactly
+    /// that option rather than advancing the cycle.
     EditMacros {
         name_input: Rect,
         text_input: Rect,
@@ -3393,10 +3279,10 @@ impl LeftItem {
 /// display order, and every hand-placement writes it: the TUI's move commands,
 /// a mouse drag on either surface.
 ///
-/// The TUI's own picker OFFERS the five non-manual modes (see `TUI_CYCLE`) and
-/// DISPLAYS `Manual` whenever a hand-placement selected it. The web mirror OFFERS
-/// active/updated/created/name/manual and DISPLAYS a TUI-set `NameDesc`. The
-/// shared value set therefore has six modes; both surfaces render all six.
+/// The TUI's own picker offers the non-manual modes (see `TUI_CYCLE`) and
+/// displays `Manual` whenever a hand-placement selected it. The web mirror offers
+/// active/updated/created/name/manual and displays a TUI-set `NameDesc`. Both
+/// surfaces render every mode in this enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AgentSortMode {
     /// Working / needs-attention agents float to the top (a stable float, not a
@@ -3515,22 +3401,17 @@ pub(crate) fn tab_reaches_agent_trap_warning(
 /// (removed-project) sessions are plain `Session` rows here; the renderer marks
 /// them inline.
 ///
-/// The ORDERING is the core-owned `dux_core::flat_list::order_sessions` (the
+/// The ordering is the core-owned `dux_core::flat_list::order_sessions` (the
 /// cross-language twin of the web's `flatList.ts`); this function only wraps the
-/// ordered indices into `LeftItem`s and inserts the collapsible toggle. The
-/// returned `LeftItem::Session(index)` values are indices into `sessions`
-/// (unchanged meaning); `sessions` is never mutated. See `flat_list.rs` for the
-/// per-mode rules (in `Active` the inactive tail sorts most-recently-active-first;
-/// every other mode leaves the tail verbatim).
+/// ordered indices into `LeftItem`s and inserts the collapsible toggle. Returned
+/// `LeftItem::Session(index)` values index into `sessions`, which is never
+/// mutated. See `flat_list.rs` for the per-mode rules.
 ///
 /// `is_hot(index)` reports whether the session at that index is working or needs
-/// attention (used only by `Active`).
-///
-/// `is_visible(index)` is a symmetric DISPLAY filter: an index that fails it never
-/// enters either bucket, so a filtered row disappears from the list entirely and
-/// the `InactiveToggle` tail only appears when a visible inactive row remains. When
-/// there is no active filter, callers pass `&|_| true`. Filtering is a pure display
-/// concern here: `sessions` is never mutated.
+/// attention (used only by `Active`). `is_visible(index)` is a symmetric display
+/// filter: an index that fails it enters neither bucket, so the `InactiveToggle`
+/// tail appears only when a visible inactive row remains; callers with no active
+/// filter pass `&|_| true`.
 pub(crate) fn build_left_items(
     sessions: &[AgentSession],
     inactive_collapsed: bool,
@@ -3679,14 +3560,6 @@ impl App {
             bindings.label_for(Action::ToggleHelp),
         );
         let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &paths);
-        // The orientation hint is KEPT despite the arrival of the welcome
-        // screen, which says all of this and more. It used to be called a
-        // "first-run hint", which was never accurate: it is set on EVERY cold
-        // boot, not only the first, so deleting it would take the orientation
-        // line away from every existing user in exchange for de-duplicating one
-        // launch in a fresh install's lifetime. On that one launch the welcome
-        // modal covers it anyway, and dismissing the modal writes its own
-        // status over it.
         let live_status_keys = dux_core::statusline::LiveStatusKeys::default();
         let status = boot_status(
             Duration::from_secs(config.ui.status_clear_seconds as u64),
@@ -4263,13 +4136,13 @@ impl App {
     /// server's shutdown path. Runs after the terminal is restored, so the user
     /// is back at their shell while the wind-down happens. Echoes the same start
     /// and result lines `shutdown_ptys` logs to `dux.log`, but only when there is
-    /// something to wait for — an agent-less quit stays silent.
+    /// something to wait for: an agent-less quit stays silent.
     ///
-    /// A second SIGINT/SIGTERM during the wait cuts it short: the run loop (the
-    /// only thing that polled `shutdown_flag`) has already exited, so we clear the
-    /// flag and hand it to `shutdown_ptys_interruptible` as an abort. Without this
-    /// a child that ignores SIGTERM would trap the operator for the full grace
-    /// (now up to the configured timeout) with only `kill -9` as an out.
+    /// A second SIGINT/SIGTERM during the wait cuts it short: the run loop, the
+    /// only thing that polled `shutdown_flag`, has already exited, so the flag is
+    /// cleared and handed to `shutdown_ptys_interruptible` as an abort. Without
+    /// this a child that ignores SIGTERM traps the operator for the full grace
+    /// period with only `kill -9` as an out.
     fn shutdown_agents_gracefully(&mut self) {
         let agents = self.engine.providers.len();
         let terminals = self.engine.companion_terminals.len();
@@ -4335,20 +4208,17 @@ impl App {
 
     /// Close the help overlay if it is open, reporting whether it was.
     ///
-    /// The ONE place help is closed. The close-overlay key reaches it through
-    /// [`App::close_top_overlay`] and an outside click reaches it from the help
-    /// branch of `handle_mouse`, so the two devices cannot drift — help is not
-    /// a [`PromptState`] variant, so it cannot ride the click-outside engine's
-    /// [`App::cancel_prompt`] ladder (see [`super::overlay_dismiss`]) and needs
-    /// its own shared close instead.
+    /// The one place help is closed, reached by the close-overlay key through
+    /// [`App::close_top_overlay`] and by an outside click from the help branch
+    /// of `handle_mouse`. Help is not a [`PromptState`] variant, so it cannot
+    /// ride the click-outside engine's [`App::cancel_prompt`] ladder (see
+    /// [`super::overlay_dismiss`]) and needs its own shared close instead.
     ///
     /// Dropping `help_scroll` is what closes it, and that also discards the
     /// scroll offset: help always reopens at the top, by either route.
     ///
-    /// `announce` is the only difference between the two callers. The keyboard
-    /// says how to reopen; a click stays silent, matching the engine's
-    /// deliberate no-status rule for every other outside-click dismissal (the
-    /// user just watched the overlay disappear under their cursor).
+    /// `announce` says how to reopen. A click passes `false`, matching the
+    /// engine's no-status rule for every other outside-click dismissal.
     pub(crate) fn close_help_overlay(&mut self, announce: bool) -> bool {
         if self.help_scroll.is_none() {
             return false;
@@ -4510,9 +4380,7 @@ impl App {
     /// when everything is quiet.
     ///
     /// The refusal cue is time-bounded, so it stops answering `true` on its own
-    /// and the loop goes lazy again the moment the cue is over. (Kept under the
-    /// historical `any_row_animating` name because the run loop's only question
-    /// is "must I redraw at animation cadence?", and the answer is one flag.)
+    /// and the loop goes lazy again the moment the cue is over.
     pub(crate) fn any_row_animating(&self) -> bool {
         if self.refusal_blink_running() {
             return true;
@@ -4735,34 +4603,29 @@ impl App {
                 Some(self.set_pinned_warning(format!("Project path not found: {path}")));
             return;
         }
-        // Clear only the warning THIS helper wrote. It runs on every selection
-        // move, so a tone check ("the line holds a warning") also matched the
-        // pinned restart and theme warnings, and a move in the agent list wiped
-        // a message the user still had to act on. The generation names the exact
-        // message, and the controller removes that message wherever it is: asking
-        // whether it is the NEWEST unkeyed one and then clearing "the unkeyed
-        // line" is two guesses, and on a queued line the second one takes another
-        // producer's standing warning with it.
+        // Clear only the warning this helper wrote. It runs on every selection
+        // move, and a tone check ("the line holds a warning") also matches the
+        // pinned restart and theme warnings. The generation names the exact
+        // message and the controller removes it wherever it sits, where clearing
+        // "the newest unkeyed message" would take another producer's standing
+        // warning with it.
         if let Some(generation) = self.missing_project_warning_gen.take() {
             self.status.clear_anonymous_generation(generation);
         }
     }
 
-    /// Whether the minimized center pane currently TYPES into the focused
+    /// Whether the minimized center pane currently types into the focused
     /// surface's PTY: focus is on the Center pane, nothing modal or fullscreen
     /// is in the way, the pane is showing the agent surface (not a diff), and
     /// that surface has a live PTY behind it.
     ///
-    /// This is a DERIVED predicate, deliberately not new state: focus loss, a
-    /// prompt opening, a tab switch and an agent exit all end typeability for
-    /// free, with nothing to desync. Fullscreen interactive mode is a separate
-    /// regime (raw stdin passthrough keyed on `input_target`) and is excluded
-    /// here by the overlay and `input_target` checks.
-    ///
-    /// The companion-terminal surface gets the same treatment as the agent
-    /// surface: the liveness question is asked through
-    /// [`Self::selected_terminal_surface_client`], which resolves whichever
-    /// surface the center pane is showing.
+    /// Derived, deliberately not new state: focus loss, a prompt opening, a tab
+    /// switch and an agent exit all end typeability for free, with nothing to
+    /// desync. Fullscreen interactive mode is a separate regime (raw stdin
+    /// passthrough keyed on `input_target`) and is excluded here by the overlay
+    /// and `input_target` checks. The liveness question goes through
+    /// [`Self::selected_terminal_surface_client`], so a companion terminal is
+    /// answered exactly like the agent surface.
     ///
     /// Scroll state is deliberately NOT part of this predicate: callers that
     /// must suppress typing while scrolled back (the line-scroll gating tenet)
@@ -5121,12 +4984,10 @@ impl App {
                 self.engine.config.ui.github_integration = self.engine.github_integration_enabled;
                 if self.engine.github_integration_enabled {
                     // Off-to-on: re-ask `gh` which hosts it can serve, and do
-                    // NOTHING else. The user who logs in to their enterprise
-                    // host and then enables the integration must not be stuck
-                    // with the answer from boot, and the status held right now
-                    // is that answer: acting on it here armed a refresh the
-                    // probe's completion then armed again, along with a second
-                    // poller. The completion arms the work, exactly once.
+                    // nothing else. The status held right now is the answer from
+                    // boot, which predates the login that enabled the
+                    // integration; the probe's completion arms the follow-up
+                    // work, exactly once.
                     self.engine.spawn_gh_status_check();
                 } else {
                     self.engine.pr_statuses.clear();
@@ -5327,15 +5188,11 @@ impl App {
         } else if github_was_enabled
             && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
         {
-            // The integration was ALREADY on, so this reload is not an
-            // off-to-on transition and the status is a settled answer rather
-            // than one a probe is about to replace: re-deriving the sync set and
-            // refreshing is the right thing to do. The off-to-on case is handled
-            // above by launching the probe and nothing else, whose completion
-            // arms this same work exactly once.
-            //
-            // Re-seed first so a manually attached PR's badge survives the
-            // reload-time `pr_statuses` churn without waiting for a cycle.
+            // The integration was already on, so the status is a settled answer
+            // rather than one a probe is about to replace: re-derive the sync set
+            // and refresh. Re-seed first so a manually attached PR's badge
+            // survives the reload-time `pr_statuses` churn without waiting for a
+            // cycle.
             self.engine.seed_pr_statuses_from_store();
             self.engine.update_pr_sync_sessions();
             self.engine.spawn_initial_pr_refresh();
@@ -5775,13 +5632,10 @@ impl App {
 
     /// Point the changed-files panel at the selected agent and ask for a read.
     ///
-    /// The git read goes to a WORKER. It used to run inline here, on the
-    /// interface thread, as a deliberate exception: the TUI is single-user, so
-    /// the read refilled the lists within this same call and nothing flickered.
-    /// What that traded away was the whole interface for the length of one
-    /// `git status` sweep, on every selection move, and a worktree with
-    /// thousands of changed files made that a freeze rather than a pause. The
-    /// flicker is the cheaper cost, and only a focus change pays it.
+    /// The git read goes to a worker: an inline `git status` sweep costs the
+    /// whole interface on every selection move, and a worktree with thousands of
+    /// changed files makes that a freeze rather than a pause. The cost is a
+    /// flicker while the lists refill, paid only on a focus change.
     pub(crate) fn reload_changed_files(&mut self) {
         let session_id = self.selected_session().map(|s| s.id.clone());
         // Capture the previously-watched session BEFORE set_watched_session
@@ -5847,20 +5701,17 @@ impl App {
     /// The `refresh-changes` palette command: recompute the selected agent's
     /// changed files immediately.
     ///
-    /// dux has no file watcher. It refreshes when dux itself changes a file
-    /// through one of its own actions (which on the web includes a file dropped
-    /// onto a pane, a surface the TUI deliberately does not have, since a real
-    /// terminal emulator already types a dropped path in for you), and anything
-    /// else, a file the user changed from a terminal or an agent writing in its
-    /// worktree, only shows up on the next poll. This is how the user says "look
-    /// again" instead of waiting.
+    /// dux has no file watcher: it refreshes when one of its own actions changes
+    /// a file, and anything else (a file the user changed from a terminal, an
+    /// agent writing in its worktree) shows up only on the next poll. This is
+    /// how the user says "look again" instead of waiting.
     ///
-    /// The git read goes to a WORKER, never to this thread. That is the general
-    /// rule for anything that shells out, and this command is the worst possible
-    /// place to break it: it exists for "I just did something in a shell", which
-    /// is exactly when another process may still hold `.git/index.lock`, and an
-    /// inline read would freeze the whole interface with no spinner to show for
-    /// it. [`Self::apply_changed_files_refresh_outcome`] resolves the keyed busy
+    /// The git read goes to a worker, never to this thread. This command is the
+    /// worst possible place to break that rule: it exists for "I just did
+    /// something in a shell", which is exactly when another process may still
+    /// hold `.git/index.lock`, and an inline read would freeze the whole
+    /// interface with no spinner to show for it.
+    /// [`Self::apply_changed_files_refresh_outcome`] resolves the keyed busy
     /// when the worker's `ChangedFilesReady` drains, in both the success and the
     /// failure branch, so the busy always reaches a final.
     pub(crate) fn refresh_changed_files_now(&mut self) -> Result<()> {
@@ -6394,21 +6245,19 @@ impl App {
 
     /// How many browsers have this agent open: every PTY the agent owns, summed.
     ///
-    /// Summed over its provider tabs AND its companion terminals, because the
-    /// SIDEBAR ROW is about the agent the same way its liveness ORs across tabs:
-    /// somebody with any of the agent's terminals open is somebody else looking at
-    /// this agent, and the agent's row is the only place that fact is shown at all
-    /// (the terminal rows carry no count of their own). A browser watching two of
-    /// them counts twice, which is the honest reading of "how many remote viewers
-    /// are attached" and the only one this side can back up.
+    /// Summed over its provider tabs and its companion terminals, the way the
+    /// row's liveness ORs across tabs, because the agent's row is the only place
+    /// that fact is shown at all (the terminal rows carry no count of their
+    /// own). A browser watching two of them counts twice, which is the honest
+    /// reading of "how many remote viewers are attached".
     ///
-    /// Zero when nothing is serving, structurally: the subscriber lists are exactly
-    /// the web PTY sockets, and without a serve there are none.
+    /// Zero when nothing is serving, structurally: the subscriber lists are
+    /// exactly the web PTY sockets, and without a serve there are none.
     ///
-    /// Takes `tab_ids` rather than resolving them, because the only caller is the
-    /// agent row, which needs them anyway for its tab count, and `session_tab_ids`
-    /// allocates a `Vec<String>` with a clone per tab: this runs once per row per
-    /// frame, on the render path.
+    /// Takes `tab_ids` rather than resolving them: the only caller is the agent
+    /// row, which needs them anyway, and `session_tab_ids` allocates a
+    /// `Vec<String>` with a clone per tab on a path that runs once per row per
+    /// frame.
     pub(crate) fn remote_viewer_count(&self, session_id: &str, tab_ids: &[String]) -> usize {
         let tabs: usize = tab_ids
             .iter()
@@ -6552,26 +6401,24 @@ impl App {
 
     /// Returns all running companion terminals as (terminal_id, terminal) pairs,
     /// ordered by the shared active sort mode (`config.ui.agent_sort`), mirroring
-    /// the agent comparators in [`build_left_items`]. UNFILTERED: the sidebar's
+    /// the agent comparators in [`build_left_items`]. Unfiltered: the sidebar's
     /// visible list is [`Self::terminal_items`].
     ///
-    /// The terminal comparators are kept in LOCKSTEP with the web surface's
-    /// `sortFlatTerminals` (`crates/dux-web/web/src/lib/flatTerminals.ts`); the two
-    /// are duplicated per surface by necessity, so any change here must change there
-    /// too. The comparators:
+    /// The comparators are kept in lockstep with the web surface's
+    /// `sortFlatTerminals` (`crates/dux-web/web/src/lib/flatTerminals.ts`), so any
+    /// change here must change there too:
     /// - `Manual`: base order (by `sort_order` ascending, i.e. creation order).
     /// - `Created`: newest first (`Reverse(created_at)`).
     /// - `Updated`: newest first, by the same PTY-activity-derived timestamp the
     ///   viewmodel exposes as `TerminalView::updated_at` (last activity, else spawn).
-    /// - `NameAsc` / `NameDesc`: by the terminal's DISPLAYED primary label
+    /// - `NameAsc` / `NameDesc`: by the terminal's displayed primary label
     ///   (`foreground_cmd` when present and non-empty, else `label`), lowercased, so
-    ///   name-sort is WYSIWYG.
+    ///   name-sort matches what is on screen.
     /// - `Active` (default): working-or-typing terminals float to the top (a stable
     ///   float keeping base order within each group); terminals have no attention.
     ///
     /// The base sort by `sort_order` runs first in every mode: `sort_by_key` is
-    /// stable, so equal keys (and the `Active` float) keep the manual base order,
-    /// matching the agents' tie-stability.
+    /// stable, so equal keys and the `Active` float keep the manual base order.
     pub(crate) fn sorted_terminal_items(&self) -> Vec<(&String, &CompanionTerminal)> {
         let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
         let mut items: Vec<_> = self.engine.companion_terminals.iter().collect();
@@ -6810,7 +6657,7 @@ impl App {
     /// web surface sharing the same SQLite file. This is a silent, best-effort
     /// persist: a failure here must not block or roll back the (already
     /// authoritative) in-process focus switch, so any error is intentionally
-    /// discarded, matching the wire command's "no status" contract (J3).
+    /// discarded, matching the wire command's "no status" contract.
     pub(crate) fn set_focused_tab(&mut self, session_id: &str, tab_id: &str) {
         // The slot tab is the default focus, so focusing it is recorded as "no
         // memory" on both the in-process map and the persisted column.
@@ -6875,15 +6722,13 @@ impl App {
     /// [`SelectionOrigin`]. Callers stamp it onto a new selection and pass it
     /// back in as the "now" frame when testing live cells.
     pub(crate) fn snapshot_selection_origin(&self) -> SelectionOrigin {
-        // The capacity the SELECTED PTY was actually spawned with, read from the
-        // client rather than from config. Capacity is fixed when the emulator is
-        // built and a live config reload never reaches a running PTY, so reading
-        // `ui.agent_scrollback_lines` here made a full ring read as unsaturated
-        // the moment someone raised the setting, and drift detection stopped
-        // firing for every PTY that predates the reload. A zero capacity, or no
-        // resolvable client, is treated as "never saturated" rather than
-        // "always", so an unconfigured surface keeps the ordinary behaviour
-        // instead of dropping every selection.
+        // The capacity the selected PTY was spawned with, read from the client
+        // rather than from config: capacity is fixed when the emulator is built
+        // and a live reload never reaches a running PTY, so reading
+        // `ui.agent_scrollback_lines` here would make a full ring read as
+        // unsaturated the moment someone raised the setting. A zero capacity, or
+        // no resolvable client, means "never saturated" rather than "always", so
+        // an unconfigured surface keeps the ordinary behaviour.
         let capacity = self
             .selected_terminal_surface_client()
             .map(|client| client.scrollback_capacity())
@@ -7013,30 +6858,26 @@ pub(crate) fn sync_config_projects_with_store(
     })
 }
 
-/// Pre-flight for the in-process TUI→web flip: resolve LOCAL MODE addresses
-/// (loopback:port plus the machine's Tailscale address:port when one was
-/// detected) and actually bind a std `TcpListener` for each BEFORE the TUI tears
-/// anything down. Returning the bound listeners (rather than addresses) means
-/// there is no rebind race when the web server adopts them.
+/// Pre-flight for the in-process flip from the TUI to the web server: resolve
+/// local-mode addresses (loopback:port plus the machine's Tailscale
+/// address:port when one was detected) and actually bind a std `TcpListener`
+/// for each before the TUI tears anything down. Returning the bound listeners
+/// rather than addresses means there is no rebind race when the web server
+/// adopts them.
 ///
-/// The flip is structurally local-only: this function takes `port` +
-/// `tailscale_ip`, never a configurable bind host, so it can never open a public
-/// listener.
-/// Tailscale detection (`tailscale ip`) is a subprocess call, so the CALLER runs
-/// it on a worker thread and hands the result here — this function does no
-/// blocking work beyond the (fast, local) `TcpListener::bind`.
+/// Structurally local-only: it takes `port` and `tailscale_ip`, never a
+/// configurable bind host, so it can never open a public listener. Tailscale
+/// detection (`tailscale ip`) is a subprocess call the caller runs on a worker
+/// thread; nothing here blocks beyond the local `TcpListener::bind`.
 ///
-/// Required vs best-effort mirrors the CLI serve path: loopback is REQUIRED, so a
-/// bind failure there is FATAL (the pre-flight fails, the TUI stays up, and the
-/// failing address is logged); the Tailscale leg is BEST-EFFORT, so a bind
-/// failure there is DROPPED with a warning (named in the returned `warnings`) and
-/// the flip proceeds loopback-only. This matches how a Tailscale address that was
-/// never DETECTED already degrades to loopback with a warning.
+/// Loopback is required, so a bind failure there fails the whole pre-flight (the
+/// TUI stays up, the failing address is logged, and already-bound listeners
+/// drop); the Tailscale leg is best-effort, so a failure there is dropped with a
+/// warning in the returned `warnings` and the flip proceeds loopback-only.
 ///
 /// Each display URL reflects the listener's `local_addr`, so an ephemeral `:0`
 /// port resolves to the real port the user can open. Returns `(listeners, urls,
-/// warnings)`; on a REQUIRED bind failure the whole pre-flight fails and
-/// already-bound listeners drop.
+/// warnings)`.
 fn preflight_server_listeners(
     port: u16,
     tailscale_ip: Option<std::net::IpAddr>,

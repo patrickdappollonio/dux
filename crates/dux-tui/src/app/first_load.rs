@@ -1,25 +1,23 @@
 //! The two first-load screens: the first-run welcome and the post-upgrade
-//! what's-new. They share ONE modal frame and differ only in text and buttons.
+//! what's-new. They share one modal frame and differ only in text and buttons.
 //!
 //! The gate (which screen, and whether the launch stamps the running version as
-//! seen) is [`dux_core::first_load`]; the CONTENT is
+//! seen) is [`dux_core::first_load`]; the content is
 //! [`dux_core::welcome_screen`] and [`dux_core::release_notes`]. Nothing in this
-//! module re-authors prose or re-parses a release body — it only lays the shared
+//! module re-authors prose or re-parses a release body: it only lays the shared
 //! data out for a terminal.
 //!
 //! # The approved layout
 //!
-//! The braille duck sits in a LEFT column, a ruled vertical divider separates it
-//! from scrollable prose on the RIGHT, and exactly TWO buttons sit at the bottom.
+//! The braille duck sits in a left column, a ruled vertical divider separates it
+//! from scrollable prose on the right, and exactly two buttons sit at the bottom.
 //! The border is the ordinary rounded overlay border every dux modal already
-//! uses — that was decided after building and comparing double, thick,
-//! quadrant-outside, and two hybrid treatments in a real terminal; rounded reads
-//! as part of the app rather than as a stranger. Do not make it heavier.
+//! uses; do not make it heavier.
 //!
-//! The duck takes the theme's LEADING color (whatever derives from
+//! The duck takes the theme's leading color (whatever derives from
 //! `accent.primary`), so it belongs to whatever theme the user runs and needs no
 //! new theme token. That deliberately rules out `session_detached`, the theme's
-//! only amber, which carries the WARNING semantic and would recolor the duck
+//! only amber, which carries the warning semantic and would recolor the duck
 //! whenever a theme restyles warnings. The modal border keeps the normal overlay
 //! border color: accenting it too would make it the same hue as the duck and
 //! flatten the composition.
@@ -53,16 +51,15 @@ pub(crate) const DUCK: &[&str] = &[
 /// Visible width of one [`DUCK`] row, in columns.
 pub(crate) const ART_WIDTH: u16 = 33;
 
-/// Target modal width in COLUMNS. Deliberately wider than a routine dialog
-/// because this one carries the art column PLUS prose.
+/// Target modal width in columns. Deliberately wider than a routine dialog
+/// because this one carries the art column plus prose.
 ///
-/// Sized from the READING MEASURE rather than picked round: the duck column and
-/// the divider spend a fixed 38 columns, so the prose column is whatever is left.
-/// At 104 that leaves 63 characters, inside the classic 60-70 band where prose is
-/// comfortable to read. The earlier 90 left only 49, which read cramped next to
-/// the art. [`centered_rect_exact`] clamps it down, so a narrow window simply
-/// gets less, and below [`shows_art`]'s threshold the duck drops out entirely and
-/// the prose takes the full width.
+/// Sized from the reading measure rather than picked round: the duck column and
+/// the divider spend a fixed 38 columns, so at 104 the prose column is 63
+/// characters, inside the classic 60-70 band where prose is comfortable to read.
+/// [`centered_rect_exact`] clamps it down, so a narrow window simply gets less,
+/// and below [`shows_art`]'s threshold the duck drops out entirely and the prose
+/// takes the full width.
 pub(crate) const MODAL_COLS: u16 = 104;
 
 /// Below this many columns of prose the art column is dropped entirely: a duck
@@ -230,13 +227,11 @@ impl FirstLoadPrompt {
     /// The address shown right-aligned and dimmed next to the buttons, or
     /// nothing.
     ///
-    /// Only the WELCOME screen carries one: it is plain text there, because
-    /// nothing on that screen opens the site (the palette's own commands and
-    /// the app menu are the routes to it) and a new user should be able to read
-    /// where dux lives. The what's-new screen shows none: its "Open full notes"
-    /// button is the link, so repeating the destination as text was redundant,
-    /// and measurement showed the ~51-62 character release URL never fit beside
-    /// the buttons at common terminal sizes anyway.
+    /// Only the welcome screen carries one, as plain text: nothing on that
+    /// screen opens the site, and a new user should be able to read where dux
+    /// lives. The what's-new screen shows none, because its "Open full notes"
+    /// button is the link and a release URL does not fit beside the buttons at
+    /// common terminal sizes.
     pub(crate) fn footer_link(&self) -> Option<String> {
         match &self.screen {
             FirstLoadScreen::Welcome(_) => Some(dux_core::urls::WEBSITE.to_string()),
@@ -400,14 +395,10 @@ pub(crate) fn whats_new_lines(
     }
 
     // A release whose body had nothing the parser could read gets an explanation
-    // and stops here. The guard is `has_renderable_body`, NOT `lines.is_empty()`:
-    // a headline alone makes `lines` non-empty while leaving the body blank, and
-    // that shape is what GitHub's APPENDED `## What's Changed` plus the release
-    // workflow's APPENDED horizontal rule and `## Installation` leave behind when
-    // the human writes a one-line headline and no prose. (Both generators append,
-    // after the human's own sections; the rule is why "no body" cannot simply mean
-    // "no text".) See `dux_core::release_notes` for the format a release body has
-    // to follow.
+    // and stops here. The guard is `has_renderable_body`, not `lines.is_empty()`:
+    // a headline alone leaves `lines` non-empty with a blank body, which is the
+    // shape the appended `## What's Changed` and `## Installation` sections
+    // produce. See `dux_core::release_notes` for the format a body must follow.
     if !notes.has_renderable_body() {
         lines.push(Line::from(Span::styled(
             dux_core::release_notes::NO_NOTES_EXPLANATION.to_string(),
@@ -537,17 +528,13 @@ pub(crate) fn button_row(
 /// row of breathing space.
 const CHROME_ROWS: u16 = 6;
 
-/// Rows the BODY wants, and what actually sets the modal's height.
+/// Rows the body wants, and what actually sets the modal's height.
 ///
 /// The duck (15 rows) must not set the height: the resulting 17-row prose pane
-/// opens both screens already scrolled. The welcome carries a wrapped tagline,
-/// four paragraphs and three numbered steps (step 3 of a three-step "how to
-/// start" guide below the fold on the first screen a new user ever sees), and a
-/// release carries a headline, its intro and its feature titles.
-///
-/// 24 rows shows appreciably more of both before any scrolling. It is a target,
-/// not a demand: [`centered_rect_exact`] clamps to the terminal, so a short
-/// window simply gets less and the scroll marker says so.
+/// opens both screens already scrolled, with the welcome's closing steps below
+/// the fold. 24 rows shows appreciably more of both before any scrolling. It is
+/// a target, not a demand: [`centered_rect_exact`] clamps to the terminal, so a
+/// short window simply gets less and the scroll marker says so.
 const MIN_BODY_ROWS: u16 = 24;
 
 /// Where the modal sits. Deliberately one function so the renderer and any test
@@ -761,19 +748,11 @@ fn notes_status_op(
             // The modal IS the visible result, so no second message.
             dux_core::engine::Final::clear()
         })
-        // The asymmetry below is DELIBERATE; do not "fix" the quiet branch into
-        // an error. CLAUDE.md's "prefer explicit failure over silent waiting"
-        // governs operations the USER initiated. An unsolicited background
-        // version check is not one: raising an error status here would put a
-        // failure toast on screen at every launch on a plane, a train, a
-        // locked-down network, or whenever GitHub is having a bad hour — pure
-        // noise about something the user never asked for and cannot act on. The
-        // core gate already guarantees a retry (a transient failure does NOT
-        // mark the version seen, so the notes reappear on a launch with
-        // network), and the reason is always written to dux.log. The explicit
-        // `show-release-notes` path fails loudly, which is where the tenet
-        // actually applies — INCLUDING when the user asked while an automatic
-        // fetch was already running, which is what `explicit_waiting` carries.
+        // An unsolicited version check fails quietly: an error status would toast
+        // at every launch with no network. The core gate leaves the version
+        // unseen on a transient failure, so the notes reappear, and the reason
+        // reaches dux.log. A fetch the user asked for fails loudly, including
+        // one asked for while an automatic fetch runs (`explicit_waiting`).
         .on_failure(
             move |err: &dux_core::release_notes::FetchError| match purpose {
                 NotesFetchPurpose::Automatic

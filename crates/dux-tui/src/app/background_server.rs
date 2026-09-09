@@ -6,8 +6,8 @@
 //! installs; this crate depends only on `dux-core` and never learns that a web
 //! layer exists.
 //!
-//! The `start-web-server` flip is a DIFFERENT thing and is untouched: it swaps the
-//! terminal UI out for the server. These commands keep both up at once.
+//! The `start-web-server` flip is a different thing: it swaps the terminal UI
+//! out for the server. These commands keep both up at once.
 
 use dux_core::engine::EventReaction;
 
@@ -73,13 +73,12 @@ impl App {
     ///
     /// The sweeps have exactly one runner per process and while serving that
     /// runner is this surface, so without this lane a browser watching an agent
-    /// die is told nothing at all and only notices the row vanish when the
-    /// fingerprint backstop next fires.
+    /// die is told nothing until the fingerprint backstop next fires.
     ///
     /// Handed over on every iteration while serving, empty sweeps included: the
-    /// companion is the one that decides an empty hand-off is nothing to do (it
-    /// does), and a caller-side skip would make "the drain reports its sweeps" a
-    /// claim no test can pin.
+    /// companion is the one that decides an empty hand-off is nothing to do, and
+    /// a caller-side skip would make "the drain reports its sweeps" a claim no
+    /// test can pin.
     pub(crate) fn note_companion_maintenance(
         &mut self,
         maintenance: &dux_core::background_serve::DrainedMaintenance,
@@ -185,26 +184,26 @@ impl App {
         }
     }
 
-    /// Start serving the web UI in the background of this TUI.
+    /// Start serving the web UI in the background when `[server]
+    /// serve_while_tui` asks for it and nothing is serving yet.
     ///
-    /// The pre-flight (Tailscale detection, then an actual `TcpListener::bind` of
-    /// each address) runs on a worker thread, exactly as the flip's does and for
-    /// the same reason: `tailscale ip` is a subprocess call and must not block the
-    /// run loop. Binding BEFORE anything starts is what keeps a port collision to
-    /// a status line with the TUI untouched.
-    ///
-    /// `trigger` decides the tone of the SUCCESS outcome only: see
-    /// [`BackgroundServerStart`].
-    /// The boot-time start `[server] serve_while_tui` asks for. It is the one
-    /// start nobody on this keyboard performed, so it is the one that reports as
-    /// a start the config made; keeping the decision here, with the condition,
-    /// is what lets a test pin that the boot path really passes that trigger.
+    /// The one start nobody on this keyboard performed, so it passes
+    /// [`BackgroundServerStart::ConfigAtStartup`] and reports as a start the
+    /// config made.
     pub(crate) fn start_background_server_from_config(&mut self) {
         if self.engine.config.server.serve_while_tui && !self.background_server_is_serving() {
             self.start_background_server(BackgroundServerStart::ConfigAtStartup);
         }
     }
 
+    /// Start serving the web UI in the background of this TUI. `trigger` decides
+    /// the tone of the success outcome only: see [`BackgroundServerStart`].
+    ///
+    /// The pre-flight (Tailscale detection, then an actual `TcpListener::bind` of
+    /// each address) runs on a worker thread, as the flip's does: `tailscale ip`
+    /// is a subprocess call and must not block the run loop. Binding before
+    /// anything starts keeps a port collision to a status line with the TUI
+    /// untouched.
     pub(crate) fn start_background_server(&mut self, trigger: BackgroundServerStart) {
         if self.companion.is_none() {
             self.set_error(
@@ -645,12 +644,11 @@ impl App {
 
 /// What asked for the background server to start.
 ///
-/// This decides the TONE of the success outcome and nothing else: a failure or a
+/// This decides the tone of the success outcome and nothing else: a failure or a
 /// cancellation reads the same whoever asked. The startup autostart is the one
-/// start nobody performed, so its outcome takes the warning tone and stays on the
-/// most-recent-wins status line for the three windows a warning gets. An info
-/// there clears after one window, which at boot means the user is never told a
-/// listener was already up before they sat down.
+/// start nobody performed, so its outcome takes the warning tone, which holds the
+/// most-recent-wins status line longer than an info would; an info at boot clears
+/// before the user has sat down to read that a listener came up.
 ///
 /// A reload that flips the setting to true is a `UserRequest`: editing the file is
 /// an act the user has just taken, and they are looking at the screen when it

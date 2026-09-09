@@ -1,11 +1,9 @@
 //! The one-line hint footer a modal paints along its bottom edge.
 //!
-//! Every modal that shows one builds the same shape by hand: a leading space,
-//! then `key badge` + ` ` + `description` segments separated by two spaces. The
-//! duplication is not the only reason to lift it out. Two rules are easy to get
-//! wrong per-copy and are now structural here:
+//! The shape is a leading space, then `key badge` + ` ` + `description`
+//! segments separated by two spaces. Two rules are structural here:
 //!
-//! * **A segment whose key has no honest label is DROPPED, not blanked.** Every
+//! * **A segment whose key has no honest label is dropped, not blanked.** Every
 //!   binding is user-configurable, so a lookup can legitimately come back
 //!   empty, and the rename-agent footer additionally has to skip any key its
 //!   text field swallows (see `keybindings::text_field_owns_key` and

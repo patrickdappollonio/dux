@@ -425,17 +425,13 @@ impl App {
         reaction: EventReaction,
         routing: &CompanionRouting,
     ) {
-        // ORIGIN ROUTING. While the background web server is on, both surfaces see
-        // the same worker events, and a few reactions carry a follow-up that DOES
-        // something: it spawns a git job, adds a project, or dispatches an agent
-        // create. Those belong to whichever surface asked for them, and the engine
-        // is the one that knows (see `dux_core::engine::owner_of_reaction`). A
-        // browser's PR-create must not also pop a name prompt here.
-        //
-        // Checked here rather than per arm so a `Multi` routes leaf by leaf: this
-        // function is what recurses through one, carrying the same verdict source
-        // down so a leaf cannot be judged against a map the fanout has since
-        // emptied.
+        // Origin routing: while the background web server is on, both surfaces
+        // see the same worker events, and a reaction's follow-up (a git job, an
+        // added project, an agent create) belongs to whichever surface asked for
+        // it, which the engine is the one to know (see
+        // `dux_core::engine::owner_of_reaction`). Checked here rather than per
+        // arm so a `Multi` routes leaf by leaf, carrying the same verdict source
+        // down: a leaf must not be judged against a map the fanout has emptied.
         if routing.companion_owns(&reaction) {
             // The web's follow-up for this ran during the fanout and can have
             // mutated the workspace (the inline project add writes
@@ -1358,16 +1354,13 @@ impl App {
 
     pub(super) fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
         self.last_pty_size = outcome.pty_size;
-        // OWNERSHIP OF A CHILD THIS SURFACE STARTED. This arm runs on both
-        // surfaces (see `owner_of_reaction`), so the launch has to be recognised
-        // as this one's rather than assumed: an id armed at dispatch for every
-        // ordinary launch, and the create flag for a create, whose session id is
-        // minted in the worker and so cannot be armed by id at all.
-        //
-        // Both are spent whether or not the claim happens, and the claim is made
-        // only for a launch that really produced a child: a claim recorded
-        // against an id no pty answers to is a driver nobody can see or take
-        // over.
+        // This arm runs on both surfaces (see `owner_of_reaction`), so a child
+        // this surface started has to be recognised rather than assumed: an id
+        // armed at dispatch for every ordinary launch, and the create flag for a
+        // create, whose session id is minted in the worker and so cannot be armed
+        // by id at all. Both are spent whether or not the claim happens, and only
+        // a launch that really produced a child is claimed: a claim against an id
+        // no pty answers to is a driver nobody can see or take over.
         let armed = self.tui_launched_ptys.remove(&outcome.tab_id);
         let created_here = matches!(
             &outcome.view,
@@ -1419,14 +1412,12 @@ impl App {
             }
             AgentLaunchReadyView::SessionMissing => {
                 // The session vanished between dispatch and launch. Resolve any
-                // open reconnect busy so its spinner doesn't linger (a create
-                // launch never reaches SessionMissing, it commits unconditionally
-                // so only the reconnect op needs clearing here), then take down
-                // whatever launch spinner is still ON THE LINE as a final
-                // fallback. Writing an empty message used to do that job and no
-                // longer can: the line is a queue, so an empty unkeyed message
-                // retires an unkeyed entry and leaves a keyed spinner up until
-                // the busy timeout calls it timed out, which it was not.
+                // open reconnect busy so its spinner does not linger (a create
+                // launch commits unconditionally and never reaches
+                // SessionMissing), then take down whatever launch spinner is
+                // still on the line. An empty unkeyed message cannot do that job:
+                // the line is a queue, so it retires an unkeyed entry and leaves
+                // a keyed spinner up until the busy timeout calls it timed out.
                 if let Some(op) = self.pending_reconnect_ops.remove(&outcome.session.id) {
                     self.apply_reaction(
                         op.resolve(&dux_core::engine::LaunchOutcome::Missing)
@@ -1441,15 +1432,12 @@ impl App {
                 // fullscreen (see CreateCommitted above).
                 self.land_completed_launch(outcome.wants_fullscreen);
                 // Resolve the keyed reconnect op so its success replaces exactly
-                // the "Launching…"/"Starting fresh…" busy. Falls back to an
-                // anonymous info when no op is stashed (e.g. a launch not driven
-                // through the reconnect dispatch sites).
-                // Key by tab id, which the slot pointer names (resolves its
-                // pending reconnect op as before), but an extra-tab launch has no
-                // op under its tab id, so it falls through to an anonymous status
-                // instead of resolving the session-slot tab's op with the wrong message.
-                // The engine's message is shared with the web; the TUI appends
-                // where the launch landed and how to toggle fullscreen.
+                // the "Launching…"/"Starting fresh…" busy. Keyed by tab id, which
+                // the slot pointer names; an extra-tab launch has no op under its
+                // tab id and falls back to an anonymous info rather than
+                // resolving the slot tab's op with the wrong message. The engine's
+                // message is shared with the web; the TUI appends where the launch
+                // landed and how to toggle fullscreen.
                 let status_message =
                     self.launch_completion_message(status_message, outcome.wants_fullscreen);
                 self.resolve_reconnect_op_or(
