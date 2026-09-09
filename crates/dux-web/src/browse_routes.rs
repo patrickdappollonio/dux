@@ -125,7 +125,8 @@ struct MkdirReply {
 /// arithmetic to defeat. `create_dir` never overwrites, follows, or removes.
 async fn mkdir(State(_state): State<AppState>, Json(body): Json<MkdirBody>) -> Response {
     let parent = body.parent;
-    // The same path checks the inspect endpoint makes, in the same order.
+    // The parent is checked as a path string: present, absolute and bounded.
+    // Classifying what is there is the inspect endpoint's job, not this route's.
     if parent.is_empty() {
         return (StatusCode::BAD_REQUEST, "parent is required").into_response();
     }
