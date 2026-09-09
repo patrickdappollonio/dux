@@ -849,40 +849,51 @@ pub(super) fn delete_agent_branch_warning(
         }
         text.push_str(&clause);
     }
-    if let Some(answer) = unpushed
-        && answer.count > 0
-    {
-        let count = answer.count;
-        let plural = if count == 1 { "commit" } else { "commits" };
-        // A repository with no remote-tracking refs has not held anything back;
-        // it has nowhere to have pushed to, and the count is its whole history.
-        // Saying "not pushed anywhere" there reads as an accusation about work
-        // that was never going anywhere, so the sentence says what is true.
-        text.push_str(&if answer.has_remote_refs {
-            if drifted {
-                format!(" They have {count} {plural} not pushed anywhere between them.")
-            } else {
-                format!(" It has {count} {plural} not pushed anywhere.")
-            }
-        } else {
-            let (subject, possessive) = if drifted {
-                ("them", "their")
-            } else {
-                ("it", "its")
-            };
-            // A single commit gets its own clause: "all 1 of its commits" is
-            // the sentence admitting it was assembled rather than written.
-            let existence = if count == 1 {
-                format!("{possessive} only commit exists")
-            } else {
-                format!("all {count} of {possessive} commits exist")
-            };
-            format!(
-                " Nothing on {subject} has been pushed anywhere: {existence} only on this machine."
-            )
-        });
+    if let Some(sentence) = unpushed_commits_sentence(unpushed, drifted) {
+        text.push_str(&sentence);
     }
     Some(text)
+}
+
+/// What the delete warning says about commits the branches are holding, or
+/// `None` when there is nothing to say.
+///
+/// A repository with no remote-tracking refs has not held anything back; it has
+/// nowhere to have pushed to, and the count is its whole history. Saying "not
+/// pushed anywhere" there reads as an accusation about work that was never going
+/// anywhere, so the sentence says what is true instead.
+fn unpushed_commits_sentence(
+    unpushed: Option<dux_core::git::UnpushedCommits>,
+    drifted: bool,
+) -> Option<String> {
+    let answer = unpushed?;
+    let count = answer.count;
+    if count == 0 {
+        return None;
+    }
+    if answer.has_remote_refs {
+        let plural = if count == 1 { "commit" } else { "commits" };
+        return Some(if drifted {
+            format!(" They have {count} {plural} not pushed anywhere between them.")
+        } else {
+            format!(" It has {count} {plural} not pushed anywhere.")
+        });
+    }
+    let (subject, possessive) = if drifted {
+        ("them", "their")
+    } else {
+        ("it", "its")
+    };
+    // A single commit gets its own clause: "all 1 of its commits" is the
+    // sentence admitting it was assembled rather than written.
+    let existence = if count == 1 {
+        format!("{possessive} only commit exists")
+    } else {
+        format!("all {count} of {possessive} commits exist")
+    };
+    Some(format!(
+        " Nothing on {subject} has been pushed anywhere: {existence} only on this machine."
+    ))
 }
 
 /// The worktree-manager checkbox label, naming the branch it would delete.
@@ -22945,6 +22956,45 @@ mod tests {
             count,
             has_remote_refs: true,
         })
+    }
+
+    #[test]
+    fn the_unpushed_sentence_says_nothing_without_a_counted_commit() {
+        assert_eq!(super::unpushed_commits_sentence(None, false), None);
+        assert_eq!(
+            super::unpushed_commits_sentence(pushed_nowhere(0), false),
+            None
+        );
+    }
+
+    #[test]
+    fn the_unpushed_sentence_counts_and_pluralizes_per_branch_count() {
+        assert_eq!(
+            super::unpushed_commits_sentence(pushed_nowhere(1), false).unwrap(),
+            " It has 1 commit not pushed anywhere."
+        );
+        assert_eq!(
+            super::unpushed_commits_sentence(pushed_nowhere(3), true).unwrap(),
+            " They have 3 commits not pushed anywhere between them."
+        );
+    }
+
+    #[test]
+    fn the_unpushed_sentence_drops_the_accusation_without_remote_refs() {
+        let never_pushed = |count| {
+            Some(dux_core::git::UnpushedCommits {
+                count,
+                has_remote_refs: false,
+            })
+        };
+        assert_eq!(
+            super::unpushed_commits_sentence(never_pushed(1), false).unwrap(),
+            " Nothing on it has been pushed anywhere: its only commit exists only on this machine."
+        );
+        assert_eq!(
+            super::unpushed_commits_sentence(never_pushed(4), true).unwrap(),
+            " Nothing on them has been pushed anywhere: all 4 of their commits exist only on this machine."
+        );
     }
 
     /// The count is a git answer that lands after the dialog is already up, so
