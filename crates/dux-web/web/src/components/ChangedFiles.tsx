@@ -86,6 +86,7 @@ import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { cn } from "@/lib/utils"
 import type { ChangedFileView, SessionView } from "@/lib/types"
 import { agentRoot } from "@/lib/editorRoot"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 import {
   useChangedFilesController,
   type ChangesBulkVerb,
@@ -355,14 +356,12 @@ interface FileGroupProps {
 // abbreviate, with no thousands separators, matching the figures elsewhere.
 function recapLabel(scope: string, recap: ChangedFilesRecap): string {
   const lines = (n: number, verb: string) =>
-    `${n} line${n === 1 ? "" : "s"} ${verb}`
+    `${formatRegularCount(n, "line")} ${verb}`
   const parts: string[] = []
   if (recap.additions > 0) parts.push(lines(recap.additions, "added"))
   if (recap.deletions > 0) parts.push(lines(recap.deletions, "removed"))
   if (recap.binaryCount > 0) {
-    parts.push(
-      `${recap.binaryCount} binary file${recap.binaryCount === 1 ? "" : "s"}`,
-    )
+    parts.push(formatRegularCount(recap.binaryCount, "binary file"))
   }
   return `${scope}: ${parts.join(", ")}`
 }

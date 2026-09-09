@@ -10,6 +10,7 @@ import {
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeDeleteProject, deleteProject, useDux } from "@/lib/store"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 
 // The destructive cascade counterpart to `RemoveProjectDialog`: it also deletes
 // every agent's worktree from disk, so the copy spells that out. Offered only for
@@ -33,7 +34,7 @@ export function DeleteProjectDialog() {
   // no agents has no worktrees to mention.
   const cascadeClause =
     agentCount > 0
-      ? `, its ${agentCount} agent${agentCount === 1 ? "" : "s"}, and ${
+      ? `, its ${formatRegularCount(agentCount, "agent")}, and ${
           agentCount === 1 ? "its worktree" : "their worktrees"
         } on disk`
       : ""
