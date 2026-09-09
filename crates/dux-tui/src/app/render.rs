@@ -1275,6 +1275,7 @@ impl App {
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
+        self.redraw.renders = self.redraw.renders.wrapping_add(1);
         // Pre-fill the whole frame with the theme's app background. Cells
         // that no widget paints over (gutters, modal interiors, the strip
         // under the PR banner caps) inherit this color, so light themes

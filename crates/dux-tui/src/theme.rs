@@ -18,6 +18,13 @@ pub const SPINNER_FRAMES: &[char] = &['◜', '◠', '◝', '◞', '◡', '◟'];
 /// animates, which is what keeps this cadence honest.
 pub const SPINNER_FRAME_MS: u128 = 75;
 
+/// Wall-clock milliseconds per sampled frame of the working-name shimmer. The
+/// band sweeps once every 1500ms (`shimmer::PERIOD_MS`) and its brightness is
+/// continuous, so unlike the spinner it has no glyph of its own to change: this
+/// is the interval at which a redraw is worth paying for, and it is the cadence
+/// the shimmer had when every poll drew a frame.
+pub const SHIMMER_FRAME_MS: u128 = 33;
+
 /// The single shared solid-dot glyph used everywhere dux needs a round dot:
 /// the attention indicator, status dots, and the tab strip's active-tab
 /// marker. One literal, reused by name, so the glyph can never drift between

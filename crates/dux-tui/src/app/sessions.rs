@@ -1963,6 +1963,7 @@ impl App {
             return;
         };
         self.unpushed_count_rx = None;
+        self.mark_frame_dirty();
         if let PromptState::ConfirmDeleteAgent {
             session_id,
             unpushed_commits,
@@ -3800,6 +3801,7 @@ impl App {
             return;
         };
         let pending = self.pending_diff.take().expect("checked just above");
+        self.mark_frame_dirty();
         if answer.key != pending.key {
             return;
         }
@@ -4755,6 +4757,7 @@ mod tests {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             shutdown_sig_ids: Vec::new(),
             force_redraw: false,
+            redraw: RedrawGate::default(),
             welcome_tip_index: 0,
             welcome_logo_visible: false,
             welcome_logo_alt: false,

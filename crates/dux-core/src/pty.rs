@@ -1511,6 +1511,15 @@ impl PtyClient {
             .unwrap_or_default()
     }
 
+    /// Whether the grid has changes the next snapshot would pick up, WITHOUT
+    /// consuming the flag (`snapshot_into` is the consumer). A surface that
+    /// gates its redraws asks this; it is a superset of `take_received_data`,
+    /// which reports content changes only and deliberately swallows a resized
+    /// child's repaint burst.
+    pub fn has_pending_output(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
     /// Returns `true` if the PTY received data since the last call, then
     /// clears the flag. Used to detect streaming activity for UI indicators
     /// without interfering with the snapshot dirty flag.

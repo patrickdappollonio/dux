@@ -555,6 +555,9 @@ pub struct App {
     /// directly without registering real handlers.
     pub(crate) shutdown_sig_ids: Vec<signal_hook::SigId>,
     pub(crate) force_redraw: bool,
+    /// The run loop's draw gate: poll cadence and draw cadence are separate
+    /// questions (see [`redraw`]).
+    pub(crate) redraw: RedrawGate,
     pub(crate) welcome_tip_index: usize,
     /// Whether the ASCII logo was rendered in the previous frame.
     pub(crate) welcome_logo_visible: bool,
@@ -3564,6 +3567,8 @@ mod input;
 pub(crate) mod modal;
 mod overlay_dismiss;
 mod pty_ownership;
+mod redraw;
+pub(crate) use redraw::RedrawGate;
 mod render;
 mod reorder;
 mod sessions;
@@ -3903,6 +3908,7 @@ impl App {
             shutdown_flag: signals.shutdown_flag,
             shutdown_sig_ids: signals.shutdown_sig_ids,
             force_redraw: false,
+            redraw: RedrawGate::default(),
             welcome_tip_index: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as usize)
@@ -4065,10 +4071,10 @@ impl App {
 
             self.prepare_run_tick();
             self.refresh_run_terminal(terminal);
-            if !self.draw_run_frame(terminal) {
+            // The loop keeps polling at its own cadence; only the DRAW is gated.
+            if !self.draw_and_forward(Instant::now(), |app| app.draw_run_frame(terminal)) {
                 continue;
             }
-            self.forward_host_passthrough();
 
             if let Some((listeners, urls)) = self.pending_server_flip.take() {
                 return RunExit::FlipToServer { listeners, urls };
@@ -4083,7 +4089,7 @@ impl App {
         self.drain_events();
         // Browser requests observe this tick's worker results and render in the same frame.
         self.service_companion();
-        self.engine.poll_pty_activity();
+        self.note_visible_pty_output();
         // Mark the visible tab before signals can raise or clear its attention state.
         self.note_focused_agent_viewed();
         self.engine.poll_agent_signals();
@@ -4100,10 +4106,15 @@ impl App {
             self.clear_prompt_hint();
         }
         self.status.tick(Instant::now(), BUSY_TIMEOUT);
+        // The sidebar reflects these per-row flags, and nothing else reports them.
+        if self.refresh_row_activity() {
+            self.mark_frame_dirty();
+        }
     }
 
     fn refresh_run_terminal(&mut self, terminal: &mut ratatui::DefaultTerminal) {
         if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
+            self.mark_frame_dirty();
             self.retire_pending_link_click();
             if let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize()) {
                 self.report_runtime_error("terminal resize failed", &err);
@@ -4114,6 +4125,7 @@ impl App {
             return;
         }
         self.force_redraw = false;
+        self.mark_frame_dirty();
         if let Err(err) = terminal.clear() {
             self.report_runtime_error("force redraw failed", &err);
         }
@@ -4127,6 +4139,8 @@ impl App {
 
     fn draw_run_frame(&mut self, terminal: &mut ratatui::DefaultTerminal) -> bool {
         if let Err(err) = terminal.draw(|frame| self.render(frame)) {
+            // The gate consumed the mark for a frame that never landed.
+            self.mark_frame_dirty();
             self.report_runtime_error("terminal draw failed", &err);
             thread::sleep(Duration::from_millis(100));
             return false;
@@ -4528,6 +4542,9 @@ impl App {
     /// a test: each of them retires state a test can then assert on, and a
     /// retirement that only exists inside a loop body is one nobody can prove.
     pub(crate) fn handle_terminal_event(&mut self, event: Event) -> bool {
+        // Every input event is a redraw source; none of the handlers below has
+        // to remember it.
+        self.mark_frame_dirty();
         match event {
             Event::Key(key) => match self.handle_key(key) {
                 Ok(exit) => exit,

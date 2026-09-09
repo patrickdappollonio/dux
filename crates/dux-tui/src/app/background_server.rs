@@ -114,6 +114,8 @@ impl App {
             _ => return,
         };
         if outcome.mutated || followup_ran {
+            // A browser's action changed state this surface also shows.
+            self.mark_frame_dirty();
             self.refresh_after_companion_mutation();
         }
         // The serve retired itself (a required listener died, or its request

@@ -104,6 +104,9 @@ impl App {
     fn apply_pruned_pty_events(&mut self) -> dux_core::background_serve::DrainedMaintenance {
         let context = PruneViewContext::capture(self);
         let pruned = self.engine.prune_exited_ptys();
+        if !pruned.is_empty() {
+            self.mark_frame_dirty();
+        }
         let reported_prunes = if self.background_server_is_serving() {
             pruned.clone()
         } else {
@@ -112,9 +115,14 @@ impl App {
         self.apply_pruned_agent_tabs(&pruned, &context);
         self.apply_selected_agent_exit(&pruned);
         self.apply_pruned_terminals(&pruned);
+        let foregrounds_changed = self.engine.refresh_terminal_foregrounds();
+        if foregrounds_changed {
+            // A terminal row's label is its foreground command.
+            self.mark_frame_dirty();
+        }
         dux_core::background_serve::DrainedMaintenance {
             pruned: reported_prunes,
-            foregrounds_changed: self.engine.refresh_terminal_foregrounds(),
+            foregrounds_changed,
         }
     }
 
@@ -295,6 +303,8 @@ impl App {
 
     fn drain_worker_events(&mut self) {
         while let Ok(event) = self.engine.worker_rx.try_recv() {
+            // A drained event is a redraw source whatever it turns out to be.
+            self.mark_frame_dirty();
             let metadata = DrainedEventMetadata::capture(&event);
             self.disarm_tui_launch_for_failed_event(&event);
             let reaction = self.engine.process_worker_event(event);
@@ -312,6 +322,7 @@ impl App {
     fn apply_resume_fallback_sweep(&mut self) {
         let sweep_size = self.pty_size_for_launch();
         for reaction in self.engine.sweep_resume_fallbacks(sweep_size) {
+            self.mark_frame_dirty();
             let routing = self.companion_routing();
             self.notify_companion(&reaction);
             self.apply_routed_reaction(reaction, &routing);
@@ -320,6 +331,7 @@ impl App {
 
     fn dispatch_reaped_worktree_removals(&mut self) {
         for removal in self.engine.reap_terminating_ptys() {
+            self.mark_frame_dirty();
             let _busy = self.engine.dispatch_deferred_worktree_removal(removal);
         }
     }

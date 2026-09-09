@@ -914,6 +914,7 @@ impl App {
             return;
         };
         self.notes_fetch_rx = None;
+        self.mark_frame_dirty();
         self.apply_notes_fetch(fetched);
     }
 
@@ -937,6 +938,7 @@ impl App {
         let plan =
             dux_core::first_load::after_fetch(plan, dux_core::first_load::NotesOutcome::Fetched);
         self.prompt = PromptState::FirstLoad(FirstLoadPrompt::whats_new(*notes, plan.mark_seen));
+        self.mark_frame_dirty();
     }
 
     /// The pure-ish half of [`Self::drain_notes_fetch`], so the fold is testable

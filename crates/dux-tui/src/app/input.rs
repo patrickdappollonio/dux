@@ -2944,6 +2944,9 @@ impl App {
         if n == 0 {
             return Ok(false);
         }
+        // Raw bytes are input like any other: local state (scroll, selection,
+        // the macro bar) can move before the child echoes anything.
+        self.mark_frame_dirty();
 
         if self.consume_loading_raw_input(&buf[..n]) {
             return Ok(false);

@@ -9,7 +9,7 @@ use crate::app::{
     App, CenterMode, ChangeAgentProviderMode, ChangeAgentProviderOption, ChangeAgentProviderPrompt,
     ChangeDefaultProviderOption, ChangeDefaultProviderPrompt, ChangeProjectDefaultProviderOption,
     ChangeProjectDefaultProviderPrompt, FocusPane, FullscreenOverlay, InputTarget,
-    MouseLayoutState, OverlayMouseLayoutState, PromptState, RightSection, TextInput,
+    MouseLayoutState, OverlayMouseLayoutState, PromptState, RedrawGate, RightSection, TextInput,
 };
 use crate::clipboard::Clipboard;
 use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -309,6 +309,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         shutdown_flag: Arc::new(AtomicBool::new(false)),
         shutdown_sig_ids: Vec::new(),
         force_redraw: false,
+        redraw: RedrawGate::default(),
         welcome_tip_index: 0,
         welcome_logo_visible: false,
         welcome_logo_alt: false,
