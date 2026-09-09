@@ -201,22 +201,18 @@ impl SessionStore {
         let frozen_titles = {
             let tx = self.conn.unchecked_transaction()?;
             // IDEMPOTENT, UNGATED backfill: freeze the birth branch for any row
-            // that still lacks one. The WHERE clause is self-limiting (new rows
-            // always record a genuine `initial_branch` at creation, so they are
-            // never empty), so running it on every `migrate()` is a no-op once
-            // healed — but it self-heals rows stranded by a crash mid-migration
-            // or a downgrade→re-upgrade window. The true original may already be
-            // lost to prior drift, so freeze the current branch as the recorded
-            // initial (best available).
+            // that still lacks one. The WHERE clause is self-limiting, since new
+            // rows always record a genuine `initial_branch` at creation, so this
+            // is a no-op once healed and still repairs rows stranded by a crash
+            // mid-migration or a downgrade-then-upgrade window. The true original
+            // may already be lost to prior drift, so the current branch is frozen
+            // as the recorded initial.
             //
-            // GATED ON THE KIND COLUMN. Note what the gate does and does not
-            // buy: a standalone row has an empty `initial_branch` AND an empty
-            // `branch_name` permanently by design, so the assignment itself
-            // would be '' to '', a no-op. The gate is here so the statement can
-            // never START mattering for folder rows: it says out loud that this
-            // heal is about branch identity, which they have none of, and it
-            // keeps a future change to either side (a default branch name, a
-            // non-empty placeholder) from quietly writing one onto them.
+            // Gated on the KIND column: a standalone row has an empty
+            // `initial_branch` and an empty `branch_name` permanently by design,
+            // so the assignment would be a no-op today. The gate keeps it from
+            // ever starting to matter for folder rows, which have no branch
+            // identity to heal.
             tx.execute(
                 "update agent_sessions set initial_branch = branch_name \
                  where workspace_kind = 'managed' \
@@ -224,22 +220,20 @@ impl SessionStore {
                 [],
             )?;
             // ONE-TIME backfill, gated on the FIRST appearance of the
-            // `initial_branch` column so it runs exactly once — mirroring the
-            // gated `sort_order` backfill below. `migrate()` runs on every
-            // `open()`, which happens on every startup AND every background
-            // project-persistence / config-reload; an unconditional `title`
+            // `initial_branch` column so it runs exactly once, mirroring the gated
+            // `sort_order` backfill below. `migrate()` runs on every `open()`,
+            // which happens on every startup and every background
+            // project-persistence or config-reload, and an unconditional `title`
             // backfill would re-freeze the intentionally-NULL `title` of every
-            // auto-named agent on each open, silently pinning it so the display
-            // can no longer track the branch. `title IS NULL` is a legitimate
-            // ongoing state for auto-named agents, so this must never re-run.
+            // auto-named agent on each open, pinning it so the display can no
+            // longer track the branch. `title IS NULL` is a legitimate ongoing
+            // state for auto-named agents, so this must never re-run.
             //
-            // Migration asymmetry (intentional): legacy pet-named agents present
-            // at the moment of the one-time upgrade get their current name frozen
-            // into `title` here, so their display can never drift with the
-            // branch again. Agents auto-named AFTER the upgrade keep `title` NULL
-            // and their display continues to track `branch_name` (drift shown via
-            // `initial_branch`). A future reader seeing this split should know it
-            // is the deliberate freeze tradeoff, not an oversight.
+            // The asymmetry is deliberate: legacy pet-named agents present at the
+            // one-time upgrade get their current name frozen into `title` here, so
+            // their display never drifts with the branch again, while agents
+            // auto-named afterwards keep `title` NULL and track `branch_name`,
+            // with drift shown through `initial_branch`.
             let frozen = if initial_branch_added {
                 //
                 // Gated on the kind column for the same reason as the backfill
@@ -291,11 +285,11 @@ impl SessionStore {
         //
         // Retryable: run the backfill when the column was just added, OR when a
         // prior crash stranded the table in the gap between the (autocommitted)
-        // ALTER and the backfill — detected by `session_sort_order_needs_backfill`
+        // ALTER and the backfill, detected by `session_sort_order_needs_backfill`
         // as "some project has 2+ sessions all still at the default 0". Gating on
-        // `ensure_column` alone (the previous behavior) left a crash-stranded
-        // table pinned at sort_order=0 forever, because the next boot sees the
-        // column present and skips the backfill permanently.
+        // `ensure_column` alone would pin a crash-stranded table at sort_order=0
+        // forever, since the next boot sees the column present and skips the
+        // backfill.
         let sort_order_added = ensure_column(
             &self.conn,
             "agent_sessions",
@@ -1435,28 +1429,22 @@ impl SessionStore {
             .unwrap_or("unknown");
         // UPDATE first: existing sessions are re-upserted constantly (status
         // changes, provider starts), and that hot path must not pay the
-        // min(sort_order) placement query below. The SET list deliberately
-        // omits `sort_order` so re-upserting an existing session never
-        // disturbs the user's chosen order.
+        // min(sort_order) placement query below. Three columns are therefore
+        // INSERT-but-not-SET:
         //
-        // It omits `branch_provenance` for a stronger reason: provenance is
-        // decided once, at creation, and an UPDATE that could rewrite it is an
-        // UPDATE that could turn a user's pre-existing `develop` into a branch
-        // dux believes it owns and force-deletes. INSERT-but-not-SET, following
-        // `sort_order`. Do NOT copy `initial_branch`'s treatment below: that
-        // one IS in the SET list (its immutability is engine discipline), and
-        // adding `branch_provenance` beside it would break this guarantee.
+        // - `sort_order`, so a re-upsert never disturbs the user's chosen order.
+        // - `branch_provenance`, decided once at creation: an UPDATE that could
+        //   rewrite it could turn a user's pre-existing `develop` into a branch
+        //   dux believes it owns and force-deletes.
+        // - `slot_tab_id`, which is identity: written by `create_session` and
+        //   afterwards only by the migration's repair passes, the only code that
+        //   knows whether a session still needs its first tab MINTED or has a live
+        //   tab to ADOPT. The read path hands a pre-pointer row the session's own
+        //   id as a stand-in, so a re-upsert would store that stand-in as a real
+        //   pointer and the next open would adopt tab 2 instead of minting tab 1.
         //
-        // `slot_tab_id` joins them, for the same shape of reason. The pointer is
-        // identity: it is written once by `create_session` and afterwards only by
-        // the migration's repair passes, which are the only code that knows
-        // whether a session still needs its first tab MINTED or has a live tab to
-        // ADOPT. A hot-path UPDATE cannot know that, and one that writes the
-        // pointer back turns the first answer into the second: the read path
-        // hands a pre-pointer row the session's own id as a stand-in, and
-        // re-upserting it would store that stand-in as a real pointer, so the
-        // next open sees a dangling id and adopts tab 2 instead of minting tab 1.
-        // INSERT-but-not-SET, following `sort_order` and `branch_provenance`.
+        // `initial_branch` IS in the SET list; its immutability is engine
+        // discipline rather than a schema guarantee, so do not follow it here.
         let updated = conn.execute(
             r#"
             update agent_sessions set

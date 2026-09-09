@@ -882,14 +882,13 @@ struct CarriedProject {
 ///
 /// Captured BEFORE the rebuild below. `patch_projects` replaces the whole array
 /// (it has to: a project can be removed, and per-project keys are optional, so
-/// there is no in-place edit that covers every case), and without this capture
-/// that replacement silently deleted anything the user had put there.
+/// there is no in-place edit that covers every case), so anything not captured
+/// here is deleted by that replacement.
 ///
-/// BOTH legal spellings of the array are read. `[[projects]]` (an array of
-/// tables) is what dux writes, but `projects = [ { ... } ]` (an array of inline
-/// tables) parses to the identical `Config`, so a user who hand-wrote that form
-/// has a working config, and reading only one spelling deleted their keys on the
-/// next save.
+/// BOTH legal spellings of the array are read. `[[projects]]` (an array of tables)
+/// is what dux writes, but `projects = [ { ... } ]` (an array of inline tables)
+/// parses to the identical `Config`, so a user who hand-wrote that form has a
+/// working config and must not lose their keys on the next save.
 ///
 /// Every entry is captured, including one with no unmanaged keys and one with no
 /// `id` at all, because the comments hang off the entry rather than off its keys.
@@ -976,11 +975,9 @@ fn unmanaged_project_keys(doc: &DocumentMut) -> Vec<Option<CarriedProject>> {
 ///
 /// Identity is tried in three steps, most specific first:
 ///
-/// 1. the PAIR of `id` and raw `path`. Matching on the id alone kept each entry's
-///    keys with whatever landed in the same SLOT, so two entries sharing an id
-///    (a hand-edit the project sync rejects, but that a file can hold) swapped
-///    their keys the moment the two projects were reordered in memory: measured,
-///    `/b` came back carrying `/a`'s key.
+/// 1. the PAIR of `id` and raw `path`. Matching on the id alone lets two entries
+///    sharing an id (a hand-edit the project sync rejects, but that a file can
+///    hold) swap their keys as soon as the projects are reordered in memory.
 /// 2. the `id` alone, because the raw path is not always comparable: the loader
 ///    env-expands it, so a file that spells it `$HOME/p` holds `/home/ada/p` in
 ///    memory and never matches on the pair.

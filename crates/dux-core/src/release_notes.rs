@@ -66,24 +66,22 @@ fn has_content(entries: &[String]) -> bool {
 /// The code points BOTH surfaces treat as invisible.
 ///
 /// Neither language's own `trim` can be the definition, because they trim
-/// DIFFERENT sets, which is a real divergence and not a theoretical one: Rust
-/// trims U+0085 (next line) and JavaScript does not; JavaScript trims U+FEFF
-/// (byte-order mark) and Rust does not. So the same release body emptied out in
-/// the browser and kept a body in the terminal, or the reverse, and the two
-/// screens disagreed about whether to show the no-notes explanation.
+/// DIFFERENT sets: Rust trims U+0085 (next line) and JavaScript does not;
+/// JavaScript trims U+FEFF (byte-order mark) and Rust does not. Left to their own
+/// trims, the same release body empties out on one surface and keeps a body on the
+/// other, and the two screens disagree about whether to show the no-notes
+/// explanation.
 ///
-/// The set is Unicode `White_Space` (which is exactly what `char::is_whitespace`
-/// answers, U+0085 included) plus the zero-width characters, which are worse than
-/// whitespace: they render as literally nothing, so a body made of them is the
-/// original blank-panel bug with an extra step. The web declares the same set as
+/// The set is Unicode `White_Space` (exactly what `char::is_whitespace` answers,
+/// U+0085 included) plus the zero-width characters, which are worse than
+/// whitespace: they render as literally nothing. The web declares the same set as
 /// `INVISIBLE_CODE_POINTS`, and a test here reads that declaration back.
 ///
-/// Sharing the SET is not on its own enough, and for a while it was all that was
-/// shared: [`html_line_break_at`] still asked `char::is_whitespace` about the gaps
-/// inside a `<br>` while the web asked `\s`, so `<br` U+0085 `/>` and `<br` U+FEFF
-/// `/>` still landed on opposite answers, measured. Both matchers now call this
-/// function, and `tests/fixtures/release_notes_cross_language.json` pins the
-/// ANSWERS from both languages rather than only the set.
+/// Sharing the SET is not enough on its own: every matcher must call this
+/// function, [`html_line_break_at`]'s gap check included, or `<br` U+0085 `/>` and
+/// `<br` U+FEFF `/>` land on opposite answers. `tests/fixtures/
+/// release_notes_cross_language.json` pins the ANSWERS from both languages rather
+/// than only the set.
 pub fn is_invisible_char(c: char) -> bool {
     c.is_whitespace() || matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
 }
@@ -197,19 +195,15 @@ fn find_at(chars: &[char], from: usize, needle: &str) -> Option<usize> {
 /// Splits a release body into headline, intro paragraphs, and feature titles.
 ///
 /// Stops at the SECOND `## ` heading, which is where the machine-written tail
-/// begins. BOTH generators APPEND: GitHub's auto-generated `## What's Changed`
-/// commit list lands after every human-written section (check the body of any
-/// real dux release), and the release workflow then appends a horizontal rule and
-/// `## Installation`. Everything after that second heading is machine-written and
-/// not worth showing in a modal.
+/// begins: both generators APPEND, GitHub's auto-generated `## What's Changed`
+/// commit list landing after every human-written section and the release workflow
+/// then appending a horizontal rule and `## Installation`. That direction is why
+/// the human's own `## ` line comes first and is therefore the headline, and why a
+/// body with no human `## ` line hands the headline to the boilerplate rather than
+/// merely stopping early.
 ///
-/// Getting that direction right matters for the next reader, not for the code: it
-/// is why the human's own `## ` line comes FIRST and is therefore the headline,
-/// and why a body with no human `## ` line hands the headline to the boilerplate
-/// instead of merely stopping early.
-///
-/// Char-based throughout: release prose is full of multi-byte punctuation and
-/// byte slicing would panic mid-character.
+/// Char-based throughout: release prose is full of multi-byte punctuation and byte
+/// slicing would panic mid-character.
 pub fn parse_release_body(body: &str) -> ParsedBody {
     let mut notes = ParsedBody::default();
     let mut para = String::new();
@@ -746,9 +740,6 @@ pub fn write_cache(path: &Path, notes: &ReleaseNotes, now: DateTime<Utc>) -> Res
 /// `tag` is BOTH the cache key and what gets requested, which is the point: the
 /// fetched notes always carry the tag that was asked for, so the entry written
 /// here is the entry the next launch looks up and the TTL actually takes effect.
-/// (An earlier version keyed on the running version but fetched
-/// `/releases/latest`; whenever the newest published tag differed, every lookup
-/// missed and dux refetched on every single launch.)
 ///
 /// A definitive [`FetchError::NoSuchRelease`] is returned as-is and does NOT fall
 /// back to a stale entry: there is no release, so there is nothing to be stale

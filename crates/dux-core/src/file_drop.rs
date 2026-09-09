@@ -2,58 +2,46 @@
 //!
 //! # Why this saves a file instead of sending its bytes
 //!
-//! The obvious reading of "drop a file onto the terminal" is to push the file's
-//! bytes into the child's input stream. That cannot work. No agent CLI reads a
-//! file from its input stream: they take a PATH, or they read the clipboard of
-//! the machine THEY run on, which for a browser user is the wrong computer.
-//! Every terminal emulator whose source was read (Alacritty, kitty, WezTerm,
-//! Ghostty, GNOME Terminal, Konsole, iTerm2) answers a drop by inserting the
-//! PATH as text. So dux does what a terminal does: save the file, then let the
-//! browser paste its path.
+//! No agent CLI reads a file from its input stream: they take a PATH, or they read
+//! the clipboard of the machine they run on, which for a browser user is the wrong
+//! computer. Every terminal emulator whose source was read (Alacritty, kitty,
+//! WezTerm, Ghostty, GNOME Terminal, Konsole, iTerm2) answers a drop by inserting
+//! the path as text, so dux saves the file and lets the browser paste its path.
 //!
-//! This module owns the saving half. The pasting half is the browser's, over
-//! its own already-gated PTY socket, and deliberately never happens here (see
-//! `dux_web::file_drop_routes` for why routing it through the upload handler
-//! would walk past the server's input-ownership gate).
+//! This module owns the saving half. The pasting half is the browser's, over its
+//! own already-gated PTY socket, and deliberately never happens here: routing it
+//! through the upload handler would walk past the server's input-ownership gate
+//! (see `dux_web::file_drop_routes`).
 //!
 //! # What this module guarantees
 //!
-//! - **A dropped name is validated, never rewritten.** An accented or non-Latin
-//!   name is kept exactly as the user had it. Rewriting names to "safe"
+//! - **A dropped name is validated, never rewritten.** Rewriting names to "safe"
 //!   characters destroys them, can collapse two distinct names into one, and can
 //!   even produce `.` or `..`.
-//! - **Creation is atomic and never overwrites.** The file is created relative
-//!   to a PINNED DIRECTORY HANDLE, exclusively, refusing to follow a symlink. On
-//!   a name clash the next candidate is tried, so two uploads of `shot.png` in
-//!   the same second produce two files.
-//! - **A symlink at any candidate fails the request.** Refusing to follow it is
-//!   the safety property; quietly writing next to it would hide the fact that
-//!   something unexpected is sitting there. A probe that FAILS is never read as
-//!   "not a symlink"; it fails the request too.
+//! - **Creation is atomic and never overwrites.** The file is created relative to
+//!   a pinned directory handle, exclusively, refusing to follow a symlink. On a
+//!   name clash the next candidate is tried.
+//! - **A symlink at any candidate fails the request.** A probe that fails is never
+//!   read as "not a symlink"; it fails the request too.
 //! - **A failed or abandoned write removes what it partly wrote.**
-//! - **The whole path is checked, not just the name.** The name is the last
-//!   component of a path that is what actually gets sent to the terminal, so the
-//!   DIRECTORY is held to the same standard: absolute, valid UTF-8, free of
-//!   control characters, and verified to still name the pinned directory. A
-//!   folder holding a line feed or an escape byte would arrive at the line
-//!   editor as something other than a path, and no way of writing the path
-//!   protects that layer; a folder that is not valid UTF-8 would arrive full of
-//!   replacement characters. Refusing the drop is better than saving a file the
-//!   user cannot reference. (The web pastes the path BARE, neither quoted nor
-//!   escaped, because the agent CLIs do not tokenise the paste the way a shell
-//!   does; the reasoning lives on `pastePayload` in
-//!   `crates/dux-web/web/src/lib/fileDrop.ts`.)
+//! - **The whole path is checked, not just the name.** The directory is held to
+//!   the same standard as the name: absolute, valid UTF-8, free of control
+//!   characters, and verified to still name the pinned directory. A folder holding
+//!   a line feed or an escape byte would arrive at the line editor as something
+//!   other than a path, and no way of writing the path protects that layer; a
+//!   folder that is not valid UTF-8 would arrive full of replacement characters.
+//!   How the browser quotes the path it pastes is a per-provider setting; see
+//!   [`crate::config::WebDragDropPaste`].
 //! - **An unreadable process is a refusal, not a licence to write elsewhere.**
-//!   Asking a live process where it is can fail because the process has GONE, or
-//!   because dux is not allowed to look (a shell running as another user) or
-//!   cannot make sense of what it sees. Only the first falls through to the next
-//!   candidate directory. The rest refuse, because writing to the suspended
-//!   parent's directory and then confidently naming it in a toast is worse than
-//!   saying no. A process that has EXITED but has not been reaped counts as
-//!   gone, even though its pid still answers signal 0; so does a member that
-//!   vanished mid-scan. What may never count as gone is a process dux simply
-//!   could not inspect, and a group scan carries that difference rather than
-//!   returning a short list as if it were the whole truth.
+//!   Asking a live process where it is can fail because the process has gone, or
+//!   because dux may not look (a shell running as another user) or cannot make
+//!   sense of what it sees. Only the first falls through to the next candidate
+//!   directory; the rest refuse, because writing to the suspended parent's
+//!   directory and then naming it in a toast is worse than saying no. A process
+//!   that has exited but not been reaped counts as gone, as does a member that
+//!   vanished mid-scan; a process dux could not inspect never does, and a group
+//!   scan carries that difference rather than returning a short list as if it were
+//!   the whole truth.
 
 use std::io::Read;
 use std::io::Write;
@@ -538,20 +526,18 @@ impl DropDir {
     /// This is the ONE place the upload directory comes into existence.
     ///
     /// `relative` must already have been through
-    /// [`crate::config::normalized_upload_directory`], which is what guarantees
-    /// it is relative and made of named components only. That check is about the
-    /// SHAPE of the path; the enforcement is here, and it is a different
-    /// mechanism: the walk opens one component at a time from the pinned
-    /// worktree handle with `O_NOFOLLOW`, so a symlink at ANY component fails
-    /// the request rather than being followed out of the worktree. Nothing is
-    /// ever resolved back to text and reopened, so there is no window in which a
-    /// component can be swapped for a link.
+    /// [`crate::config::normalized_upload_directory`], which guarantees it is
+    /// relative and made of named components only. That check is about the SHAPE
+    /// of the path; the enforcement is here: the walk opens one component at a time
+    /// from the pinned worktree handle with `O_NOFOLLOW`, so a symlink at ANY
+    /// component fails the request rather than being followed out of the worktree.
+    /// Nothing is resolved back to text and reopened, so there is no window in
+    /// which a component can be swapped for a link.
     ///
-    /// Idempotent and safe to race with a concurrent upload: `mkdirat` is
-    /// allowed to report `EEXIST` (somebody else got there first) and the walk
-    /// simply opens what is there, and the `.gitignore` is created with
-    /// `O_CREAT | O_EXCL`, so exactly one writer creates it and an existing one
-    /// (whatever it holds, and even if it is a symlink) is left untouched.
+    /// Idempotent and safe to race with a concurrent upload: `mkdirat` may report
+    /// `EEXIST` and the walk simply opens what is there, and the `.gitignore` is
+    /// created with `O_CREAT | O_EXCL`, so exactly one writer creates it and an
+    /// existing one is left untouched whatever it holds, symlink included.
     pub fn open_uploads(
         worktree: &Path,
         relative: &str,
@@ -620,24 +606,19 @@ impl DropDir {
     /// This is the durable half of the two drop intents. A file dropped on an
     /// agent means "look at this for me" and goes to the invisible upload
     /// directory ([`Self::open_uploads`]); a file dropped on the editor's tree
-    /// means "add this to my project", so it lands where the user pointed, as
-    /// an ordinary visible file git can see. Nothing here creates a directory
-    /// and nothing here writes a `.gitignore`, and both omissions are the
-    /// point rather than an oversight: the tree only offers directories that
-    /// exist, and hiding the file from git would defeat the intent.
-    ///
-    /// It is a separate function from `open_uploads` rather than a flag on it
-    /// because the two differ in what they are ALLOWED to do to the user's
-    /// project, and a boolean parameter deciding whether a walk may create
-    /// directories is exactly the kind of switch that gets passed the wrong
-    /// way round.
+    /// means "add this to my project", so it lands where the user pointed, as an
+    /// ordinary visible file git can see. Nothing here creates a directory and
+    /// nothing here writes a `.gitignore`: the tree only offers directories that
+    /// exist, and hiding the file from git would defeat the intent. That
+    /// difference in what each is allowed to do to the user's project is why this
+    /// is a separate function from `open_uploads` rather than a flag on it.
     ///
     /// The guards are the ones the rest of the editor already applies, in two
-    /// layers. [`validate_tree_drop_dir`] refuses the SHAPE (absolute, `..`,
-    /// `.`, a `.git` component). The walk then enforces it: one component at a
-    /// time from the pinned worktree handle with `O_NOFOLLOW`, so a symlink at
-    /// any component fails the request instead of being followed out of the
-    /// tree, and nothing is resolved back to text and reopened.
+    /// layers. [`validate_tree_drop_dir`] refuses the SHAPE (absolute, `..`, `.`,
+    /// a `.git` component). The walk then enforces it: one component at a time
+    /// from the pinned worktree handle with `O_NOFOLLOW`, so a symlink at any
+    /// component fails the request instead of being followed out of the tree, and
+    /// nothing is resolved back to text and reopened.
     pub fn open_tree_dir(worktree: &Path, relative: &str) -> Result<Self, DropDirError> {
         validate_tree_drop_dir(relative).map_err(DropDirError::TreeDirRefused)?;
 
@@ -848,12 +829,12 @@ fn reportable_path_of(fd: &OwnedFd, opened_as: &Path) -> Result<PathBuf, DropDir
 /// The path a pinned directory answers to, checked only to still NAME that
 /// directory.
 ///
-/// This is [`reportable_path_of`] without the terminal-facing half. Those
-/// checks (absolute, valid UTF-8, no control character) are all about what
-/// survives being typed into a PTY, and the editor's tree drop types nothing
-/// anywhere: it saves a file and reports a name. A directory called `"we\nird"`
-/// is legal on Linux and macOS and the file tree shows it, so refusing to save
-/// into it, with a sentence about a terminal, was wrong twice over.
+/// This is [`reportable_path_of`] without the terminal-facing half. Those checks
+/// (absolute, valid UTF-8, no control character) are all about what survives being
+/// typed into a PTY, and the editor's tree drop types nothing anywhere: it saves a
+/// file and reports a name. A directory called `"we\nird"` is legal on Linux and
+/// macOS and the file tree shows it, so saving into it must not be refused with a
+/// sentence about a terminal.
 ///
 /// The identity check stays for BOTH callers, because it answers a different
 /// question: whether the handle still refers to something reachable under this
@@ -1198,18 +1179,17 @@ fn probe_process_cwd(pid: u32) -> CwdProbe {
 
 /// Whether `pid` names a process that can still answer for itself.
 ///
-/// Signal 0 alone is not enough, and reading it as the whole answer was a bug.
-/// It reports `ESRCH` for a pid nobody is using and `EPERM` for one that is
-/// there and belongs to someone else, which is still THERE. But a process that
-/// has EXITED and has not yet been reaped, a ZOMBIE, answers signal 0 too: its
-/// pid stays allocated while it holds an exit status for its parent, and a
-/// shell does not reap a finished job the instant it ends.
+/// Signal 0 alone is not enough. It reports `ESRCH` for a pid nobody is using and
+/// `EPERM` for one that is there and belongs to someone else, which is still
+/// THERE. But a process that has EXITED and not yet been reaped, a ZOMBIE, answers
+/// signal 0 too: its pid stays allocated while it holds an exit status for its
+/// parent, and a shell does not reap a finished job the instant it ends.
 ///
-/// A zombie has nothing left to ask. Verified against the kernel rather than
-/// reasoned about: for a real unreaped child, `/proc/<pid>/cwd` and
-/// `/proc/<pid>/ns/mnt` both answer `ENOENT` while `kill(pid, 0)` succeeds. So
-/// treating it as alive turned "this job finished" into a REFUSAL, exactly
-/// where a surviving group member or the shell should have been asked instead.
+/// A zombie has nothing left to ask. Verified against the kernel: for a real
+/// unreaped child, `/proc/<pid>/cwd` and `/proc/<pid>/ns/mnt` both answer `ENOENT`
+/// while `kill(pid, 0)` succeeds. Treating it as alive turns "this job finished"
+/// into a REFUSAL, where a surviving group member or the shell should be asked
+/// instead.
 fn process_can_answer(pid: u32) -> bool {
     signal_zero_finds(pid) && !process_is_zombie(pid)
 }
@@ -1317,20 +1297,18 @@ fn group_scan_step(stat: std::io::Result<Vec<u8>>, pgid: u32) -> ScanEntry {
             // Present, readable, and not something this code can make sense of.
             None => ScanEntry::Unreadable,
         },
-        // It exited between the listing and the read. Ordinary churn, and a
-        // fact: it is not in the group any more.
+        // It exited between the listing and the read: ordinary churn, and a fact
+        // that it is not in the group any more.
         //
-        // TWO errnos say that, and knowing only one of them is what made this
-        // wrong. ENOENT is the pid directory being gone before the open. ESRCH
-        // is the subtler one, and it was MEASURED rather than reasoned about:
-        // `std::fs::read` opens and then reads, and procfs resolves the task at
-        // READ time, so a process reaped in between opens perfectly and then
-        // fails with "no such process". Rust has no `ErrorKind` for it, so it
-        // arrives as `Uncategorized`, and reading that as "dux could not look"
-        // marked the whole scan INCOMPLETE and refused an ordinary drop because
-        // an unrelated program somewhere on the machine happened to exit at the
-        // wrong moment. Same shape as every other defect in this file: an
-        // inability to look and a fact about the world collapsed into one.
+        // TWO errnos say that. ENOENT is the pid directory being gone before the
+        // open. ESRCH is the subtler one, measured: `std::fs::read` opens and then
+        // reads, and procfs resolves the task at READ time, so a process reaped in
+        // between opens perfectly and then fails with "no such process". Rust has
+        // no `ErrorKind` for it, so it arrives as `Uncategorized`; reading that as
+        // "dux could not look" would mark the whole scan INCOMPLETE and refuse an
+        // ordinary drop because an unrelated program happened to exit at the wrong
+        // moment. An inability to look and a fact about the world must never
+        // collapse into one answer.
         Err(e)
             if e.kind() == std::io::ErrorKind::NotFound
                 || e.raw_os_error() == Some(libc::ESRCH) =>
@@ -1394,27 +1372,20 @@ fn process_group_members(pgid: u32) -> ProcessGroup {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        // macOS answers UNKNOWN, deliberately, and it is a real gap rather than
-        // a placeholder waiting to be filled in casually.
+        // macOS answers UNKNOWN deliberately: Linux enumerates a process group
+        // by reading `/proc`, and the macOS equivalents (libproc's
+        // `proc_listpids`, or a parse of `ps -eo pid,pgid`) are a guess until
+        // they have been RUN on a Mac. An unverified enumeration would not fail
+        // loudly; it would report a confident empty group, which falls through to
+        // the SHELL's directory, which is the wrong-destination defect this whole
+        // chain exists to prevent.
         //
-        // Linux enumerates a process group by reading `/proc`. macOS has no
-        // `/proc`, so the equivalent is `proc_listpids` through libproc or a
-        // parse of `ps -eo pid,pgid`, and either one is a guess until it has
-        // been RUN on a Mac: what `ps` prints for a zombie, whether a
-        // partially-readable listing can be told from a complete one, and what
-        // libproc returns for a group whose leader has just gone are all
-        // measurable facts and none of them is memory. Writing an unverified
-        // enumeration here would not fail loudly; it would report a confident
-        // empty group, which falls through to the SHELL's directory, which is
-        // exactly the "guessed the wrong destination" defect this whole chain
-        // exists to prevent.
-        //
-        // So the honest answer is Unknown, which the caller turns into a
-        // refusal. The window is narrow: it opens only when the foreground
-        // leader has already exited while its group still owns the terminal
-        // (`open_with` only asks for members in the `Gone` arm), and the user
-        // is told to run the drop again. `website/docs/dropping-files.md` says
-        // so rather than promising the Linux behaviour everywhere.
+        // The caller turns Unknown into a refusal. The window is narrow: it opens
+        // only when the foreground leader has already exited while its group still
+        // owns the terminal (`open_with` only asks for members in the `Gone` arm),
+        // and the user is told to run the drop again.
+        // `website/docs/dropping-files.md` says so rather than promising the Linux
+        // behaviour everywhere.
         let _ = pgid;
         ProcessGroup::Unknown
     }
@@ -1424,19 +1395,17 @@ fn process_group_members(pgid: u32) -> ProcessGroup {
 /// executable name, as BYTES.
 ///
 /// Split at the LAST `)` rather than by splitting on whitespace from the start,
-/// because field two is the executable name in parentheses and it can contain
-/// both spaces and parentheses. After it come state, ppid and then the process
-/// group.
+/// because field two is the executable name in parentheses and can contain both
+/// spaces and parentheses. After it come state, ppid and then the process group.
 ///
 /// Bytes and not text, because a process name is a filename and a filename is a
-/// byte string: nothing stops it holding bytes that are not valid UTF-8, and
-/// that is an ordinary legal name rather than an attack. Decoding the line as
-/// text made the whole read fail for such a process, which read as "not a
-/// zombie" (so a finished process looked alive and REFUSED the drop) and as
-/// "could not inspect" during a group scan (so one unrelated oddly named
-/// process anywhere on the machine refused an ordinary drop). Everything this
-/// parser actually reads is ASCII; only the name it steps over is not, so the
-/// last `)` is exactly the right place to start.
+/// byte string: nothing stops it holding bytes that are not valid UTF-8, and that
+/// is an ordinary legal name rather than an attack. A text decode fails the whole
+/// read for such a process, which reads as "not a zombie" (a finished process
+/// looks alive and REFUSES the drop) and as "could not inspect" during a group
+/// scan (one unrelated oddly named process anywhere on the machine refuses an
+/// ordinary drop). Everything this parser reads is ASCII; only the name it steps
+/// over is not.
 #[cfg(any(target_os = "linux", test))]
 fn stat_fields_after_comm(stat: &[u8]) -> Option<impl Iterator<Item = &[u8]>> {
     let after_comm = &stat[stat.iter().rposition(|&b| b == b')')? + 1..];
@@ -1533,16 +1502,6 @@ impl WorkingDirectory {
     }
 }
 
-/// Pin the current working directory of a live process.
-///
-/// On Linux `/proc/<pid>/cwd` is the directory, so opening it with `O_DIRECTORY`
-/// yields the handle in one step, with nothing to swap in between.
-///
-/// On macOS there is no such entry. `lsof` ships with the system and reports it,
-/// so it is asked, and the answer is then opened by path. **That reopen-by-path
-/// gap cannot be closed by this mechanism**, and is stated rather than glossed:
-/// on macOS the directory named by `lsof` could in principle be replaced before
-/// the open. Linux has no such gap.
 /// Whether `pid` sees the same filesystem tree dux does.
 ///
 /// `/proc/<pid>/ns/mnt` is a magic link whose text (`mnt:[4026531840]`) is the
@@ -1562,6 +1521,16 @@ fn shares_our_mount_namespace(pid: u32) -> Result<bool, DropDirError> {
     Ok(ours == theirs)
 }
 
+/// Pin the current working directory of a live process.
+///
+/// On Linux `/proc/<pid>/cwd` is the directory, so opening it with `O_DIRECTORY`
+/// yields the handle in one step, with nothing to swap in between.
+///
+/// On macOS there is no such entry. `lsof` ships with the system and reports it,
+/// so it is asked, and the answer is then opened by path. **That reopen-by-path
+/// gap cannot be closed by this mechanism**, and is stated rather than glossed:
+/// on macOS the directory named by `lsof` could in principle be replaced before
+/// the open. Linux has no such gap.
 pub fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
     #[cfg(target_os = "linux")]
     {
@@ -1598,28 +1567,22 @@ pub fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
 /// The working directory out of `lsof -Fn` output, as BYTES.
 ///
 /// A Unix path is a byte string and is not required to be valid UTF-8, so this
-/// never decodes. Decoding lsof's answer lossily, which is what this used to do,
-/// substitutes a replacement character for every byte it cannot read, and the
-/// result is a DIFFERENT path: usually one that names nothing, occasionally one
-/// that names something else. Either way dux would then open it, save into it,
-/// and report it as the folder the file landed in. The rule everywhere else in
-/// this module is that a path dux cannot name exactly is REFUSED and never
-/// substituted, and a lossy decode is a substitution wearing a success. So the
-/// bytes are carried through unchanged, the directory that is opened is the real
-/// one, and a path that genuinely cannot be reported as text is refused where
-/// every other unreportable path is, as [`UnreportablePath::NotUtf8`], at the
-/// moment it would be sent to a terminal.
+/// never decodes. A lossy decode substitutes a replacement character for every
+/// byte it cannot read, and the result is a DIFFERENT path: usually one that names
+/// nothing, occasionally one that names something else, which dux would then open,
+/// save into, and report as the folder the file landed in. The rule everywhere
+/// else in this module is that a path dux cannot name exactly is refused and never
+/// substituted, so the bytes are carried through unchanged and a path that
+/// genuinely cannot be reported as text is refused as [`UnreportablePath::NotUtf8`]
+/// at the moment it would be sent to a terminal.
 ///
-/// `-Fn` prints one field per line, each prefixed by its field letter; `n` is
-/// the name field, which for the `cwd` descriptor is the path. One limit of that
-/// format is left open and is stated rather than glossed: a field is terminated
+/// `-Fn` prints one field per line, each prefixed by its field letter; `n` is the
+/// name field, which for the `cwd` descriptor is the path. A field is terminated
 /// by a newline, so a directory whose own name contains a newline is
 /// indistinguishable from two fields and comes back truncated. lsof offers a
-/// NUL-terminated mode for exactly this, and it is deliberately not used here,
-/// because this branch only ever runs on macOS and nobody has been able to
-/// measure that flag against the lsof macOS ships. Guessing at an unverified
-/// flag on a path that cannot be exercised is how the rest of this file went
-/// wrong; a documented limit is the honest alternative.
+/// NUL-terminated mode for exactly this, deliberately not used here: this branch
+/// only ever runs on macOS and nobody has been able to measure that flag against
+/// the lsof macOS ships.
 #[cfg(any(not(target_os = "linux"), test))]
 fn lsof_cwd_path(stdout: &[u8]) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;

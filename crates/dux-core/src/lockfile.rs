@@ -94,20 +94,17 @@ impl std::error::Error for AcquireError {}
 
 /// Bounded retry parameters for reading the holder's PID on contention.
 ///
-/// There are two race windows the retry loop must absorb:
+/// Two race windows the retry loop must absorb:
 ///
-/// 1. **Empty file** — the winner's `flock()` returned but its PID write
-///    hasn't landed yet. The file is empty or truncated.
-/// 2. **Stale PID** — the lockfile contained a PID from a now-dead process
-///    and the winner is mid-overwrite (truncate → write). The loser reads
-///    the old bytes before the winner's new PID appears.
+/// 1. **Empty file** - the winner's `flock()` returned but its PID write has not
+///    landed yet, so the file is empty or truncated.
+/// 2. **Stale PID** - the lockfile held a PID from a now-dead process and the
+///    winner is mid-overwrite, so the loser reads the old bytes.
 ///
-/// To handle both, the loop prefers two consecutive reads that return the
-/// **same** PID. A changing value means the winner is still writing, so
-/// the loop keeps going. If the budget is exhausted without two reads
-/// agreeing, the last observed PID is returned as a best-effort fallback.
-/// This adds one extra 2ms sleep in the common case (winner already wrote)
-/// while correctly riding out mid-overwrite races.
+/// The loop therefore waits for two consecutive reads returning the SAME PID; a
+/// changing value means the winner is still writing. If the budget runs out
+/// without two reads agreeing, the last observed PID is returned as a best-effort
+/// fallback. The cost is one extra 2ms sleep when the winner already wrote.
 const PID_READ_ATTEMPTS: usize = 5;
 const PID_READ_RETRY_DELAY: Duration = Duration::from_millis(2);
 
@@ -183,9 +180,9 @@ fn read_holder_pid_with_retry(file: &mut File) -> Option<u32> {
 /// reporting a potentially-stale PID is more useful than `None`. Returns
 /// `None` only if no attempt produced a parseable value at all.
 ///
-/// The retry parameters are explicit so tests can use generous budgets
-/// that remain deterministic under CI load, while production uses the
-/// tight defaults from [`PID_READ_ATTEMPTS`] and [`PID_READ_RETRY_DELAY`].
+/// The retry parameters are explicit so tests can use generous budgets that stay
+/// deterministic under load; production uses [`PID_READ_ATTEMPTS`] and
+/// [`PID_READ_RETRY_DELAY`].
 fn read_holder_pid(file: &mut File, attempts: usize, delay: Duration) -> Option<u32> {
     let mut last_pid: Option<u32> = None;
     for attempt in 0..attempts {

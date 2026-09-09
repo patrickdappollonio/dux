@@ -980,37 +980,26 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
 /// reload that only touched, say, `[ui]` theme settings leaves every compared
 /// field equal and triggers no warning.
 ///
-/// Compared fields: the bind `host` and `port`, the `allowed_hosts` host-guard
-/// list, all five WebSocket caps, both `file_drop_*` caps, and the two
-/// directory-work concurrency limits.
+/// Settings deliberately absent from the comparison, each because a restart
+/// warning there would be false:
 ///
-/// `access_log` and `search_index_max_files` are deliberately ABSENT: the routes
-/// read those two off shared cells a reload writes, so warning about them would
-/// name a restart for a change that has already taken effect.
+/// - `access_log` and `search_index_max_files`: the routes read these off shared
+///   cells a reload writes, so the change has already taken effect.
+/// - The `tailscale` mode: a live switch. A reload hands the new mode to the
+///   running serve, which stops or starts the watcher, binds or drops the leg, and
+///   moves the Host guard's Tailscale-literal rule with it.
+/// - The browser-side reconnect timings (`replay_wait_seconds`,
+///   `reconnect_backoff_cap_seconds`, `heartbeat_seconds`,
+///   `heartbeat_deadline_seconds`): nothing on the server reads them. They ride
+///   the bootstrap document, which every client refetches on a config reload, so a
+///   change retimes every open tab live.
+/// - `pty_send_timeout_seconds`: read on the server, but read live at the moment a
+///   terminal connection opens, so the next connection already has the new value.
 ///
-/// The `tailscale` MODE is deliberately ABSENT: it is a live switch. A reload
-/// that changes it hands the new mode to the running serve, which stops or
-/// starts the watcher, binds or drops the leg, and moves the Host guard's
-/// Tailscale-literal rule with it. Warning about a restart there would be false.
-///
-/// The four browser-side reconnect timings (`replay_wait_seconds`,
-/// `reconnect_backoff_cap_seconds`, `heartbeat_seconds`,
-/// `heartbeat_deadline_seconds`) are deliberately ABSENT for the same reason
-/// `access_log` and `search_index_max_files` are: nothing on the server reads
-/// them. They ride the bootstrap document, which every client refetches on a
-/// config reload, so a change retimes every open tab live and warning about a
-/// restart there would be false. `pty_send_timeout_seconds` is absent for the
-/// neighbouring reason: it IS read on the server, but it is read live, at the
-/// moment a terminal connection opens, so the next connection already has the
-/// new value.
-///
-/// All five WebSocket caps are also startup-bound: the three per-class
-/// connection-cap semaphores (`max_websocket_events_connections`,
-/// `max_websocket_agent_connections`, `max_websocket_terminal_connections`) are
-/// built ONCE in `build_app` and never resized on reload, and the two tab caps
-/// (`max_websocket_tab_connections`, `max_websocket_tabs_per_agent`) are frozen
-/// into `RouterParams`. The deprecated `bind` field is migrated into `host`/`port` on load,
-/// so a change to it surfaces through those fields.
+/// The WebSocket caps are startup-bound: the per-class connection-cap semaphores
+/// are built once in `build_app` and never resized on reload, and the tab caps are
+/// frozen into `RouterParams`. The deprecated `bind` field is migrated into
+/// `host`/`port` on load, so a change to it surfaces through those fields.
 pub fn server_bind_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
     prev.host != next.host
         || prev.port != next.port
@@ -1070,25 +1059,21 @@ pub struct ProviderCommandConfig {
     pub web_dragdrop_paste: Option<String>,
 }
 
-/// The form a DRAGGED AND DROPPED file's path takes when the WEB UI writes it
-/// into a provider's prompt.
+/// The form a dragged and dropped file's path takes when the web UI writes it into
+/// a provider's prompt.
 ///
 /// The `web_` prefix on the config key is load-bearing: this affects the browser
-/// and nothing else. The terminal UI needs none of it, because dropping a file
-/// onto a terminal window there is the host terminal emulator's job, and the file
-/// is already on the machine the agent runs on.
+/// and nothing else. Dropping a file onto a terminal window in the terminal UI is
+/// the host terminal emulator's job, and the file is already on the machine the
+/// agent runs on.
 ///
-/// This exists because the receiving end is an agent CLI, not a shell, and the
-/// CLIs do not agree on how they read a pasted path. Each one takes the whole
-/// pasted string and normalizes it its own way before deciding whether it names
-/// a file. The right form is therefore a property of the CLI, which is why it is
-/// a per-provider setting a maintainer can extend rather than a rule baked in
-/// here.
-///
-/// WHAT WAS MEASURED. Every row below was produced by RUNNING the CLI's own
-/// normalizer over the exact bytes dux sends, not by reading and summarizing it.
-/// The measurements are what makes this a table of evidence rather than opinion,
-/// so a new row belongs here only once someone has run the new CLI the same way.
+/// The receiving end is an agent CLI, not a shell, and the CLIs do not agree on
+/// how they read a pasted path: each takes the whole pasted string and normalizes
+/// it its own way before deciding whether it names a file. The right form is
+/// therefore a property of the CLI, which is why this is a per-provider setting a
+/// maintainer can extend rather than a rule baked in here. Every row below was
+/// produced by running the CLI's own normalizer over the exact bytes dux sends, so
+/// a new row belongs here only once someone has run the new CLI the same way.
 ///
 /// | CLI                 | What it does to a pasted path                                           | Form it needs   |
 /// |---------------------|-------------------------------------------------------------------------|-----------------|
@@ -1100,37 +1085,32 @@ pub struct ProviderCommandConfig {
 /// | Codex (shlex 1.3.0) | Strips one matching quote pair, resolves `file://`, otherwise runs the   | `single_quoted` |
 /// |                     | text through POSIX shell lexing and accepts it ONLY if it comes out as  |                 |
 /// |                     | exactly one token. A bare path containing a space is silently ignored.  |                 |
-/// | Copilot CLI         | Closed source. NOT verified. Defaulted to `bare`, the do-nothing option | `bare` (guess)  |
-/// |                     | and what two of the three verified CLIs want.                           |                 |
+/// | Copilot CLI         | Closed source, not verified. Defaulted to `bare`, the do-nothing option.| `bare` (guess)  |
 ///
 /// Anything dux does not ship, including a provider a user adds themselves, gets
 /// `bare` for the same reason.
 ///
-/// WHAT IS KNOWN TO FAIL, which is the more useful half of the table:
+/// Known failures, both properties of the receiving tool rather than bugs in dux,
+/// and neither to be worked around from this side:
 ///
-/// - `single_quoted` on a path containing an APOSTROPHE breaks Claude Code. POSIX
+/// - `single_quoted` on a path containing an apostrophe breaks Claude Code. POSIX
 ///   writes an embedded apostrophe as close-escape-reopen, and Claude Code's
-///   unescape step then collapses that into three consecutive apostrophes. Run
-///   against exactly what dux produced, a real `/home/p/Bob's app/shot.png` came
-///   back with three apostrophes in the middle of it, naming nothing.
-/// - ANY form carrying a BACKSLASH is mangled by Claude Code's unescape step. That
-///   covers `backslash_escaped` outright, and also a path that simply has a
-///   backslash in its name, whatever form it is sent in. The unescape eats it.
+///   unescape step collapses that into three consecutive apostrophes, naming
+///   nothing.
+/// - Any form carrying a backslash is mangled by Claude Code's unescape step, as
+///   is a path that simply has a backslash in its name, whatever form it is sent
+///   in.
 ///
-/// Both are properties of the receiving tool, not bugs in dux, and no workaround
-/// should be attempted from this side: dux sends the correct bytes and the CLI
-/// rewrites them.
-///
-/// GETTING IT WRONG IS NOT USUALLY A BREAKAGE. The normal symptom is that the file
+/// Getting it wrong is not usually a breakage: the normal symptom is that the file
 /// is not attached automatically and its path is left in the prompt as ordinary
 /// text, which the user can still work with.
 ///
-/// ADDING A FORM. The set is open by construction: a new form is one more variant
-/// plus one more arm in [`WebDragDropPaste::parse`], [`WebDragDropPaste::as_str`]
-/// and the web's `pastePayload`, with no rework anywhere else. One candidate is
-/// deliberately ABSENT: a `file://` URL. Codex and OpenCode both resolve one, but
-/// whether Claude Code does on its paste path is UNVERIFIED, and a form should not
-/// ship on an unmeasured assumption. Measure it and it can be added.
+/// A new form is one more variant plus one more arm in
+/// [`WebDragDropPaste::parse`], [`WebDragDropPaste::as_str`] and the web's
+/// `pastePayload`, with no rework anywhere else. A `file://` URL is deliberately
+/// absent: Codex and OpenCode both resolve one, but whether Claude Code does on
+/// its paste path is unverified, and a form should not ship on an unmeasured
+/// assumption.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WebDragDropPaste {
     /// The path exactly as it is on disk: nothing added, nothing escaped.
@@ -1221,25 +1201,22 @@ impl WebDragDropPaste {
 /// When the web UI's touch terminal puts up the mobile compose bar
 /// ([`UiConfig::compose_bar`]).
 ///
-/// WHY THIS IS THREE-WAY AND NOT A BOOLEAN. [`Self::Auto`] asks the browser
-/// whether touch is the primary pointing device (`pointer: coarse`), which is
-/// the right question: the compose bar exists because a soft keyboard's
-/// autocorrect, swipe and IME have nothing to correct when keystrokes go
-/// straight into a terminal. It replaced a viewport-WIDTH check, which had the
-/// bug that rotating a tablet changed the typing surface underneath the user.
+/// Three-way rather than a boolean. [`Self::Auto`] asks the browser whether touch
+/// is the primary pointing device (`pointer: coarse`), which is the right
+/// question: the compose bar exists because a soft keyboard's autocorrect, swipe
+/// and IME have nothing to correct when keystrokes go straight into a terminal.
 ///
-/// But a capability gate cannot finish the job, and this is MEASURED rather
-/// than assumed: on an Android tablet, WITH and WITHOUT a physical keyboard
-/// attached, every interaction media query is identical (`pointer: coarse`
-/// true, `any-pointer: fine` true, `any-hover: hover` false). A keyboard case
-/// is invisible to the browser, so the two situations that want opposite
-/// answers are indistinguishable, and the only thing that can resolve them is
-/// the user saying so. Hence [`Self::Always`] and [`Self::Never`].
+/// A capability gate cannot finish the job. Measured on an Android tablet, with
+/// and without a physical keyboard attached, every interaction media query is
+/// identical (`pointer: coarse` true, `any-pointer: fine` true, `any-hover: hover`
+/// false). A keyboard case is invisible to the browser, so the two situations that
+/// want opposite answers are indistinguishable and only the user can resolve them.
+/// Hence [`Self::Always`] and [`Self::Never`].
 ///
-/// DO NOT BUILD KEYBOARD SNIFFING to close that gap. Also measured: focusing an
+/// Do not build keyboard sniffing to close that gap. Also measured: focusing an
 /// input on an Android tablet while the on-screen keyboard opened and closed
-/// produced NO observable change at all. Window height, visual viewport height
-/// and `navigator.virtualKeyboard.boundingRect` were identical across two full
+/// produced no observable change at all. Window height, visual viewport height and
+/// `navigator.virtualKeyboard.boundingRect` were identical across two full
 /// open-and-close cycles, so there is nothing to detect after the fact either.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ComposeBarMode {
@@ -1396,21 +1373,19 @@ pub struct UiConfig {
     /// above the internal ceiling are clamped with a warning. Default 20.
     pub agent_tabs_max: u16,
     /// Seconds before a transient status-line message (a success/info
-    /// confirmation) auto-clears. The TUI has one status line, so messages take
-    /// turns on it rather than overwriting each other: each confirmation gets
-    /// this window to itself and the next one waits, while a warning or an error
-    /// jumps the queue and drops the confirmations still waiting behind it. A
-    /// busy/pending message stays until its operation finishes and an error
+    /// confirmation) auto-clears. The TUI has one status line, so confirmations
+    /// take turns on it: each gets this window to itself and the next one waits,
+    /// while a warning or an error jumps the queue and drops the confirmations
+    /// behind it. A busy message stays until its operation finishes and an error
     /// until the next message arrives, so neither is governed by this number.
+    ///
     /// The web's toasts use this as a base for every tone (warning 3x, error 4x,
-    /// matching `WARNING_DURATION_FACTOR` and `ERROR_DURATION_FACTOR` in
-    /// `crates/dux-web/web/src/lib/notify.ts`),
-    /// because a toast you have to click away is friction a status line is not.
-    /// On the web that grading is applied entirely in the browser: the setting
-    /// has no server-side clearing effect there, and the few messages marked
-    /// sticky (they wait for the user) ignore it. 0 disables auto-clear
-    /// entirely; with no window to wait out, the TUI line stops queueing and
-    /// shows the most recent message until the next one arrives.
+    /// through `WARNING_DURATION_FACTOR` and `ERROR_DURATION_FACTOR` in
+    /// `crates/dux-web/web/src/lib/notify.ts`), because a toast you have to click
+    /// away is friction a status line is not. That grading is applied entirely in
+    /// the browser, and messages marked sticky ignore it. 0 disables auto-clear:
+    /// with no window to wait out, the TUI line stops queueing and shows the most
+    /// recent message until the next one arrives.
     pub status_clear_seconds: u16,
     pub branch_sync_interval: u16,
     pub show_diff_line_numbers: bool,
@@ -1454,23 +1429,22 @@ pub struct UiConfig {
     pub terminal_font_size: u16,
     /// WHEN the web UI's touch terminal shows the compose bar: a buffered text
     /// box below the accessory-bar keys where the phone keyboard's
-    /// autocorrect/swipe input work, with a Send button that delivers the
-    /// message plus a submitting Enter in one write. While it is up, tapping
-    /// the terminal focuses the compose box instead of the raw terminal input;
-    /// when it is not, a tap types directly into the terminal (the
-    /// pre-compose-bar behavior).
+    /// autocorrect/swipe input work, with a Send button that delivers the message
+    /// plus a submitting Enter in one write. While it is up, tapping the terminal
+    /// focuses the compose box instead of the raw terminal input; when it is not,
+    /// a tap types directly into the terminal.
     ///
-    /// The raw config string, parsed at use through [`ComposeBarMode`] so a
-    /// typo degrades gracefully (warn once at load and fall back) instead of
-    /// failing the whole config load, mirroring the
-    /// `pr_banner_position`/`agent_sort`/[`WebDragDropPaste`] convention.
-    /// `"auto"` (the default) lets the browser decide from the pointer, and
-    /// `"always"`/`"never"` are the manual overrides. See [`ComposeBarMode`]
-    /// for why the manual pair has to exist at all.
+    /// The raw config string, parsed at use through [`ComposeBarMode`] so a typo
+    /// degrades gracefully (warn once at load and fall back) instead of failing
+    /// the whole config load, mirroring the
+    /// `pr_banner_position`/`agent_sort`/[`WebDragDropPaste`] convention. `"auto"`
+    /// (the default) lets the browser decide from the pointer, and
+    /// `"always"`/`"never"` are the manual overrides; see [`ComposeBarMode`] for
+    /// why the manual pair has to exist at all.
     ///
-    /// A pre-`ComposeBarMode` config holding the old BOOLEAN still loads: see
-    /// [`deserialize_compose_bar`]. Changing it from the web's Preferences
-    /// dialog persists the new value here. Web-only behavior.
+    /// A config holding the older BOOLEAN spelling still loads: see
+    /// [`deserialize_compose_bar`]. Changing it from the web's Preferences dialog
+    /// persists the new value here. Web-only behavior.
     #[serde(deserialize_with = "deserialize_compose_bar")]
     pub compose_bar: String,
     /// Whether the web UI's mobile terminal screens show the terminal-keys
@@ -1479,23 +1453,18 @@ pub struct UiConfig {
     /// restored from the input `⋯` menu below the terminal or from the web
     /// UI's Preferences dialog. Web-only behavior.
     pub mobile_accessory_bar: bool,
-    /// Directory, RELATIVE to the agent's worktree, that a file dropped or
-    /// pasted onto an AGENT pane is saved into. An absolute path, a `..`
-    /// traversal, or an empty value degrades to [`DEFAULT_UPLOAD_DIRECTORY`]
-    /// with one warning at load (see [`upload_directory_load_warning`]).
+    /// Directory, RELATIVE to the agent's worktree, that a file dropped or pasted
+    /// onto an AGENT pane is saved into. An absolute path, a `..` traversal, or an
+    /// empty value degrades to [`DEFAULT_UPLOAD_DIRECTORY`] with one warning at
+    /// load (see [`upload_directory_load_warning`]).
     ///
-    /// A TERMINAL pane is deliberately not covered: a file dropped on a
-    /// terminal still lands in the directory that terminal is actually in,
-    /// because a shell that has been `cd`'d somewhere is showing the user where
-    /// they are working.
+    /// A TERMINAL pane is deliberately not covered: a file dropped on a terminal
+    /// lands in the directory that terminal is actually in, because a shell that
+    /// has been `cd`'d somewhere is showing the user where they are working.
     ///
-    /// This pair lives on `[ui]` rather than in a section of its own because a
+    /// This pair lives on `[ui]` rather than a section of its own because a
     /// top-level `[uploads]` section would imply the feature exists in the TUI
-    /// too, and it does not: dropping a file on a terminal window in the TUI is
-    /// the host emulator's job, and the in-browser editor is web-only. `[ui]` is
-    /// already the home for web-only preferences (`compose_bar`,
-    /// `copy_on_select`), and the `upload_` prefix groups the pair the way
-    /// `terminal_font_family` / `terminal_font_size` already do.
+    /// too, and it does not. Web-only behavior.
     pub upload_directory: String,
     /// Keep a `.gitignore` holding a single `*` in the upload directory, so the
     /// uploads (and that file itself) are invisible to git. Attempted on every
@@ -1510,10 +1479,9 @@ pub struct UiConfig {
     /// the web UI saves it as a `.txt` file in [`UiConfig::upload_directory`]
     /// and pastes that file's path instead of typing the text.
     ///
-    /// The reason is the agent's context window. It is finite, but an agent can
-    /// read or scan a document efficiently when it needs to; a wall of pasted
-    /// text spends the window whether the agent needed all of it or not, while
-    /// a path costs almost nothing.
+    /// The reason is the agent's context window: a wall of pasted text spends it
+    /// whether the agent needed all of it or not, while a path costs almost
+    /// nothing.
     ///
     /// `0` switches the behaviour off. A value below
     /// [`MIN_UPLOAD_PASTED_TEXT_CHARS`] or above
@@ -1522,14 +1490,10 @@ pub struct UiConfig {
     ///
     /// A TERMINAL pane never consults this, structurally: a long paste into a
     /// shell is a command or a heredoc, and turning that into a file would
-    /// destroy what the user meant.
-    ///
-    /// The mobile compose bar IS in scope, deliberately. A paste that large is
-    /// a document whichever surface receives it, and the draft is the better
-    /// place for the path rather than a reason to skip the rule: the text would
-    /// otherwise fill the message box, and the user can write around a path
-    /// before pressing Send. Web-only behavior, as its `upload_` companions
-    /// are.
+    /// destroy what the user meant. The mobile compose bar IS in scope: a paste
+    /// that large is a document whichever surface receives it, and the user can
+    /// write around the path before pressing Send. Web-only behavior, as its
+    /// `upload_` companions are.
     pub upload_pasted_text_chars: usize,
     /// Seconds the attention indicators stay visible after dux regains your
     /// attention, before the focused agent's needs-attention flag clears.
@@ -1654,23 +1618,18 @@ pub const MAX_UPLOAD_DIRECTORY_BYTES: usize = libc::PATH_MAX as usize;
 /// usable. Pure, and phrased as a sentence fragment the warning completes.
 ///
 /// **This is a check on the SHAPE of the path and nothing else.** It proves the
-/// path is relative and walks downward through named components only, so no
-/// value dux accepts can NAME somewhere outside the worktree. It cannot prove
-/// where the path RESOLVES to: a symlinked component could still point out of
-/// the tree, and no amount of string inspection would see it. That is enforced
-/// where it can actually be enforced, at creation time, by walking the path one
-/// component at a time from a pinned worktree handle with `O_NOFOLLOW`, which
-/// refuses a symlink instead of following it (see
-/// `crate::file_drop::open_uploads_dir`).
+/// path is relative and walks downward through named components only, so no value
+/// dux accepts can NAME somewhere outside the worktree. It cannot prove where the
+/// path RESOLVES to: a symlinked component could still point out of the tree, and
+/// no string inspection would see it. That is enforced at creation time instead,
+/// by walking the path one component at a time from a pinned worktree handle with
+/// `O_NOFOLLOW` (see [`crate::file_drop::DropDir::open_uploads`]).
 ///
-/// The last three refusals are a different kind, and they are here for a
-/// different reason: they name a shape the FILESYSTEM will refuse. A value
-/// holding a control character (reachable from TOML through a `\n` escape) used
-/// to pass, and the directory really was created, but every drop into it then
-/// failed; a NUL failed with an opaque `Invalid argument`; an over-long one
-/// failed with `File name too long`. All three per drop, in a message about the
-/// wrong subject. Refusing them at load is what the warn-once-and-degrade design
-/// exists to do.
+/// The control-character, NUL and length refusals are a different kind: they name
+/// a shape the FILESYSTEM will refuse. Such a directory can be created and then
+/// fail every drop into it, once per drop, with a message about the wrong subject
+/// (`Invalid argument` for a NUL, `File name too long` for an over-long path).
+/// Refusing them at load is what the warn-once-and-degrade design exists to do.
 fn upload_directory_rejection(configured: &str) -> Option<&'static str> {
     let trimmed = configured.trim();
     if trimmed.is_empty() {
@@ -1753,18 +1712,15 @@ pub fn normalized_upload_directory(configured: &str) -> String {
 ///
 /// Claude Code collapses a long paste in its composer at around 800 characters,
 /// but the collapse is VISUAL and LOSSLESS: the whole text still reaches the
-/// agent, so it is not a reason to file anything away. Codex accepts a paste up
-/// to its request-size cap, which is orders of magnitude above any prompt
-/// someone types. Neither measured CLI truncates text at a low four-figure
-/// count, so the earlier default of 1000 was turning ordinary prompts into
-/// files for a danger that was not there.
+/// agent. Codex accepts a paste up to its request-size cap, orders of magnitude
+/// above any prompt someone types. Neither measured CLI truncates text at a low
+/// four-figure count.
 ///
-/// 4000 characters is roughly a long page of prose: ordinary instructions,
-/// however wordy, still arrive inline as text, while an error log, a stack
-/// trace or a diff runs well past it and becomes a file the agent can read on
-/// demand. That is the split the feature exists for. It stays a preference: a
-/// user running an unmeasured CLI that handles long pastes worse lowers it, and
-/// one who wants everything typed out sets `0`.
+/// 4000 characters is roughly a long page of prose: ordinary instructions, however
+/// wordy, still arrive inline as text, while an error log, a stack trace or a diff
+/// runs well past it and becomes a file the agent can read on demand. It stays a
+/// preference: a user running an unmeasured CLI that handles long pastes worse
+/// lowers it, and one who wants everything typed out sets `0`.
 pub const DEFAULT_UPLOAD_PASTED_TEXT_CHARS: usize = 4_000;
 
 /// Floor on a *nonzero* `ui.upload_pasted_text_chars`.
@@ -1940,24 +1896,23 @@ impl ProviderCommandConfig {
     /// in a `[providers.<name>]` block that identifies which CLI is on the other
     /// end of a paste.
     ///
-    /// The block's NAME does not, and treating it as though it did was a real
-    /// defect: a provider's name is free text the user chooses, so
+    /// The block's NAME does not: it is free text the user chooses, so
     /// `[providers.myagent] command = "codex"` is a real Codex and
     /// `[providers.codex] command = "something-else"` is not. Anything keyed by
-    /// the name therefore answered for the wrong CLI in both directions at once.
-    /// The web's per-CLI paste-length table is keyed by this instead.
+    /// the name answers for the wrong CLI in both directions at once, so the web's
+    /// per-CLI paste-length table is keyed by this instead.
     ///
-    /// The FILE NAME rather than the whole string, because `command` may be a
-    /// full path (`/usr/local/bin/codex`), a `~`-relative one, or a bare name
-    /// found on `PATH`, and all three name the same CLI. Argument-carrying
-    /// wrappers (`command = "npx"`, `command = "mise"`) are deliberately NOT
-    /// unwrapped: what they finally exec is not knowable from config, so they
-    /// resolve to the wrapper and fall into the "no entry, no limit" case, which
-    /// withholds nothing.
+    /// The FILE NAME rather than the whole string, because `command` may be a full
+    /// path (`/usr/local/bin/codex`), a `~`-relative one, or a bare name found on
+    /// `PATH`, and all three name the same CLI. Argument-carrying wrappers
+    /// (`command = "npx"`, `command = "mise"`) are deliberately NOT unwrapped: what
+    /// they finally exec is not knowable from config, so they resolve to the
+    /// wrapper and fall into the "no entry, no limit" case, which withholds
+    /// nothing.
     ///
-    /// Falls back to the whole string when there is no file name to take (an
-    /// empty command, or one that is nothing but separators), so the answer is
-    /// never silently empty.
+    /// Falls back to the whole string when there is no file name to take (an empty
+    /// command, or one that is nothing but separators), so the answer is never
+    /// silently empty.
     pub fn command_file_name(&self) -> String {
         std::path::Path::new(&self.command)
             .file_name()
@@ -2238,36 +2193,26 @@ impl DuxPaths {
     /// at runtime with no mode dux can choose, and `dux.log`. A directory
     /// another local user cannot search settles all of them at once.
     ///
-    /// It TIGHTENS on every startup, not only on first creation, because every
-    /// existing installation already has a `0755` root and a change that only
-    /// applied to new ones would reach nobody. The tightening only clears group
+    /// It TIGHTENS on every startup, not only on first creation, so an existing
+    /// installation's `0755` root is fixed too. The tightening only clears group
     /// and other bits, so it is idempotent and cannot lock the owner out.
     ///
-    /// The WORKTREES directory is deliberately left at the umask default. Those
-    /// are the user's own checkouts, opened in their own editor, and the mode
-    /// dux found is the mode dux leaves.
-    ///
-    /// Do not repeat the older reason for this, that the checkouts may be
-    /// "shared on purpose". They sit inside a `0700` root now, so another local
-    /// user cannot search their way in whatever the worktrees directory itself
-    /// says, and on-purpose sharing through this path is no longer possible.
-    /// Anyone who really was sharing a worktree with another local account lost
-    /// that when the root was tightened, and the way back is to put the
-    /// worktrees somewhere outside the config root rather than to loosen the
-    /// root. The mode is still preserved, for the honest reason that it is the
-    /// user's own checkout and not dux's file to relabel.
+    /// The WORKTREES directory is deliberately left at the umask default: those
+    /// are the user's own checkouts, opened in their own editor, and the mode dux
+    /// found is the mode dux leaves. They sit inside a `0700` root, so another
+    /// local user cannot search their way in whatever the worktrees directory
+    /// itself says; sharing a worktree with another local account means putting
+    /// the worktrees outside the config root, never loosening the root.
     pub fn ensure_dirs(&self) -> Result<()> {
         crate::file_modes::create_private_dir_all(&self.root)
             .with_context(|| format!("failed to create {}", self.root.display()))?;
-        // `config.toml` too, and it is the file the promise mattered most for
-        // since it holds `[env]` tokens. Nothing used to tighten it. It reached
-        // `0600` only because `write_config_atomic` creates its temp at `0600`
-        // and renames over the original, and that runs on first creation or on
-        // a save that actually changed the document, so a config chmod'd to
-        // `0644` by hand stayed `0644` for good while the log and the database
-        // were corrected on every open. A missing file is not an error here and
-        // is not created, and the pass only ever clears group and other bits, so
-        // a deliberate `0400` survives.
+        // `config.toml` too, the file this matters most for since it holds `[env]`
+        // tokens. Without this pass it reaches `0600` only when
+        // `write_config_atomic` creates its temp at `0600` and renames over the
+        // original, so a config chmod'd to `0644` by hand would stay `0644` while
+        // the log and the database were corrected on every open. A missing file is
+        // not an error here and is not created, and the pass only ever clears group
+        // and other bits, so a deliberate `0400` survives.
         crate::file_modes::restrict_to_owner_best_effort(&self.config_path, "config file");
         fs::create_dir_all(&self.worktrees_root)
             .with_context(|| format!("failed to create {}", self.worktrees_root.display()))?;
@@ -3093,25 +3038,12 @@ pub struct ServerCliOverrides {
     pub no_tailscale: bool,
 }
 
-/// Resolve the complete `dux server` listening plan from config + CLI overrides +
-/// the detected Tailscale address. This is the single source of truth for the
-/// bind rules; the binary reads the returned [`ServerPlan`]'s addresses.
-///
-/// dux is trusted-local: the primary listener is always the configured
-/// `host:port` (loopback by default) or an explicit `--bind`. There is no auth
-/// gate and no public-bind refusal; the operator chooses the host directly and
-/// the host guard (config `allowed_hosts`) governs which `Host` headers are
-/// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
-/// disabled / not detected); when present and not already covered by the primary
-/// bind it is added as a BEST-EFFORT leg.
 /// Parse a `[server] host` value into an [`std::net::IpAddr`], trimming
 /// surrounding whitespace first. The SINGLE server-host parser, shared by
-/// `resolve_server_plan` (the `dux server` bind path) and the TUI's early
-/// `validate_server_host`, so a whitespaced host parses consistently at both
-/// (previously the early check trimmed while the bind path did not, so
-/// `" 0.0.0.0"` passed the check and then failed the actual bind). Hostnames are
-/// not resolved; the value must be an IP literal such as `127.0.0.1` or
-/// `0.0.0.0`.
+/// [`resolve_server_plan`] (the `dux server` bind path) and the TUI's early
+/// `validate_server_host`, so a whitespaced host parses the same way at both.
+/// Hostnames are not resolved; the value must be an IP literal such as
+/// `127.0.0.1` or `0.0.0.0`.
 pub fn parse_server_host(host: &str) -> Result<std::net::IpAddr, String> {
     use std::str::FromStr;
     let trimmed = host.trim();
@@ -3123,6 +3055,17 @@ pub fn parse_server_host(host: &str) -> Result<std::net::IpAddr, String> {
     })
 }
 
+/// Resolve the complete `dux server` listening plan from config + CLI overrides +
+/// the detected Tailscale address. This is the single source of truth for the
+/// bind rules; the binary reads the returned [`ServerPlan`]'s addresses.
+///
+/// dux is trusted-local: the primary listener is always the configured
+/// `host:port` (loopback by default) or an explicit `--bind`. There is no auth
+/// gate and no public-bind refusal; the operator chooses the host directly and
+/// the host guard (config `allowed_hosts`) governs which `Host` headers are
+/// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
+/// disabled / not detected); when present and not already covered by the primary
+/// bind it is added as a BEST-EFFORT leg.
 pub fn resolve_server_plan(
     server: &ServerConfig,
     cli: &ServerCliOverrides,

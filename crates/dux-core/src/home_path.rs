@@ -4,17 +4,16 @@
 //!
 //! Both are deliberately answered from `home::home_dir()` and nothing else.
 //! `Paths::config_root` (see [`crate::config`]) also consults `DUX_HOME` and
-//! `XDG_CONFIG_HOME`, because it is answering a different question: where dux
-//! keeps ITS OWN files. A terminal opening under `$XDG_CONFIG_HOME` because the
-//! user redirected dux's config would surprise everybody.
+//! `XDG_CONFIG_HOME`, because it answers a different question: where dux keeps
+//! its own files. A terminal opening under `$XDG_CONFIG_HOME` because the user
+//! redirected dux's config would surprise everybody.
 //!
 //! Each question is split into a function TAKING the resolved home and a thin
 //! wrapper that resolves it, so "the home directory cannot be resolved" is
-//! testable without mutating the process environment (which is unsafe in a
-//! threaded test runner, and which the repo's git-isolation work already got
-//! bitten by). The WHERE half also probes the filesystem, because a path is not
-//! yet a directory a shell can start in (see [`dir_is_usable`]); the WRITTEN
-//! half stays pure string work.
+//! testable without mutating the process environment, which is unsafe in a
+//! threaded test runner. The WHERE half also probes the filesystem, because a
+//! path is not yet a directory a shell can start in (see [`dir_is_usable`]); the
+//! WRITTEN half stays pure string work.
 
 use std::path::{Path, PathBuf};
 
@@ -28,18 +27,14 @@ use std::path::{Path, PathBuf};
 /// because the walk follows symlinks, a dangling link reports `ENOENT`. The
 /// `is_dir` check is then belt and braces rather than the load-bearing part.
 ///
-/// The EMPTY path is rejected before the probe runs, because joining `.` onto
-/// it is the one input where the join changes the question being asked: an
-/// empty path has no components, so `"".join(".")` is `"."`, the CURRENT
-/// directory, which is essentially always usable. The probe would answer yes
-/// about a directory nobody asked about, and the empty path itself would then
-/// go to the spawn and fail. Every other shape keeps its subject (see
+/// The EMPTY path is rejected before the probe runs: it has no components, so
+/// `"".join(".")` is `"."`, the current directory, and the probe would answer yes
+/// about a directory nobody asked about while the empty path itself went on to
+/// fail the spawn. Every other shape keeps its subject (see
 /// `joining_a_dot_only_changes_the_subject_for_the_empty_path`).
 ///
-/// This is a probe, so it is inherently a moment in time: a directory can be
-/// removed between the check and the spawn. It is not a guarantee, it is the
-/// difference between the common unusable-home cases costing the user a
-/// terminal and costing them nothing.
+/// This is a probe, so it is a moment in time: a directory can be removed between
+/// the check and the spawn. It is not a guarantee.
 pub fn dir_is_usable(path: &Path) -> bool {
     if path.as_os_str().is_empty() {
         return false;
@@ -57,20 +52,15 @@ pub fn dir_is_usable(path: &Path) -> bool {
 /// filesystem root, which exists on every platform dux supports.
 ///
 /// A home that resolves but is NOT USABLE ([`dir_is_usable`]) takes the same
-/// fallback, because it is the same situation from the user's side. An EMPTY
-/// path is one of those: it is a resolver answering without answering, and it
-/// is not a directory anything can start in, so it is treated as no home at
-/// all rather than as the current directory. The
-/// directory is handed to the spawn as the child's working directory, so a home
-/// that is a regular file, a dangling symlink, or a directory dux may not
-/// search fails the spawn outright and the terminal is never created. That is a
-/// clean failure, and a useless one: the fallback exists so that a shell still
-/// runs somewhere.
+/// fallback, because it is the same situation from the user's side. An EMPTY path
+/// is one of those, treated as no home at all rather than as the current
+/// directory. The result is handed to the spawn as the child's working directory,
+/// so without the fallback a home that is a regular file, a dangling symlink, or a
+/// directory dux may not search would fail the spawn and no terminal would exist.
 ///
-/// Note what this deliberately does NOT do: it chooses a DIRECTORY, it does not
-/// retry a failed spawn. A missing shell or a bad `[terminal] command` is a
-/// configuration problem the user needs to see, and retrying it at `/` would
-/// bury it.
+/// This chooses a DIRECTORY; it does not retry a failed spawn. A missing shell or
+/// a bad `[terminal] command` is a configuration problem the user needs to see,
+/// and retrying it at `/` would bury it.
 pub fn standalone_terminal_dir_from(home: Option<PathBuf>) -> PathBuf {
     match home {
         Some(home) if dir_is_usable(&home) => home,

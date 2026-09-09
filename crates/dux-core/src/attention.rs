@@ -1,52 +1,45 @@
 //! Pure, PTY-independent scanner for the "needs attention" and progress signals
 //! that agent CLIs embed in their raw terminal output.
 //!
-//! dux runs each agent inside an embedded terminal emulator. That emulator would
-//! ordinarily hand us a ready-made [`alacritty_terminal::event::Event::Bell`] for
-//! the classic terminal ding, but it has no event at all for the richer OSC
-//! notification codes (`OSC 9`, `OSC 777`) or the `OSC 9;4` progress report:
-//! alacritty's `Event` carries a bell, a title/icon change, a clipboard store, a
-//! colour request and a PTY write, and nothing else, so those sequences reaching
-//! its parser are simply consumed. Scanning the raw byte stream ourselves, just
-//! before feeding it to the emulator, is therefore the ONLY detection path for
-//! them. The bell is scanned here too rather than taken from `Event::Bell`, so
-//! that one signal set comes from one mechanism and cannot double-fire.
+//! The embedded terminal emulator raises an event for the classic bell but has no
+//! event for the richer OSC notification codes (`OSC 9`, `OSC 777`) or the
+//! `OSC 9;4` progress report: those sequences reach its parser and are consumed.
+//! Scanning the raw byte stream here, just before feeding the emulator, is the
+//! only detection path for them. The bell is scanned here too rather than taken
+//! from [`alacritty_terminal::event::Event::Bell`], so one signal set comes from
+//! one mechanism and cannot double-fire.
 //!
-//! This module is deliberately free of any PTY, terminal, or engine dependency so
-//! it can be exhaustively unit-tested at the byte level. It is a small streaming
-//! state machine:
+//! This module depends on no PTY, terminal, or engine type, so it can be
+//! exhaustively unit-tested at the byte level. It is a small streaming state
+//! machine:
 //!
-//! - A bare `BEL` (`0x07`) encountered OUTSIDE any escape sequence is the classic
-//!   terminal ding ([`AttentionEvent::Bell`]). A `BEL` that terminates an OSC, or
-//!   that sits inside a DCS/tmux envelope, is structural and never a ding.
+//! - A bare `BEL` (`0x07`) outside any escape sequence is the classic terminal
+//!   ding ([`AttentionEvent::Bell`]). A `BEL` that terminates an OSC, or that sits
+//!   inside a DCS/tmux envelope, is structural and never a ding.
 //! - `ESC ] 9 ; <message> (BEL | ESC \)` and `ESC ] 777 ; notify ; ...` are
 //!   attention notifications ([`AttentionEvent::Notify`]).
 //! - `ESC ] 9 ; 4 ; <state> ; <pct> (BEL | ESC \)` is a progress report
-//!   ([`AttentionEvent::Progress`]); it is NEVER attention. States 1 (working
-//!   with a value) and 3 (working indeterminate) mean busy; 0 (done/idle) and
-//!   every other state mean idle. To distinguish a real progress report from a
-//!   notification whose free text merely begins `4;`, the `<state>` field must be
-//!   a short (1-2 char) ASCII-digit token; otherwise the whole thing is a Notify.
-//!   A residual ambiguity remains and is inherent to the shared OSC 9 prefix: a
-//!   notification body that literally begins `4;<one-or-two-digits>[;...]` is
-//!   indistinguishable from progress and is classified as progress. Real notify
-//!   bodies from Claude/Codex are prose, so this collision is vanishingly rare.
+//!   ([`AttentionEvent::Progress`]) and is never attention. States 1 (working with
+//!   a value) and 3 (working indeterminate) mean busy; 0 (done/idle) and every
+//!   other state mean idle. `<state>` must be a 1-2 character ASCII-digit token or
+//!   the whole sequence is a Notify; a notification body literally beginning
+//!   `4;<one-or-two-digits>[;...]` is indistinguishable from progress and is
+//!   classified as progress, an ambiguity inherent to the shared OSC 9 prefix.
 //! - Agents running under tmux wrap their escape codes in an outer
 //!   `ESC P tmux ; <payload with every ESC doubled> ESC \` passthrough envelope;
 //!   the scanner unwraps it and scans the inner content.
-//! - A sequence can be split across two reads, so the scanner carries an
-//!   unterminated trailing sequence to the next [`AttentionScanner::scan`] call,
-//!   bounded by [`MAX_CARRY`] so a garbage stream can never grow it without
-//!   bound. The carry remembers how far the terminator search already got (and
-//!   for which sequence kind) so a slow-dripping unterminated sequence is scanned
-//!   once, not re-scanned from the start on every chunk.
+//! - A sequence can be split across two reads, so an unterminated trailing
+//!   sequence is carried to the next [`AttentionScanner::scan`] call, bounded by
+//!   [`MAX_CARRY`] so a garbage stream can never grow it without bound. The carry
+//!   remembers how far the terminator search already got, and for which sequence
+//!   kind, so a slow-dripping sequence is scanned once rather than re-scanned from
+//!   the start on every chunk.
 //!
 //! # Trust boundary
 //!
 //! These signals are read from whatever the agent writes to its terminal, so any
-//! content the agent displays (a file it `cat`s, a tool's output) that happens to
-//! contain these escape codes can forge or mask an attention/progress signal.
-//! This is inherent to terminal escape codes: a real terminal would pop the same
+//! content the agent displays (a file it `cat`s, a tool's output) containing these
+//! escape codes can forge or mask a signal. A real terminal would pop the same
 //! desktop notification for the same bytes. The blast radius is bounded by the
 //! attention config switches and by the engine's short progress-authority window.
 

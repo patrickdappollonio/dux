@@ -1,5 +1,5 @@
 //! The command-palette registry: the single source of truth for every command
-//! the TUI's `Ctrl-p` palette can run.
+//! the TUI's command palette can run.
 //!
 //! Each [`PaletteCommand`] carries the action it dispatches plus the dashed
 //! command name and description shown in the palette. Keybindings remain
@@ -8,19 +8,17 @@
 //!
 //! ## Scope: this table is the TUI palette, and only the TUI palette
 //!
-//! The web UI has no command palette. Its equivalent surface is the cog **app
-//! menu**, which is defined client-side in
-//! `crates/dux-web/web/src/lib/appMenu.ts` and does NOT read this table. The
-//! two surfaces are independent: there is no projection and no cross-language
-//! pin holding them together.
+//! The web UI has no command palette. Its equivalent surface is the cog app
+//! menu, defined client-side in `crates/dux-web/web/src/lib/appMenu.ts`, which
+//! does not read this table: there is no projection and no cross-language pin
+//! holding the two surfaces together.
 //!
 //! When you add a command here, decide explicitly whether it also warrants an
-//! entry in the web app menu (see CLAUDE.md); nothing will fail if you skip
-//! it. Many commands here are inherently per-project, per-session, or
-//! per-terminal; on the web those live as parameterized row/menu/dialog
-//! actions rather than global menu entries. The per-row comments below record
-//! that reasoning. The exhaustiveness test in `keybindings.rs` guarantees
-//! every command in this table is listed by the TUI palette exactly once.
+//! entry in the web app menu (see CLAUDE.md); nothing will fail if you skip it.
+//! Commands that are per-project, per-session or per-terminal live on the web as
+//! parameterized row, menu or dialog actions rather than global menu entries.
+//! The exhaustiveness test in `keybindings.rs` guarantees every command in this
+//! table is listed by the TUI palette exactly once.
 
 pub mod search;
 
@@ -143,9 +141,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ChangeTheme,
         name: "change-theme",
         description: "Switch the dux color theme",
-        // TUI-only: the web has no theme switcher because it is pinned DARK (it
-        // does not follow the browser, as this note used to say: `main.tsx` force-
-        // adds the `.dark` class and the light tokens are inert).
+        // TUI-only: the web is pinned DARK and has no theme switcher. `main.tsx`
+        // force-adds the `.dark` class and the light tokens are inert.
     },
     PaletteCommand {
         action: Action::ReloadConfig,
@@ -240,8 +237,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Show and focus the selected agent",
         // Per-session: on the web an agent is selected by clicking its sidebar or
         // mobile-hub row (`selectSession` in `store.ts`), including from the
-        // collapsed icon rail. There is no named "Switch session" group anywhere
-        // in the web UI, which is what this note used to claim.
+        // collapsed icon rail. There is no named session-switching group there.
     },
     PaletteCommand {
         action: Action::OpenProjectBrowser,

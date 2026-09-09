@@ -126,18 +126,17 @@ pub fn stamp_from_meta(meta: &std::fs::Metadata) -> FileStamp {
 /// `.git`-component rejection so `.git/*` files can be opened. Returns
 /// `(abs_path, is_git_dir, is_outside)`.
 ///
-/// - `is_git_dir`: true when the canonical real path is inside a `.git`
-///   directory (the caller must set `read_only = true`).
-/// - `is_outside`: true when the canonical real path escapes the worktree via
-///   ANY symlink — intermediate OR leaf. The caller must set `read_only = true`
-///   and skip the normal O_NOFOLLOW branch, reading from the resolved target
-///   instead. (Dangling symlinks whose parent cannot be canonicalized are
-///   surfaced as an error, same as today.)
+/// - `is_git_dir`: true when the canonical real path is inside a `.git` directory
+///   (the caller must set `read_only = true`).
+/// - `is_outside`: true when the canonical real path escapes the worktree via ANY
+///   symlink, intermediate or leaf. The caller must set `read_only = true` and
+///   skip the normal O_NOFOLLOW branch, reading from the resolved target instead.
+///   A dangling symlink whose parent cannot be canonicalized is an error.
 ///
 /// Traversal attacks (absolute paths, `..`) are still rejected with an error.
 ///
-/// This is `pub` (not `pub(crate)`) because `dux-web`'s `file_routes` uses it
-/// for the read-permissive resolver in `read_raw` (cross-crate call).
+/// `pub` rather than `pub(crate)` because `dux-web`'s `file_routes` calls it for
+/// the read-permissive resolver in `read_raw`.
 pub fn resolve_worktree_path_for_read(
     worktree: &Path,
     rel_path: &str,
@@ -397,24 +396,21 @@ fn open_for_writing_error(e: rustix::io::Errno, abs_path: &Path) -> anyhow::Erro
 
 /// Write `content` over an EXISTING file only if it still matches `expected`.
 ///
-/// Everything here hangs off one descriptor, and that is the point. The obvious
-/// shape (stat the path, compare, then call [`write_nofollow`]) truncates the
-/// file as part of opening it, so by the time anything could be compared the
-/// other writer's work is already gone; and even a stat that passed would be a
-/// statement about the path, not about the file the write then lands on. So:
-/// open `O_WRONLY | O_NOFOLLOW` with NEITHER `O_CREAT` nor `O_TRUNC` (nothing
-/// is destroyed and nothing is created by the open itself), `fstat` that
-/// descriptor, compare, and only then `ftruncate` + write through it.
+/// Everything hangs off one descriptor. Stat-then-[`write_nofollow`] cannot work:
+/// that open truncates, so the other writer's work is gone before anything can be
+/// compared, and a stat is a statement about the path rather than about the file
+/// the write lands on. So: open `O_WRONLY | O_NOFOLLOW` with NEITHER `O_CREAT` nor
+/// `O_TRUNC`, `fstat` that descriptor, compare, and only then `ftruncate` and write
+/// through it.
 ///
-/// `ENOENT` is a conflict, not a create: with a token in hand the client is
-/// saying "update the file I read", and the file it read is gone. Resurrecting
-/// it would undo a deletion the user never saw.
+/// `ENOENT` is a conflict, not a create: with a token in hand the client is saying
+/// "update the file I read", and that file is gone. Resurrecting it would undo a
+/// deletion the user never saw.
 ///
-/// The window this does NOT close is the human one: between the read that
-/// produced `expected` and the save, the user is thinking, and any writer may
-/// land in there. That is exactly the window the guard REPORTS on rather than
-/// prevents. What remains after the guard is only the microseconds between the
-/// `fstat` and the `ftruncate` on the same descriptor.
+/// The window this does NOT close is the human one, between the read that produced
+/// `expected` and the save; that is the window the guard REPORTS on rather than
+/// prevents. What remains after the guard is the microseconds between the `fstat`
+/// and the `ftruncate` on the same descriptor.
 fn write_checked_existing(
     abs_path: &Path,
     content: &str,
@@ -675,31 +671,19 @@ enum RenameMechanism {
 /// Rename `src` onto `dst`, refusing an occupied destination in one syscall.
 ///
 /// A stat followed by [`std::fs::rename`] is not the same promise: `rename(2)`
-/// silently OVERWRITES (measured: file-onto-file and directory-onto-empty-
-/// directory both succeed), so another client can create the destination in
-/// the window between the two calls and lose it, and dux is explicitly
-/// multi-client with no trash to recover from.
-/// `renameat_with(RenameFlags::NOREPLACE)` puts the refusal in the rename call
-/// itself. rustix maps that flag to `RENAME_NOREPLACE` on Linux and to
-/// `renameatx_np`'s `RENAME_EXCL` on macOS, which are dux's two supported
-/// targets.
+/// silently overwrites (measured: file-onto-file and directory-onto-empty-
+/// directory both succeed), so another client can create the destination in the
+/// window between the two calls and lose it, and dux is explicitly multi-client
+/// with no trash to recover from. `renameat_with(RenameFlags::NOREPLACE)` puts the
+/// refusal in the rename call itself. rustix maps that flag to `RENAME_NOREPLACE`
+/// on Linux and to `renameatx_np`'s `RENAME_EXCL` on macOS, which are dux's two
+/// supported targets.
 ///
-/// The fallback is narrow and stated rather than hidden: a filesystem with no
-/// `renameat2` (and macOS before 10.12, where rustix finds no `renameatx_np`
-/// and answers `ENOSYS`) reports `ENOSYS`/`EINVAL`/`ENOTSUP`, and only there
-/// does this stat first and rename after, which is the older racy pair. There
-/// and only there does the TOCTOU window still exist.
-///
-/// What the tests prove is that on this platform both a successful and a
-/// refused no-replace rename go through the SYSCALL path and not the fallback
-/// (`RenameMechanism`, asserted below), and that an occupied destination is
-/// refused with the source and destination untouched. The ATOMICITY itself is
-/// deliberately not asserted, because it is not black-box testable from here:
-/// the only observable difference between the two paths is a window measured
-/// in microseconds inside another process's scheduling, and a test that tried
-/// to hit it would be a load-driven flake that proves nothing when it passes.
-/// Asserting the branch is the deterministic stand-in: it fails the moment the
-/// syscall stops being the thing that answers.
+/// The fallback is narrow: a filesystem with no `renameat2` (and macOS before
+/// 10.12, where rustix finds no `renameatx_np` and answers `ENOSYS`) reports
+/// `ENOSYS`/`EINVAL`/`ENOTSUP`, and only there does this stat first and rename
+/// after, which is the older racy pair. There and only there does the TOCTOU
+/// window still exist.
 fn rename_no_replace(src: &Path, dst: &Path) -> Result<(), RenameNoReplaceError> {
     rename_no_replace_reporting(src, dst).1
 }
@@ -905,22 +889,20 @@ pub struct WorktreeEntryInfo {
     /// The symlink's target as stored on disk (not resolved), for a symlink.
     pub symlink_target: Option<String>,
     /// The TARGET's mtime and size, present only when this entry is a symlink
-    /// whose target could be stat'd. `None` for everything else, so presence
-    /// is the client's test rather than a sentinel value.
+    /// whose target could be stat'd. `None` for everything else, so presence is
+    /// the client's test rather than a sentinel value.
     ///
-    /// Why the route carries two stamps rather than one. The info panel
-    /// describes the LINK, on purpose and permanently: following it would
-    /// print a mode, a size and an mtime belonging to a file the user did not
-    /// ask about. But [`read_file`] reads THROUGH the link and stamps the
-    /// descriptor it actually read from, so the editor's freshness check was
-    /// comparing the target's stamp against the link's and finding a
-    /// difference every single time: a symlinked open file read as stale
-    /// forever, and its banner could never be retired.
+    /// The route carries two stamps because its consumers ask different
+    /// questions. The info panel describes the LINK, permanently: following it
+    /// would print a mode, a size and an mtime belonging to a file the user did
+    /// not ask about. [`read_file`] reads THROUGH the link and stamps the
+    /// descriptor it actually read from, so the editor's freshness check must
+    /// compare against this target stamp or a symlinked open file reads as stale
+    /// forever and its banner can never be retired.
     ///
-    /// So both facts travel, and each consumer takes the one it is asking
-    /// about. The mtime goes through the same [`format_mtime`] as every other
-    /// timestamp on the wire, because two formatters would silently disagree
-    /// on the same instant.
+    /// The mtime goes through the same [`format_mtime`] as every other timestamp
+    /// on the wire, because two formatters would silently disagree on the same
+    /// instant.
     pub target_modified: Option<String>,
     pub target_size: Option<u64>,
     pub git: GitStatusView,
@@ -971,20 +953,16 @@ impl std::error::Error for EntryMissing {}
 /// Describe one worktree entry for the editor's read-only info panel.
 ///
 /// Containment is the SAME boundary every other editor operation uses:
-/// `resolve_worktree_path` refuses an absolute path, any `..` or `.` segment,
-/// a `.git` component anywhere, and (for a path that exists, or a dangling
-/// symlink) anything whose realpath escapes the worktree or lands inside a
-/// `.git` directory.
+/// `resolve_worktree_path` refuses an absolute path, any `..` or `.` segment, a
+/// `.git` component anywhere, and (for a path that exists, or a dangling symlink)
+/// anything whose realpath escapes the worktree or lands inside a `.git` directory.
 ///
-/// That last check is what refuses a symlink escaping the tree, and the reason
-/// is the TARGET PATH STRING, not the target's contents: the stat below is
-/// `symlink_metadata`, which reports the LINK's own lstat and never the
-/// target's size, mode or mtime, so nothing about the host file leaks that
-/// way. What does leak is `symlink_target`, which the panel prints verbatim,
-/// and `/root/.ssh/id_ed25519` is a disclosure on its own.
-///
-/// The stat is `symlink_metadata`, so nothing is followed and a symlink is
-/// described as itself.
+/// That last check refuses a symlink escaping the tree, and the reason is the
+/// TARGET PATH STRING rather than the target's contents: the stat is
+/// `symlink_metadata`, so nothing is followed, a symlink is described as itself,
+/// and no size, mode or mtime of the host file leaks. What would leak is
+/// `symlink_target`, which the panel prints verbatim, and `/root/.ssh/id_ed25519`
+/// is a disclosure on its own.
 pub fn entry_info(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeEntryInfo> {
     use std::os::unix::fs::PermissionsExt;
 

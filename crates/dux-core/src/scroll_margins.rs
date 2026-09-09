@@ -8,17 +8,13 @@
 //! scrolling again.
 //!
 //! The terminal engine dux drives keeps its region in a private field with no
-//! accessor, so it cannot be read back from the terminal that already has it.
-//! Instead this module runs a second parser over the same bytes and keeps its own
-//! copy. The parser drives `Handler`, whose seventy-odd methods all have empty
-//! default bodies, so an observer implements only the handful of callbacks that
-//! can move the region and ignores everything else. It touches no grid and
-//! allocates nothing per byte.
+//! accessor, so this module runs a second parser over the same bytes and keeps its
+//! own copy. It drives `Handler`, whose methods have empty default bodies, so an
+//! observer implements only the callbacks that can move the region. It touches no
+//! grid and allocates nothing per byte.
 //!
-//! Two copies of one value can drift, so the rule for this module is that it
-//! mirrors the engine rather than the specification. The engine writes its region
-//! at five sites, found by reading every assignment to that private field and
-//! every caller that reaches one, and this module moves at all five:
+//! Two copies of one value can drift, so this module mirrors the engine rather
+//! than the specification. It moves the region wherever the engine does:
 //!
 //! - construction, which starts at the whole screen
 //! - a resize, which widens back to the whole screen at the new height, but ONLY
@@ -33,12 +29,12 @@
 //!   so no `set_scrolling_region` callback carries it and the observer has to
 //!   watch the private-mode callbacks to see it at all
 //!
-//! Only the explicit set is a program saying something; the other four are the
-//! engine acting on its own. An observer that watched the set alone would report
-//! a region the program no longer has after any of them, and restoring a stale
-//! region is worse than restoring none. `pty::tests` drives each of those sites
-//! through both this tracker and a live terminal and asserts they agree, which is
-//! what keeps the mirror honest as the dependency changes.
+//! Only the explicit set is a program saying something; the rest are the engine
+//! acting on its own. An observer that watched the set alone would report a region
+//! the program no longer has after any of them, and restoring a stale region is
+//! worse than restoring none. The tests in `pty` drive each of those sites through
+//! both this tracker and a live terminal and assert they agree, which is what
+//! keeps the mirror honest as the dependency changes.
 //!
 //! Column mode is not exotic. The standard terminal description for xterm carries
 //! it in its initialisation and reset strings, so a routine terminal-initialising
@@ -200,17 +196,15 @@ impl ScrollRegionTracker {
     /// Follow the terminal through a resize, which widens the region back to the
     /// whole screen at the new height.
     ///
-    /// A resize to the size already in effect is not a resize: the engine
-    /// compares both dimensions up front and returns before it reaches its
-    /// region, so this returns too. That guard is the whole reason this takes a
-    /// width it otherwise has no use for, and it is load bearing rather than an
-    /// optimisation. A browser client sends its size on every reconnect, every
-    /// tab focus, every visibility change and every input claim, and nearly all
-    /// of those carry the size already in effect; widening on them would leave
-    /// this reporting the whole screen while the child still had its margins, and
-    /// the next reconnect would then assert the whole screen over a layout the
-    /// program still has. A width-only change IS a real resize and does widen the
-    /// region, which is why comparing heights alone would not do.
+    /// A resize to the size already in effect is not a resize: the engine compares
+    /// both dimensions up front and returns before it reaches its region, so this
+    /// returns too. That guard is why this takes a width it otherwise has no use
+    /// for, and it is load bearing. A browser client sends its size on every
+    /// reconnect, tab focus, visibility change and input claim, nearly always the
+    /// size already in effect; widening on those would leave this reporting the
+    /// whole screen while the child still had its margins. A width-only change IS
+    /// a real resize and does widen the region, so comparing heights alone would
+    /// not do.
     pub fn resize(&mut self, rows: u16, cols: u16) {
         if self.rows == rows && self.cols == cols {
             return;
