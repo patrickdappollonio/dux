@@ -33,6 +33,17 @@ type InfoResult =
   | { kind: "error"; message: string }
   | { kind: "vanished" }
 
+// What a failed read means for the panel. A 404 says the entry is GONE, which the
+// vanished-target guard dismisses on; anything else is an answer the user needs to
+// read, so the panel stays open carrying it.
+function infoResultFromError(e: unknown): InfoResult {
+  if (e instanceof FileApiError && e.status === 404) return { kind: "vanished" }
+  return {
+    kind: "error",
+    message: e instanceof Error ? e.message : "could not read file info",
+  }
+}
+
 interface FileInfoDialogProps {
   root: EditorRoot
   target: FileInfoTarget | null
@@ -75,20 +86,7 @@ export function FileInfoDialog({
       })
       .catch((e: unknown) => {
         if (cancelled) return
-        // A 404 means the entry is GONE, which the vanished-target guard reacts
-        // to; anything else is an answer the user needs to read.
-        if (e instanceof FileApiError && e.status === 404) {
-          setLoaded({ path, result: { kind: "vanished" } })
-          return
-        }
-        setLoaded({
-          path,
-          result: {
-            kind: "error",
-            message:
-              e instanceof Error ? e.message : "could not read file info",
-          },
-        })
+        setLoaded({ path, result: infoResultFromError(e) })
       })
     return () => {
       cancelled = true
