@@ -14991,10 +14991,18 @@ not_a_real_action = ["x"]
             }
             other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
-        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
-        assert_eq!(
-            app.status.message(),
-            "Branch check complete for \"demo\". Confirm or edit the agent name to continue."
+        // Read the outcome from the status set, not the line: on a slow
+        // machine the deferred "still reading changed files" spinner can take
+        // the line first, which the queue allows, and the outcome waits behind it.
+        let outcome =
+            "Branch check complete for \"demo\". Confirm or edit the agent name to continue.";
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .any(|s| s.tone == "info" && s.message == outcome),
+            "the branch-check outcome must be recorded; got {:?}",
+            app.status.snapshot()
         );
     }
 
