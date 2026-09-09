@@ -1,37 +1,32 @@
 //! Front-end-specific configuration surface.
 //!
-//! The `Engine` owns the config *write* path (the off-thread, atomic
-//! `ConfigWriteQueue`), but two config concerns still depend on front-end-only
+//! The `Engine` owns the config write path; two concerns need front-end-only
 //! knowledge and stay behind this seam:
 //!
-//! - **reload**: re-reading + validating config and re-syncing project records
-//!   against the session store. The TUI validates `[keys]` (which needs the
-//!   TUI-only `RuntimeBindings`) and runs the project-sync helpers; the web does
-//!   a plain read-only load.
-//! - **recover_render**: rendering the full config text to write back when the
-//!   on-disk file is corrupt. The TUI produces a fully-commented canonical
-//!   render (needs `RuntimeBindings`); the web produces a plain serialization.
+//! - `reload`: re-read and validate config and re-sync project records against
+//!   the session store. The TUI validates `[keys]`, which needs the TUI-only
+//!   `RuntimeBindings`; the web does a plain read-only load.
+//! - `recover_render`: render the text to write over a corrupt on-disk config.
+//!   The TUI renders the commented canonical form, the web a plain
+//!   serialization.
 //!
-//! The TUI provides `dux_tui::TuiConfigSurface`; the web provides
-//! `dux_web::WebConfigSurface`. Tests use [`NoopConfigSurface`].
+//! `dux_tui::TuiConfigSurface` and `dux_web::WebConfigSurface` implement it;
+//! tests use [`NoopConfigSurface`].
 
 use std::sync::mpsc::Sender;
 
 use crate::config::{Config, DuxPaths};
 use crate::worker::WorkerEvent;
 
-/// Guarantees that a reload worker ALWAYS posts exactly one
-/// `WorkerEvent::ConfigReloadReady`, even if the worker panics or returns early
-/// before producing a result.
+/// Guarantees a reload worker posts exactly one
+/// `WorkerEvent::ConfigReloadReady`, even on an early return or a panic.
 ///
-/// A reload opens a barrier on the engine (quiesces the config writer and defers
-/// config-mutating commands); the barrier only closes when `ConfigReloadReady`
-/// lands. If a panicking reload worker never posted a completion, the writer
-/// would stay paused and saves would be frozen forever. Every
+/// A reload opens a barrier on the engine (the config writer quiesces and
+/// config-mutating commands defer) that only `ConfigReloadReady` closes, so a
+/// missing completion freezes saves for the rest of the process. Every
 /// [`ConfigSurface::reload`] implementation must drive its completion through
 /// this guard: call [`ReloadCompletionGuard::complete`] with the real result on
-/// the success/error path, and the guard's `Drop` posts an `Err` completion if
-/// `complete` was never reached (e.g. a panic unwound past it).
+/// the success and error paths; `Drop` posts an `Err` if it was never reached.
 pub struct ReloadCompletionGuard {
     worker_tx: Sender<WorkerEvent>,
     sent: bool,
@@ -65,10 +60,8 @@ impl ReloadCompletionGuard {
 
 impl Drop for ReloadCompletionGuard {
     fn drop(&mut self) {
-        // Only fires when `complete` was never called (early return / panic):
-        // post a failure completion so the engine closes the reload barrier
-        // (resume the writer, clear `reloading`, drain deferred) rather than
-        // freezing saves forever.
+        // Only fires when `complete` was never called (early return or panic):
+        // the engine closes the reload barrier on a completion of either kind.
         self.send(Err(
             "the config reload worker stopped before producing a result".to_string(),
         ));
@@ -77,25 +70,22 @@ impl Drop for ReloadCompletionGuard {
 
 /// Front-end-specific configuration surface. [`ConfigSurface::reload`] spawns
 /// its own worker thread and posts `WorkerEvent::ConfigReloadReady` when done;
-/// [`ConfigSurface::recover_render`] is a pure function that returns the config
-/// text to write (the Engine performs the actual write through its writer).
+/// [`ConfigSurface::recover_render`] is pure and the Engine does the writing.
 pub trait ConfigSurface: Send + Sync {
     /// Reload the user config from disk, validate it, and re-sync project
     /// records against the session store. Post `WorkerEvent::ConfigReloadReady`
     /// when done. Runs on its own worker thread.
     fn reload(&self, paths: DuxPaths, worker_tx: Sender<WorkerEvent>);
 
-    /// Render the full config file text for `config`. Used by the Engine's
-    /// `RecoverConfig` handler to overwrite a corrupt on-disk config. This does
-    /// NOT write or post an event — it only produces the bytes; the Engine
-    /// writes them through `config_write::write_config_secure`.
+    /// Render the full config file text for `config`. Produces bytes only: the
+    /// Engine's `RecoverConfig` handler writes them over a corrupt on-disk
+    /// config through `config_write::write_config_secure`.
     fn recover_render(&self, config: &Config) -> String;
 }
 
-/// A no-op implementation for tests that need to construct an `Engine`
-/// without a real front-end attached. `reload` immediately posts a success
-/// `WorkerEvent` so any caller draining the worker channel can observe
-/// completion; `recover_render` returns a plain serialization.
+/// A no-op implementation for tests constructing an `Engine` with no front end.
+/// `reload` posts a success `WorkerEvent` immediately so a caller draining the
+/// worker channel still observes completion; `recover_render` serializes plainly.
 #[doc(hidden)]
 pub struct NoopConfigSurface;
 

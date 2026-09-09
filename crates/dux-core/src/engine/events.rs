@@ -360,11 +360,10 @@ pub enum EventReaction {
     /// from the state dux held). Emitted only on the transition, never once per
     /// re-check, so the surfaces can act on it without de-duplicating.
     ///
-    /// The terminal UI needs nothing from it: it reads `Engine::gh_status` live
-    /// when it gates a palette command. The web does, because `gh_available`
-    /// rides the bootstrap document a browser fetches once at connect, so
-    /// without a nudge a browser keeps hiding the pull-request entries until it
-    /// is reloaded.
+    /// A surface that reads `Engine::gh_status` live needs nothing from it. A
+    /// browser does, because `gh_available` rides the bootstrap document
+    /// fetched once at connect, so without a nudge it keeps hiding the
+    /// pull-request entries until reloaded.
     GhAvailabilityChanged {
         available: bool,
     },
@@ -504,13 +503,10 @@ pub enum AgentLaunchFailedOutcome {
 }
 
 /// Domain mutations the Engine performed in response to a
-/// `ProjectPersistenceCompleted` worker event; carries everything the App
-/// needs for view follow-up (rebuild_left_items, persist_config_projects_from_runtime,
-/// reload_changed_files for Delete, selected_left adjustment, status).
-///
-/// The Engine never calls `persist_config_projects_from_runtime` because
-/// that helper uses binary-only `RuntimeBindings` / `save_config` — it lives
-/// on App until Phase E5 carves dux-tui.
+/// `ProjectPersistenceCompleted` worker event, carrying everything a surface
+/// needs for its view follow-up. The Engine never calls
+/// `persist_config_projects_from_runtime` itself, because that helper uses
+/// binary-only `RuntimeBindings` and `save_config`.
 pub struct ProjectPersistenceOutcome {
     pub action: ProjectPersistenceAction,
     pub view: ProjectPersistenceView,
@@ -556,13 +552,11 @@ pub enum ProjectPersistenceView {
 
 /// What happened to the agent's BRANCHES when its worktree was removed.
 ///
-/// Two answers, because a delete now has two legal shapes. dux deletes the
-/// branches it created; it removes the worktree and keeps the branches when
-/// they are not its own (an agent attached to an existing branch, or adopted
-/// along with an existing worktree). The keep path never calls the branch
-/// deleting code at all, so it has no [`crate::git::RemoveResult`] to report
-/// and must not invent one: a `RemoveResult` full of `Deleted` would be a
-/// straightforward lie, and one full of `AlreadyGone` would be the opposite lie.
+/// Two answers, because a delete has two legal shapes: dux deletes the branches
+/// it created, and removes the worktree while keeping branches that are not its
+/// own. The keep path never calls the branch-deleting code, so it has no
+/// [`crate::git::RemoveResult`] to report and must not invent one, which would
+/// be a lie in one direction or the other.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RemovedBranches {
     /// dux deleted the branches it owned; git's per-branch report.
@@ -596,14 +590,12 @@ impl BranchDeleteInputs {
     /// Every branch the delete would remove, which is exactly what the dialogs
     /// name and count commits on.
     ///
-    /// THE CONSENT RULE. A delete that removes the branch removes both the one
+    /// The consent rule. A delete that removes the branch removes both the one
     /// the worktree is on now and the one the agent was born on (see
-    /// [`crate::git::remove_worktree`]), so a dialog that names only one of
-    /// them asks permission for something smaller than what happens. An agent
-    /// that never drifted has one branch under both names and this is one name.
-    ///
-    /// The current branch leads, because that is the one every other surface
-    /// shows for the agent.
+    /// [`crate::git::remove_worktree`]), so a dialog naming only one asks
+    /// permission for something smaller than what happens. An agent that never
+    /// drifted has one branch under both names, and this is one name. The
+    /// current branch leads, because every other surface shows that one.
     pub fn warned_branches(&self) -> Vec<&str> {
         let mut branches = vec![self.branch_name.as_str()];
         if !self.initial_branch.is_empty() && self.initial_branch != self.branch_name {
@@ -616,16 +608,14 @@ impl BranchDeleteInputs {
 /// Why a removal that kept the branches kept them, given the provenance and
 /// the delete dialog's answer.
 ///
-/// One function so the synchronous and deferred removal paths cannot word the
-/// same outcome differently. It is only ever called on the keeping arm, so
-/// "the user said yes" cannot reach it.
+/// One function, so the synchronous and deferred removal paths cannot word the
+/// same outcome differently. Only ever called on the keeping arm.
 ///
-/// The provenance sentence WINS whenever it is true, and "you left the box
-/// unticked" is reserved for the one case it cannot describe: a branch dux
-/// created, which would have gone unasked, spared because the user unticked
-/// the box. Unticking the box on a pre-existing branch leaves it at its default,
-/// and telling that user their own click is why `develop` survived would be
-/// both less informative and slightly untrue.
+/// The provenance sentence wins whenever it is true, and the unticked-box
+/// sentence is reserved for the one case provenance cannot describe: a branch
+/// dux created, spared because the user unticked the box. Unticking on a
+/// pre-existing branch leaves it at its default, so telling that user their own
+/// click is why the branch survived would be untrue.
 pub(crate) fn branch_kept_reason(
     provenance: crate::model::BranchProvenance,
     delete_branch: Option<bool>,
@@ -757,15 +747,13 @@ pub enum BeginDeleteSessionOutcome {
     /// NOT delete.
     TabLaunching,
     /// Worktree-removing delete: the Engine has already SIGTERMed the agent PTY
-    /// (and the session's terminals) and moved them to the terminating set,
-    /// capturing the worktree removal to run only after the agent exits. The
-    /// caller **vanishes the session now** (`finish_delete_session` with
-    /// `update_status=false`) and mints its OWN keyed `HandlerStatusOp` from this
-    /// `busy_message` (the TUI in `App::pending_delete_ops`, the web in
-    /// `Engine::pending_delete_ops_web`), showing its pending busy. Once the agent
-    /// PTY is reaped, `reap_terminating_ptys` hands the removal to
-    /// `dispatch_deferred_worktree_removal`, whose worker posts
-    /// `WorktreeRemoveCompleted` — resolving that op with each surface's wording.
+    /// and the session's terminals and moved them to the terminating set,
+    /// capturing the worktree removal to run once the agent exits. The caller
+    /// vanishes the session now, through `finish_delete_session` with
+    /// `update_status=false`, and mints its own keyed `HandlerStatusOp` from
+    /// `busy_message`. Once the PTY is reaped, `reap_terminating_ptys` hands the
+    /// removal to `dispatch_deferred_worktree_removal`, whose worker posts
+    /// `WorktreeRemoveCompleted` and resolves that op.
     AsyncStarted { busy_message: String },
     /// Inline path: no worktree removal needed (no `delete_worktree` request
     /// or shared with siblings). App should call the existing
@@ -802,14 +790,11 @@ pub struct BeginDeleteSessionView {
     pub outcome: BeginDeleteSessionOutcome,
 }
 
-/// View follow-up for `Command::DispatchAgentLaunch`. The Engine performs
-/// the in-flight check + spawn; the App caller uses `launched` to decide
-/// site-specific follow-up (busy messages, status updates, fallback
-/// branches). `status` is `Some(StatusUpdate::info(…))` only on the
-/// already-in-flight path. `session_id` is the id of the session whose
-/// launch was attempted, populated on both branches so downstream
-/// observers (e.g. the future web layer) can correlate the dispatch
-/// with its session without re-deriving it from the request.
+/// View follow-up for `Command::DispatchAgentLaunch`. The Engine does the
+/// in-flight check and the spawn; the caller reads `launched` to decide its
+/// site-specific follow-up. `status` is `Some` only on the already-in-flight
+/// path. `session_id` is populated on both branches, so an observer can
+/// correlate the dispatch with its session without re-deriving it.
 pub struct DispatchAgentLaunchView {
     pub session_id: String,
     /// The tab whose launch was dispatched (the slot tab id for the session-slot tab).
@@ -835,14 +820,11 @@ fn session_label(session: &AgentSession) -> String {
 }
 
 impl Engine {
-    /// Find any other session that owns `worktree_path` and currently has a
-    /// running provider, and detach it so the incoming launch can take over.
-    /// Returns the detached session's id + label so the App caller can clear
-    /// the engine's `pty_activity`/`pty_input` entries and surface the label in
-    /// status messages.
-    ///
-    /// The App's `detach_conflicting_worktree_session` is a thin wrapper that
-    /// also drops the `pty_activity` and `pty_input` entries for the returned id.
+    /// Find any other session that owns `worktree_path` and has a running
+    /// provider, and detach it so the incoming launch can take over. Returns the
+    /// detached session's id and label, so the caller can clear the engine's
+    /// `pty_activity` and `pty_input` entries for that id and name it in status
+    /// messages.
     pub fn detach_conflicting_worktree_session(
         &mut self,
         worktree_path: &str,
@@ -944,25 +926,21 @@ impl Engine {
     /// already there.
     ///
     /// A bare insert would replace the entry, and dropping the displaced client
-    /// SIGKILLs the child it names, so a working agent could be killed by a
-    /// launch that landed late, with nothing said anywhere. Here the intruder is
-    /// the NEW client: it is dropped (and its own just-spawned child with it),
-    /// the running one is kept, and the refusal is logged with both processes.
+    /// SIGKILLs the child it names, so a late launch could kill a working agent.
+    /// Here the new client is the intruder: it is dropped along with its
+    /// just-spawned child, the running one is kept, and the refusal is logged.
     ///
-    /// This is a backstop, not the gate: `Command::DispatchAgentLaunch` refuses
-    /// a launch over a live provider before any process is spawned, and the
-    /// per-tab in-flight lock stops two launches racing for one tab. So the
-    /// launch's own view is left to say whatever it would ordinarily say; there
-    /// is a live process in the tab either way, which is what the user asked
-    /// for.
+    /// A backstop, not the gate: `Command::DispatchAgentLaunch` refuses a launch
+    /// over a live provider before any process is spawned, and the per-tab
+    /// in-flight lock stops two launches racing for one tab. The launch's own
+    /// view is left to say whatever it ordinarily says, since there is a live
+    /// process in the tab either way.
     ///
-    /// The outcome is RETURNED rather than swallowed, because the caller's
+    /// The outcome is returned rather than swallowed, because the caller's
     /// follow-up bookkeeping is all about the process this call may have just
-    /// killed. Republishing the drop-paste form and arming a resume-fallback
-    /// candidate for a child that never joined the tab are both wrong, and the
-    /// candidate is actively destructive: the survivor is the OLD child, and if
-    /// it stays quiet past its resume wait the sweep tears the tab down and
-    /// SIGKILLs it.
+    /// killed. Arming a resume-fallback candidate for a child that never joined
+    /// the tab is actively destructive: the survivor is the old child, and if it
+    /// stays quiet past its resume wait the sweep SIGKILLs it.
     #[must_use]
     fn insert_launched_provider(
         &mut self,
@@ -1129,16 +1107,12 @@ impl Engine {
 
         // Ghost-launch guard: an extra tab whose row was deleted while its
         // launch was in flight must not resurrect a live PTY under a dead tab
-        // id. Dropping `client` here (PtyClient::Drop) terminates the freshly
-        // spawned process. The session-slot tab is exempt: its row is real, but
-        // the engine's in-memory `agent_tabs` map holds only the extras, so
-        // "not in the map" is normal for it.
-        //
-        // Asked of the LIVE session, never of `session` (the snapshot the
-        // request was built from): a promotion during this launch moves the slot,
-        // and judged by the snapshot the freshly promoted tab looks like an extra
-        // whose row has gone, so this guard would kill the process it just
-        // started.
+        // id, so dropping `client` here terminates the freshly spawned process.
+        // The session-slot tab is exempt, because the in-memory `agent_tabs` map
+        // holds only the extras. Asked of the live session, never of the
+        // snapshot the request was built from: a promotion during this launch
+        // moves the slot, and by the snapshot the promoted tab looks like an
+        // extra whose row has gone, so the guard would kill what it just began.
         let is_slot_tab = self.is_slot_tab_of(SessionIdRef::new(&session.id), &tab_id);
         if !is_slot_tab && !self.agent_tabs.contains_key(&tab_id) {
             logger::info(&format!(
@@ -1158,24 +1132,17 @@ impl Engine {
             );
         }
 
-        // The insert DECIDES, and the bookkeeping below follows it. A launch that
-        // lands on a tab a live process already holds is dropped, and everything
-        // that speaks for the just-launched process is then a statement about a
-        // child that no longer exists:
+        // The insert decides and the bookkeeping below follows it. A launch
+        // landing on a tab a live process already holds is dropped, so anything
+        // speaking for the just-launched process would describe a child that no
+        // longer exists: the drop-paste form would be republished for a dead
+        // pid, and the resume-fallback candidate would let the sweep call the
+        // old child's quiet a hung resume and SIGKILL a healthy agent. The
+        // detach sits below the insert for the same reason: it is done on behalf
+        // of the launch, so a launch that never took the tab must not do it.
         //
-        // - the drop-paste form would be republished for a dead pid;
-        // - the resume-fallback candidate is worse than wrong. The child in the
-        //   tab is the OLD one, which was never resuming; if it happens to stay
-        //   quiet past `resume_wait_timeout_ms` the sweep calls the resume hung,
-        //   tears the tab's runtime down and SIGKILLs a healthy agent.
-        //
-        // The detach moved BELOW the insert for the same reason: detaching
-        // somebody else's session off this worktree is done on behalf of the
-        // launch, so a launch that never took the tab must not do it.
-        //
-        // What stays unconditional is what remains TRUE either way: a live
-        // process is in this tab, so the agent is Active, and the slot tab's
-        // auto-reopen intent is what the user asked for.
+        // Unconditional below is only what stays true either way: a live process
+        // is in this tab, so the agent is Active.
         let inserted = self.insert_launched_provider(&tab_id, client);
         let detached = inserted
             .kept()
@@ -1358,54 +1325,28 @@ impl Engine {
         }
     }
 
-    /// Engine half of the session-deletion cascade. Removes the session from
-    /// the store + providers + runtime maps + the sessions vector; refreshes
-    /// branch-sync entries; spawns the startup-log deletion worker. Returns
-    /// `Ok(None)` if the session was already gone; `Ok(Some(outcome))` with
-    /// the context the App needs for its view-side follow-up; `Err` on a
-    /// store failure (in-memory state untouched in that case so the UI keeps
-    /// showing the session).
+    /// Clear every runtime map entry for all of a session's tabs, the
+    /// session-slot tab and every extra tab alike, by looping
+    /// [`Engine::clear_tab_runtime`]. Does not remove the persisted
+    /// `agent_tabs` records: a detach keeps them, because the session lives on
+    /// disconnected, and a delete removes them separately.
     ///
-    /// **Ordering invariant for engine-side helpers**: this method performs
-    /// all engine-state cleanup (providers, running_provider_pins,
-    /// resume_fallback_candidates, pty_activity, sessions.retain,
-    /// update_branch_sync_sessions) before returning. The caller is then
-    /// responsible for view-side cleanup (e.g. companion-terminal view
-    /// teardown). During the gap between this method returning and the
-    /// App-side applier running, those view-only maps still hold stale
-    /// entries for the deleted session_id. Engine helpers invoked from inside
-    /// this method MUST NOT read those view-only maps for the deleted
-    /// session_id — they will see stale data. If a future helper needs to
-    /// observe view state during deletion, the deletion sequence must be
-    /// re-architected to invert the engine/view ordering.
-    /// Clear every runtime map entry (`providers`, `running_provider_pins`,
-    /// `resume_fallback_candidates`, `pty_activity`, `pty_input`, and the
-    /// in-flight `AgentLaunch` key) for ALL of a session's tabs — the
-    /// session-slot tab and every extra tab. Does NOT
-    /// remove the persisted `agent_tabs` records: a detach keeps them (the
-    /// session lives on, just disconnected); a delete removes them separately
-    /// via `agent_tabs.retain`.
-    ///
-    /// This is the tab-aware replacement for the single-`session.id` map clears
-    /// every WHOLE-AGENT teardown path used before tabs existed. Session-slot
-    /// scoped operations (`kill_session_pty`, force-reconnect) deliberately do
-    /// NOT use it — they act on the session-slot tab only via `clear_tab_runtime`
-    /// directly and must leave the user's independent extra tabs running.
+    /// Session-slot scoped operations must not use it: they act on the slot tab
+    /// alone and have to leave the user's independent extra tabs running.
     fn clear_session_tab_runtime(&mut self, session_id: &str) {
         for tab_id in self.tab_ids_for_session(session_id) {
             self.clear_tab_runtime(&tab_id);
         }
     }
 
-    /// Remember what a tab LAUNCHED with, so the spine can answer for that TAB
+    /// Remember what a tab launched with, so the spine answers for that tab
     /// rather than for its provider's name: two live tabs of one provider
-    /// launched either side of a config edit need the two forms they each
-    /// started with, and one name cannot carry both. It is also what still
-    /// answers after the user renames or removes the tab's `[providers.<name>]`
-    /// block. Both halves come from the exact [`ProviderCommandConfig`] the
-    /// launch used rather than being re-read from the current config, because
-    /// the whole point is to survive a later edit.
-    /// Retired by [`Engine::clear_tab_runtime`] when the process goes.
+    /// launched either side of a config edit need the forms they each started
+    /// with, and one name cannot carry both. It also still answers after the
+    /// user renames or removes the tab's `[providers.<name>]` block. Both halves
+    /// come from the exact [`ProviderCommandConfig`] the launch used, never
+    /// re-read from the current config, which is the whole point. Retired by
+    /// [`Engine::clear_tab_runtime`] when the process goes.
     fn record_launched_drop_paste(
         &mut self,
         tab_id: &TabIdRef,
@@ -1422,20 +1363,14 @@ impl Engine {
         );
     }
 
-    /// Clear every runtime map keyed by ONE tab id: the body below is the list,
-    /// and it is the SINGLE source of truth for it. Three callers rely on that:
-    /// `close_tab` (a single extra tab), `clear_session_tab_runtime` (a whole
-    /// session, looped) and `retry_resume_fallback` (a stale resume attempt
-    /// about to be relaunched). Adding a new tab-keyed map is therefore a
-    /// one-line change here rather than a comment-enforced convention spread
-    /// across three files.
+    /// Clear every runtime map keyed by one tab id. The body below is the list
+    /// and the single source of truth for it, so adding a tab-keyed map is a
+    /// one-line change here. Never name these maps at a call site: a partial
+    /// list leaks every map it omits whenever that call site's relaunch fails.
     ///
-    /// Never name these maps at a call site: a partial list leaks every map it
-    /// omits whenever the relaunch that call site dispatched then fails.
-    ///
-    /// The three PTY maps below are keyed by the wider PTY keyspace (agent tabs
-    /// AND companion terminals share them), so they take the id's raw string;
-    /// everything else is tab-keyed and takes the id as itself. See
+    /// The PTY maps below are keyed by the wider PTY keyspace, shared with
+    /// companion terminals, so they take the id's raw string; everything else is
+    /// tab-keyed and takes the id as itself. See
     /// [`Engine::clear_terminal_runtime`] for the other half of that split.
     pub fn clear_tab_runtime(&mut self, tab_id: &TabIdRef) {
         self.providers.remove(tab_id);
@@ -1474,6 +1409,17 @@ impl Engine {
         self.pty_pointer.remove(terminal_id);
     }
 
+    /// Engine half of the session-deletion cascade: remove the session from the
+    /// store, the providers, the runtime maps and the sessions vector, refresh
+    /// branch-sync entries and spawn the startup-log deletion worker. `Ok(None)`
+    /// when the session was already gone, `Ok(Some(outcome))` with the context a
+    /// caller needs for its view-side follow-up, `Err` on a store failure, which
+    /// leaves in-memory state untouched so the UI keeps showing the session.
+    ///
+    /// Ordering invariant: all engine-state cleanup happens before this returns,
+    /// and the caller then does view-side cleanup. In the gap, view-only maps
+    /// still hold entries for the deleted session id, so an engine helper called
+    /// from inside here must not read them for that id.
     pub fn finish_delete_session(
         &mut self,
         session_id: &str,
@@ -1609,23 +1555,21 @@ impl Engine {
         })
     }
 
-    /// Synchronous engine half of "delete this session" — looks up the session
-    /// and project, optionally calls `git::remove_worktree`, then runs the full
+    /// Synchronous engine half of deleting a session: look up the session and
+    /// project, optionally call `git::remove_worktree`, then run the full
     /// `finish_delete_session` cascade.
     ///
-    /// Returns `Ok(None)` if the session was already gone or an async delete
-    /// worker is already in flight for this session; `Ok(Some(outcome))`
-    /// otherwise; `Err` if `git::remove_worktree` or
-    /// `session_store.delete_session` fails. A missing project record does NOT
-    /// abort the deletion — the session record is still removed, but its worktree
-    /// is kept (we cannot run `git worktree remove` without the project repo).
+    /// `Ok(None)` when the session was already gone or an async delete worker is
+    /// in flight for it, `Ok(Some(outcome))` otherwise, `Err` when
+    /// `git::remove_worktree` or `session_store.delete_session` fails. A missing
+    /// project record does not abort the deletion: the session record still goes
+    /// but its worktree is kept, since `git worktree remove` needs the repo.
     ///
-    /// Callers must ensure no async worker is already removing this worktree
-    /// (`pending_deletions` should not contain `session_id`). If a caller
-    /// bypasses that contract, this method soft-returns `Ok(None)` and logs an
-    /// error rather than racing `git::remove_worktree` against the in-flight
-    /// async deletion — debug-only checks would not catch this in release
-    /// builds, and the path is destructive (worktrees are user data).
+    /// Callers must ensure no async worker is already removing this worktree, so
+    /// `pending_deletions` must not contain `session_id`. A caller that bypasses
+    /// that contract gets a soft `Ok(None)` and a logged error rather than a
+    /// race against the in-flight deletion: the path is destructive and a
+    /// debug-only check would not catch it in a release build.
     pub fn do_delete_session(
         &mut self,
         session_id: &str,
@@ -1666,15 +1610,12 @@ impl Engine {
                 && crate::project_browser::same_directory(s.directory(), session.directory())
         });
 
-        // What a removal actually needs: a project to run git in AND a managed
-        // working copy to remove. Resolved as one pair up front, so the removal
-        // block below can be entered only when both exist and there is no arm
-        // in it that could delete a directory dux did not create.
-        //
-        // A standalone agent's directory is the user's folder, so its deletion
-        // removes dux's record of the agent and nothing else, ever: it has no
-        // managed workspace, so `removal_target` is `None` for it and the block
-        // is unreachable rather than guarded.
+        // A removal needs a project to run git in and a managed working copy to
+        // remove, resolved as one pair up front so the block below is entered
+        // only when both exist and no arm in it can delete a directory dux did
+        // not create. A standalone agent has no managed workspace, so
+        // `removal_target` is `None` and the block is unreachable rather than
+        // guarded: deleting one removes dux's record and nothing else.
         let removal_target = match (project.as_ref(), session.workspace.as_managed()) {
             (Some(project), Some(managed)) if delete_worktree && !other_sessions_on_worktree => {
                 Some((project, managed))
@@ -1735,18 +1676,16 @@ impl Engine {
                 self.clear_terminal_runtime(terminal_id);
             }
             // Clear `closing_sessions` even if removal fails: the session record
-            // survives an `Err` (the `?` aborts the delete), and unlike the async
-            // `WorktreeRemoveCompleted` handler nothing else would clear the flag,
-            // leaving the agent permanently barred from creating/relaunching tabs.
-            // THE GATE. Unasked, dux deletes the branches it created and only
-            // those: an agent attached to `develop`, or adopted with an
-            // existing worktree, gives up its worktree and keeps its branches,
-            // because they were the user's before the agent existed. The delete
-            // dialog's checkbox is the one thing that overrides that, in either
-            // direction, and it arrives here as `delete_branch`. Deciding it
-            // HERE means the project-delete cascade (which calls this per agent
-            // with no answer) inherits the provenance default, so removing a
-            // project still cannot take `develop` with it.
+            // survives an `Err`, and nothing else would clear the flag, leaving
+            // the agent permanently barred from creating or relaunching tabs.
+            //
+            // The gate. Unasked, dux deletes only the branches it created: an
+            // agent attached to an existing branch, or adopted with an existing
+            // worktree, gives up its worktree and keeps its branches. The delete
+            // dialog's checkbox overrides that in either direction and arrives
+            // as `delete_branch`. Deciding it here means the project-delete
+            // cascade, which calls this per agent with no answer, inherits the
+            // provenance default.
             let result = if managed
                 .branch_provenance
                 .resolve_branch_deletion(delete_branch)
@@ -2013,18 +1952,14 @@ impl Engine {
             branch_provenance,
             ..
         } = managed;
-        // RE-CHECK the occupancy the decision was made on. This removal was
-        // planned when the delete began and runs only once the agent's PTYs
-        // reap, which is seconds later; in that window another agent can come
-        // to occupy the directory. `closing_sessions` does not cover it: that
-        // blocks new TABS on the dying agent, not a new agent pointed at the
-        // same place, which is exactly what creating a standalone agent there
-        // does.
-        //
-        // Preserving the directory is the safe direction to be wrong in: the
-        // worst case is a leftover the worktree manager can still remove, and
-        // the alternative is `git worktree remove --force` on a directory a
-        // live provider is running in.
+        // Re-check the occupancy the decision was made on: this removal was
+        // planned when the delete began and runs seconds later, once the
+        // agent's PTYs reap, and another agent can occupy the directory in that
+        // window. `closing_sessions` does not cover it, because it blocks new
+        // tabs on the dying agent rather than a new agent pointed at the same
+        // place. Preserving the directory is the safe direction to be wrong in:
+        // the worst case is a leftover the worktree manager can still remove,
+        // against `git worktree remove --force` on a live provider's directory.
         if let Some(occupant) = self.sessions.iter().find(|s| {
             s.id != session_id
                 && crate::project_browser::same_directory(s.directory(), &worktree_path)
@@ -2159,19 +2094,14 @@ impl Engine {
                 )
             }
             AgentLaunchKind::Tab { is_fresh, .. } => {
-                // Ghost-launch guard, mirroring `process_agent_launch_ready`: a
-                // extra tab whose row was deleted while its launch was in
-                // flight must not be treated as a real failure. Without this,
-                // an abort-during-launch would log an ERROR, call
-                // `delete_agent_tab` again (hitting the "map and SQLite may
-                // have diverged" WARN in storage.rs for a row that is already
-                // gone), and surface a user-facing "Tab launch failed"
-                // warning for a tab the user already closed. The session-slot tab
-                // is exempt for the same reason as in the ready-path guard: the
-                // in-memory map holds only the extras.
-                //
-                // Asked of the LIVE session for the same reason as there: the
-                // request's snapshot predates any promotion this launch raced.
+                // Ghost-launch guard, mirroring `process_agent_launch_ready`:
+                // an extra tab whose row was deleted while its launch was in
+                // flight is not a real failure, and treating it as one logs an
+                // error, deletes an already-gone row and warns the user about a
+                // tab they closed. The session-slot tab is exempt because the
+                // in-memory map holds only the extras. Asked of the live
+                // session, since the request's snapshot predates any promotion
+                // this launch raced.
                 let is_slot_tab = self.is_slot_tab_of(SessionIdRef::new(&session.id), &tab_id);
                 if !is_slot_tab && !self.agent_tabs.contains_key(&tab_id) {
                     logger::info(&format!(
@@ -2185,18 +2115,14 @@ impl Engine {
                     session.display_label(),
                     message,
                 ));
-                // A brand-new tab whose very first spawn failed never had a
-                // conversation — remove its row so it does not linger as a
-                // permanently-broken dormant tab. An explicit relaunch of an
+                // A brand-new tab whose first spawn failed never had a
+                // conversation, so its row goes rather than lingering as a
+                // permanently broken dormant tab; an explicit relaunch of an
                 // already-persisted dormant tab keeps its row so the user can
-                // retry; either way the real error is surfaced to the caller.
-                //
-                // Gated on the tab not being the slot AT ARRIVAL, by the same
-                // live read as the guard above: a promotion while this launch was
-                // in flight can have handed the slot to the very tab that is
-                // failing, and deleting that row would leave the agent's pointer
-                // naming a row that no longer exists. A slot tab keeps its row and
-                // becomes the dormant crash-diagnosis surface instead.
+                // retry. Gated on the tab not being the slot at arrival, by the
+                // same live read as the guard above: a promotion mid-launch can
+                // have handed the slot to the failing tab, and deleting that row
+                // would leave the agent's pointer naming a row that is gone.
                 if is_fresh && !is_slot_tab {
                     // Persist-first (mirrors close_tab): only drop the in-memory
                     // entry once the row is actually gone, so a failed DB delete
@@ -2243,38 +2169,6 @@ impl Engine {
         outcome
     }
 
-    /// Close the reload barrier opened by `Command::ReloadConfig` and drive the
-    /// follow-up: drop the writer quiesce guard, clear `reloading`, and drain
-    /// any commands that were deferred while the reload was in flight.
-    ///
-    /// Ordering matters: on success the engine first applies the
-    /// reloaded config to its own state, then clears the barrier flags, then
-    /// drains the deferred commands — each of which re-mutates the now-current
-    /// config and eager-writes. The deferred command's write is therefore the
-    /// LAST write to disk, and the config it carries (reloaded + the deferred
-    /// change) is the final on-disk state.
-    ///
-    /// To keep in-memory state in lockstep with disk, the `ApplyReloadedConfig`
-    /// reaction carries the FINAL config (reloaded + drained) whenever deferred
-    /// commands ran. The surface's richer apply (theme/keybindings/projects, and
-    /// for the web the auth-gate rebuild) then re-applies that same final config,
-    /// so it never reverts a deferred change back to the pre-deferral snapshot.
-    ///
-    /// In the common no-deferral case the engine leaves `self.config` untouched
-    /// and returns the bare reloaded config: the surface's apply does the swap
-    /// and must see the still-running (pre-swap) config so it can diff old vs new
-    /// (the web actor's "restart to apply server settings" detection). The one
-    /// tradeoff: when a deferral coincides with a [server] change in the same
-    /// reload, the engine pre-swaps before the actor diffs, so that advisory
-    /// restart warning is suppressed — the auth-gate rebuild, which reads the
-    /// final users, still takes effect. This is acceptable for that rare overlap.
-    ///
-    /// On failure (the reload could not be parsed, OR it parsed but could not be
-    /// applied to engine state) the in-memory config is unchanged (still current),
-    /// so the deferred user commands are re-applied against it rather than dropped.
-    /// The reload-failed reaction is placed LAST in the returned `Multi` so
-    /// its error status wins the surface's status line instead of being overwritten
-    /// by a deferred save's success message.
     /// Log a pull-request badge move for one session, if it moved.
     ///
     /// Raised here rather than in the sync worker because this is the point a
@@ -2298,6 +2192,29 @@ impl Engine {
         logger::info(&crate::gh::format_pr_change(branch, previous, fresh));
     }
 
+    /// Close the reload barrier opened by `Command::ReloadConfig`: drop the
+    /// writer quiesce guard, clear `reloading`, and drain the commands deferred
+    /// while the reload was in flight.
+    ///
+    /// Ordering matters. On success the reloaded config is applied to engine
+    /// state, then the barrier flags clear, then the deferred commands drain,
+    /// each re-mutating the now-current config and eager-writing, so a deferred
+    /// command's write is the last write to disk and the final on-disk state.
+    /// The `ApplyReloadedConfig` reaction therefore carries the final config,
+    /// reloaded plus drained, whenever deferred commands ran, so the surface's
+    /// richer apply cannot revert a deferred change to the pre-deferral state.
+    ///
+    /// With no deferral the engine leaves `self.config` alone and returns the
+    /// bare reloaded config, because the surface does the swap and must see the
+    /// pre-swap config to diff old against new. The tradeoff: a deferral
+    /// coinciding with a `[server]` change suppresses that advisory restart
+    /// warning, since the engine pre-swapped before the diff.
+    ///
+    /// On failure, whether the reload could not be parsed or could not be
+    /// applied to engine state, the in-memory config is unchanged, so the
+    /// deferred commands are re-applied against it rather than dropped. The
+    /// reload-failed reaction goes last in the returned `Multi` so its error
+    /// wins the status line over a deferred save's success message.
     fn process_config_reload_ready(&mut self, result: Result<Config, String>) -> EventReaction {
         let deferred = std::mem::take(&mut self.deferred_commands);
         let has_deferred = !deferred.is_empty();
@@ -2307,15 +2224,13 @@ impl Engine {
         // leaves `self.config` untouched so the surface can still diff old vs new.
         let must_preswap = has_deferred;
 
-        // Step 1: compute the primary reaction and, on success, apply the reloaded
-        // config to engine state BEFORE clearing the barrier — but only when we
-        // must drain deferred commands (they re-mutate and re-save the config, so
-        // they need the reloaded config as their base). With no deferral the engine
-        // leaves `self.config` alone and lets the surface do the swap (so the
-        // surface can still diff old vs new). `failure` carries a reload-failed
-        // reaction when the reload could not be applied — including the case where
-        // the parse succeeded but applying it to engine state failed: that is a
-        // genuine reload failure, not a silent success on a stale config.
+        // Step 1: compute the primary reaction and, on success, apply the
+        // reloaded config to engine state before clearing the barrier, but only
+        // when deferred commands must drain, since they re-mutate and re-save
+        // the config and need the reloaded one as their base. `failure` carries
+        // a reload-failed reaction whenever the reload could not be applied, a
+        // successful parse that engine state rejected included: that is a real
+        // failure, not a silent success on a stale config.
         let mut failure: Option<EventReaction> = None;
         let bare_apply: Option<EventReaction> = match result {
             Ok(config) => {
@@ -2694,16 +2609,13 @@ impl Engine {
                 available: now_available,
             });
         }
-        // The check is silent on success. A status is posted when the user
-        // asked for it (whatever the answer), or when availability was LOST;
-        // a gain says nothing, because "gh is installed and logged in" is the
-        // expected state and only a failure is news. It also has to be silent:
-        // the boot probe starts from Unknown, so the ordinary happy outcome
-        // used to post an Info line that landed after, and covered, the
-        // warning about a background web server that was already serving on
-        // the TUI's single most-recent-wins status line. The
-        // `GhAvailabilityChanged` reaction still fires on a gain, and the
-        // GitHub controls lighting up is the visible signal.
+        // Silent on success. A status goes out when the user asked, whatever the
+        // answer, or when availability was lost; a gain says nothing, because a
+        // working `gh` is the expected state and only a failure is news. It also
+        // has to be silent because the boot probe starts from Unknown, and a
+        // happy outcome posting an Info line would cover an earlier warning on a
+        // most-recent-wins status line. `GhAvailabilityChanged` still fires on a
+        // gain, and the GitHub controls lighting up is the visible signal.
         if asked_for || (changed && !now_available) {
             reactions.push(EventReaction::Status(
                 self.gh_availability_status(unreachable_reason.as_deref()),

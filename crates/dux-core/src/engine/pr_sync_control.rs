@@ -1,20 +1,16 @@
 //! Arm/disarm state for pull-request background work, and the single-instance
 //! guard for its long-lived poller.
 //!
-//! This replaces a bare `Arc<AtomicBool>` kill switch, which could not do the
-//! job on its own. The poller reads the switch once per
-//! [`PR_SYNC_SLICE_SECS`](super::PR_SYNC_SLICE_SECS), so the documented "turn it
-//! off and on again" workflow lands inside that window: the running poller never
-//! observes the `false`, the enable spawns a second poller, and both then poll
-//! `gh` forever. Repeat the workflow and the traffic multiplies again.
+//! Arming, disarming, and the poller's own "should I keep going" check all
+//! happen under one lock, and arming spawns only when no loop is live. A plain
+//! flag cannot do this: the poller reads it once per
+//! [`PR_SYNC_SLICE_SECS`](super::PR_SYNC_SLICE_SECS), so a disable and enable
+//! inside that window leaves two pollers running `gh` forever.
 //!
-//! So arming, disarming, and the poller's own "should I keep going" check all
-//! happen under ONE lock, and arming spawns only when no loop is live. Deciding
-//! to stop and releasing the slot are the same critical section, which is what
-//! closes the opposite race: an enable that arrives while a poller is on its way
-//! out either sees the slot still taken (and the poller then sees the re-enable
-//! and keeps running) or sees it free (and spawns a replacement). It can never
-//! see a live poller that is about to exit and so leave zero.
+//! Deciding to stop and releasing the slot are the same critical section, which
+//! closes the opposite race: an enable arriving while a poller is on its way out
+//! either sees the slot still taken (and the poller then sees the re-enable and
+//! keeps running) or sees it free and spawns a replacement, never zero.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -45,9 +41,8 @@ impl PrSyncControl {
 
     /// Arm pull-request work, and claim the poller slot if it is free.
     ///
-    /// Returns whether the caller must actually start a poller thread. `false`
-    /// means one is already live and has just been told to keep going, so a
-    /// second must NOT be spawned.
+    /// Returns whether the caller must start a poller thread. `false` means one
+    /// is already live and has just been told to keep going; do not spawn.
     #[must_use]
     pub fn arm(&self) -> bool {
         let mut state = self.lock();
@@ -60,9 +55,9 @@ impl PrSyncControl {
         true
     }
 
-    /// Disarm pull-request work. The live poller (if any) ends its loop on its
-    /// next slice; the slot is released there, not here, so a re-arm inside that
-    /// window is handed the poller that is still running rather than a new one.
+    /// Disarm pull-request work. A live poller ends its loop on its next slice
+    /// and releases the slot there, not here, so a re-arm inside that window is
+    /// handed the still-running poller rather than a new one.
     pub fn disarm(&self) {
         self.lock().enabled = false;
     }
@@ -78,10 +73,9 @@ impl PrSyncControl {
         false
     }
 
-    /// Release the poller slot for a reason that is not the kill switch: the
-    /// event receiver was dropped, or the thread never started at all. Without
-    /// this the slot would stay claimed and pull-request polling would be dead
-    /// for the rest of the process.
+    /// Release the poller slot for a reason that is not a disarm: the event
+    /// receiver was dropped, or the thread never started. A slot left claimed
+    /// keeps pull-request polling dead for the rest of the process.
     pub fn poller_stopped(&self) {
         self.lock().poller_live = false;
     }
@@ -101,15 +95,14 @@ impl PrSyncControl {
         self.lock().poller_live
     }
 
-    /// How many poller threads have been started. The number a lifecycle test
-    /// counts: "a second permanent poller was created" is exactly this going up
-    /// twice across one enable.
+    /// How many poller threads have been started. Rising twice across one
+    /// enable means a second permanent poller was created.
     pub fn poller_starts(&self) -> u64 {
         self.lock().poller_starts
     }
 
-    /// How many one-shot refreshes have been dispatched. Counted for the same
-    /// reason: acting on a stale status used to produce two per enable.
+    /// How many one-shot refreshes have been dispatched. More than one per
+    /// enable means something acted on a stale armed status.
     pub fn refresh_starts(&self) -> u64 {
         self.lock().refresh_starts
     }

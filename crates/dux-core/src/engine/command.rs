@@ -1,6 +1,5 @@
-//! The `Command` enum — the §4.5 engine-operation vocabulary. Every
-//! mutation or background-spawn the Engine performs in response to a
-//! TUI key or a web-UI click is named here and dispatched through
+//! The `Command` enum, the engine-operation vocabulary. Every mutation or
+//! background spawn the Engine performs is named here and dispatched through
 //! `Engine::apply`.
 
 use std::path::PathBuf;
@@ -18,9 +17,8 @@ use crate::worker::{
     PullOutcome, PullTarget, WorkerEvent,
 };
 
-/// What the Engine should do. Variants are payload-carrying — the caller
-/// computes the context (selected session id, prompt state, etc.) and
-/// supplies it. The Engine performs the domain work and returns an
+/// What the Engine should do. Variants carry their payload: the caller computes
+/// the context and supplies it, the Engine does the domain work and returns an
 /// `EventReaction` describing any view follow-up.
 pub enum Command {
     /// Complete a deletion that's already past its git step. Used by both
@@ -50,76 +48,69 @@ pub enum Command {
         /// [`crate::model::BranchProvenance::resolve_branch_deletion`].
         delete_branch: Option<bool>,
     },
-    /// Persist a project mutation. The `Add` action is handled INLINE
-    /// (synchronously): the handler writes SQLite and config.toml in `apply` and
-    /// returns `EventReaction::ProjectPersistenceOutcome(Added)` on success or an
-    /// error-toned `EventReaction::Status` (the add rolled back) on failure — both
-    /// immediately, no worker. All OTHER actions go through the background worker:
-    /// fire-and-forget, the worker posts `WorkerEvent::ProjectPersistenceCompleted`
-    /// back, which surfaces as `EventReaction::ProjectPersistenceOutcome` in the
-    /// next `drain_events` pass.
+    /// Persist a project mutation. `Add` is handled inline: the handler writes
+    /// SQLite and config.toml in `apply` and returns
+    /// `EventReaction::ProjectPersistenceOutcome(Added)`, or an error-toned
+    /// `EventReaction::Status` once the add has rolled back. Every other action
+    /// goes through the background worker, whose
+    /// `WorkerEvent::ProjectPersistenceCompleted` surfaces as
+    /// `EventReaction::ProjectPersistenceOutcome` on a later drain.
     ///
     /// Boxed to keep the enum size within the clippy `large_enum_variant`
-    /// threshold (`ProjectPersistenceAction` is 248 bytes unboxed).
+    /// threshold.
     ///
-    /// `status_op_id` correlates a TUI [`crate::engine::HandlerStatusOp`] whose
-    /// final is decided in the completion handler (the post-worker config write
-    /// is fallible, producing a third outcome the worker never sees). It rides
-    /// from the dispatch site through the worker and back on
-    /// `ProjectPersistenceOutcome` so the handler can resolve the right op.
-    /// `None` for the non-TUI callers (web/wire, engine internals) that do not
-    /// drive a handler-resolved status.
+    /// `status_op_id` correlates a [`crate::engine::HandlerStatusOp`] whose final
+    /// is decided in the completion handler, because the post-worker config
+    /// write is fallible and produces a third outcome the worker never sees. It
+    /// rides from the dispatch site through the worker and back on
+    /// `ProjectPersistenceOutcome`. `None` for callers that drive no
+    /// handler-resolved status.
     PersistProject {
         action: Box<ProjectPersistenceAction>,
         status_op_id: Option<String>,
     },
 
-    /// Remove a project AND cascade-delete its agents' records + runtime,
-    /// KEEPING their worktrees on disk. Tolerates a "ghost" project id that
-    /// exists only via orphaned sessions (no project record): the orphaned
-    /// sessions are cleared and the project-record delete is a harmless no-op.
-    /// The project-record + config removal run via the persistence worker.
+    /// Remove a project and cascade-delete its agents' records and runtime,
+    /// keeping their worktrees on disk. Tolerates a ghost project id that exists
+    /// only through orphaned sessions: those are cleared and the project-record
+    /// delete is a no-op. The record and config removal run in the persistence
+    /// worker.
     RemoveProject {
         project_id: String,
         project_name: String,
     },
 
-    /// Delete a project AND cascade-delete its agents' records + runtime,
-    /// REMOVING their worktrees from disk (the destructive counterpart to
-    /// `RemoveProject`, which keeps worktrees). Each session goes through the
-    /// shared `do_delete_session` path (`delete_worktree == true`), so the kill,
-    /// worktree removal, and record cleanup stay single-source. Guards the whole
-    /// project up front against an in-flight async worktree removal or a
-    /// launching tab, so a partial delete can never report success while
-    /// stranding a session. Like `RemoveProject`, the project-record + config
-    /// removal keep the same tolerance for a ghost id.
+    /// Delete a project and cascade-delete its agents' records and runtime,
+    /// removing their worktrees from disk. The destructive counterpart to
+    /// `RemoveProject`, which keeps them. Each session goes through the shared
+    /// `do_delete_session` path with `delete_worktree == true`, so the kill,
+    /// worktree removal and record cleanup stay single-source. Guards the whole
+    /// project up front against an in-flight worktree removal or a launching
+    /// tab, so a partial delete cannot report success while stranding a session.
     DeleteProject {
         project_id: String,
         project_name: String,
     },
 
-    /// Spawn the create-agent worker. Returns `EventReaction::Status(Error)` if
-    /// another create is already in flight; otherwise marks `InFlightKey::CreateAgent`,
-    /// spawns the worker, and returns `EventReaction::Status(Busy(busy_message))`.
-    /// `term_size` is supplied by the caller because `crossterm::terminal::size()`
-    /// is binary-only.
+    /// Spawn the create-agent worker. Returns an error status if another create
+    /// is already in flight; otherwise marks `InFlightKey::CreateAgent`, spawns
+    /// the worker and returns the busy status. `term_size` comes from the caller
+    /// because `crossterm::terminal::size()` is binary-only.
     ///
     /// Boxed to keep the enum size within the clippy `large_enum_variant`
-    /// threshold (`CreateAgentRequest` contains a full `Project` + fields).
+    /// threshold.
     DispatchCreateAgentRequest {
         request: Box<CreateAgentRequest>,
         busy_message: String,
         term_size: (u16, u16),
     },
 
-    /// Spawn the agent-launch worker (Reconnect / ForceReconnect / ResumeFallback
-    /// / StartupAutoReopen / Create-finalize). Returns a typed view carrying
-    /// `launched: bool` so App callers can do their per-site post-action.
-    /// When already-in-flight, the view carries `launched: false` + a
-    /// Status::info ("Agent X is already launching.").
+    /// Spawn the agent-launch worker. Returns a typed view carrying
+    /// `launched: bool` so callers can do their per-site post-action; an
+    /// already-in-flight launch carries `launched: false` and an info status.
     ///
     /// Boxed to keep the enum size within the clippy `large_enum_variant`
-    /// threshold (`AgentLaunchRequest` carries `AgentSession` + env vector).
+    /// threshold.
     DispatchAgentLaunch { request: Box<AgentLaunchRequest> },
 
     /// Stage a single file. Synchronous git call (microseconds for the
@@ -137,23 +128,19 @@ pub enum Command {
         path: String,
     },
 
-    /// Discard a single unstaged file's changes. Synchronous git call (`git
-    /// checkout -- <path>` for tracked files, `rm` for untracked ones — the
-    /// `is_untracked` flag selects which). Destructive: it permanently throws
-    /// away working-tree changes (or deletes the file outright when untracked).
-    /// Returns `EventReaction::Status(Info(...))` with an actionable message on
-    /// success; an `Err` propagates to the caller on failure.
+    /// Discard a single unstaged file's changes. A synchronous git call, with
+    /// `is_untracked` selecting `git checkout -- <path>` or `rm`. Destructive:
+    /// it permanently throws away working-tree changes, or deletes an untracked
+    /// file outright. An `Err` propagates to the caller on failure.
     DiscardFile {
         worktree_path: PathBuf,
         path: String,
         is_untracked: bool,
     },
 
-    /// Run `git commit -m <message>` synchronously. Returns
-    /// `EventReaction::Status(Info(success_message))` on success or
-    /// `EventReaction::Status(Error("Commit failed: <e>"))` on failure. The
-    /// caller pre-formats `success_message` because it depends on
-    /// view-side bindings the engine cannot resolve.
+    /// Run `git commit -m <message>` synchronously. The caller pre-formats
+    /// `success_message` because it depends on view-side bindings the engine
+    /// cannot resolve.
     CommitChanges {
         worktree_path: PathBuf,
         message: String,
@@ -165,13 +152,10 @@ pub enum Command {
     /// `WorkerEvent::PushCompleted`.
     Push { worktree_path: PathBuf },
 
-    /// Spawn a `git pull` worker for either a project's leading branch or
-    /// the current session's branch. Returns
-    /// `EventReaction::Status(Busy(busy_message))` if the in-flight guard
-    /// accepted the request, or `EventReaction::Status(Warning(
-    /// already_running_message))` if another pull is already running for
-    /// the same repo path. Completion is reported via
-    /// `WorkerEvent::PullCompleted`.
+    /// Spawn a `git pull` worker for either a project's leading branch or the
+    /// current session's branch. Returns the busy status when the in-flight
+    /// guard accepts, or a warning when another pull is already running for the
+    /// same repo path. Completion arrives as `WorkerEvent::PullCompleted`.
     Pull {
         repo_path: PathBuf,
         target: PullTarget,
@@ -184,12 +168,10 @@ pub enum Command {
     /// existing reaction handler surfaces as a status message.
     OpenPath { path: PathBuf, target: String },
 
-    /// Toggle a session's `auto_reopen_enabled` flag. The App caller passes
-    /// the new value + branch name (computed from the cloned selected session
-    /// upfront — preserves the App-side capture-before-mutate behaviour). The
-    /// engine performs the upsert in-place; if the session was removed
-    /// in-flight, falls back to `session_store.set_auto_reopen_enabled`
-    /// (matches the original method's race-handling).
+    /// Toggle a session's `auto_reopen_enabled` flag. The caller passes the new
+    /// value and the branch name, captured before the mutation. The engine
+    /// upserts in place, falling back to `session_store.set_auto_reopen_enabled`
+    /// when the session was removed in flight.
     ToggleAgentAutoReopen {
         session_id: String,
         branch_name: String,
@@ -202,116 +184,99 @@ pub enum Command {
     DeleteTerminal { terminal_id: String },
 
     /// Persist the global `env` block to the user config file. The engine
-    /// eager-saves through `Engine::config_writer` (the shared off-thread
-    /// queue) and reports the result synchronously, rolling the in-memory env
-    /// back if the write fails.
+    /// eager-saves through `Engine::config_writer` and reports the result
+    /// synchronously, rolling the in-memory env back if the write fails.
     PersistGlobalEnv {
         env: std::collections::BTreeMap<String, String>,
     },
 
     /// Reload the user config from disk, validate it, and resync project
-    /// records against the session store. Opens a reload barrier (quiesces the
-    /// config writer + defers config-mutating commands) and kicks off the
-    /// surface's reload worker; completion arrives as
-    /// `WorkerEvent::ConfigReloadReady`, which closes the barrier.
+    /// records against the session store. Opens a reload barrier, quiescing the
+    /// config writer and deferring config-mutating commands, and starts the
+    /// surface's reload worker; `WorkerEvent::ConfigReloadReady` closes it.
     ReloadConfig,
 
-    /// Write a canonical (fully-templated) config to disk, overwriting the
-    /// existing file. Used by the config-reload-failed modal to restore a
-    /// known-good config. Renders via `Engine::surface` and writes synchronously
-    /// through `config_write::write_config_secure`, returning the result status.
+    /// Write a canonical, fully-templated config to disk, overwriting the
+    /// existing file, to restore a known-good config after a failed reload.
+    /// Renders through `Engine::surface` and writes synchronously through
+    /// `config_write::write_config_secure`.
     RecoverConfig,
 
     /// Persist a custom display order for the agent sessions within a single
-    /// project. `session_ids` must be EXACTLY the full set of that project's
-    /// sessions — no missing ids, no extras, no duplicates, all belonging to
-    /// `project_id` — otherwise the engine returns an actionable error and
-    /// touches nothing. On success it writes the order to storage and reorders
-    /// the matching rows of `self.sessions` in place, leaving other projects'
-    /// rows in their existing relative positions. Returns
-    /// `EventReaction::Nothing` (silent success; the refreshed view is the
-    /// feedback), since reorders are high-frequency during a drag.
+    /// project. `session_ids` must be exactly the full set of that project's
+    /// sessions, with no omissions, extras or duplicates, or the engine returns
+    /// an actionable error and touches nothing. On success it writes the order
+    /// to storage and reorders the matching rows of `self.sessions` in place,
+    /// leaving other projects' rows in their relative positions. Silent success:
+    /// reorders are high-frequency during a drag, so the refreshed view is the
+    /// feedback.
     ReorderSessions {
         project_id: String,
         session_ids: Vec<String>,
     },
 
-    /// Persist a GLOBAL custom order for every agent (the flat model). `session_ids`
-    /// must be EXACTLY the full set of all session ids. On success it writes one
-    /// global `sort_order` permutation and re-sorts `self.sessions` to match.
-    /// Returns `EventReaction::Nothing` (silent; the refreshed view is the feedback).
+    /// Persist a global custom order for every agent. `session_ids` must be
+    /// exactly the full set of all session ids. On success it writes one global
+    /// `sort_order` permutation and re-sorts `self.sessions` to match. Silent:
+    /// the refreshed view is the feedback.
     ReorderAgents { session_ids: Vec<String> },
 
     /// Persist a custom display order for the workspace's projects.
-    /// `project_ids` must be EXACTLY the full set of known project ids (same
-    /// strict validation as [`Command::ReorderSessions`]). On success it writes
-    /// the order to storage and reorders `self.projects` to match. Returns
-    /// `EventReaction::Nothing`.
+    /// `project_ids` must be exactly the full set of known project ids, under
+    /// the same strict validation as [`Command::ReorderSessions`]. On success it
+    /// writes the order to storage and reorders `self.projects` to match.
     ReorderProjects { project_ids: Vec<String> },
 
-    /// Persist a GLOBAL runtime order for every companion terminal (session- and
-    /// project-owned alike, since the web renders one flat Terminals section).
-    /// `terminal_ids` must be EXACTLY the full set of current terminal ids. On
-    /// success it stamps each terminal's runtime `sort_order` to match; there is
-    /// NO storage write (terminals are runtime-only). Returns
-    /// `EventReaction::Nothing` (silent; the refreshed view is the feedback).
+    /// Persist a global runtime order for every companion terminal, whatever its
+    /// owner. `terminal_ids` must be exactly the full set of current terminal
+    /// ids; each terminal's runtime `sort_order` is stamped to match, with no
+    /// storage write, because terminals are runtime-only. Silent success: the
+    /// refreshed view is the feedback.
     ReorderTerminals { terminal_ids: Vec<String> },
 
     /// Run a configured text macro against a live PTY target. `target_id` names
     /// either an agent session (surface `Agent`) or a companion terminal
-    /// (surface `Terminal`); the engine resolves which via the same
-    /// providers-then-terminals lookup the web actor's `pty_for` uses. Resolves
-    /// the macro by name (unknown → error Status), surface-checks it against the
-    /// target (mismatch → error Status), transforms the text via
-    /// `dux_core::macros::macro_payload_bytes`, and writes it to the target's
-    /// PTY. Returns `EventReaction::Status(Info("Sent macro \"<name>\"."))` on
-    /// success — the TUI's exact wording.
+    /// (surface `Terminal`), resolved by a providers-then-terminals lookup. An
+    /// unknown macro name and a surface mismatch both return an error Status;
+    /// otherwise the text is transformed by
+    /// `dux_core::macros::macro_payload_bytes` and written to the target's PTY.
     RunMacro { target_id: String, name: String },
 
     /// Wholesale-replace the `[macros]` config and persist it. Adopts `macros`
-    /// into the running `config.macros` immediately (so the ViewModel's `macros`
-    /// refreshes without a manual reload) and eager-saves through
-    /// `Engine::config_writer`, reporting the result synchronously. Keep-and-
-    /// report: a failed write leaves the new macros active for the session.
+    /// into the running `config.macros` immediately, so the ViewModel refreshes
+    /// without a reload, then eager-saves through `Engine::config_writer` and
+    /// reports the result synchronously. Keep and report: a failed write leaves
+    /// the new macros active for the session.
     ///
-    /// Last-write-wins: the replacement is the editor's whole set, seeded from a
-    /// pre-edit snapshot of `[macros]`. A Save therefore clobbers any concurrent
-    /// hand-edit to the `[macros]` block made on disk between snapshot and save —
-    /// identical to the `PersistGlobalEnv` precedent. Acceptable for the
-    /// single-operator model; a multi-writer setup would need read-modify-merge.
+    /// Last write wins. The replacement is the editor's whole set, seeded from a
+    /// pre-edit snapshot, so a save clobbers any hand-edit to the `[macros]`
+    /// block made on disk in between. Acceptable under the single-operator
+    /// model; a multi-writer setup would need read-modify-merge.
     UpdateMacros { macros: crate::config::MacrosConfig },
 
-    /// Point the changed-files watch at a session's worktree (or clear it with
-    /// `None`). Mirrors the engine half of the TUI's `reload_changed_files`, but
-    /// keeps git OFF the engine actor thread: resolves the session, sets
-    /// `watched_worktree` + `watched_session_id`, and empties the lists
-    /// synchronously (cheap), then spawns a one-shot worker to compute the
-    /// staged/unstaged lists off-thread. The worker's `ChangedFilesReady` event
-    /// populates the pane a few ticks later via the normal drain. Returns
-    /// `EventReaction::Nothing` — the refreshed ViewModel broadcast is the
-    /// feedback (no status toast on every selection). The web sends this when a
-    /// browser selects a session so the global poller knows which worktree the
-    /// client is viewing.
+    /// Point the changed-files watch at a session's worktree, or clear it with
+    /// `None`. Keeps git off the engine actor thread: resolving the session,
+    /// setting `watched_worktree` and `watched_session_id` and emptying the
+    /// lists are synchronous, then a one-shot worker computes the staged and
+    /// unstaged lists and its `ChangedFilesReady` populates the pane on a later
+    /// drain. Returns `EventReaction::Nothing`, because the refreshed ViewModel
+    /// broadcast is the feedback rather than a toast on every selection.
     WatchChangedFiles { session_id: Option<String> },
 }
 
 impl Engine {
-    /// Single dispatch point for every engine-affecting operation. The
-    /// TUI's input layer calls this with a `Command` translated from key
-    /// events; the web layer calls it with `Command`s deserialized from
-    /// WebSocket messages. Returns an `EventReaction`
-    /// the caller routes through its view-applier.
+    /// Single dispatch point for every engine-affecting operation, whether the
+    /// `Command` came from a key event or off the wire. Returns an
+    /// `EventReaction` the caller routes through its view-applier.
     #[allow(deprecated)] // blessed sync-direct: Command::RecoverConfig quiesces the writer and writes directly
     pub fn apply(&mut self, command: Command) -> anyhow::Result<EventReaction> {
-        // Count every command taken, deferred ones included: a deferral is still
-        // a caller having asked for something, and the counter's only reader is
-        // asking "did anything happen on this iteration?". Counted at the top so
-        // an early return cannot skip it.
+        // Count every command taken, deferred ones included: the counter's
+        // reader only asks whether anything happened this iteration. Counted at
+        // the top so an early return cannot skip it.
         self.command_applies = self.command_applies.wrapping_add(1);
         // While a config reload barrier is open, hold any config-mutating
-        // command until the reload lands so it re-applies against the
-        // freshly-reloaded config instead of racing it (see
-        // `Engine::is_config_mutating` and the `ConfigReloadReady` handler).
+        // command until the reload lands, so it re-applies against the fresh
+        // config instead of racing it.
         if self.reloading && Self::is_config_mutating(&command) {
             self.deferred_commands.push(command);
             return Ok(EventReaction::Nothing);
@@ -385,22 +350,20 @@ impl Engine {
                 busy_message,
                 term_size,
             } => {
-                // Pre-check the in-flight guard BEFORE minting/stashing the op so a
-                // rejected dispatch (an agent is already being created) cannot leak
-                // an unresolved op into `pending_create_ops`. `spawn_command_worker`
-                // applies the same guard, but only AFTER consuming the spec, so the
-                // op must not exist yet when it short-circuits.
+                // Pre-check the in-flight guard before minting the op, so a
+                // rejected dispatch cannot leak an unresolved op into
+                // `pending_create_ops`. `spawn_command_worker` applies the same
+                // guard only after consuming the spec, by which point the op
+                // would already exist.
                 if self.is_in_flight(&InFlightKey::CreateAgent) {
                     return Ok(EventReaction::Status(StatusUpdate::error(
                         "An agent is already being created or forked.",
                     )));
                 }
                 // Mint the shared create-agent `HandlerStatusOp`: its opaque id
-                // correlates the dispatch busy, every progress re-emit, and the
-                // eventual final (resolved engine-side in the launch-ready /
-                // launch-failed handlers from a `CreateLaunchOutcome`). The
-                // resolver reproduces the create wording byte-for-byte for both
-                // surfaces.
+                // correlates the dispatch busy, every progress re-emit and the
+                // final the launch-ready and launch-failed handlers resolve from
+                // a `CreateLaunchOutcome`, so both surfaces word it identically.
                 let op = crate::engine::status_op(busy_message)
                     .resolve_in_handler(|o: &crate::engine::CreateLaunchOutcome| {
                         use crate::engine::{CreateLaunchOutcome, Final};
@@ -409,11 +372,10 @@ impl Engine {
                                 Final::info(status_message.clone())
                             }
                             CreateLaunchOutcome::StartupFailed { branch_name, error } => {
-                                // STICKY: the agent exists but its provisioning
-                                // stopped part-way, so the worktree is in an
-                                // unknown state, and the message itself sends the
-                                // user to the startup command logs, which is an
-                                // action outside the toast.
+                                // Sticky: provisioning stopped part-way, so the
+                                // worktree is in an unknown state and the
+                                // message sends the user to the startup command
+                                // logs, an action outside the toast.
                                 Final::error(format!(
                                     "Startup command failed for agent \"{branch_name}\": {error}. \
                                      Open the startup command logs for details."
@@ -421,10 +383,9 @@ impl Engine {
                                 .sticky()
                             }
                             CreateLaunchOutcome::PersistFailed { error } => {
-                                // STICKY: the worktree was created but its session
-                                // row was not saved, so dux will not know about it
-                                // after a restart and the directory is left behind
-                                // for the user to deal with by hand.
+                                // Sticky: the worktree exists but its session row
+                                // does not, so dux forgets it on restart and the
+                                // user is left the directory to clean up.
                                 Final::error(format!("Failed to persist session: {error}")).sticky()
                             }
                             CreateLaunchOutcome::Failed { message } => {
@@ -437,12 +398,11 @@ impl Engine {
                     // resolve in later ticks, after `current_origin` was reset).
                     .with_scope(self.current_origin.clone());
                 let op_id = op.id().to_string();
-                // Surface this create's op id to a synchronous `apply_wire` caller
-                // (a REST create handler), which reads it from
-                // `WireCommandOutcome.created_op_id` to correlate ITS exact new
-                // session via `created_session_for_op` once the worker mints it.
-                // Cleared at the top of every `apply_wire`, so it never leaks into
-                // an unrelated command's outcome.
+                // Surface this create's op id to a synchronous `apply_wire`
+                // caller, which reads `WireCommandOutcome.created_op_id` to
+                // correlate its own new session through `created_session_for_op`.
+                // Cleared at the top of every `apply_wire`, so it cannot leak
+                // into an unrelated command's outcome.
                 self.last_created_op_id = Some(op_id.clone());
                 let op_id_for_job = op_id.clone();
                 let op_id_panic = op_id.clone();
@@ -481,23 +441,19 @@ impl Engine {
             Command::DispatchAgentLaunch { request } => {
                 let branch_name = request.session.display_label();
                 let session_id = request.session.id.clone();
-                // The in-flight launch lock is keyed by tab id (one lock per tab),
-                // so two tabs of the same session can launch concurrently. The
-                // View keeps `session_id` for UI correlation. For the session-slot
-                // tab these are equal.
+                // The in-flight launch lock is keyed by tab id, one per tab, so
+                // two tabs of one session can launch concurrently. The View
+                // keeps `session_id` for UI correlation.
                 let tab_id = request.tab_id.clone();
                 // The View is a surface payload, so it carries the id as a plain
                 // string; the engine-side decisions above keep the typed form.
                 let tab_id_view = tab_id.as_str().to_string();
                 // Guard the shared launch chokepoint against a session whose
-                // worktree is mid-removal. `create_tab` and the web extra-tab
-                // launch branch already check `closing_sessions` themselves,
-                // but every launch path (reconnect, resume-fallback,
-                // web-dormant-relaunch, session-slot reconnect) funnels through
-                // this command, so checking once here covers all of them —
-                // including the residual window where a transient
-                // `finish_delete_session` DB failure leaves the record
-                // lingering in `closing_sessions` past the synchronous delete.
+                // worktree is mid-removal. Every launch path funnels through
+                // this command, so checking once here covers them all, the
+                // residual window included where a transient
+                // `finish_delete_session` DB failure leaves the record in
+                // `closing_sessions` past the synchronous delete.
                 if self.closing_sessions.contains(&session_id) {
                     // Log the refusal so it shows up in dux.log even when a
                     // caller ignores the returned view's `launched` flag, as
@@ -533,22 +489,16 @@ impl Engine {
                         },
                     )));
                 }
-                // A LIVE process already holds this tab. Launching over it would
-                // replace the entry in `providers`, and dropping the displaced
-                // client SIGKILLs the child it names: a working agent killed
-                // mid-thought, with nothing said anywhere. Every legitimate
-                // relaunch path (force reconnect, resume fallback, an explicit
-                // stop) tears the runtime down before it dispatches, so reaching
-                // here with a live provider means the launch is redundant, and
-                // the live child is the one worth keeping.
+                // A live process already holds this tab, and launching over it
+                // would replace the entry in `providers`, whose displaced client
+                // SIGKILLs the child it names on drop. Every legitimate relaunch
+                // path tears the runtime down before it dispatches, so reaching
+                // here with a live provider means the launch is redundant.
                 //
-                // "Live" is `PtyClient::is_live`, which excludes a child that has
-                // reached end of input AND one that has already been reaped: both
-                // are waiting to be pruned rather than being anybody's working
-                // agent, and refusing for either would refuse the relaunch of a
-                // tab that just died. Asking `is_exited` alone got the reaped one
-                // wrong, and the refusal below would then have named a process
-                // that no longer existed.
+                // `PtyClient::is_live` is the right question because it excludes
+                // both a child at end of input and one already reaped: each is
+                // waiting to be pruned, and refusing for either would refuse the
+                // relaunch of a tab that just died.
                 if let Some(client) = self.providers.get(&tab_id)
                     && client.is_live()
                 {
@@ -571,10 +521,9 @@ impl Engine {
                         },
                     )));
                 }
-                // Clone for the panic event closure before `request` is
-                // consumed by the job closure. `AgentLaunchRequest` is
-                // `Clone`, which keeps the panic recovery path symmetric
-                // with `process_agent_launch_failed`.
+                // Clone for the panic event closure before the job closure
+                // consumes `request`, so panic recovery can take the same path
+                // as `process_agent_launch_failed`.
                 let panic_request = (*request).clone();
                 let reaction = self.spawn_command_worker(
                     CommandWorkerSpec {
@@ -598,13 +547,10 @@ impl Engine {
                 match reaction {
                     EventReaction::Nothing => {
                         // A launch is on its way, so the previous run's verdict
-                        // stops counting: whatever this launch does is the fresh
-                        // one. Clearing it HERE, at the one chokepoint every
-                        // launch funnels through, is what lets an explicit start
-                        // (and a reconnect, and a create) get past the diagnosis
-                        // card without any surface having to ask for it. Only a
-                        // dispatch that actually launched clears; a refusal
-                        // leaves the verdict standing, because nothing ran.
+                        // stops counting. Clearing it at the one chokepoint
+                        // every launch funnels through is what gets an explicit
+                        // start past the diagnosis card with no surface asking.
+                        // A refusal leaves the verdict standing: nothing ran.
                         self.clear_tab_run_failure(&tab_id);
                         Ok(EventReaction::DispatchAgentLaunchView(Box::new(
                             DispatchAgentLaunchView {
@@ -715,10 +661,8 @@ impl Engine {
                 new_enabled,
             } => {
                 if let Some(current) = self.sessions.iter_mut().find(|c| c.id == session_id) {
-                    // Persist FIRST so a DB failure leaves in-memory state
-                    // untouched and the UI continues showing the prior
-                    // (still-true) value. Mirrors finish_delete_session's
-                    // DB-first pattern.
+                    // Persist first so a DB failure leaves in-memory state
+                    // untouched and the UI keeps showing the still-true value.
                     let mut candidate = current.clone();
                     candidate.auto_reopen_enabled = new_enabled;
                     candidate.updated_at = chrono::Utc::now();
@@ -737,11 +681,9 @@ impl Engine {
 
             Command::DeleteTerminal { terminal_id } => {
                 // Graceful close: SIGTERM the terminal and move it to the
-                // terminating set so the reaper force-kills it after the grace if
-                // it ignores SIGTERM — rather than dropping it here (an immediate
-                // hard SIGKILL via `PtyClient::drop`). Non-blocking: the terminal
-                // disappears from the UI now; the child winds down in the
-                // background.
+                // terminating set so the reaper force-kills it after the grace,
+                // rather than dropping it here for an immediate SIGKILL. The
+                // terminal leaves the UI now and the child winds down behind it.
                 let label = self.begin_close_companion_terminal(&terminal_id);
                 Ok(EventReaction::DeleteTerminalView(Box::new(
                     DeleteTerminalView { terminal_id, label },
@@ -771,24 +713,22 @@ impl Engine {
             }
 
             Command::ReloadConfig => {
-                // Reject a reentrant reload: a second reload while one is in
-                // flight would drop the live `reload_guard` (resuming the writer
-                // mid-reload) and spawn a second worker whose completion would
-                // close a barrier that is no longer the one it opened. Refuse
-                // instead — the in-flight reload will land on its own.
+                // Reject a reentrant reload: a second one would drop the live
+                // `reload_guard`, resuming the writer mid-reload, and spawn a
+                // worker whose completion closes a barrier it never opened.
                 if self.reloading {
                     return Ok(EventReaction::Status(StatusUpdate::info(
                         "A config reload is already in progress.",
                     )));
                 }
-                // Open the reload barrier: quiesce the writer (so no queued save
-                // races the reload), mark `reloading` (so config-mutating
-                // commands defer), and kick off the surface's reload worker. The
-                // barrier closes when `ConfigReloadReady` lands.
+                // Open the reload barrier: quiesce the writer so no queued save
+                // races the reload, mark `reloading` so config-mutating commands
+                // defer, and start the surface's reload worker. The barrier
+                // closes when `ConfigReloadReady` lands.
                 //
-                // If the writer never acknowledged the pause, the barrier is
-                // not effective — a still-running writer could clobber the
-                // reload's config write. Abort and let the caller retry.
+                // An unacknowledged pause means no barrier: a still-running
+                // writer could clobber the reload's config write, so abort and
+                // let the caller retry.
                 let guard = self.config_writer.quiesce();
                 if !guard.is_acknowledged() {
                     return Ok(EventReaction::Status(StatusUpdate::error(
@@ -803,10 +743,9 @@ impl Engine {
             }
 
             Command::RecoverConfig => {
-                // Reject recovery while a reload barrier is open: a reload already
-                // holds the writer quiesce, and recovery taking its OWN quiesce
-                // would, on its guard drop, resume the writer while the reload is
-                // still mid-flight. Refuse and let the reload finish first.
+                // Reject recovery while a reload barrier is open: the reload
+                // holds the writer quiesce, and a second quiesce would resume
+                // the writer mid-reload when its guard dropped.
                 if self.reloading {
                     return Ok(EventReaction::Status(StatusUpdate::info(
                         "A config reload is in progress; try recovering again in a moment.",
@@ -861,11 +800,9 @@ impl Engine {
             Command::RunMacro { target_id, name } => self.run_macro(&target_id, &name),
 
             Command::UpdateMacros { macros } => {
-                // Keep-and-report (no rollback): adopt the new macros into the
-                // running config immediately so the ViewModel reflects them, then
-                // eager-save through the queue. If the write fails the macros stay
-                // active for this session — we only report that the on-disk file
-                // may be stale, rather than reverting a change the user made.
+                // Keep and report, never roll back: the new macros go live so
+                // the ViewModel reflects them, and a failed write is reported as
+                // a possibly stale file rather than reverting the user's change.
                 self.config.macros = macros;
                 let count = self.config.macros.entries.len();
                 if let Err(e) = self.config_writer.save_eager(self.config.clone()) {
@@ -882,13 +819,10 @@ impl Engine {
             }
 
             Command::WatchChangedFiles { session_id } => {
-                // Cheap on the actor thread: resolve + set the watch (no git),
-                // then compute changed files OFF-thread in a one-shot worker. The
-                // `ChangedFilesReady` event lands via the normal drain (it
-                // path-checks the worktree, so a moved watch drops a stale
-                // result) → ViewModel update → broadcast. On clear (`None`),
-                // `set_watched_session` already emptied the lists synchronously,
-                // so the ViewModel reflects the cleared pane immediately.
+                // Resolving and setting the watch runs no git, so it is cheap on
+                // the actor thread; the changed files are computed off-thread.
+                // `ChangedFilesReady` path-checks the worktree, so a watch that
+                // moved meanwhile drops the stale result.
                 if let Some(worktree) = self.set_watched_session(session_id.as_deref()) {
                     self.spawn_changed_files_refresh(worktree);
                 }
@@ -1019,10 +953,9 @@ impl Engine {
         let mut removed = 0usize;
         for session_id in &session_ids {
             // `None` for the branch: the project-removal dialog asks about the
-            // project, not about each agent's branch one at a time, so nobody
-            // answered that question and the provenance default stands. That
-            // is what keeps a project removal from taking a user's `develop`
-            // with it, and it is unchanged by the per-agent checkbox.
+            // project rather than each agent's branch, so nobody answered that
+            // question and the provenance default stands. That is what keeps a
+            // project removal from taking a user's `develop` with it.
             if self.do_delete_session(session_id, true, None)?.is_some() {
                 removed += 1;
             }
@@ -1144,16 +1077,13 @@ impl Engine {
         )))
     }
 
-    /// Run a configured text macro against a live PTY target. Mirrors the TUI's
-    /// macro bar: resolve the macro by name, gate it by the target's surface,
-    /// translate newlines via the shared core transform, and write to the PTY.
-    /// See [`Command::RunMacro`] for the full contract.
+    /// Run a configured text macro against a live PTY target: resolve the macro
+    /// by name, gate it by the target's surface, translate newlines through the
+    /// shared core transform and write to the PTY. See [`Command::RunMacro`].
     fn run_macro(&mut self, target_id: &str, name: &str) -> anyhow::Result<EventReaction> {
-        // Resolve the target's surface: an agent provider is `Agent`, a companion
-        // terminal is `Terminal`. Unknown id → error.
-        // `target_id` is a PTY id of unknown kind: a macro target may be an agent
-        // tab or a companion terminal, and which one is exactly what this probe
-        // decides. Named as a tab id only for the tab-keyed probe.
+        // `target_id` is a PTY id of unknown kind: a macro target may be an
+        // agent tab or a companion terminal, and this probe decides which. It
+        // is named as a tab id only for the tab-keyed lookup.
         let surface = if self.providers.contains_key(TabIdRef::new(target_id)) {
             crate::model::SessionSurface::Agent
         } else if self.companion_terminals.contains_key(target_id) {
@@ -1200,10 +1130,9 @@ impl Engine {
     }
 
     /// Validate and apply a new per-project session order. See
-    /// [`Command::ReorderSessions`] for the strict-set contract. On success the
-    /// store is written first (DB-first, matching the rest of the engine), then
-    /// `self.sessions` is re-sorted so the project's rows follow `session_ids`
-    /// while every other project's rows keep their existing relative order.
+    /// [`Command::ReorderSessions`] for the strict-set contract. The store is
+    /// written first, then `self.sessions` is re-sorted so the project's rows
+    /// follow `session_ids` and every other project's keep their order.
     fn reorder_sessions(&mut self, project_id: &str, session_ids: &[String]) -> anyhow::Result<()> {
         let current: Vec<String> = self
             .sessions
@@ -1216,11 +1145,10 @@ impl Engine {
         self.session_store
             .reorder_sessions(project_id, session_ids)?;
 
-        // Build a position lookup for this project's ids, then stably re-sort
-        // the whole Vec. Rows outside this project sort by their existing index
-        // (kept stable); rows inside it sort by their new position. Because the
-        // sort is stable and out-of-project keys preserve the original index,
-        // cross-project relative order is untouched.
+        // Stably re-sort the whole Vec: rows inside this project sort by their
+        // new position, rows outside by their existing index. Stability plus
+        // out-of-project keys that preserve the original index is what leaves
+        // cross-project relative order untouched.
         let new_pos: std::collections::HashMap<&str, usize> = session_ids
             .iter()
             .enumerate()
@@ -1236,11 +1164,10 @@ impl Engine {
         Ok(())
     }
 
-    /// Validate and apply a new GLOBAL agent order (the flat model). Unlike
-    /// [`reorder_sessions`], which is project-scoped, `session_ids` must be the
-    /// complete set of ALL sessions and the whole Vec is re-sorted to match — a
-    /// dragged agent can land anywhere, independent of project. Store first
-    /// (DB-first), then the in-memory Vec.
+    /// Validate and apply a new global agent order. Unlike [`reorder_sessions`],
+    /// which is project-scoped, `session_ids` must be the complete set of all
+    /// sessions and the whole Vec is re-sorted to match, because a dragged agent
+    /// can land anywhere. The store is written first, then the in-memory Vec.
     fn reorder_agents(&mut self, session_ids: &[String]) -> anyhow::Result<()> {
         let current: Vec<String> = self.sessions.iter().map(|s| s.id.clone()).collect();
         validate_reorder(&current, session_ids, "agent")?;
@@ -1256,14 +1183,13 @@ impl Engine {
         Ok(())
     }
 
-    /// Validate and apply a new GLOBAL order for every companion terminal (both
-    /// session- and project-owned). `terminal_ids` must be EXACTLY the full set of
-    /// current terminal ids; on success each terminal's runtime `sort_order` is
-    /// stamped to its index in `terminal_ids`. Mirrors [`reorder_agents`] but with
-    /// NO storage call: terminals are runtime-only (no SQLite row), so the new
-    /// order lives only in memory and resets to creation order on restart. This is
-    /// a pure permutation of the `sort_order` field; it does NOT touch
-    /// `pty_activity`/`updated_at` (reordering is not activity).
+    /// Validate and apply a new global order for every companion terminal.
+    /// `terminal_ids` must be exactly the full set of current terminal ids; each
+    /// terminal's runtime `sort_order` is stamped to its index. Like
+    /// [`reorder_agents`] but with no storage call, because terminals are
+    /// runtime-only, so the order resets to creation order on restart. A pure
+    /// permutation of `sort_order`: reordering is not activity, so it leaves
+    /// `pty_activity` and `updated_at` alone.
     fn reorder_terminals(&mut self, terminal_ids: &[String]) -> anyhow::Result<()> {
         let current: Vec<String> = self.companion_terminals.keys().cloned().collect();
         validate_reorder(&current, terminal_ids, "terminal")?;
@@ -1292,16 +1218,13 @@ impl Engine {
         Ok(())
     }
 
-    /// Persist the current in-memory session order to storage, per project. The
-    /// TUI calls this after its sort actions mutate `self.sessions` so the
-    /// chosen order survives a reload and matches the web UI by construction.
-    /// Does NOT re-sort the Vec (it is already in the desired order); it only
-    /// writes each project's ordered id list. Errors propagate to the caller.
+    /// Persist the current in-memory session order to storage, per project, so a
+    /// sort action's chosen order survives a reload and matches every surface by
+    /// construction. Does not re-sort the Vec, which is already in the desired
+    /// order; it only writes each project's ordered id list.
     pub fn persist_session_order(&self) -> anyhow::Result<()> {
-        // Flat model: agents are one global list, so persist the in-memory Vec order
-        // as a single global `sort_order` permutation (not per-project). A TUI sort
-        // command sorts `self.sessions` and calls this; the web's global drag reaches
-        // the same store method through `ReorderAgents`.
+        // Agents are one global list, so the in-memory Vec order is persisted
+        // as a single global `sort_order` permutation rather than per project.
         let ids: Vec<String> = self.sessions.iter().map(|s| s.id.clone()).collect();
         self.session_store.set_global_session_order(&ids)?;
         Ok(())
@@ -1355,20 +1278,16 @@ fn validate_reorder(current: &[String], requested: &[String], noun: &str) -> any
     Ok(())
 }
 
-/// Re-sort `items` so that elements for which `position` returns `Some(p)` are
+/// Re-sort `items` so elements for which `position` returns `Some(p)` are
 /// ordered by `p` among themselves, while elements returning `None` keep their
-/// original relative order. Note that absolute interleaving between the two
-/// groups MAY change (positioned items can compact toward the front of the
-/// range they sort into); what is guaranteed is each group's internal relative
-/// order. That is sufficient here because both surfaces group sessions by
-/// project before display, so only per-project relative order is observable.
+/// original relative order. Only each group's internal relative order is
+/// guaranteed: interleaving between the two groups may change, because
+/// positioned items can compact toward the front of the range they sort into.
 fn reorder_in_place<T>(items: &mut Vec<T>, position: impl Fn(&T) -> Option<usize>) {
-    // Build the desired index order: a stable sort of the original indices by
-    // (key, original_index), where the key is the new position for positioned
-    // items and the original index for the rest. Positioned items can interleave
-    // with None items, but because we then write the reordered elements back
-    // into the SAME slot sequence, the relative order of None items is preserved
-    // and positioned items land in ascending-position order.
+    // A stable sort of the original indices by (key, original_index), where the
+    // key is the new position for positioned items and the original index for
+    // the rest. The reordered elements are written back into the same slot
+    // sequence, which is what preserves the relative order of the None items.
     let mut indices: Vec<usize> = (0..items.len()).collect();
     indices.sort_by(|&a, &b| {
         let ka = position(&items[a]).unwrap_or(a);
@@ -1385,10 +1304,9 @@ fn reorder_in_place<T>(items: &mut Vec<T>, position: impl Fn(&T) -> Option<usize
         .collect();
 }
 
-/// The tri-state status op for a `PullTarget::Project` refresh: a pulled or
-/// no-origin refresh is an info final, and a FAILED refresh is a WARNING (the
-/// refresh is best-effort; the project keeps working from local branch state,
-/// and the user is told so).
+/// The tri-state status op for a `PullTarget::Project` refresh. A failure is a
+/// warning rather than an error: the refresh is best-effort and the project
+/// keeps working from local branch state.
 fn project_refresh_status_op(
     busy_message: String,
     project_name: &str,

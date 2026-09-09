@@ -3,13 +3,11 @@
 //! "loading" status that never resolves is inexpressible.
 //!
 //! Construct one at the dispatch site with [`status_op`], declaring the pending
-//! message and then both outcome closures. Hand it to
-//! [`Engine::spawn_status_op`](crate::engine::Engine::spawn_status_op): the
-//! pending [`StatusTone::Busy`] shows immediately, the work runs off-thread, and
-//! the matching closure resolves the [`Final`] *where the typed result is in
-//! scope*, shipping back only the plain [`ResolvedFinal`] data. The engine turns
-//! that into the keyed final (or a clear) so the pending status is always
-//! replaced.
+//! message and then both outcome closures, and hand it to
+//! [`Engine::spawn_status_op`](crate::engine::Engine::spawn_status_op). The
+//! matching closure resolves the [`Final`] where the typed result is in scope
+//! and ships back plain [`ResolvedFinal`] data, which the engine turns into the
+//! keyed final so the pending status is always replaced.
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -70,12 +68,10 @@ impl Final {
         Final::Clear
     }
 
-    /// Mark this outcome as one that waits for the user (builder form, chained
-    /// onto one of the tone constructors). A [`Final::Clear`] has no message to
-    /// keep, so it is returned unchanged.
-    ///
-    /// Reserve it for outcomes where the user must act OUTSIDE the toast to
-    /// recover, or where something may have been lost or left half-done.
+    /// Mark this outcome as one that waits for the user. A [`Final::Clear`] has
+    /// no message to keep and is returned unchanged. Reserve it for outcomes
+    /// where the user must act outside the toast to recover, or where something
+    /// may have been lost or left half-done.
     pub fn sticky(self) -> Self {
         match self {
             Final::Message { tone, text, .. } => Final::Message {
@@ -89,20 +85,17 @@ impl Final {
 }
 
 /// The resolved outcome shipped back from a worker thread: the operation's key
-/// plus the [`Final`] produced by running the matching success/failure closure
-/// where the typed result was in scope. Plain data so it crosses the worker
-/// channel without closures.
+/// and the [`Final`] its matching closure produced. Plain data, so it crosses
+/// the worker channel without closures.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedFinal {
     pub key: String,
     pub outcome: Final,
-    /// Delivery audience captured at dispatch time (before the worker thread
-    /// spawned, while `Engine::current_origin` was still set). Defaults to
-    /// [`StatusScope::All`]; the deferred-op mint sites set it so a push/pull
-    /// final reaches only the originating connection. Copied
-    /// onto the emitted [`StatusUpdate`] in [`Self::into_reaction`] (by the time
-    /// the worker completes, `current_origin` has been reset, so the scope must
-    /// travel here rather than be re-read).
+    /// Delivery audience captured at dispatch time, while
+    /// `Engine::current_origin` is still set, and copied onto the emitted
+    /// [`StatusUpdate`] in [`Self::into_reaction`]. It must travel here rather
+    /// than be re-read: `current_origin` is reset by the time the worker
+    /// completes. Defaults to [`StatusScope::All`].
     pub scope: StatusScope,
 }
 
@@ -148,10 +141,9 @@ impl ResolvedFinal {
     }
 }
 
-/// Entry point: a pending message, awaiting its success closure. An opaque
-/// correlation id is minted internally, so the caller never authors or sees a
-/// key — the busy and its final correlate purely by sharing this object. You
-/// cannot obtain a [`StatusOp`] without passing through `on_success` then
+/// Entry point: a pending message, awaiting its success closure. The
+/// correlation id is minted internally, so a caller never authors or sees a key.
+/// A [`StatusOp`] is unobtainable without passing through `on_success` then
 /// `on_failure`, so both outcomes are always declared.
 pub fn status_op(pending: impl Into<String>) -> NeedsSuccess {
     NeedsSuccess {
@@ -179,11 +171,10 @@ impl NeedsSuccess {
     }
 
     /// Alternative to `on_success`/`on_failure` for operations whose final is
-    /// decided LATER, in the completion handler, from an outcome the worker
-    /// can't see (post-worker fallible state, a 3-way result, render context).
-    /// The single closure is declared HERE (so the outcome is still mandatory at
-    /// dispatch) but receives a handler-computed `Outcome` and runs where that
-    /// outcome exists. The op is correlated to its pending by the opaque id.
+    /// decided in the completion handler, from an outcome the worker cannot see.
+    /// The single closure is still declared here, so an outcome stays mandatory
+    /// at dispatch, but receives a handler-computed `Outcome` and runs where
+    /// that outcome exists. The opaque id correlates the op to its pending.
     pub fn resolve_in_handler<O, F>(self, f: F) -> HandlerStatusOp<O>
     where
         F: FnOnce(&O) -> Final + Send + 'static,
@@ -205,12 +196,11 @@ pub struct HandlerStatusOp<O> {
     key: String,
     pending: String,
     resolver: Box<dyn FnOnce(&O) -> Final + Send>,
-    /// Delivery audience captured at dispatch time (from `Engine::current_origin`).
-    /// Defaults to [`StatusScope::All`]; the deferred-op dispatch sites stamp it so
-    /// the pending busy, every `progress` re-emit, AND the eventual `resolve` final
-    /// reach only the originating connection. The busy and finals for these ops are
-    /// emitted in LATER ticks (worker-completion followups) when `current_origin`
-    /// has been reset, so the scope must live on the op rather than be re-read.
+    /// Delivery audience captured at dispatch time from `Engine::current_origin`
+    /// and applied to the pending busy, every `progress` re-emit and the
+    /// eventual `resolve` final. It must live on the op rather than be re-read:
+    /// those later emits happen in worker-completion followups, by which point
+    /// `current_origin` has been reset. Defaults to [`StatusScope::All`].
     scope: StatusScope,
 }
 
@@ -241,9 +231,8 @@ impl<O> HandlerStatusOp<O> {
             .with_scope(self.scope.clone())
     }
 
-    /// An UPDATED keyed busy on the same id, for operations that report progress
-    /// mid-flight (e.g. agent creation streaming "Creating worktree…", "Launching
-    /// session…"). Does not consume the op — the eventual [`Self::resolve`] still
+    /// An updated keyed busy on the same id, for operations that report progress
+    /// mid-flight. Does not consume the op: the eventual [`Self::resolve`] still
     /// replaces it.
     pub fn progress(&self, message: impl Into<String>) -> StatusUpdate {
         StatusUpdate::busy(message)
@@ -264,18 +253,12 @@ impl crate::engine::Engine {
     /// waiting on.
     ///
     /// This is what stops the status line's busy timeout from calling a slow
-    /// operation stranded, and [`Engine::live_status_keys`] is the one oracle
-    /// for it. The op registries are deliberately NOT consulted: several keyed
-    /// busies have no registry at all (every [`Engine::spawn_status_op`] call,
-    /// and the TUI's own App-level op maps), so an answer assembled from
-    /// registries is an answer that is wrong for whatever it forgot.
-    ///
-    /// [`InFlightKey`](crate::engine::InFlightKey) does not answer it either,
-    /// even where it looks like it could. `InFlightKey::Pull(repo)` really does
-    /// track a pull for its whole run, but its variants exist for mutual
-    /// exclusion between operations of a KIND, so they name no status key:
-    /// `CreateAgent` is a unit variant and could not tell two concurrent
-    /// creates apart, and nothing maps a key back to a variant.
+    /// operation stranded, and `Engine::live_status_keys` is the one oracle for
+    /// it. Do not answer it from the op registries: several keyed busies have no
+    /// registry at all, so a registry-assembled answer is wrong for whatever it
+    /// forgot. [`InFlightKey`](crate::engine::InFlightKey) cannot answer it
+    /// either, because its variants exist for mutual exclusion between
+    /// operations of a kind and so name no status key.
     pub fn status_op_is_live(&self, key: &str) -> bool {
         self.live_status_keys.is_live(key)
     }
@@ -284,38 +267,35 @@ impl crate::engine::Engine {
     /// heartbeated rather than called timed out.
     ///
     /// Every path that emits a keyed [`StatusTone::Busy`] must call this, or the
-    /// operation gets the old behavior: a false "timed out" warning twenty
-    /// seconds in, however long it is really going to take. Nothing retires it
-    /// here; the surface's controller does that when the final lands.
+    /// operation draws a false "timed out" warning at `statusline::BUSY_TIMEOUT`
+    /// however long it really takes. Nothing retires it here; the surface's
+    /// controller does that when the final lands.
     pub fn register_status_key(&self, key: &str) {
         self.live_status_keys.register(key);
     }
 
-    /// Drop a registration whose final will never be emitted.
-    ///
-    /// Only for the paths that abandon an operation before it can produce one
-    /// (a worker thread that fails to spawn). An operation that ends normally is
-    /// retired by its final, through the controller.
+    /// Drop a registration whose final will never be emitted. Only for paths
+    /// that abandon an operation before it can produce one, such as a worker
+    /// thread that fails to spawn; an operation that ends normally is retired by
+    /// its final, through the controller.
     pub fn retire_status_key(&self, key: &str) {
         self.live_status_keys.retire(key);
     }
 
     /// Register an op as running and hand back the pending busy to emit for it.
     ///
-    /// The pairing is the point: a site goes through here and cannot register
-    /// the operation without also showing it, or show it without registering it.
-    /// Use it wherever a keyed busy is emitted by hand; the two spawn
-    /// primitives already do it for the ops they own.
+    /// The pairing is the point: a site cannot register the operation without
+    /// showing it, or show it without registering it. Use it wherever a keyed
+    /// busy is emitted by hand; the spawn primitives already do it themselves.
     pub fn begin_status_op<O: PendingStatusOp>(&self, op: &O) -> StatusUpdate {
         self.register_status_key(op.status_key());
         op.pending_status()
     }
 }
 
-/// The shared shape of the two op flavours: something with a status key and a
-/// pending busy to show under it. Exists so [`Engine::begin_status_op`] is one
-/// method rather than one per flavour, and so a third flavour has an obvious
-/// place to join.
+/// The shared shape of the op flavours: a status key and a pending busy to show
+/// under it, so [`Engine::begin_status_op`] is one method rather than one per
+/// flavour.
 pub trait PendingStatusOp {
     fn status_key(&self) -> &str;
     fn pending_status(&self) -> StatusUpdate;

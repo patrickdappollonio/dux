@@ -1,11 +1,8 @@
-//! `Engine::retry_resume_fallback` — the engine-owned resume-fallback retry.
-//! One method both TUI retry paths (exit-driven and timeout-driven) call so
-//! the provider/candidate/pin removal and the re-dispatch happen atomically
+//! `Engine::retry_resume_fallback`, the engine-owned resume-fallback retry.
+//! One method both retry paths (exit-driven and timeout-driven) call, so the
+//! provider, candidate and pin removal and the re-dispatch happen atomically
 //! inside a single `&mut self` call, closing the window where a session has
 //! neither its old nor its new provider.
-//!
-//! Background and rationale: see
-//! `docs/superpowers/specs/2026-05-31-finish-delete-and-resume-fallback-design.md`.
 
 use std::time::Duration;
 
@@ -16,36 +13,33 @@ use crate::model::{AgentSession, ProviderKind, SessionStatus};
 use crate::worker::{AgentLaunchKind, AgentLaunchRequest};
 
 /// Visible-line threshold below which a resumed provider's output counts as
-/// "minimal" (no real conversation): a `--continue` that found nothing prints a
-/// short error and exits. Shared by both detection windows.
+/// minimal, meaning no real conversation: a `--continue` that found nothing
+/// prints a short error and exits. Shared by both detection windows.
 pub const RESUME_MINIMAL_OUTPUT_LINES: usize = 5;
 
 /// What the resume-fallback sweep should do with one resume candidate, decided
-/// purely from its observable state. Pure and unit-tested so the two detection
-/// windows (`--continue` exits empty; a resume hangs past its timeout) live in
-/// one place and `dux serve` gets the same behavior the TUI has.
+/// purely from its observable state, so both detection windows (`--continue`
+/// exits empty, and a resume hangs past its timeout) live in one place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeFallbackDecision {
     /// The resumed provider EXITED with only minimal output: the resume found no
     /// prior conversation, so relaunch fresh (window a).
     RetryExitedMinimal,
-    /// The resumed provider EXITED with real output: it ran a conversation that
-    /// ended normally, so drop the candidate and let the exit-prune path detach
-    /// it (never a fresh relaunch).
+    /// The resumed provider exited with real output, so it ran a conversation
+    /// that ended normally: drop the candidate and let the exit-prune path
+    /// detach it, never relaunch.
     DropNonMinimalExit,
-    /// The resumed provider is STILL RUNNING but produced no visible output past
-    /// its `resume_wait_timeout_ms` window: treat it as hung and relaunch fresh
-    /// (window b).
+    /// The resumed provider is still running but produced no visible output
+    /// past its `resume_wait_timeout_ms` window: hung, so relaunch fresh.
     RetryHungTimeout,
     /// Healthy (or not yet decidable): leave the candidate alone.
     Wait,
 }
 
-/// The pure resume-fallback decision. `exited`/`minimal`/`has_output` are the
-/// provider's observable flags; `timeout_ms` is the provider's configured
-/// `resume_wait_timeout_ms` (`None` or `0` disables the hung window); `elapsed`
-/// is how long the resume has been running. No engine or PTY access, so the
-/// whole matrix is unit-tested without spawning a process.
+/// The pure resume-fallback decision. `exited`, `minimal` and `has_output` are
+/// the provider's observable flags, `timeout_ms` is its configured
+/// `resume_wait_timeout_ms` (`None` or `0` disables the hung window) and
+/// `elapsed` is how long the resume has been running.
 pub(crate) fn resume_fallback_decision(
     exited: bool,
     minimal: bool,
@@ -71,38 +65,35 @@ pub(crate) fn resume_fallback_decision(
 /// Outcome of an attempted resume-fallback retry. Three states because the
 /// caller must react differently to each — collapsing any two corrupts state.
 pub enum ResumeFallbackOutcome {
-    /// Engine removed the candidate + provider + pin and dispatched a fresh
+    /// Engine removed the candidate, provider and pin and dispatched a fresh
     /// `resume:false` launch. `reaction` is the `DispatchAgentLaunchView`
-    /// follow-up the caller must apply. Treat the session as HANDLED: skip the
-    /// normal exit/Detached cleanup AND the post-exit UI/PR follow-ups.
+    /// follow-up the caller must apply. Treat the session as handled: skip the
+    /// normal exit and Detached cleanup and the post-exit UI and PR follow-ups.
     ///
-    /// If the OS thread-spawn itself failed (the only `launched:false` cause
-    /// reachable here, since the in-flight pre-check already passed), the
-    /// engine has already marked the session `Detached` and `reaction` carries
-    /// the spawn-error status. It is still `Retried`.
+    /// An OS thread-spawn failure is the only `launched:false` cause reachable
+    /// here, since the in-flight pre-check already passed; the engine has then
+    /// already marked the session `Detached` and `reaction` carries the spawn
+    /// error. It is still `Retried`.
     ///
-    /// `reaction` is boxed because `EventReaction` is large (~272 bytes) and
-    /// the other two variants are unit — leaving it unboxed trips clippy's
-    /// `large_enum_variant` lint, which is a `-D warnings` CI gate. The
-    /// codebase boxes for this same reason in `command.rs`.
+    /// `reaction` is boxed because `EventReaction` is large next to the unit
+    /// variants beside it, and clippy's `large_enum_variant` is a CI gate.
     Retried { reaction: Box<EventReaction> },
-    /// A launch is already in flight for this session. The engine did NOTHING
-    /// (candidate, provider, pin untouched). Treat the session as PROTECTED:
-    /// skip the destructive exit cleanup AND the post-exit UI/PR follow-ups,
-    /// exactly as if it had been retried. The in-flight launch will resolve.
+    /// A launch is already in flight for this session, so the engine left the
+    /// candidate, provider and pin untouched. Treat the session as protected:
+    /// skip the destructive exit cleanup and the post-exit UI and PR follow-ups
+    /// exactly as if it had been retried; the in-flight launch resolves it.
     InFlight,
-    /// The session is no longer an eligible resume candidate. The engine has
-    /// removed any stale candidate entry. The caller proceeds with normal
-    /// exit handling (fall through to the Detached path).
+    /// The session is no longer an eligible resume candidate and the engine has
+    /// removed any stale entry. The caller falls through to normal exit
+    /// handling and the Detached path.
     NotCandidate,
 }
 
 impl Engine {
     /// Build an `AgentLaunchRequest` from engine state. `pty_size` is the only
-    /// front-end-sourced input (the TUI's last known PTY size); everything else
-    /// (provider config, resolved env, scrollback) comes from engine state.
-    /// The TUI's `agent_launch_request` delegates here so there is a single
-    /// source of truth for request construction.
+    /// front-end-sourced input; provider config, resolved env and scrollback all
+    /// come from engine state. Every surface delegates here, so request
+    /// construction has one source of truth.
     pub fn build_agent_launch_request(
         &self,
         session: AgentSession,
@@ -115,17 +106,15 @@ impl Engine {
         self.build_tab_launch_request(tab_id, None, session, resume, pty_size, kind)
     }
 
-    /// Tab-aware launch-request builder. `tab_provider = None` uses the session's
-    /// own provider (the session-slot tab); `Some(provider)`
-    /// launches that provider for an extra tab.
+    /// Tab-aware launch-request builder. `tab_provider = None` uses the
+    /// session's own provider, the session-slot tab; `Some(provider)` launches
+    /// that provider for an extra tab.
     ///
     /// Resume eligibility is dynamic, not positional: a tab launches with the
-    /// provider's `--continue` flag only if it is the sole/first provider coming
-    /// up in the shared worktree — i.e. no OTHER tab of this session currently has
-    /// a live provider or an in-flight launch. `--continue` is directory-scoped
-    /// and always grabs the *most-recent* conversation, so at most one tab may
-    /// resume; the first tab into an otherwise-empty worktree resumes, and every
-    /// tab launched while another is already live/launching starts fresh.
+    /// provider's `--continue` flag only when no other tab of this session has a
+    /// live provider or an in-flight launch. `--continue` is directory-scoped
+    /// and always grabs the most recent conversation, so at most one tab may
+    /// resume and every tab launched beside a live one starts fresh.
     pub fn build_tab_launch_request(
         &self,
         tab_id: TabId,
@@ -139,9 +128,8 @@ impl Engine {
         // Resume is decided per-provider in one place; see `tab_resume_decision`.
         let resume = self.tab_resume_decision(&session, &tab_id, &provider, resume);
         let provider_config = crate::config::provider_config(&self.config, &provider);
-        // A standalone agent has no project to overlay, so it gets the
-        // GLOBAL environment rather than the empty one a missed project lookup
-        // would fall through to.
+        // A standalone agent has no project to overlay, so it gets the global
+        // environment, not the empty one a missed project lookup falls to.
         let env = self.session_env(&session);
         AgentLaunchRequest {
             session,
@@ -154,24 +142,23 @@ impl Engine {
             pty_size,
             scrollback_lines: self.config.ui.agent_scrollback_lines,
             kind,
-            // Landing is minimized by default. The TUI flips
-            // this on the returned request for fullscreen-seeking gestures;
-            // web-originated launches never touch it.
+            // Landing is minimized by default; a fullscreen-seeking gesture
+            // flips this on the returned request.
             wants_fullscreen: false,
         }
     }
 
-    /// Build the launch request for reopening a DORMANT extra tab (a tab with a
-    /// row but no live process, e.g. after a restart), the single source both
-    /// surfaces call so the resolution, resume decision, and the fresh/resumed
-    /// wording cannot drift. Returns `None` for an unknown tab or a tab whose
-    /// owning session is gone; the caller dispatches the request through its own
-    /// launch path (the core dispatch chokepoint re-gates resume and refuses a
-    /// closing session, so no surface needs its own guard).
+    /// Build the launch request for reopening a dormant extra tab, a tab with a
+    /// row but no live process. The single source both surfaces call, so the
+    /// resolution, the resume decision and the fresh-versus-resumed wording
+    /// cannot drift. Returns `None` for an unknown tab or one whose owning
+    /// session is gone; the caller dispatches through its own launch path, and
+    /// the core dispatch chokepoint re-gates resume and refuses a closing
+    /// session, so no surface needs a guard of its own.
     ///
-    /// Resume is decided per-provider by `tab_resume_decision`: reopening
-    /// resumes that provider's conversation when this is the sole live/launching
-    /// tab of its provider, otherwise it starts fresh.
+    /// Resume is decided per provider by `tab_resume_decision`: reopening
+    /// resumes that provider's conversation only when this is the sole live or
+    /// launching tab of its provider.
     pub fn dormant_tab_launch_request(
         &self,
         tab_id: &str,
@@ -211,9 +198,9 @@ impl Engine {
         ))
     }
 
-    /// Attempt a resume-fallback retry for `session_id`. Synchronous: all state
-    /// transitions happen inside this one `&mut self` call so no other
-    /// `drain_events` tick can observe a half-applied state. See
+    /// Attempt a resume-fallback retry for `session_id`. Synchronous: every
+    /// state transition happens inside this one `&mut self` call, so no other
+    /// `drain_events` tick observes a half-applied state. See
     /// `ResumeFallbackOutcome` for how the caller must treat each result.
     pub fn retry_resume_fallback(
         &mut self,
@@ -231,9 +218,8 @@ impl Engine {
         if !self.resume_fallback_candidates.contains_key(tab_id) {
             return ResumeFallbackOutcome::NotCandidate;
         }
-        // 3. Owning session gone: drop the stale candidate, fall through. Resume
-        //    candidates are keyed by tab id, so resolve the owning session (the
-        //    session-slot tab resolves to itself; an extra tab via its row).
+        // 3. Owning session gone: drop the stale candidate and fall through.
+        //    Candidates are keyed by tab id, so the owning session is resolved.
         let Some(session_id) = self.owning_session_for_tab(tab_id.as_str()) else {
             self.resume_fallback_candidates.remove(tab_id);
             return ResumeFallbackOutcome::NotCandidate;
@@ -246,24 +232,16 @@ impl Engine {
         // BEFORE tearing down the pin, so the fresh relaunch reuses it.
         let is_session_slot = self.is_slot_tab(&session, tab_id);
         let provider = self.tab_running_provider(&session, tab_id);
-        // 4. Tear down the stale resume attempt, through the ONE function that
-        //    knows every map keyed by a tab id. This used to remove the three
-        //    maps this path could name (`resume_fallback_candidates`,
-        //    `providers`, `running_provider_pins`) and nothing else, so every
-        //    other tab-keyed map survived a relaunch that then failed: the
-        //    launched drop-paste form kept being published in bootstrap for a
-        //    process that was gone, and `pty_progress` could leave a spinner on.
-        //    Routing it here means the next map added to `clear_tab_runtime`
-        //    does not have to remember this site as well.
-        //
-        //    Safe to call now rather than piecemeal: the in-flight pre-check at
-        //    step 1 already returned, so clearing the `AgentLaunch` key is a
-        //    no-op, and the provider that was running has been captured above.
+        // 4. Tear down the stale resume attempt through the one function that
+        //    knows every map keyed by a tab id, so a map added there later does
+        //    not have to remember this site too. Safe to call whole: the
+        //    in-flight pre-check at step 1 already returned, so clearing the
+        //    `AgentLaunch` key is a no-op, and the running provider was
+        //    captured above.
         self.clear_tab_runtime(tab_id);
-        // 5. Build a fresh, non-resume launch request. The session-slot tab goes
-        //    through the session-slot path (ResumeFallback view drives its status
-        //    line); an extra tab rebuilds its own provider as a Tab launch so the
-        //    ready/failed handlers stay tab-scoped and never flip session state.
+        // 5. Build a fresh, non-resume launch request. An extra tab rebuilds its
+        //    own provider as a Tab launch so the ready and failed handlers stay
+        //    tab-scoped and never flip session state.
         let request = if is_session_slot {
             self.build_agent_launch_request(
                 session,
@@ -284,10 +262,10 @@ impl Engine {
                 },
             )
         };
-        // 6. Dispatch. `launched:false` is reachable only via OS thread-spawn
-        //    failure now (the in-flight pre-check above already passed), so on
-        //    failure we mark the session Detached — but only for the session-slot
-        //    tab, since an extra tab's failure must not tear down live siblings.
+        // 6. Dispatch. The in-flight pre-check above already passed, so an OS
+        //    thread-spawn failure is the only `launched:false` left, and it
+        //    marks the session Detached for the session-slot tab only: an extra
+        //    tab's failure must not tear down live siblings.
         let reaction = match self.apply(Command::DispatchAgentLaunch {
             request: Box::new(request),
         }) {
@@ -308,25 +286,21 @@ impl Engine {
 
     /// Sweep every seeded resume-fallback candidate through both detection
     /// windows and act on each, returning the launch reactions the caller must
-    /// apply through its own reaction pipeline (the TUI's `apply_reaction`, the
-    /// web loop's `drive_web_launch_followup`). The engine-owned counterpart of
-    /// the two TUI loops (`workers.rs` exit sub-loop + `retry_hung_resume_sessions`),
-    /// so `dux serve` gets the same continue-then-fresh behavior instead of
-    /// showing "Agent exited" on a failed resume and hanging forever on a stuck one.
+    /// apply through its own reaction pipeline. Every surface routes through
+    /// here, so continue-then-fresh behavior cannot drift between them.
     ///
-    /// For each candidate the DECISION is the pure `resume_fallback_decision`
-    /// (owning `has_minimal_output` and the `resume_wait_timeout_ms` window):
-    /// - `RetryExitedMinimal` / `RetryHungTimeout` -> `retry_resume_fallback`
-    ///   with the window-appropriate status message; a `Retried` reaction is
-    ///   collected. That retry tears down every tab-keyed map itself, through
-    ///   `clear_tab_runtime`, so this loop names none of them.
-    /// - `DropNonMinimalExit` -> drop the candidate so the normal exit-prune
-    ///   path detaches it.
-    /// - `Wait` -> leave it alone.
+    /// Each candidate is decided by the pure `resume_fallback_decision`:
+    /// - `RetryExitedMinimal` and `RetryHungTimeout` go to
+    ///   `retry_resume_fallback` with the window-appropriate status message,
+    ///   collecting a `Retried` reaction. The retry tears down every tab-keyed
+    ///   map itself, through `clear_tab_runtime`, so this loop names none.
+    /// - `DropNonMinimalExit` drops the candidate so the normal exit-prune path
+    ///   detaches it.
+    /// - `Wait` leaves it alone.
     ///
-    /// MUST run before `prune_exited_ptys`: a `RetryExited*` candidate's provider
-    /// must be pulled out of `providers` (by the retry) before the prune would
-    /// otherwise reap it and mark the agent Detached.
+    /// Must run before `prune_exited_ptys`: the retry has to pull a
+    /// `RetryExited*` candidate's provider out of `providers` before the prune
+    /// reaps it and marks the agent Detached.
     pub fn sweep_resume_fallbacks(&mut self, pty_size: (u16, u16)) -> Vec<EventReaction> {
         let mut reactions = Vec::new();
         // Snapshot the candidate ids: `retry_resume_fallback` mutates the map.
@@ -393,11 +367,9 @@ impl Engine {
             if let ResumeFallbackOutcome::Retried { reaction } =
                 self.retry_resume_fallback(tab_id.as_str(), pty_size, status_message)
             {
-                // No hand-clearing here. The retry's teardown goes through
-                // `clear_tab_runtime`, which knows every tab-keyed map, so this
-                // site was a second, PARTIAL copy of that list: it named the
-                // activity and input stamps and nothing else, which is exactly
-                // the drift `clear_tab_runtime` exists to prevent.
+                // Nothing is cleared by hand here: the retry's teardown goes
+                // through `clear_tab_runtime`, and a second list of tab-keyed
+                // maps at this site is exactly the drift it exists to prevent.
                 reactions.push(*reaction);
             }
         }

@@ -1,13 +1,9 @@
-//! Companion-terminal lifecycle on the headless `Engine`. Companion terminals are
-//! plain PTYs distinct from agent providers: they have no launch/resume flow and
-//! no provider semantics; they simply run the configured terminal command. A
-//! terminal is owned by an agent session (spawned in that agent's worktree), a
-//! project (a "project terminal", spawned at the project's repo root with no
-//! agent attached), or nothing at all (a "standalone terminal", spawned in the
-//! user's home directory with neither). The TUI spawns session-owned terminals
-//! via `App::spawn_companion_terminal_for_session`; this mirrors that flow for
-//! headless callers (the web server) and adds the project-owned and standalone
-//! flavors.
+//! Companion-terminal lifecycle on the headless `Engine`. Companion terminals
+//! are plain PTYs distinct from agent providers: no launch or resume flow and no
+//! provider semantics, just the configured terminal command. A terminal is owned
+//! by an agent session, spawned in that agent's worktree; by a project, spawned
+//! at its repo root with no agent attached; or by nothing at all, spawned in the
+//! user's home directory.
 
 use std::path::{Path, PathBuf};
 
@@ -22,10 +18,8 @@ impl Engine {
     /// Spawn a new companion terminal in the given session's worktree and register
     /// it in `companion_terminals`. Returns the generated `(terminal_id, label)`.
     ///
-    /// The terminal runs `config.terminal.command`/`args` with the session's
-    /// resolved environment (global env merged with the owning project's env).
-    /// This is the headless equivalent of the TUI's
-    /// `spawn_companion_terminal_for_session` + insert.
+    /// The terminal runs `config.terminal.command` and `args` with the session's
+    /// resolved environment, the global env merged with the owning project's.
     pub fn create_companion_terminal(
         &mut self,
         session_id: &str,
@@ -40,10 +34,9 @@ impl Engine {
             .context("unknown session")?;
 
         // A standalone agent belongs to no project, so a terminal opened on it
-        // gets the GLOBAL environment with no project overlay, exactly like a
-        // standalone terminal. Reading a project id that is not there and
-        // falling through to `unwrap_or_default` would silently hand it an
-        // EMPTY environment instead, which is a different and much worse thing.
+        // gets the global environment with no project overlay. Falling through
+        // to `unwrap_or_default` on a missing project id would hand it an empty
+        // environment instead, which is a different and much worse thing.
         let env = match session.project_id() {
             Some(project_id) => self
                 .projects
@@ -72,11 +65,10 @@ impl Engine {
     /// Spawn a new project terminal at the given project's repo root and register
     /// it in `companion_terminals`. Returns the generated `(terminal_id, label)`.
     ///
-    /// A project terminal is a plain shell with no agent attached: same terminal
-    /// command, same resolved environment (global env merged with the project's
-    /// env), owned by the project instead of a session. It deliberately does NOT
-    /// run the project's `startup_command` (that is worktree provisioning for
-    /// new agents, not a shell rc).
+    /// A project terminal is a plain shell with no agent attached: the same
+    /// terminal command and the global env merged with the project's, owned by
+    /// the project instead of a session. It does not run the project's
+    /// `startup_command`, which is worktree provisioning, not a shell rc.
     pub fn create_project_terminal(
         &mut self,
         project_id: &str,
@@ -112,17 +104,13 @@ impl Engine {
     /// Spawn a new standalone terminal in the user's home directory and register
     /// it in `companion_terminals`. Returns the generated `(terminal_id, label)`.
     ///
-    /// A standalone terminal belongs to nothing: no agent, no project. So it
-    /// takes its directory from [`crate::home_path::standalone_terminal_dir`]
-    /// (the home directory, or `/` when that cannot be resolved) rather than
-    /// from an owner's path, and it gets the GLOBAL environment with no project
-    /// overlay, because there is no project to overlay it with. The two owned
-    /// kinds above merge `config.env` with their project's `env`; this one has
-    /// only the global half, and that is the whole difference.
+    /// A standalone terminal belongs to no agent and no project, so it takes its
+    /// directory from [`crate::home_path::standalone_terminal_dir`] rather than
+    /// an owner's path and gets the global environment with no project overlay,
+    /// where the owned kinds merge `config.env` with their project's `env`.
     ///
-    /// Like a project terminal it deliberately does NOT run any
-    /// `startup_command`: that is worktree provisioning for new agents, not a
-    /// shell rc, and a standalone terminal has no project to take one from.
+    /// Like a project terminal it does not run any `startup_command`: that is
+    /// worktree provisioning for new agents, not a shell rc.
     pub fn create_standalone_terminal(&mut self, rows: u16, cols: u16) -> Result<(String, String)> {
         let dir = crate::home_path::standalone_terminal_dir();
         // The global half only. `resolve_agent_env` merges a project's env over
@@ -144,14 +132,14 @@ impl Engine {
         rows: u16,
         cols: u16,
     ) -> Result<(String, String)> {
-        // A companion terminal is a plain shell, not an agent, so it opts out of
-        // agent-signal tracking: its bytes are never scanned for OSC/bell
-        // attention signals (which it does not consume) and it can never raise a
-        // spurious attention flag.
+        // A companion terminal is a plain shell, so it opts out of agent-signal
+        // tracking: its bytes are never scanned for OSC or bell attention
+        // signals and it can never raise a spurious attention flag.
         //
-        // `rows`/`cols` come from the caller so a TUI spawn matches the visible
-        // pane on the first frame (no initial reflow of the shell); headless web
-        // callers pass a default size and rely on the client's first resize.
+        // `rows` and `cols` come from the caller so a spawn beside a visible
+        // pane matches it on the first frame, with no initial reflow of the
+        // shell; a headless caller passes a default and relies on the client's
+        // first resize.
         let client = PtyClient::spawn_with_env_opts(
             &self.config.terminal.command,
             &self.config.terminal.args,
@@ -192,27 +180,23 @@ impl Engine {
     /// Where a file dropped onto the pane currently showing `pty_id` should be
     /// saved.
     ///
-    /// `pty_id` is whatever the browser pane is attached to, which is the only
+    /// `pty_id` is whatever the browser pane is attached to, the only
     /// identifier it reliably has: a terminal id, an agent's session id (the
     /// session-slot tab), or an extra tab's id. Resolving all three here keeps
     /// the upload route from having to know how tabs relate to sessions.
     ///
-    /// The two answers are deliberately different in kind, and they answer
-    /// different INTENTS.
+    /// The two answers differ in kind because the intents differ. An agent
+    /// means "look at this for me", so the file goes to that agent's upload
+    /// directory, inside the worktree and ignored by git, where it never touches
+    /// the user's git status and dies with the agent; every tab of one agent
+    /// shares one worktree, so which tab is on screen changes nothing.
     ///
-    /// An AGENT is "look at this for me": the file goes to that agent's upload
-    /// directory (`ui.upload_directory`, inside the worktree and ignored by
-    /// git), so it never touches the user's git status and it dies with the
-    /// agent. Every tab of one agent shares one worktree, so which tab is on
-    /// screen does not change the answer.
-    ///
-    /// A TERMINAL is unchanged: it gets a PLAN rather than a path, because the
-    /// real answer is the live working directory of a shell that may have been
-    /// `cd`'d anywhere, and that must not be computed on this thread. A
-    /// terminal is where the user is working, so a file dropped on one lands
-    /// there, whoever owns the terminal. A STANDALONE terminal has no worktree
-    /// at all, and cannot reach the upload branch: it is matched here, first,
-    /// as a terminal.
+    /// A terminal gets a plan rather than a path: the real answer is the live
+    /// working directory of a shell that may have been `cd`'d anywhere, and that
+    /// must not be computed on this thread. A terminal is where the user is
+    /// working, so a drop lands there whoever owns it, and a standalone terminal
+    /// is matched here first, as a terminal, so it never reaches the upload
+    /// branch it has no worktree for.
     pub fn file_drop_destination(
         &self,
         pty_id: &str,
@@ -225,10 +209,9 @@ impl Engine {
         let session = self.session_behind_pty(pty_id)?;
         Some(crate::file_drop::FileDropDestination::AgentUploads {
             worktree: session.directory().into(),
-            // Normalized on every read rather than trusted: the pure normalizer
-            // is the read-path half of the warn-once-at-load pair, so a config
-            // that never went through `load_config` (a test, an in-memory
-            // Config) still resolves a usable directory.
+            // Normalized on every read rather than trusted, so a config that
+            // never went through `load_config` still resolves a usable
+            // directory.
             relative: crate::config::normalized_upload_directory(&self.config.ui.upload_directory),
             write_gitignore: self.upload_seed_allowed(session),
         })
@@ -237,31 +220,22 @@ impl Engine {
     /// Whether the hidden upload directory dux creates inside an agent's
     /// working directory should be seeded with a self-gitignoring `.gitignore`.
     ///
-    /// A managed worktree keeps today's behavior: the configured preference
-    /// decides, and the directory is always inside a repository anyway.
+    /// For a managed worktree the configured preference decides, and the
+    /// directory is inside a repository anyway.
     ///
-    /// A STANDALONE agent's folder is the user's, so the preference is ANDed
-    /// with "can git see this path at all". The rule is git visibility rather
-    /// than "is this a working repository", because a folder sitting inside
-    /// somebody else's repository is exactly where untracked uploads would
-    /// pollute their `git status`. A plain folder gets no junk written into it,
-    /// and a folder dux could not classify gets nothing either: writing into
-    /// the user's directory on a guess is the one direction that cannot be
-    /// undone by dux, which never cleans the folder up.
+    /// A standalone agent's folder is the user's, so the preference is ANDed
+    /// with whether git can see the path at all. The rule is git visibility
+    /// rather than "is this a working repository", because a folder sitting
+    /// inside somebody else's repository is exactly where untracked uploads
+    /// would pollute their `git status`. A plain folder and a folder dux could
+    /// not classify both get nothing written: dux never cleans the folder up,
+    /// so writing there on a guess cannot be undone.
     ///
-    /// THE UNPROBED WINDOW, and how it heals. A drop that lands before the
-    /// folder has been classified still CREATES the upload directory (that is
-    /// `DropDir::open_uploads`'s job and it is not conditional), just without
-    /// the `.gitignore`. For a folder that turns out to be a repository, those
-    /// uploads show up as untracked files until the next drop into the same
-    /// agent: `open_uploads` runs again with the verdict in hand, and its
-    /// `.gitignore` create is `O_CREAT | O_EXCL`, so it seeds the directory that
-    /// is already there rather than needing a fresh one. Nothing is lost in the
-    /// meantime and nothing is written on a guess. A retroactive seed the moment
-    /// the verdict lands was considered and not taken: it would put a filesystem
-    /// write on the engine actor thread (or need its own worker plus a
-    /// seed-an-existing-directory entry point) to close a window the next drop
-    /// closes for free.
+    /// A drop landing before the folder is classified still creates the upload
+    /// directory, unconditionally, just without the `.gitignore`. The next drop
+    /// into the same agent heals it: `DropDir::open_uploads` runs again with the
+    /// verdict in hand and its `.gitignore` create is `O_CREAT | O_EXCL`, so it
+    /// seeds the directory already there.
     fn upload_seed_allowed(&self, session: &crate::model::AgentSession) -> bool {
         if !self.config.ui.upload_write_gitignore {
             return false;
@@ -274,27 +248,22 @@ impl Engine {
         }
     }
 
-    /// Where a file dropped onto the EDITOR'S FILE TREE should be saved: the
-    /// tree directory the user dropped on, inside that agent's worktree.
+    /// Where a file dropped onto the editor's file tree should be saved: the
+    /// tree directory the user dropped on, inside that agent's worktree. The
+    /// other intent from [`Self::file_drop_destination`], which answers "look at
+    /// this for me" with the invisible upload directory; this answers "add this
+    /// file to my project" with an ordinary file git can see.
     ///
-    /// The other intent. [`Self::file_drop_destination`] answers "look at this
-    /// for me" with the invisible upload directory; this answers "add this file
-    /// to my project" with the place the user pointed at, as an ordinary file
-    /// git can see.
+    /// A terminal id answers with the directory the terminal was spawned in,
+    /// never its live working directory, which is where this parts company with
+    /// [`Self::file_drop_destination`]. A drop on the terminal itself follows
+    /// the shell, because it means "put this where I am typing"; the tree was
+    /// drawn from the pinned root, so following the shell here would land the
+    /// same click somewhere else after a `cd`.
     ///
-    /// A TERMINAL id answers with its own root, because a terminal now has a
-    /// file tree: its editor is rooted at the directory the terminal was spawned
-    /// in. The root is that SPAWN directory and never the live working
-    /// directory, which is the one place this deliberately parts company with
-    /// [`Self::file_drop_destination`] above. A drop on the terminal itself is
-    /// "put this where I am typing", so it follows the shell; a drop on the
-    /// editor's tree is "add this file where I pointed", and the tree it was
-    /// pointed at is drawn from the pinned root. Following the shell here would
-    /// mean the same click landed somewhere else after a `cd`.
-    ///
-    /// `relative` is carried through UNVALIDATED on purpose: the guards belong
-    /// next to the walk that opens the directory (`DropDir::open_tree_dir`), on
-    /// the blocking pool, not on the engine thread.
+    /// `relative` is carried through unvalidated: the guards belong next to the
+    /// walk that opens the directory, `DropDir::open_tree_dir`, on the blocking
+    /// pool rather than the engine thread.
     pub fn file_drop_tree_destination(
         &self,
         pty_id: &str,
@@ -317,19 +286,18 @@ impl Engine {
     /// session id and its worktree, or `None` when there is no agent behind the
     /// pane at all.
     ///
-    /// This answers OWNERSHIP only, never whether the file actually landed in
-    /// that worktree. A terminal's directory is discovered from a live process
-    /// and the shell may have been `cd`'d anywhere, so containment is checked by
-    /// the caller against the FINAL path, once the file exists.
+    /// This answers ownership only, never whether the file landed in that
+    /// worktree: a terminal's directory is discovered from a live process whose
+    /// shell may have been `cd`'d anywhere, so the caller checks containment
+    /// against the final path once the file exists.
     ///
-    /// A terminal owned by a PROJECT or by NOTHING answers `None`, because
-    /// neither has an agent pane listing changed files. The match is exhaustive
-    /// so a fourth kind of owner has to be answered for here.
+    /// A terminal owned by a project or by nothing answers `None`, having no
+    /// agent pane listing changed files. The match is exhaustive so a fourth
+    /// kind of owner has to be answered for here.
     pub fn file_drop_refresh_target(&self, pty_id: &str) -> Option<(String, PathBuf)> {
-        // The two branches resolve DIFFERENT keyspaces and must not share a
-        // lookup: a companion terminal names its owner by SESSION id, while a
-        // bare pane id is a TAB id. No tab id is ever a session id, so a shared
-        // lookup would silently answer for the wrong entity.
+        // The two branches resolve different keyspaces and must not share a
+        // lookup: a companion terminal names its owner by session id, while a
+        // bare pane id is a tab id, and no tab id is ever a session id.
         let session = match self.companion_terminals.get(pty_id) {
             Some(terminal) => match terminal.owner.as_ref() {
                 crate::model::TerminalOwnerRef::Session(id) => self.session_by_id(id)?,
@@ -345,17 +313,15 @@ impl Engine {
     /// on this workspace answers to it.
     ///
     /// A pane addresses its PTY with whichever id its surface holds, and for an
-    /// agent's slot tab that is not always the tab's own id. The slot tab's id
-    /// is generated and the session merely points at it, so the browser's URL
-    /// grammar spells "whichever tab is in the slot" as the SESSION id: a hash
-    /// is parsed before any spine has named the real one, and the pane carries
-    /// that placeholder into every id it sends afterwards. The agent PTY socket
-    /// route already resolves that spelling (it streams
-    /// `slot_tab_id`, never the path's session id), and this is the same
-    /// resolution for every other seam that takes a pane id.
+    /// agent's slot tab that is not always the tab's own id: the browser's URL
+    /// grammar spells "whichever tab is in the slot" as the session id, because
+    /// a hash is parsed before any spine has named the real one, and the pane
+    /// carries that placeholder into every id it sends afterwards. The agent PTY
+    /// socket route resolves the same spelling, streaming `slot_tab_id` rather
+    /// than the path's session id.
     ///
-    /// The answer is a key into the runtime maps: a companion terminal id, or a
-    /// tab id. It is never a session id, which is exactly the point.
+    /// The answer is a key into the runtime maps, a companion terminal id or a
+    /// tab id, and never a session id.
     pub fn pty_key_for_pane_id(&self, pane_id: &str) -> Option<String> {
         if self.companion_terminals.contains_key(pane_id) {
             return Some(pane_id.to_string());
@@ -369,13 +335,12 @@ impl Engine {
 
     /// The agent session a pane's pty id belongs to: the agent whose
     /// session-slot tab it is, or the session owning that extra tab. The id is
-    /// canonicalized first, so the bare per-agent spelling a browser sends for
-    /// a slot tab resolves here exactly as it does on the PTY socket, and then
-    /// routed through `owning_session_for_tab` so this pane-side lookup and the
-    /// rest of the engine resolve a tab id the same single way.
+    /// canonicalized first, so the bare per-agent spelling a browser sends for a
+    /// slot tab resolves here as it does on the PTY socket, then routed through
+    /// `owning_session_for_tab` so a tab id resolves one way everywhere.
     ///
     /// A companion terminal id canonicalizes to itself and owns no session, so
-    /// it answers `None` here; every caller matches terminals first anyway.
+    /// it answers `None`; every caller matches terminals first anyway.
     fn session_behind_pty(&self, pty_id: &str) -> Option<&crate::model::AgentSession> {
         let tab_id = self.pty_key_for_pane_id(pty_id)?;
         let session_id = self.owning_session_for_tab(&tab_id)?;

@@ -1,9 +1,8 @@
 //! Engine lifecycle housekeeping shared by all surfaces: detecting and cleaning
-//! up PTY child processes (agent providers and companion terminals) that have
-//! exited. The TUI has its own richer exit handling (resume-fallback, UI focus);
-//! this is the minimal headless-safe cleanup the web server's engine loop calls
-//! each tick so exited agents/terminals don't linger in `providers` /
-//! `companion_terminals` (and therefore the ViewModel).
+//! up exited PTY child processes, both agent providers and companion terminals.
+//! The headless-safe cleanup every engine loop calls each tick, so an exited
+//! agent or terminal does not linger in `providers` or `companion_terminals`,
+//! and therefore in the ViewModel.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -18,43 +17,31 @@ use super::Engine;
 /// How long an agent PTY may stay unpruned while the two facts prune needs, a
 /// fully drained terminal buffer and the child's exit STATUS, are still arriving.
 ///
-/// The two signals disagree on purpose, and NEITHER implies the other. `try_wait`
-/// reaps the child the instant it becomes waitable; the reader thread sets
-/// `is_exited` at `Ok(0)`, EOF on the PTY read side, which is the only moment all
-/// of the child's output is guaranteed to be in the terminal buffer. Prune needs
-/// both, and each direction of the disagreement loses something real:
+/// Neither signal implies the other. `try_wait` reaps the child the instant it
+/// becomes waitable; the reader thread sets `is_exited` at EOF on the PTY read
+/// side, the only moment all of the child's output is guaranteed to be in the
+/// terminal buffer. Prune needs both, and each direction loses something real:
 ///
-/// - Reaped but NOT drained: the crash excerpt is captured off a buffer the
-///   reader has not finished filling, and since `try_wait` yields the status
-///   exactly once there is no second chance later, so the agent gets reported as
-///   exited with an EMPTY excerpt, losing exactly the diagnostic the message
-///   exists to show.
-/// - Drained but NOT reaped: the exit status is `None`, and every decision keyed
-///   on it silently takes its unknown branch. `clean_exit_closes_tab_row` cannot
-///   fire, so an extra tab whose CLI exited cleanly keeps a dead row the user
-///   then has to close by hand. This window is real, not theoretical: the kernel
-///   closes a dying task's descriptors before it makes the task waitable, so EOF
-///   can genuinely land first, and it is reproduced by construction in
-///   `prune_defers_a_drained_child_until_its_exit_status_is_known`.
+/// - Reaped but not drained: the crash excerpt is read off a buffer the reader
+///   has not finished filling, and `try_wait` yields the status exactly once, so
+///   the agent is reported as exited with an empty excerpt.
+/// - Drained but not reaped: the exit status is `None` and every decision keyed
+///   on it takes its unknown branch, so `clean_exit_closes_tab_row` cannot fire
+///   and an extra tab whose CLI exited cleanly keeps a dead row. The kernel
+///   closes a dying task's descriptors before making it waitable, so EOF really
+///   can land first.
 ///
-/// So prune waits for BOTH and falls back to whichever clock it has once this
-/// grace expires. The fallback cannot be dropped in either direction: a surviving
-/// GRANDCHILD holding the PTY slave open means the read side never EOFs, and a
-/// child that closes its own descriptors and keeps running is never reaped at
-/// all, so waiting on either fact alone would leak that provider forever.
+/// Prune therefore waits for both and falls back to whichever clock it has once
+/// this grace expires. The fallback cannot be dropped in either direction: a
+/// surviving grandchild holding the PTY slave open means the read side never
+/// EOFs, and a child that closes its own descriptors and keeps running is never
+/// reaped, so waiting on one fact alone would leak that provider forever.
 ///
-/// 250ms is chosen as the smallest value that is unambiguously both:
-/// - **invisible in the normal case**, where the child is the only holder of the
-///   slave, so EOF lands within microseconds of the exit and prune fires on the
-///   very next engine tick (the web loop at 50ms, the TUI at 33ms while any row
-///   animates and 100ms otherwise) exactly as before, and the grace is never
-///   even consulted; and
-/// - **far more than a scheduler needs**, since the deferral is re-evaluated on
-///   every tick, so the reader thread gets a few dozen chances to be scheduled
-///   and drain a few kilobytes rather than the single chance it had before.
-///
-/// It is also the ceiling on how long a PTY held open by a grandchild, or by a
-/// child that EOFs without ever exiting, lingers, which is why it is not larger.
+/// The value is the smallest that is both invisible in the normal case, where
+/// EOF lands within microseconds of the exit and prune fires on the next engine
+/// tick without the grace being consulted, and far more than a scheduler needs,
+/// since the deferral is re-evaluated every tick. It is also the ceiling on how
+/// long a PTY held open by a grandchild lingers, which is why it is not larger.
 pub const REAPED_DRAIN_GRACE: Duration = Duration::from_millis(250);
 
 /// Whether an agent PTY whose child is on its way out is ready to be pruned,
@@ -62,16 +49,14 @@ pub const REAPED_DRAIN_GRACE: Duration = Duration::from_millis(250);
 /// ago its reader thread reached EOF (so the terminal buffer is complete), and
 /// how long ago the child was reaped.
 ///
-/// The rule is: prune once we hold BOTH facts, or once either clock has run past
-/// [`REAPED_DRAIN_GRACE`]. Holding out for both is what protects the two things
-/// prune consumes exactly once and can never re-read, the crash excerpt and the
-/// exit status; the grace is the safety valve, so a PTY that will never supply
-/// the missing half cannot wedge the prune forever. See [`REAPED_DRAIN_GRACE`]
-/// for what each direction loses and why neither arm can be dropped.
+/// Prune once both facts are held, or once either clock has run past
+/// [`REAPED_DRAIN_GRACE`]. Holding out for both protects the two things prune
+/// consumes exactly once and can never re-read, the crash excerpt and the exit
+/// status; the grace is the safety valve, so a PTY that will never supply the
+/// missing half cannot wedge the prune forever.
 ///
 /// `since_eof` is `Some` exactly when the reader is at end of input, so it
-/// carries the old `reader_at_eof` flag as well as the clock that bounds it.
-/// Pure, so the policy is testable without a real PTY.
+/// carries both that fact and the clock that bounds it.
 pub fn agent_pty_ready_to_prune(
     exit_status_known: bool,
     since_eof: Option<Duration>,
@@ -93,34 +78,25 @@ pub fn agent_pty_ready_to_prune(
 /// keys on a launch failure or a non-zero exit, and a provider that comes up and
 /// quits immediately with status 0 satisfies neither: a wrong subcommand a CLI
 /// answers with a usage line, a wrapper script that checks something and ends, a
-/// resume against a conversation that is not there. Selecting the agent starts
-/// it, it exits, the surface drops the user back where they were, and the next
-/// click does the same thing again with nothing on screen ever explaining it.
+/// resume against a conversation that is not there. Without this window,
+/// selecting the agent starts it, it exits, and the next click does the same
+/// thing again with nothing on screen ever explaining it.
 ///
-/// Five seconds is the window: far longer than the instant-exit shapes above,
-/// and far shorter than any session a person actually uses. It is deliberately
-/// judged on the run's own length rather than on how the run ended, because the
-/// exit status is exactly the fact that carries no information here.
+/// The window is judged on the run's own length rather than on how it ended,
+/// because the exit status is exactly the fact that carries no information here.
+/// It breaks a loop only a surface that starts a tab because somebody looked at
+/// it can enter; where a start is always explicit it costs nothing, because an
+/// explicit start clears the tab's verdict. The verdict is enforced server-side,
+/// so no client can forget it or talk past it.
 ///
-/// The LOOP it breaks is the web's. Only the web starts a tab because somebody
-/// looked at it (selecting an agent starts its healthy dormant first tab), so
-/// only there can a click turn into an endless start-exit-start cycle. In the
-/// terminal UI a start is always an explicit act, and an explicit start clears
-/// the tab's verdict by design, so the window costs a TUI user nothing beyond
-/// the dormant card's wording after a run that was over in a blink. The verdict
-/// is enforced server-side rather than in either client for the same reason it
-/// is recorded here: no surface can forget it and no client can talk past it.
-///
-/// Two shapes are false positives, and both are accepted:
-/// - a provider that DOUBLE-FORKS, exiting its foreground process immediately
-///   while the real session runs on. dux judges the child it spawned, so such a
-///   provider records a failed run on every launch. No supported provider does
-///   this today (dux embeds an interactive CLI in a PTY, which is the opposite
-///   shape), and the cost is a dormant card the user starts past.
-/// - a quit that was not TYPED: a macro or another programmatic write ending the
+/// Two shapes are accepted false positives:
+/// - a provider that double-forks, exiting its foreground process while the real
+///   session runs on, records a failed run on every launch, because dux judges
+///   the child it spawned. No supported provider has that shape.
+/// - a quit that was not typed: a macro or other programmatic write ending the
 ///   CLI within the window is not stamped as input, so it reads as a run that
-///   never came up. The exemption keys on typing because that is the fact that
-///   separates a person quitting from a provider that never started.
+///   never came up. Typing is the fact that separates a person quitting from a
+///   provider that never started.
 pub const RAPID_EXIT_WINDOW: Duration = Duration::from_secs(5);
 
 /// Whether a finished run ended badly by virtue of how BRIEF it was: shorter
@@ -153,17 +129,15 @@ pub struct DeferredWorktreeRemoval {
     pub session_id: String,
     pub project_path: String,
     /// The managed working copy to remove, captured whole at delete time: the
-    /// worktree path, the current branch, the branch the agent was BORN on
+    /// worktree path, the current branch, the branch the agent was born on
     /// (deleted too when it differs, or a drifted agent leaves its birth branch
-    /// behind, see `git::remove_worktree`), and where the branch came from
-    /// (which decides whether the removal may delete branches at all, because
-    /// dux deletes only what it created; see `Engine::do_delete_session`).
+    /// behind) and where the branch came from, which decides whether the removal
+    /// may delete branches at all, since dux deletes only what it created.
     ///
-    /// Carried as the whole [`crate::model::ManagedWorkspace`] rather than as
-    /// loose fields SO THAT A STANDALONE AGENT CANNOT PRODUCE ONE. A folder
-    /// workspace has no value of this type to offer, so no delete of a
-    /// standalone agent can construct a removal for the user's folder. That is
-    /// the structural spelling of "dux never touches the folder".
+    /// Carried as a whole [`crate::model::ManagedWorkspace`] rather than loose
+    /// fields so that a standalone agent cannot produce one: a folder workspace
+    /// has no value of this type to offer, so no delete of a standalone agent
+    /// can construct a removal for the user's folder.
     pub managed: crate::model::ManagedWorkspace,
     /// The delete dialog's "also delete the branch" answer, captured when the
     /// delete was requested. `None` for a caller with no dialog behind it,
@@ -230,13 +204,12 @@ pub struct PrunedPty {
     /// "{provider} on {branch}" descriptor (extra tab), or the terminal's label
     /// (companion terminal).
     pub label: String,
-    /// True when the exit also CLOSED the tab (deleted its `agent_tabs` row):
-    /// a clean exit (code 0) of an extra tab is the user deliberately ending
-    /// that conversation, so no dead pill is left in the strip. Nothing of
-    /// value is lost — the provider's conversation history lives in the
-    /// worktree, not the row. Always `false` for the session-slot tab (it has
-    /// no row), for a non-zero/unknown exit (the dormant relaunch screen is
-    /// the crash-diagnosis surface), and for a companion terminal.
+    /// True when the exit also closed the tab, deleting its `agent_tabs` row: a
+    /// status-0 exit of an extra tab is the user deliberately ending that
+    /// conversation, and its history lives in the worktree rather than the row.
+    /// Always `false` for the session-slot tab, which has no row, for a non-zero
+    /// or unknown exit, whose dormant screen is the crash-diagnosis surface, and
+    /// for a companion terminal.
     pub tab_closed: bool,
     /// The reaped child's exit-success (`Some(true)` clean, `Some(false)`
     /// non-zero, `None` when only EOF was observed without a status). Captured
@@ -287,18 +260,14 @@ struct ExitedAgentPty {
 }
 
 /// Whether an exited agent tab's row should be closed along with the prune:
-/// only an EXTRA tab (the slot tab's row stays, so its slot survives) that
-/// exited CLEANLY (code 0 — the user deliberately ended the conversation, e.g.
-/// /exit) and whose run did not end badly for any other reason. The one shared
-/// rule both surfaces' exit paths consult, so the TUI loop and the web's
-/// `prune_exited_ptys` cannot drift.
+/// only an extra tab, since the slot tab's row stays so its slot survives, that
+/// exited with status 0 and whose run did not end badly for any other reason.
+/// The one shared rule every surface's exit path consults.
 ///
-/// `ended_badly` is the same verdict the prune records for the tab, and it is
-/// asked here so the two cannot disagree about one exit. A run that was over
-/// inside [`RAPID_EXIT_WINDOW`] without anybody typing into it is a provider
-/// that never came up, whatever status it managed to exit with, and closing its
-/// row throws away both the diagnosis surface the verdict exists for and the
-/// verdict itself, since removing a row clears the tab's recorded failure.
+/// `ended_badly` is the same verdict the prune records for the tab, asked here
+/// so the two cannot disagree about one exit. Closing the row of a run that
+/// ended badly would throw away both the diagnosis surface the verdict exists
+/// for and the verdict itself, since removing a row clears the recorded failure.
 pub fn clean_exit_closes_tab_row(
     is_session_slot: bool,
     exit_success: Option<bool>,
@@ -443,23 +412,18 @@ impl Engine {
     pub fn prune_exited_ptys(&mut self) -> Vec<PrunedPty> {
         let mut pruned = Vec::new();
 
-        // Agent providers (keyed by TAB id). Capture each exited client's
-        // exit-success so a clean exit can clear `desired_running` (matching the
-        // TUI), which keeps a deliberately-exited agent from auto-reopening.
-        // Capture the minimal-output excerpt in the SAME pass, before
-        // `clear_tab_runtime` below drops the client: the TUI's exit-status
-        // message needs this data off the returned value, and once the tab is
-        // cleared there is no client left to re-read it from.
+        // Agent providers, keyed by tab id. Capture each exited client's
+        // exit-success, so a clean exit can clear `desired_running` and keep a
+        // deliberately-exited agent from auto-reopening, and the minimal-output
+        // excerpt in the same pass, before `clear_tab_runtime` below drops the
+        // client and leaves nothing to re-read it from.
         //
-        // Both of those are once-only reads, and they arrive from two different
-        // places in either order: the excerpt is only truthful once the READER
-        // thread has reached EOF, and the status only exists once the child has
-        // been reaped. So an agent that has supplied one and not the other is
-        // left in place and reconsidered on a later tick, up to
-        // `REAPED_DRAIN_GRACE` (see it for what each direction loses).
-        // `PtyClient::try_wait` memoizes the status, so deferring costs nothing:
-        // a reap observed on the first tick is still available on the tick that
-        // finally prunes.
+        // Both are once-only reads arriving from two places in either order: the
+        // excerpt is truthful only once the reader thread has reached EOF, and
+        // the status exists only once the child has been reaped. An agent that
+        // has supplied one and not the other is left in place and reconsidered
+        // on a later tick, up to `REAPED_DRAIN_GRACE`. `PtyClient::try_wait`
+        // memoizes the status, so deferring costs nothing.
         let exited_agents: Vec<ExitedAgentPty> = self
             .providers
             .iter_mut()
@@ -476,11 +440,11 @@ impl Engine {
                     client.reaped_at().map(|at| at.elapsed()),
                 ) {
                     let is_minimal = client.has_minimal_output(5);
-                    // ONE read of the dying screen, shared by both consumers: the
-                    // TUI's minimal-output message wants the whole thing and only
+                    // One read of the dying screen, shared by both consumers:
+                    // the minimal-output message wants the whole thing and only
                     // when the screen was minimal, the tab's verdict wants the
-                    // tail whatever the screen held. Reading twice would be two
-                    // locks for one truth.
+                    // tail whatever it held. Reading twice is two locks for one
+                    // truth.
                     let visible = client.visible_text_excerpt(usize::MAX);
                     let verdict_excerpt = crate::tab_verdict::verdict_excerpt(&visible);
                     let output_excerpt = if is_minimal { visible } else { String::new() };
@@ -510,20 +474,18 @@ impl Engine {
             read_error,
         } in exited_agents
         {
-            // Resolve the exited PTY's owning session and whether it held the
-            // slot. `providers` is keyed by tab id and a tab id names no session,
-            // so resolve via the tab index first, or the label falls back to a
-            // raw id and the session-state marks silently no-op on the wrong
-            // key.
+            // `providers` is keyed by tab id and a tab id names no session, so
+            // the owning session must be resolved through the tab index; a raw
+            // id would leave the label bare and the session-state marks
+            // silently no-op on the wrong key.
             let owning = self.owning_session_for_tab(tab_id.as_str());
             let is_session_slot = owning
                 .as_deref()
                 .is_some_and(|sid| self.is_slot_tab_of(SessionIdRef::new(sid), &tab_id));
-            // When the AGENT itself exits (its session-slot tab), re-check its PR
-            // now: an exit commonly follows a merge, so the badge would otherwise
-            // stay stale until the next background sync. This is the shared-exit
-            // trigger both surfaces get; the TUI additionally fires it from its own
-            // richer exit loop. Rate-limited and in-flight-guarded inside the spawn.
+            // When the agent itself exits, re-check its pull request now: an
+            // exit commonly follows a merge, so the badge would otherwise stay
+            // stale until the next background sync. Rate-limited and
+            // in-flight-guarded inside the spawn.
             if is_session_slot && let Some(sid) = owning.clone() {
                 self.spawn_pr_check_for_session(&sid, crate::engine::PR_CHECK_MIN_INTERVAL);
             }
@@ -554,23 +516,18 @@ impl Engine {
             // the rest of a tab's runtime, so an entry here can only have been
             // made since this provider came up.
             let was_typed_into = self.pty_input.contains_key(tab_id.as_str());
-            // Clear EVERY runtime map keyed by this tab via the single-source
-            // helper — not just providers/activity/input. In particular
-            // `running_provider_pins` (set when a live tab is retargeted) would
-            // otherwise leak and keep showing the old provider for the now-exited
-            // tab; a long-running server would also leak one entry per exited tab.
+            // Clear every runtime map keyed by this tab through the
+            // single-source helper. `running_provider_pins`, set when a live tab
+            // is retargeted, would otherwise leak an entry per exited tab and
+            // keep showing the old provider for this one.
             self.clear_tab_runtime(&tab_id);
-            // No tab is privileged: the agent only detaches once its LAST tab is
-            // gone. `clear_tab_runtime` above already dropped this tab from
-            // `providers`, so `any_tab_active` reflects the true post-exit state —
-            // if a sibling tab is still live/launching the agent stays Active.
-            // This exit detaches the agent only when it was the LAST live tab.
-            // An explicit match on the owner: only a session-owned prune can
-            // detach an agent (an orphan has no session to mark).
-            // Resolve "which session, if any, this exit detaches" ONCE, through an
-            // exhaustive match, and then act on the answer. Re-testing the owner
-            // with a partial pattern below would be a second, silently-extendable
-            // ownership decision for the same question.
+            // No tab is privileged: the agent detaches only once its last live
+            // tab is gone. `clear_tab_runtime` above already dropped this tab
+            // from `providers`, so `any_tab_active` reflects the post-exit
+            // state. Which session this exit detaches, if any, is resolved once
+            // through an exhaustive match on the owner, because re-testing it
+            // with a partial pattern below would be a second, silently
+            // extendable ownership decision for the same question.
             let detaching_session: Option<String> =
                 match owner.as_ref().map(crate::model::TerminalOwner::as_ref) {
                     Some(crate::model::TerminalOwnerRef::Session(sid)) => {
@@ -594,37 +551,27 @@ impl Engine {
                 }
                 self.mark_session_status(sid, SessionStatus::Detached);
             }
-            // A run ends BADLY in one of two ways, and either records the tab's
-            // verdict: a non-zero exit says so itself, and a run that was over
-            // within `RAPID_EXIT_WINDOW` without anybody typing into it says the
-            // same thing about a provider that never came up, whatever status it
-            // managed to exit with. Recorded AFTER `clear_tab_runtime` above
-            // (which wipes the flag for every deliberate end) so the verdict
-            // survives its own teardown. The guard is existence, the same one the
-            // launch-failed path uses: an orphan PTY has no tab anything can ever
-            // ask about again, so a verdict for it would be one leaked entry per
-            // orphan on a long-running server.
+            // A run ends badly either by exiting non-zero or by being over
+            // within `RAPID_EXIT_WINDOW` with nobody typing into it, which says
+            // the provider never came up whatever status it exited with.
+            // Recorded after `clear_tab_runtime` above, which wipes the flag for
+            // every deliberate end, so the verdict survives its own teardown.
+            // Guarded on the tab still existing: an orphan PTY has no tab
+            // anything can ask about again, so its verdict would leak.
             //
-            // A RESUMED launch usually never reaches this point: the
-            // resume-fallback sweep runs first, and for a resume that exited with
-            // minimal output it pulls the tab out of `providers` and relaunches it
-            // fresh, so only the fresh retry's own quick death is judged here. The
-            // ONE arm that falls through is `DropNonMinimalExit`, a resume that
-            // printed more than `RESUME_MINIMAL_OUTPUT_LINES` visible lines and
-            // then ended: the sweep drops the candidate and hands the exit to this
-            // prune deliberately. If that also happened inside the rapid window
-            // with nobody typing, it is judged here like any other run, which is
-            // the intended answer: a resume that put a screenful up and quit on
-            // its own within five seconds is a run that did not come up either.
+            // A resumed launch usually never reaches here, because the
+            // resume-fallback sweep runs first and relaunches fresh. The one arm
+            // that falls through is `DropNonMinimalExit`, a resume that printed
+            // real output and then ended, and inside the rapid window with
+            // nobody typing it is judged here like any other run.
             let ended_badly = exit_success == Some(false)
                 || rapid_exit_ends_run_badly(run_duration, was_typed_into);
             if ended_badly && owning.is_some() {
-                // WHICH ending, in priority order. A non-zero status is the most
-                // informative answer there is, so it wins even when the run was
-                // also over in a blink; the rapid-exit kind is reserved for the
-                // case whose whole point is that the status said nothing was
-                // wrong. An unknown status is its own answer rather than a
-                // stand-in number: dux never saw one.
+                // Which ending, in priority order. A non-zero status is the most
+                // informative answer, so it wins even over a run that was also
+                // over in a blink; the rapid-exit kind is for the case whose
+                // point is that the status said nothing was wrong. An unknown
+                // status is its own answer, never a stand-in number.
                 let ending = match (exit_success, exit_code) {
                     (Some(false), Some(status)) => TabRunEnding::ExitedWithStatus { status },
                     (Some(true), _) => TabRunEnding::RapidCleanExit,
@@ -634,21 +581,17 @@ impl Engine {
                 };
                 self.mark_tab_run_failed(&tab_id, ending, verdict_excerpt);
             }
-            // Say out loud that this tab did not end the ordinary way. Nothing
-            // downstream can work it out: the read error left no exit status, so
-            // the tab reads as "exited, status unknown" exactly like a child that
-            // was merely slow to be reaped, and the process dux then killed may
-            // have been perfectly healthy.
+            // Nothing downstream can work out that this tab did not end the
+            // ordinary way: the read error left no exit status, so the tab reads
+            // as exited-status-unknown just like a child that was slow to reap.
             if let Some(error) = &read_error {
                 crate::logger::warn(&format!(
                     "tab \"{tab_id}\" ({label}) was killed after a read error, exit status unknown: {error}"
                 ));
             }
-            // The verdict decides the row as well as the mark. Closing the row
-            // clears the recorded failure, so a rapid clean exit used to record a
-            // verdict and delete it again in the same breath, leaving an extra tab
-            // with no row, no verdict and nothing on screen about a provider that
-            // never came up.
+            // The verdict decides the row as well as the mark, because closing
+            // the row clears the recorded failure: a rapid clean exit must not
+            // record a verdict and delete it again in the same breath.
             let tab_closed = clean_exit_closes_tab_row(is_session_slot, exit_success, ended_badly)
                 && self.remove_agent_tab_row(tab_id.as_str());
             pruned.push(PrunedPty {
@@ -665,13 +608,11 @@ impl Engine {
             });
         }
 
-        // Companion terminals (keyed by terminal id). Deliberately the simpler
-        // "either signal" condition rather than the agents' readiness rule above:
-        // a terminal prune reads NEITHER of the two once-only facts that rule
-        // protects. It captures no excerpt, and it carries no exit status at all
-        // (`exit_success` below is hardcoded `None`, because a terminal exit
-        // drives no status-dependent decision anywhere). With nothing to lose by
-        // pruning early, deferring one would only keep a dead terminal on screen.
+        // Companion terminals, keyed by terminal id, take the simpler "either
+        // signal" condition rather than the agents' readiness rule above: a
+        // terminal prune reads neither once-only fact that rule protects,
+        // capturing no excerpt and carrying no exit status, so deferring one
+        // would only keep a dead terminal on screen.
         let exited_terminals: Vec<(String, String)> = self
             .companion_terminals
             .iter_mut()
@@ -709,39 +650,32 @@ impl Engine {
         pruned
     }
 
-    /// The grace `Duration` an individual delete/close gives a child to exit
-    /// before the background reaper force-kills it. Uses the global top-level
-    /// `shutdown_timeout_seconds` (engine-wide; the close/delete handlers are
-    /// shared by both surfaces and cannot tell TUI from web). Background, so the
-    /// value only bounds force-kill latency, never blocks the UI.
+    /// The grace an individual delete or close gives a child to exit before the
+    /// background reaper force-kills it, from the engine-wide
+    /// `shutdown_timeout_seconds`, since the shared handlers cannot tell one
+    /// surface from another. It bounds force-kill latency and blocks no UI.
     fn individual_close_grace(&self) -> std::time::Duration {
         crate::config::shutdown_grace(self.config.shutdown_timeout_seconds)
     }
 
-    /// Tear down ONE tab's live provider as a deliberate, user-initiated KILL
-    /// (the kill overlay / close-session-slot-tab action), and report what
-    /// happened. The single-source teardown decision shared by the wire
-    /// `kill_session_pty` and the TUI kill overlay, so both surfaces agree.
+    /// Tear down one tab's live provider as a deliberate, user-initiated kill
+    /// and report what happened. The single-source teardown decision every
+    /// surface's kill path shares.
     ///
     /// Behavior, in order:
-    /// - No live provider for `tab_id` -> `killed: false`, nothing changes
-    ///   (idempotent, so a double-tap or a kill racing a natural exit is a
-    ///   no-op, not an error).
-    /// - Otherwise `clear_tab_runtime` drops the provider (SIGKILL via
-    ///   `PtyClient::drop`, the intended semantics of an explicit kill) and
-    ///   clears every runtime map keyed by the tab, INCLUDING the in-flight
-    ///   `AgentLaunch` key a hand-rolled list used to miss.
-    /// - The agent detaches only when this was its LAST live tab
+    /// - No live provider for `tab_id` gives `killed: false` and changes
+    ///   nothing, so a double-tap or a kill racing a natural exit is a no-op.
+    /// - Otherwise `clear_tab_runtime` drops the provider, SIGKILLing it through
+    ///   `PtyClient::drop`, and clears every runtime map keyed by the tab, the
+    ///   in-flight `AgentLaunch` key included.
+    /// - The agent detaches only when this was its last live tab
     ///   (`any_tab_active` is in-flight-aware). On detach the session is marked
-    ///   `Detached` AND `desired_running` is cleared, because a deliberate kill
-    ///   is the "user no longer wants this agent" signal: without clearing it
-    ///   the startup auto-reopen pass would relaunch the agent the user just
-    ///   killed. A surviving sibling leaves `desired_running` untouched (the
-    ///   agent is still wanted running).
+    ///   `Detached` and `desired_running` is cleared, or the startup auto-reopen
+    ///   pass would relaunch the agent the user just killed. A surviving sibling
+    ///   leaves `desired_running` untouched.
     ///
-    /// This is distinct from `prune_exited_ptys`, which handles NATURAL exits
-    /// and deliberately keeps `desired_running` set on a crash so auto-reopen
-    /// can bring the agent back.
+    /// Distinct from `prune_exited_ptys`, which handles natural exits and keeps
+    /// `desired_running` set on a crash so auto-reopen can bring the agent back.
     pub fn kill_tab_runtime(&mut self, tab_id: &str) -> KillTabRuntimeOutcome {
         let session_id = self.owning_session_for_tab(tab_id);
         // Transport-facing (a wire command's path segment): named here, at the
@@ -795,13 +729,12 @@ impl Engine {
     /// background reap. `label` is kept for the reap log; `worktree_removal` is
     /// dispatched once the PTY is reaped (agent delete with `delete_worktree`).
     ///
-    /// Returns the `worktree_removal` back **unhandled** when the session has no
-    /// live provider (the agent already exited or never started): there is no PTY
-    /// to wait for, so the caller must dispatch the removal immediately rather
-    /// than let it be lost. Returns `None` when it was captured on a terminating
-    /// entry (or there was nothing to remove).
+    /// Returns the `worktree_removal` back unhandled when the session has no
+    /// live provider: there is no PTY to wait for, so the caller must dispatch
+    /// the removal immediately rather than let it be lost. Returns `None` when
+    /// it was captured on a terminating entry, or there was nothing to remove.
     ///
-    /// Takes a TAB id, never a session id: `providers` is tab-keyed and
+    /// Takes a tab id, never a session id: `providers` is tab-keyed and
     /// `close_tab` passes an extra tab's id through here.
     #[must_use]
     pub fn begin_close_provider(
@@ -829,13 +762,11 @@ impl Engine {
     /// SIGTERM every companion terminal belonging to a session and move them all
     /// into the terminating set (used when the owning agent is deleted).
     ///
-    /// A STANDALONE terminal is deliberately not in scope, and the omission is a
-    /// decision rather than something to be tidied up later. It belongs to no
-    /// agent, so deleting an agent has nothing to do with it. Nothing closes a
-    /// standalone terminal automatically: it ends when the user closes it or dux
-    /// shuts down. The same note sits on `begin_close_project_terminals` below,
-    /// and the rule itself is on `TerminalOwner::closed_by_session_delete`, whose
-    /// exhaustive match is what actually enforces it.
+    /// A standalone terminal is deliberately not in scope, and the omission is a
+    /// decision rather than something to tidy up later: it belongs to no agent,
+    /// and nothing closes it automatically. The rule lives on
+    /// `TerminalOwner::closed_by_session_delete`, whose exhaustive match
+    /// enforces it.
     pub fn begin_close_session_terminals(&mut self, session_id: &str) {
         let ids: Vec<String> = self
             .companion_terminals
@@ -851,14 +782,11 @@ impl Engine {
     /// SIGTERM every project terminal belonging to a project and move them all
     /// into the terminating set (used when the project is removed).
     ///
-    /// A STANDALONE terminal is deliberately not in scope, and the omission is a
-    /// decision rather than something to be tidied up later. It belongs to no
-    /// project, so removing a project has nothing to do with it. Nothing closes
-    /// a standalone terminal automatically: it ends when the user closes it or
-    /// dux shuts down. The same note sits on `begin_close_session_terminals`
-    /// above, and the rule itself is on
-    /// `TerminalOwner::closed_by_project_removal`, whose exhaustive match is
-    /// what actually enforces it.
+    /// A standalone terminal is deliberately not in scope, and the omission is a
+    /// decision rather than something to tidy up later: it belongs to no
+    /// project, and nothing closes it automatically. The rule lives on
+    /// `TerminalOwner::closed_by_project_removal`, whose exhaustive match
+    /// enforces it.
     pub fn begin_close_project_terminals(&mut self, project_id: &str) {
         let ids: Vec<String> = self
             .companion_terminals
@@ -934,11 +862,10 @@ impl Engine {
         dispatch
     }
 
-    /// Boot-time normalization of persisted session statuses (the headless
-    /// counterpart of the TUI's `restore_sessions`): nothing is running yet, so
-    /// a session whose worktree still exists is `Detached`; one whose worktree
-    /// vanished is `Exited`. Statuses persist via `mark_session_status`. Unlike
-    /// the TUI this does not auto-reopen anything — the web resumes on subscribe.
+    /// Boot-time normalization of persisted session statuses: nothing is running
+    /// yet, so a session whose worktree still exists is `Detached` and one whose
+    /// worktree vanished is `Exited`, persisted through `mark_session_status`.
+    /// Auto-reopens nothing.
     pub fn normalize_restored_sessions(&mut self) {
         let ids: Vec<(String, bool)> = self
             .sessions
@@ -953,14 +880,11 @@ impl Engine {
             };
             self.mark_session_status(&id, status);
         }
-        // Classify every restored STANDALONE agent's folder now, off-thread, so
-        // the first frame already knows whether each one's changes panel works
-        // rather than starting at "dux has not looked yet".
-        //
-        // It matters beyond the panel: an unprobed folder reads as
-        // Indeterminate, which fails CLOSED for mutations and for the upload
-        // directory's gitignore seed. Waiting for the panel to open would leave
-        // a file dropped before then unseeded in a folder git can see.
+        // Classify every restored standalone agent's folder off-thread now. An
+        // unprobed folder reads as Indeterminate, which fails closed for
+        // mutations and for the upload directory's gitignore seed, so waiting
+        // for the changes panel to open would leave a file dropped before then
+        // unseeded in a folder git can see.
         self.probe_standalone_folders();
     }
 
@@ -980,31 +904,27 @@ impl Engine {
         }
     }
 
-    /// The sessions eligible for a startup auto-reopen relaunch, the CORE-owned
-    /// eligibility rule both surfaces apply (the TUI after `restore_sessions`,
-    /// the web server after `bootstrap_engine`'s status normalization). A
-    /// session qualifies only when EVERY condition holds:
+    /// The sessions eligible for a startup auto-reopen relaunch, the core-owned
+    /// eligibility rule every surface applies. A session qualifies only when
+    /// every condition holds:
     ///
     /// - the global `ui.auto_reopen_agents` switch is on,
     /// - the session recorded reopen intent (`desired_running`: it was still
     ///   running when dux last exited),
     /// - the per-agent `auto_reopen_enabled` opt-in is on,
-    /// - the directory it runs in still exists on disk (a vanished directory
-    ///   cannot host a provider),
-    /// - for a MANAGED agent, its project has not opted out
+    /// - the directory it runs in still exists on disk,
+    /// - for a managed agent, its project has not opted out
     ///   (`project_allows_auto_reopen`), and
-    /// - its provider can actually resume a conversation
-    ///   (`supports_session_resume`; reopening a provider that starts from
-    ///   scratch would silently discard the conversation the intent was about).
+    /// - its provider can resume a conversation (`supports_session_resume`;
+    ///   reopening one that starts from scratch would silently discard the
+    ///   conversation the intent was about).
     ///
-    /// The project consult is a STRUCTURAL switch on the workspace, not a
-    /// lookup that happens to miss. `project_allows_auto_reopen` fails OPEN on
-    /// an unknown project, so a standalone agent passed through it would sail
-    /// past a question nobody ever answered for it; here the question is simply
-    /// not asked, and the fail-open helper is unreachable from that arm.
+    /// The project consult is a structural switch on the workspace, not a lookup
+    /// that happens to miss. `project_allows_auto_reopen` fails open on an
+    /// unknown project, so a standalone agent passed through it would sail past
+    /// a question nobody answered for it; here the question is not asked at all.
     ///
-    /// Only the DECISION lives here; each surface keeps its own launch dispatch
-    /// (`build_agent_launch_request` with `AgentLaunchKind::StartupAutoReopen`).
+    /// Only the decision lives here; each surface keeps its own launch dispatch.
     pub fn auto_reopen_candidates(&self) -> Vec<AgentSession> {
         if !self.config.ui.auto_reopen_agents {
             return Vec::new();
@@ -1031,15 +951,13 @@ impl Engine {
     }
 
     /// Gracefully wind down every running PTY for server shutdown: SIGTERM each
-    /// child (agents save state for a later resume), wait up to `grace` for
-    /// exits, and mark agent sessions Detached (persisted). `desired_running`
-    /// is left untouched — a server shutdown is not the user stopping the
-    /// agent. Any child still alive when `grace` elapses is force-killed
-    /// (SIGKILL) on the spot so the logged result is truthful; `PtyClient::drop`
-    /// remains the backstop. Logs a start and a result line to `dux.log` and
-    /// returns a [`ShutdownReport`] so callers can echo the same lines to their
-    /// own surface. A grace of `0` skips the wait and force-kills immediately.
-    /// With nothing running, it is a silent no-op (no signals, no logs).
+    /// child so agents save state for a later resume, wait up to `grace`, and
+    /// mark agent sessions Detached. `desired_running` is left untouched,
+    /// because a server shutdown is not the user stopping the agent. Any child
+    /// still alive when `grace` elapses is SIGKILLed on the spot so the logged
+    /// result is truthful. Returns a [`ShutdownReport`] so callers can echo the
+    /// logged lines onto their own surface. A grace of `0` force-kills
+    /// immediately, and with nothing running this is a silent no-op.
     pub fn shutdown_ptys(&mut self, grace: std::time::Duration) -> ShutdownReport {
         self.shutdown_ptys_interruptible(grace, None)
     }

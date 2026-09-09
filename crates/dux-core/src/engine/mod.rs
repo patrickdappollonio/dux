@@ -146,18 +146,16 @@ pub struct LaunchedDropPaste {
 
 /// The coalescing queue behind [`Engine::spawn_changed_files_refresh`].
 ///
-/// One changed-files read is a full git sweep over a worktree, and the TUI asks
-/// for one on every selection move. Without coalescing, holding a movement key
-/// down spawns a thread and a sweep per keypress, and every answer but the last
-/// is dropped as stale the moment it arrives: pure waste, paid on a repository
-/// slow enough that the waste is what the user feels.
+/// One changed-files read is a full git sweep over a worktree, and a surface
+/// asks for one on every selection move. Without coalescing, holding a movement
+/// key down spawns a thread and a sweep per keypress and drops every answer but
+/// the last as stale on arrival.
 ///
-/// So the queue keeps at most ONE worker alive and at most ONE queued request,
-/// and a new request REPLACES the queued one: the newest worktree is the one
-/// the user is looking at, so it is the one that gets read next. The pending
-/// slot and the running flag live under the same lock, which is what closes the
-/// gap between a worker deciding it has nothing left to do and a requester
-/// seeing a worker that is still marked as running.
+/// The queue therefore keeps at most one worker alive and at most one queued
+/// request, and a new request replaces the queued one, because the newest
+/// worktree is the one the user is looking at. The pending slot and the running
+/// flag live under the same lock, which closes the gap between a worker deciding
+/// it has nothing left to do and a requester seeing it still marked running.
 #[derive(Default)]
 pub struct ChangedFilesRefreshQueue {
     pending: Option<PathBuf>,
@@ -247,16 +245,13 @@ pub struct Engine {
     /// and the in-flight guard already serialises those samples.
     pub resource_collector: Arc<Mutex<crate::resource_stats::ResourceCollector>>,
 
-    // Batch B fields
     pub worker_tx: Sender<WorkerEvent>,
     pub worker_rx: Receiver<WorkerEvent>,
     /// The single ordered, off-thread, atomic config writer for this process.
-    /// `PersistGlobalEnv` / `UpdateMacros` (and, in later tasks, the other
-    /// config-mutating handlers) write through this so saves never block the
-    /// engine thread and never race each other. Its `Drop` sends an explicit
+    /// Every config-mutating handler writes through this, so saves never block
+    /// the engine thread and never race each other. Its `Drop` sends an explicit
     /// `Shutdown` that the writer obeys even while paused, so a `QuiesceGuard`
-    /// in `reload_guard` can outlive it without deadlocking — field declaration
-    /// order relative to `reload_guard` no longer affects correctness.
+    /// in `reload_guard` can outlive it without deadlocking.
     pub config_writer: ConfigWriteQueue,
     /// Front-end-specific config concerns the Engine cannot own itself: reload
     /// (validation + project-sync) and recover rendering. The TUI plugs in a
@@ -297,28 +292,24 @@ pub struct Engine {
     /// path is concerned: the paste FORM and the COMMAND that identifies the CLI
     /// receiving it. Keyed by tab id.
     ///
-    /// Keyed by TAB, not by provider name, because a provider name cannot carry
-    /// the answer. Launch a tab, edit that provider's `web_dragdrop_paste`,
-    /// launch another: both processes are live, both report the same provider
-    /// name, and each needs the form it started with. It is published per tab in
-    /// [`crate::viewmodel::AgentTabView::drop_paste`] and the browser resolves it
-    /// from the pane's own tab, so the LAUNCHED profile wins for a live tab and a
-    /// config edit takes effect on that tab's next launch.
+    /// Keyed by tab, not by provider name, because a provider name cannot carry
+    /// the answer: launch a tab, edit that provider's `web_dragdrop_paste`,
+    /// launch another, and both live processes report the same name while each
+    /// needs the form it started with. Published per tab in
+    /// [`crate::viewmodel::AgentTabView::drop_paste`] and resolved from the
+    /// pane's own tab, so the launched profile wins for a live tab and a config
+    /// edit takes effect on that tab's next launch.
     ///
-    /// It also covers the case it was first written for: the user renames or
-    /// deletes a `[providers.<name>]` block while a tab is still running that
-    /// provider. The tab keeps reporting the name it launched as (that is what is
-    /// actually on screen), so a browser looking that name up in the configured
-    /// map would find nothing and fall back to `bare`, changing how a dropped path
-    /// is quoted under a running agent that never changed. Keeping the launched
-    /// profile with the PROCESS is the fix, and it retires when the process does,
-    /// through `clear_tab_runtime`.
+    /// It also covers a `[providers.<name>]` block renamed or deleted while a
+    /// tab still runs that provider. The tab keeps reporting the name it
+    /// launched as, so looking that name up in the configured map would find
+    /// nothing and fall back to `bare`, changing how a dropped path is quoted
+    /// under a running agent that never changed. The profile retires with the
+    /// process, through `clear_tab_runtime`.
     ///
-    /// The alternative considered was to refuse a rename or a removal while a
-    /// process is live. It was rejected because `config.toml` is a file the user
-    /// edits in their own editor and dux reloads: there is no point at which a
-    /// refusal could be delivered, and the reload would either have to be
-    /// abandoned wholesale or silently keep a block the file no longer contains.
+    /// Refusing the rename instead is not an option: `config.toml` is a file the
+    /// user edits in their own editor and dux reloads, so there is no point at
+    /// which a refusal could be delivered.
     pub launched_drop_paste: HashMap<TabId, LaunchedDropPaste>,
     pub companion_terminals: HashMap<String, CompanionTerminal>,
     /// Persisted **extra tabs** (secondary provider tabs), keyed by tab id with
@@ -426,12 +417,11 @@ pub struct Engine {
     /// session id. A managed agent never has an entry: its worktree is a
     /// repository by construction.
     ///
-    /// The verdict is decided here, on the engine, rather than re-derived by
-    /// each surface, because it shells out to git and both surfaces would
-    /// otherwise ask the same question at different moments and disagree. It is
-    /// filled by a background probe (never on the engine thread) at load and at
-    /// creation, refreshed when the changes panel opens, and carried on the
-    /// wire so the browser renders the same answer the server acted on.
+    /// The verdict is decided on the engine rather than re-derived per surface,
+    /// because it shells out to git and two surfaces asking at different moments
+    /// would disagree. Filled by a background probe, never on the engine thread,
+    /// at load and creation, refreshed when the changes panel opens, and carried
+    /// on the wire so a browser renders the answer the server acted on.
     ///
     /// An absent entry means "not probed yet", which every reader must treat as
     /// [`crate::git::FolderRepoStatus::Indeterminate`]: quiet, honest, and no
@@ -516,34 +506,32 @@ pub struct Engine {
     /// and the in-process flip carries this map across automatically with the
     /// engine.
     pub pty_activity: HashMap<String, Instant>,
-    /// Tracks when the user last forwarded keystrokes to each agent's PTY. The
-    /// terminal echoes the user's own typing back as PTY output, which would
-    /// otherwise read as the agent streaming ([`Engine::is_agent_streaming`])
-    /// and falsely light the "working" indicator. Surfaces stamp this via
-    /// [`Engine::note_pty_input`] when forwarding interactive input to an agent
-    /// (never companion terminals — their output doesn't feed the agent's
-    /// working state), and the predicate voids streaming while an entry is
-    /// fresh. Engine-owned for the same reason as `pty_activity`: both the TUI
-    /// and the web actor project identical working state, and the in-process
-    /// flip carries the map across with the engine. Invariant: cleared wherever
-    /// `pty_activity` is cleared (session teardown, detach, forced relaunch) so
-    /// the two never drift; a new teardown path must drop both entries.
+    /// When the user last forwarded keystrokes to each agent's PTY. The terminal
+    /// echoes typing back as PTY output, which would otherwise read as the agent
+    /// streaming ([`Engine::is_agent_streaming`]) and falsely light the working
+    /// indicator, so the predicate voids streaming while an entry is fresh.
+    /// Stamped through [`Engine::note_pty_input`] when forwarding interactive
+    /// input to an agent, never for a companion terminal, whose output does not
+    /// feed an agent's working state. Engine-owned for the same reason as
+    /// `pty_activity`: every surface must project identical working state.
+    ///
+    /// Invariant: cleared wherever `pty_activity` is cleared, so the two never
+    /// drift; a new teardown path must drop both entries.
     pub pty_input: HashMap<String, Instant>,
-    /// Tracks when a POINTER report (a wheel notch or a click) was last
-    /// forwarded to each PTY, and for how long it suppresses. Separate from
-    /// `pty_input` because the two answer opposite questions about the same
-    /// byte: a forwarded wheel must NEVER read as the user typing (design
-    /// tenet: selecting or scrolling a terminal is not typing), but it DOES
-    /// make the child repaint, and a repaint the user asked for is not the
-    /// agent working. While an entry here is fresh
-    /// [`Engine::is_agent_streaming`] stops inferring "working" from output
-    /// text and defers to the agent's own `OSC 9;4` report. The window is
-    /// carried per entry rather than being one constant because a scroll and a
-    /// click suppress for very different lengths of time (see
+    /// When a pointer report (a wheel notch or a click) was last forwarded to
+    /// each PTY, and for how long it suppresses. Separate from `pty_input`
+    /// because the two answer opposite questions about the same byte: a
+    /// forwarded wheel must never read as the user typing, but it does make the
+    /// child repaint, and a repaint the user asked for is not the agent working.
+    /// While an entry here is fresh, [`Engine::is_agent_streaming`] stops
+    /// inferring working from output text and defers to the agent's own
+    /// `OSC 9;4` report. The window is per entry rather than one constant,
+    /// because a scroll and a click suppress for very different lengths (see
     /// [`pointer_suppression_window`]). Stamped through
-    /// [`Engine::note_pty_write`] by both surfaces. Invariant, exactly as for
-    /// `pty_input`: cleared wherever `pty_activity` is cleared, so the maps
-    /// never drift; the teardown tests pin it.
+    /// [`Engine::note_pty_write`].
+    ///
+    /// Invariant, as for `pty_input`: cleared wherever `pty_activity` is
+    /// cleared, so the maps never drift.
     pub pty_pointer: HashMap<String, PointerStamp>,
     /// Tabs (keyed by tab id) that have raised a "needs attention" signal that
     /// has not yet been looked at. Memory-only runtime state, never persisted —
@@ -552,34 +540,28 @@ pub struct Engine {
     /// a tab the user is engaged with) and cleared when the user looks at or
     /// tears down the tab. The sidebar rolls this up across an agent's tabs.
     pub needs_attention: HashSet<TabId>,
-    /// Tabs (keyed by tab id) whose LAST run ended badly: a launch that failed
-    /// outright, or a process that exited non-zero. The VALUE is the verdict
+    /// Tabs, keyed by tab id, whose last run ended badly: a launch that failed
+    /// outright, or a process that exited non-zero. The value is the verdict
     /// (see [`crate::tab_verdict::TabRunVerdict`]): how the run ended, when, and
-    /// the last lines it had on screen, captured once at the moment it ended.
-    /// A boolean could only ever produce "something went wrong"; the card the
-    /// entry exists for is a diagnosis surface, so it carries the diagnosis.
-    /// Published per tab as
-    /// [`crate::viewmodel::AgentTabView::last_run_failed`] (whose truth is
-    /// simply "an entry exists") and
-    /// [`crate::viewmodel::AgentTabView::last_run_verdict`], where it is what
-    /// stops a surface from launching a dormant tab on selection alone: a tab
-    /// that keeps failing (a resume against a conversation that isn't there, a
-    /// provider that is no longer on PATH) would otherwise relaunch every time
-    /// the user looks at it, with no way out but to look somewhere else.
+    /// the last lines it had on screen, captured once as it ended. The card it
+    /// exists for is a diagnosis surface, so it carries the diagnosis rather
+    /// than a boolean's "something went wrong". Published per tab as
+    /// [`crate::viewmodel::AgentTabView::last_run_failed`], whose truth is that
+    /// an entry exists, and
+    /// [`crate::viewmodel::AgentTabView::last_run_verdict`]. It is what stops a
+    /// surface from launching a dormant tab on selection alone, so a tab that
+    /// keeps failing does not relaunch every time the user looks at it.
     ///
-    /// Unlike every other tab-keyed map, this one is not about a LIVE process:
-    /// it exists precisely to outlive the process it describes. It is cleared
-    /// when a launch is dispatched for the tab (any launch is somebody asking
-    /// for one, so the next failure is a fresh verdict) and forgotten when the
-    /// tab's row goes away. [`Engine::clear_tab_runtime`] clears it as well,
-    /// because that is where every DELIBERATE end funnels and a tab the user
-    /// already dealt with deserves a clean slate; the exit prune is the one
-    /// caller that must not lose the verdict, and it records it AFTER calling
-    /// that teardown.
+    /// Unlike every other tab-keyed map this one is not about a live process; it
+    /// exists to outlive the process it describes. Cleared when a launch is
+    /// dispatched for the tab, since any launch is somebody asking for one, and
+    /// forgotten when the tab's row goes. [`Engine::clear_tab_runtime`] clears
+    /// it too, because every deliberate end funnels there; the exit prune is the
+    /// one caller that must not lose the verdict, and it records it after
+    /// calling that teardown.
     ///
-    /// Memory-only, like `needs_attention`: after a restart every tab comes back
-    /// dormant with a clean slate, which is what makes a restart a way out of a
-    /// tab that was failing before it.
+    /// Memory-only, like `needs_attention`, so every tab comes back dormant with
+    /// a clean slate and a restart is a way out of a tab that was failing.
     pub failed_tab_runs: HashMap<TabId, crate::tab_verdict::TabRunVerdict>,
     /// The most recent `OSC 9;4` progress report per tab (keyed by tab id), with
     /// the moment the engine observed it. [`Engine::is_agent_streaming`] treats a
@@ -643,19 +625,15 @@ pub struct Engine {
     /// keeps its own op in the App layer, so this registry stays empty for it.
     pub pending_delete_ops_web: HashMap<String, HandlerStatusOp<WebDeleteOutcome>>,
 
-    /// Create-agent ops (the "Creating a new agent…" busy and its progress
-    /// re-emits). SHARED by both surfaces because the create busy is emitted
-    /// engine-side via `spawn_command_worker` and its final wording is
-    /// byte-identical on the TUI and the web. Keyed by the op's opaque id, which
+    /// Create-agent ops: the create busy and its progress re-emits, shared by
+    /// every surface because the busy is emitted engine-side and its final
+    /// wording is identical everywhere. Keyed by the op's opaque id, which
     /// threads from the `DispatchCreateAgentRequest` dispatch through
-    /// `CreateAgentRequest`/`AgentLaunchKind::Create.status_op_id` so it survives
-    /// the worktree-creation → PTY-launch round trip and is still present on the
-    /// `AgentLaunchReady`/`AgentLaunchFailed` completion. The op is resolved
-    /// ENGINE-SIDE in `process_agent_launch_ready`/`process_agent_launch_failed`
-    /// (and on `CreateAgentFailed`) against a [`CreateLaunchOutcome`], producing a
-    /// keyed `Status` reaction returned alongside the View as a `Multi` — so
-    /// whichever surface is running applies the same final. Progress re-emits via
-    /// `op.progress(message)` without consuming the op.
+    /// `AgentLaunchKind::Create.status_op_id` so it survives the worktree
+    /// creation and PTY launch and is still present at completion. Resolved
+    /// engine-side against a [`CreateLaunchOutcome`], producing a keyed `Status`
+    /// reaction returned alongside the View as a `Multi`. Progress re-emits
+    /// through `op.progress(message)` without consuming the op.
     pub pending_create_ops: HashMap<String, HandlerStatusOp<CreateLaunchOutcome>>,
 
     /// Web-side reconnect / force-restart launch ops (the "Launching agent…" /
@@ -673,15 +651,13 @@ pub struct Engine {
     /// with whichever surface's [`crate::statusline::KeyedStatusController`] is
     /// rendering them.
     ///
-    /// This is the whole answer to "has this spinner been abandoned, or is the
-    /// work merely slow": the engine registers a key when it starts the
-    /// operation behind it, and the controller retires the key when a final
-    /// lands on it. It deliberately does NOT enumerate the op registries above.
-    /// They are not the only things that emit a keyed busy (a bare
-    /// `spawn_status_op` and the TUI's own App-level registries do too), and an
-    /// enumeration is a list a future registry gets left off.
-    ///
-    /// See [`crate::statusline::LiveStatusKeys`] for how each half fails safely.
+    /// The whole answer to whether a spinner has been abandoned or the work is
+    /// merely slow: the engine registers a key when it starts the operation
+    /// behind it, and the controller retires the key when a final lands on it.
+    /// It does not enumerate the op registries above, which are not the only
+    /// things that emit a keyed busy, and an enumeration is a list a future
+    /// registry gets left off. See [`crate::statusline::LiveStatusKeys`] for how
+    /// each half fails safely.
     pub live_status_keys: crate::statusline::LiveStatusKeys,
 
     /// The opaque create-op id minted by the MOST RECENT synchronous
@@ -877,18 +853,13 @@ pub const AGENT_INPUT_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1250)
 /// decision defers to the agent's own `OSC 9;4` progress report instead (see
 /// [`Engine::is_agent_streaming`]).
 ///
-/// Be precise about what that deferral buys, because only some providers can
-/// answer: Claude Code and Copilot emit `OSC 9;4` progress, and Codex and
-/// OpenCode do not (see `website/docs/attention-indicators.md`). For the
-/// providers that report, a busy agent keeps reading busy while it is
-/// scrolled. For the ones that do not, a genuinely busy agent reads IDLE for
-/// the length of this window, which is the price of not lighting the indicator
-/// every time somebody scrolls an idle one.
+/// Only some providers can answer that deferral; the ones that do not leave a
+/// genuinely busy agent reading idle for the length of this window, which is the
+/// price of not lighting the indicator every time somebody scrolls an idle one.
 ///
-/// Same length as [`AGENT_INPUT_SUPPRESSION_WINDOW`] and for the same reason:
-/// it must comfortably outlast the trailing repaint of the last notch, while a
-/// scroll that has stopped hands the heuristic back promptly. Wall-clock, per
-/// the design tenet.
+/// Same length as [`AGENT_INPUT_SUPPRESSION_WINDOW`] and for the same reason: it
+/// must comfortably outlast the trailing repaint of the last notch, while a
+/// scroll that has stopped hands the heuristic back promptly.
 pub const POINTER_REPAINT_WINDOW: Duration = Duration::from_millis(1250);
 
 /// The same suppression after a BUTTON press or release (a click, a phone tap,
@@ -1302,17 +1273,14 @@ impl Engine {
     /// open, so it re-applies against the freshly-reloaded config rather than
     /// racing it.
     ///
-    /// `PersistGlobalEnv` / `UpdateMacros` write `config.toml` directly through
-    /// the engine's config writer. `PersistProject` / `RemoveProject` write
-    /// SQLite first and only mirror the change into `config.toml` afterward (via
-    /// `persist_projects_to_config`); deferring them is still correct so that
-    /// mirror runs against the reloaded project set rather than a stale one.
-    /// `ReloadConfig` / `RecoverConfig` drive the barrier themselves and are
-    /// deliberately excluded. Provider/theme/pane-width saves are surface
-    /// (TUI App) handlers that currently write `config.toml` directly (not through
-    /// `Engine::config_writer`), so they are NOT covered by this deferral nor by
-    /// the writer's quiesce backstop, and a save from those paths during a reload
-    /// is unguarded.
+    /// `PersistGlobalEnv` and `UpdateMacros` write `config.toml` through the
+    /// engine's config writer. `PersistProject` and `RemoveProject` write SQLite
+    /// first and mirror into `config.toml` afterwards, and deferring them is
+    /// still correct so that mirror runs against the reloaded project set.
+    /// `ReloadConfig` and `RecoverConfig` drive the barrier themselves and are
+    /// excluded. Surface-side saves that write `config.toml` without going
+    /// through `Engine::config_writer` are covered by neither this deferral nor
+    /// the writer's quiesce, so a save from one during a reload is unguarded.
     fn is_config_mutating(cmd: &Command) -> bool {
         matches!(
             cmd,
@@ -1453,30 +1421,21 @@ impl Engine {
     /// PTY OUTPUT wins over everything, then the agent's own OSC 9;4 progress
     /// report, then idle.
     ///
-    /// - Rendered output within [`AGENT_STREAMING_WINDOW`] → working. `pty_activity`
-    ///   is stamped only on real content changes in the terminal's ACTIVE AREA
-    ///   (see `TerminalState::take_content_change`, which hashes the active area
-    ///   rather than the displayed viewport precisely so a scrolled-back operator
-    ///   still sees a producing agent as working), so this is genuine agent
-    ///   output, not an OSC status
-    ///   sequence. It overrides the OSC report everywhere: an agent that misreports
-    ///   "idle" (or stopped reporting) while still printing must still read as
-    ///   working. There are two exceptions, and both are output the USER caused:
-    ///   the terminal echoing keystrokes within [`AGENT_INPUT_SUPPRESSION_WINDOW`],
-    ///   and the REPAINT a child answers a forwarded pointer report with. A child
-    ///   that owns the mouse redraws its whole grid for every wheel notch, so
-    ///   without the second exception the mere act of scrolling an idle agent lit
-    ///   the working indicator for as long as the user scrolled. How long that
-    ///   second exception lasts depends on the gesture: [`POINTER_REPAINT_WINDOW`]
-    ///   for a wheel notch, the much shorter [`POINTER_CLICK_REPAINT_WINDOW`] for a
-    ///   click or tap, and nothing at all for pointer motion (see
+    /// - Rendered output within [`AGENT_STREAMING_WINDOW`] means working.
+    ///   `pty_activity` is stamped only on real content changes in the
+    ///   terminal's active area, so this is genuine agent output rather than an
+    ///   OSC status sequence, and it overrides the OSC report everywhere: an
+    ///   agent that misreports idle while still printing reads as working. The
+    ///   two exceptions are both output the user caused: keystroke echo within
+    ///   [`AGENT_INPUT_SUPPRESSION_WINDOW`], and the repaint a child answers a
+    ///   forwarded pointer report with, whose length depends on the gesture (see
     ///   [`pointer_suppression_window`]).
-    /// - No fresh (non-echo) output → fall back to a fresh OSC 9;4 progress report,
-    ///   if any. A stale report (older than [`PROGRESS_AUTHORITY_WINDOW`]) grants no
-    ///   authority, so a crashed agent that stopped reporting can't stick it on.
+    /// - No fresh, non-echo output falls back to a fresh OSC 9;4 progress
+    ///   report. A report older than [`PROGRESS_AUTHORITY_WINDOW`] grants no
+    ///   authority, so a crashed agent that stopped reporting cannot stick it on.
     /// - Otherwise idle.
     ///
-    /// Keyed by TAB id (see `poll_pty_activity`), not session id.
+    /// Keyed by tab id, never session id.
     pub fn is_agent_streaming(&self, tab_id: &str) -> bool {
         // TEXT WINS: a visible content change is the ground truth that the agent is
         // producing work, and it overrides the agent's own OSC progress claims.
@@ -1521,24 +1480,19 @@ impl Engine {
             .is_some_and(|t| t.elapsed() < AGENT_INPUT_SUPPRESSION_WINDOW)
     }
 
-    /// Whether a companion terminal is "busy" (its Working cue). Unlike an agent,
-    /// a terminal is busy in two cases: it is streaming output right now
-    /// (`is_agent_streaming`), OR a foreground app is running in it even while
-    /// quiet. `PtyClient::foreground_process_name` returns `None` when the shell
-    /// itself owns the terminal foreground (an idle prompt) and `Some(app)` once a
-    /// real command runs, so a set `foreground_cmd` means an app is running. Typing
-    /// takes precedence: while the user is typing into the terminal it reads as
-    /// Typing, not Working, matching how `is_agent_streaming` voids streaming
-    /// during input. Returns false for an unknown id.
+    /// Whether a companion terminal is busy, its Working cue. Unlike an agent it
+    /// is busy in two cases: streaming output now (`is_agent_streaming`), or a
+    /// foreground app running in it even while quiet, which a set
+    /// `foreground_cmd` reports. Typing takes precedence, matching how
+    /// `is_agent_streaming` voids streaming during input. False for an unknown
+    /// id.
     ///
-    /// Scrolling deliberately suppresses only the FIRST of the two cases. The
-    /// output half is an INFERENCE from repaint text, and a repaint the user's
-    /// own wheel provoked is no evidence at all, so `is_agent_streaming`
-    /// discounts it (see [`POINTER_REPAINT_WINDOW`]). The foreground-app half is
-    /// a FACT read off the kernel: a `vim` that repaints because somebody
-    /// scrolled it is still `vim` running, so scrolling must not hide it.
-    /// Suppressing that half too would make every terminal with a real process
-    /// in it flicker to Idle the moment the user scrolled to read its output.
+    /// Scrolling suppresses only the first case. The output half is an inference
+    /// from repaint text, and a repaint the user's own wheel provoked is no
+    /// evidence, so `is_agent_streaming` discounts it (see
+    /// [`POINTER_REPAINT_WINDOW`]). The foreground-app half is a fact read off
+    /// the kernel: a `vim` that repaints because somebody scrolled it is still
+    /// `vim` running, so scrolling must not hide it.
     pub fn terminal_is_working(&self, terminal_id: &str) -> bool {
         if self.is_typing(terminal_id) {
             return false;
@@ -2370,17 +2324,12 @@ impl Engine {
                 label: "gh-status-check".into(),
                 in_flight_key: None,
                 // The primitive logs a panic at error level before this event is
-                // built, so an OBSOLETE probe panicking still writes an error
-                // line even though the generation guard then discards its
-                // result. That is deliberate. Moving the logging into the
-                // generation-aware handler would make the one worker whose
-                // result may be discarded also the one whose crashes are
-                // invisible, and it would mean adding a per-caller knob to a
-                // primitive eleven sites share. A panic is a defect in dux's own
-                // code and it really happened; the generation stamp governs
-                // which ANSWER wins, not which events were true. The handler
-                // logs the discard at debug level so the pair reads correctly in
-                // `dux.log`.
+                // built, so an obsolete probe that panics still writes an error
+                // line even though the generation guard discards its result.
+                // That is deliberate: a panic is a defect in dux's own code and
+                // it really happened, and the generation stamp governs which
+                // answer wins, not which events were true. The handler logs the
+                // discard at debug level so the pair reads correctly.
                 panic_event: Some(Box::new(move |reason| WorkerEvent::GhStatusChecked {
                     generation,
                     // A panic decided nothing, so it is reported as transient:
@@ -2416,37 +2365,27 @@ impl Engine {
         }
     }
 
-    /// Point the changed-files watch at a session's worktree, or clear it. This
-    /// is the CHEAP half (no git): it only resolves the session and updates the
-    /// watch state, returning the worktree to compute changed files for (if any).
+    /// Point the changed-files watch at a session's worktree, or clear it. The
+    /// cheap half, running no git: it resolves the session, sets
+    /// `watched_worktree` and `watched_session_id`, and always empties the
+    /// staged and unstaged lists so the pane never shows the previous watch's
+    /// files between this call and the compute landing.
     ///
-    /// It is the engine half of the TUI's `App::reload_changed_files`: it sets
-    /// `watched_worktree` (which the background poller reads every 2–10s) and
-    /// `watched_session_id`, then ALWAYS empties the staged/unstaged lists so the
-    /// pane never shows the PREVIOUS watch's files between this call and the
-    /// compute landing (preserving the `watched_session_id` cross-tab invariant).
-    /// The web layer calls this when a browser selects a session (the TUI never
-    /// set it for the web, which is why the web changed-files pane stayed empty).
+    /// The changed-files compute itself must not run on the calling thread: it
+    /// shells out to several git subprocesses and would freeze every client on a
+    /// slow repository or a git-lock stall. Every caller must follow this with
+    /// `spawn_changed_files_refresh`; there is no inline exception.
     ///
-    /// IMPORTANT: the actual changed-files compute (`git::changed_files`) must NOT
-    /// be done on the calling thread — it shells out to several git subprocesses
-    /// and would freeze every web client on a slow repo / git-lock stall, and
-    /// the whole terminal UI on the TUI's own thread. Every caller on both
-    /// surfaces follows this call with `spawn_changed_files_refresh`. The TUI's
-    /// selection-driven read used to be the one exception, computing inline to
-    /// avoid a flicker; a worktree with thousands of changed files made that
-    /// trade a freeze on every selection move, so there is no exception left.
+    /// - `None`, or an unknown id, clears the watch and the lists and returns
+    ///   `None`.
+    /// - `Some(id)` for a known session watches its worktree, records the id,
+    ///   empties the lists and returns `Some(worktree)`.
     ///
-    /// - `None` (or an UNKNOWN id) → clear the watch and the lists, return `None`.
-    /// - `Some(id)` for a known session → watch its worktree, record the id, empty
-    ///   the lists, and return `Some(worktree)` to compute changed files for.
-    ///
-    /// For a STANDALONE agent the watch is folder-driven: it is enrolled only
-    /// while the folder is itself a repository, so nothing ever polls a plain
-    /// folder (which would answer with an error every cycle and surface as
-    /// "the repository is busy"). Opening the panel is also the moment the
-    /// folder verdict is refreshed, so a folder that became a repository since
-    /// the last look starts working here.
+    /// For a standalone agent the watch is folder-driven: enrolled only while
+    /// the folder is itself a repository, so nothing ever polls a plain folder,
+    /// which would answer with an error every cycle. Opening the panel also
+    /// refreshes the folder verdict, so a folder that has become a repository
+    /// since the last look starts working here.
     #[must_use]
     pub fn set_watched_session(&mut self, session_id: Option<&str>) -> Option<PathBuf> {
         // Refresh first: the probe is off-thread, so this call still uses the
@@ -2496,14 +2435,12 @@ impl Engine {
     /// first sorting out which kind it is.
     ///
     /// An unprobed standalone folder answers
-    /// [`crate::git::FolderRepoStatus::Unprobed`], not "no repository": dux has
-    /// not looked yet, and saying anything more definite would let a mutation
-    /// through on a guess. It gates exactly as `Indeterminate` does and reads
-    /// as a wait rather than as a fault, which matters because a freshly
-    /// created agent in a healthy repository spends a moment in this state.
-    ///
-    /// An unknown id keeps `Indeterminate`: there is no folder to still be
-    /// looking at.
+    /// [`crate::git::FolderRepoStatus::Unprobed`] rather than "no repository":
+    /// dux has not looked yet, and anything more definite would let a mutation
+    /// through on a guess. It gates exactly as `Indeterminate` does but reads as
+    /// a wait rather than a fault, which matters because a freshly created agent
+    /// in a healthy repository spends a moment there. An unknown id keeps
+    /// `Indeterminate`, having no folder to still be looking at.
     pub fn folder_repo_status(&self, session_id: &str) -> crate::git::FolderRepoStatus {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             return crate::git::FolderRepoStatus::Indeterminate;
@@ -2522,16 +2459,15 @@ impl Engine {
     /// post the answer back as [`WorkerEvent::FolderRepoStatusReady`].
     ///
     /// A no-op for a managed agent and for an unknown id: neither has a folder
-    /// whose repository-ness can change under dux. `repo_path_kind` runs up to
-    /// four git subprocesses, so this must never run inline; a folder on a
-    /// stalled network mount would otherwise freeze every web client.
+    /// whose repository-ness can change under dux. `git::repo_path_kind` runs
+    /// several git subprocesses, so this must never run inline; a folder on a
+    /// stalled network mount would otherwise freeze every client.
     ///
     /// Also a no-op while a probe for the same agent is already running. Every
-    /// question about the folder asks for a refresh, and the web's
-    /// changed-files poller asks every two seconds, so without the guard this
-    /// was an unbounded loop of threads and git subprocesses for as long as a
-    /// standalone agent's changes panel stayed open. One probe in flight is
-    /// enough: its answer is what the next question reads.
+    /// question about the folder asks for a refresh, the changed-files poll
+    /// included, so without the guard an open changes panel is an unbounded
+    /// loop of threads and git subprocesses. One probe in flight is enough: its
+    /// answer is what the next question reads.
     pub fn spawn_folder_repo_probe(&mut self, session_id: &str) {
         let Some(folder) = self
             .sessions
@@ -2568,15 +2504,12 @@ impl Engine {
     /// Give the probe's single-instance slot back after a spawn that never
     /// started.
     ///
-    /// [`Self::spawn_loop_worker`] deliberately does not clear in-flight keys
-    /// itself (its own doc says so), and this key is otherwise cleared only by
-    /// the `FolderRepoStatusReady` handler, which a thread that never ran can
-    /// never post. One failed spawn would therefore pin the key for the rest of
-    /// the run: the folder's git surface keeps answering `Unprobed`, the changes
-    /// panel stays quiet, every mutation is refused, the upload seed is
-    /// withheld, and only a restart heals it. Releasing the key re-arms the
-    /// probe instead, so the next ask (the changed-files poll, a couple of
-    /// seconds away while the panel is open) tries again.
+    /// [`Self::spawn_loop_worker`] does not clear in-flight keys itself, and
+    /// this key is otherwise cleared only by the `FolderRepoStatusReady`
+    /// handler, which a thread that never ran can never post. One failed spawn
+    /// would pin the key for the rest of the run, leaving the folder answering
+    /// `Unprobed`, every mutation refused and only a restart to heal it.
+    /// Releasing the key re-arms the probe, so the next ask tries again.
     fn release_folder_repo_probe(&mut self, session_id: &str) {
         self.clear_in_flight(&InFlightKey::FolderRepoProbe(session_id.to_string()));
         crate::logger::warn(&format!(
@@ -2606,24 +2539,22 @@ impl Engine {
             .store(self.running_process_count() > 0, Ordering::Relaxed);
     }
 
-    /// Compute the changed files for `worktree` OFF the engine actor thread and
-    /// post them back as a `ChangedFilesReady` event. The one-shot worker mirrors
-    /// `spawn_pr_check_for_session`'s spawn shape and the changed-files poller's
-    /// git call. The event carries the `worktree` it was computed for, so the
-    /// `ChangedFilesReady` drain in `process_worker_event` automatically drops a
-    /// result whose watch has since moved (the 4faf872 stale-poll guard).
+    /// Compute the changed files for `worktree` off the engine actor thread and
+    /// post them back as a `ChangedFilesReady` event. The event carries the
+    /// `worktree` it was computed for, so the drain in `process_worker_event`
+    /// drops a result whose watch has since moved.
     ///
-    /// A `git::changed_files` error rides along as `Err`: the drain leaves the
-    /// lists untouched rather than emptying them, so a locked or unreadable
-    /// repository never renders as a clean worktree, and a surface waiting on
-    /// this refresh (the TUI's `refresh-changes` command) can report the failure
-    /// as a failure. Both surfaces call this right after `set_watched_session`.
+    /// A `git::changed_files` error rides along as `Err` and the drain leaves
+    /// the lists untouched rather than emptying them, so a locked or unreadable
+    /// repository never renders as a clean worktree and a surface waiting on
+    /// this refresh can report the failure as a failure. Every caller runs this
+    /// right after `set_watched_session`.
     ///
-    /// Requests COALESCE through [`ChangedFilesRefreshQueue`]: one worker at a
+    /// Requests coalesce through [`ChangedFilesRefreshQueue`]: one worker at a
     /// time, one queued request, newest wins. A surface that asks on every
-    /// selection move (the TUI does) would otherwise spawn a thread and a git
-    /// sweep per keypress while a key is held down, and every answer but the
-    /// last is dropped as stale on arrival anyway.
+    /// selection move would otherwise spawn a thread and a git sweep per
+    /// keypress while a key is held, and every answer but the last is dropped as
+    /// stale on arrival anyway.
     pub fn spawn_changed_files_refresh(&self, worktree: PathBuf) {
         let queue = Arc::clone(&self.changed_files_refresh);
         if !lock_changed_files_queue(&queue).request(worktree) {
@@ -3262,22 +3193,11 @@ impl Engine {
         );
     }
 
-    /// Trigger a single-session PR check for a deliberate event (a refs change,
-    /// an agent exit, the user asking), unless it was checked more recently than
-    /// `min_interval` ago. Those pass [`PR_CHECK_MIN_INTERVAL`]; foreground focus
-    /// goes through [`Self::spawn_foreground_pr_check`] instead, which carries
-    /// both the tighter [`PR_FOREGROUND_DEBOUNCE`] and its own sync trigger.
-    ///
-    /// The timestamp is recorded BEFORE the worker thread is spawned so a burst
-    /// of triggers within a single event-loop tick — e.g. several callers each
-    /// invoking this for the same session before the first worker's
-    /// `PrStatusReady` event has been processed — does not bypass the
-    /// rate-limit and spawn N concurrent `gh` subprocesses.
-    /// Seed `pr_statuses` from the persisted `latest_prs` rows so both startups
-    /// (the TUI and `dux serve`) show PR badges immediately, before the first
-    /// network poll and even when `gh` is unavailable. A no-op when GitHub
-    /// integration is off. The "OPEN"/"MERGED"/"CLOSED" decode is the shared
-    /// `gh::reconstruct_pr_from_stored`, so the mapping lives in one place.
+    /// Seed `pr_statuses` from the persisted `latest_prs` rows, so a startup
+    /// shows pull-request badges immediately, before the first network poll and
+    /// even when `gh` is unavailable. A no-op when GitHub integration is off.
+    /// The status decode is the shared `gh::reconstruct_pr_from_stored`, so the
+    /// mapping lives in one place.
     pub fn seed_pr_statuses_from_store(&mut self) {
         if !self.github_integration_enabled {
             return;
@@ -3322,6 +3242,16 @@ impl Engine {
         }
     }
 
+    /// Trigger a single-session pull-request check for a deliberate event (a
+    /// refs change, an agent exit, the user asking), unless it was checked more
+    /// recently than `min_interval` ago. Those pass [`PR_CHECK_MIN_INTERVAL`];
+    /// foreground focus goes through [`Self::spawn_foreground_pr_check`], which
+    /// carries the tighter [`PR_FOREGROUND_DEBOUNCE`] and its own sync trigger.
+    ///
+    /// The timestamp is recorded before the worker thread is spawned, so a burst
+    /// of triggers within one event-loop tick, before the first worker's
+    /// `PrStatusReady` has been processed, cannot bypass the rate limit and
+    /// spawn concurrent `gh` subprocesses.
     pub fn spawn_pr_check_for_session(&mut self, session_id: &str, min_interval: Duration) {
         self.spawn_pr_check_for_session_with(
             session_id,
@@ -3541,17 +3471,15 @@ impl Engine {
     /// unrelated external drift, and return the parameters the surface hands to
     /// `git::rename_branch` in its own background worker.
     ///
-    /// This is the single decision both the TUI and a future web rename
-    /// consume, so validation, no-op detection, the optimistic write, and the
-    /// expectation stash cannot drift between surfaces. The engine deliberately
-    /// does NOT mark the rename in-flight here — that marker belongs to the
-    /// worker spawn (`BackgroundWorkerSpec::in_flight_key`), so a surface that
-    /// never dispatches (title-only or no-op) leaves no dangling marker.
+    /// The single decision every surface consumes, so validation, no-op
+    /// detection, the optimistic write and the expectation stash cannot drift
+    /// between them. The engine does not mark the rename in-flight here: that
+    /// marker belongs to the worker spawn, so a surface that never dispatches,
+    /// on the title-only or no-op paths, leaves no dangling marker.
     ///
-    /// The surface still owns everything presentation-shaped: the keyed status
+    /// The surface owns everything presentation-shaped: the keyed status
     /// wording, the worker dispatch and its completion event, the list rebuild,
-    /// and, on a synchronous spawn failure, the unwind via
-    /// `revert_optimistic_rename`.
+    /// and the unwind through `revert_optimistic_rename` on a spawn failure.
     pub fn prepare_branch_rename(
         &mut self,
         session_id: &str,
@@ -4075,39 +4003,27 @@ impl Engine {
                 folder.display()
             );
         }
-        // THE OCCUPIED-DIRECTORY REFUSAL. Coding CLIs resume their conversation
-        // history PER DIRECTORY, so a second agent in one directory would
-        // silently pick up the first one's conversation, which is a
-        // data-loss-shaped surprise rather than a mere duplicate.
+        // The occupied-directory refusal. Coding CLIs resume their conversation
+        // history per directory, so a second agent in one directory would
+        // silently pick up the first one's conversation.
         //
-        // It compares against EVERY agent, not only the standalone ones. A
+        // It compares against every agent, not only the standalone ones: a
         // managed agent's worktree is a directory just the same, and aiming a
-        // standalone agent at one is worse than a shared conversation: the
-        // launch detaches the agent already there
-        // (`detach_conflicting_worktree_session`), and the survivor then blocks
-        // that worktree's deletion forever with a "still used by other agents"
-        // message about an agent the user never associated with it.
+        // standalone agent at one is worse than a shared conversation, because
+        // the launch detaches the agent already there and the survivor then
+        // blocks that worktree's deletion forever. Canonical paths, so a symlink
+        // is not a way around it.
         //
-        // Canonical paths, so a symlink is not a way around it.
+        // This canonicalizes on the engine thread, which the folder probe's own
+        // doc forbids for itself; the probe runs on a poll and would repeat that
+        // cost forever, while this runs once per create. The blast radius is
+        // wider than the folder just picked, because the loop canonicalizes
+        // every existing agent's directory too, so one hung mount stalls the
+        // engine actor for this whole call. That window is the accepted cost of
+        // not splitting the create in two and re-checking afterwards anyway.
         //
-        // This canonicalizes ON THE ENGINE THREAD, which the folder probe's own
-        // doc forbids for itself, and the difference is deliberate: the probe
-        // runs on a poll and would repeat that cost forever, while this runs
-        // once per create.
-        //
-        // BE HONEST ABOUT THE BLAST RADIUS, though, because it is wider than the
-        // one folder the user just picked: the loop canonicalizes EVERY existing
-        // agent's directory as well, so one hung mount anywhere in the workspace
-        // stalls the engine actor for this whole call, and the actor is what
-        // serves keystrokes to every other agent. The accepted cost is that
-        // window, on an action the user just took; the alternative is a
-        // two-phase create, where the occupancy refusal would have to be
-        // re-checked after the worker returned anyway. The candidate is
-        // canonicalized ONCE up front rather than once per session, which is the
-        // cheap half of the cost and all of it when there are no other agents.
-        //
-        // The refusal is a SIGNPOST, not a wall: adding the folder as a project
-        // is the multi-agent shape dux is built for, and it brings tabs along.
+        // The refusal is a signpost, not a wall: adding the folder as a project
+        // is the multi-agent shape dux is built for.
         let wanted = crate::project_browser::canonical_or_original(&folder);
         if let Some(existing) = self.sessions.iter().find(|session| {
             crate::project_browser::canonical_or_original(std::path::Path::new(session.directory()))
@@ -4190,20 +4106,18 @@ impl Engine {
         })
     }
 
-    /// THE CHOKEPOINT. Resolve a session id to the managed working copy a
+    /// The chokepoint. Resolve a session id to the managed working copy a
     /// branch-identity git feature may run in, or an error saying why it may
     /// not.
     ///
-    /// Every git action that is about the AGENT's branch goes through here:
-    /// push, pull, fork, the pull-request routes, branch rename, provenance,
-    /// the worktree manager. Hiding the buttons is not an answer, because each
-    /// of those is also an HTTP route and a palette command, so the id of a
-    /// standalone agent could otherwise reach a real push in the user's folder
-    /// from a command line.
+    /// Every git action about the agent's branch goes through here: push, pull,
+    /// fork, the pull-request routes, branch rename, provenance, the worktree
+    /// manager. Hiding the buttons is not an answer, because each of those is
+    /// also an HTTP route and a palette command, so a standalone agent's id
+    /// could otherwise reach a real push in the user's folder.
     ///
-    /// This is deliberately NOT the question the changes panel asks. That one
-    /// is folder-driven and answered live by repository detection, because a
-    /// standalone agent pointed at a repository gets a real changes panel; see
+    /// Deliberately not the question the changes panel asks, which is
+    /// folder-driven and answered live by repository detection; see
     /// [`Self::folder_repo_status`].
     ///
     /// `feature` and `remedy` are the two halves of the refusal sentence; see
@@ -4227,18 +4141,15 @@ impl Engine {
         }
     }
 
-    /// The resolved environment an agent's processes run with.
+    /// The resolved environment an agent's processes run with. A managed agent
+    /// gets the global environment merged with its project's; a standalone agent
+    /// gets the global environment with no project overlay, like a standalone
+    /// terminal, because there is no project to overlay it with.
     ///
-    /// A MANAGED agent gets the global environment merged with its project's,
-    /// as always. A STANDALONE agent gets the global environment with NO
-    /// project overlay, exactly like a standalone terminal
-    /// (`create_standalone_terminal`), because there is no project to overlay
-    /// it with.
-    ///
-    /// This is a named, tested answer rather than an inherited code path on
-    /// purpose: every site that looked a project up and fell through
-    /// `unwrap_or_default` would silently hand a project-less agent an EMPTY
-    /// environment, which is a very different thing from the global one.
+    /// A named, tested answer rather than an inherited code path: a site that
+    /// looked the project up and fell through `unwrap_or_default` would silently
+    /// hand a project-less agent an empty environment, which is a very different
+    /// thing from the global one.
     pub fn session_env(&self, session: &AgentSession) -> Vec<(String, String)> {
         let project_env = match &session.workspace {
             crate::model::AgentWorkspace::Managed(managed) => self
@@ -4648,17 +4559,15 @@ impl Engine {
 
     /// Swap which provider (CLI) an agent session uses on its NEXT launch.
     ///
-    /// This is the engine half of the TUI's `apply_change_agent_provider`. It
-    /// does NOT kill or relaunch a running agent: it changes the persisted
-    /// provider so the next launch (reconnect) uses it, and, when a provider is
-    /// still running on the session's PTY, pins the previously-running provider
-    /// so UI labels keep telling the truth until the user exits and relaunches.
+    /// Does not kill or relaunch a running agent: it changes the persisted
+    /// provider so the next launch uses it, and pins the previously-running
+    /// provider while one is still on the session's PTY, so UI labels keep
+    /// telling the truth until the user exits and relaunches.
     ///
-    /// Returns the data each surface needs to format its own status message
-    /// (the TUI references a rebindable keybinding label; the web does not), so
-    /// message wording stays surface-side. An unknown session is an error; the
-    /// caller is responsible for the no-op "already uses this provider" case,
-    /// since only the surface knows the session's display label for that copy.
+    /// Returns the data each surface needs to format its own status message, so
+    /// wording stays surface-side. An unknown session is an error; the caller
+    /// owns the no-op "already uses this provider" case, since only the surface
+    /// knows the session's display label for that copy.
     pub fn change_agent_provider(
         &mut self,
         session_id: &str,
