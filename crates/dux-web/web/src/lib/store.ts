@@ -2485,7 +2485,7 @@ function syncUrl(mode?: "replace" | "push"): void {
     return
   }
   const next = routeHash(currentRoute())
-  const current = typeof location !== "undefined" ? (location.hash ?? "") : ""
+  const current = currentHash()
   // Belt and braces: when the address is already what we would write, the
   // branch below would take the replace arm anyway (an unchanged hash is an
   // unchanged screen) and rewrite the identical URL. Skipping the write is
@@ -2502,6 +2502,14 @@ function syncUrl(mode?: "replace" | "push"): void {
   } catch (err) {
     console.warn("[dux] history write refused", err)
   }
+}
+
+// The hash the browser is parked on, or "" where there is no browser to ask:
+// the store is imported by the marketing site's static render, which runs under
+// plain Node.
+function currentHash(): string {
+  if (typeof location === "undefined") return ""
+  return location.hash ?? ""
 }
 
 // The URL to write for a hash. An empty target hash collapses to the bare path
@@ -2533,7 +2541,7 @@ function movesScreen(
 // browser has already moved its cursor, so this only mirrors the destination
 // into state and must never write the URL back.
 function applyUrlRoute(): void {
-  const hash = typeof location !== "undefined" ? (location.hash ?? "") : ""
+  const hash = currentHash()
   const route = parseRoute(hash)
   // The surface bit follows the URL immediately, spine or no spine: which
   // shell renders must not wait on a fetch, and it is what lets the
@@ -2838,7 +2846,7 @@ function targetSessionId(target: SelectedTarget): string | null {
 function retryRouteNotFound(spine: Spine): void {
   const missing = state.routeNotFound
   if (!missing) return
-  const route = parseRoute(typeof location !== "undefined" ? (location.hash ?? "") : "")
+  const route = parseRoute(currentHash())
   if (!route.target) return
   if (targetSessionId(route.target) !== missing.sessionId) return
   if (!spine.sessions.some((s) => s.id === missing.sessionId)) return
