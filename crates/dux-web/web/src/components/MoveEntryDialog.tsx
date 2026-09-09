@@ -73,33 +73,20 @@ type BrowseState =
   | { status: "loaded"; entries: DirEntry[] }
   | { status: "error"; message: string }
 
-function MoveEntryDialogBody({
-  root,
-  target,
-  isDirty,
-  onClose,
-  onSubmit,
-}: {
-  root: EditorRoot
-  target: MoveEntryTarget
-  isDirty: boolean
-  onClose: () => void
-  onSubmit: (destDir: string) => Promise<void>
-}) {
-  // Start where the entry already is: the common move is a short hop, and
-  // starting at the root would make every move begin by re-walking there.
-  const [dir, setDir] = useState(() => parentDir(target.path))
-  const [submitting, setSubmitting] = useState(false)
-  const [reloadNonce, setReloadNonce] = useState(0)
-  // The last listing that came back, tagged with the directory and attempt it
-  // belongs to, so "loading" is DERIVED rather than set from inside an effect.
+// One directory listing, refetched whenever the browsed directory or the retry
+// attempt changes. "Loading" is DERIVED from the listing on hand not matching
+// what is being asked for, rather than set from inside the effect, so a listing
+// that arrives for a directory the user has already left cannot be shown.
+function useDirListing(
+  root: EditorRoot,
+  dir: string,
+  attempt: number,
+): BrowseState {
   const [loaded, setLoaded] = useState<{
     key: string
     state: BrowseState
   } | null>(null)
-  const key = `${reloadNonce}:${dir}`
-  const state: BrowseState =
-    loaded !== null && loaded.key === key ? loaded.state : { status: "loading" }
+  const key = `${attempt}:${dir}`
 
   useEffect(() => {
     let cancelled = false
@@ -125,6 +112,31 @@ function MoveEntryDialogBody({
       cancelled = true
     }
   }, [root, dir, key])
+
+  return loaded !== null && loaded.key === key
+    ? loaded.state
+    : { status: "loading" }
+}
+
+function MoveEntryDialogBody({
+  root,
+  target,
+  isDirty,
+  onClose,
+  onSubmit,
+}: {
+  root: EditorRoot
+  target: MoveEntryTarget
+  isDirty: boolean
+  onClose: () => void
+  onSubmit: (destDir: string) => Promise<void>
+}) {
+  // Start where the entry already is: the common move is a short hop, and
+  // starting at the root would make every move begin by re-walking there.
+  const [dir, setDir] = useState(() => parentDir(target.path))
+  const [submitting, setSubmitting] = useState(false)
+  const [reloadNonce, setReloadNonce] = useState(0)
+  const state = useDirListing(root, dir, reloadNonce)
 
   // Stepping into a folder unmounts the clicked button and focus falls to the
   // dialog, so it is put back on the new list's first control. Skipped on the

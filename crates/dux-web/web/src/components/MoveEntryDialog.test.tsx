@@ -204,4 +204,29 @@ describe("MoveEntryDialog", () => {
     // At the root there is nothing above, so the climb control is gone.
     expect(screen.queryByRole("button", { name: /Up one level/i })).toBeNull()
   })
+
+  it("says why a listing failed and lists the folder on retry", async () => {
+    let failing = true
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init: RequestInit) => {
+        const dir = (JSON.parse(String(init.body)) as { dir: string }).dir
+        if (failing) return Promise.reject(new Error("the disk went away"))
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ dir, entries: TREE[""] }),
+          text: () => Promise.resolve(""),
+        } as unknown as Response)
+      }),
+    )
+    renderDialog()
+
+    await waitFor(() => screen.getByText("the disk went away"))
+    failing = false
+    fireEvent.click(screen.getByRole("button", { name: /Retry/i }))
+
+    await waitFor(() => screen.getByRole("button", { name: /^src-old$/ }))
+    expect(screen.queryByText("the disk went away")).toBeNull()
+  })
 })
