@@ -16,10 +16,8 @@ import Stats from "./Stats.astro";
       </p>
     </div>
 
-    {/* Side by side where there is room, stacked where there is not. `md` is
-        the breakpoint because these are two dense paragraphs: at `sm` widths a
-        pair of columns leaves each one a few words per line. `items-stretch`
-        so the two cards match height rather than one floating short. */}
+    {/* `md` is the breakpoint because these are two dense paragraphs: at `sm`
+        widths a pair of columns leaves each a few words per line. */}
     <div class="mt-6 mb-10 grid items-stretch gap-2.5 md:grid-cols-2">
       <div class="flex items-start gap-2.5 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel-2)]/50 p-4 text-sm text-[color:var(--color-muted)]">
         <span class="mt-0.5 shrink-0 text-[color:var(--color-success)]">✓</span>

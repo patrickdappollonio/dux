@@ -1,16 +1,9 @@
-// Render the web-UI figure to a file, the same way `fetch-contributors.mjs`
-// writes contributor data and `generate-webp.mjs` writes images: a step in
-// `prep` that produces an artifact the site then reads.
+// Render the web-UI figure to a file: a `prep` step producing an artifact the
+// site reads, run before `astro dev` and `astro build` alike.
 //
-// This runs before `astro dev` and before `astro build`, so the figure is
-// regenerated on every run of either and says so in the log, next to the other
-// prep steps.
-//
-// Rendering here rather than inside the page also removes the problem that made
-// the page version fragile: the components have to be imported and the store
-// seeded in one module graph, and doing that from inside an Astro page put the
-// seed and the components in different instances, so the tree rendered without
-// its workspace. One Vite server, one graph, one seed.
+// It renders here rather than inside the Astro page because the components and
+// the store seed have to share one module graph: from inside a page they land in
+// different instances and the tree renders without its workspace.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
@@ -23,17 +16,10 @@ const APP = fileURLToPath(new URL("../../crates/dux-web/web/", import.meta.url))
 const OUT = fileURLToPath(new URL("../src/figure/figure.html", import.meta.url));
 
 // A fresh clone has this repository's source but not the sibling app's
-// dependencies, and without them nothing below can resolve. So install them,
-// here, rather than telling a contributor to go and do it by hand.
-//
-// This is what keeps `npm run dev`, `npm run build` and CI identical: one
-// mechanism, run from `prep`, so there is no separate setup step to forget in a
-// workflow file or in a contributing guide, and no state where the site builds
-// on one machine and not another. `npm ci` is idempotent and fast once the
-// install exists, so the common case costs a spawn and nothing else.
-//
-// Install only, never `npm run build`. The figure renders from SOURCE, so
-// building the app here would be minutes of work producing output nothing reads.
+// dependencies, so they are installed here rather than in a setup step a workflow
+// file or a contributing guide can forget. `npm ci` is idempotent, so the common
+// case costs a spawn. Install only, never `npm run build`: the figure renders
+// from source, so building the app would produce output nothing reads.
 if (!existsSync(APP + "node_modules/react/index.js")) {
   if (!existsSync(APP + "package.json")) {
     console.error(

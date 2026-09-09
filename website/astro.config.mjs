@@ -17,24 +17,16 @@ export default defineConfig({
   site: "https://getdux.app",
   output: "static",
   trailingSlash: "ignore",
-  // mdx() inherits the markdown config below (heading anchors, Shiki) so .mdx
-  // docs get the same treatment as .md, plus inline components.
-  //
-  // pagefind() builds the static search index on `astro build` (shipped in
-  // dist/pagefind/) and serves a prebuilt index during `astro dev`. Only pages
-  // carrying `data-pagefind-body` are indexed — the docs (DocsLayout.astro) and
-  // blog posts (BlogLayout.astro) — so the index covers docs and blog while
-  // excluding the marketing homepage.
-  // The sitemap excludes the RSS endpoint (it's a feed, not a page). Draft
-  // posts never reach the sitemap because they're dropped from the production
-  // build entirely (see src/pages/blog/[...slug].astro).
+  // mdx() inherits the markdown config below, so .mdx docs get the same treatment
+  // as .md. pagefind() indexes only pages carrying `data-pagefind-body`, which is
+  // the docs and blog layouts, so the marketing homepage stays out. The sitemap
+  // excludes the RSS endpoint; draft posts never reach it because the production
+  // build drops them entirely.
   integrations: [
     mdx(),
-    // React is here for ONE thing: the homepage's web-UI figure, which renders
-    // the dux web app's real components (from crates/dux-web/web/src) to static
-    // HTML at build time. No page carries a `client:*` directive, so no React
-    // runtime is shipped to any visitor. Keep it that way: the figure's whole
-    // claim is that it is the real UI with zero JavaScript behind it.
+    // React is here only for the homepage's web-UI figure. No page carries a
+    // `client:*` directive, so no React runtime reaches a visitor, and the
+    // figure's whole claim is that it is the real UI with zero JavaScript.
     react(),
     pagefind(),
     // Newsletter status pages are post-subscribe/post-confirm landing pages
@@ -50,32 +42,23 @@ export default defineConfig({
   build: {
     inlineStylesheets: "auto",
   },
-  // Tailwind 4 through its own Vite plugin, which is the path Astro and
-  // Tailwind both document. The PostCSS plugin is not usable here: under
-  // Vite 8 the bundled postcss-import resolves `@import "tailwindcss"` in
-  // global.css as a relative file and fails before Tailwind's plugin ever
-  // runs. The Vite plugin resolves the bare package import itself.
+  // Tailwind 4 through its Vite plugin, never the PostCSS one: under Vite 8 the
+  // bundled postcss-import resolves `@import "tailwindcss"` as a relative file
+  // and fails before Tailwind's plugin runs.
   vite: {
     plugins: [webUiReactBridge(), tailwindcss()],
     server: {
       fs: {
-        // The figure renders the app's real components, and those components
-        // load real assets from the app's own dependencies: the variable font
-        // is the one that shows up first. Vite will RESOLVE a module outside its
-        // root but refuses to SERVE a file from there, so the dev server
-        // answered the font request with "outside of Vite serving allow list"
-        // and the figure rendered in a fallback face.
-        //
-        // Only the app's directory is added. This is a dev-server read
-        // permission, so it stays as narrow as the thing it exists for.
+        // Vite resolves a module outside its root but refuses to SERVE a file
+        // from there, and the figure's components load real assets out of the
+        // app's dependencies. Only the app's directory is added: this is a
+        // dev-server read permission, so it stays as narrow as its purpose.
         allow: [".", WEB_UI_ROOT],
       },
     },
-    // The web-UI figure imports the dux web app's components straight out of
-    // `crates/dux-web/web/src`. They resolve through the app's own `@` alias,
-    // and every React copy in play has to collapse to one. Shared with the test
-    // runner (`vitest.config.ts`) so the drift guard renders the figure exactly
-    // the way this build does; see `src/lib/web-ui-alias.mjs`.
+    // The figure's components resolve through the app's own `@` alias, and every
+    // React copy in play has to collapse to one. Shared with `vitest.config.ts`
+    // so the drift guard renders the figure exactly the way this build does.
     resolve: { alias: webUiAlias() },
     build: {
       // Match Tailwind's own compile targets. Tailwind emits the vendor
@@ -88,26 +71,16 @@ export default defineConfig({
     },
   },
   markdown: {
-    // GitHub's dark theme reads cleanly on the site's near-black panels and
-    // ships its token colors calibrated for that background. shikiConfig and
-    // syntaxHighlight stay at the markdown level — Astro forwards them to the
-    // processor's renderer, so highlighting is unaffected by the processor.
+    // GitHub's dark theme ships its token colors calibrated for the near-black
+    // background the site's panels use. shikiConfig and syntaxHighlight stay at
+    // the markdown level, from where Astro forwards them to the renderer.
     shikiConfig: { theme: "github-dark-default", wrap: false },
     // Astro 6 deprecated top-level markdown.rehypePlugins/remarkPlugins in
     // favor of a processor built with unified() from @astrojs/markdown-remark.
     processor: unified({
-      // GitHub-style emoji shortcodes (`:smile:` -> 😄) in any Markdown page.
-      // Operates on text nodes only, so shortcodes inside code spans/blocks are
-      // left literal.
-      //
-      // remarkAdmonitions turns GitHub-style `> [!NOTE]` blockquotes into styled
-      // alert callouts (see src/lib/remark-admonitions.mjs; styled in global.css).
-      //
-      // remarkGraphviz turns a ```dot fenced block into a themed inline SVG,
-      // laid out at build time by Graphviz-WASM. It runs after the others
-      // because it replaces those nodes with raw HTML. The same renderer backs
-      // the <Diagram> component used on the homepage, so both surfaces draw
-      // through one pipeline (see src/lib/graphviz.mjs).
+      // Emoji shortcodes operate on text nodes only, so shortcodes inside code
+      // spans and blocks stay literal. remarkGraphviz runs last because it
+      // replaces its nodes with raw HTML.
       remarkPlugins: [remarkGemoji, remarkAdmonitions, remarkGraphviz],
       rehypePlugins: [
         // Give every heading a stable slug id, then append a clickable "#"

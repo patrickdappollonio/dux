@@ -1,11 +1,8 @@
 ---
-// Site search modal — covers the docs and the blog (every page that carries
-// `data-pagefind-body`). Mounted once globally in Layout.astro and opened from
-// the header button (which dispatches the `open-search` event) or via the
-// Cmd/Ctrl-K and "/" shortcuts. The Pagefind engine is dynamically imported
-// only on first open, so pages that never search ship none of it.
-//
-// All visuals derive from the tokens in global.css — no hardcoded colors.
+// Site search modal over every page carrying `data-pagefind-body`, mounted once
+// in Layout.astro and opened by the `open-search` event or the Cmd/Ctrl-K and "/"
+// shortcuts. The Pagefind engine is imported only on first open, so a page that
+// never searches ships none of it. Visuals derive from the global.css tokens.
 ---
 
 <div id="docs-search" class="search-overlay" hidden>
@@ -526,11 +523,9 @@
     overflow-y: auto;
   }
 
-  /* The result rows below are built in JavaScript (document.createElement), so
-     they never receive Astro's scoping attribute. Their rules must therefore be
-     `:global()` — but every one is nested under the templated `.search-results`
-     container, so the styles reach the dynamic children without leaking to the
-     rest of the site. */
+  /* Result rows are built with `document.createElement`, so they never receive
+     Astro's scoping attribute and their rules must be `:global()`; nesting each
+     under `.search-results` is what keeps them from leaking site-wide. */
   .search-results :global(.search-result-group + .search-result-group) {
     margin-top: 0.15rem;
   }

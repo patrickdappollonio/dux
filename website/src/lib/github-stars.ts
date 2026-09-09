@@ -1,8 +1,6 @@
-// Build-time GitHub star lookup, baked into the HTML so there are no
-// client-side API calls. Degrades to `null` (badge omitted) on any failure,
-// because the count comes from someone else's API and their rate limiter should
-// not be able to break a contributor's build. The skip is announced in the build
-// log by `fetchJson`, so an omitted badge is never a mystery.
+// Build-time GitHub star lookup, baked into the HTML so there are no client-side
+// API calls. Degrades to `null` on any failure, because a third party's rate
+// limiter must not break a contributor's build; `fetchJson` announces the skip.
 import { fetchJson, githubHeaders } from "./remote-json";
 // @ts-expect-error - plain .mjs helper, shared with the plain-Node build scripts
 import { unexpectedShapeWarning } from "./remote-failure.mjs";

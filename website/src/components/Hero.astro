@@ -9,16 +9,12 @@ import {
 import { getReleaseDownloads, getNpmTotal, formatCount } from "../lib/stats";
 import { getLatestVersion } from "../lib/version";
 
-// Read at build time from the repository's latest published release, so the
-// pill cannot go stale. `null` on any lookup failure, in which case the pill
-// does not render. See src/lib/version.ts for why it is derived rather than
-// written down.
+// Read at build time from the repository's latest published release, so the pill
+// cannot go stale; `null` on any lookup failure, and then it does not render.
 const version = await getLatestVersion("patrickdappollonio/dux");
 
-// Build-time social proof, split the same way the install section's counters
-// are: where the counters come from, then the total. Either half may fail, so
-// each segment renders only when its own lookup resolved and the total only
-// when both did, leaving no hole either way.
+// Either half may fail, so each segment renders only when its own lookup resolved
+// and the total only when both did, leaving no hole either way.
 const [downloads, npm] = await Promise.all([
   getReleaseDownloads("patrickdappollonio/dux"),
   getNpmTotal("@patrickdappollonio/dux"),
@@ -70,25 +66,18 @@ const fallback = [
       </div>
 
       <h1 class="hero-headline">
-        {/* Each word is its own accent unit, which keeps a break available
-            between them, and the full stop lives inside the second unit's
-            nowrap box where nothing can strand it. Three simpler shapes are
-            measured and do not work: a stop outside the accent span is stranded
-            on a line of its own at narrow widths, because that span is an
-            inline-block and therefore an atomic inline; a word joiner does not
-            help, because at those widths no other break opportunity fits and
-            the browser breaks anyway; and binding the whole phrase into one
-            nowrap unit overflows the viewport, because "proper office." is
-            wider than a 320px column.
+        {/* Each word is its own accent unit, keeping a break available between
+            them, and the full stop lives inside the second unit's nowrap box:
+            outside the accent span it strands on a line of its own, because that
+            span is an inline-block and therefore an atomic inline, and one nowrap
+            unit for the whole phrase overflows a 320px column.
 
-            Each unit's underline is anchored to a
-            wrapper holding only its word, so the rule never reaches under the
-            dot; the leading unit's rule is extended by one character cell (the
-            headline is monospaced, so 1ch is exactly the space's advance) and
-            the two bars meet as the single continuous rule the design asks
-            for. The cost, stated rather than discovered: when the two words do
-            land on different lines, the first bar hangs one cell past
-            "proper". */}
+            Each underline is anchored to a wrapper holding only its word, so the
+            rule never reaches under the dot, and the leading unit's rule is
+            extended by 1ch, exactly the space's advance in this monospaced
+            headline, so the two bars meet. The cost, stated rather than
+            discovered: when the words land on different lines the first bar
+            hangs one cell past its word. */}
         Your AI agents deserve a <span class="hero-mark"
           ><span class="hero-mark-words"
             ><span class="hero-mark-word">proper</span><span
@@ -148,10 +137,9 @@ const fallback = [
 </section>
 
 <style>
-  /* The hero owns the fold: the viewport minus the sticky header (h-14). The
-     custom property is the CSS layer's idea of the hero's height, which the
-     scene overwrites with the measured one at mount; this default is what a
-     scripts-off visit gets, where there is no shader to disagree with it. */
+  /* The hero owns the fold: the viewport minus the sticky header. The custom
+     property is the CSS layer's idea of the hero's height, which the scene
+     overwrites at mount; this default is what a scripts-off visit gets. */
   .hero-fold {
     position: relative;
     min-height: calc(100svh - 3.5rem);
@@ -167,10 +155,9 @@ const fallback = [
     height: 100%;
     display: block;
     z-index: 0;
-    /* Crossfades in over the CSS layer on its first rendered frame, so the
-       handoff is not a pop. With no script it never arrives and the CSS layer
-       simply IS the background; with WebGL refused the canvas is hidden
-       outright, same result. */
+    /* Crossfades in over the CSS layer on its first rendered frame, so the handoff
+       is not a pop. With no script, or WebGL refused, the CSS layer simply is
+       the background. */
     opacity: 0;
     transition: opacity 260ms ease;
   }
@@ -195,10 +182,9 @@ const fallback = [
     pointer-events: none;
   }
 
-  /* The body paints its own faint glows over the ink, and the hero's layers
-     are opaque, so a hard edge shows wherever they simply stop. Dissolving the
-     background layers (never the copy) over the last stretch lets the body's
-     paint take over with no seam. */
+  /* The body paints its own faint glows over the ink and the hero's layers are
+     opaque, so dissolving the background layers (never the copy) over the last
+     stretch is what keeps a hard edge from showing where they stop. */
   .hero-fold canvas,
   .hero-base,
   .hero-scrim {

@@ -34,11 +34,9 @@ const scriptId = `asciicast-${castId}`;
       </a>
     </div>
 
-    {/* Names the surface before the reader has to guess. The cast is the
-        terminal UI, and without saying so the next section's Web UI tab looks
-        like a different product rather than the same workspace. Points forward
-        rather than repeating the pitch: the figure below is one scroll away and
-        makes the case better than a sentence can. */}
+    {/* Names the surface: the cast is the terminal UI, and without saying so the
+        next section's Web UI tab reads as a different product rather than the
+        same workspace. */}
     <p class="mt-4 text-sm text-[color:var(--color-muted)] leading-relaxed">
       This is the terminal UI, recorded live. The same workspace runs in a browser too, and you can flip between the two in the section below.
     </p>
@@ -55,19 +53,14 @@ const scriptId = `asciicast-${castId}`;
         <span class="ml-auto pill text-[10px] !py-0.5">live recording</span>
       </div>
       <div class="bg-black p-2 sm:p-3">
-        {/* The sizer (see the style block below) reserves the player's final
-            height before anything loads. Without it the injected asciinema
-            player starts as a ~150px placeholder and grows several hundred
-            pixels once the cast loads, which happens mid-scroll on an anchor
-            click and makes every section below this one land short of its
-            heading. All three states (fallback poster, loading placeholder,
-            loaded player) live in the same reserved box, so the demo never
-            moves the rest of the page. */}
+        {/* The sizer reserves the player's final height before anything loads:
+            the injected asciinema player otherwise starts as a small placeholder
+            and grows once the cast loads, mid-scroll on an anchor click. All
+            three states share the reserved box, so the demo never moves the page. */}
         <div class="asciinema-embed relative [&_.asciinema-player]:!mx-auto">
-          {/* Local fallback: a real dux frame + play CTA. Shown by default and
-              hidden once the official asciinema embed injects its player. This
-              keeps the demo from rendering an empty box when asciinema.org is
-              unreachable (or blocked by a content blocker). */}
+          {/* Local fallback, shown by default and hidden once the asciinema embed
+              injects its player, so an unreachable or blocked asciinema.org
+              leaves a real frame rather than an empty box. */}
           <a
             id="dux-demo-fallback"
             href={link}
@@ -100,16 +93,12 @@ const scriptId = `asciicast-${castId}`;
   </div>
 
   <style>
-    /* Reserve the embed's final height so the loading player cannot shift the
-       page (the anchor-scroll bug described above). The asciinema iframe sizes
-       itself to width * (784 / 1609) plus a 58.3px control bar, measured at
-       six viewport widths (390 to 1440) within a pixel; the ratio is the
-       cast's terminal, the constant is the player chrome. An aspect-ratio
-       cannot express the constant term, so a padding-top sizer does (padding
-       percentages resolve against the width). The children stack on the sizer
-       in one grid cell; if a future cast is taller than the reservation, the
-       cell grows and the shift is back but small; a shorter one leaves a
-       quiet letterbox gap. Never a broken layout. */
+    /* Reserves the embed's final height so the loading player cannot shift the
+       page. The asciinema iframe sizes itself to the cast's terminal ratio plus a
+       constant control bar, and an aspect-ratio cannot express a constant term,
+       so a padding-top sizer does: padding percentages resolve against the width.
+       A cast taller than the reservation grows the cell, a shorter one leaves a
+       letterbox gap, and neither breaks the layout. */
     .asciinema-embed {
       display: grid;
     }

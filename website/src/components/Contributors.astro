@@ -1,9 +1,7 @@
 ---
-// Homepage "thank you" strip: a left-to-right wrapping row of contributor
-// avatars, each linking to their GitHub profile. The data is a build-time
-// snapshot (src/data/contributors.json) populated by scripts/fetch-contributors.mjs;
-// renders nothing when the snapshot is empty so the page never shows a hollow
-// section.
+// Homepage "thank you" strip of contributor avatars, read from the build-time
+// snapshot scripts/fetch-contributors.mjs writes. Renders nothing when the
+// snapshot is empty, so the page never shows a hollow section.
 import contributors from "../data/contributors.json";
 
 // Defend against a malformed snapshot (e.g. a bad merge): treat anything that

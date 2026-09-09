@@ -69,10 +69,9 @@ interface Pane {
   nextDraw: number;
 }
 
-// `CanvasRenderingContext2D.roundRect` is only in Safari 16.4 and Firefox 112
-// and later, and it throws rather than no-ops where it is missing: once per
-// pane per redraw, forever, because the loop reschedules before the throw. The
-// arcTo path draws the same rectangle everywhere else.
+// `CanvasRenderingContext2D.roundRect` throws rather than no-ops where it is
+// missing, once per pane per redraw forever, because the loop reschedules before
+// the throw. The arcTo path draws the same rectangle everywhere else.
 const HAS_ROUND_RECT =
   typeof CanvasRenderingContext2D !== "undefined" &&
   typeof CanvasRenderingContext2D.prototype.roundRect === "function";
@@ -143,10 +142,9 @@ ${ambienceGlsl()}
   // its two guarantees: no term can render a pixel darker than the backdrop,
   // and none of them has an edge.
 
-  // The lattice is anchored in CSS pixels rather than in the aspect-normalised
-  // p, so the dots stay square and stay CELL apart whatever the viewport ratio
-  // does. Dividing out the device pixel ratio is what makes gl_FragCoord a
-  // CSS-pixel coordinate.
+  // Anchored in CSS pixels rather than the aspect-normalised p, so the dots stay
+  // square and CELL apart whatever the viewport ratio does; dividing out the
+  // device pixel ratio is what makes gl_FragCoord a CSS-pixel coordinate.
   vec2 px = gl_FragCoord.xy / uDpr;
   float rd = length(mod(px + CELL * 0.5, CELL) - CELL * 0.5);
 
@@ -252,11 +250,9 @@ export function mountHeroScene(
   const group = new THREE.Group();
   scene.add(group);
 
-  // Ambience is one fullscreen analytic pass, not sprites. A glow sprite on
-  // this canvas composited as `sprite + (1 - accumulated alpha) * page`:
-  // additive blending accumulates DESTINATION alpha too, so a sprite punched a
-  // hole in the page's own gradients and handed back far less light than it
-  // hid, rendering darker than the backdrop it was meant to lift.
+  // Ambience is one fullscreen analytic pass, never sprites: additive blending
+  // accumulates destination alpha too, so a glow sprite punches a hole in the
+  // page's own gradients and renders darker than the backdrop it should lift.
   const bgScene = new THREE.Scene();
   const bgCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   // Each slot is (x, y, birth, strength), the origin in CSS pixels from the
@@ -292,11 +288,9 @@ export function mountHeroScene(
     c.width = W;
     c.height = H;
     const ctx = c.getContext("2d") as CanvasRenderingContext2D;
-    // Deliberately no `colorSpace`: three then treats these sRGB canvas bytes
-    // as linear and re-encodes them on output, which brightens them. The pane
-    // colours were tuned by eye against exactly that pipeline and the approved
-    // screenshots were rendered through it, so setting SRGBColorSpace here
-    // would change the signed-off look. That is a redesign, not a fix.
+    // Deliberately no `colorSpace`: three then treats these sRGB canvas bytes as
+    // linear and re-encodes them on output. The pane colours are tuned against
+    // exactly that pipeline, so setting SRGBColorSpace is a redesign, not a fix.
     const tex = new THREE.CanvasTexture(c);
     tex.minFilter = THREE.LinearFilter;
     tex.generateMipmaps = false;
@@ -567,10 +561,9 @@ export function mountHeroScene(
   const pointer = { x: 0, y: 0, tx: 0, ty: 0 };
   let lastFine = -1e9;
   const ring = new RippleRing();
-  // The shader reads the same clock the frame loop feeds `uTime`, so impulses
-  // are stamped with the last rendered scene time rather than with
-  // `performance.now()`: at most one frame stale, and never on a different
-  // timebase from the front that grows out of it.
+  // Impulses are stamped with the last rendered scene time, the same clock the
+  // frame loop feeds `uTime`, never `performance.now()`: at most one frame stale,
+  // and never on a different timebase from the front that grows out of it.
   let sceneTime = 0;
 
   function onPointerMove(e: PointerEvent): void {
@@ -605,10 +598,9 @@ export function mountHeroScene(
     dropRipple(ring.claim(), e.clientX, e.clientY, RIPPLE.pressAmp);
   }
 
-  // Reduced motion gets a still lattice and no ripple listeners, so the slots
-  // stay empty and the ripple branch in the shader never fires. The parallax
-  // listeners above are unconditional; under reduced motion nothing renders
-  // after the still frame, so they move nothing.
+  // Reduced motion gets a still lattice and no ripple listeners, so the slots stay
+  // empty and the shader's ripple branch never fires. The parallax listeners above
+  // are unconditional, but nothing renders after the still frame, so they move nothing.
   const hoverCapable = window.matchMedia("(hover: hover)").matches;
   if (!reduced) {
     // A glide trail needs a cursor that hovers. A finger dragging has no such
@@ -677,11 +669,9 @@ export function mountHeroScene(
     const w = hero.clientWidth || 1;
     const h = hero.clientHeight || 1;
     const narrow = w < NARROW_WIDTH_PX;
-    // The CSS layer sizes its circles and phases its lattice against the fold
-    // height; the shader uses the canvas's real one. They diverge when the copy
-    // overflows the fold, and the crossfade pops. The stylesheet's default is
-    // left in place for a scripts-off visit, where there is no shader to
-    // disagree with.
+    // The CSS layer sizes its circles against the fold height and the shader
+    // against the canvas's real one, so the crossfade pops when the copy
+    // overflows the fold. The stylesheet's default stands for a scripts-off visit.
     hero.style.setProperty("--hero-fold-h", `${h}px`);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     // The lattice is measured in CSS pixels, so the shader needs the ratio it

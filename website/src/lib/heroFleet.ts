@@ -1,12 +1,8 @@
 /**
- * The parts of the homepage hero that hold still: its palette, its pane
- * contents, its background arithmetic and the small rules that decide when a
- * ripple is allowed to spawn and when the camera starts swaying on its own.
- *
- * They live apart from `heroScene.ts` because the CSS fallback layer and the
- * WebGL pass must agree on the same numbers: the canvas crossfades in over the
- * CSS layer, so any divergence reads as a jump. Both are generated from the
- * values below rather than written down twice.
+ * The parts of the homepage hero that hold still: its palette, pane contents,
+ * background arithmetic and spawn rules. Apart from `heroScene.ts` because the
+ * canvas crossfades in over the CSS fallback layer, so both are generated from
+ * these values rather than written down twice and left to diverge.
  */
 
 /** Site `--color-ink`, as the shader's sRGB byte triple. */
@@ -173,9 +169,8 @@ export const PANES: readonly PaneDef[] = [
 export const NARROW_WIDTH_PX = 760;
 
 /**
- * Depth grading, baked into the palette instead of being left to fog alone:
- * fog only pulls colours toward the ink, which dims without desaturating, and a
- * far pane full of saturated green still shouts.
+ * Depth grading baked into the palette rather than left to fog, which only pulls
+ * colours toward the ink and dims without desaturating.
  */
 export function grade(hex: string, depth: number): string {
   const n = parseInt(hex.slice(1), 16);
@@ -302,10 +297,9 @@ export const RIPPLE = {
 };
 
 /**
- * Round-robin allocator for the shader's fixed ripple array. Eight slots is
- * enough at the throttled spawn rate: the oldest slot is already dead of old
- * age by the time the newest overwrites it, so the array never truncates a ring
- * the eye can still see.
+ * Round-robin allocator for the shader's fixed ripple array. At the throttled
+ * spawn rate the oldest slot is already dead of old age when the newest
+ * overwrites it, so the array never truncates a ring the eye can still see.
  */
 export class RippleRing {
   private slot = 0;
@@ -360,9 +354,8 @@ export function rippleOrigin(
 export const SWAY_IDLE_MS = 3000;
 
 /**
- * `pointermove` never fires on a touch screen, so a phone would otherwise sit
- * perfectly still. The camera takes over whenever no mouse has been seen
- * lately, which covers both a touch device and an abandoned desktop tab.
+ * `pointermove` never fires on a touch screen, so the camera takes over whenever
+ * no mouse has been seen lately: a touch device or an abandoned desktop tab.
  */
 export function swayTarget(nowMs: number, lastFineMs: number): number {
   return nowMs - lastFineMs > SWAY_IDLE_MS ? 1 : 0;
@@ -374,21 +367,16 @@ export function swayOffset(t: number): { x: number; y: number } {
 }
 
 /**
- * The frame clock's largest step, in seconds. A longer gap is a pause the
- * scene slept through rather than motion anybody watched: a hidden tab, a
- * throttled background, a stalled main thread.
+ * The frame clock's largest step, in seconds. A longer gap is a pause the scene
+ * slept through rather than motion anybody watched.
  */
 export const MAX_STEP_SEC = 0.05;
 
 /**
- * The seconds a frame is allowed to advance the scene by.
- *
- * The elapsed time is accumulated from these rather than read off a
- * `THREE.Clock`, which offers no way to hold it across a pause: letting the
- * clock run hands the frame after a hidden tab the whole pause at once, and
- * `Clock.start()` resets its elapsed time to zero, so resuming from it sends
- * the scene back to the beginning instead. Either way the panes teleport and
- * every live ripple lands outside its own lifetime.
+ * The seconds a frame may advance the scene by. Elapsed time accumulates from
+ * these rather than off a `THREE.Clock`, which cannot be held across a pause:
+ * letting it run hands the frame after a hidden tab the whole pause at once, and
+ * `Clock.start()` resets elapsed time to zero. Either way the panes teleport.
  */
 export function clampStep(deltaSec: number): number {
   if (!(deltaSec > 0)) return 0;
@@ -416,9 +404,8 @@ function round(n: number, places: number): string {
 }
 
 /**
- * The gaussian sampled at 0, 1, 1.5 and 2.2 radii, which is where it has
- * effectively reached nothing. A CSS radial gradient has no gaussian, so the
- * fallback layer traces the shader's curve through these four stops.
+ * A CSS radial gradient has no gaussian, so the fallback layer traces the
+ * shader's curve through stops sampled where the gaussian reaches nothing.
  */
 const FALLBACK_STOPS: ReadonlyArray<[number, number]> = [
   [0, 1],
@@ -431,15 +418,11 @@ const FALLBACK_STOPS: ReadonlyArray<[number, number]> = [
 const FALLBACK_EXTENT = 2.2;
 
 /**
- * `background-image` for the pure-CSS layer painted under the canvas. Without
- * it the hero is an empty hole until the first WebGL frame lands; it is also
- * what the hero falls back to when WebGL never comes up, and what a scripts-off
- * visitor sees.
- *
+ * `background-image` for the pure-CSS layer under the canvas: what the hero shows
+ * before the first WebGL frame, when WebGL never comes up, and with scripts off.
  * The fields are circles in the shader's aspect-corrected space, so their radii
- * are fractions of the hero's HEIGHT and are written against `foldVar` rather
- * than as percentages, which would resolve against the box and squash the
- * circles into ellipses.
+ * are fractions of the hero's HEIGHT, written against `foldVar` rather than as
+ * percentages, which would resolve against the box and squash them into ellipses.
  */
 export function fallbackBackgroundImage(foldVar: string): string {
   const [lr, lg, lb] = LATTICE.tint;
@@ -474,20 +457,12 @@ export function fallbackBackgroundSize(): string {
 }
 
 /**
- * `background-position` for the same layers, which is what puts the CSS
- * lattice on the shader's grid rather than half a cell off it.
- *
- * The shader's dots sit where `mod(px + CELL * 0.5, CELL) - CELL * 0.5` is
- * zero, which is every whole multiple of the cell measured from the canvas's
- * BOTTOM-LEFT corner, because that is where `gl_FragCoord` counts from. The
- * CSS layer tiles from the top-left with the dot in the middle of its tile, so
- * the tiling is shifted by half a cell in x, and by the frame's height less
- * half a cell in y, to turn the top-left origin back into a bottom-left one.
- * Both shifts wrap modulo the cell, which is what a repeating background does
- * with any position, so the fold height need not be a multiple of anything.
- *
- * Without this the two layers disagree by half a cell and the lattice visibly
- * slides during the canvas crossfade.
+ * `background-position` for the same layers, which puts the CSS lattice on the
+ * shader's grid rather than half a cell off it, where the lattice would visibly
+ * slide during the canvas crossfade. The shader's dots sit at whole multiples of
+ * the cell from the canvas's BOTTOM-LEFT corner, where `gl_FragCoord` counts
+ * from, so the top-left CSS tiling is shifted by half a cell in x and by the
+ * frame's height less half a cell in y. Both shifts wrap modulo the cell.
  */
 export function fallbackBackgroundPosition(foldVar: string): string {
   const half = LATTICE.cellPx * (LATTICE_ANCHOR_PCT / 100);
@@ -502,11 +477,8 @@ export function inkCss(): string {
 }
 
 /** GLSL ES 1.00 has no implicit int-to-float conversion, so every generated
-    literal has to carry a decimal point even when it is a whole number.
-    Refuses anything JavaScript would print in exponential notation, below
-    about 1e-6 and at 1e21, because `1e-7.0` is not a GLSL literal: the scene's
-    constants are nowhere near either bound, so this is a guard on the domain
-    rather than a conversion. */
+    literal carries a decimal point. Refuses anything JavaScript would print in
+    exponential notation, because `1e-7.0` is not a GLSL literal. */
 export function glslFloat(n: number, places = 5): string {
   const s = round(n, places);
   if (!Number.isFinite(n) || /[eE]/.test(s)) {

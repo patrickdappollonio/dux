@@ -1,52 +1,39 @@
 import { createRequire } from "node:module"
 import { fileURLToPath } from "node:url"
 
-// The web UI figure on the homepage renders the REAL React components out of
-// `crates/dux-web/web/src` to static HTML at build time. Two things have to be
-// true for that import to resolve the way it does inside the web app itself:
+// The homepage figure imports the real React components out of
+// `crates/dux-web/web/src`, and two things must hold for that to resolve the way
+// it does inside the web app itself:
 //
-//   1. `@/…`, the web app's own alias for its `src` directory. Every one of
-//      its components imports through it, so without this nothing resolves.
+//   1. `@/…`, the web app's own alias for its `src` directory, which every one of
+//      its components imports through.
+//   2. One React, and specifically the WEB APP's copy. Its dependencies sit in
+//      its own `node_modules` and resolve React from there by plain Node
+//      resolution, which an alias declared here does not reach; two live copies
+//      set the hook dispatcher on one and read it from the other, surfacing as
+//      "cannot read properties of null (reading 'useContext')".
 //
-//   2. ONE React, and specifically the WEB APP's copy. The web app has its own
-//      `node_modules`, so its dependencies (`lucide-react`, `@base-ui/react`,
-//      `sonner`) resolve React from there by plain Node resolution, which an
-//      alias declared over here does not reach. Two live copies means React's
-//      hook dispatcher is set on one and read from the other, which surfaces as
-//      "cannot read properties of null (reading 'useContext')" the moment an
-//      icon renders. MEASURED, not assumed: aliasing these at the site's own
-//      copy (with `resolve.dedupe` and with every dependency inlined) still
-//      failed exactly that way, and pointing them at the web app's copy is what
-//      made the render succeed. So the arrow goes this direction.
-//
-// Both the Astro build (`astro.config.mjs`) and the drift-guard test runner
-// (`vitest.config.ts`) read this, so the figure cannot render one way in the
-// test and another way on the site.
+// The Astro build and the drift-guard test runner both read this, so the figure
+// cannot render one way in the test and another on the site.
 
 const here = (p) => fileURLToPath(new URL(p, import.meta.url))
 
 export const WEB_UI_SRC = here("../../../crates/dux-web/web/src")
 export const WEB_UI_MODULES = here("../../../crates/dux-web/web/node_modules")
-// The app's project root. The dev server has to be allowed to READ from here,
-// not just resolve into it: the components pull real assets out of the app's
-// dependencies (the variable font among them), and Vite refuses to serve a file
-// outside its own root unless the path is on the allow list.
+// The app's project root. The dev server must be allowed to READ from here, not
+// just resolve into it: the components pull real assets out of the app's
+// dependencies, and Vite refuses to serve a file outside its root unless allowed.
 export const WEB_UI_ROOT = here("../../../crates/dux-web/web")
 
 /**
- * Every React import, from this project AND from the app's components, points at
- * the APP's copy. That is what collapses them onto one React: the app's UI
- * packages (lucide-react, @base-ui/react and friends) sit in the app's
- * node_modules with a React beside them, and anything that lets them resolve it
- * themselves produces a second copy and a null dispatcher on `useContext`.
+ * Every React import, this project's and the app's components' alike, points at
+ * the APP's copy, which is what collapses them onto one React.
  *
- * Vite's dev SSR runner deliberately does not externalize an import that
- * matches an alias. Aliasing these CommonJS packages straight to files made
- * Vite inline those files as if they were ESM (`module is not defined`). The
- * site-owned bridge modules below become ESM facades which use Node's
- * `createRequire` to load the app's packages natively. That also preserves the
- * singleton: externalized app-side UI packages use Node resolution and reach
- * these exact same files.
+ * Vite's dev SSR runner does not externalize an import matching an alias, so
+ * aliasing these CommonJS packages straight to files makes Vite inline them as
+ * ESM (`module is not defined`). The bridge modules below are ESM facades using
+ * `createRequire` instead, which also preserves the singleton: externalized
+ * app-side packages use Node resolution and reach these same files.
  */
 const BRIDGE_ROOT = here("./web-ui-react-bridge")
 
@@ -74,14 +61,11 @@ export function webUiAlias() {
 }
 
 /**
- * Turn the site-owned bridge modules into SSR-safe ESM facades around the
- * app's CommonJS React entry points. Client/build transforms read the bridge
- * files normally, where Vite's production CommonJS pipeline handles them.
- *
- * Named exports are derived from the installed entry point so this stays in
- * lockstep with React upgrades instead of maintaining a handwritten export
- * list. `createRequire` and every target path are embedded in the facade, so
- * Node caches the same real files for the facade and for app-side packages.
+ * Turn the site-owned bridge modules into SSR-safe ESM facades around the app's
+ * CommonJS React entry points. Named exports are derived from the installed
+ * entry point, so this stays in lockstep with React upgrades, and `createRequire`
+ * plus every target path are embedded so Node caches the same real files for the
+ * facade and for app-side packages.
  */
 export function webUiReactBridge() {
   const require = createRequire(import.meta.url)

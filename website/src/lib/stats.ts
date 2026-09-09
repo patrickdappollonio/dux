@@ -1,12 +1,7 @@
-// Build-time project stats for the homepage: total release-asset downloads
-// (Homebrew pulls these too) and all-time npm downloads. Both are fetched once
-// at build and baked into the HTML. Either returns `null` on failure, and the
-// caller hides that counter.
-//
-// Hiding rather than failing is deliberate: these are third-party numbers, and
-// GitHub's ~60-requests-an-hour unauthenticated limit is a normal thing for a
-// contributor to hit. Every hidden counter is announced in the build log by
-// `fetchJson`, so nobody has to guess whether it was skipped or broken.
+// Build-time project stats for the homepage: release-asset downloads (Homebrew
+// pulls these too) and all-time npm downloads, fetched once and baked into the
+// HTML. Either returns `null` on failure and the caller hides that counter, which
+// `fetchJson` announces in the build log so a skipped one is never a mystery.
 import { fetchJson, githubHeaders } from "./remote-json";
 // @ts-expect-error - plain .mjs helper, shared with the plain-Node build scripts
 import { unexpectedShapeWarning } from "./remote-failure.mjs";
@@ -41,11 +36,9 @@ function isoDay(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-// First-publish day for a package, used as the lower bound when summing
-// all-time downloads. Falls back to the npm stats epoch when the registry
-// lookup fails or the package predates it. It still announces the skip, but its
-// stated effect is deliberately reassuring: the epoch bound produces the same
-// total, just with a few wasted empty windows, so no figure on the page moves.
+// First-publish day for a package, the lower bound when summing all-time
+// downloads. Falls back to the npm stats epoch, which produces the same total
+// through a few wasted empty windows, so no figure on the page moves.
 async function getNpmFirstPublish(pkg: string): Promise<string> {
   const data = await fetchJson<{ time?: { created?: string } }>(
     `https://registry.npmjs.org/${pkg}`,
@@ -59,17 +52,13 @@ async function getNpmFirstPublish(pkg: string): Promise<string> {
   return created && created > NPM_STATS_EPOCH ? created : NPM_STATS_EPOCH;
 }
 
-// Total npm downloads across the package's whole lifetime. npm's point API
-// caps each query at 18 months, so we sum consecutive (non-overlapping)
-// 17-month windows from the first-publish day up to today. Returns null only
-// when no window yields data, so the caller hides the counter just as it would
-// on a failed lookup.
+// npm's point API caps each query at 18 months, so lifetime downloads are summed
+// over consecutive non-overlapping windows from the first-publish day. Null only
+// when no window yields data, so the caller hides the counter.
 //
-// A PARTIAL result is the hazard: if some windows answer and others do not,
-// the figure is a real
-// number that is quietly too small, which is worse than a missing counter
-// because it looks trustworthy. `fetchJson` warns once for the endpoint, and
-// this adds a second line saying how much of the lifetime is actually counted.
+// A partial result is the hazard: some windows answering and others not gives a
+// real number that is quietly too small, which looks more trustworthy than a
+// missing counter, so this says how much of the lifetime was actually counted.
 export async function getNpmTotal(pkg: string): Promise<number | null> {
   const label = `all-time npm downloads for ${pkg}`;
   const effect = "The npm counter (and the combined Total) is hidden";

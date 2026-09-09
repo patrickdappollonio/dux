@@ -1,20 +1,9 @@
 ---
-// Click-to-maximize for docs screenshots.
-//
-// A screenshot the prose column had to SHRINK is the only one worth opening:
-// there are pixels the reader cannot see. Those images (and only those) get
-// wrapped in a real <button> with a zoom-in cursor and a corner affordance, and
-// a click opens the one <dialog> below FITTED, showing the whole screenshot,
-// with the readout naming the real percentage of natural size and natural size
-// a double click (or a snapping zoom step) away. An image that already fits at
-// 1:1 is left exactly as it was: no cursor change, no affordance, no click
-// behaviour, because there is nothing to reveal.
-//
-// The arithmetic lives in src/lib/image-zoom.ts (unit-tested without a
-// browser); the script here is wiring only. Styling is src/styles/image-zoom.css
-// and reads the site tokens.
-//
-// Rendered by DocsLayout, so it exists once per docs page.
+// Click-to-maximize for docs screenshots. Only an image the prose column had to
+// shrink is armed, because only that one has pixels the reader cannot see; an
+// image already at 1:1 keeps no cursor change, no affordance and no click
+// behaviour. The arithmetic lives in src/lib/image-zoom.ts and the script here is
+// wiring only. Rendered by DocsLayout, so it exists once per docs page.
 import "../styles/image-zoom.css";
 ---
 
@@ -128,11 +117,9 @@ import "../styles/image-zoom.css";
     let bounds: ScaleBounds = boundsFor(1);
     let opener: HTMLElement | null = null;
 
-    // ── Viewer ────────────────────────────────────────────────────────────
     // The space a fitted image has to live in: the stage, less the toolbar it
-    // would otherwise slide under and the caption below it. Both are measured
-    // rather than guessed, so an empty caption (an image with no alt) gives its
-    // room back.
+    // would otherwise slide under and the caption below it. Both are measured, so
+    // an empty caption gives its room back.
     const FIT_GAP = 16;
     const availableBox = () => {
       const box = stage.getBoundingClientRect();
@@ -203,10 +190,8 @@ import "../styles/image-zoom.css";
 
     const open = (source: HTMLImageElement, trigger: HTMLElement) => {
       opener = trigger;
-      // Deliberately the <img> src, never the <picture>'s webp <source>: the
-      // viewer exists to show real pixels, so it loads the original raster the
-      // markdown named. (`currentSrc` would hand back the webp the browser
-      // picked for the page.)
+      // Deliberately the <img> src, never `currentSrc`, which hands back the webp
+      // the browser picked: the viewer exists to show the original raster.
       const src = source.getAttribute("src") ?? source.src;
       caption.textContent = source.alt ?? "";
       viewer.alt = source.alt ?? "";

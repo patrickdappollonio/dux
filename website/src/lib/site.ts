@@ -1,14 +1,9 @@
-// The site-wide title and meta description, in one place.
+// The site-wide title and meta description, imported by both Layout.astro's prop
+// defaults and index.astro so every page describes the product one way.
 //
-// Layout.astro's prop defaults and index.astro both import from here, so the
-// homepage and every fallback page describe the product one way.
-//
-// What the description has to get right, in this order: what dux does, that it
-// has TWO front ends over one workspace (a terminal UI and a web UI, both first
-// class, neither one the other's remote control), and the no-protocol-layer
-// point. The last one is the actual differentiator, so it never gets cut for
-// length. Reaching the workspace from a phone is a consequence of the web front
-// end, so it rides along at the end rather than leading.
+// The description must say, in this order: what dux does, that it has two front
+// ends over one workspace, and the no-protocol-layer point, which is the actual
+// differentiator and never gets cut for length.
 
 export const SITE_TITLE =
   "dux: run multiple Claude Code, Codex & Copilot agents in parallel, terminal or browser | getdux.app";

@@ -1,21 +1,9 @@
-// THE ONE STYLISED PIECE OF THE FIGURE, and it is stylised because it cannot be
-// anything else.
-//
-// Everything else on this page is the real dux component, rendered from
-// `crates/dux-web/web/src`. The terminal INTERIOR is not, and no amount of work
-// will make it so: the real pane is xterm.js, which needs a live DOM to measure
-// a character cell against and a live WebSocket streaming PTY bytes to have
-// anything to draw. A build-time render has neither. So this block stands in for
-// the pane's contents, in the same idiom the rest of the site already uses to
-// draw a terminal.
-//
-// This is not a gap waiting to be closed. Do not "fix" it by pulling xterm in or
-// by hydrating this figure: the whole point of the figure is that it ships zero
-// JavaScript. The chrome AROUND this block (the tab strip, the PR lane, the
-// header, the sidebar, the changed-files pane) is the genuine article.
-//
-// The transcript is invented, and matches the fabricated workspace in
-// `workspace.ts`: an agent partway through adding a payment retry.
+// The one stylised piece of the figure, and permanently so: the real terminal
+// pane is xterm.js, which needs a live DOM to measure a character cell against
+// and a live WebSocket streaming PTY bytes, and a build-time render has neither.
+// Do not close the gap by pulling xterm in or hydrating the figure, which ships
+// zero JavaScript. The transcript is invented and matches the fabricated
+// workspace in `workspace.ts`.
 
 interface Line {
   /** Rendered dim, as a shell/agent prompt or chrome. */

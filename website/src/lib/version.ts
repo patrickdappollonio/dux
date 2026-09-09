@@ -1,40 +1,16 @@
-// The version the site advertises, and the "what's new" stamp that sits next to
-// it. Both live here because both are release-cycle values, so a release only
-// ever has one file to think about.
+// The version the site advertises and the "what's new" stamp beside it: both are
+// release-cycle values, so a release has one file to think about.
 //
-// WHY THIS IS DERIVED AND NOT A CONSTANT
+// The version is read from the release itself at build time rather than written
+// down anywhere: the version in Cargo.toml and package.json are placeholders the
+// release process does not bump, and `git describe` needs tags the deploy
+// workflow's checkout does not guarantee. The site deploys on `release:
+// published`, so the latest release is always the one this page announces.
 //
-// Every hardcoded alternative has the same failure mode: it goes wrong silently,
-// because nothing breaks when a number is merely out of date.
-//
-// The candidates, and why they lost:
-//   - Cargo.toml's `[workspace.package] version` is "0.1.0", a placeholder that
-//     the release process does not bump. It is not the release version.
-//   - npm/package.json is "0.0.0-dev", same story.
-//   - `git describe` needs tags in the checkout. `.github/workflows/pages.yml`
-//     checks out a single ref with actions/checkout, so tag availability is an
-//     implementation detail of the action, not something the site can rely on.
-//   - A named constant here still needs a human to remember it.
-//
-// So the version is READ FROM THE RELEASE ITSELF, at build time, through the
-// same `fetchJson` helper the star count and download counters already use. The
-// site deploys on the `release: published` event (see
-// .github/workflows/pages.yml), so by the time this build runs, the release this
-// page is announcing is already the repository's latest release. There is
-// nothing left to forget.
-//
-// The failure mode is deliberately "show nothing", not "show something old":
-// when the lookup fails (offline build, rate limit, timeout) the caller drops
-// the version segment from the pill entirely. The pill can be missing a version.
-// It can never display a wrong one. It does not fail the build either, because
-// the release lives on GitHub's API and their rate limiter is not a reason a
-// contributor cannot build this site. What it DOES do is say so: every skipped
-// lookup prints a line naming the endpoint and the fix, so a pill with no
-// version is a reported outcome rather than a silent one.
-//
-// Known limitation: GitHub's `releases/latest` endpoint skips drafts and
-// prereleases. Publish a version as a prerelease and the site keeps showing the
-// previous stable one, which is the correct answer for a marketing page anyway.
+// A failed lookup drops the version segment from the pill entirely: the pill can
+// be missing a version, never display a wrong one, and never fail the build.
+// GitHub's `releases/latest` skips drafts and prereleases, so publishing a
+// prerelease keeps the previous stable version on the page.
 import { fetchJson, githubHeaders } from "./remote-json";
 // @ts-expect-error - plain .mjs helper, shared with the plain-Node build scripts
 import { unexpectedShapeWarning } from "./remote-failure.mjs";
@@ -75,20 +51,10 @@ export async function getLatestVersion(repo: string): Promise<string | null> {
 }
 
 /**
- * The "what's new in this release" stamp on the hero headline.
- *
- * RETIRING IT: "now with X" is true for one release and quietly false forever
- * after. When the web UI stops being news (roughly one release after v0.7.0, or
- * whenever the next headline feature lands), do one of two things and nothing
- * else:
- *   - point it at the new thing, keeping the same "now with …" shape, or
- *   - set this to `null`, which removes the badge from every place it renders
- *     with no markup changes.
- *
- * IT ANNOUNCES THE SURFACE, NOT THE TRAVEL. dux has two front ends over one
- * workspace, both first class; reaching it from a phone is a consequence
- * of the web UI existing, not what the release added, so the badge names the
- * surface.
+ * The "what's new in this release" stamp on the hero headline. It names the
+ * surface a release added, never how the surface is reached. `null` retires the
+ * badge from every place it renders with no markup changes, which is the exit
+ * once "now with …" stops being true.
  */
 export const WHATS_NEW_BADGE: string | null = "now with a web UI";
 

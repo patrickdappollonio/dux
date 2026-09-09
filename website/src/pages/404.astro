@@ -1,24 +1,15 @@
 ---
-// Custom 404. Astro emits this route as dist/404.html, which is exactly the
-// file GitHub Pages serves for any unknown path, so no extra config is needed.
+// Astro emits this route as dist/404.html, the file GitHub Pages serves for any
+// unknown path, so no extra config is needed.
 //
-// Layout choice: the general Layout plus Header/Footer, NOT DocsLayout. A 404
-// can be reached from anywhere (a stale blog link, a mistyped marketing URL, a
-// docs page that moved), so the docs sidebar would be both wrong context and a
-// false promise that the missing page was a docs page. The general chrome gives
-// a lost visitor the whole nav, the search button, and the footer links.
+// The general Layout, deliberately not DocsLayout: a 404 is reachable from
+// anywhere, so a docs sidebar would be both wrong context and a false promise
+// that the missing page was a docs page. It needs no sitemap filter either
+// (@astrojs/sitemap hard-excludes the 404 and 500 routes) and is absent from the
+// Pagefind index, which only covers pages carrying `data-pagefind-body`.
 //
-// Utility page: noindex (Layout emits the robots meta) and no structured data.
-// It also stays out of the sitemap for free: @astrojs/sitemap hard-excludes the
-// 404 and 500 routes (STATUS_CODE_PAGES in its index.js), so no filter entry is
-// needed in astro.config.mjs. It is likewise absent from the Pagefind index,
-// because only pages carrying `data-pagefind-body` are indexed and that marker
-// lives in DocsLayout/BlogLayout, not here.
-//
-// Search is the global DocsSearch modal already mounted once in Layout.astro.
-// Nothing is re-implemented: the button below just carries `data-open-search`,
-// the attribute DocsSearch's document-level click handler listens for (the same
-// hook the header button uses). Cmd/Ctrl-K and "/" work here too.
+// The search button carries `data-open-search`, the attribute DocsSearch's
+// document-level click handler listens for, rather than re-implementing search.
 import Layout from "../layouts/Layout.astro";
 import Header from "../components/Header.astro";
 import Footer from "../components/Footer.astro";
@@ -32,10 +23,8 @@ const description =
 <Layout title={title} description={description} noIndex emitStructuredData={false}>
   <Header />
   <main>
-    {/* The newsletter status pages already established this shell (grid
-        background, centered card, pill + heading + body + actions + footnote).
-        A 404 is the same kind of page, so it reuses the component as-is rather
-        than growing a second one. */}
+    {/* Reuses the newsletter status pages' shell as-is rather than growing a
+        second one: a 404 is the same kind of page. */}
     <NewsletterStatus pill="▸ error 404">
       <Fragment slot="title">
         There's no <span class="text-[color:var(--color-accent)]">office</span> at
@@ -56,10 +45,9 @@ const description =
           likely a typo, a link that aged badly, or a page that has since moved.
         </p>
 
-        {/* The recovery path, and the reason this page exists: the docs and the
-            blog are both fully searchable, so a page that moved is usually one
-            query away. Styled as a search field rather than a plain button so
-            it reads as the primary thing to do here. */}
+        {/* The recovery path: the docs and the blog are both searchable, so a
+            moved page is usually one query away. Styled as a search field, not a
+            button, so it reads as the primary thing to do here. */}
         <button
           type="button"
           data-open-search

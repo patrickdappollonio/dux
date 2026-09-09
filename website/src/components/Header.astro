@@ -23,12 +23,9 @@ const nav = [
       </span>
     </a>
 
-    {/* Opens the global search modal (docs + blog; see DocsSearch.astro). Also
-        bound to Cmd/Ctrl-K and "/". Icon-only on small screens; the label and
-        shortcut hint appear at lg. `lg:mx-auto` gives it auto margins on both
-        sides so it centres in the free space between the logo and the nav
-        (without forcing either to a fixed width and squeezing the links); on
-        small screens `ml-auto` parks it next to the hamburger. */}
+    {/* Opens the global search modal, which Cmd/Ctrl-K and "/" also reach.
+        `lg:mx-auto` centres it in the free space between the logo and the nav
+        without forcing either to a fixed width and squeezing the links. */}
     <button
       type="button"
       data-open-search
@@ -56,10 +53,8 @@ const nav = [
       >
     </button>
 
-    {/* Right cluster: the desktop nav and (on small screens) the hamburger.
-        Natural width — the search button's auto margins center it in the gap to
-        the left of this cluster, so the nav keeps its full width and the links
-        never get squeezed. */}
+    {/* Right cluster, at natural width: the search button's auto margins centre
+        it in the gap to the left, so the nav keeps its full width. */}
     <div class="flex items-center gap-1.5">
       {/* Full inline nav — desktop only. Below lg it collapses into the
           hamburger menu so the bar never crowds or wraps. */}

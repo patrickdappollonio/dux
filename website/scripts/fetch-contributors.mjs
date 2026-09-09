@@ -1,31 +1,12 @@
 #!/usr/bin/env node
-// Build step / manual refresh for the homepage contributor list.
+// Build step and manual refresh (`npm run contributors`) for the homepage
+// contributor list: fetches contributors from the GitHub API, resizes each
+// avatar, and rewrites src/data/contributors.json and public/contributors/.
 //
-// Fetches the repo's contributors from the GitHub API, downloads and resizes
-// each avatar, and rewrites the committed snapshot:
-//   - src/data/contributors.json     (login + profile URL + local avatar path)
-//   - public/contributors/<login>.png (80px avatar, served at /contributors/…)
-//
-// Strategy: fresh-with-vendored-fallback. On a fully successful refresh it
-// overwrites the tracked files (commit the diff to publish). On ANY failure
-// (network blocked, rate limited, a single avatar that won't download) it
-// leaves the committed snapshot untouched and exits 0, so a flaky API never
-// fails the build: the previously committed snapshot is the fallback. The
-// refresh is all-or-nothing, so nothing is written until every avatar is in
-// hand.
-//
-// The fallback is deliberate. GitHub allows roughly 60 unauthenticated API
-// requests an hour per IP and this script pages through the contributor list,
-// so being rate limited here is ordinary rather than exceptional, and stopping
-// a contributor's build over someone else's quota would be the wrong trade.
-// What it must never do is fall back QUIETLY: every skipped refresh prints why,
-// including the plain statement that a 403 from the GitHub API is rate limiting
-// rather than a permissions problem, so a stale snapshot is a reported outcome.
-// The wording is shared with the site's own build-time lookups (see
-// src/lib/remote-failure.mjs).
-//
-// Run manually with `npm run contributors`; runs automatically in `npm run
-// build` before generate-webp/astro build.
+// The refresh is all-or-nothing: on any failure it leaves the committed snapshot
+// untouched and exits 0, so a rate limit never fails a contributor's build. It
+// must never fall back quietly, though, so every skipped refresh prints why, in
+// the wording shared with the site's own lookups (src/lib/remote-failure.mjs).
 
 import sharp from "sharp";
 import { mkdir, writeFile, readdir, rm } from "node:fs/promises";
@@ -64,11 +45,9 @@ function hasToken() {
   return Boolean(process.env.GH_TOKEN || process.env.GITHUB_TOKEN);
 }
 
-// Fetch with a hard timeout that also covers reading the body: `read` consumes
-// the response (e.g. r.json() / r.arrayBuffer()) while the abort timer is still
-// armed, so a stalled body can't hang the build past the deadline. Returns what
-// `read` produced, or null on any failure, explaining the HTTP status or error
-// reason so a kept-stale snapshot is diagnosable straight from the build log.
+// The timeout covers reading the body too: `read` consumes the response while
+// the abort timer is still armed, so a stalled body cannot hang the build past
+// the deadline. Null on any failure, with the status or reason printed.
 async function fetchWithTimeout(url, headers, read, label) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -159,12 +138,9 @@ async function downloadAvatar(avatarUrl, login) {
   }
 }
 
-// Remove avatar PNGs that are no longer in the current contributor set, so a
-// contributor who drops off the list doesn't leave a stale file behind.
-// `keepLogins` holds lowercased logins and the comparison is case-insensitive:
-// GitHub logins are case-insensitive, so a casing change between runs must not
-// delete the file the new snapshot references (notably on case-insensitive
-// macOS filesystems, where it is the very same file).
+// Remove avatar PNGs no longer in the contributor set. `keepLogins` is lowercased
+// and the comparison is case-insensitive: GitHub logins are, so a casing change
+// between runs must not delete the file the new snapshot references.
 async function pruneStaleAvatars(keepLogins) {
   let entries;
   try {
@@ -233,9 +209,8 @@ async function main() {
   );
 }
 
-// Any unexpected error (disk full, permission denied, etc.) must not fail the
-// build — the whole point is that a bad refresh falls back to the committed
-// snapshot. Catch it, warn, and exit 0 so the `&&` build chain continues.
+// A bad refresh falls back to the committed snapshot, so any unexpected error
+// (disk full, permission denied) warns and exits 0 to keep the `&&` chain going.
 await main().catch((e) => {
   console.warn(
     `fetch-contributors: unexpected local error (${e?.message ?? e}). This is not a network ` +

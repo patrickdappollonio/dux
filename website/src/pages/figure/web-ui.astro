@@ -1,21 +1,13 @@
 ---
-// The web-UI figure, as its own document.
-//
-// This page exists to be embedded by `WebUI.astro` on the homepage. It is not a
-// destination: it carries `noindex`, it is filtered out of the sitemap
-// (`astro.config.mjs`), and it deliberately does NOT use `Layout.astro`: it
-// must not load the marketing site's stylesheet, only the app's own (see
-// `figure.css` for why the two cannot share a document).
-//
-// What renders here is the dux web UI's REAL React components, out of
-// `crates/dux-web/web/src`, against a fabricated workspace seeded into the real
-// store. There is no `client:*` directive anywhere on this page, so Astro
-// renders the tree at build time and ships ZERO JavaScript: the visitor gets
-// markup and CSS. It is the actual UI, simply not photographed.
+// The web-UI figure as its own document, embedded by `Manifesto.astro` on the
+// homepage rather than visited: it carries `noindex` and is filtered out of the
+// sitemap. Deliberately not `Layout.astro`, because it must load the app's
+// stylesheet and not the marketing site's (see `figure.css` for why the two
+// cannot share a document). No `client:*` directive anywhere, so the tree renders
+// at build time and ships zero JavaScript.
 import "../../figure/figure.css";
 // The markup is produced by `scripts/render-figure.mjs`, a `prep` step that runs
-// before `astro dev` and `astro build` alike, the same way contributor data and
-// the webp images are produced. The page reads the artifact.
+// before `astro dev` and `astro build` alike. The page reads the artifact.
 import figure from "../../figure/figure.html?raw";
 ---
 

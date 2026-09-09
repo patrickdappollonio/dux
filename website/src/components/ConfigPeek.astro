@@ -1,8 +1,7 @@
 ---
-// A taste of what the config file feels like. Reinforces "config IS the docs".
-// The TOML snippet is hand-tokenized to HTML so we can colorize without a
-// syntax-highlight runtime and without fighting Astro's JSX brace parser
-// over literal "${...}" sequences inside the config text.
+// The TOML snippet is hand-tokenized to HTML so it colorizes without a
+// syntax-highlight runtime and without Astro's JSX brace parser reading the
+// literal "${...}" sequences inside the config text.
 
 const dim = (s: string) => `<span style="color:var(--color-dim)">${s}</span>`;
 const accent = (s: string) => `<span style="color:var(--color-accent)">${s}</span>`;

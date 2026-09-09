@@ -1,10 +1,7 @@
 ---
-// A Graphviz diagram rendered to inline SVG at build time.
-//
-// The Markdown side gets the same thing from a ```dot fence (see
-// src/lib/remark-graphviz.mjs); this is the component for .astro pages, so the
-// homepage and the docs draw through one renderer and share one stylesheet.
-// Nothing ships to the browser but the SVG.
+// A Graphviz diagram rendered to inline SVG at build time: the .astro counterpart
+// of the ```dot fence in src/lib/remark-graphviz.mjs, so the homepage and the docs
+// draw through one renderer and share one stylesheet.
 import { renderDiagram } from "../lib/graphviz.mjs";
 
 interface Props {

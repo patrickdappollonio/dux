@@ -1,83 +1,30 @@
 ---
-// The surfaces section: dux's three-pane shape, and the two front ends that
-// draw it. It sits directly under the asciinema demo so the terminal UI and the
-// web UI are met as a pair rather than as a product and an add-on.
+// The surface switch is two radio inputs plus `:has()` in the scoped styles, so
+// it costs no JavaScript; every rule that hides a panel is an override, so a
+// browser without `:has()` shows a panel rather than blanking.
 //
-// THE FIGURE IS SWITCHABLE, AND THE SWITCH COSTS NO JAVASCRIPT.
-//
-// Two radio inputs wrapped in their own labels, plus `:has()` in the scoped
-// style block below, do the whole job. That buys three things a scripted tab
-// strip does not: the panel is correct in the HTML the server sends, arrow-key
-// navigation between the two is the browser's own radio-group behaviour, and
-// there is nothing to fail. The chip styling is lifted from InstallTabs.astro so
-// the control reads as the same control the install section uses.
-//
-// Because every rule that hides a panel is an override, a browser without
-// `:has()` shows the terminal panel and never blanks: the default is the plain
-// cascade, not a JavaScript boot step.
-//
-// TERMINAL PANEL: the real dux screenshot (assets/dux-screenshot.svg, copied
-// into public/ at build time), not a CSS approximation.
-//
-// WEB PANEL: NOT A SCREENSHOT AND NOT A DRAWING.
-//
-// It is the dux web UI's own React components, imported out of
-// `crates/dux-web/web/src` and rendered to static HTML while this site builds,
-// against a fabricated workspace seeded into the app's real store. It ships zero
-// JavaScript. Live at /figure/web-ui (noindex, out of the sitemap) and embedded
-// below in an iframe; see `src/figure/` for the whole apparatus and
-// `src/figure/figure.css` for why it has to be its own document.
-//
-// A screenshot was the obvious alternative and was turned down on purpose: a
-// capture goes stale the week the UI changes and needs a person in the loop
-// every time. This cannot go stale, because there is no copy of the UI here to
-// go stale. If a component changes, the figure changes with it on the next
-// build, and if a component stops rendering standalone the drift guard in
-// `src/figure/figure.test.tsx` fails the build rather than shipping a blank box.
-//
-// The web panel carries no caption. The tab above it already names it, the prose
-// says what it is, and a line of small type claiming authenticity would be
-// protesting too much.
-//
-// THE PHONE SLOT IS STILL A REAL CAPTURE, AND STILL OPTIONAL. The figure is
-// desktop chrome; the mobile shell is a different composition and its centre is
-// a live terminal, so a genuine capture is the honest way to show it.
-// `publicPng` returns null when the file is absent and the whole block is
-// skipped, so the panel renders complete without it:
-//
-//   public/dux-web-phone.png    a PORTRAIT capture of the mobile shell on a
-//                               phone, ideally showing an agent's terminal with
-//                               the accessory bar and compose bar. Target
-//                               1170x2532 (iPhone native).
-//
-// PNG only (the size is read from the PNG header). `npm run prep` writes a
-// `.webp` sibling automatically, and this picks it up when present.
+// The web panel is the dux web UI's own React components rendered to static HTML
+// at build time (see `src/figure/`), embedded from /figure/web-ui in an iframe.
+// The phone slot is an optional real capture: `publicPng` returns null when
+// public/dux-web-phone.png is absent and the whole block is skipped. PNG only,
+// because the size is read from the PNG header.
 import { publicPng } from "../lib/public-image";
 
 const phone = publicPng("dux-web-phone");
 
-// The embedded figure's logical viewport. The iframe is laid out at exactly this
-// size and then scaled down to whatever width it is given, entirely in CSS
-// (container query units), so the app always renders its DESKTOP layout no
-// matter how narrow the visitor's screen is.
-//
-// The two numbers are declared once, here, and reach the CSS as custom
-// properties on the figure's wrapper. Deliberately NOT `define:vars`, which
-// stamps the variables onto EVERY top-level element the component renders: it
-// works, but it repeats the pair on a few dozen unrelated tags in the shipped
-// HTML when exactly one element needs them.
+// The iframe's logical viewport: it is laid out at exactly this size and scaled
+// down in CSS, so the app always renders its desktop layout however narrow the
+// visitor's screen is. Reaches the CSS as custom properties on the figure's
+// wrapper, not through `define:vars`, which stamps the pair onto every
+// top-level element the component renders.
 const FIGURE_W = 1440;
 const FIGURE_H = 900;
 const figureVars = `--figure-w: ${FIGURE_W}; --figure-h: ${FIGURE_H};`;
 
-// One class list for both tabs so the two can never drift apart. The rest state
-// is here; the checked and focused states live in the scoped stylesheet, because
-// they hang off `:has()` rather than off a class this file can toggle.
-//
-// `min-h-10` is 40px, the same floor the dux web UI holds its own controls to on
-// a phone, and the pair stretches to fill the bar's width below `sm` so the
-// targets are as large as the screen allows. This is the figure's primary
-// control, so it is sized like one rather than like a caption.
+// One class list for both tabs so the two cannot drift; the checked and focused
+// states live in the scoped stylesheet, because they hang off `:has()` rather
+// than off a class this file can toggle. The minimum height is a touch-target
+// floor: this is the figure's primary control, not a caption.
 const tab =
   "surface-tab relative -mb-px inline-flex min-h-11 flex-1 cursor-pointer items-center justify-center rounded-t-lg border border-transparent px-3 text-[13px] font-medium text-[color:var(--color-muted)] transition-colors hover:bg-[color:var(--color-panel)] hover:text-[color:var(--color-text)] sm:flex-none sm:px-5 sm:text-sm";
 ---
@@ -140,24 +87,16 @@ const tab =
     </div>
 
     <div class="surface-switch mt-10">
-      {/* The chrome bar is the install section's bar with the same dots, label
-          treatment and chip shapes, rebuilt from the same utilities rather than
-          reusing `.term-bar`: that class carries a bottom-only border because it
-          caps a `.term` frame, and this bar stands alone above a panel that
-          brings its own rounded border and glow. The label hides below `sm` so
-          the two chips keep their full width on a phone. */}
-      {/* ONE box. `.term` is the site's own window primitive and supplies the
-          single border, the single rounding, the overflow clip and the glow, so
-          the bar and the figure share a frame instead of being two objects with
-          a gap between them. Nothing inside carries its own border, rounding or
-          shadow, and nothing inside carries padding: the figure meets the bar's
-          bottom edge and the frame's own left, right and bottom edges. */}
+      {/* Rebuilt from the install bar's utilities rather than reusing `.term-bar`,
+          which carries a bottom-only border because it caps a `.term` frame; this
+          bar stands above a panel bringing its own border and glow. */}
+      {/* One box: `.term` supplies the single border, rounding, overflow clip and
+          glow, so nothing inside carries its own border, rounding, shadow or
+          padding and the figure meets the bar and the frame's own edges. */}
       <div class="surface-window">
         {/* Not `.term-bar`: that class centres its children inside `py-2`, and
             these tabs have to reach the bar's bottom edge to join the panel
-            below them. Same dots, same background, same divider, tabs sitting on
-            the divider instead of floating above it. The title text hides below
-            `sm` so the two tabs keep their width on a phone. */}
+            below them, sitting on the divider rather than floating above it. */}
         <div class="surface-window__bar">
           <div class="surface-window__title">
             <span class="term-dot" style="background:#ff5f56"></span>
@@ -196,22 +135,15 @@ const tab =
 
           <div class="surface-panel" data-surface="web">
             <div class="webui-figure" style={figureVars}>
-              {/* Presented as a picture, deliberately: the sandbox withholds
-                  scripts, form submission and navigation, and the pointer and
-                  tab stops are turned off in CSS, so nothing inside is
-                  clickable and nothing can be tabbed into. The prose above
-                  carries the meaning for anyone not looking at it.
+              {/* Presented as a picture: the sandbox withholds scripts, form
+                  submission and navigation, and CSS turns off the pointer and the
+                  tab stops, so nothing inside is clickable or reachable.
 
                   `allow-same-origin` is granted, and only that. A bare
-                  `sandbox=""` gives the frame an OPAQUE origin, which makes
-                  every subresource request cross-origin. In production that is
-                  survivable because the stylesheet is a plain file, but the dev
-                  server hands CSS over as a JavaScript module, so the request
-                  was refused outright and the figure rendered with no styling
-                  at all: no theme, and the wordmark image apparently missing.
-                  Granting the origin back does NOT make the frame interactive,
-                  because `allow-scripts` is still withheld and nothing can run
-                  inside it. */}
+                  `sandbox=""` gives the frame an opaque origin, making every
+                  subresource request cross-origin, which the dev server refuses
+                  because it hands CSS over as a JavaScript module. The frame stays
+                  non-interactive regardless, because `allow-scripts` is withheld. */}
               <iframe
                 src="/figure/web-ui"
                 title="The dux web UI, rendered from its own components"
@@ -258,21 +190,11 @@ const tab =
 </section>
 
 <style>
-  /* A WINDOW, built for this and nothing else.
-     It deliberately does NOT reuse `.term`, the site's terminal primitive. That
-     class is a frame that expects to sit around a padded body, so a title bar
-     plus a figure inside it rendered as a bar with a gap beneath it, which is
-     the half-committed look this replaces. A window is one object: one border,
-     one radius, one shadow, and content that meets its own edges.
-
-     `overflow: hidden` is what actually enforces it. The radius clips whatever
-     is inside, so the figure cannot poke a square corner through a round frame
-     and nothing inside needs its own rounding.
-
-     The margin reset on the body's children is not defensive tidiness. The
-     figure, the SVG and the iframe wrapper all arrive with their own spacing
-     from elsewhere, and any one of them reintroduces the gap. The frame refuses
-     it once, here, rather than asking every future child to remember. */
+  /* Deliberately not `.term`, the site's terminal primitive: that class frames a
+     padded body, and a window is one object whose content meets its own edges.
+     `overflow: hidden` enforces it, so nothing inside needs its own rounding,
+     and the margin reset absorbs the spacing the figure, the SVG and the iframe
+     wrapper each arrive with. */
   .surface-window {
     display: flex;
     flex-direction: column;
@@ -289,17 +211,9 @@ const tab =
   /* The title bar. `align-items: flex-end` is load-bearing: it drops the tabs
      onto the bar's bottom edge so the active one can join the panel below,
      which is the whole reason the tabs live in the bar rather than above it. */
-  /* The bar carries ONE inset, on the left and right, and no vertical padding
-     of its own. Its height comes from the tabs, which reach its bottom edge so
-     the active one can join the panel.
-
-     The lights and the title then CENTRE themselves in whatever height that
-     produces, rather than being pushed into place by a hand-picked offset. The
-     previous version padded the bar 8px at the top, 12px at the sides and 0 at
-     the bottom, then shoved the lights up 14px with their own padding: four
-     numbers, none of them agreeing, which is why the cluster never sat evenly.
-     Now there is one number for the horizontal inset and the vertical is
-     symmetric by construction, so it stays even if the tabs change size. */
+  /* One horizontal inset and no vertical padding of its own: the bar's height
+     comes from the tabs, and the lights and title centre themselves in whatever
+     that produces, so the cluster stays even if the tabs change size. */
   .surface-window__bar {
     display: flex;
     flex-wrap: wrap;
@@ -339,19 +253,11 @@ const tab =
     display: block;
   }
 
-  /* The switch. Every rule here is an OVERRIDE of a panel that is visible by
-     default, so the WEB panel survives anything: no `:has()` support, no
-     stylesheet at all, no JavaScript (there is none to miss).
-
-     The web surface is the default deliberately. The section directly above
-     already shows the terminal UI, as a recorded cast, so opening on the
-     terminal again would spend this figure repeating it. Defaulting to the web
-     panel also means its iframe is not `display: none` at load, so it starts
-     fetching immediately instead of on the first click.
-
-     Anchored on the class, not on the attribute alone: Astro scopes a selector
-     by hanging its component id off a class or an element, and a lone
-     `[data-surface="web"]` picks up no id at all and ships as a page-wide rule. */
+  /* Every rule is an override of a panel visible by default, so the web panel
+     survives no `:has()` support and no stylesheet at all, and its iframe is
+     never `display: none` at load. Anchored on the class, never the bare
+     attribute: Astro scopes a selector by hanging its component id off a class
+     or an element, so a lone `[data-surface="web"]` ships as a page-wide rule. */
   .surface-panel[data-surface="tui"] {
     display: none;
   }
@@ -364,10 +270,9 @@ const tab =
     display: block;
   }
 
-  /* The radio itself is the accessible control and stays focusable and
-     keyboard-operable; it is only visually replaced by its own tab. `sr-only`
-     would do this too, but the tab has to be the thing the focus ring lands on,
-     so the input is collapsed inside it rather than moved out of it. */
+  /* The radio stays the focusable control and is only visually replaced by its
+     tab. Collapsed inside the tab rather than moved out with `sr-only`, because
+     the tab has to be what the focus ring lands on. */
   .surface-radio {
     position: absolute;
     width: 1px;
@@ -376,15 +281,10 @@ const tab =
     pointer-events: none;
   }
 
-  /* The active tab JOINS THE PANEL. It takes the panel's own background, draws
-     the frame's border up its sides, and then paints its bottom border in that
-     same background over the bar's divider (the `-mb-px` in the tab's class list
-     is what puts it on top of the line). The result is a tab with no floor,
-     opening into the content below it.
-
-     That is the primary signal and it is a SHAPE, not a colour: the active tab
-     is a different silhouette, sits on a different background, and is the only
-     one connected to the panel. The accent text is a second, redundant cue. */
+  /* The active tab joins the panel: it paints its bottom border in the panel's
+     own background over the bar's divider, which the `-mb-px` in the tab's class
+     list puts it on top of. Shape is the primary signal here, not colour; the
+     accent text is a second, redundant cue. */
   .surface-tab:has(.surface-radio:checked) {
     background: var(--color-ink);
     border-color: var(--color-border);
@@ -401,28 +301,17 @@ const tab =
     outline-offset: -2px;
   }
 
-  /* `--figure-w` / `--figure-h` are set inline on `.webui-figure` from the
-     single pair of constants in the frontmatter, so the iframe's own width and
-     height attributes and this scaling can never disagree.
-
-     The wrapper's aspect-ratio reserves the right box before the lazy iframe
-     loads, so nothing on the page jumps when it arrives.
-
-     Presentation only: the frame is sandboxed and aria-hidden, and these two
-     rules make sure a pointer or a caret cannot get into it either. */
-  /* The frame is a PICTURE of the app, not a small viewport it lays out into.
-     The iframe is given the app's real desktop size and then scaled down to
-     whatever room the box has, so a phone shows the whole desktop UI shrunk,
-     the way a screenshot would, rather than the app re-flowing into a letterbox.
-
-     `--figure-scale` is set by the script below, because the factor is a ratio
-     of two widths and CSS cannot divide one length by another. The media-query
-     values are the no-JavaScript floor: roughly right at each size, replaced by
-     the exact value the moment the script runs.
-
-     Never scale it with `transform: scale(calc(100cqw / var(--figure-w)))`: that
-     calc mixes a length into `scale()`'s number slot, browsers drop the whole
-     transform silently, and `overflow: hidden` crops the full-width layout. */
+  /* `--figure-w` / `--figure-h` come inline from the frontmatter constants, so
+     the iframe's own width and height attributes and this scaling cannot
+     disagree; the aspect-ratio reserves the box before the lazy iframe lands.
+     The frame is presentation only, so a pointer and a caret are kept out too. */
+  /* The iframe is given the app's real desktop size and scaled down, so a phone
+     shows the whole desktop UI shrunk rather than the app re-flowing.
+     `--figure-scale` comes from the script below because CSS cannot divide one
+     length by another; the media-query values are the no-JavaScript floor.
+     Never `transform: scale(calc(100cqw / var(--figure-w)))`: that mixes a
+     length into `scale()`'s number slot, browsers drop the transform silently,
+     and `overflow: hidden` then crops the full-width layout. */
   .webui-figure {
     aspect-ratio: var(--figure-w) / var(--figure-h);
     background: var(--color-ink);
@@ -473,16 +362,10 @@ const tab =
 </style>
 
 <script>
-  // Scale the figure so the whole desktop UI always fits its box, exactly.
-  //
-  // CSS gets close with breakpoints but cannot do this itself: the factor is one
-  // width divided by another, and `calc()` will not divide a length by a length.
-  // Without this the picture is right at four sizes and slightly off everywhere
-  // between them.
-  //
-  // The iframe itself still ships no JavaScript. This runs on the page AROUND
-  // it, and if it never runs the media-query values above still show the whole
-  // UI, just not to the pixel.
+  // Fits the figure to its box exactly: the factor is one width divided by
+  // another, and `calc()` will not divide a length by a length. This runs on the
+  // page around the iframe, which still ships no JavaScript of its own; if it
+  // never runs, the media-query values above still show the whole UI.
   const frames = document.querySelectorAll<HTMLElement>(".webui-figure")
   if (frames.length > 0 && "ResizeObserver" in window) {
     const fit = (frame: HTMLElement) => {

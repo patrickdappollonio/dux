@@ -1,50 +1,20 @@
 ---
-// "Server mode. Host it anywhere." The remote-dux pitch.
+// dux has no authentication of any kind, so "host it anywhere" is only true as
+// "host it behind something that authenticates". That sentence is the section's
+// second paragraph rather than a footnote, and the card for the two built-in
+// guards (the Host allowlist and the same-origin check) says outright that they
+// are not access control: they stop a browser being tricked into talking to your
+// dux, and do nothing about a person who visits the URL.
 //
-// PLACEMENT: directly after InstallSection, before the blog/contributors tail.
-// The install section is where the reader learns that ONE binary carries both
-// front ends and that `dux server` comes out of that same executable. This
-// section is the immediate "so put that binary on a box that is not your
-// laptop" follow-through, and it is the only section that asks the reader to
-// think about deployment, so it belongs after the thing it deploys rather than
-// interrupting the feature narrative above.
-//
-// THE SPINE IS THE MISSING LOGIN, NOT A FOOTNOTE.
-//
-// dux has no authentication of any kind. Not a weak one, not a default
-// password: there is no auth layer. Every client that reaches the port shares
-// one workspace and can drive any agent, browse the server's filesystem through
-// the project picker, and read every session. So "host it anywhere" is only
-// true as "host it behind something that authenticates", and that sentence is
-// the section's second paragraph rather than a warning strip at the bottom.
-//
-// It is also, deliberately, part of the pitch. A competent reader deciding
-// whether to put this on a VPS is better served by knowing exactly what they
-// are signing up for than by a vague reassurance, and the honest version
-// happens to be the more attractive one: the proxy is one Compose file and the
-// docs page has it.
-//
-// The two built-in guards (the Host allowlist and the same-origin check) get
-// their own card SAYING THEY ARE NOT ACCESS CONTROL. They stop a browser being
-// tricked into talking to your dux; they do nothing about a person who visits
-// the URL. Leaving them unmentioned invites the reader to discover them and
-// mistake them for a gate, so the section names them and then disowns them.
-//
-// The topology is a real diagram, laid out by Graphviz at build time and
-// emitted as inline SVG (see src/lib/graphviz.mjs). It was ASCII box drawing
-// once, which read as terminal output when the subject is a deployment, and
-// then a row of styled cards, which read as three cards. A deployment has
-// nodes and edges, so it is drawn with nodes and edges. Every color comes from
-// the site's tokens through the `.diagram` rules in global.css, the DOT below
-// names classes and never colors, and nothing ships to the visitor but markup.
+// The topology is laid out by Graphviz at build time and emitted as inline SVG
+// (see src/lib/graphviz.mjs). The DOT below names classes and never colors, so
+// every color comes from the site's tokens through global.css's `.diagram` rules.
 import Diagram from "./Diagram.astro";
 
 const topology = `digraph server_mode {
   bgcolor="transparent";
-  // Left to right, unlike the docs diagrams, which stack. This one sits in a
-  // full-width homepage panel, so a vertical stack wastes the width and then
-  // scales itself small to fit the height. The flow is also literally a journey
-  // from outside to inside, which reads better along the page than down it.
+  // Left to right, unlike the docs diagrams, which stack: this one sits in a
+  // full-width homepage panel, where a vertical stack wastes the width.
   rankdir=LR;
   nodesep=0.30;
   ranksep=0.55;

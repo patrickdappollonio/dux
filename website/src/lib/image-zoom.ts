@@ -1,20 +1,11 @@
-// Pure, framework-free logic for the docs screenshot lightbox. Kept separate
-// from the DOM glue in ImageZoom.astro so the arithmetic can be unit-tested
-// without a browser; the component's script imports these helpers and only
-// handles wiring (events, focus, transforms).
+// Pure, framework-free logic for the docs screenshot lightbox, kept apart from
+// the DOM glue in ImageZoom.astro so the arithmetic is unit-testable.
 //
 // The viewer's transform is always `translate(x, y) scale(s)` around the
-// element's center, so every helper below works in viewport pixels measured
-// from the center of the stage. Scale 1 means the image is drawn at its natural
-// pixel size, and the readout says so: it is a percentage of natural size, not
-// of the fitted view, so a reader always knows whether they are looking at real
-// pixels.
-//
-// The viewer opens FITTED (the whole screenshot visible), because a screenshot
-// is a picture of a layout before it is a wall of pixels, and landing on a crop
-// of the middle answers no question the reader had. Natural size is one double
-// click away, and one or two zoom steps away, because the step ladder snaps to
-// 100% whenever a step would cross it.
+// element's center, so every helper works in viewport pixels measured from the
+// stage center, and scale 1 is natural pixel size. The readout is a percentage of
+// natural size, never of the fitted view. The viewer opens fitted, with natural
+// size a double click or a snapping zoom step away.
 
 /** Smallest scale the controls step down to; a fitted view may sit below it. */
 export const MIN_SCALE = 0.25;
@@ -48,8 +39,8 @@ const DEFAULT_BOUNDS: ScaleBounds = { min: MIN_SCALE, max: MAX_SCALE };
 
 /**
  * The bounds for a given fitted scale. A screenshot far larger than the window
- * fits below the ordinary floor, and the floor must not fight the fit: zooming
- * all the way out has to be able to show the whole image.
+ * fits below the ordinary floor, and zooming all the way out must still show the
+ * whole image, so the floor may not fight the fit.
  */
 export function boundsFor(fit: number): ScaleBounds {
   return { min: Math.min(MIN_SCALE, fit), max: MAX_SCALE };
@@ -57,8 +48,7 @@ export function boundsFor(fit: number): ScaleBounds {
 
 /**
  * The scale at which the whole image is visible in the space available. Never
- * above 1: a small screenshot is shown at its own size rather than blown up
- * into a blurry poster.
+ * above 1, so a small screenshot is shown at its own size.
  */
 export function fitScale(
   naturalWidth: number,
@@ -84,10 +74,8 @@ export function clampScale(scale: number, bounds: ScaleBounds = DEFAULT_BOUNDS):
 
 /**
  * One press of Zoom in (`direction` 1) or Zoom out (`direction` -1).
- * Multiplicative, so a step feels the same at every scale, with one exception:
- * a step that would cross natural size lands ON natural size instead. That
- * makes 100% a stop on the ladder rather than a value you can only skip past,
- * which matters because 100% is the one scale that means something.
+ * Multiplicative, so a step feels the same at every scale, except that a step
+ * crossing natural size lands on it: 100% is a stop, not a value to skip past.
  */
 export function stepScale(
   scale: number,
@@ -102,9 +90,8 @@ export function stepScale(
 }
 
 /**
- * What a double click should switch to: fitted and natural size, back and
- * forth. When the image already fits at natural size there is no third state
- * to offer, so a double click magnifies instead.
+ * What a double click switches to: fitted and natural size, back and forth. An
+ * image already fitting at natural size has no third state, so it magnifies.
  */
 export function toggleScale(scale: number, fit: number): number {
   if (sameScale(fit, 1)) return sameScale(scale, 1) ? DOUBLE_TAP_SCALE : 1;
@@ -112,9 +99,9 @@ export function toggleScale(scale: number, fit: number): number {
 }
 
 /**
- * Whether an image is worth arming with the lightbox: only one the column had
- * to SHRINK has detail to reveal. The tolerance absorbs sub-pixel layout
- * rounding, which would otherwise arm images that are effectively at 1:1.
+ * Whether an image is worth arming with the lightbox: only one the column had to
+ * shrink has detail to reveal. The tolerance absorbs sub-pixel layout rounding,
+ * which would otherwise arm images effectively at 1:1.
  */
 export function shouldArm(
   naturalWidth: number,
@@ -126,9 +113,9 @@ export function shouldArm(
 }
 
 /**
- * Keep the image's translation inside the stage. An image smaller than the
- * stage is pinned to the center (offset 0); a larger one may be dragged until
- * its edge meets the stage edge, never past it.
+ * Keep the image's translation inside the stage: one smaller than the stage is
+ * pinned to the center, a larger one may be dragged until its edge meets the
+ * stage edge, never past it.
  */
 export function clampOffset(
   offset: number,
@@ -141,10 +128,9 @@ export function clampOffset(
 }
 
 /**
- * Change scale while holding the content point under `anchor` still, which is
- * what makes wheel and pinch zoom feel anchored to the cursor or the fingers
- * rather than to the middle of the screen. `anchor` is in stage pixels from the
- * stage center; pass {x:0,y:0} for the button controls, which zoom on center.
+ * Change scale while holding the content point under `anchor` still, so wheel and
+ * pinch zoom track the cursor or the fingers. `anchor` is in stage pixels from
+ * the stage center; the button controls pass {x:0,y:0} and zoom on center.
  */
 export function zoomAtPoint(
   transform: ViewerTransform,

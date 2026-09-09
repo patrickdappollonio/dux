@@ -11,30 +11,21 @@ import { useDux } from "@/lib/store"
 import { StaticTerminal } from "./StaticTerminal"
 import { focusedSessionId } from "./workspace"
 
-// The homepage's web-UI figure.
+// The homepage's web-UI figure: the dux web UI's own React components, imported
+// out of `crates/dux-web/web/src` and rendered to static HTML at build time
+// against a fabricated workspace seeded into the real store (`seed.ts`). No
+// client directive anywhere, so it ships zero JavaScript.
 //
-// This is NOT a mockup and NOT a screenshot. It is the dux web UI's own React
-// components, imported straight out of `crates/dux-web/web/src` and rendered to
-// static HTML while the site builds, against a fabricated workspace seeded into
-// the real store (`seed.ts`). Astro renders a React component with no client
-// directive at build time and ships ZERO JavaScript for it, so what reaches the
-// visitor is markup and CSS: a photo made of the real thing rather than a photo
-// of it. Nothing here can drift from the app, because there is no copy to drift.
+// It departs from `App.tsx`'s `DesktopShell` only where a still frame has no
+// runtime, and each departure is permanent:
 //
-// Three deliberate departures from `App.tsx`'s `DesktopShell`, all of them
-// because a still frame has no runtime:
-//
-//   1. The terminal interior is `StaticTerminal`, a stylised block. xterm needs a
-//      live DOM and a live byte stream. See that file for why this is permanent.
-//   2. `ResizablePanelGroup` is replaced by a plain flex split at the same
-//      proportions. The resizable panels size themselves from a measured
-//      container, which a build-time render does not have, so they would emit
-//      a collapsed layout.
-//   3. `GlobalOverlays` (every dialog, the toaster, the offline modal) is
-//      omitted. All of it renders nothing until opened, and it drags in the
-//      editor's eager Monaco import, which cannot initialize off a browser.
-//
-// Everything else on screen is the shipped component doing its shipped job.
+//   1. The terminal interior is `StaticTerminal`: xterm needs a live DOM and a
+//      live byte stream.
+//   2. `ResizablePanelGroup` becomes a plain flex split at the same proportions:
+//      the resizable panels size themselves from a measured container and would
+//      otherwise emit a collapsed layout.
+//   3. `GlobalOverlays` is omitted: it renders nothing until opened and drags in
+//      the editor's eager Monaco import, which cannot initialize off a browser.
 export function WebUIFigure() {
   const { spine, sidebarWidth } = useDux()
   const session = spine?.sessions.find((s) => s.id === focusedSessionId)

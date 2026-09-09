@@ -1,9 +1,7 @@
 ---
-// A compact, build-time strip of live download counters, sized to sit directly
-// under the install widget in the install section. Any counter whose lookup
-// fails is dropped; if all fail, nothing renders. The hero states the same
-// totals as a single line; this is the breakdown, beside the thing being
-// counted.
+// Build-time download counters, sized to sit under the install widget. A counter
+// whose lookup failed is dropped and an all-failed strip renders nothing. The
+// hero states the same totals as one line; this is the breakdown.
 import { getReleaseDownloads, getNpmTotal, formatCount } from "../lib/stats";
 
 const repo = "patrickdappollonio/dux";
@@ -47,17 +45,11 @@ if (downloads !== null && npm !== null) {
 }
 ---
 
-{/* Sits above the counters and shares their card styling, so the two read as
-    one stack rather than two unrelated boxes. Rendered unconditionally, unlike
-    the counters below it, which disappear when the stats fetch fails: how to
-    START dux should not depend on whether GitHub answered.
-
-    No keybinding is printed here on purpose. Every binding in dux is
-    user-configurable, so a printed key is wrong for anyone who has rebound it,
-    and this site's own rule is that the in-app help overlay is the authority
-    for keys. The palette COMMAND name is stable and is the honest thing to
-    name. A printed key was removed from this same page earlier for exactly
-    this reason. */}
+{/* Rendered unconditionally, unlike the counters below it, which disappear when
+    the stats fetch fails: how to START dux must not depend on whether GitHub
+    answered. No keybinding is printed: every binding in dux is user-configurable,
+    so the in-app help overlay is the authority and the palette command name is
+    the stable thing to name. */}
 <p
   class="mt-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel)]/40 px-4 py-3 text-center text-sm leading-relaxed text-[color:var(--color-muted)] backdrop-blur"
 >

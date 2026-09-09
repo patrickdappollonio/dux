@@ -22,37 +22,25 @@ if (!chrome) {
 }
 
 const DEVICE_SCALE = 2
-// The capture's own frame, in CSS pixels, around the terminal grid. A CROP does
-// not get one: everything outside a crop's cell rect is other cells of the same
-// screen, not background, so a margin would drag in half a row of the header
-// and half a column of the next pane. A crop lands flush on its cell edges.
+// The capture's own frame, in CSS pixels, around the terminal grid. A crop gets
+// none: everything outside its cell rect is other cells of the same screen, so a
+// margin would drag in half a row of the header and half a column of the next pane.
 const FRAME = 18
 
-// The preferred face. Commercial and NOT vendored: the harness names it and
-// lets the host resolve it, so a machine without it simply falls back to the
-// bundled Dux Mono stack (a warning, never a failure). The exact family name
-// is what `fc-list` reports.
+// The preferred face. Commercial and not vendored: named here and resolved by
+// the host, so a machine without it falls back to the bundled Dux Mono stack.
+// The exact family name is what `fc-list` reports.
 const PREFERRED_FAMILY = "MonoLisa Nerd Font Mono"
 const DUX_STACK = '"Dux Mono Symbols", "Dux Mono", "Dux Mono Fill", monospace'
 const FONT_STACK = `"${PREFERRED_FAMILY}", ${DUX_STACK}`
 
-// Why 12.5 and not a round number: xterm's DOM renderer lays every cell out at
-// the font's own advance, unrounded. At any size whose advance does not land on
-// a WHOLE DEVICE pixel, Chromium antialiases the left and right edge of every
-// glyph box, and a row of `▄`/`▀`/`█` comes out as a comb of ~60%-ink seams,
-// one per cell boundary. Measured at deviceScaleFactor 2, font size 14: cell
-// advance 16.786 device px, 19 seam pixels across 24 cells, darkest seam 153 of
-// 255. Neither font fixes that on its own; the fractional advance does it.
-//
-// Dux Mono's advance is exactly 0.6em and MonoLisa's is exactly 0.64em, so a
-// size is seam-free for both only when 1.2*size and 1.28*size are both whole:
-// 12.5 is the only such size in a readable range (25 and 37.5 are the others).
-// At 12.5 the measured advance is 16 device px under MonoLisa and 15 under the
-// Dux fallback, every block row measures full 255 ink with zero seam pixels,
-// and the ※ drift check stays at zero under both.
-//
-// If you change this size, re-measure: `(advance in CSS px) * 2` must be a
-// whole number for BOTH stacks, or the comb comes back.
+// xterm's DOM renderer lays every cell out at the font's own unrounded advance,
+// and any size whose advance misses a whole device pixel makes Chromium
+// antialias every glyph box edge, turning a row of block glyphs into a comb of
+// seams. Dux Mono's advance is exactly 0.6em and MonoLisa's exactly 0.64em, so a
+// size is seam-free for both only when 1.2*size and 1.28*size are both whole.
+// Changing this size means re-measuring: `(advance in CSS px) * 2` must be a
+// whole number for both stacks, or the comb comes back.
 const FONT_SIZE = 12.5
 
 const ansi = fs.readFileSync(ansiPath, "utf8").replace(/\n$/, "")
@@ -67,17 +55,12 @@ const xtermJs = require.resolve("@xterm/xterm")
 const packageRoot = path.dirname(path.dirname(xtermJs))
 const xtermCss = fs.readFileSync(path.join(packageRoot, "css", "xterm.css"), "utf8")
 
-// The crop is computed from the plain-text grid the capture writes beside the
-// ANSI, so it is expressed in CELLS and multiplied by the cell metrics measured
-// off the live terminal. That is what keeps a crop edge on an exact cell
-// boundary instead of slicing a border column down its middle, which is what
-// the hand-tuned pixel constants this replaced used to do.
-//
-// "sidebar" frames the left pane: its border column on the left, the matching
-// border column on the right, its top border row, and every row down to the
-// last one with content in it plus one row of air. The pane's own bottom border
-// is deliberately outside the crop; these shots are about the rows, and the
-// pane runs to the bottom of a 45-row screen with nothing in it.
+// A crop is expressed in CELLS, computed from the plain-text grid the capture
+// writes beside the ANSI and multiplied by cell metrics measured off the live
+// terminal, so a crop edge lands on an exact cell boundary rather than slicing a
+// border column down its middle. "sidebar" frames the left pane down to its last
+// row with content plus one row of air, deliberately excluding the pane's own
+// bottom border: the pane runs to the bottom of a 45-row screen with nothing in it.
 const MAX_ASPECT = 1.5
 
 function readGrid(textPath) {
@@ -114,11 +97,9 @@ function sidebarCropCells(grid, cell) {
 
   const endRow = lastContentRow + 1
   const height = (endRow - topRow + 1) * cell.height
-  // Tall narrow pictures read badly in the docs, so a crop never exceeds
-  // MAX_ASPECT. Cells are much taller than they are wide, so this has to be
-  // measured in PIXELS: a rect that looks square in cell counts is over 2:1 on
-  // screen. There is room to spare on every shot today; if a future one runs
-  // out, widen into the neighbouring pane rather than cutting real rows.
+  // Measured in PIXELS, not cell counts: cells are much taller than they are
+  // wide, so a rect that looks square in cells is over 2:1 on screen. A crop
+  // that runs out of room should widen into the neighbouring pane, not cut rows.
   const gridWidth = Math.max(...grid.map((line) => line.length))
   let endColumn = rightColumn
   while (height > MAX_ASPECT * (endColumn + 1) * cell.width && endColumn + 1 < gridWidth) {
@@ -158,29 +139,20 @@ function sidebarCropCells(grid, cell) {
     .xterm { padding: 0; }
   ` })
   await page.addScriptTag({ path: xtermJs })
-  // Fetch every BUNDLED face BEFORE the Terminal is constructed.
-  // `document.fonts.ready` alone is not enough: it settles once no load is
-  // pending, and a `unicode-range`-restricted face nothing has rendered yet has
-  // no load pending, so it stays unfetched. xterm's DOM renderer then measures
-  // glyph advances against the fallback font, caches them (its WidthCache busts
-  // only on a font change), and emits negative letter-spacing that drags whole
-  // rows left once the real face arrives: measured drift of a full cell for ※,
-  // 0.4 for ✓/✷/↳, 0.22 for braille.
+  // Every bundled face must be fetched before the Terminal is constructed.
+  // `document.fonts.ready` settles once no load is pending, and a
+  // `unicode-range`-restricted face nothing has rendered has no load pending, so
+  // xterm's DOM renderer measures glyph advances against the fallback, caches
+  // them, and drags whole rows left once the real face arrives.
   //
-  // Each load names ONE family with a sample inside that family's own
-  // unicode-range, so no face depends on where it sits in the stack. The range
-  // literals above are the same ones the web app declares in
-  // crates/dux-web/web/src/index.css and exports from
-  // crates/dux-web/web/src/lib/terminalFont.ts; when a range moves there, move
-  // it here and re-pick these samples. Deliberately not shared code: a build
-  // step for a screenshot tool is not worth it.
-  //
-  // A load whose family or sample matches no declared face resolves to an
-  // EMPTY array rather than rejecting, so a typo here would silently bring the
-  // drifted capture back. Every result is checked and an empty one fails the
-  // capture out loud. Only the bundled faces are checked this way: a face the
-  // OPERATING SYSTEM provides is never in `document.fonts` at all, so the
-  // preferred family is probed by measurement instead, further down.
+  // Each load names one family with a sample inside that family's own
+  // unicode-range, so no face depends on where it sits in the stack; the range
+  // literals above mirror crates/dux-web/web/src/index.css, so a range that
+  // moves there moves here too. A load matching no declared face resolves to an
+  // empty array rather than rejecting, so every result is checked and an empty
+  // one fails the capture out loud. Only bundled faces can be checked this way:
+  // an OS-provided face is never in `document.fonts`, so the preferred family is
+  // probed by measurement further down.
   await page.evaluate(async () => {
     const preloads = [
       { shorthand: '14px "Dux Mono"', sample: "Ag" },
@@ -201,12 +173,10 @@ function sidebarCropCells(grid, cell) {
   })
   await page.evaluate(() => document.fonts.ready)
 
-  // The preferred face is installed on the host, not shipped here, so its
-  // absence is a warning rather than a failure: the capture still works on the
-  // bundled stack, at a different (also seam-free) cell size. It cannot be
-  // detected through `document.fonts`, which only ever holds CSS-declared
-  // faces, so measure a run of glyphs against a family that certainly does not
-  // exist and see whether naming the face changes the answer.
+  // The preferred face is installed on the host, so its absence is a warning and
+  // not a failure. It cannot be detected through `document.fonts`, which only
+  // holds CSS-declared faces, so a run of glyphs is measured against a family
+  // that certainly does not exist to see whether naming the face changes it.
   const preferredPresent = await page.evaluate((family) => {
     const context = document.createElement("canvas").getContext("2d")
     const sample = "M".repeat(20)

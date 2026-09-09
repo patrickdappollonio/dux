@@ -1,15 +1,9 @@
-// Renders ```dot fenced blocks in Markdown as diagrams instead of code.
+// Renders ```dot fenced blocks in Markdown as diagrams instead of code. Layout
+// runs at build time through Graphviz-WASM (see src/lib/graphviz.mjs), so the
+// page ships inline SVG and no JavaScript, and everything after the language word
+// on the fence line becomes the caption and the SVG's accessible name.
 //
-//   ```dot A request's path from the internet to dux.
-//   digraph { a -> b }
-//   ```
-//
-// The layout runs at BUILD time through Graphviz-WASM (see src/lib/graphviz.mjs
-// for why that renderer and not Mermaid), so the page ships inline SVG and no
-// JavaScript. Everything after the language word on the fence line becomes the
-// figure's caption and the SVG's accessible name.
-//
-// Written as a small manual mdast walk, like remark-admonitions.mjs, to avoid a
+// A small manual mdast walk, like remark-admonitions.mjs, avoiding a
 // unist-util-visit dependency. The transformer is async because the WASM module
 // loads asynchronously; unified awaits it.
 

@@ -1,16 +1,11 @@
 ---
-// Each feature is a CSS-mocked screenshot + copy.
-// The mockups are static: what you see is HTML and Tailwind, no JS.
+// Each feature is a CSS-mocked screenshot plus copy: static HTML and Tailwind.
 //
-// Every tile carries a surface marker: `Terminal`, `Web`, or `Both`. dux has two
-// front ends over one workspace and a reader deciding between them should not have
-// to guess which one a feature lives in. The marker is a promise, so it is
-// checked against the code, not against the tile's own copy. `Both` is the one
-// that costs us if it is wrong, because it reads as "this works in my browser".
-//
-// Mock boxes for terminal features are `mono`. Mock boxes for web-native
-// features are `font-sans` on purpose: a monospace mock reads as another
-// terminal, which is exactly the wrong thing to say about the browser UI.
+// Every tile's surface marker (`Terminal`, `Web`, `Both`) is a promise, so it is
+// checked against the code rather than against the tile's own copy; `Both` is the
+// one that costs if it is wrong, because it reads as "this works in my browser".
+// Terminal mock boxes are `mono` and web-native ones `font-sans`, because a
+// monospace mock reads as another terminal.
 ---
 
 <section class="tile-filter-scope py-16 sm:py-24">
@@ -24,25 +19,16 @@
       <p class="mt-3 text-[color:var(--color-muted)]">
         Every dux feature exists because someone (read: me) got tired of doing it the dumb way. Hover over any tile for a closer look.
       </p>
-      {/* The legend is also the filter: at most one chip active, or none.
-          
-          That pair of requirements is why there is a script here at all, and it
-          is the only one on this page. A radio cannot be un-picked, so it needs
-          a fourth "All" chip to escape. A checkbox un-picks itself but lets two
-          be on at once. CSS can express either one alone and neither one
-          together, so the checkboxes carry the toggling and six lines of script
-          clear the others.
-          
-          It degrades honestly. With no script the chips still filter, they just
-          also allow two at a time, and two at a time still narrows sensibly
-          (Terminal plus Web leaves what is in both). With no `:has()` support
-          nothing is hidden at all, which is the right thing to fall back to:
-          the whole grid. */}
+      {/* At most one chip active, or none, which is why this page's only script
+          exists: a radio cannot be un-picked without a fourth "All" chip, a
+          checkbox un-picks itself but allows two at once, and CSS can express
+          either alone and not both, so the checkboxes toggle and the script
+          clears the others. With no script the chips still filter, two at a
+          time; with no `:has()` support nothing is hidden and the grid is whole. */}
       <fieldset class="tile-filter mt-4 flex flex-wrap items-center gap-x-2 gap-y-1.5 border-0 p-0 text-[color:var(--color-dim)]">
-        {/* The legend names the group for assistive tech only. The visible
-            sentence is a plain span, because a `legend` is laid out specially
-            and does not behave as a flex child, so leaving it visible inside a
-            flex row puts it somewhere different in every browser. */}
+        {/* The legend names the group for assistive tech only: a visible `legend`
+            is laid out specially and does not behave as a flex child, so it lands
+            somewhere different in every browser. The visible sentence is a span. */}
         <legend class="sr-only">Filter tiles by which front end they run on</legend>
         <span>dux has two front ends over one workspace, so each tile says where it lives:</span>
         <label class="tile-filter__chip pill pill-xs">
@@ -111,10 +97,9 @@
           rel="noopener"
           class="mt-3 inline-flex items-center gap-1 text-xs font-medium text-[color:var(--color-accent)] hover:underline"
         >
-          {/* No hand-written arrow. This link leaves the site, so the layout's
-              external-link script appends its own icon, and a manual arrow made
-              two. An INTERNAL link keeps its arrow, because nothing is appended
-              to those. */}
+          {/* No hand-written arrow: this link leaves the site, so the layout's
+              external-link script appends one. An internal link keeps its own,
+              because nothing is appended to those. */}
           Watch every theme in action
         </a>
       </article>
@@ -554,26 +539,16 @@
 </section>
 
 <style>
-  /* Every rule is an OVERRIDE on tiles that are visible by default, so with no
-     `:has()` support, or no stylesheet at all, the reader gets the whole grid.
-     Nothing here can hide a tile by failing.
-
-     Anchored on `.feature-tile`, never on the bare attribute: Astro scopes a
-     selector by hanging its component id off a class or an element, and a lone
-     `[data-surface="web"]` picks up no id and ships as a page-wide rule.
-
-     The semantics are the maintainer's: TERMINAL means the terminal ones plus
-     the ones that work in both, WEB the same on its side, and BOTH means only
-     the ones that work in both. So the two surface filters ANSWER "what can I
-     do here", while BOTH answers "what is the same wherever I am". */
-  /* Hidden means faded and gone from the flow, not just gone. `display` cannot
-     normally be transitioned, so the tile animates its opacity and scale while
-     `transition-behavior: allow-discrete` holds `display` until the fade has
-     finished. Going the other way, `@starting-style` gives the browser a state
-     to animate FROM, otherwise a tile that returns simply appears.
-
-     If either of those is unsupported the tile still hides and shows, just
-     instantly, which is exactly what it did before. */
+  /* Every rule is an override on tiles visible by default, so no `:has()` support
+     and no stylesheet at all both leave the reader the whole grid. Anchored on
+     `.feature-tile`, never the bare attribute: Astro scopes a selector by hanging
+     its component id off a class or an element, so a lone `[data-surface="web"]`
+     ships as a page-wide rule. Terminal and Web each include the tiles that work
+     in both; Both includes only those. */
+  /* `display` cannot normally be transitioned, so the tile animates opacity and
+     scale while `transition-behavior: allow-discrete` holds `display` until the
+     fade finishes, and `@starting-style` gives a returning tile a state to
+     animate from. Without either, the tile still hides and shows, instantly. */
   .feature-tile {
     transition:
       opacity 180ms ease,

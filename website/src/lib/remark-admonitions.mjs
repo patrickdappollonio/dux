@@ -1,19 +1,11 @@
-// GitHub-style admonitions (alerts) for Markdown prose. Runs as a remark plugin
-// on the shared markdown processor (see astro.config.mjs), so any `.md`/`.mdx`
-// page can use the familiar GitHub syntax:
+// GitHub-style admonitions for Markdown prose, as a remark plugin on the shared
+// markdown processor. A blockquote whose first line is `> [!NOTE]` (or TIP,
+// IMPORTANT, WARNING, CAUTION) becomes an `.admonition` div with a titled header;
+// an ordinary blockquote is left untouched, and the styling lives in global.css.
 //
-//   > [!NOTE]
-//   > Useful information the reader should know.
-//
-// The recognized types are NOTE, TIP, IMPORTANT, WARNING, and CAUTION. A matching
-// blockquote is rewritten to render as `<div class="admonition admonition-note">`
-// with a titled header (an octicon + label); the color and layout live in
-// global.css. An ordinary blockquote (no `[!TYPE]` first line) is left untouched.
-//
-// Written as a small manual mdast walk to avoid a unist-util-visit dependency
-// (mirrors rehype-prose-images.mjs). The octicon SVG is injected directly as hast
-// via `data.hChildren`, so its color follows the title's `currentColor` and no
-// CSS data-URI encoding is needed.
+// A small manual mdast walk, avoiding a unist-util-visit dependency the way
+// rehype-prose-images.mjs does. The octicon SVG is injected as hast through
+// `data.hChildren`, so its color follows the title's `currentColor`.
 
 const LABEL = {
   note: "Note",

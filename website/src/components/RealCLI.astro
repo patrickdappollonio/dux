@@ -67,11 +67,9 @@ const duck = [
             class="mono text-[color:var(--color-accent)] inline-block text-left"
             style="font-size:13px; line-height:1.4"
           >{duck}</pre>
-          {/* No key printed here on purpose: every binding in dux is
-              user-configurable, so a key in marketing copy is stale the moment
-              someone rebinds it, and the in-app help overlay is the authoritative
-              list. Scoped to the terminal UI too, because the palette is a
-              terminal-side thing; the web UI's equivalent home is its cog menu. */}
+          {/* No key printed: every binding in dux is user-configurable and the
+              in-app help overlay is the authoritative list. Scoped to the terminal
+              UI, because the palette is terminal-side; the web's home is its cog. */}
           <p class="mt-5 mono text-[11px] text-[color:var(--color-muted)]">
             Lost? The <span class="text-[color:var(--color-accent)]">command palette</span> lists every action in the terminal UI.
           </p>

@@ -1,33 +1,14 @@
-// Build-time diagrams: Graphviz DOT in, themed inline SVG out.
+// Build-time diagrams: Graphviz DOT in, themed inline SVG out. Graphviz compiled
+// to WebAssembly lays out in plain Node with no browser, which mermaid-cli would
+// require: it measures text with `getBBox()` and drives a headless Chromium, and
+// a browser download in `npm ci` would make a flaky fetch a broken build.
 //
-// WHY GRAPHVIZ-WASM AND NOT MERMAID
-//
-// The site ships almost no JavaScript on purpose, so a diagram renderer that
-// runs in the visitor's browser was never on the table. The usual build-time
-// alternative (mermaid-cli) drives a headless Chromium through Puppeteer,
-// because Mermaid measures text with `getBBox()` and needs a real layout
-// engine. That would put a browser download in every contributor's `npm ci`,
-// and the frontend build is a hard failure in this repo, so a flaky browser
-// fetch would become a broken build.
-//
-// `@hpcc-js/wasm-graphviz` is Graphviz compiled to WebAssembly. It lays out and
-// renders in plain Node with no browser, has zero runtime dependencies, and
-// emits SVG markup that goes straight into the page. Nothing is shipped to the
-// visitor but the SVG.
-//
-// THEMING
-//
-// Graphviz writes colors as *presentation attributes* (`fill="lightgrey"`,
-// `stroke="black"`). Presentation attributes lose to any CSS rule, so the
-// styling in global.css (`.diagram …`) overrides all of them and every color in
-// a rendered diagram comes from the site's own tokens. That is why the DOT
-// sources below never name a color: they name a `class`, which Graphviz copies
-// onto the emitted `<g>`, and CSS does the rest.
-//
-// The one exception is *size*: font sizes stay as Graphviz computed them,
-// because the layout was measured against them. A secondary label line is
-// authored at 9pt and CSS dims it via an attribute selector on that size (see
-// global.css); changing a point size in DOT means changing it there too.
+// DOT sources never name a color, only a `class` Graphviz copies onto the
+// emitted `<g>`: Graphviz writes colors as presentation attributes, which lose
+// to global.css's `.diagram` rules, so every color comes from the site's tokens.
+// Font sizes are the exception and stay as Graphviz computed them, because the
+// layout was measured against them; a 9pt secondary label is dimmed by an
+// attribute selector on that size, so changing it in DOT means changing it there.
 
 import { Graphviz } from "@hpcc-js/wasm-graphviz";
 
@@ -42,24 +23,17 @@ function loadGraphviz() {
 const PX_PER_PT = 96 / 72;
 
 /**
- * Widest a diagram is allowed to shrink to before its container scrolls
- * instead. Below this the labels stop being readable, and a horizontal scroll
- * inside the figure beats unreadable text on a phone.
+ * Widest a diagram may shrink to before its container scrolls instead: below
+ * this the labels stop being readable.
  */
 const MIN_READABLE_PX = 380;
 
 /**
- * Turn Graphviz's standalone SVG document into an inline, responsive fragment.
- *
- * - drops the XML prolog, DOCTYPE and generator comments (an inline SVG cannot
- *   carry a prolog, and the generator comment is noise in every page)
- * - drops the per-node `<title>` elements, which are Graphviz's internal node
- *   ids and would otherwise surface as tooltips reading "cluster_host"
- * - replaces the fixed `width`/`height` in points with `width="100%"`, keeping
- *   the `viewBox` so the drawing scales, and records the intrinsic width as a
- *   custom property so CSS can cap it and set a readable floor
- *
- * Exported for the unit tests; callers want `renderDot`.
+ * Turn Graphviz's standalone SVG document into an inline, responsive fragment:
+ * the prolog and DOCTYPE go (an inline SVG cannot carry one), the per-node
+ * `<title>` elements go (they are internal node ids and surface as tooltips),
+ * and the fixed width/height in points become `width="100%"` plus the intrinsic
+ * width as a custom property. Exported for the tests; callers want `renderDot`.
  */
 export function inlineSvg(svg, { className = "", label = "" } = {}) {
   const start = svg.indexOf("<svg");
@@ -106,17 +80,14 @@ export async function renderDot(dot, options = {}) {
 }
 
 /**
- * Wrap a rendered SVG in the figure chrome: a scroll container (so a diagram
- * wider than the column scrolls in its own box rather than the page body) and
- * an optional caption.
+ * Wrap a rendered SVG in the figure chrome: a scroll container, so a diagram
+ * wider than the column scrolls in its own box rather than the page body.
  */
 export function diagramFigure(svg, caption = "", className = "") {
   const body = `<div class="diagram-scroll">${svg}</div>`;
   const figcaption = caption ? `<figcaption class="diagram-caption">${caption}</figcaption>` : "";
-  // The caller's class goes on the FIGURE, which is this component's root and
-  // the element that carries the sizing. It used to be applied to the `<svg>`
-  // instead, so a modifier like `diagram--full` silently did nothing: the rule
-  // targeting it never reached the figure's own `max-width`.
+  // The caller's class goes on the figure, not the `<svg>`: the figure is the
+  // root and the element that carries the sizing a modifier needs to reach.
   const extra = className ? ` ${className}` : "";
   return `<figure class="diagram not-prose${extra}">${body}${figcaption}</figure>`;
 }

@@ -2,11 +2,9 @@ import { defineConfig } from "vitest/config"
 
 import { webUiAlias, webUiReactBridge } from "./src/lib/web-ui-alias.mjs"
 
-// The site's own unit tests plus the web-UI figure's drift guard
-// (`src/figure/figure.test.tsx`), which imports the REAL components out of
-// `crates/dux-web/web/src`. Those need the same `@` alias and the same single
-// React copy the Astro build gives them, so both configs read the alias map from
-// one module rather than restating it.
+// The web-UI figure's drift guard imports the real components out of
+// `crates/dux-web/web/src`, which need the same `@` alias and the same single
+// React copy the Astro build gives them, so both configs read one alias map.
 export default defineConfig({
   plugins: [webUiReactBridge()],
   resolve: { alias: webUiAlias() },

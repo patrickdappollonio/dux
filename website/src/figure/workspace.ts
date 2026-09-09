@@ -1,13 +1,7 @@
-// The fabricated workspace the homepage figure renders.
-//
-// Everything here is invented, and deliberately so: it is a plausible afternoon
-// of work on a made-up storefront, not a capture of anyone's machine. The point
-// is that the SHAPES are real. These are the exact `Spine` / `Bootstrap` /
-// `ChangedFileView` types the server sends, so the real components read them
-// exactly as they read live data, and if one of those contracts changes this
-// file stops type-checking.
-//
-// No real company, product or person is named.
+// The fabricated workspace the homepage figure renders. Everything here is
+// invented and names no real company, product or person; what is real is the
+// SHAPES, which are the exact `Spine` / `Bootstrap` / `ChangedFileView` types the
+// server sends, so a changed contract stops this file type-checking.
 
 import type { Bootstrap } from "@/lib/bootstrapApi"
 import type { Spine } from "@/lib/workspaceApi"
@@ -200,10 +194,8 @@ const sessions: SessionView[] = [
     branch_name: "dux/invoice-pdf-export",
     // Idle: nothing running, nothing waiting on the user.
   }),
-  // A STANDALONE agent: it belongs to no project and runs in a folder the user
-  // already had, so its row names the folder where the others name a project.
-  // Seeded here because a figure that only shows project agents would not show
-  // that row shape at all.
+  // A standalone agent, seeded so the figure shows that row shape too: it belongs
+  // to no project, so its row names a folder where the others name a project.
   session({
     id: "agt-notes",
     project_id: "",

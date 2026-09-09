@@ -28,10 +28,8 @@ const site = Astro.site ?? new URL("https://getdux.app");
 const canonical = new URL(Astro.url.pathname, site).toString();
 const ogImageURL = new URL(ogImage, site).toString();
 
-// Alt text for the social card. It describes what the card actually SHOWS (the
-// headline plus a dux session running several agents) rather than defining the
-// product, so it does not need rewording every time the surface story changes.
-// Update it if public/og.png is redrawn.
+// Alt text for the social card: it describes what the card SHOWS rather than
+// defining the product, so only a redraw of public/og.png needs it reworded.
 const ogImageAlt =
   "dux: your AI agents deserve a proper office. A dux session running several AI coding agents in parallel, one git worktree each.";
 

@@ -8,13 +8,9 @@ import {
   unstagedFiles,
 } from "./workspace"
 
-// Put the fabricated workspace into the REAL store, so the real components read
-// it through the real `useDux()` and have no idea they are being rendered by a
-// marketing site. Nothing is mocked and no prop is threaded: the store is where
-// the app's state lives, so the store is what gets seeded.
-//
-// This runs once, at build time, before `renderToStaticMarkup`. In the browser
-// the store boots off the server instead and this module is never shipped.
+// Puts the fabricated workspace into the REAL store, so the components read it
+// through the real `useDux()` with nothing mocked and no prop threaded. Runs once
+// at build time, before `renderToStaticMarkup`; never shipped to a browser.
 let seeded = false
 
 export function seedFigureWorkspace(): void {
