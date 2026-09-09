@@ -13,8 +13,10 @@ import {
   folderWorkspace,
   managedWorkspace,
   sessionLabel,
+  type AgentWorkspaceWire,
 } from "@/lib/agentWorkspace"
 import { sessionsApi } from "@/lib/sessionsApi"
+import type { SessionView } from "@/lib/types"
 import { closeDelete, deleteSession, useDux } from "@/lib/store"
 
 // Why a branch predates the agent, one clause per provenance; an unrecognized
@@ -92,6 +94,54 @@ function branchWarning(
   return parts.join(" ")
 }
 
+type ManagedWorkspace = Extract<AgentWorkspaceWire, { kind: "managed" }>
+
+// Every branch the box names and the count covers: the one the worktree is on
+// now and, on drift, the birth branch. Both are deleted, so both are named.
+function localBranches(managed: ManagedWorkspace | null): string[] {
+  if (!managed) return []
+  const drifted =
+    managed.initial_branch && managed.initial_branch !== managed.branch_name
+  return drifted
+    ? [managed.branch_name, managed.initial_branch]
+    : [managed.branch_name]
+}
+
+// Everything the dialog says about the agent it is about, out of the agent and
+// the two answers the server sends after it opens. A missing agent answers with
+// no name and no boxes, which is the state the vanish guard closes on.
+interface DeleteSessionView {
+  name: string | undefined
+  // The MANAGED identity, when there is one. Every worktree and branch
+  // affordance hangs off it, so a standalone agent's boxes do not exist rather
+  // than unticking.
+  managed: ManagedWorkspace | null
+  folder: Extract<AgentWorkspaceWire, { kind: "folder" }> | null
+  branchIsDuxs: boolean
+  branches: string[]
+  warning: string | null
+}
+
+function deleteSessionView(
+  session: SessionView | undefined,
+  answeredBranches: string[] | null,
+  unpushed: UnpushedCount,
+): DeleteSessionView {
+  const managed = session ? managedWorkspace(session.workspace) : null
+  const provenance = managed?.branch_provenance ?? "created"
+  // The branches the server says the delete would remove, preferred over
+  // working the pair out again here; the local pair stands in until it lands.
+  const branches = answeredBranches ?? localBranches(managed)
+  return {
+    name: session ? sessionLabel(session) : undefined,
+    managed,
+    folder: session ? folderWorkspace(session.workspace) : null,
+    branchIsDuxs: provenance === "created",
+    branches,
+    warning: branchWarning(provenance, branches, unpushed),
+  }
+}
+
 export function DeleteSessionDialog() {
   const { deleteTarget, spine } = useDux()
   const [deleteWorktree, setDeleteWorktree] = useState(false)
@@ -100,32 +150,15 @@ export function DeleteSessionDialog() {
   const [branchAnswer, setBranchAnswer] = useState<boolean | null>(null)
   // How much work ticking the branch box would destroy, arriving after the dialog
   // opens. `null` throughout means git could not answer, and nothing is said.
-  const [unpushed, setUnpushed] = useState<
-    { count: number; has_remote_refs: boolean } | null
-  >(null)
-  // The branches the server says the delete would remove, preferred over working
-  // the pair out again here. `null` until it lands; the local pair stands in.
+  const [unpushed, setUnpushed] = useState<UnpushedCount>(null)
+  // The branches the server says the delete would remove. `null` until it lands.
   const [answeredBranches, setAnsweredBranches] = useState<string[] | null>(
     null,
   )
 
   const session = spine?.sessions.find((s) => s.id === deleteTarget)
-  const name = session ? sessionLabel(session) : undefined
-  // The MANAGED identity, when there is one. Every worktree and branch affordance
-  // hangs off it, so a standalone agent's boxes do not exist rather than unticking.
-  const managed = session ? managedWorkspace(session.workspace) : null
-  const folder = session ? folderWorkspace(session.workspace) : null
-  const provenance = managed?.branch_provenance ?? "created"
-  const branchIsDuxs = provenance === "created"
-  // Every branch the box names and the count covers: the one the worktree is on
-  // now and, on drift, the birth branch. Both are deleted, so both are named.
-  const localBranches = managed
-    ? managed.initial_branch && managed.initial_branch !== managed.branch_name
-      ? [managed.branch_name, managed.initial_branch]
-      : [managed.branch_name]
-    : []
-  const warnedBranches = answeredBranches ?? localBranches
-  const branchWarningText = branchWarning(provenance, warnedBranches, unpushed)
+  const { name, managed, folder, branchIsDuxs, branches, warning } =
+    deleteSessionView(session, answeredBranches, unpushed)
   // The box starts in the provenance default: ticked for a branch dux made,
   // unticked for one that predates the agent. Both are overridable.
   const deleteBranch = branchAnswer ?? branchIsDuxs
@@ -233,14 +266,14 @@ export function DeleteSessionDialog() {
               onCheckedChange={setBranchAnswer}
             />
             <label htmlFor="delete-branch" className="break-all text-sm">
-              {branchCheckboxLabel(warnedBranches)}
+              {branchCheckboxLabel(branches)}
             </label>
           </div>
         )}
-        {managed && deleteWorktree && branchWarningText !== null && (
+        {managed && deleteWorktree && warning !== null && (
           // The danger sits in the warning text, never in a red checkbox: the box is
           // an ordinary control and the sentence under it says what is at stake.
-          <p className="text-sm text-destructive">{branchWarningText}</p>
+          <p className="text-sm text-destructive">{warning}</p>
         )}
         <div className="h-2" />
         <DialogFooter>
